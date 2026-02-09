@@ -35,6 +35,7 @@ async function createFixture(): Promise<{
   configPath: string
   migrationsDir: string
   metaDir: string
+  schemaPath: string
 }> {
   const dir = await mkdtemp(join(tmpdir(), 'chx-cli-test-'))
   const schemaPath = join(dir, 'schema.ts')
@@ -55,7 +56,7 @@ async function createFixture(): Promise<{
     'utf8'
   )
 
-  return { dir, configPath, migrationsDir, metaDir }
+  return { dir, configPath, migrationsDir, metaDir, schemaPath }
 }
 
 describe('@chx/cli command flows', () => {
@@ -157,6 +158,31 @@ describe('@chx/cli command flows', () => {
       }
       expect(statusPayload.checksumMismatchCount).toBe(1)
       expect(statusPayload.checksumMismatches[0]?.name).toBe('99999999999999_init.sql')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --json returns structured validation errors', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst broken = table({\n  database: 'app',\n  name: 'broken',\n  columns: [{ name: 'id', type: 'UInt64' }],\n  engine: 'MergeTree()',\n  primaryKey: ['missing_col'],\n  orderBy: ['id'],\n})\n\nexport default schema(broken)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(1)
+
+      const payload = JSON.parse(result.stdout) as {
+        command: string
+        error: string
+        issues: Array<{ code: string; message: string }>
+      }
+      expect(payload.command).toBe('generate')
+      expect(payload.error).toBe('validation_failed')
+      expect(payload.issues.some((issue) => issue.code === 'primary_key_missing_column')).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

@@ -117,6 +117,33 @@ export interface MigrationPlan {
   riskSummary: Record<RiskLevel, number>
 }
 
+export type ValidationIssueCode =
+  | 'duplicate_object_name'
+  | 'duplicate_column_name'
+  | 'duplicate_index_name'
+  | 'primary_key_missing_column'
+  | 'order_by_missing_column'
+
+export interface ValidationIssue {
+  code: ValidationIssueCode
+  kind: SchemaDefinition['kind']
+  database: string
+  name: string
+  message: string
+}
+
+export class ChxValidationError extends Error {
+  readonly issues: ValidationIssue[]
+
+  constructor(issues: ValidationIssue[]) {
+    super(
+      `Schema validation failed with ${issues.length} issue${issues.length === 1 ? '' : 's'}`
+    )
+    this.name = 'ChxValidationError'
+    this.issues = issues
+  }
+}
+
 function normalizeSQLFragment(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
@@ -202,6 +229,104 @@ export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition 
 
 function definitionKey(def: SchemaDefinition): string {
   return `${def.kind}:${def.database}.${def.name}`
+}
+
+function pushValidationIssue(
+  issues: ValidationIssue[],
+  def: SchemaDefinition,
+  code: ValidationIssueCode,
+  message: string
+): void {
+  issues.push({
+    code,
+    kind: def.kind,
+    database: def.database,
+    name: def.name,
+    message,
+  })
+}
+
+function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]): void {
+  const columnSeen = new Set<string>()
+  const columnSet = new Set<string>()
+  for (const column of def.columns) {
+    if (columnSeen.has(column.name)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'duplicate_column_name',
+        `Table ${def.database}.${def.name} has duplicate column name "${column.name}"`
+      )
+      continue
+    }
+    columnSeen.add(column.name)
+    columnSet.add(column.name)
+  }
+
+  const indexSeen = new Set<string>()
+  for (const index of def.indexes ?? []) {
+    if (indexSeen.has(index.name)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'duplicate_index_name',
+        `Table ${def.database}.${def.name} has duplicate index name "${index.name}"`
+      )
+      continue
+    }
+    indexSeen.add(index.name)
+  }
+
+  for (const column of def.primaryKey) {
+    if (!columnSet.has(column)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'primary_key_missing_column',
+        `Table ${def.database}.${def.name} primaryKey references missing column "${column}"`
+      )
+    }
+  }
+
+  for (const column of def.orderBy) {
+    if (!columnSet.has(column)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'order_by_missing_column',
+        `Table ${def.database}.${def.name} orderBy references missing column "${column}"`
+      )
+    }
+  }
+}
+
+export function validateDefinitions(definitions: SchemaDefinition[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const objectKeys = new Set<string>()
+  for (const def of definitions) {
+    const key = definitionKey(def)
+    if (objectKeys.has(key)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'duplicate_object_name',
+        `Duplicate schema object definition "${def.kind}:${def.database}.${def.name}"`
+      )
+      continue
+    }
+    objectKeys.add(key)
+
+    if (def.kind === 'table') {
+      validateTableDefinition(def, issues)
+    }
+  }
+
+  return issues
+}
+
+function assertValidDefinitions(definitions: SchemaDefinition[]): void {
+  const issues = validateDefinitions(definitions)
+  if (issues.length > 0) throw new ChxValidationError(issues)
 }
 
 export function canonicalizeDefinitions(definitions: SchemaDefinition[]): SchemaDefinition[] {
@@ -316,6 +441,7 @@ function renderMaterializedViewSQL(def: MaterializedViewDefinition): string {
 }
 
 export function toCreateSQL(def: SchemaDefinition): string {
+  assertValidDefinitions([def])
   if (def.kind === 'table') return renderTableSQL(def)
   if (def.kind === 'view') return renderViewSQL(def)
   return renderMaterializedViewSQL(def)
@@ -469,6 +595,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): Migration
 export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
   const oldCanonical = canonicalizeDefinitions(oldDefinitions)
   const newCanonical = canonicalizeDefinitions(newDefinitions)
+  assertValidDefinitions(newCanonical)
   const oldMap = createMap(oldCanonical)
   const newMap = createMap(newCanonical)
   const operations: MigrationOperation[] = []

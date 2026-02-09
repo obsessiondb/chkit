@@ -49,6 +49,7 @@ async function dropDatabase(url: string, username: string, password: string, dat
   const auth = Buffer.from(`${username}:${password}`).toString('base64')
   await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(10_000),
     headers: {
       Authorization: `Basic ${auth}`,
       'Content-Type': 'text/plain',
@@ -87,7 +88,9 @@ describe('@chx/cli doppler env e2e', () => {
     expect(() => getRequiredEnv()).not.toThrow()
   })
 
-  test('runs init + generate + migrate + status against live ClickHouse', async () => {
+  test(
+    'runs init + generate + migrate + status against live ClickHouse',
+    async () => {
     const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
     const database = `chx_e2e_${dbSuffix}`
     const fixture = await createFixture(database)
@@ -150,5 +153,7 @@ describe('@chx/cli doppler env e2e', () => {
       }
       await rm(fixture.dir, { recursive: true, force: true })
     }
-  })
+    },
+    240_000
+  )
 })
