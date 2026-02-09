@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
@@ -10,13 +11,18 @@ import fg from 'fast-glob'
 import { generateArtifacts } from '@chx/codegen'
 import { createClickHouseExecutor } from '@chx/clickhouse'
 import {
+  canonicalizeDefinitions,
   collectDefinitionsFromModule,
   defineConfig,
+  planDiff,
   type ChxConfig,
+  type MigrationOperation,
   type SchemaDefinition,
+  type Snapshot,
 } from '@chx/core'
 
 const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
+const CLI_VERSION = '0.1.0'
 
 type Command = 'init' | 'generate' | 'migrate' | 'status' | 'help' | 'version'
 
@@ -24,23 +30,39 @@ function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--config <path>]
-  chx migrate [--config <path>] [--execute]
-  chx status [--config <path>]
+  chx generate [--name <migration-name>] [--config <path>] [--plan] [--json]
+  chx migrate [--config <path>] [--execute] [--plan] [--json]
+  chx status [--config <path>] [--json]
 
 Options:
   --config <path>  Path to config file (default: ${DEFAULT_CONFIG_FILE})
   --name <name>    Migration name for generate
   --execute        Execute pending migrations on ClickHouse
+  --plan           Print plan details for operation review
+  --json           Emit machine-readable JSON output
   -h, --help       Show help
   -v, --version    Show version
 `)
 }
 
 function parseArg(flag: string, args: string[]): string | undefined {
-  const idx = args.findIndex((a) => a === flag)
+  const idx = args.indexOf(flag)
   if (idx === -1) return undefined
   return args[idx + 1]
+}
+
+function hasFlag(flag: string, args: string[]): boolean {
+  return args.includes(flag)
+}
+
+function printOutput(value: unknown, jsonMode: boolean): void {
+  if (jsonMode) {
+    console.log(JSON.stringify(value, null, 2))
+    return
+  }
+  if (typeof value === 'string') {
+    console.log(value)
+  }
 }
 
 async function loadConfig(configPathArg?: string): Promise<{ config: ChxConfig; path: string }> {
@@ -74,11 +96,7 @@ async function loadSchemaDefinitions(schemaGlobs: string | string[]): Promise<Sc
     all.push(...collectDefinitionsFromModule(mod))
   }
 
-  const dedup = new Map<string, SchemaDefinition>()
-  for (const def of all) {
-    dedup.set(`${def.kind}:${def.database}.${def.name}`, def)
-  }
-  return [...dedup.values()]
+  return canonicalizeDefinitions(all)
 }
 
 async function writeIfMissing(filePath: string, content: string): Promise<void> {
@@ -113,41 +131,162 @@ function resolveDirs(config: ChxConfig): { outDir: string; migrationsDir: string
   return { outDir, migrationsDir, metaDir }
 }
 
+async function readSnapshot(metaDir: string): Promise<Snapshot | null> {
+  const file = join(metaDir, 'snapshot.json')
+  if (!existsSync(file)) return null
+  const raw = await readFile(file, 'utf8')
+  const parsed = parseJSONOrThrow<Partial<Snapshot> & { definitions?: SchemaDefinition[] }>(
+    raw,
+    file,
+    'snapshot'
+  )
+  return {
+    version: 1,
+    generatedAt: parsed.generatedAt ?? '',
+    definitions: canonicalizeDefinitions(parsed.definitions ?? []),
+  }
+}
+
+function summarizePlan(operations: MigrationOperation[]): string[] {
+  return operations.map((op) => `${op.type} [${op.risk}] ${op.key}`)
+}
+
 async function cmdGenerate(args: string[]): Promise<void> {
   const configPath = parseArg('--config', args)
   const migrationName = parseArg('--name', args)
+  const jsonMode = hasFlag('--json', args)
+  const planMode = hasFlag('--plan', args)
 
   const { config } = await loadConfig(configPath)
   const definitions = await loadSchemaDefinitions(config.schema)
   const { migrationsDir, metaDir } = resolveDirs(config)
+  const previousSnapshot = await readSnapshot(metaDir)
+  const plan = planDiff(previousSnapshot?.definitions ?? [], definitions)
+
+  if (planMode) {
+    const payload = {
+      command: 'generate',
+      mode: 'plan',
+      operationCount: plan.operations.length,
+      riskSummary: plan.riskSummary,
+      operations: plan.operations,
+    }
+
+    if (jsonMode) {
+      printOutput(payload, true)
+      return
+    }
+
+    console.log(`Planned operations: ${payload.operationCount}`)
+    console.log(
+      `Risk summary: safe=${payload.riskSummary.safe}, caution=${payload.riskSummary.caution}, danger=${payload.riskSummary.danger}`
+    )
+    for (const line of summarizePlan(plan.operations)) console.log(`- ${line}`)
+    return
+  }
 
   const result = await generateArtifacts({
     definitions,
     migrationsDir,
     metaDir,
     migrationName,
+    plan,
+    cliVersion: CLI_VERSION,
   })
 
-  console.log(`Generated migration: ${result.migrationFile}`)
+  const payload = {
+    command: 'generate',
+    migrationFile: result.migrationFile,
+    snapshotFile: result.snapshotFile,
+    definitionCount: definitions.length,
+    operationCount: plan.operations.length,
+    riskSummary: plan.riskSummary,
+  }
+
+  if (jsonMode) {
+    printOutput(payload, true)
+    return
+  }
+
+  if (result.migrationFile) {
+    console.log(`Generated migration: ${result.migrationFile}`)
+  } else {
+    console.log('No migration generated: plan is empty.')
+  }
   console.log(`Updated snapshot:   ${result.snapshotFile}`)
   console.log(`Definitions:        ${definitions.length}`)
+  console.log(`Operations:         ${plan.operations.length}`)
+  console.log(
+    `Risk summary:       safe=${plan.riskSummary.safe}, caution=${plan.riskSummary.caution}, danger=${plan.riskSummary.danger}`
+  )
+}
+
+interface MigrationJournalEntry {
+  name: string
+  appliedAt: string
+  checksum: string
 }
 
 interface MigrationJournal {
-  applied: string[]
+  version: 1
+  applied: MigrationJournalEntry[]
+}
+
+interface ChecksumMismatch {
+  name: string
+  expected: string
+  actual: string
+}
+
+function parseJSONOrThrow<T>(raw: string, filePath: string, kind: string): T {
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    throw new Error(`Invalid ${kind} JSON at ${filePath}. Fix or remove the file and retry.`)
+  }
+}
+
+function checksum(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
 async function readJournal(metaDir: string): Promise<MigrationJournal> {
   const file = join(metaDir, 'journal.json')
-  if (!existsSync(file)) return { applied: [] }
+  if (!existsSync(file)) return { version: 1, applied: [] }
   const raw = await readFile(file, 'utf8')
-  return JSON.parse(raw) as MigrationJournal
+  const parsed = parseJSONOrThrow<
+    Partial<MigrationJournal> & { applied?: MigrationJournalEntry[] | string[] }
+  >(raw, file, 'journal')
+
+  const normalizedApplied: MigrationJournalEntry[] = []
+  for (const item of parsed.applied ?? []) {
+    if (typeof item === 'string') {
+      normalizedApplied.push({
+        name: item,
+        appliedAt: '',
+        checksum: '',
+      })
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    if (typeof item.name !== 'string') continue
+    normalizedApplied.push({
+      name: item.name,
+      appliedAt: typeof item.appliedAt === 'string' ? item.appliedAt : '',
+      checksum: typeof item.checksum === 'string' ? item.checksum : '',
+    })
+  }
+
+  return {
+    version: 1,
+    applied: normalizedApplied,
+  }
 }
 
 async function writeJournal(metaDir: string, journal: MigrationJournal): Promise<void> {
   await mkdir(metaDir, { recursive: true })
   const file = join(metaDir, 'journal.json')
-  await writeFile(file, JSON.stringify(journal, null, 2) + '\n', 'utf8')
+  await writeFile(file, `${JSON.stringify(journal, null, 2)}\n`, 'utf8')
 }
 
 async function listMigrations(migrationsDir: string): Promise<string[]> {
@@ -155,16 +294,69 @@ async function listMigrations(migrationsDir: string): Promise<string[]> {
   return files.sort()
 }
 
+function extractExecutableStatements(sql: string): string[] {
+  const nonCommentLines = sql
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n')
+
+  return nonCommentLines
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .map((part) => `${part};`)
+}
+
+async function findChecksumMismatches(
+  migrationsDir: string,
+  journal: MigrationJournal
+): Promise<ChecksumMismatch[]> {
+  const mismatches: ChecksumMismatch[] = []
+  for (const entry of journal.applied) {
+    if (!entry.checksum) continue
+    const fullPath = join(migrationsDir, entry.name)
+    if (!existsSync(fullPath)) continue
+    const sql = await readFile(fullPath, 'utf8')
+    const actual = checksum(sql)
+    if (actual !== entry.checksum) {
+      mismatches.push({
+        name: entry.name,
+        expected: entry.checksum,
+        actual,
+      })
+    }
+  }
+  return mismatches
+}
+
 async function cmdStatus(args: string[]): Promise<void> {
   const configPath = parseArg('--config', args)
+  const jsonMode = hasFlag('--json', args)
   const { config } = await loadConfig(configPath)
   const { migrationsDir, metaDir } = resolveDirs(config)
 
   await mkdir(migrationsDir, { recursive: true })
   const files = await listMigrations(migrationsDir)
   const journal = await readJournal(metaDir)
+  const appliedNames = new Set(journal.applied.map((entry) => entry.name))
+  const pending = files.filter((f) => !appliedNames.has(f))
+  const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
 
-  const pending = files.filter((f) => !journal.applied.includes(f))
+  const payload = {
+    command: 'status',
+    migrationsDir,
+    total: files.length,
+    applied: journal.applied.length,
+    pending: pending.length,
+    pendingMigrations: pending,
+    checksumMismatchCount: checksumMismatches.length,
+    checksumMismatches,
+  }
+
+  if (jsonMode) {
+    printOutput(payload, true)
+    return
+  }
 
   console.log(`Migrations directory: ${migrationsDir}`)
   console.log(`Total migrations:     ${files.length}`)
@@ -175,11 +367,17 @@ async function cmdStatus(args: string[]): Promise<void> {
     console.log('\nPending migrations:')
     for (const item of pending) console.log(`- ${item}`)
   }
+  if (checksumMismatches.length > 0) {
+    console.log('\nChecksum mismatches on applied migrations:')
+    for (const item of checksumMismatches) console.log(`- ${item.name}`)
+  }
 }
 
 async function cmdMigrate(args: string[]): Promise<void> {
   const configPath = parseArg('--config', args)
-  const execute = args.includes('--execute')
+  const execute = hasFlag('--execute', args)
+  const jsonMode = hasFlag('--json', args)
+  const planMode = hasFlag('--plan', args)
 
   const { config } = await loadConfig(configPath)
   const { migrationsDir, metaDir } = resolveDirs(config)
@@ -187,19 +385,56 @@ async function cmdMigrate(args: string[]): Promise<void> {
   await mkdir(migrationsDir, { recursive: true })
   const files = await listMigrations(migrationsDir)
   const journal = await readJournal(metaDir)
-  const pending = files.filter((f) => !journal.applied.includes(f))
+  const appliedNames = new Set(journal.applied.map((entry) => entry.name))
+  const pending = files.filter((f) => !appliedNames.has(f))
+  const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
+
+  if (checksumMismatches.length > 0) {
+    if (jsonMode) {
+      printOutput(
+        {
+          command: 'migrate',
+          mode: execute ? 'execute' : 'plan',
+          error: 'Checksum mismatch detected on applied migrations',
+          checksumMismatches,
+        },
+        true
+      )
+      return
+    }
+    throw new Error(
+      `Checksum mismatch detected on applied migrations: ${checksumMismatches
+        .map((item) => item.name)
+        .join(', ')}`
+    )
+  }
 
   if (pending.length === 0) {
-    console.log('No pending migrations.')
+    if (jsonMode) {
+      printOutput({ command: 'migrate', pending: [], applied: [], mode: execute ? 'execute' : 'plan' }, true)
+    } else {
+      console.log('No pending migrations.')
+    }
     return
   }
 
-  console.log(`Pending migrations: ${pending.length}`)
-  for (const file of pending) console.log(`- ${file}`)
+  const planned = {
+    command: 'migrate',
+    mode: execute ? 'execute' : 'plan',
+    pending,
+  }
 
-  if (!execute) {
-    console.log('\nPlan only. Re-run with --execute to apply and journal these migrations.')
-    return
+  if (planMode || !execute) {
+    if (jsonMode) {
+      printOutput(planned, true)
+    } else {
+      console.log(`Pending migrations: ${pending.length}`)
+      for (const file of pending) console.log(`- ${file}`)
+      if (!execute) {
+        console.log('\nPlan only. Re-run with --execute to apply and journal these migrations.')
+      }
+    }
+    if (!execute) return
   }
 
   if (!config.clickhouse) {
@@ -207,16 +442,41 @@ async function cmdMigrate(args: string[]): Promise<void> {
   }
 
   const db = createClickHouseExecutor(config.clickhouse)
+  const appliedNow: MigrationJournalEntry[] = []
 
   for (const file of pending) {
     const fullPath = join(migrationsDir, file)
     const sql = await readFile(fullPath, 'utf8')
-    await db.execute(sql)
-    journal.applied.push(file)
-    console.log(`Applied: ${file}`)
+    const statements = extractExecutableStatements(sql)
+    for (const statement of statements) {
+      await db.execute(statement)
+    }
+
+    const entry: MigrationJournalEntry = {
+      name: file,
+      appliedAt: new Date().toISOString(),
+      checksum: checksum(sql),
+    }
+    journal.applied.push(entry)
+    appliedNow.push(entry)
+    await writeJournal(metaDir, journal)
+
+    if (!jsonMode) console.log(`Applied: ${file}`)
   }
 
-  await writeJournal(metaDir, journal)
+  if (jsonMode) {
+    printOutput(
+      {
+        command: 'migrate',
+        mode: 'execute',
+        applied: appliedNow,
+        journalFile: join(metaDir, 'journal.json'),
+      },
+      true
+    )
+    return
+  }
+
   console.log(`\nJournal updated: ${join(metaDir, 'journal.json')}`)
 }
 
@@ -230,7 +490,7 @@ async function main(): Promise<void> {
   }
 
   if (first === '-v' || first === '--version' || first === 'version') {
-    console.log('0.1.0')
+    console.log(CLI_VERSION)
     return
   }
 
