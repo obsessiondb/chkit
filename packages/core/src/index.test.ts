@@ -280,4 +280,66 @@ describe('@chx/core planner v1', () => {
 
     expect(() => planDiff([], invalidDefs)).toThrow(ChxValidationError)
   })
+
+  test('returns empty plan for equivalent schemas', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'users',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(defs, defs)
+    expect(plan.operations).toHaveLength(0)
+    expect(plan.riskSummary).toEqual({
+      safe: 0,
+      caution: 0,
+      danger: 0,
+    })
+  })
+
+  test('plan ordering is deterministic regardless of input definition order', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const newDefsA = [
+      view({
+        database: 'app',
+        name: 'events_view',
+        as: 'SELECT id FROM app.events',
+      }),
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const newDefsB = [...newDefsA].reverse()
+    const planA = planDiff(oldDefs, newDefsA)
+    const planB = planDiff(oldDefs, newDefsB)
+
+    expect(planA.operations.map((op) => `${op.type}:${op.key}`)).toEqual(
+      planB.operations.map((op) => `${op.type}:${op.key}`)
+    )
+    expect(planA.riskSummary).toEqual(planB.riskSummary)
+  })
 })
