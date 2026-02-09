@@ -1,0 +1,27 @@
+{
+  "name": "@chx/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "chx": "./dist/bin/chx.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "bun run src/bin/chx.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome lint src",
+    "test": "bun test src",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@chx/clickhouse": "workspace:*",
+    "@chx/codegen": "workspace:*",
+    "@chx/core": "workspace:*",
+    "fast-glob": "^3.3.2"
+  }
+}
