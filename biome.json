@@ -1,0 +1,18 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.3.0/schema.json",
+  "files": {
+    "includes": ["**", "!**/dist/**", "!**/node_modules/**", "!**/.turbo/**"]
+  },
+  "linter": {
+    "enabled": true
+  },
+  "formatter": {
+    "enabled": true
+  },
+  "javascript": {
+    "formatter": {
+      "semicolons": "asNeeded",
+      "quoteStyle": "single"
+    }
+  }
+}

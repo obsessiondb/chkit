@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@chx/core": ["../core/src/index", "../core/src"],
+      "@chx/clickhouse": ["../clickhouse/src/index", "../clickhouse/src"],
+      "@chx/codegen": ["../codegen/src/index", "../codegen/src"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}
