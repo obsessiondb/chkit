@@ -58,7 +58,22 @@ async function dropDatabase(url: string, username: string, password: string, dat
   })
 }
 
-async function createFixture(database: string): Promise<{ dir: string; configPath: string; migrationsDir: string }> {
+function renderBaseSchema(database: string): string {
+  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
+}
+
+function renderEvolvedSchema(database: string): string {
+  return `import { schema, table, view } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n    { name: 'source', type: 'String', default: 'web' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersView = view({\n  database: '${database}',\n  name: 'users_view',\n  as: 'SELECT id, email, source FROM ${database}.users',\n})\n\nexport default schema(users, usersView)\n`
+}
+
+interface E2EFixture {
+  dir: string
+  configPath: string
+  migrationsDir: string
+  schemaPath: string
+}
+
+async function createFixture(database: string): Promise<E2EFixture> {
   const dir = await mkdtemp(join(tmpdir(), 'chx-cli-e2e-'))
   const schemaPath = join(dir, 'schema.ts')
   const configPath = join(dir, 'clickhouse.config.ts')
@@ -68,11 +83,7 @@ async function createFixture(database: string): Promise<{ dir: string; configPat
 
   const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
 
-  await writeFile(
-    schemaPath,
-    `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
-    'utf8'
-  )
+  await writeFile(schemaPath, renderBaseSchema(database), 'utf8')
 
   await writeFile(
     configPath,
@@ -80,7 +91,7 @@ async function createFixture(database: string): Promise<{ dir: string; configPat
     'utf8'
   )
 
-  return { dir, configPath, migrationsDir }
+  return { dir, configPath, migrationsDir, schemaPath }
 }
 
 describe('@chx/cli doppler env e2e', () => {
@@ -153,6 +164,72 @@ describe('@chx/cli doppler env e2e', () => {
       }
       await rm(fixture.dir, { recursive: true, force: true })
     }
+    },
+    240_000
+  )
+
+  test(
+    'runs additive second migration cycle in a separate project flow',
+    async () => {
+      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+      const database = `chx_e2e_additive_${dbSuffix}`
+      const fixture = await createFixture(database)
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+
+      try {
+        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(firstGenerate.exitCode).toBe(0)
+
+        const firstExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        if (firstExecute.exitCode !== 0) {
+          throw new Error(
+            `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
+          )
+        }
+        expect(firstExecute.exitCode).toBe(0)
+
+        await writeFile(fixture.schemaPath, renderEvolvedSchema(database), 'utf8')
+
+        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(secondGenerate.exitCode).toBe(0)
+        const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as {
+          operationCount: number
+          migrationFile: string | null
+        }
+        expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
+        expect(secondGeneratePayload.migrationFile).toBeTruthy()
+
+        const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--plan', '--json'])
+        expect(secondPlan.exitCode).toBe(0)
+        const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
+        expect(secondPlanPayload.pending.length).toBe(1)
+
+        const secondExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        if (secondExecute.exitCode !== 0) {
+          throw new Error(
+            `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
+          )
+        }
+        expect(secondExecute.exitCode).toBe(0)
+
+        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'])
+        expect(statusResult.exitCode).toBe(0)
+        const statusPayload = JSON.parse(statusResult.stdout) as {
+          total: number
+          applied: number
+          pending: number
+        }
+        expect(statusPayload.total).toBe(2)
+        expect(statusPayload.applied).toBe(2)
+        expect(statusPayload.pending).toBe(0)
+      } finally {
+        try {
+          await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
+        } catch {
+          // Best-effort cleanup for shared e2e environment.
+        }
+        await rm(fixture.dir, { recursive: true, force: true })
+      }
     },
     240_000
   )
