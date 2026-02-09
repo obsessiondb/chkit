@@ -228,4 +228,29 @@ describe('@chx/cli command flows', () => {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
+
+  test('second generate --json is a no-op with no migration file', async () => {
+    const fixture = await createFixture()
+    try {
+      const first = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(first.exitCode).toBe(0)
+      const firstPayload = JSON.parse(first.stdout) as {
+        migrationFile: string | null
+        operationCount: number
+      }
+      expect(firstPayload.migrationFile).toBeTruthy()
+      expect(firstPayload.operationCount).toBeGreaterThan(0)
+
+      const second = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(second.exitCode).toBe(0)
+      const secondPayload = JSON.parse(second.stdout) as {
+        migrationFile: string | null
+        operationCount: number
+      }
+      expect(secondPayload.operationCount).toBe(0)
+      expect(secondPayload.migrationFile).toBeNull()
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
 })
