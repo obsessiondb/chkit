@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  ChxValidationError,
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
   materializedView,
@@ -8,6 +9,7 @@ import {
   schema,
   table,
   toCreateSQL,
+  validateDefinitions,
   view,
 } from './index'
 
@@ -234,5 +236,48 @@ describe('@chx/core planner v1', () => {
       caution: 2,
       danger: 0,
     })
+  })
+
+  test('validates duplicate columns, indexes, and missing key columns', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'id', type: 'UInt64' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id', 'missing_pk_col'],
+        orderBy: ['id', 'missing_order_col'],
+        indexes: [
+          { name: 'idx_source', expression: 'id', type: 'set', granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', granularity: 1 },
+        ],
+      }),
+    ]
+
+    const issues = validateDefinitions(defs)
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'duplicate_column_name',
+      'duplicate_index_name',
+      'primary_key_missing_column',
+      'order_by_missing_column',
+    ])
+  })
+
+  test('planDiff throws typed validation error for invalid schema', () => {
+    const invalidDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['missing'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    expect(() => planDiff([], invalidDefs)).toThrow(ChxValidationError)
   })
 })

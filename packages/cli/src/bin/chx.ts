@@ -11,6 +11,7 @@ import fg from 'fast-glob'
 import { generateArtifacts } from '@chx/codegen'
 import { createClickHouseExecutor } from '@chx/clickhouse'
 import {
+  ChxValidationError,
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
   defineConfig,
@@ -161,7 +162,29 @@ async function cmdGenerate(args: string[]): Promise<void> {
   const definitions = await loadSchemaDefinitions(config.schema)
   const { migrationsDir, metaDir } = resolveDirs(config)
   const previousSnapshot = await readSnapshot(metaDir)
-  const plan = planDiff(previousSnapshot?.definitions ?? [], definitions)
+  let plan: ReturnType<typeof planDiff>
+  try {
+    plan = planDiff(previousSnapshot?.definitions ?? [], definitions)
+  } catch (error) {
+    if (error instanceof ChxValidationError) {
+      if (jsonMode) {
+        printOutput(
+          {
+            command: 'generate',
+            error: 'validation_failed',
+            issues: error.issues,
+          },
+          true
+        )
+        process.exitCode = 1
+        return
+      }
+
+      const details = error.issues.map((issue) => `- [${issue.code}] ${issue.message}`).join('\n')
+      throw new Error(`${error.message}\n${details}`)
+    }
+    throw error
+  }
 
   if (planMode) {
     const payload = {
