@@ -423,6 +423,7 @@ async function cmdMigrate(args: string[]): Promise<void> {
         },
         true
       )
+      process.exitCode = 1
       return
     }
     throw new Error(

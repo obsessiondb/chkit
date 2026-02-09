@@ -187,4 +187,45 @@ describe('@chx/cli command flows', () => {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
+
+  test('migrate --plan --json fails on checksum mismatch', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      await writeFile(
+        join(fixture.metaDir, 'journal.json'),
+        `${JSON.stringify(
+          {
+            version: 1,
+            applied: [
+              {
+                name: '99999999999999_init.sql',
+                appliedAt: new Date().toISOString(),
+                checksum: 'abc123',
+              },
+            ],
+          },
+          null,
+          2
+        )}\n`,
+        'utf8'
+      )
+      await writeFile(join(fixture.migrationsDir, '99999999999999_init.sql'), 'SELECT 1;\n', 'utf8')
+
+      const result = runCli(['migrate', '--config', fixture.configPath, '--plan', '--json'])
+      expect(result.exitCode).toBe(1)
+      const payload = JSON.parse(result.stdout) as {
+        command: string
+        error: string
+        checksumMismatches: Array<{ name: string }>
+      }
+      expect(payload.command).toBe('migrate')
+      expect(payload.error).toContain('Checksum mismatch')
+      expect(payload.checksumMismatches[0]?.name).toBe('99999999999999_init.sql')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
 })
