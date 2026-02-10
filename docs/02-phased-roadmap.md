@@ -55,7 +55,7 @@ Duration: 2-4 weeks
 3. Add risk tags in plan output.
 4. Improve migration file format with headers and metadata.
 5. Improve migrate execution and journal semantics.
-6. Add `--plan` and `--json` output modes.
+6. Add dry-run planning and `--json` output modes.
 7. Add comprehensive unit tests for planner.
 
 ### Exit Criteria
@@ -85,7 +85,6 @@ Duration: 3-5 weeks
 2. Add drift report format.
 3. Add safety policy config:
    - `allowDestructive`
-   - `requireConfirmOnDanger`
 4. Add forced explicit flags for dangerous ops.
 5. Add operation-level validation and warnings.
 
@@ -94,30 +93,21 @@ Duration: 3-5 weeks
 2. destructive operations always gated.
 3. no silent destructive SQL in default mode.
 
-## Phase 3: Advanced ClickHouse Semantics
-Duration: 4-8 weeks
+## Phase 3: Deferred Optional Features (Pick-and-Choose)
+Duration: scheduled after core phases based on priority and real-world demand.
 
 ### Objectives
-1. Handle distributed/cluster-specific behaviors better.
-2. Add optional rename and compatibility helpers.
-3. Reduce pain points from existing custom infra migrations.
+1. Keep the core roadmap focused on must-have migration reliability.
+2. Track advanced features as optional modules that can be adopted independently.
 
-### Deliverables
-1. distributed table strategy support:
-   - local + distributed pair modeling
-   - cluster-aware SQL rendering options
-2. rename assistance flow (interactive + guarded).
-3. compatibility matrix by ClickHouse version.
-
-### Tasks
-1. Introduce distributed mode DSL extensions.
-2. Implement rename detection as optional planner pass.
-3. Validate engine-specific constraints before render.
-4. Add integration tests for cluster/distributed scenarios.
+### Optional Feature Docs
+1. `optional-feature-rename-assistance-flow.md`
+2. `optional-feature-clickhouse-compatibility-matrix.md`
+3. `optional-feature-engine-specific-validation.md`
 
 ### Exit Criteria
-1. Existing `clickhouse-infra` core schema patterns can be represented.
-2. distributed migrations validated in staging environments.
+1. Core phases (0-2) are stable and production-usable for target non-distributed workflows.
+2. Optional features are pulled in only when justified by concrete usage scenarios.
 
 ## Phase 4: Plugin System and Optional Modules
 Duration: 3-6 weeks
@@ -160,7 +150,6 @@ Duration: ongoing
 ### Tasks
 1. Add examples:
    - simple single-node project
-   - distributed cluster project
    - migration-heavy project
 2. Add troubleshooting matrix.
 3. Add CI recipes (GitHub Actions examples).
@@ -205,9 +194,9 @@ Duration: ongoing
 1. drift detection with actionable output.
 2. safer destructive flow.
 
-### Milestone M5 (end of Phase 3)
-1. distributed-aware schema support.
-2. rename helper (manual confirmation required).
+### Milestone M5 (optional feature selection gate)
+1. decide which optional features to implement next based on production signals.
+2. schedule selected optional features as focused, standalone deliveries.
 
 ### Milestone M6 (Phase 4)
 1. plugin API release.

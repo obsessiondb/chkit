@@ -13,6 +13,7 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "turbo run test",
+    "test:env": "doppler run --project chx --config ci -- bun run test",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
