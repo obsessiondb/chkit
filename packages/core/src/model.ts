@@ -83,6 +83,7 @@ export interface ChxConfig {
   outDir?: string
   migrationsDir?: string
   metaDir?: string
+  plugins?: ChxPluginRegistration[]
   check?: {
     failOnPending?: boolean
     failOnChecksumMismatch?: boolean
@@ -99,6 +100,15 @@ export interface ChxConfig {
     secure?: boolean
   }
 }
+
+export type ChxPluginRegistration =
+  | string
+  | {
+      resolve: string
+      name?: string
+      enabled?: boolean
+      options?: Record<string, unknown>
+    }
 
 export interface SnapshotV1 {
   version: 1
