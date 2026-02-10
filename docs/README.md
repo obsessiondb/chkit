@@ -1,4 +1,7 @@
-# CHX Planning Docs Index
+# CHX Internal Planning Docs Index
+
+This `/docs` folder is for internal planning and implementation material.
+Public user-facing documentation now lives in `/apps/docs/src/content/docs`.
 
 Use this order when bootstrapping a new planning/execution context:
 
