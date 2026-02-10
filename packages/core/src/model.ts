@@ -78,37 +78,88 @@ export interface MaterializedViewDefinition {
 
 export type SchemaDefinition = TableDefinition | ViewDefinition | MaterializedViewDefinition
 
-export interface ChxConfig {
+export interface ChxCheckConfig {
+  failOnPending?: boolean
+  failOnChecksumMismatch?: boolean
+  failOnDrift?: boolean
+}
+
+export interface ChxSafetyConfig {
+  allowDestructive?: boolean
+}
+
+export interface ChxUserClickHouseConfig {
+  url: string
+  username?: string
+  password?: string
+  database?: string
+  secure?: boolean
+}
+
+export interface ChxResolvedClickHouseConfig {
+  url: string
+  username: string
+  password: string
+  database: string
+  secure: boolean
+}
+
+export interface ChxLegacyPluginRegistration {
+  resolve: string
+  name?: string
+  enabled?: boolean
+  options?: Record<string, unknown>
+}
+
+export interface ChxInlinePluginRegistration<
+  TPlugin = unknown,
+  TOptions extends object = Record<string, unknown>,
+> {
+  plugin: TPlugin
+  name?: string
+  enabled?: boolean
+  options?: TOptions
+}
+
+export type ChxPluginRegistration =
+  | string
+  | ChxLegacyPluginRegistration
+  | ChxInlinePluginRegistration
+
+export interface ChxUserConfig {
   schema: string | string[]
   outDir?: string
   migrationsDir?: string
   metaDir?: string
   plugins?: ChxPluginRegistration[]
-  check?: {
-    failOnPending?: boolean
-    failOnChecksumMismatch?: boolean
-    failOnDrift?: boolean
-  }
-  safety?: {
-    allowDestructive?: boolean
-  }
-  clickhouse?: {
-    url: string
-    username?: string
-    password?: string
-    database?: string
-    secure?: boolean
-  }
+  check?: ChxCheckConfig
+  safety?: ChxSafetyConfig
+  clickhouse?: ChxUserClickHouseConfig
 }
 
-export type ChxPluginRegistration =
-  | string
-  | {
-      resolve: string
-      name?: string
-      enabled?: boolean
-      options?: Record<string, unknown>
-    }
+export interface ChxResolvedConfig {
+  schema: string[]
+  outDir: string
+  migrationsDir: string
+  metaDir: string
+  plugins: ChxPluginRegistration[]
+  check: Required<ChxCheckConfig>
+  safety: Required<ChxSafetyConfig>
+  clickhouse?: ChxResolvedClickHouseConfig
+}
+
+export interface ChxConfigEnv {
+  command?: string
+  mode?: string
+}
+
+export type ChxConfigFn<T extends ChxUserConfig = ChxUserConfig> = (
+  env: ChxConfigEnv
+) => T | Promise<T>
+
+export type ChxConfigInput<T extends ChxUserConfig = ChxUserConfig> = T | ChxConfigFn<T>
+export type ChxConfig = ChxUserConfig
+export type ResolvedChxConfig = ChxResolvedConfig
 
 export interface SnapshotV1 {
   version: 1
@@ -195,8 +246,41 @@ export class ChxValidationError extends Error {
   }
 }
 
-export function defineConfig(config: ChxConfig): ChxConfig {
+export function defineConfig<T extends ChxUserConfig>(config: T): T
+export function defineConfig<T extends ChxUserConfig>(config: ChxConfigFn<T>): ChxConfigFn<T>
+export function defineConfig<T extends ChxUserConfig>(config: ChxConfigInput<T>): ChxConfigInput<T> {
   return config
+}
+
+export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
+  const outDir = config.outDir ?? './chx'
+  const migrationsDir = config.migrationsDir ?? join(outDir, 'migrations')
+  const metaDir = config.metaDir ?? join(outDir, 'meta')
+
+  return {
+    schema: Array.isArray(config.schema) ? config.schema : [config.schema],
+    outDir,
+    migrationsDir,
+    metaDir,
+    plugins: config.plugins ?? [],
+    check: {
+      failOnPending: config.check?.failOnPending ?? true,
+      failOnChecksumMismatch: config.check?.failOnChecksumMismatch ?? true,
+      failOnDrift: config.check?.failOnDrift ?? true,
+    },
+    safety: {
+      allowDestructive: config.safety?.allowDestructive ?? false,
+    },
+    clickhouse: config.clickhouse
+      ? {
+          url: config.clickhouse.url,
+          username: config.clickhouse.username ?? 'default',
+          password: config.clickhouse.password ?? '',
+          database: config.clickhouse.database ?? 'default',
+          secure: config.clickhouse.secure ?? false,
+        }
+      : undefined,
+  }
 }
 
 export function table(input: Omit<TableDefinition, 'kind'>): TableDefinition {
@@ -222,3 +306,4 @@ export function isSchemaDefinition(value: unknown): value is SchemaDefinition {
   const kind = (value as { kind?: string }).kind
   return kind === 'table' || kind === 'view' || kind === 'materialized_view'
 }
+import { join } from 'node:path'
