@@ -116,6 +116,34 @@ export interface BackfillStatusSummary {
   lastError?: string
 }
 
+export interface BackfillPluginCheckContext {
+  command: 'check'
+  config: ResolvedChxConfig
+  configPath: string
+  jsonMode: boolean
+  options: Record<string, unknown>
+}
+
+export interface BackfillPluginCheckResult {
+  plugin: string
+  evaluated: boolean
+  ok: boolean
+  findings: Array<{
+    code:
+      | 'backfill_required_pending'
+      | 'backfill_plan_missing'
+      | 'backfill_plan_stale'
+      | 'backfill_overlap_blocked'
+      | 'backfill_window_exceeds_limit'
+      | 'backfill_chunk_failed_retry_exhausted'
+      | 'backfill_policy_relaxed'
+    message: string
+    severity: 'info' | 'warn' | 'error'
+    metadata?: Record<string, unknown>
+  }>
+  metadata?: Record<string, unknown>
+}
+
 export interface BuildBackfillPlanOutput {
   plan: BackfillPlanState
   planPath: string
@@ -177,6 +205,13 @@ export interface BackfillPlugin {
   }>
   hooks?: {
     onConfigLoaded?: (context: { command: string; configPath: string; options: Record<string, unknown> }) => void
+    onCheck?: (
+      context: BackfillPluginCheckContext
+    ) => BackfillPluginCheckResult | undefined | Promise<BackfillPluginCheckResult | undefined>
+    onCheckReport?: (context: {
+      result: BackfillPluginCheckResult
+      print: (line: string) => void
+    }) => void | Promise<void>
   }
 }
 
@@ -766,6 +801,15 @@ async function collectActiveRunTargets(runsDir: string): Promise<Map<string, str
   return active
 }
 
+async function listPlanIds(plansDir: string): Promise<string[]> {
+  if (!existsSync(plansDir)) return []
+  const entries = await readdir(plansDir, { withFileTypes: true })
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => entry.name.replace(/\.json$/, ''))
+    .sort()
+}
+
 function summarizeRunStatus(run: BackfillRunState, runPath: string, eventPath: string): BackfillStatusSummary {
   const summary = {
     total: run.chunks.length,
@@ -796,6 +840,92 @@ function summarizeRunStatus(run: BackfillRunState, runPath: string, eventPath: s
     runPath,
     eventPath,
     lastError: run.lastError,
+  }
+}
+
+export async function evaluateBackfillCheck(input: {
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+}): Promise<BackfillPluginCheckResult> {
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
+  const plansDir = join(stateDir, 'plans')
+  const runsDir = join(stateDir, 'runs')
+
+  const planIds = await listPlanIds(plansDir)
+  if (planIds.length === 0) {
+    return {
+      plugin: 'backfill',
+      evaluated: true,
+      ok: true,
+      findings: [],
+      metadata: {
+        requiredCount: 0,
+        activeRuns: 0,
+        failedRuns: 0,
+      },
+    }
+  }
+
+  let requiredCount = 0
+  let activeRuns = 0
+  let failedRuns = 0
+
+  for (const planId of planIds) {
+    const runPath = join(runsDir, `${planId}.json`)
+    const run = await readRun(runPath)
+    if (!run) {
+      requiredCount += 1
+      continue
+    }
+
+    if (run.status === 'running') activeRuns += 1
+    if (run.status === 'failed') failedRuns += 1
+    if (run.status !== 'completed') requiredCount += 1
+  }
+
+  const findings: BackfillPluginCheckResult['findings'] = []
+  if (requiredCount > 0) {
+    findings.push({
+      code: 'backfill_required_pending',
+      message: `Required backfills pending completion: ${requiredCount}`,
+      severity: input.options.policy.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
+      metadata: {
+        requiredCount,
+      },
+    })
+  }
+
+  if (failedRuns > 0) {
+    findings.push({
+      code: 'backfill_chunk_failed_retry_exhausted',
+      message: `Backfill runs failed after retry budget: ${failedRuns}`,
+      severity: 'error',
+      metadata: {
+        failedRuns,
+      },
+    })
+  }
+
+  if (!input.options.policy.failCheckOnRequiredPendingBackfill) {
+    findings.push({
+      code: 'backfill_policy_relaxed',
+      message: 'Backfill check policy is relaxed: failCheckOnRequiredPendingBackfill=false.',
+      severity: 'warn',
+    })
+  }
+
+  const ok = findings.every((finding) => finding.severity !== 'error')
+  return {
+    plugin: 'backfill',
+    evaluated: true,
+    ok,
+    findings,
+    metadata: {
+      requiredCount,
+      activeRuns,
+      failedRuns,
+    },
   }
 }
 
@@ -1494,6 +1624,25 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       onConfigLoaded({ options: runtimeOptions }) {
         const merged = mergeOptions(base, runtimeOptions)
         validateBaseOptions(merged)
+      },
+      async onCheck({ config, configPath, options: runtimeOptions }) {
+        const effectiveOptions = mergeOptions(base, runtimeOptions)
+        validateBaseOptions(effectiveOptions)
+        return evaluateBackfillCheck({
+          configPath,
+          config,
+          options: effectiveOptions,
+        })
+      },
+      onCheckReport({ result, print }) {
+        const findingCodes = result.findings.map((finding) => finding.code)
+        if (result.ok) {
+          print('backfill check: ok')
+          return
+        }
+        print(
+          `backfill check: failed${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`
+        )
       },
     },
   }
