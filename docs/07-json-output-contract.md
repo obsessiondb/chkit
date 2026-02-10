@@ -135,6 +135,12 @@ Keys:
 4. `error`
 5. `dangerousMigrations`
 
+## Exit Codes
+
+1. `0`: success
+2. `1`: generic command failure, validation failure, or policy failure
+3. `3`: destructive migrate blocked by the safety gate (`migrate --execute` with pending `risk=danger` migration(s) and no `--allow-destructive`)
+
 ## Compatibility Policy
 
 1. Existing keys/meanings are stable for `schemaVersion = 1`.
