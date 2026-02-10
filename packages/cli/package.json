@@ -22,6 +22,7 @@
     "@chx/clickhouse": "workspace:*",
     "@chx/codegen": "workspace:*",
     "@chx/core": "workspace:*",
+    "@stricli/core": "^1.2.5",
     "fast-glob": "^3.3.2"
   }
 }
