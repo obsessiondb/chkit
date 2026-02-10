@@ -29,6 +29,7 @@ bun run chx check
 - `chx status [--config <path>] [--json]`
 - `chx drift [--config <path>] [--json]`
 - `chx check [--config <path>] [--strict] [--json]`
+- `chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
 - `chx version`
 
 ## Global Flags
@@ -93,6 +94,10 @@ export default {
   outDir: './chx',
   migrationsDir: './chx/migrations',
   metaDir: './chx/meta',
+  plugins: [
+    // './plugins/my-plugin.ts',
+    // { resolve: './plugins/my-plugin.ts', options: { dryRun: true }, enabled: true },
+  ],
 
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
@@ -112,6 +117,25 @@ export default {
   },
 }
 ```
+
+### Plugin API v1
+
+Plugin modules should export `definePlugin(...)` from `@chx/cli`.
+
+- `manifest.apiVersion` must be `1`.
+- Optional compatibility gates:
+  - `manifest.compatibility.cli.minMajor`
+  - `manifest.compatibility.cli.maxMajor`
+- Lifecycle hooks:
+  - `onConfigLoaded`
+  - `onSchemaLoaded`
+  - `onPlanCreated`
+  - `onBeforeApply`
+  - `onAfterApply`
+- Plugin command namespace:
+  - `chx plugin`
+  - `chx plugin <plugin-name>`
+  - `chx plugin <plugin-name> <command> [args...]`
 
 ## Output Artifacts
 

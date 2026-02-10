@@ -9,6 +9,7 @@ import { cmdDrift } from './commands/drift.js'
 import { cmdGenerate } from './commands/generate.js'
 import { cmdInit } from './commands/init.js'
 import { cmdMigrate } from './commands/migrate.js'
+import { cmdPlugin } from './commands/plugin.js'
 import { cmdStatus } from './commands/status.js'
 
 function printHelp(): void {
@@ -20,6 +21,7 @@ Usage:
   chx status [--config <path>] [--json]
   chx drift [--config <path>] [--json]
   chx check [--config <path>] [--strict] [--json]
+  chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
 
 Options:
   --config <path>  Path to config file (default: clickhouse.config.ts)
@@ -227,6 +229,27 @@ const app = buildApplication(
           exitIfNeeded()
         },
       }),
+      plugin: buildCommand<{
+        config?: string
+        json?: boolean
+      }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'List plugins and run plugin namespace commands',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdPlugin(args)
+          exitIfNeeded()
+        },
+      }),
       help: buildCommand({
         parameters: {},
         docs: {
@@ -254,7 +277,19 @@ const app = buildApplication(
   }
 )
 
-run(app, process.argv.slice(2), { process }).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+const argv = process.argv.slice(2)
+if (argv[0] === 'plugin') {
+  cmdPlugin(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else {
+  run(app, argv, { process }).catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
+}
