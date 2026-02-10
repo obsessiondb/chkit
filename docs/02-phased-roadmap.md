@@ -97,26 +97,24 @@ Duration: 3-5 weeks
 Duration: 4-8 weeks
 
 ### Objectives
-1. Handle distributed/cluster-specific behaviors better.
-2. Add optional rename and compatibility helpers.
-3. Reduce pain points from existing custom infra migrations.
+1. Add optional rename and compatibility helpers.
+2. Strengthen advanced engine-aware validation and planner safeguards.
+3. Reduce pain points from existing custom infra migrations (non-distributed scope).
 
 ### Deliverables
-1. distributed table strategy support:
-   - local + distributed pair modeling
-   - cluster-aware SQL rendering options
-2. rename assistance flow (interactive + guarded).
-3. compatibility matrix by ClickHouse version.
+1. rename assistance flow (interactive + guarded).
+2. compatibility matrix by ClickHouse version.
+3. advanced engine-specific validation and migration hints.
 
 ### Tasks
-1. Introduce distributed mode DSL extensions.
-2. Implement rename detection as optional planner pass.
-3. Validate engine-specific constraints before render.
-4. Add integration tests for cluster/distributed scenarios.
+1. Implement rename detection as optional planner pass.
+2. Validate engine-specific constraints before render.
+3. Add compatibility rule checks for selected ClickHouse versions.
+4. Add integration tests for advanced engine/rename scenarios.
 
 ### Exit Criteria
 1. Existing `clickhouse-infra` core schema patterns can be represented.
-2. distributed migrations validated in staging environments.
+2. rename/compatibility flows validated in staging-like environments.
 
 ## Phase 4: Plugin System and Optional Modules
 Duration: 3-6 weeks
@@ -159,7 +157,6 @@ Duration: ongoing
 ### Tasks
 1. Add examples:
    - simple single-node project
-   - distributed cluster project
    - migration-heavy project
 2. Add troubleshooting matrix.
 3. Add CI recipes (GitHub Actions examples).
@@ -205,8 +202,8 @@ Duration: ongoing
 2. safer destructive flow.
 
 ### Milestone M5 (end of Phase 3)
-1. distributed-aware schema support.
-2. rename helper (manual confirmation required).
+1. rename helper (manual confirmation required).
+2. compatibility checks for selected ClickHouse versions.
 
 ### Milestone M6 (Phase 4)
 1. plugin API release.
