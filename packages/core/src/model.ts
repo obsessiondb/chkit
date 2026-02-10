@@ -88,7 +88,6 @@ export interface ChxConfig {
   }
   safety?: {
     allowDestructive?: boolean
-    requireConfirmOnDanger?: boolean
   }
   clickhouse?: {
     url: string
