@@ -10,7 +10,10 @@ import {
   buildBackfillPlan,
   computeBackfillStateDir,
   createBackfillPlugin,
+  executeBackfillRun,
+  getBackfillStatus,
   normalizeBackfillOptions,
+  resumeBackfillRun,
 } from './index'
 
 describe('@chx/plugin-backfill options', () => {
@@ -29,14 +32,13 @@ describe('@chx/plugin-backfill options', () => {
     expect(options.limits.minChunkMinutes).toBe(15)
   })
 
-  test('exposes plan command and typed registration helper', () => {
+  test('exposes commands and typed registration helper', () => {
     const plugin = createBackfillPlugin()
     const registration = backfill({ defaults: { chunkHours: 4 } })
 
     expect(plugin.manifest.name).toBe('backfill')
     expect(plugin.manifest.apiVersion).toBe(1)
-    expect(plugin.commands).toHaveLength(1)
-    expect(plugin.commands[0]?.name).toBe('plan')
+    expect(plugin.commands.map((command) => command.name)).toEqual(['plan', 'run', 'resume', 'status'])
     expect(registration.name).toBe('backfill')
     expect(registration.enabled).toBe(true)
     expect(registration.options?.defaults?.chunkHours).toBe(4)
@@ -134,5 +136,122 @@ describe('@chx/plugin-backfill planning', () => {
 
     expect(defaultDir).toBe(resolve('/tmp/project/chx/meta/backfill'))
     expect(overriddenDir).toBe(resolve('/tmp/project/custom-state'))
+  })
+})
+
+describe('@chx/plugin-backfill run lifecycle', () => {
+  test('runs plan chunks and reports completed status', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chx/meta',
+      })
+      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+
+      expect(ran.status.status).toBe('completed')
+      expect(ran.status.totals.done).toBe(3)
+      expect(ran.status.totals.failed).toBe(0)
+
+      const status = await getBackfillStatus({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+      expect(status.status).toBe('completed')
+      expect(status.totals.done).toBe(3)
+      expect(status.runPath).toContain('/runs/')
+      expect(status.eventPath).toContain('/events/')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('supports fail then resume without replaying done chunks', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chx/meta',
+      })
+      const options = normalizeBackfillOptions({
+        defaults: {
+          chunkHours: 2,
+          maxRetriesPerChunk: 1,
+        },
+      })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      const failChunkId = planned.plan.chunks[1]?.id
+      expect(failChunkId).toBeTruthy()
+
+      const firstRun = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execution: {
+          simulation: {
+            failChunkId,
+            failCount: 1,
+          },
+        },
+      })
+
+      expect(firstRun.status.status).toBe('failed')
+      expect(firstRun.status.totals.done).toBe(1)
+      expect(firstRun.status.totals.failed).toBe(1)
+
+      const resumed = await resumeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execution: {
+          replayFailed: true,
+        },
+      })
+
+      expect(resumed.status.status).toBe('completed')
+      expect(resumed.status.totals.done).toBe(3)
+
+      const runRaw = JSON.parse(await readFile(resumed.runPath, 'utf8')) as {
+        chunks: Array<{ id: string; attempts: number }>
+      }
+      const firstChunk = planned.plan.chunks[0]
+      const firstChunkState = runRaw.chunks.find((chunk) => chunk.id === firstChunk?.id)
+      expect(firstChunkState?.attempts).toBe(1)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
