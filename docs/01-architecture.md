@@ -163,7 +163,9 @@ Canonicalization is critical to avoid noisy diffs.
 
 ## Config Model (Target)
 ```ts
-export default {
+import { defineConfig } from '@chx/core'
+
+export default defineConfig({
   schema: './src/db/schema/**/*.ts',
   migrationsDir: './chx/migrations',
   metaDir: './chx/meta',
@@ -182,7 +184,7 @@ export default {
   output: {
     json: false,
   },
-}
+})
 ```
 
 ## Plugin Architecture (Target)

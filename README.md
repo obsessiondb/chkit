@@ -99,12 +99,22 @@ Returns non-zero when enabled checks fail.
 ## Config (`clickhouse.config.ts`)
 
 ```ts
-export default {
+import { defineConfig } from '@chx/core'
+import { typegen } from '@chx/plugin-typegen'
+
+export default defineConfig({
   schema: './src/db/schema/**/*.ts',
   outDir: './chx',
   migrationsDir: './chx/migrations',
   metaDir: './chx/meta',
   plugins: [
+    // Typed registration (recommended):
+    typegen({
+      outFile: './src/generated/chx-types.ts',
+      emitZod: false,
+    }),
+
+    // Legacy path-based registration (still supported):
     // './plugins/my-plugin.ts',
     // { resolve: './plugins/my-plugin.ts', options: { dryRun: true }, enabled: true },
   ],
@@ -125,12 +135,14 @@ export default {
   safety: {
     allowDestructive: false,
   },
-}
+})
 ```
 
 ### Plugin API v1
 
 Plugin modules should export `definePlugin(...)` from `@chx/cli`.
+
+For typed config registration, plugin packages can export helpers that return inline registrations (for example `typegen(...)` from `@chx/plugin-typegen`).
 
 - `manifest.apiVersion` must be `1`.
 - Optional compatibility gates:
