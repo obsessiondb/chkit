@@ -10,6 +10,7 @@ import {
   buildBackfillPlan,
   computeBackfillStateDir,
   createBackfillPlugin,
+  evaluateBackfillCheck,
   executeBackfillRun,
   getBackfillStatus,
   normalizeBackfillOptions,
@@ -250,6 +251,85 @@ describe('@chx/plugin-backfill run lifecycle', () => {
       const firstChunk = planned.plan.chunks[0]
       const firstChunkState = runRaw.chunks.find((chunk) => chunk.id === firstChunk?.id)
       expect(firstChunkState?.attempts).toBe(1)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('@chx/plugin-backfill check integration', () => {
+  test('reports pending required backfills when plan exists but run is missing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chx/meta',
+      })
+      const options = normalizeBackfillOptions({})
+
+      await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      const checkResult = await evaluateBackfillCheck({
+        configPath,
+        config,
+        options,
+      })
+
+      expect(checkResult.ok).toBe(false)
+      expect(checkResult.findings.map((finding) => finding.code)).toContain('backfill_required_pending')
+      expect(checkResult.metadata?.requiredCount).toBe(1)
+      expect(checkResult.metadata?.activeRuns).toBe(0)
+      expect(checkResult.metadata?.failedRuns).toBe(0)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('reports ok after completed run and emits no finding codes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chx/meta',
+      })
+      const options = normalizeBackfillOptions({})
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+      await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+
+      const checkResult = await evaluateBackfillCheck({
+        configPath,
+        config,
+        options,
+      })
+
+      expect(checkResult.ok).toBe(true)
+      expect(checkResult.findings).toEqual([])
+      expect(checkResult.metadata?.requiredCount).toBe(0)
+      expect(checkResult.metadata?.failedRuns).toBe(0)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
