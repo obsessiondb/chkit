@@ -1,9 +1,12 @@
 import { mkdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import process from 'node:process'
+import { createInterface } from 'node:readline/promises'
 
 import { createClickHouseExecutor } from '@chx/clickhouse'
 
 import {
+  collectDestructiveOperationMarkers,
   type MigrationJournalEntry,
   checksumSQL,
   emitJson,
@@ -16,6 +19,26 @@ import {
   readJournal,
   writeJournal,
 } from '../lib.js'
+
+function isBackgroundOrCI(): boolean {
+  return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY
+}
+
+async function confirmDestructiveExecution(markers: Array<{ migration: string; summary: string }>): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    console.log('Destructive operations detected:')
+    for (const marker of markers) {
+      console.log(`- ${marker.migration}: ${marker.summary}`)
+    }
+    console.log('')
+    console.log('Type "yes" to continue. Any other input cancels.')
+    const response = await rl.question('Apply destructive operations? [no/yes]: ')
+    return response.trim().toLowerCase() === 'yes'
+  } finally {
+    rl.close()
+  }
+}
 
 export async function cmdMigrate(args: string[]): Promise<void> {
   const execute = hasFlag('--execute', args)
@@ -76,28 +99,49 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     if (!execute) return
   }
 
-  const dangerousMigrations: string[] = []
+  const destructiveMigrations: string[] = []
+  const destructiveOperations: Array<{ migration: string; summary: string }> = []
   for (const file of pending) {
     const sql = await readFile(join(migrationsDir, file), 'utf8')
     if (migrationContainsDangerOperation(sql)) {
-      dangerousMigrations.push(file)
+      destructiveMigrations.push(file)
+      destructiveOperations.push(...collectDestructiveOperationMarkers(file, sql))
     }
   }
 
-  const destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
-  if (dangerousMigrations.length > 0 && !destructiveAllowed) {
+  let destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
+  if (destructiveMigrations.length > 0 && !destructiveAllowed) {
     const error =
-      'Blocked dangerous migration execution. Re-run with --allow-destructive or set safety.allowDestructive=true after review.'
+      'Blocked destructive migration execution. Re-run with --allow-destructive or set safety.allowDestructive=true after review.'
     if (jsonMode) {
       emitJson('migrate', {
         mode: 'execute',
         error,
-        dangerousMigrations,
+        destructiveMigrations,
+        destructiveOperations,
       })
       process.exitCode = 3
       return
     }
-    throw new Error(`${error}\nDangerous migrations: ${dangerousMigrations.join(', ')}`)
+
+    if (isBackgroundOrCI()) {
+      throw new Error(
+        `${error}\nDestructive migrations: ${destructiveMigrations.join(', ')}\n` +
+          'Non-interactive run detected. Pass --allow-destructive to proceed.'
+      )
+    }
+
+    const confirmed = await confirmDestructiveExecution(destructiveOperations)
+    if (!confirmed) {
+      throw new Error(
+        `Destructive migration cancelled by user.\nDestructive migrations: ${destructiveMigrations.join(', ')}`
+      )
+    }
+    destructiveAllowed = true
+  }
+
+  if (destructiveMigrations.length > 0 && !destructiveAllowed) {
+    throw new Error('Blocked destructive migration execution.')
   }
 
   if (!config.clickhouse) {

@@ -4,7 +4,7 @@ import { rm, writeFile } from 'node:fs/promises'
 import { createFixture, renderUsersSchema, runCli } from './testkit.test'
 
 describe('@chx/cli migration scenario flows', () => {
-  test('start state + schema changes produce expected diff and migrate danger gate', async () => {
+  test('start state + schema changes produce expected diff and migrate destructive gate', async () => {
     const fixture = await createFixture()
     try {
       const init = runCli([
@@ -70,10 +70,10 @@ describe('@chx/cli migration scenario flows', () => {
       expect(migrateExecute.exitCode).toBe(3)
       const migratePayload = JSON.parse(migrateExecute.stdout) as {
         error: string
-        dangerousMigrations: string[]
+        destructiveMigrations: string[]
       }
-      expect(migratePayload.error).toContain('Blocked dangerous migration execution')
-      expect(migratePayload.dangerousMigrations).toContain('20260101020000_structural.sql')
+      expect(migratePayload.error).toContain('Blocked destructive migration execution')
+      expect(migratePayload.destructiveMigrations).toContain('20260101020000_structural.sql')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

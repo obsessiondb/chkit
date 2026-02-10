@@ -216,7 +216,7 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('migrate --execute --json blocks danger operations without allow flag', async () => {
+  test('migrate --execute --json blocks destructive operations without allow flag', async () => {
     const fixture = await createFixture()
     try {
       await mkdir(fixture.migrationsDir, { recursive: true })
@@ -233,13 +233,34 @@ describe('@chx/cli command flows', () => {
         schemaVersion: number
         mode: string
         error: string
-        dangerousMigrations: string[]
+        destructiveMigrations: string[]
+        destructiveOperations: Array<{ migration: string; summary: string }>
       }
       expect(payload.command).toBe('migrate')
       expect(payload.schemaVersion).toBe(1)
       expect(payload.mode).toBe('execute')
-      expect(payload.error).toContain('Blocked dangerous migration execution')
-      expect(payload.dangerousMigrations).toEqual(['20260101000000_drop_users.sql'])
+      expect(payload.error).toContain('Blocked destructive migration execution')
+      expect(payload.destructiveMigrations).toEqual(['20260101000000_drop_users.sql'])
+      expect(payload.destructiveOperations.length).toBeGreaterThan(0)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate --execute blocks destructive operations in non-interactive mode with explicit guidance', async () => {
+    const fixture = await createFixture()
+    try {
+      await mkdir(fixture.migrationsDir, { recursive: true })
+      await writeFile(
+        join(fixture.migrationsDir, '20260101000000_drop_users.sql'),
+        '-- operation: drop_table key=table:app.users risk=danger\nDROP TABLE IF EXISTS app.users;\n',
+        'utf8'
+      )
+
+      const result = runCli(['migrate', '--config', fixture.configPath, '--execute'])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('Blocked destructive migration execution')
+      expect(result.stderr).toContain('Non-interactive run detected. Pass --allow-destructive to proceed.')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -259,7 +280,7 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('migrate --execute --allow-destructive bypasses danger gate', async () => {
+  test('migrate --execute --allow-destructive bypasses destructive gate', async () => {
     const fixture = await createFixture()
     try {
       await mkdir(fixture.migrationsDir, { recursive: true })
@@ -276,13 +297,13 @@ describe('@chx/cli command flows', () => {
         schemaVersion: number
         mode: string
         error: string
-        dangerousMigrations: string[]
+        destructiveMigrations: string[]
       }
       expect(blockedPayload.command).toBe('migrate')
       expect(blockedPayload.schemaVersion).toBe(1)
       expect(blockedPayload.mode).toBe('execute')
-      expect(blockedPayload.error).toContain('Blocked dangerous migration execution')
-      expect(blockedPayload.dangerousMigrations).toEqual(['20260101000000_drop_users.sql'])
+      expect(blockedPayload.error).toContain('Blocked destructive migration execution')
+      expect(blockedPayload.destructiveMigrations).toEqual(['20260101000000_drop_users.sql'])
 
       const allowed = runCli([
         'migrate',
@@ -295,7 +316,7 @@ describe('@chx/cli command flows', () => {
       expect(allowed.exitCode).toBe(1)
       expect(allowed.stdout).toBe('')
       expect(allowed.stderr).toContain('clickhouse config is required for --execute')
-      expect(allowed.stderr).not.toContain('Blocked dangerous migration execution')
+      expect(allowed.stderr).not.toContain('Blocked destructive migration execution')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -551,7 +572,7 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('migrate --execute --json danger gate uses stable error payload keys', async () => {
+  test('migrate --execute --json destructive gate uses stable error payload keys', async () => {
     const fixture = await createFixture()
     try {
       await mkdir(fixture.migrationsDir, { recursive: true })
@@ -566,7 +587,8 @@ describe('@chx/cli command flows', () => {
       const payload = JSON.parse(result.stdout) as Record<string, unknown>
       expect(sortedKeys(payload)).toEqual([
         'command',
-        'dangerousMigrations',
+        'destructiveMigrations',
+        'destructiveOperations',
         'error',
         'mode',
         'schemaVersion',

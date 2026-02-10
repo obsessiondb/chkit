@@ -28,7 +28,7 @@ Options:
                    Deterministic migration file prefix override (e.g. 20260101010101)
   --execute        Execute pending migrations on ClickHouse
   --allow-destructive
-                   Required with --execute when pending migrations contain risk=danger operations
+                   Required in non-interactive mode when pending migrations contain destructive operations
   --plan           Print plan details for operation review
   --strict         Force all check policies on for this invocation
   --json           Emit machine-readable JSON output
@@ -129,7 +129,7 @@ const app = buildApplication(
             config: optionalStringFlag('Path to config file', 'path'),
             execute: optionalBooleanFlag('Execute pending migrations on ClickHouse'),
             allowDestructive: optionalBooleanFlag(
-              'Allow dangerous migrations tagged with risk=danger'
+              'Allow destructive migrations tagged with risk=danger'
             ),
             plan: optionalBooleanFlag('Print pending migration plan'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),

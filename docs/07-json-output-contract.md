@@ -125,7 +125,7 @@ Keys:
 4. `error`
 5. `checksumMismatches`
 
-### `migrate` dangerous migration blocked error
+### `migrate` destructive migration blocked error
 
 Keys:
 
@@ -133,7 +133,8 @@ Keys:
 2. `schemaVersion`
 3. `mode`
 4. `error`
-5. `dangerousMigrations`
+5. `destructiveMigrations`
+6. `destructiveOperations`
 
 ## Exit Codes
 
