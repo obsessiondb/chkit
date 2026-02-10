@@ -85,7 +85,6 @@ Duration: 3-5 weeks
 2. Add drift report format.
 3. Add safety policy config:
    - `allowDestructive`
-   - `requireConfirmOnDanger`
 4. Add forced explicit flags for dangerous ops.
 5. Add operation-level validation and warnings.
 

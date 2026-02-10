@@ -177,7 +177,6 @@ export default {
     },
   },
   safety: {
-    requireConfirmOnDanger: true,
     allowDestructive: false,
   },
   output: {
