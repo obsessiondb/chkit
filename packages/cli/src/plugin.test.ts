@@ -451,6 +451,181 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('chx plugin backfill resume enforces compatibility check unless force override is provided', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { chunkHours: 2, maxRetriesPerChunk: 1 } })\n`,
+        'utf8'
+      )
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { chunkHours: 2, maxRetriesPerChunk: 1 } } }],\n}\n`,
+        'utf8'
+      )
+
+      const planned = runCli([
+        'plugin',
+        'backfill',
+        'plan',
+        '--target',
+        'app.users',
+        '--from',
+        '2026-01-01T00:00:00.000Z',
+        '--to',
+        '2026-01-01T06:00:00.000Z',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      const planPayload = JSON.parse(planned.stdout) as { planId: string; planPath: string }
+      const planState = JSON.parse(await readFile(planPayload.planPath, 'utf8')) as {
+        chunks: Array<{ id: string }>
+      }
+
+      const failed = runCli([
+        'plugin',
+        'backfill',
+        'run',
+        '--plan-id',
+        planPayload.planId,
+        '--simulate-fail-chunk',
+        planState.chunks[1]?.id as string,
+        '--simulate-fail-count',
+        '1',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(failed.exitCode).toBe(1)
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { chunkHours: 2, maxRetriesPerChunk: 5 } } }],\n}\n`,
+        'utf8'
+      )
+
+      const blockedResume = runCli([
+        'plugin',
+        'backfill',
+        'resume',
+        '--plan-id',
+        planPayload.planId,
+        '--replay-failed',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(blockedResume.exitCode).toBe(2)
+      expect(blockedResume.stdout).toContain('compatibility check failed')
+
+      const forcedResume = runCli([
+        'plugin',
+        'backfill',
+        'resume',
+        '--plan-id',
+        planPayload.planId,
+        '--replay-failed',
+        '--force-compatibility',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(forcedResume.exitCode).toBe(0)
+      const forcedPayload = JSON.parse(forcedResume.stdout) as { status: string }
+      expect(forcedPayload.status).toBe('completed')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chx plugin backfill cancel and doctor provide operator remediation flow', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { chunkHours: 2, maxRetriesPerChunk: 1 } })\n`,
+        'utf8'
+      )
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        'utf8'
+      )
+
+      const planned = runCli([
+        'plugin',
+        'backfill',
+        'plan',
+        '--target',
+        'app.users',
+        '--from',
+        '2026-01-01T00:00:00.000Z',
+        '--to',
+        '2026-01-01T06:00:00.000Z',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      const planPayload = JSON.parse(planned.stdout) as { planId: string; planPath: string }
+      const planState = JSON.parse(await readFile(planPayload.planPath, 'utf8')) as {
+        chunks: Array<{ id: string }>
+      }
+
+      runCli([
+        'plugin',
+        'backfill',
+        'run',
+        '--plan-id',
+        planPayload.planId,
+        '--simulate-fail-chunk',
+        planState.chunks[1]?.id as string,
+        '--simulate-fail-count',
+        '1',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+
+      const cancelled = runCli([
+        'plugin',
+        'backfill',
+        'cancel',
+        '--plan-id',
+        planPayload.planId,
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(cancelled.exitCode).toBe(0)
+      const cancelPayload = JSON.parse(cancelled.stdout) as { status: string }
+      expect(cancelPayload.status).toBe('cancelled')
+
+      const doctor = runCli([
+        'plugin',
+        'backfill',
+        'doctor',
+        '--plan-id',
+        planPayload.planId,
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(doctor.exitCode).toBe(1)
+      const doctorPayload = JSON.parse(doctor.stdout) as {
+        issueCodes: string[]
+        recommendations: string[]
+      }
+      expect(doctorPayload.issueCodes).toContain('backfill_required_pending')
+      expect(doctorPayload.recommendations.join(' ')).toContain('backfill resume')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('chx typegen writes output file', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')

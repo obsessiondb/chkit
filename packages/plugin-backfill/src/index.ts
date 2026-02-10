@@ -93,6 +93,7 @@ export interface BackfillRunState {
   lastError?: string
   replayDone: boolean
   replayFailed: boolean
+  compatibilityToken: string
   options: BackfillPlanState['options']
   chunks: BackfillRunChunkState[]
 }
@@ -170,10 +171,19 @@ interface BackfillExecutionOptions {
   replayDone?: boolean
   replayFailed?: boolean
   forceOverlap?: boolean
+  forceCompatibility?: boolean
   simulation?: {
     failChunkId?: string
     failCount?: number
   }
+}
+
+export interface BackfillDoctorReport {
+  planId: string
+  status: BackfillPlanStatus
+  issueCodes: string[]
+  recommendations: string[]
+  failedChunkIds: string[]
 }
 
 export interface ExecuteBackfillRunOutput {
@@ -199,7 +209,7 @@ export interface BackfillPlugin {
     version?: string
   }
   commands: Array<{
-    name: 'plan' | 'run' | 'resume' | 'status'
+    name: 'plan' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
     description: string
     run: (context: BackfillPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
@@ -233,6 +243,7 @@ interface ParsedRunArgs {
   replayDone: boolean
   replayFailed: boolean
   forceOverlap: boolean
+  forceCompatibility: boolean
   simulateFailChunk?: string
   simulateFailCount: number
 }
@@ -242,9 +253,18 @@ interface ParsedResumeArgs {
   replayDone: boolean
   replayFailed: boolean
   forceOverlap: boolean
+  forceCompatibility: boolean
 }
 
 interface ParsedStatusArgs {
+  planId: string
+}
+
+interface ParsedCancelArgs {
+  planId: string
+}
+
+interface ParsedDoctorArgs {
   planId: string
 }
 
@@ -501,6 +521,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let replayDone = false
   let replayFailed = false
   let forceOverlap = false
+  let forceCompatibility = false
   let simulateFailChunk: string | undefined
   let simulateFailCount = 1
 
@@ -520,6 +541,11 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
 
     if (token === '--force-overlap') {
       forceOverlap = true
+      continue
+    }
+
+    if (token === '--force-compatibility') {
+      forceCompatibility = true
       continue
     }
 
@@ -554,6 +580,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     replayDone,
     replayFailed,
     forceOverlap,
+    forceCompatibility,
     simulateFailChunk,
     simulateFailCount,
   }
@@ -566,6 +593,7 @@ function parseResumeArgs(args: string[]): ParsedResumeArgs {
     replayDone: parsed.replayDone,
     replayFailed: parsed.replayFailed,
     forceOverlap: parsed.forceOverlap,
+    forceCompatibility: parsed.forceCompatibility,
   }
 }
 
@@ -587,6 +615,14 @@ function parseStatusArgs(args: string[]): ParsedStatusArgs {
   if (!planId) throw new BackfillConfigError('Missing required --plan-id <id>')
 
   return { planId: normalizePlanId(planId) }
+}
+
+function parseCancelArgs(args: string[]): ParsedCancelArgs {
+  return parseStatusArgs(args)
+}
+
+function parseDoctorArgs(args: string[]): ParsedDoctorArgs {
+  return parseStatusArgs(args)
 }
 
 function ensureHoursWithinLimits(input: {
@@ -688,6 +724,24 @@ function stableSerialize(value: unknown): string {
     .join(',')}}`
 }
 
+function computeCompatibilityToken(input: {
+  plan: BackfillPlanState
+  options: NormalizedBackfillPluginOptions
+}): string {
+  return hashId(
+    stableSerialize({
+      planId: input.plan.planId,
+      target: input.plan.target,
+      from: input.plan.from,
+      to: input.plan.to,
+      planOptions: input.plan.options,
+      runtimeDefaults: input.options.defaults,
+      runtimePolicy: input.options.policy,
+      runtimeLimits: input.options.limits,
+    })
+  )
+}
+
 function planIdentity(target: string, from: string, to: string, chunkHours: number): string {
   return `${target}|${from}|${to}|${chunkHours}`
 }
@@ -760,19 +814,27 @@ async function readRun(runPath: string): Promise<BackfillRunState | null> {
   return readJsonMaybe<BackfillRunState>(runPath)
 }
 
-function createRunState(plan: BackfillPlanState, input: BackfillExecutionOptions): BackfillRunState {
+function createRunState(input: {
+  plan: BackfillPlanState
+  options: NormalizedBackfillPluginOptions
+  execution: BackfillExecutionOptions
+}): BackfillRunState {
   const startedAt = nowIso()
   return {
-    planId: plan.planId,
-    target: plan.target,
+    planId: input.plan.planId,
+    target: input.plan.target,
     status: 'planned',
     createdAt: startedAt,
     startedAt,
     updatedAt: startedAt,
-    replayDone: input.replayDone ?? false,
-    replayFailed: input.replayFailed ?? false,
-    options: plan.options,
-    chunks: plan.chunks.map((chunk) => ({
+    replayDone: input.execution.replayDone ?? false,
+    replayFailed: input.execution.replayFailed ?? false,
+    compatibilityToken: computeCompatibilityToken({
+      plan: input.plan,
+      options: input.options,
+    }),
+    options: input.plan.options,
+    chunks: input.plan.chunks.map((chunk) => ({
       id: chunk.id,
       from: chunk.from,
       to: chunk.to,
@@ -938,6 +1000,25 @@ async function persistRunAndEvent(input: {
   input.run.updatedAt = nowIso()
   await writeJson(input.runPath, input.run)
   await appendEvent(input.eventPath, input.event)
+}
+
+function ensureRunCompatibility(input: {
+  run: BackfillRunState
+  plan: BackfillPlanState
+  options: NormalizedBackfillPluginOptions
+  forceCompatibility: boolean
+}): void {
+  if (!input.run.compatibilityToken) return
+  const expected = computeCompatibilityToken({
+    plan: input.plan,
+    options: input.options,
+  })
+  if (input.run.compatibilityToken === expected) return
+  if (input.forceCompatibility) return
+
+  throw new BackfillConfigError(
+    `Run compatibility check failed for plan ${input.plan.planId}. Runtime options changed since last checkpoint. Retry with --force-compatibility to acknowledge override.`
+  )
 }
 
 async function executeChunk(input: {
@@ -1231,6 +1312,46 @@ function statusPayload(summary: BackfillStatusSummary): {
   }
 }
 
+function cancelPayload(summary: BackfillStatusSummary): {
+  ok: boolean
+  command: 'cancel'
+  planId: string
+  status: BackfillPlanStatus
+  chunkCounts: BackfillStatusSummary['totals']
+  runPath: string
+  eventPath: string
+} {
+  return {
+    ok: summary.status === 'cancelled',
+    command: 'cancel',
+    planId: summary.planId,
+    status: summary.status,
+    chunkCounts: summary.totals,
+    runPath: summary.runPath,
+    eventPath: summary.eventPath,
+  }
+}
+
+function doctorPayload(report: BackfillDoctorReport): {
+  ok: boolean
+  command: 'doctor'
+  planId: string
+  status: BackfillPlanStatus
+  issueCodes: string[]
+  recommendations: string[]
+  failedChunkIds: string[]
+} {
+  return {
+    ok: report.issueCodes.length === 0,
+    command: 'doctor',
+    planId: report.planId,
+    status: report.status,
+    issueCodes: report.issueCodes,
+    recommendations: report.recommendations,
+    failedChunkIds: report.failedChunkIds,
+  }
+}
+
 export async function buildBackfillPlan(input: {
   target: string
   from: string
@@ -1336,12 +1457,28 @@ export async function executeBackfillRun(input: {
 
   let run = await readRun(paths.runPath)
   if (!run) {
-    run = createRunState(plan, execution)
+    run = createRunState({
+      plan,
+      options: input.options,
+      execution,
+    })
+  } else {
+    ensureRunCompatibility({
+      run,
+      plan,
+      options: input.options,
+      forceCompatibility: execution.forceCompatibility ?? false,
+    })
   }
 
   if (run.status === 'completed' && !execution.replayDone && !execution.replayFailed) {
     throw new BackfillConfigError(
       `Run already completed for plan ${plan.planId}. Use --replay-done to run completed chunks again.`
+    )
+  }
+  if (run.status === 'cancelled') {
+    throw new BackfillConfigError(
+      `Run is cancelled for plan ${plan.planId}. Create a new plan or inspect with backfill doctor.`
     )
   }
 
@@ -1373,6 +1510,28 @@ export async function resumeBackfillRun(input: {
   if (!run) {
     throw new BackfillConfigError(
       `Run state not found for plan ${plan.planId}. Start with backfill run before resume.`
+    )
+  }
+
+  ensureRunCompatibility({
+    run,
+    plan,
+    options: input.options,
+    forceCompatibility: input.execution?.forceCompatibility ?? false,
+  })
+  if (input.options.policy.blockOverlappingRuns && !input.execution?.forceOverlap) {
+    const activeTargets = await collectActiveRunTargets(paths.runsDir)
+    for (const [activePlanId, activeTarget] of activeTargets.entries()) {
+      if (activePlanId === plan.planId) continue
+      if (activeTarget !== plan.target) continue
+      throw new BackfillConfigError(
+        `Overlapping active run detected for target ${plan.target} (plan ${activePlanId}). Retry with --force-overlap to override.`
+      )
+    }
+  }
+  if (run.status === 'cancelled') {
+    throw new BackfillConfigError(
+      `Run is cancelled for plan ${plan.planId}. Create a new plan or inspect with backfill doctor.`
     )
   }
 
@@ -1421,6 +1580,105 @@ export async function getBackfillStatus(input: {
   }
 
   return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+}
+
+export async function cancelBackfillRun(input: {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+}): Promise<BackfillStatusSummary> {
+  const { plan, stateDir } = await readPlan({
+    planId: input.planId,
+    configPath: input.configPath,
+    config: input.config,
+    options: input.options,
+  })
+  const paths = backfillPaths(stateDir, plan.planId)
+  const run = await readRun(paths.runPath)
+
+  if (!run) {
+    throw new BackfillConfigError(
+      `Run state not found for plan ${plan.planId}. Start with backfill run before cancel.`
+    )
+  }
+  if (run.status === 'completed') {
+    throw new BackfillConfigError(`Run already completed for plan ${plan.planId}; cannot cancel.`)
+  }
+  if (run.status === 'cancelled') {
+    return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+  }
+
+  run.status = 'cancelled'
+  run.completedAt = nowIso()
+  run.lastError = 'Cancelled by operator'
+  for (const chunk of run.chunks) {
+    if (chunk.status === 'running') {
+      chunk.status = 'pending'
+    }
+  }
+
+  await persistRunAndEvent({
+    run,
+    runPath: paths.runPath,
+    eventPath: paths.eventPath,
+    event: {
+      type: 'run_cancelled',
+      planId: plan.planId,
+    },
+  })
+
+  return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+}
+
+export async function getBackfillDoctorReport(input: {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+}): Promise<BackfillDoctorReport> {
+  const status = await getBackfillStatus(input)
+  const issueCodes: string[] = []
+  const recommendations: string[] = []
+  const failedChunkIds: string[] = []
+
+  const run = await readRun(status.runPath)
+  for (const chunk of run?.chunks ?? []) {
+    if (chunk.status === 'failed') failedChunkIds.push(chunk.id)
+  }
+
+  if (status.status === 'planned') {
+    issueCodes.push('backfill_plan_missing')
+    recommendations.push(`Run: chx plugin backfill run --plan-id ${status.planId}`)
+  }
+  if (status.status === 'failed') {
+    issueCodes.push('backfill_chunk_failed_retry_exhausted')
+    recommendations.push(`Inspect status: chx plugin backfill status --plan-id ${status.planId}`)
+    recommendations.push(
+      `Retry failed chunks: chx plugin backfill resume --plan-id ${status.planId} --replay-failed`
+    )
+  }
+  if (status.status === 'cancelled') {
+    issueCodes.push('backfill_required_pending')
+    recommendations.push(
+      `Resume execution: chx plugin backfill resume --plan-id ${status.planId} --replay-failed`
+    )
+  }
+  if (status.status === 'running') {
+    issueCodes.push('backfill_required_pending')
+    recommendations.push(`Monitor progress: chx plugin backfill status --plan-id ${status.planId}`)
+  }
+  if (issueCodes.length === 0) {
+    recommendations.push('No remediation required.')
+  }
+
+  return {
+    planId: status.planId,
+    status: status.status,
+    issueCodes,
+    recommendations,
+    failedChunkIds,
+  }
 }
 
 export function createBackfillPlugin(options: BackfillPluginOptions = {}): BackfillPlugin {
@@ -1498,6 +1756,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 replayDone: parsed.replayDone,
                 replayFailed: parsed.replayFailed,
                 forceOverlap: parsed.forceOverlap,
+                forceCompatibility: parsed.forceCompatibility,
                 simulation: {
                   failChunkId: parsed.simulateFailChunk,
                   failCount: parsed.simulateFailCount,
@@ -1550,6 +1809,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 replayDone: parsed.replayDone,
                 replayFailed: parsed.replayFailed,
                 forceOverlap: parsed.forceOverlap,
+                forceCompatibility: parsed.forceCompatibility,
               },
             })
 
@@ -1612,6 +1872,87 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               print({ ok: false, command: 'status', error: message })
             } else {
               print(`Backfill status failed: ${message}`)
+            }
+
+            if (error instanceof BackfillConfigError) return 2
+            return 1
+          }
+        },
+      },
+      {
+        name: 'cancel',
+        description: 'Cancel an in-progress backfill run and prevent further chunk execution',
+        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+          try {
+            const parsed = parseCancelArgs(args)
+            const effectiveOptions = mergeOptions(base, runtimeOptions)
+            validateBaseOptions(effectiveOptions)
+
+            const summary = await cancelBackfillRun({
+              planId: parsed.planId,
+              config,
+              configPath,
+              options: effectiveOptions,
+            })
+            const payload = cancelPayload(summary)
+
+            if (jsonMode) {
+              print(payload)
+            } else {
+              print(
+                `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+
+            return payload.ok ? 0 : 1
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (jsonMode) {
+              print({ ok: false, command: 'cancel', error: message })
+            } else {
+              print(`Backfill cancel failed: ${message}`)
+            }
+
+            if (error instanceof BackfillConfigError) return 2
+            return 1
+          }
+        },
+      },
+      {
+        name: 'doctor',
+        description: 'Provide actionable remediation steps for failed or pending backfill runs',
+        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+          try {
+            const parsed = parseDoctorArgs(args)
+            const effectiveOptions = mergeOptions(base, runtimeOptions)
+            validateBaseOptions(effectiveOptions)
+
+            const report = await getBackfillDoctorReport({
+              planId: parsed.planId,
+              config,
+              configPath,
+              options: effectiveOptions,
+            })
+            const payload = doctorPayload(report)
+
+            if (jsonMode) {
+              print(payload)
+            } else {
+              print(
+                `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`
+              )
+              for (const recommendation of payload.recommendations) {
+                print(`- ${recommendation}`)
+              }
+            }
+
+            return payload.ok ? 0 : 1
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (jsonMode) {
+              print({ ok: false, command: 'doctor', error: message })
+            } else {
+              print(`Backfill doctor failed: ${message}`)
             }
 
             if (error instanceof BackfillConfigError) return 2

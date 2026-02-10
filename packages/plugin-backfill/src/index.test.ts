@@ -8,10 +8,12 @@ import { resolveConfig } from '@chx/core'
 import {
   backfill,
   buildBackfillPlan,
+  cancelBackfillRun,
   computeBackfillStateDir,
   createBackfillPlugin,
   evaluateBackfillCheck,
   executeBackfillRun,
+  getBackfillDoctorReport,
   getBackfillStatus,
   normalizeBackfillOptions,
   resumeBackfillRun,
@@ -39,7 +41,14 @@ describe('@chx/plugin-backfill options', () => {
 
     expect(plugin.manifest.name).toBe('backfill')
     expect(plugin.manifest.apiVersion).toBe(1)
-    expect(plugin.commands.map((command) => command.name)).toEqual(['plan', 'run', 'resume', 'status'])
+    expect(plugin.commands.map((command) => command.name)).toEqual([
+      'plan',
+      'run',
+      'resume',
+      'status',
+      'cancel',
+      'doctor',
+    ])
     expect(registration.name).toBe('backfill')
     expect(registration.enabled).toBe(true)
     expect(registration.options?.defaults?.chunkHours).toBe(4)
@@ -251,6 +260,142 @@ describe('@chx/plugin-backfill run lifecycle', () => {
       const firstChunk = planned.plan.chunks[0]
       const firstChunkState = runRaw.chunks.find((chunk) => chunk.id === firstChunk?.id)
       expect(firstChunkState?.attempts).toBe(1)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('blocks resume on compatibility mismatch unless forceCompatibility is enabled', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chx/meta',
+      })
+      const planOptions = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
+      })
+      const changedOptions = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 5 },
+      })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options: planOptions,
+      })
+      const failChunkId = planned.plan.chunks[1]?.id
+      expect(failChunkId).toBeTruthy()
+
+      await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options: planOptions,
+        execution: {
+          simulation: { failChunkId, failCount: 1 },
+        },
+      })
+
+      await expect(
+        resumeBackfillRun({
+          planId: planned.plan.planId,
+          configPath,
+          config,
+          options: changedOptions,
+          execution: { replayFailed: true },
+        })
+      ).rejects.toThrow('Run compatibility check failed')
+
+      const resumed = await resumeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options: changedOptions,
+        execution: { replayFailed: true, forceCompatibility: true },
+      })
+      expect(resumed.status.status).toBe('completed')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('cancel marks run as cancelled and doctor reports actionable remediation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chx/meta',
+      })
+      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+      await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+
+      await expect(
+        cancelBackfillRun({
+          planId: planned.plan.planId,
+          configPath,
+          config,
+          options,
+        })
+      ).rejects.toThrow('already completed')
+
+      const options2 = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
+      })
+      const planned2 = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-02T00:00:00.000Z',
+        to: '2026-01-02T06:00:00.000Z',
+        configPath,
+        config,
+        options: options2,
+      })
+      await executeBackfillRun({
+        planId: planned2.plan.planId,
+        configPath,
+        config,
+        options: options2,
+        execution: {
+          simulation: { failChunkId: planned2.plan.chunks[1]?.id, failCount: 1 },
+        },
+      })
+      const cancelled = await cancelBackfillRun({
+        planId: planned2.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+      expect(cancelled.status).toBe('cancelled')
+
+      const doctor = await getBackfillDoctorReport({
+        planId: planned2.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+      expect(doctor.issueCodes).toContain('backfill_required_pending')
+      expect(doctor.recommendations.join(' ')).toContain('backfill resume')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
