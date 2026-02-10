@@ -175,11 +175,18 @@ function normalizeSQLFragment(value: string): string {
 }
 
 function normalizeColumnShape(column: ColumnDefinition): string {
+  const normalizeDefaultValue = (value: string): string => {
+    const normalized = normalizeSQLFragment(value)
+    const quoted = normalized.match(/^'(.*)'$/)
+    if (!quoted) return normalized
+    return (quoted[1] ?? '').replace(/''/g, "'")
+  }
+
   const normalizedDefault = (() => {
     if (column.default === undefined) return ''
     const asString = String(column.default)
-    if (asString.startsWith('fn:')) return normalizeSQLFragment(asString.slice(3))
-    return normalizeSQLFragment(asString)
+    if (asString.startsWith('fn:')) return normalizeDefaultValue(asString.slice(3))
+    return normalizeDefaultValue(asString)
   })()
   const parts = [
     `type=${String(column.type).trim()}`,
@@ -211,9 +218,11 @@ function normalizeClause(value: string | undefined): string {
 
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
-  return normalizeSQLFragment(value)
+  const normalized = normalizeSQLFragment(value)
     .replace(/\(\)\s*$/, '')
     .toLowerCase()
+  if (normalized === 'sharedmergetree') return 'mergetree'
+  return normalized
 }
 
 export function compareTableShape(expected: TableDefinition, actual: ActualTableShape): TableDriftDetail | null {
@@ -236,7 +245,7 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   }
 
   const expectedSettings = expected.settings ?? {}
-  const settingKeys = [...new Set([...Object.keys(expectedSettings), ...Object.keys(actual.settings)])].sort()
+  const settingKeys = Object.keys(expectedSettings).sort()
   const settingDiffs: string[] = []
   for (const key of settingKeys) {
     const left = key in expectedSettings ? String(expectedSettings[key]) : ''

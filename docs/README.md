@@ -10,11 +10,12 @@ Use this order when bootstrapping a new planning/execution context:
 6. `05-implementation-backlog.md`
 7. `07-json-output-contract.md`
 8. `08-internal-structure.md`
+9. `09-phase1-closure.md` (closure checklist/evidence snapshot)
 
 ## Quick Prompt for New Context
 If you start a fresh context window, paste this:
 
-> Read all files in `/Users/marc/Workspace/chx/docs` in order from `00-` to `07-`, then propose a concrete 2-week execution plan for Phase 0 + Phase 1 with PR-sized tasks, risk controls, and acceptance criteria.
+> Read all planning files in `/Users/marc/Workspace/chx/docs` in numeric order (`00`, `01`, `02`, `03`, `04`, `05`, `07`, `08`), then propose a concrete 2-week execution plan for Phase 0 + Phase 1 with PR-sized tasks, risk controls, and acceptance criteria.
 
 ## Current Repo Baseline
 - Monorepo scaffold exists with packages:
@@ -27,3 +28,6 @@ If you start a fresh context window, paste this:
   - `chx generate`
   - `chx migrate`
   - `chx status`
+  - `chx drift`
+  - `chx check`
+  - `chx version`

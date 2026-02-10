@@ -155,11 +155,11 @@ function parseClauseFromCreateTableQuery(
 }
 
 export function parseEngineFromCreateTableQuery(createTableQuery: string | undefined): string | undefined {
-  if (!createTableQuery) return undefined
-  const match = createTableQuery.match(/\bENGINE\s*=\s*([^\n;]+)/i)
-  const raw = match?.[1]?.trim()
-  if (!raw) return undefined
-  return normalizeSQLFragment(raw)
+  return parseClauseFromCreateTableQuery(
+    createTableQuery,
+    /\bENGINE\s*=\s*/i,
+    /\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|;|$/i
+  )
 }
 
 export function parsePrimaryKeyFromCreateTableQuery(

@@ -70,6 +70,13 @@ SETTINGS index_granularity = 8192;`
     expect(parseUniqueKeyFromCreateTableQuery(query)).toBe('(id, ts)')
   })
 
+  test('parses engine without leaking ORDER BY/SETTINGS clauses on single-line queries', () => {
+    const query =
+      'CREATE TABLE app.events (id UInt64) ENGINE = MergeTree() ORDER BY id SETTINGS index_granularity = 8192;'
+
+    expect(parseEngineFromCreateTableQuery(query)).toBe('MergeTree()')
+  })
+
   test('parses projection definitions from create table query', () => {
     const query = `CREATE TABLE app.events
 (
