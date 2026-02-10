@@ -14,8 +14,9 @@ Use this order when bootstrapping a new planning/execution context:
 ## Optional Feature Specs
 1. `optional-feature-clickhouse-compatibility-matrix.md`
 2. `optional-feature-engine-specific-validation.md`
-3. `optional-feature-dependency-intelligence-plugin.md`
-4. `optional-feature-rename-assistance-flow.md`
+3. `optional-feature-typegen-plugin.md`
+4. `optional-feature-dependency-intelligence-plugin.md`
+5. `optional-feature-rename-assistance-flow.md`
 
 ## Quick Prompt for New Context
 If you start a fresh context window, paste this:
