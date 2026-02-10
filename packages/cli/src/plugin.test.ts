@@ -3,7 +3,14 @@ import { existsSync } from 'node:fs'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { CLI_ENTRY, CORE_ENTRY, TYPEGEN_PLUGIN_ENTRY, createFixture, runCli } from './testkit.test'
+import {
+  BACKFILL_PLUGIN_ENTRY,
+  CLI_ENTRY,
+  CORE_ENTRY,
+  TYPEGEN_PLUGIN_ENTRY,
+  createFixture,
+  runCli,
+} from './testkit.test'
 
 describe('plugin runtime', () => {
   test('generate --dryrun --json applies onPlanCreated hook output', async () => {
@@ -64,6 +71,77 @@ describe('plugin runtime', () => {
       const payload = JSON.parse(result.stdout) as { ok: boolean; args: string[] }
       expect(payload.ok).toBe(true)
       expect(payload.args).toEqual(['alpha', 'beta'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chx plugin backfill plan writes deterministic state artifact', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        'utf8'
+      )
+
+      const first = runCli([
+        'plugin',
+        'backfill',
+        'plan',
+        '--target',
+        'app.users',
+        '--from',
+        '2026-01-01T00:00:00.000Z',
+        '--to',
+        '2026-01-01T12:00:00.000Z',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(first.exitCode).toBe(0)
+      const firstPayload = JSON.parse(first.stdout) as {
+        ok: boolean
+        planId: string
+        chunkCount: number
+        chunkHours: number
+        existed: boolean
+        planPath: string
+      }
+      expect(firstPayload.ok).toBe(true)
+      expect(firstPayload.chunkCount).toBe(2)
+      expect(firstPayload.chunkHours).toBe(6)
+      expect(firstPayload.existed).toBe(false)
+      expect(existsSync(firstPayload.planPath)).toBe(true)
+
+      const second = runCli([
+        'plugin',
+        'backfill',
+        'plan',
+        '--target',
+        'app.users',
+        '--from',
+        '2026-01-01T00:00:00.000Z',
+        '--to',
+        '2026-01-01T12:00:00.000Z',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(second.exitCode).toBe(0)
+      const secondPayload = JSON.parse(second.stdout) as {
+        planId: string
+        existed: boolean
+      }
+      expect(secondPayload.planId).toBe(firstPayload.planId)
+      expect(secondPayload.existed).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
