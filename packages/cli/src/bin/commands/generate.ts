@@ -22,6 +22,7 @@ import {
   readSnapshot,
   summarizePlan,
 } from '../lib.js'
+import { loadPluginRuntime } from '../plugin-runtime.js'
 
 interface TableRenameMapping {
   oldDatabase: string
@@ -506,8 +507,23 @@ export async function cmdGenerate(args: string[]): Promise<void> {
   const planMode = hasFlag('--dryrun', args)
   const interactiveRenames = hasFlag('--interactive-renames', args)
 
-  const { config, dirs, jsonMode } = await getCommandContext(args)
-  const definitions = await loadSchemaDefinitions(config.schema)
+  const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
+  const pluginRuntime = await loadPluginRuntime({
+    config,
+    configPath,
+    cliVersion: CLI_VERSION,
+  })
+  await pluginRuntime.runOnConfigLoaded({
+    command: 'generate',
+    config,
+    configPath,
+  })
+  let definitions = await loadSchemaDefinitions(config.schema)
+  definitions = await pluginRuntime.runOnSchemaLoaded({
+    command: 'generate',
+    config,
+    definitions,
+  })
   const cliTableMappings = parseRenameTableMappings(args)
   const cliColumnMappings = parseRenameColumnMappings(args)
   const schemaMappings = collectSchemaRenameMappings(definitions)
@@ -546,6 +562,13 @@ export async function cmdGenerate(args: string[]): Promise<void> {
   plan = applyExplicitTableRenames(plan, activeTableMappings)
   assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
   plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings))
+  plan = await pluginRuntime.runOnPlanCreated(
+    {
+      command: 'generate',
+      config,
+    },
+    plan
+  )
 
   if (!planMode && interactiveRenames) {
     const selected = await promptRenameSuggestions(plan.renameSuggestions)
@@ -593,6 +616,21 @@ export async function cmdGenerate(args: string[]): Promise<void> {
     plan,
     cliVersion: CLI_VERSION,
   })
+
+  const typegenPlugin = pluginRuntime.plugins.find((entry) => entry.plugin.manifest.name === 'typegen')
+  const typegenRunOnGenerate = typegenPlugin ? typegenPlugin.options.runOnGenerate !== false : false
+  if (typegenPlugin && typegenRunOnGenerate) {
+    const typegenExitCode = await pluginRuntime.runPluginCommand('typegen', 'typegen', {
+      config,
+      configPath,
+      jsonMode: false,
+      args: [],
+      print() {},
+    })
+    if (typegenExitCode !== 0) {
+      throw new Error(`Plugin "typegen" failed in generate integration with exit code ${typegenExitCode}.`)
+    }
+  }
 
   const payload = {
     migrationFile: result.migrationFile,

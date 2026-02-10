@@ -8,7 +8,7 @@ export async function cmdInit(): Promise<void> {
 
   await writeIfMissing(
     configPath,
-    `export default {\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chx',\n  migrationsDir: './chx/migrations',\n  metaDir: './chx/meta',\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n}\n`
+    `export default {\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chx',\n  migrationsDir: './chx/migrations',\n  metaDir: './chx/meta',\n  plugins: [\n    // { resolve: './plugins/example-plugin.ts', options: {}, enabled: true },\n  ],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n}\n`
   )
 
   await writeIfMissing(

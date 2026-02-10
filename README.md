@@ -25,10 +25,12 @@ bun run chx check
 
 - `chx init`
 - `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
+- `chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
 - `chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
 - `chx status [--config <path>] [--json]`
 - `chx drift [--config <path>] [--json]`
 - `chx check [--config <path>] [--strict] [--json]`
+- `chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
 - `chx version`
 
 ## Global Flags
@@ -51,6 +53,14 @@ Creates starter files if missing:
 - Validates definitions
 - Diffs against `meta/snapshot.json`
 - Writes migration SQL + updates snapshot (unless `--dryrun`)
+- Runs `typegen` plugin automatically when configured with `runOnGenerate: true` (default)
+
+### `chx typegen`
+
+- Optional manual command to generate TypeScript types from schema definitions
+- `--check` verifies generated output is up-to-date (no write)
+- Supports optional Zod emission (`--emit-zod`)
+- Returns non-zero on stale/missing artifacts in check mode
 
 ### `chx migrate`
 
@@ -82,6 +92,7 @@ CI gate command. Evaluates:
 - pending migrations
 - checksum mismatches
 - schema drift
+- plugin checks (including `typegen` when configured)
 
 Returns non-zero when enabled checks fail.
 
@@ -93,6 +104,10 @@ export default {
   outDir: './chx',
   migrationsDir: './chx/migrations',
   metaDir: './chx/meta',
+  plugins: [
+    // './plugins/my-plugin.ts',
+    // { resolve: './plugins/my-plugin.ts', options: { dryRun: true }, enabled: true },
+  ],
 
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
@@ -113,6 +128,27 @@ export default {
 }
 ```
 
+### Plugin API v1
+
+Plugin modules should export `definePlugin(...)` from `@chx/cli`.
+
+- `manifest.apiVersion` must be `1`.
+- Optional compatibility gates:
+  - `manifest.compatibility.cli.minMajor`
+  - `manifest.compatibility.cli.maxMajor`
+- Lifecycle hooks:
+  - `onConfigLoaded`
+  - `onSchemaLoaded`
+  - `onPlanCreated`
+  - `onBeforeApply`
+  - `onAfterApply`
+  - `onCheck`
+  - `onCheckReport`
+- Plugin command namespace:
+  - `chx plugin`
+  - `chx plugin <plugin-name>`
+  - `chx plugin <plugin-name> <command> [args...]`
+
 ## Output Artifacts
 
 Under `metaDir`:
@@ -132,3 +168,4 @@ Under `migrationsDir`:
 
 - Internal architecture and repository structure: `docs/08-internal-structure.md`
 - Planning docs index: `docs/README.md`
+- Typegen plugin usage/configuration: `docs/typegen-plugin.md`

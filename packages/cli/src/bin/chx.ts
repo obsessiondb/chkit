@@ -9,17 +9,21 @@ import { cmdDrift } from './commands/drift.js'
 import { cmdGenerate } from './commands/generate.js'
 import { cmdInit } from './commands/init.js'
 import { cmdMigrate } from './commands/migrate.js'
+import { cmdPlugin } from './commands/plugin.js'
 import { cmdStatus } from './commands/status.js'
+import { cmdTypegen } from './commands/typegen.js'
 
 function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
   chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--interactive-renames] [--config <path>] [--dryrun] [--json]
+  chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
   chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
   chx status [--config <path>] [--json]
   chx drift [--config <path>] [--json]
   chx check [--config <path>] [--strict] [--json]
+  chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
 
 Options:
   --config <path>  Path to config file (default: clickhouse.config.ts)
@@ -37,6 +41,14 @@ Options:
   --allow-destructive
                    Required in non-interactive mode when pending migrations contain destructive operations
   --dryrun         Print operation plan without writing artifacts
+  --check          Validate generated type artifacts are up-to-date
+  --out-file <path>
+                   Override typegen output file path for one run
+  --emit-zod       Enable Zod validator generation in typegen
+  --no-emit-zod    Disable Zod validator generation in typegen
+  --bigint-mode <mode>
+                   Set large integer mapping mode for typegen (string|bigint)
+  --include-views  Include views in typegen output
   --strict         Force all check policies on for this invocation
   --json           Emit machine-readable JSON output
   -h, --help       Show help
@@ -139,6 +151,45 @@ const app = buildApplication(
           exitIfNeeded()
         },
       }),
+      typegen: buildCommand<{
+        config?: string
+        check?: boolean
+        outFile?: string
+        emitZod?: boolean
+        noEmitZod?: boolean
+        bigintMode?: string
+        includeViews?: boolean
+        json?: boolean
+      }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            check: optionalBooleanFlag('Check for stale generated artifacts without writing'),
+            outFile: optionalStringFlag('Output file path override', 'path'),
+            emitZod: optionalBooleanFlag('Emit Zod validators'),
+            noEmitZod: optionalBooleanFlag('Disable Zod validator emission'),
+            bigintMode: optionalStringFlag('Bigint type mode: string or bigint', 'mode'),
+            includeViews: optionalBooleanFlag('Include views in generated types'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'Run type generation plugin workflow',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--check', flags.check)
+          addStringFlag(args, '--out-file', flags.outFile)
+          addBooleanFlag(args, '--emit-zod', flags.emitZod)
+          addBooleanFlag(args, '--no-emit-zod', flags.noEmitZod)
+          addStringFlag(args, '--bigint-mode', flags.bigintMode)
+          addBooleanFlag(args, '--include-views', flags.includeViews)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdTypegen(args)
+          exitIfNeeded()
+        },
+      }),
       migrate: buildCommand<{
         config?: string
         apply?: boolean
@@ -227,6 +278,27 @@ const app = buildApplication(
           exitIfNeeded()
         },
       }),
+      plugin: buildCommand<{
+        config?: string
+        json?: boolean
+      }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'List plugins and run plugin namespace commands',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdPlugin(args)
+          exitIfNeeded()
+        },
+      }),
       help: buildCommand({
         parameters: {},
         docs: {
@@ -254,7 +326,28 @@ const app = buildApplication(
   }
 )
 
-run(app, process.argv.slice(2), { process }).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+const argv = process.argv.slice(2)
+if (argv[0] === 'plugin') {
+  cmdPlugin(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else if (argv[0] === 'typegen') {
+  cmdTypegen(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else {
+  run(app, argv, { process }).catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
+}
