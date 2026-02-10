@@ -38,6 +38,23 @@ describe('@chx/core smoke', () => {
     expect(toCreateSQL(defs[0])).toContain('CREATE TABLE IF NOT EXISTS app.users')
   })
 
+  test('renders unique key and projections in create table sql', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      uniqueKey: ['id'],
+      projections: [{ name: 'p_recent', query: 'SELECT id ORDER BY id DESC LIMIT 10' }],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('UNIQUE KEY (`id`)')
+    expect(sql).toContain('PROJECTION `p_recent` (SELECT id ORDER BY id DESC LIMIT 10)')
+  })
+
   test('collects and de-duplicates definitions from module exports', () => {
     const users = table({
       database: 'app',
@@ -179,6 +196,158 @@ describe('@chx/core planner v1', () => {
     })
   })
 
+  test('plans non-additive table changes with risk classification', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String' },
+          { name: 'old_col', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        ttl: 'toDateTime(id)',
+        settings: { index_granularity: 8192, old_setting: 1 },
+        indexes: [
+          {
+            name: 'idx_source',
+            expression: 'source',
+            type: 'set',
+            granularity: 1,
+          },
+          {
+            name: 'idx_old',
+            expression: 'old_col',
+            type: 'set',
+            granularity: 1,
+          },
+        ],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'LowCardinality(String)' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        settings: { index_granularity: 4096 },
+        indexes: [
+          {
+            name: 'idx_source',
+            expression: 'lower(source)',
+            type: 'set',
+            granularity: 2,
+          },
+        ],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_drop_column',
+      'alter_table_modify_column',
+      'alter_table_drop_index',
+      'alter_table_drop_index',
+      'alter_table_add_index',
+      'alter_table_modify_setting',
+      'alter_table_reset_setting',
+      'alter_table_modify_ttl',
+    ])
+    expect(plan.riskSummary).toEqual({
+      safe: 0,
+      caution: 7,
+      danger: 1,
+    })
+  })
+
+  test('recreates table when structural keys change', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        uniqueKey: ['id'],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        uniqueKey: ['id', 'id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual(['drop_table', 'create_table'])
+    expect(plan.riskSummary).toEqual({
+      safe: 1,
+      caution: 0,
+      danger: 1,
+    })
+  })
+
+  test('plans projection add/replace/remove operations', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [
+          { name: 'p_old', query: 'SELECT id ORDER BY id LIMIT 1' },
+          { name: 'p_change', query: 'SELECT id' },
+        ],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [
+          { name: 'p_new', query: 'SELECT id ORDER BY id DESC LIMIT 5' },
+          { name: 'p_change', query: 'SELECT id ORDER BY id LIMIT 10' },
+        ],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_drop_projection',
+      'alter_table_add_projection',
+      'alter_table_add_projection',
+      'alter_table_drop_projection',
+    ])
+    expect(plan.riskSummary).toEqual({
+      safe: 0,
+      caution: 4,
+      danger: 0,
+    })
+  })
+
   test('recreates changed view definitions with caution risk', () => {
     const oldDefs = [
       view({
@@ -264,6 +433,26 @@ describe('@chx/core planner v1', () => {
       'primary_key_missing_column',
       'order_by_missing_column',
     ])
+  })
+
+  test('validates duplicate projection names', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [
+          { name: 'p_events', query: 'SELECT id' },
+          { name: 'p_events', query: 'SELECT id ORDER BY id' },
+        ],
+      }),
+    ]
+
+    const issues = validateDefinitions(defs)
+    expect(issues.map((issue) => issue.code)).toEqual(['duplicate_projection_name'])
   })
 
   test('planDiff throws typed validation error for invalid schema', () => {

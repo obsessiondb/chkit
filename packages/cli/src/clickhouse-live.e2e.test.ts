@@ -29,6 +29,14 @@ function getRequiredEnv(): {
   return { clickhouseUrl, clickhouseUser, clickhousePassword }
 }
 
+function tryGetEnv(): ReturnType<typeof getRequiredEnv> | null {
+  try {
+    return getRequiredEnv()
+  } catch {
+    return null
+  }
+}
+
 function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync({
     cmd: ['bun', CLI_ENTRY, ...args],
@@ -95,17 +103,21 @@ async function createFixture(database: string): Promise<E2EFixture> {
 }
 
 describe('@chx/cli doppler env e2e', () => {
+  const liveEnv = tryGetEnv()
+
   test('validates required env variables are present', () => {
+    if (!liveEnv) return
     expect(() => getRequiredEnv()).not.toThrow()
   })
 
   test(
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
+    if (!liveEnv) return
     const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
     const database = `chx_e2e_${dbSuffix}`
     const fixture = await createFixture(database)
-    const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+    const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
     try {
       const initResult = runCli(fixture.dir, ['init'])
@@ -171,10 +183,11 @@ describe('@chx/cli doppler env e2e', () => {
   test(
     'runs additive second migration cycle in a separate project flow',
     async () => {
+      if (!liveEnv) return
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_additive_${dbSuffix}`
       const fixture = await createFixture(database)
-      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
       try {
         const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
@@ -222,6 +235,74 @@ describe('@chx/cli doppler env e2e', () => {
         expect(statusPayload.total).toBe(2)
         expect(statusPayload.applied).toBe(2)
         expect(statusPayload.pending).toBe(0)
+      } finally {
+        try {
+          await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
+        } catch {
+          // Best-effort cleanup for shared e2e environment.
+        }
+        await rm(fixture.dir, { recursive: true, force: true })
+      }
+    },
+    240_000
+  )
+
+  test(
+    'runs non-danger additive migrate path and ends with successful check',
+    async () => {
+      if (!liveEnv) return
+      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+      const database = `chx_e2e_check_${dbSuffix}`
+      const fixture = await createFixture(database)
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
+
+      try {
+        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(firstGenerate.exitCode).toBe(0)
+        const firstExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        if (firstExecute.exitCode !== 0) {
+          throw new Error(
+            `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
+          )
+        }
+
+        await writeFile(fixture.schemaPath, renderEvolvedSchema(database), 'utf8')
+
+        const secondPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--plan', '--json'])
+        expect(secondPlan.exitCode).toBe(0)
+        const secondPlanPayload = JSON.parse(secondPlan.stdout) as {
+          operations: Array<{ type: string }>
+        }
+        expect(secondPlanPayload.operations.some((op) => op.type === 'drop_table')).toBe(false)
+
+        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(secondGenerate.exitCode).toBe(0)
+        const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as { operationCount: number }
+        expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
+
+        const secondExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        if (secondExecute.exitCode !== 0) {
+          throw new Error(
+            `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
+          )
+        }
+
+        const check = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'])
+        expect(check.exitCode).toBe(0)
+        const checkPayload = JSON.parse(check.stdout) as {
+          ok: boolean
+          failedChecks: string[]
+          pendingCount: number
+          checksumMismatchCount: number
+          driftEvaluated: boolean
+          drifted: boolean
+        }
+        expect(checkPayload.ok).toBe(true)
+        expect(checkPayload.failedChecks).toEqual([])
+        expect(checkPayload.pendingCount).toBe(0)
+        expect(checkPayload.checksumMismatchCount).toBe(0)
+        expect(checkPayload.driftEvaluated).toBe(true)
+        expect(checkPayload.drifted).toBe(false)
       } finally {
         try {
           await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)

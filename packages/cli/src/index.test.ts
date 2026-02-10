@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 
 import * as cliModule from './index'
+import { CORE_ENTRY, createFixture, runCli } from './testkit.test'
 
 describe('@chx/cli smoke', () => {
   test('imports package entry', () => {
@@ -11,52 +11,8 @@ describe('@chx/cli smoke', () => {
   })
 })
 
-const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
-const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
-
-function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
-  const result = Bun.spawnSync({
-    cmd: ['bun', './packages/cli/src/bin/chx.ts', ...args],
-    cwd: WORKSPACE_ROOT,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: process.env,
-  })
-
-  return {
-    exitCode: result.exitCode,
-    stdout: new TextDecoder().decode(result.stdout),
-    stderr: new TextDecoder().decode(result.stderr),
-  }
-}
-
-async function createFixture(): Promise<{
-  dir: string
-  configPath: string
-  migrationsDir: string
-  metaDir: string
-  schemaPath: string
-}> {
-  const dir = await mkdtemp(join(tmpdir(), 'chx-cli-test-'))
-  const schemaPath = join(dir, 'schema.ts')
-  const configPath = join(dir, 'clickhouse.config.ts')
-  const outDir = join(dir, 'chx')
-  const migrationsDir = join(outDir, 'migrations')
-  const metaDir = join(outDir, 'meta')
-
-  await writeFile(
-    schemaPath,
-    `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
-    'utf8'
-  )
-
-  await writeFile(
-    configPath,
-    `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n}\n`,
-    'utf8'
-  )
-
-  return { dir, configPath, migrationsDir, metaDir, schemaPath }
+function sortedKeys(payload: Record<string, unknown>): string[] {
+  return Object.keys(payload).sort((a, b) => a.localeCompare(b))
 }
 
 describe('@chx/cli command flows', () => {
@@ -67,11 +23,13 @@ describe('@chx/cli command flows', () => {
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as {
         command: string
+        schemaVersion: number
         mode: string
         operationCount: number
         operations: Array<{ type: string }>
       }
       expect(payload.command).toBe('generate')
+      expect(payload.schemaVersion).toBe(1)
       expect(payload.mode).toBe('plan')
       expect(payload.operationCount).toBeGreaterThan(0)
       expect(payload.operations.some((op) => op.type === 'create_table')).toBe(true)
@@ -91,10 +49,12 @@ describe('@chx/cli command flows', () => {
       const status = runCli(['status', '--config', fixture.configPath, '--json'])
       expect(status.exitCode).toBe(0)
       const statusPayload = JSON.parse(status.stdout) as {
+        schemaVersion: number
         total: number
         pending: number
         checksumMismatchCount: number
       }
+      expect(statusPayload.schemaVersion).toBe(1)
       expect(statusPayload.total).toBe(1)
       expect(statusPayload.pending).toBe(1)
       expect(statusPayload.checksumMismatchCount).toBe(0)
@@ -218,10 +178,12 @@ describe('@chx/cli command flows', () => {
       expect(result.exitCode).toBe(1)
       const payload = JSON.parse(result.stdout) as {
         command: string
+        schemaVersion: number
         error: string
         checksumMismatches: Array<{ name: string }>
       }
       expect(payload.command).toBe('migrate')
+      expect(payload.schemaVersion).toBe(1)
       expect(payload.error).toContain('Checksum mismatch')
       expect(payload.checksumMismatches[0]?.name).toBe('99999999999999_init.sql')
     } finally {
@@ -249,6 +211,370 @@ describe('@chx/cli command flows', () => {
       }
       expect(secondPayload.operationCount).toBe(0)
       expect(secondPayload.migrationFile).toBeNull()
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate --execute --json blocks danger operations without allow flag', async () => {
+    const fixture = await createFixture()
+    try {
+      await mkdir(fixture.migrationsDir, { recursive: true })
+      await writeFile(
+        join(fixture.migrationsDir, '20260101000000_drop_users.sql'),
+        '-- operation: drop_table key=table:app.users risk=danger\nDROP TABLE IF EXISTS app.users;\n',
+        'utf8'
+      )
+
+      const result = runCli(['migrate', '--config', fixture.configPath, '--execute', '--json'])
+      expect(result.exitCode).toBe(3)
+      const payload = JSON.parse(result.stdout) as {
+        command: string
+        schemaVersion: number
+        mode: string
+        error: string
+        dangerousMigrations: string[]
+      }
+      expect(payload.command).toBe('migrate')
+      expect(payload.schemaVersion).toBe(1)
+      expect(payload.mode).toBe('execute')
+      expect(payload.error).toContain('Blocked dangerous migration execution')
+      expect(payload.dangerousMigrations).toEqual(['20260101000000_drop_users.sql'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('drift --json fails with actionable error when clickhouse config is missing', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      const result = runCli(['drift', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('clickhouse config is required for drift checks')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate danger gate can be overridden by safety.allowDestructive config', async () => {
+    const fixture = await createFixture()
+    try {
+      await mkdir(fixture.migrationsDir, { recursive: true })
+      await writeFile(
+        join(fixture.migrationsDir, '20260101000000_drop_users.sql'),
+        '-- operation: drop_table key=table:app.users risk=danger\nDROP TABLE IF EXISTS app.users;\n',
+        'utf8'
+      )
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  safety: {\n    allowDestructive: true,\n  },\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli(['migrate', '--config', fixture.configPath, '--execute', '--json'])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('clickhouse config is required for --execute')
+      expect(result.stdout).not.toContain('Blocked dangerous migration execution')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('check --json fails when migrations are pending', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      const result = runCli(['check', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(1)
+      const payload = JSON.parse(result.stdout) as {
+        command: string
+        schemaVersion: number
+        ok: boolean
+        failedChecks: string[]
+      }
+      expect(payload.command).toBe('check')
+      expect(payload.schemaVersion).toBe(1)
+      expect(payload.ok).toBe(false)
+      expect(payload.failedChecks).toContain('pending_migrations')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('check --json passes on clean state with no migrations', async () => {
+    const fixture = await createFixture()
+    try {
+      const result = runCli(['check', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        command: string
+        ok: boolean
+        failedChecks: string[]
+      }
+      expect(payload.command).toBe('check')
+      expect(payload.ok).toBe(true)
+      expect(payload.failedChecks).toEqual([])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('check policy can ignore pending migrations', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnPending: false,\n  },\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli(['check', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        ok: boolean
+        failedChecks: string[]
+        policy: { failOnPending: boolean }
+      }
+      expect(payload.ok).toBe(true)
+      expect(payload.failedChecks).not.toContain('pending_migrations')
+      expect(payload.policy.failOnPending).toBe(false)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('check --strict overrides config policy', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnPending: false,\n  },\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli(['check', '--config', fixture.configPath, '--strict', '--json'])
+      expect(result.exitCode).toBe(1)
+      const payload = JSON.parse(result.stdout) as {
+        strict: boolean
+        ok: boolean
+        failedChecks: string[]
+        policy: { failOnPending: boolean }
+      }
+      expect(payload.strict).toBe(true)
+      expect(payload.ok).toBe(false)
+      expect(payload.policy.failOnPending).toBe(true)
+      expect(payload.failedChecks).toContain('pending_migrations')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('check policy can ignore checksum mismatches', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(generated.exitCode).toBe(0)
+      const generatePayload = JSON.parse(generated.stdout) as { migrationFile: string | null }
+      expect(generatePayload.migrationFile).toBeTruthy()
+      if (!generatePayload.migrationFile) throw new Error('expected migration file')
+
+      await writeFile(
+        join(fixture.metaDir, 'journal.json'),
+        `${JSON.stringify(
+          {
+            version: 1,
+            applied: [
+              {
+                name: basename(generatePayload.migrationFile),
+                appliedAt: new Date().toISOString(),
+                checksum: 'bad-checksum',
+              },
+            ],
+          },
+          null,
+          2
+        )}\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnChecksumMismatch: false,\n  },\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli(['check', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        ok: boolean
+        failedChecks: string[]
+        checksumMismatchCount: number
+        policy: { failOnChecksumMismatch: boolean }
+      }
+      expect(payload.checksumMismatchCount).toBe(1)
+      expect(payload.policy.failOnChecksumMismatch).toBe(false)
+      expect(payload.ok).toBe(true)
+      expect(payload.failedChecks).not.toContain('checksum_mismatch')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --json uses stable success payload keys', async () => {
+    const fixture = await createFixture()
+    try {
+      const result = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>
+      expect(sortedKeys(payload)).toEqual([
+        'command',
+        'definitionCount',
+        'migrationFile',
+        'operationCount',
+        'riskSummary',
+        'schemaVersion',
+        'snapshotFile',
+      ])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --json uses stable validation error payload keys', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst broken = table({\n  database: 'app',\n  name: 'broken',\n  columns: [{ name: 'id', type: 'UInt64' }],\n  engine: 'MergeTree()',\n  primaryKey: ['missing_col'],\n  orderBy: ['id'],\n})\n\nexport default schema(broken)\n`,
+        'utf8'
+      )
+      const result = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(1)
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>
+      expect(sortedKeys(payload)).toEqual(['command', 'error', 'issues', 'schemaVersion'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('status --json uses stable payload keys', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      const result = runCli(['status', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>
+      expect(sortedKeys(payload)).toEqual([
+        'applied',
+        'checksumMismatchCount',
+        'checksumMismatches',
+        'command',
+        'migrationsDir',
+        'pending',
+        'pendingMigrations',
+        'schemaVersion',
+        'total',
+      ])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate --plan --json uses stable payload keys', async () => {
+    const fixture = await createFixture()
+    try {
+      const generated = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(generated.exitCode).toBe(0)
+
+      const result = runCli(['migrate', '--config', fixture.configPath, '--plan', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>
+      expect(sortedKeys(payload)).toEqual(['command', 'mode', 'pending', 'schemaVersion'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('check --json uses stable payload keys', async () => {
+    const fixture = await createFixture()
+    try {
+      const result = runCli(['check', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>
+      expect(sortedKeys(payload)).toEqual([
+        'checksumMismatchCount',
+        'command',
+        'drifted',
+        'driftEvaluated',
+        'driftReasonCounts',
+        'driftReasonTotals',
+        'failedChecks',
+        'ok',
+        'pendingCount',
+        'policy',
+        'schemaVersion',
+        'strict',
+      ])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate --execute --json danger gate uses stable error payload keys', async () => {
+    const fixture = await createFixture()
+    try {
+      await mkdir(fixture.migrationsDir, { recursive: true })
+      await writeFile(
+        join(fixture.migrationsDir, '20260101000000_drop_users.sql'),
+        '-- operation: drop_table key=table:app.users risk=danger\nDROP TABLE IF EXISTS app.users;\n',
+        'utf8'
+      )
+
+      const result = runCli(['migrate', '--config', fixture.configPath, '--execute', '--json'])
+      expect(result.exitCode).toBe(3)
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>
+      expect(sortedKeys(payload)).toEqual([
+        'command',
+        'dangerousMigrations',
+        'error',
+        'mode',
+        'schemaVersion',
+      ])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --migration-id sets deterministic migration filename prefix', async () => {
+    const fixture = await createFixture()
+    try {
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--name',
+        'init',
+        '--migration-id',
+        '20260102030405',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { migrationFile: string | null }
+      expect(payload.migrationFile).toBeTruthy()
+      expect(basename(payload.migrationFile ?? '')).toBe('20260102030405_init.sql')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
