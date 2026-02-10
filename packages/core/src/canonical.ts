@@ -27,6 +27,7 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
   return {
     ...column,
     name: column.name.trim(),
+    renamedFrom: column.renamedFrom?.trim(),
     type: typeof column.type === 'string' ? column.type.trim() : column.type,
     comment: column.comment?.trim(),
   }
@@ -62,6 +63,12 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     ...def,
     database: def.database.trim(),
     name: def.name.trim(),
+    renamedFrom: def.renamedFrom
+      ? {
+          database: def.renamedFrom.database?.trim(),
+          name: def.renamedFrom.name.trim(),
+        }
+      : undefined,
     engine: def.engine.trim(),
     columns: def.columns.map(canonicalizeColumn),
     primaryKey: [...def.primaryKey].map((k) => k.trim()),

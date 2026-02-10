@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 
-import { createFixture, renderUsersSchema, runCli } from './testkit.test'
+import { CORE_ENTRY, createFixture, renderUsersSchema, runCli } from './testkit.test'
 
 describe('@chx/cli migration scenario flows', () => {
   test('start state + schema changes produce expected diff and migrate destructive gate', async () => {
@@ -26,7 +26,7 @@ describe('@chx/cli migration scenario flows', () => {
         }),
         'utf8'
       )
-      const projectionPlan = runCli(['generate', '--config', fixture.configPath, '--plan', '--json'])
+      const projectionPlan = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
       expect(projectionPlan.exitCode).toBe(0)
       const projectionPayload = JSON.parse(projectionPlan.stdout) as {
         operations: Array<{ type: string }>
@@ -44,7 +44,7 @@ describe('@chx/cli migration scenario flows', () => {
         }),
         'utf8'
       )
-      const structuralPlan = runCli(['generate', '--config', fixture.configPath, '--plan', '--json'])
+      const structuralPlan = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
       expect(structuralPlan.exitCode).toBe(0)
       const structuralPayload = JSON.parse(structuralPlan.stdout) as {
         operations: Array<{ type: string }>
@@ -74,6 +74,43 @@ describe('@chx/cli migration scenario flows', () => {
       }
       expect(migratePayload.error).toContain('Blocked destructive migration execution')
       expect(migratePayload.destructiveMigrations).toContain('20260101020000_structural.sql')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('explicit rename mappings apply while unrelated heuristic suggestions remain visible', async () => {
+    const fixture = await createFixture(
+      `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n    { name: 'source', type: 'String', default: 'unknown' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
+    )
+    try {
+      const init = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--name',
+        'init',
+        '--migration-id',
+        '20260102000000',
+        '--json',
+      ])
+      expect(init.exitCode).toBe(0)
+
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst customers = table({\n  database: 'app',\n  name: 'customers',\n  renamedFrom: { name: 'users' },\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'user_email', type: 'String', renamedFrom: 'email' },\n    { name: 'event_source', type: 'String', default: 'unknown' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(customers)\n`,
+        'utf8'
+      )
+
+      const plan = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(plan.exitCode).toBe(0)
+      const payload = JSON.parse(plan.stdout) as {
+        operations: Array<{ type: string }>
+        renameSuggestions: Array<{ from: string; to: string }>
+      }
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_table')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_column')).toBe(true)
+      expect(payload.renameSuggestions.some((s) => s.from === 'source' && s.to === 'event_source')).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

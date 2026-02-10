@@ -1,5 +1,7 @@
 import { canonicalizeDefinitions, definitionKey } from './canonical.js'
 import type {
+  ColumnDefinition,
+  ColumnRenameSuggestion,
   MigrationOperation,
   MigrationPlan,
   RiskLevel,
@@ -117,31 +119,99 @@ function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition)
   return false
 }
 
-function diffTables(oldDef: TableDefinition, newDef: TableDefinition): MigrationOperation[] {
+interface TableDiffResult {
+  operations: MigrationOperation[]
+  renameSuggestions: ColumnRenameSuggestion[]
+}
+
+function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom'> {
+  const { name: _name, renamedFrom: _renamedFrom, ...rest } = column
+  return rest
+}
+
+function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
+  return `ALTER TABLE ${table.database}.${table.name} RENAME COLUMN \`${from}\` TO \`${to}\`;`
+}
+
+function inferColumnRenameSuggestions(
+  table: TableDefinition,
+  addedColumns: ColumnDefinition[],
+  droppedColumns: ColumnDefinition[]
+): ColumnRenameSuggestion[] {
+  if (addedColumns.length === 0 || droppedColumns.length === 0) return []
+
+  const addedBySignature = new Map<string, ColumnDefinition[]>()
+  for (const column of addedColumns) {
+    const signature = JSON.stringify(normalizeColumn(column))
+    const existing = addedBySignature.get(signature) ?? []
+    existing.push(column)
+    addedBySignature.set(signature, existing)
+  }
+
+  const suggestions: ColumnRenameSuggestion[] = []
+  for (const oldColumn of droppedColumns) {
+    const signature = JSON.stringify(normalizeColumn(oldColumn))
+    const candidates = addedBySignature.get(signature)
+    if (!candidates || candidates.length !== 1) continue
+    const [candidate] = candidates
+    if (!candidate) continue
+    addedBySignature.delete(signature)
+
+    suggestions.push({
+      kind: 'column',
+      database: table.database,
+      table: table.name,
+      from: oldColumn.name,
+      to: candidate.name,
+      confidence: 'high',
+      reason:
+        'Dropped and added columns have an identical non-name definition (type, nullability, default, comment).',
+      dropOperationKey: `table:${table.database}.${table.name}:column:${oldColumn.name}`,
+      addOperationKey: `table:${table.database}.${table.name}:column:${candidate.name}`,
+      confirmationSQL: renderRenameColumnSuggestionSQL(table, oldColumn.name, candidate.name),
+    })
+  }
+
+  return suggestions.sort((a, b) => {
+    const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+    if (tableOrder !== 0) return tableOrder
+    const fromOrder = a.from.localeCompare(b.from)
+    if (fromOrder !== 0) return fromOrder
+    return a.to.localeCompare(b.to)
+  })
+}
+
+function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
   if (requiresTableRecreate(oldDef, newDef)) {
-    return [
-      {
-        type: 'drop_table',
-        key: definitionKey(newDef),
-        risk: 'danger',
-        sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name};`,
-      },
-      {
-        type: 'create_table',
-        key: definitionKey(newDef),
-        risk: 'safe',
-        sql: toCreateSQL(newDef),
-      },
-    ]
+    return {
+      operations: [
+        {
+          type: 'drop_table',
+          key: definitionKey(newDef),
+          risk: 'danger',
+          sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name};`,
+        },
+        {
+          type: 'create_table',
+          key: definitionKey(newDef),
+          risk: 'safe',
+          sql: toCreateSQL(newDef),
+        },
+      ],
+      renameSuggestions: [],
+    }
   }
 
   const ops: MigrationOperation[] = []
+  const addedColumns: ColumnDefinition[] = []
+  const droppedColumns: ColumnDefinition[] = []
 
   const oldColumns = new Map(oldDef.columns.map((c) => [c.name, c]))
   const newColumnNames = new Set(newDef.columns.map((c) => c.name))
   for (const column of newDef.columns) {
     const oldColumn = oldColumns.get(column.name)
     if (!oldColumn) {
+      addedColumns.push(column)
       addOperation(ops, {
         type: 'alter_table_add_column',
         key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
@@ -151,7 +221,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): Migration
       continue
     }
 
-    if (JSON.stringify(oldColumn) !== JSON.stringify(column)) {
+    if (JSON.stringify(normalizeColumn(oldColumn)) !== JSON.stringify(normalizeColumn(column))) {
       addOperation(ops, {
         type: 'alter_table_modify_column',
         key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
@@ -163,6 +233,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): Migration
 
   for (const oldColumn of oldDef.columns) {
     if (newColumnNames.has(oldColumn.name)) continue
+    droppedColumns.push(oldColumn)
     addOperation(ops, {
       type: 'alter_table_drop_column',
       key: `table:${newDef.database}.${newDef.name}:column:${oldColumn.name}`,
@@ -288,7 +359,10 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): Migration
     })
   }
 
-  return ops
+  return {
+    operations: ops,
+    renameSuggestions: inferColumnRenameSuggestions(newDef, addedColumns, droppedColumns),
+  }
 }
 
 export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
@@ -298,6 +372,7 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
   const oldMap = createMap(oldCanonical)
   const newMap = createMap(newCanonical)
   const operations: MigrationOperation[] = []
+  const renameSuggestions: ColumnRenameSuggestion[] = []
   const databasesToCreate = new Set<string>()
 
   for (const oldDef of oldCanonical) {
@@ -311,7 +386,9 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     if (!oldDef) continue
 
     if (newDef.kind === 'table' && oldDef.kind === 'table') {
-      operations.push(...diffTables(oldDef, newDef))
+      const diffResult = diffTables(oldDef, newDef)
+      operations.push(...diffResult.operations)
+      renameSuggestions.push(...diffResult.renameSuggestions)
       continue
     }
 
@@ -375,5 +452,15 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     riskSummary[operation.risk] = (riskSummary[operation.risk] ?? 0) + 1
   }
 
-  return { operations, riskSummary }
+  return {
+    operations,
+    riskSummary,
+    renameSuggestions: renameSuggestions.sort((a, b) => {
+      const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+      if (tableOrder !== 0) return tableOrder
+      const fromOrder = a.from.localeCompare(b.from)
+      if (fromOrder !== 0) return fromOrder
+      return a.to.localeCompare(b.to)
+    }),
+  }
 }

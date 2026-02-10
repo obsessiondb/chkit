@@ -16,10 +16,10 @@ function sortedKeys(payload: Record<string, unknown>): string[] {
 }
 
 describe('@chx/cli command flows', () => {
-  test('generate --plan --json emits operation plan payload', async () => {
+  test('generate --dryrun --json emits operation plan payload', async () => {
     const fixture = await createFixture()
     try {
-      const result = runCli(['generate', '--config', fixture.configPath, '--plan', '--json'])
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as {
         command: string
@@ -33,6 +33,278 @@ describe('@chx/cli command flows', () => {
       expect(payload.mode).toBe('plan')
       expect(payload.operationCount).toBeGreaterThan(0)
       expect(payload.operations.some((op) => op.type === 'create_table')).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun --json includes rename suggestions when a column is likely renamed', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'user_email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        renameSuggestions: Array<{ kind: string; from: string; to: string; confidence: string }>
+      }
+      expect(payload.renameSuggestions).toHaveLength(1)
+      expect(payload.renameSuggestions[0]).toMatchObject({
+        kind: 'column',
+        from: 'email',
+        to: 'user_email',
+        confidence: 'high',
+      })
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun without --interactive-renames keeps heuristic suggestions as add/drop', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'user_email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
+        'utf8'
+      )
+
+      const preview = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(preview.exitCode).toBe(0)
+      const plan = JSON.parse(preview.stdout) as {
+        operations: Array<{ type: string }>
+        renameSuggestions: unknown[]
+      }
+      expect(plan.operations.some((op) => op.type === 'alter_table_add_column')).toBe(true)
+      expect(plan.operations.some((op) => op.type === 'alter_table_drop_column')).toBe(true)
+      expect(plan.operations.some((op) => op.type === 'alter_table_rename_column')).toBe(false)
+      expect(plan.renameSuggestions.length).toBeGreaterThan(0)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun with --rename-column emits explicit rename column operation', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'user_email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-column',
+        'app.users.email=user_email',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operations: Array<{ type: string }>
+        renameSuggestions: unknown[]
+      }
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_column')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_add_column')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_drop_column')).toBe(false)
+      expect(payload.renameSuggestions).toEqual([])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun with --rename-table emits explicit rename table operation', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst customers = table({\n  database: 'app',\n  name: 'customers',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(customers)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-table',
+        'app.users=app.customers',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operations: Array<{ type: string }>
+      }
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_table')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'drop_table')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'create_table')).toBe(false)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('schema renamedFrom metadata emits explicit rename table and column operations', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst customers = table({\n  database: 'app',\n  name: 'customers',\n  renamedFrom: { name: 'users' },\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'user_email', type: 'String', renamedFrom: 'email' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(customers)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operations: Array<{ type: string }>
+        renameSuggestions: unknown[]
+      }
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_table')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_column')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'drop_table')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'create_table')).toBe(false)
+      expect(payload.renameSuggestions).toEqual([])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('cli --rename-table overrides conflicting schema renamedFrom metadata', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst customers = table({\n  database: 'app',\n  name: 'customers',\n  renamedFrom: { name: 'legacy_users' },\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(customers)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-table',
+        'app.users=app.customers',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { operations: Array<{ type: string }> }
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_table')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'drop_table')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'create_table')).toBe(false)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('cli --rename-column overrides conflicting schema renamedFrom metadata', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'primary_email', type: 'String', renamedFrom: 'legacy_email' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-column',
+        'app.users.email=primary_email',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { operations: Array<{ type: string }> }
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_column')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_add_column')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'alter_table_drop_column')).toBe(false)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate fails on conflicting --rename-column target mappings', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'preferred_email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-column',
+        'app.users.email=preferred_email,app.users.legacy_email=preferred_email',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('did not find both matching drop and add operations')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate fails when --rename-table source is missing in previous snapshot', async () => {
+    const fixture = await createFixture()
+    try {
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-table',
+        'app.missing=app.users',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('source table is missing from previous snapshot')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate fails when --rename-column does not match drop/add operations', async () => {
+    const fixture = await createFixture()
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-column',
+        'app.users.email=user_email',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('did not find both matching drop and add operations')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -148,7 +420,7 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('migrate --plan --json fails on checksum mismatch', async () => {
+  test('migrate --json fails on checksum mismatch', async () => {
     const fixture = await createFixture()
     try {
       const generated = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
@@ -174,7 +446,7 @@ describe('@chx/cli command flows', () => {
       )
       await writeFile(join(fixture.migrationsDir, '99999999999999_init.sql'), 'SELECT 1;\n', 'utf8')
 
-      const result = runCli(['migrate', '--config', fixture.configPath, '--plan', '--json'])
+      const result = runCli(['migrate', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
       const payload = JSON.parse(result.stdout) as {
         command: string
@@ -327,7 +599,7 @@ describe('@chx/cli command flows', () => {
       ])
       expect(allowed.exitCode).toBe(1)
       expect(allowed.stdout).toBe('')
-      expect(allowed.stderr).toContain('clickhouse config is required for --execute')
+      expect(allowed.stderr).toContain('clickhouse config is required for --apply')
       expect(allowed.stderr).not.toContain('Blocked destructive migration execution')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
@@ -544,13 +816,13 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('migrate --plan --json uses stable payload keys', async () => {
+  test('migrate --json uses stable payload keys', async () => {
     const fixture = await createFixture()
     try {
       const generated = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
       expect(generated.exitCode).toBe(0)
 
-      const result = runCli(['migrate', '--config', fixture.configPath, '--plan', '--json'])
+      const result = runCli(['migrate', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as Record<string, unknown>
       expect(sortedKeys(payload)).toEqual(['command', 'mode', 'pending', 'schemaVersion'])

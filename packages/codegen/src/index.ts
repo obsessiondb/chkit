@@ -46,15 +46,23 @@ function buildMigrationContent(input: {
     `-- cli-version: ${input.cliVersion}`,
     `-- definition-count: ${input.definitionCount}`,
     `-- operation-count: ${input.plan.operations.length}`,
+    `-- rename-suggestion-count: ${input.plan.renameSuggestions.length}`,
     `-- risk-summary: safe=${input.plan.riskSummary.safe}, caution=${input.plan.riskSummary.caution}, danger=${input.plan.riskSummary.danger}`,
   ]
+
+  const renameHints = input.plan.renameSuggestions.map(
+    (suggestion) =>
+      `-- rename-suggestion: kind=${suggestion.kind} table=${suggestion.database}.${suggestion.table} from=${suggestion.from} to=${suggestion.to} confidence=${suggestion.confidence}`
+  )
 
   const body = input.plan.operations
     .map((op) => [`-- operation: ${op.type} key=${op.key} risk=${op.risk}`, op.sql].join('\n'))
     .join('\n\n')
 
-  if (!body) return `${header.join('\n')}\n`
-  return `${header.join('\n')}\n\n${body}\n`
+  const withHints = [...header, ...renameHints]
+
+  if (!body) return `${withHints.join('\n')}\n`
+  return `${withHints.join('\n')}\n\n${body}\n`
 }
 
 export async function generateArtifacts(input: GenerateArtifactsInput): Promise<GenerateArtifactsOutput> {

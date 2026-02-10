@@ -33,6 +33,13 @@ Dry-run mode (`--dryrun`) keys:
 6. `operations`
 7. `renameSuggestions`
 
+Notes:
+
+1. `operations[].type` may include explicit rename operations:
+   - `alter_table_rename_table` (from `--rename-table` or table `renamedFrom`)
+   - `alter_table_rename_column` (from `--rename-column`, column `renamedFrom`, or accepted heuristic suggestion in interactive mode)
+2. `renameSuggestions` contains only heuristic suggestions that are not yet explicitly accepted.
+
 ### `status`
 
 Keys:
