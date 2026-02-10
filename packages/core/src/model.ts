@@ -23,6 +23,7 @@ export type PrimitiveColumnType =
 export interface ColumnDefinition {
   name: string
   type: PrimitiveColumnType | string
+  renamedFrom?: string
   nullable?: boolean
   default?: string | number | boolean
   comment?: string
@@ -44,6 +45,7 @@ export interface TableDefinition {
   kind: 'table'
   database: string
   name: string
+  renamedFrom?: { database?: string; name: string }
   columns: ColumnDefinition[]
   engine: string
   primaryKey: string[]
@@ -119,6 +121,8 @@ export type MigrationOperationType =
   | 'alter_table_add_column'
   | 'alter_table_modify_column'
   | 'alter_table_drop_column'
+  | 'alter_table_rename_column'
+  | 'alter_table_rename_table'
   | 'alter_table_add_index'
   | 'alter_table_add_projection'
   | 'alter_table_modify_setting'
@@ -134,9 +138,23 @@ export interface MigrationOperation {
   sql: string
 }
 
+export interface ColumnRenameSuggestion {
+  kind: 'column'
+  database: string
+  table: string
+  from: string
+  to: string
+  confidence: 'high'
+  reason: string
+  dropOperationKey: string
+  addOperationKey: string
+  confirmationSQL: string
+}
+
 export interface MigrationPlan {
   operations: MigrationOperation[]
   riskSummary: Record<RiskLevel, number>
+  renameSuggestions: ColumnRenameSuggestion[]
 }
 
 export type ValidationIssueCode =

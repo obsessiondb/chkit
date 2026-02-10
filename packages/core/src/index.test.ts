@@ -267,6 +267,125 @@ describe('@chx/core planner v1', () => {
       caution: 7,
       danger: 1,
     })
+    expect(plan.renameSuggestions).toEqual([])
+  })
+
+  test('suggests a likely column rename when add/drop definitions match', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String', nullable: true, default: 'unknown' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'origin', type: 'String', nullable: true, default: 'unknown' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_add_column',
+      'alter_table_drop_column',
+    ])
+    expect(plan.renameSuggestions).toEqual([
+      {
+        kind: 'column',
+        database: 'app',
+        table: 'events',
+        from: 'source',
+        to: 'origin',
+        confidence: 'high',
+        reason:
+          'Dropped and added columns have an identical non-name definition (type, nullability, default, comment).',
+        dropOperationKey: 'table:app.events:column:source',
+        addOperationKey: 'table:app.events:column:origin',
+        confirmationSQL: 'ALTER TABLE app.events RENAME COLUMN `source` TO `origin`;',
+      },
+    ])
+  })
+
+  test('does not suggest rename when new column definition differs', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'origin', type: 'LowCardinality(String)' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.renameSuggestions).toEqual([])
+  })
+
+  test('ignores renamedFrom metadata for same-name column equality checks', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String', renamedFrom: 'legacy_source' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toEqual([])
+    expect(plan.renameSuggestions).toEqual([])
   })
 
   test('recreates table when structural keys change', () => {
@@ -489,6 +608,7 @@ describe('@chx/core planner v1', () => {
       caution: 0,
       danger: 0,
     })
+    expect(plan.renameSuggestions).toEqual([])
   })
 
   test('plan ordering is deterministic regardless of input definition order', () => {
