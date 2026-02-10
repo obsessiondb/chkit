@@ -1,42 +1,51 @@
 # Optional Feature: Backfill Orchestration Plugin
 
 ## Status
+
 - First-party optional plugin target.
 - Treated as operationally sensitive and intentionally not part of core.
 - Designed for phased rollout: preview first, stricter defaults after production validation.
 
 ## Problem
+
 Schema migrations that affect materialized views, destination tables, or historical data correctness often require coordinated backfills. Manual backfill execution is error-prone, difficult to review, and risky at scale.
 
 ## Goals
+
 1. Provide deterministic, reviewable backfill plans for ClickHouse workflows.
 2. Add safety gates for high-risk execution paths (cluster load, duplicate ingestion, wrong time windows).
 3. Reuse CHX plugin hooks and command namespace without coupling orchestration logic into core.
 4. Support CI validation and operator-run execution with resumable state.
 
 ## Non-Goals (v1 Preview)
+
 1. No automatic cluster-wide adaptive load balancing.
 2. No auto-generated lineage graph UI.
 3. No opaque "do everything" one-command production execution.
 4. No dependency on custom infrastructure beyond ClickHouse and local CHX metadata.
 
 ## Why Plugin (Not Core)
+
 1. Backfill policy is environment-specific and high-variance across teams.
 2. Execution strategy (partition windows, throttling, guardrails) is operational, not schema-core behavior.
 3. Failure blast radius is larger than core migration planning and needs independent lifecycle/versioning.
 
 ## Core vs Plugin Responsibility
+
 ### Keep in Core
+
 1. Deterministic schema planning and migration execution.
 2. Baseline destructive operation gating.
 3. Plugin lifecycle runtime and command dispatch.
 
 ### Put in Plugin
+
 1. Backfill plan construction and state machine.
 2. Backfill policy validation and execution guards.
 3. Progress tracking, resume semantics, and backfill-specific findings.
 
 ## Functional Scope (v1 Preview)
+
 1. Build backfill plans from explicit targets (table or materialized view destination).
 2. Partition or time-window chunking with deterministic ordering.
 3. Dry-run plan output with estimated chunk count and SQL templates.
@@ -48,20 +57,22 @@ Schema migrations that affect materialized views, destination tables, or histori
 6. Optional integration with `chx check` to detect required-but-pending backfills.
 
 ## Operator UX and Command Model (Draft)
-1. `chx plugin backfill plan --target <db.table> --from <ts> --to <ts>`
+
+1. `chx backfill plan --target <db.table> --from <ts> --to <ts>`
    - Builds deterministic chunk plan only.
-2. `chx plugin backfill run --plan-id <id>`
+2. `chx backfill run --plan-id <id>`
    - Executes previously planned backfill with checkpoints.
-3. `chx plugin backfill resume --plan-id <id>`
+3. `chx backfill resume --plan-id <id>`
    - Continues from last successful checkpoint.
-4. `chx plugin backfill status --plan-id <id>`
+4. `chx backfill status --plan-id <id>`
    - Reports chunk progress, failures, and runtime metrics.
-5. `chx plugin backfill cancel --plan-id <id>`
+5. `chx backfill cancel --plan-id <id>`
    - Marks in-progress plan as cancelled (no further chunks run).
-6. `chx plugin backfill doctor --plan-id <id>`
+6. `chx backfill doctor --plan-id <id>`
    - Provides actionable remediation for failed chunks.
 
 ## Hook Usage Plan
+
 1. `onConfigLoaded`
    - Validate backfill plugin configuration and execution policy.
 2. `onPlanCreated`
@@ -74,12 +85,13 @@ Schema migrations that affect materialized views, destination tables, or histori
    - Print human-readable summary lines for CI/operator output.
 
 ## Configuration Model (Draft)
+
 ```ts
 plugins: [
   {
-    resolve: './plugins/backfill.ts',
+    resolve: "./plugins/backfill.ts",
     options: {
-      stateDir: './chx/meta/backfill',
+      stateDir: "./chx/meta/backfill",
       defaults: {
         chunkHours: 6,
         maxParallelChunks: 1,
@@ -98,10 +110,11 @@ plugins: [
       },
     },
   },
-]
+];
 ```
 
 ## State and Artifact Model (Draft)
+
 State is persisted in plugin-scoped metadata to support resume and audit.
 
 1. `meta/backfill/plans/<plan-id>.json`
@@ -112,32 +125,40 @@ State is persisted in plugin-scoped metadata to support resume and audit.
    - append-only operational event log.
 
 Example plan state:
+
 ```ts
-type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+type BackfillPlanStatus =
+  | "planned"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 interface BackfillChunk {
-  id: string
-  from: string
-  to: string
-  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
-  attempts: number
-  lastError?: string
+  id: string;
+  from: string;
+  to: string;
+  status: "pending" | "running" | "done" | "failed" | "skipped";
+  attempts: number;
+  lastError?: string;
 }
 
 interface BackfillPlanState {
-  planId: string
-  target: string
-  createdAt: string
-  status: BackfillPlanStatus
-  chunks: BackfillChunk[]
+  planId: string;
+  target: string;
+  createdAt: string;
+  status: BackfillPlanStatus;
+  chunks: BackfillChunk[];
   options: {
-    chunkHours: number
-    maxParallelChunks: number
-  }
+    chunkHours: number;
+    maxParallelChunks: number;
+  };
 }
 ```
 
 ## Safety Model (Required)
+
 1. Backfill run requires an existing successful `plan` output unless policy disables this explicitly.
 2. Time window must be explicit (`--from`, `--to`) in non-interactive mode.
 3. Overlapping active runs for same target are blocked by default.
@@ -150,6 +171,7 @@ interface BackfillPlanState {
 7. Plugin emits explicit warning when configured with relaxed policy.
 
 ## Idempotency and Correctness Rules
+
 1. Every chunk SQL must be deterministic for the same plan input.
 2. Plan includes stable `idempotencyToken` per chunk.
 3. Resume never replays chunks marked `done` unless operator passes `--replay-done`.
@@ -157,6 +179,7 @@ interface BackfillPlanState {
 5. Any mutable runtime inputs are persisted in plan state before run starts.
 
 ## Finding Codes (Draft)
+
 1. `backfill_required_pending`
 2. `backfill_plan_missing`
 3. `backfill_plan_stale`
@@ -166,6 +189,7 @@ interface BackfillPlanState {
 7. `backfill_policy_relaxed`
 
 ## JSON Output Contract (Plugin Section Draft)
+
 ```json
 {
   "plugins": {
@@ -182,6 +206,7 @@ interface BackfillPlanState {
 ```
 
 ## Algorithm Outline
+
 1. Parse target and explicit time/partition window.
 2. Normalize to canonical chunk boundaries.
 3. Build immutable plan file and deterministic chunk IDs.
@@ -191,12 +216,14 @@ interface BackfillPlanState {
 7. On completion, mark plan status and write summary.
 
 ## Failure and Recovery Behavior
+
 1. Plugin-scoped errors must include plan id and chunk id when available.
 2. Retry exhaustion marks chunk `failed` and plan `failed`.
 3. `resume` revalidates config compatibility before execution continues.
 4. If compatibility check fails, resume is blocked until operator acknowledges with explicit override.
 
 ## Testing Strategy
+
 1. Unit tests:
    - chunking determinism
    - overlap detection
@@ -211,18 +238,21 @@ interface BackfillPlanState {
    - stable JSON fields for check integration
 
 ## Rollout Plan
+
 1. Milestone A: plugin skeleton + `plan` command + state model.
 2. Milestone B: `run/resume/status` with checkpointing and retries.
 3. Milestone C: `onCheck` integration and CI gating for required backfills.
 4. Milestone D: operator hardening in one production-like environment.
 
 ## Exit Criteria
+
 1. Deterministic plan output for identical inputs across repeated runs.
 2. Resume succeeds without duplicate execution in at least one failure scenario test.
 3. Required-backfill findings integrate with `chx check` and are CI-consumable.
 4. No core package dependency on plugin internals.
 
 ## Relationship to Other Plugins
+
 1. Dependency-intelligence plugin can emit hints that a backfill is required.
 2. Backfill plugin remains execution-focused and does not absorb full dependency graph responsibilities.
 3. Typegen plugin remains independent from backfill lifecycle.
