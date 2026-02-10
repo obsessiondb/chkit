@@ -10,7 +10,6 @@ Use this order when bootstrapping a new planning/execution context:
 6. `05-implementation-backlog.md`
 7. `07-json-output-contract.md`
 8. `08-internal-structure.md`
-9. `09-phase1-closure.md` (closure checklist/evidence snapshot)
 
 ## Quick Prompt for New Context
 If you start a fresh context window, paste this:
