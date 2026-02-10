@@ -131,7 +131,7 @@ describe('@chx/cli doppler env e2e', () => {
         throw new Error('expected generated migration file')
       }
 
-      const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--plan', '--json'])
+      const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
       expect(planResult.exitCode).toBe(0)
       const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
       expect(planPayload.pending.length).toBe(1)
@@ -212,7 +212,7 @@ describe('@chx/cli doppler env e2e', () => {
         expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
         expect(secondGeneratePayload.migrationFile).toBeTruthy()
 
-        const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--plan', '--json'])
+        const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
         expect(secondPlan.exitCode).toBe(0)
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
         expect(secondPlanPayload.pending.length).toBe(1)
@@ -268,7 +268,7 @@ describe('@chx/cli doppler env e2e', () => {
 
         await writeFile(fixture.schemaPath, renderEvolvedSchema(database), 'utf8')
 
-        const secondPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--plan', '--json'])
+        const secondPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--dryrun', '--json'])
         expect(secondPlan.exitCode).toBe(0)
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as {
           operations: Array<{ type: string }>
