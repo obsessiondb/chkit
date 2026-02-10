@@ -147,6 +147,177 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('chx plugin backfill run and status complete planned chunks', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { chunkHours: 2 } })\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        'utf8'
+      )
+
+      const planned = runCli([
+        'plugin',
+        'backfill',
+        'plan',
+        '--target',
+        'app.users',
+        '--from',
+        '2026-01-01T00:00:00.000Z',
+        '--to',
+        '2026-01-01T06:00:00.000Z',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(planned.exitCode).toBe(0)
+      const planPayload = JSON.parse(planned.stdout) as { planId: string }
+
+      const ran = runCli([
+        'plugin',
+        'backfill',
+        'run',
+        '--plan-id',
+        planPayload.planId,
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(ran.exitCode).toBe(0)
+      const runPayload = JSON.parse(ran.stdout) as {
+        status: string
+        chunkCounts: { done: number; total: number; failed: number }
+      }
+      expect(runPayload.status).toBe('completed')
+      expect(runPayload.chunkCounts.done).toBe(3)
+      expect(runPayload.chunkCounts.total).toBe(3)
+      expect(runPayload.chunkCounts.failed).toBe(0)
+
+      const status = runCli([
+        'plugin',
+        'backfill',
+        'status',
+        '--plan-id',
+        planPayload.planId,
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(status.exitCode).toBe(0)
+      const statusPayload = JSON.parse(status.stdout) as {
+        status: string
+        chunkCounts: { done: number; failed: number }
+      }
+      expect(statusPayload.status).toBe('completed')
+      expect(statusPayload.chunkCounts.done).toBe(3)
+      expect(statusPayload.chunkCounts.failed).toBe(0)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chx plugin backfill fail then resume without replaying done chunks', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { chunkHours: 2, maxRetriesPerChunk: 1 } })\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        'utf8'
+      )
+
+      const planned = runCli([
+        'plugin',
+        'backfill',
+        'plan',
+        '--target',
+        'app.users',
+        '--from',
+        '2026-01-01T00:00:00.000Z',
+        '--to',
+        '2026-01-01T06:00:00.000Z',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(planned.exitCode).toBe(0)
+      const planPayload = JSON.parse(planned.stdout) as {
+        planId: string
+        planPath: string
+      }
+      const planState = JSON.parse(await readFile(planPayload.planPath, 'utf8')) as {
+        chunks: Array<{ id: string }>
+      }
+      const failChunkId = planState.chunks[1]?.id
+      expect(failChunkId).toBeTruthy()
+
+      const failedRun = runCli([
+        'plugin',
+        'backfill',
+        'run',
+        '--plan-id',
+        planPayload.planId,
+        '--simulate-fail-chunk',
+        failChunkId as string,
+        '--simulate-fail-count',
+        '1',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(failedRun.exitCode).toBe(1)
+      const failedPayload = JSON.parse(failedRun.stdout) as {
+        status: string
+        chunkCounts: { done: number; failed: number }
+      }
+      expect(failedPayload.status).toBe('failed')
+      expect(failedPayload.chunkCounts.done).toBe(1)
+      expect(failedPayload.chunkCounts.failed).toBe(1)
+
+      const resumed = runCli([
+        'plugin',
+        'backfill',
+        'resume',
+        '--plan-id',
+        planPayload.planId,
+        '--replay-failed',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(resumed.exitCode).toBe(0)
+      const resumedPayload = JSON.parse(resumed.stdout) as {
+        status: string
+        chunkCounts: { done: number }
+        runPath: string
+      }
+      expect(resumedPayload.status).toBe('completed')
+      expect(resumedPayload.chunkCounts.done).toBe(3)
+
+      const runState = JSON.parse(await readFile(resumedPayload.runPath, 'utf8')) as {
+        chunks: Array<{ id: string; attempts: number }>
+      }
+      const firstChunkId = planState.chunks[0]?.id
+      const firstChunk = runState.chunks.find((chunk) => chunk.id === firstChunkId)
+      expect(firstChunk?.attempts).toBe(1)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('chx typegen writes output file', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')

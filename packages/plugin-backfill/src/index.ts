@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chx/core'
@@ -69,17 +69,90 @@ export interface BackfillPlanState {
   limits: Required<BackfillPluginLimits>
 }
 
-export interface BuildBackfillPlanInput {
-  target: string
+export interface BackfillRunChunkState {
+  id: string
   from: string
   to: string
-  options?: NormalizedBackfillPluginOptions
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+  attempts: number
+  idempotencyToken: string
+  sqlTemplate: string
+  startedAt?: string
+  completedAt?: string
+  lastError?: string
+}
+
+export interface BackfillRunState {
+  planId: string
+  target: string
+  status: BackfillPlanStatus
+  createdAt: string
+  startedAt: string
+  updatedAt: string
+  completedAt?: string
+  lastError?: string
+  replayDone: boolean
+  replayFailed: boolean
+  options: BackfillPlanState['options']
+  chunks: BackfillRunChunkState[]
+}
+
+export interface BackfillStatusSummary {
+  planId: string
+  target: string
+  status: BackfillPlanStatus
+  totals: {
+    total: number
+    pending: number
+    running: number
+    done: number
+    failed: number
+    skipped: number
+  }
+  attempts: number
+  updatedAt: string
+  runPath: string
+  eventPath: string
+  lastError?: string
 }
 
 export interface BuildBackfillPlanOutput {
   plan: BackfillPlanState
   planPath: string
   existed: boolean
+}
+
+interface ReadPlanOutput {
+  plan: BackfillPlanState
+  planPath: string
+  stateDir: string
+}
+
+interface BackfillPathSet {
+  stateDir: string
+  plansDir: string
+  runsDir: string
+  eventsDir: string
+  planPath: string
+  runPath: string
+  eventPath: string
+}
+
+interface BackfillExecutionOptions {
+  replayDone?: boolean
+  replayFailed?: boolean
+  forceOverlap?: boolean
+  simulation?: {
+    failChunkId?: string
+    failCount?: number
+  }
+}
+
+export interface ExecuteBackfillRunOutput {
+  run: BackfillRunState
+  status: BackfillStatusSummary
+  runPath: string
+  eventPath: string
 }
 
 export interface BackfillPluginCommandContext {
@@ -98,7 +171,7 @@ export interface BackfillPlugin {
     version?: string
   }
   commands: Array<{
-    name: 'plan'
+    name: 'plan' | 'run' | 'resume' | 'status'
     description: string
     run: (context: BackfillPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
@@ -118,6 +191,26 @@ interface ParsedPlanArgs {
   to: string
   chunkHours?: number
   forceLargeWindow: boolean
+}
+
+interface ParsedRunArgs {
+  planId: string
+  replayDone: boolean
+  replayFailed: boolean
+  forceOverlap: boolean
+  simulateFailChunk?: string
+  simulateFailCount: number
+}
+
+interface ParsedResumeArgs {
+  planId: string
+  replayDone: boolean
+  replayFailed: boolean
+  forceOverlap: boolean
+}
+
+interface ParsedStatusArgs {
+  planId: string
 }
 
 const DEFAULT_OPTIONS: NormalizedBackfillPluginOptions = {
@@ -214,7 +307,10 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
         options.policy.requireExplicitWindow,
         'policy.requireExplicitWindow'
       ),
-      blockOverlappingRuns: parseBoolean(options.policy.blockOverlappingRuns, 'policy.blockOverlappingRuns'),
+      blockOverlappingRuns: parseBoolean(
+        options.policy.blockOverlappingRuns,
+        'policy.blockOverlappingRuns'
+      ),
       failCheckOnRequiredPendingBackfill: parseBoolean(
         options.policy.failCheckOnRequiredPendingBackfill,
         'policy.failCheckOnRequiredPendingBackfill'
@@ -281,6 +377,10 @@ function hashId(input: string): string {
   return createHash('sha256').update(input).digest('hex')
 }
 
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
 function normalizeTimestamp(raw: string, flagName: string): string {
   const value = raw.trim()
   if (value.length === 0) {
@@ -299,6 +399,14 @@ function normalizeTarget(raw: string): string {
   const value = raw.trim()
   if (!/^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/.test(value)) {
     throw new BackfillConfigError('Invalid value for --target. Expected <database.table>.')
+  }
+  return value
+}
+
+function normalizePlanId(raw: string): string {
+  const value = raw.trim()
+  if (!/^[a-f0-9]{16}$/.test(value)) {
+    throw new BackfillConfigError('Invalid value for --plan-id. Expected a 16-char lowercase hex id.')
   }
   return value
 }
@@ -351,6 +459,99 @@ function parsePlanArgs(args: string[]): ParsedPlanArgs {
     chunkHours,
     forceLargeWindow,
   }
+}
+
+function parseRunArgs(args: string[]): ParsedRunArgs {
+  let planId: string | undefined
+  let replayDone = false
+  let replayFailed = false
+  let forceOverlap = false
+  let simulateFailChunk: string | undefined
+  let simulateFailCount = 1
+
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]
+    if (!token) continue
+
+    if (token === '--replay-done') {
+      replayDone = true
+      continue
+    }
+
+    if (token === '--replay-failed') {
+      replayFailed = true
+      continue
+    }
+
+    if (token === '--force-overlap') {
+      forceOverlap = true
+      continue
+    }
+
+    if (
+      token === '--plan-id' ||
+      token === '--simulate-fail-chunk' ||
+      token === '--simulate-fail-count'
+    ) {
+      const nextValue = args[i + 1]
+      if (!nextValue || nextValue.startsWith('--')) {
+        throw new BackfillConfigError(`Missing value for ${token}`)
+      }
+
+      if (token === '--plan-id') planId = nextValue
+      if (token === '--simulate-fail-chunk') simulateFailChunk = nextValue
+      if (token === '--simulate-fail-count') {
+        const parsed = Number(nextValue)
+        if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+          throw new BackfillConfigError('Invalid value for --simulate-fail-count. Expected integer > 0.')
+        }
+        simulateFailCount = parsed
+      }
+
+      i += 1
+    }
+  }
+
+  if (!planId) throw new BackfillConfigError('Missing required --plan-id <id>')
+
+  return {
+    planId: normalizePlanId(planId),
+    replayDone,
+    replayFailed,
+    forceOverlap,
+    simulateFailChunk,
+    simulateFailCount,
+  }
+}
+
+function parseResumeArgs(args: string[]): ParsedResumeArgs {
+  const parsed = parseRunArgs(args)
+  return {
+    planId: parsed.planId,
+    replayDone: parsed.replayDone,
+    replayFailed: parsed.replayFailed,
+    forceOverlap: parsed.forceOverlap,
+  }
+}
+
+function parseStatusArgs(args: string[]): ParsedStatusArgs {
+  let planId: string | undefined
+
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]
+    if (token !== '--plan-id') continue
+
+    const nextValue = args[i + 1]
+    if (!nextValue || nextValue.startsWith('--')) {
+      throw new BackfillConfigError('Missing value for --plan-id')
+    }
+    planId = nextValue
+    i += 1
+  }
+
+  if (!planId) throw new BackfillConfigError('Missing required --plan-id <id>')
+
+  return { planId: normalizePlanId(planId) }
 }
 
 function ensureHoursWithinLimits(input: {
@@ -467,86 +668,352 @@ export function computeBackfillStateDir(
   return resolve(dirname(configPath), config.metaDir, 'backfill')
 }
 
-async function readExistingPlan(planPath: string): Promise<BackfillPlanState | null> {
-  if (!existsSync(planPath)) return null
-  const raw = await readFile(planPath, 'utf8')
-  return JSON.parse(raw) as BackfillPlanState
+function backfillPaths(stateDir: string, planId: string): BackfillPathSet {
+  const plansDir = join(stateDir, 'plans')
+  const runsDir = join(stateDir, 'runs')
+  const eventsDir = join(stateDir, 'events')
+  return {
+    stateDir,
+    plansDir,
+    runsDir,
+    eventsDir,
+    planPath: join(plansDir, `${planId}.json`),
+    runPath: join(runsDir, `${planId}.json`),
+    eventPath: join(eventsDir, `${planId}.ndjson`),
+  }
 }
 
-export async function buildBackfillPlan(input: {
-  target: string
-  from: string
-  to: string
+async function readJsonMaybe<T>(filePath: string): Promise<T | null> {
+  if (!existsSync(filePath)) return null
+  return JSON.parse(await readFile(filePath, 'utf8')) as T
+}
+
+async function writeJson(filePath: string, value: unknown): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true })
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+}
+
+async function appendEvent(eventPath: string, event: Record<string, unknown>): Promise<void> {
+  await mkdir(dirname(eventPath), { recursive: true })
+  await appendFile(eventPath, `${JSON.stringify({ at: nowIso(), ...event })}\n`, 'utf8')
+}
+
+async function readExistingPlan(planPath: string): Promise<BackfillPlanState | null> {
+  return readJsonMaybe<BackfillPlanState>(planPath)
+}
+
+async function readPlan(input: {
+  planId: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
-  chunkHours?: number
-  forceLargeWindow?: boolean
-}): Promise<BuildBackfillPlanOutput> {
-  const chunkHours = input.chunkHours ?? input.options.defaults.chunkHours
-  if (chunkHours * 60 < input.options.limits.minChunkMinutes) {
-    throw new BackfillConfigError(
-      `Chunk size ${chunkHours}h is below limits.minChunkMinutes=${input.options.limits.minChunkMinutes}.`
-    )
-  }
-
-  ensureHoursWithinLimits({
-    from: input.from,
-    to: input.to,
-    limits: input.options.limits,
-    forceLargeWindow: input.forceLargeWindow ?? false,
-  })
-
-  const planId = hashId(planIdentity(input.target, input.from, input.to, chunkHours)).slice(0, 16)
+}): Promise<ReadPlanOutput> {
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
-  const planPath = join(stateDir, 'plans', `${planId}.json`)
-
-  const plan: BackfillPlanState = {
-    planId,
-    target: input.target,
-    createdAt: '1970-01-01T00:00:00.000Z',
-    status: 'planned',
-    from: input.from,
-    to: input.to,
-    chunks: buildChunks({
-      planId,
-      target: input.target,
-      from: input.from,
-      to: input.to,
-      chunkHours,
-      requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
-    }),
-    options: {
-      chunkHours,
-      maxParallelChunks: input.options.defaults.maxParallelChunks,
-      maxRetriesPerChunk: input.options.defaults.maxRetriesPerChunk,
-      requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
-    },
-    policy: input.options.policy,
-    limits: input.options.limits,
+  const paths = backfillPaths(stateDir, input.planId)
+  const plan = await readJsonMaybe<BackfillPlanState>(paths.planPath)
+  if (!plan) {
+    throw new BackfillConfigError(`Backfill plan not found: ${paths.planPath}`)
   }
-
-  const existing = await readExistingPlan(planPath)
-  if (existing) {
-    if (stableSerialize(existing) !== stableSerialize(plan)) {
-      throw new BackfillConfigError(
-        `Backfill plan already exists at ${planPath} but differs from current planning output. Remove it if you intentionally changed planning parameters.`
-      )
-    }
-    return {
-      plan: existing,
-      planPath,
-      existed: true,
-    }
-  }
-
-  await mkdir(dirname(planPath), { recursive: true })
-  await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8')
-
   return {
     plan,
-    planPath,
-    existed: false,
+    planPath: paths.planPath,
+    stateDir,
+  }
+}
+
+async function readRun(runPath: string): Promise<BackfillRunState | null> {
+  return readJsonMaybe<BackfillRunState>(runPath)
+}
+
+function createRunState(plan: BackfillPlanState, input: BackfillExecutionOptions): BackfillRunState {
+  const startedAt = nowIso()
+  return {
+    planId: plan.planId,
+    target: plan.target,
+    status: 'planned',
+    createdAt: startedAt,
+    startedAt,
+    updatedAt: startedAt,
+    replayDone: input.replayDone ?? false,
+    replayFailed: input.replayFailed ?? false,
+    options: plan.options,
+    chunks: plan.chunks.map((chunk) => ({
+      id: chunk.id,
+      from: chunk.from,
+      to: chunk.to,
+      status: 'pending',
+      attempts: 0,
+      idempotencyToken: chunk.idempotencyToken,
+      sqlTemplate: chunk.sqlTemplate,
+    })),
+  }
+}
+
+async function collectActiveRunTargets(runsDir: string): Promise<Map<string, string>> {
+  const active = new Map<string, string>()
+  if (!existsSync(runsDir)) return active
+
+  const entries = await readdir(runsDir, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    const file = join(runsDir, entry.name)
+    const run = await readRun(file)
+    if (!run) continue
+    if (run.status !== 'running') continue
+    active.set(run.planId, run.target)
+  }
+
+  return active
+}
+
+function summarizeRunStatus(run: BackfillRunState, runPath: string, eventPath: string): BackfillStatusSummary {
+  const summary = {
+    total: run.chunks.length,
+    pending: 0,
+    running: 0,
+    done: 0,
+    failed: 0,
+    skipped: 0,
+  }
+
+  let attempts = 0
+  for (const chunk of run.chunks) {
+    attempts += chunk.attempts
+    if (chunk.status === 'pending') summary.pending += 1
+    if (chunk.status === 'running') summary.running += 1
+    if (chunk.status === 'done') summary.done += 1
+    if (chunk.status === 'failed') summary.failed += 1
+    if (chunk.status === 'skipped') summary.skipped += 1
+  }
+
+  return {
+    planId: run.planId,
+    target: run.target,
+    status: run.status,
+    totals: summary,
+    attempts,
+    updatedAt: run.updatedAt,
+    runPath,
+    eventPath,
+    lastError: run.lastError,
+  }
+}
+
+async function persistRunAndEvent(input: {
+  run: BackfillRunState
+  runPath: string
+  eventPath: string
+  event: Record<string, unknown>
+}): Promise<void> {
+  input.run.updatedAt = nowIso()
+  await writeJson(input.runPath, input.run)
+  await appendEvent(input.eventPath, input.event)
+}
+
+async function executeChunk(input: {
+  run: BackfillRunState
+  chunk: BackfillRunChunkState
+  maxRetries: number
+  runPath: string
+  eventPath: string
+  simulation?: {
+    failChunkId?: string
+    failCount?: number
+  }
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const failureBudget = input.simulation?.failCount ?? 0
+
+  while (input.chunk.attempts < input.maxRetries) {
+    input.chunk.status = 'running'
+    input.chunk.attempts += 1
+    input.chunk.startedAt = nowIso()
+
+    await persistRunAndEvent({
+      run: input.run,
+      runPath: input.runPath,
+      eventPath: input.eventPath,
+      event: {
+        type: 'chunk_started',
+        planId: input.run.planId,
+        chunkId: input.chunk.id,
+        attempt: input.chunk.attempts,
+      },
+    })
+
+    const shouldSimulateFailure =
+      input.simulation?.failChunkId === input.chunk.id && input.chunk.attempts <= failureBudget
+
+    if (!shouldSimulateFailure) {
+      input.chunk.status = 'done'
+      input.chunk.completedAt = nowIso()
+      input.chunk.lastError = undefined
+
+      await persistRunAndEvent({
+        run: input.run,
+        runPath: input.runPath,
+        eventPath: input.eventPath,
+        event: {
+          type: 'chunk_done',
+          planId: input.run.planId,
+          chunkId: input.chunk.id,
+          attempt: input.chunk.attempts,
+        },
+      })
+
+      return { ok: true }
+    }
+
+    const errorMessage = `Simulated failure for chunk ${input.chunk.id} attempt ${input.chunk.attempts}`
+    input.chunk.lastError = errorMessage
+
+    if (input.chunk.attempts >= input.maxRetries) {
+      input.chunk.status = 'failed'
+      input.run.status = 'failed'
+      input.run.lastError = errorMessage
+
+      await persistRunAndEvent({
+        run: input.run,
+        runPath: input.runPath,
+        eventPath: input.eventPath,
+        event: {
+          type: 'chunk_failed_retry_exhausted',
+          planId: input.run.planId,
+          chunkId: input.chunk.id,
+          attempt: input.chunk.attempts,
+          message: errorMessage,
+        },
+      })
+
+      return { ok: false, error: errorMessage }
+    }
+
+    input.chunk.status = 'pending'
+
+    await persistRunAndEvent({
+      run: input.run,
+      runPath: input.runPath,
+      eventPath: input.eventPath,
+      event: {
+        type: 'chunk_retry_scheduled',
+        planId: input.run.planId,
+        chunkId: input.chunk.id,
+        attempt: input.chunk.attempts,
+        nextAttempt: input.chunk.attempts + 1,
+      },
+    })
+  }
+
+  return {
+    ok: false,
+    error: `Retry budget exhausted for chunk ${input.chunk.id}`,
+  }
+}
+
+async function executeRunLoop(input: {
+  plan: BackfillPlanState
+  run: BackfillRunState
+  paths: BackfillPathSet
+  options: NormalizedBackfillPluginOptions
+  execution: BackfillExecutionOptions
+}): Promise<ExecuteBackfillRunOutput> {
+  const maxRetries = input.plan.options.maxRetriesPerChunk
+
+  input.run.status = 'running'
+  input.run.replayDone = input.execution.replayDone ?? false
+  input.run.replayFailed = input.execution.replayFailed ?? false
+
+  await persistRunAndEvent({
+    run: input.run,
+    runPath: input.paths.runPath,
+    eventPath: input.paths.eventPath,
+    event: {
+      type: 'run_started',
+      planId: input.plan.planId,
+      replayDone: input.run.replayDone,
+      replayFailed: input.run.replayFailed,
+    },
+  })
+
+  for (const chunk of input.run.chunks) {
+    if (chunk.status === 'done' && !input.run.replayDone) continue
+
+    if (chunk.status === 'failed') {
+      if (!input.run.replayFailed) {
+        input.run.status = 'failed'
+        input.run.lastError =
+          chunk.lastError ??
+          `Chunk ${chunk.id} is failed and resume requires --replay-failed to re-run failed chunks.`
+
+        await persistRunAndEvent({
+          run: input.run,
+          runPath: input.paths.runPath,
+          eventPath: input.paths.eventPath,
+          event: {
+            type: 'run_blocked_failed_chunk',
+            planId: input.plan.planId,
+            chunkId: chunk.id,
+            message: input.run.lastError,
+          },
+        })
+
+        return {
+          run: input.run,
+          status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
+          runPath: input.paths.runPath,
+          eventPath: input.paths.eventPath,
+        }
+      }
+
+      chunk.status = 'pending'
+      chunk.attempts = 0
+      chunk.lastError = undefined
+      chunk.startedAt = undefined
+      chunk.completedAt = undefined
+    }
+
+    if (chunk.status === 'running') {
+      chunk.status = 'pending'
+    }
+
+    const executed = await executeChunk({
+      run: input.run,
+      chunk,
+      maxRetries,
+      runPath: input.paths.runPath,
+      eventPath: input.paths.eventPath,
+      simulation: input.execution.simulation,
+    })
+
+    if (!executed.ok) {
+      input.run.completedAt = nowIso()
+      return {
+        run: input.run,
+        status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
+        runPath: input.paths.runPath,
+        eventPath: input.paths.eventPath,
+      }
+    }
+  }
+
+  input.run.status = 'completed'
+  input.run.completedAt = nowIso()
+  input.run.lastError = undefined
+
+  await persistRunAndEvent({
+    run: input.run,
+    runPath: input.paths.runPath,
+    eventPath: input.paths.eventPath,
+    event: {
+      type: 'run_completed',
+      planId: input.plan.planId,
+    },
+  })
+
+  return {
+    run: input.run,
+    status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
+    runPath: input.paths.runPath,
+    eventPath: input.paths.eventPath,
   }
 }
 
@@ -584,6 +1051,248 @@ function planPayload(output: BuildBackfillPlanOutput): {
   }
 }
 
+function runPayload(output: ExecuteBackfillRunOutput): {
+  ok: boolean
+  command: 'run' | 'resume'
+  planId: string
+  status: BackfillPlanStatus
+  chunkCounts: BackfillStatusSummary['totals']
+  attempts: number
+  runPath: string
+  eventPath: string
+  lastError?: string
+} {
+  return {
+    ok: output.status.status === 'completed',
+    command: 'run',
+    planId: output.run.planId,
+    status: output.status.status,
+    chunkCounts: output.status.totals,
+    attempts: output.status.attempts,
+    runPath: output.runPath,
+    eventPath: output.eventPath,
+    lastError: output.status.lastError,
+  }
+}
+
+function statusPayload(summary: BackfillStatusSummary): {
+  ok: boolean
+  command: 'status'
+  planId: string
+  status: BackfillPlanStatus
+  chunkCounts: BackfillStatusSummary['totals']
+  attempts: number
+  runPath: string
+  eventPath: string
+  updatedAt: string
+  lastError?: string
+} {
+  return {
+    ok: summary.status !== 'failed',
+    command: 'status',
+    planId: summary.planId,
+    status: summary.status,
+    chunkCounts: summary.totals,
+    attempts: summary.attempts,
+    runPath: summary.runPath,
+    eventPath: summary.eventPath,
+    updatedAt: summary.updatedAt,
+    lastError: summary.lastError,
+  }
+}
+
+export async function buildBackfillPlan(input: {
+  target: string
+  from: string
+  to: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+  chunkHours?: number
+  forceLargeWindow?: boolean
+}): Promise<BuildBackfillPlanOutput> {
+  const chunkHours = input.chunkHours ?? input.options.defaults.chunkHours
+  if (chunkHours * 60 < input.options.limits.minChunkMinutes) {
+    throw new BackfillConfigError(
+      `Chunk size ${chunkHours}h is below limits.minChunkMinutes=${input.options.limits.minChunkMinutes}.`
+    )
+  }
+
+  ensureHoursWithinLimits({
+    from: input.from,
+    to: input.to,
+    limits: input.options.limits,
+    forceLargeWindow: input.forceLargeWindow ?? false,
+  })
+
+  const planId = hashId(planIdentity(input.target, input.from, input.to, chunkHours)).slice(0, 16)
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
+  const paths = backfillPaths(stateDir, planId)
+
+  const plan: BackfillPlanState = {
+    planId,
+    target: input.target,
+    createdAt: '1970-01-01T00:00:00.000Z',
+    status: 'planned',
+    from: input.from,
+    to: input.to,
+    chunks: buildChunks({
+      planId,
+      target: input.target,
+      from: input.from,
+      to: input.to,
+      chunkHours,
+      requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
+    }),
+    options: {
+      chunkHours,
+      maxParallelChunks: input.options.defaults.maxParallelChunks,
+      maxRetriesPerChunk: input.options.defaults.maxRetriesPerChunk,
+      requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
+    },
+    policy: input.options.policy,
+    limits: input.options.limits,
+  }
+
+  const existing = await readExistingPlan(paths.planPath)
+  if (existing) {
+    if (stableSerialize(existing) !== stableSerialize(plan)) {
+      throw new BackfillConfigError(
+        `Backfill plan already exists at ${paths.planPath} but differs from current planning output. Remove it if you intentionally changed planning parameters.`
+      )
+    }
+    return {
+      plan: existing,
+      planPath: paths.planPath,
+      existed: true,
+    }
+  }
+
+  await writeJson(paths.planPath, plan)
+
+  return {
+    plan,
+    planPath: paths.planPath,
+    existed: false,
+  }
+}
+
+export async function executeBackfillRun(input: {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+  execution?: BackfillExecutionOptions
+}): Promise<ExecuteBackfillRunOutput> {
+  const execution = input.execution ?? {}
+  const { plan, stateDir } = await readPlan({
+    planId: input.planId,
+    configPath: input.configPath,
+    config: input.config,
+    options: input.options,
+  })
+  const paths = backfillPaths(stateDir, plan.planId)
+
+  if (input.options.policy.blockOverlappingRuns && !execution.forceOverlap) {
+    const activeTargets = await collectActiveRunTargets(paths.runsDir)
+    for (const [activePlanId, activeTarget] of activeTargets.entries()) {
+      if (activePlanId === plan.planId) continue
+      if (activeTarget !== plan.target) continue
+      throw new BackfillConfigError(
+        `Overlapping active run detected for target ${plan.target} (plan ${activePlanId}). Retry with --force-overlap to override.`
+      )
+    }
+  }
+
+  let run = await readRun(paths.runPath)
+  if (!run) {
+    run = createRunState(plan, execution)
+  }
+
+  if (run.status === 'completed' && !execution.replayDone && !execution.replayFailed) {
+    throw new BackfillConfigError(
+      `Run already completed for plan ${plan.planId}. Use --replay-done to run completed chunks again.`
+    )
+  }
+
+  return executeRunLoop({
+    plan,
+    run,
+    paths,
+    options: input.options,
+    execution,
+  })
+}
+
+export async function resumeBackfillRun(input: {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+  execution?: BackfillExecutionOptions
+}): Promise<ExecuteBackfillRunOutput> {
+  const { plan, stateDir } = await readPlan({
+    planId: input.planId,
+    configPath: input.configPath,
+    config: input.config,
+    options: input.options,
+  })
+  const paths = backfillPaths(stateDir, plan.planId)
+  const run = await readRun(paths.runPath)
+
+  if (!run) {
+    throw new BackfillConfigError(
+      `Run state not found for plan ${plan.planId}. Start with backfill run before resume.`
+    )
+  }
+
+  return executeRunLoop({
+    plan,
+    run,
+    paths,
+    options: input.options,
+    execution: input.execution ?? {},
+  })
+}
+
+export async function getBackfillStatus(input: {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  options: NormalizedBackfillPluginOptions
+}): Promise<BackfillStatusSummary> {
+  const { plan, stateDir } = await readPlan({
+    planId: input.planId,
+    configPath: input.configPath,
+    config: input.config,
+    options: input.options,
+  })
+  const paths = backfillPaths(stateDir, plan.planId)
+  const run = await readRun(paths.runPath)
+
+  if (!run) {
+    return {
+      planId: plan.planId,
+      target: plan.target,
+      status: 'planned',
+      totals: {
+        total: plan.chunks.length,
+        pending: plan.chunks.length,
+        running: 0,
+        done: 0,
+        failed: 0,
+        skipped: 0,
+      },
+      attempts: 0,
+      updatedAt: plan.createdAt,
+      runPath: paths.runPath,
+      eventPath: paths.eventPath,
+    }
+  }
+
+  return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+}
+
 export function createBackfillPlugin(options: BackfillPluginOptions = {}): BackfillPlugin {
   const base = normalizeBackfillOptions(options)
   validateBaseOptions(base)
@@ -602,9 +1311,6 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
             const parsed = parsePlanArgs(args)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
-            if (effectiveOptions.policy.requireExplicitWindow && (!parsed.from || !parsed.to)) {
-              throw new BackfillConfigError('Backfill planning requires explicit --from and --to.')
-            }
 
             const output = await buildBackfillPlan({
               target: parsed.target,
@@ -639,9 +1345,146 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               print(`Backfill plan failed: ${message}`)
             }
 
-            if (error instanceof BackfillConfigError) {
-              return 2
+            if (error instanceof BackfillConfigError) return 2
+            return 1
+          }
+        },
+      },
+      {
+        name: 'run',
+        description: 'Execute a planned backfill with checkpointed chunk progress',
+        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+          try {
+            const parsed = parseRunArgs(args)
+            const effectiveOptions = mergeOptions(base, runtimeOptions)
+            validateBaseOptions(effectiveOptions)
+
+            const output = await executeBackfillRun({
+              planId: parsed.planId,
+              config,
+              configPath,
+              options: effectiveOptions,
+              execution: {
+                replayDone: parsed.replayDone,
+                replayFailed: parsed.replayFailed,
+                forceOverlap: parsed.forceOverlap,
+                simulation: {
+                  failChunkId: parsed.simulateFailChunk,
+                  failCount: parsed.simulateFailCount,
+                },
+              },
+            })
+
+            const payload = {
+              ...runPayload(output),
+              command: 'run' as const,
             }
+
+            if (jsonMode) {
+              print(payload)
+            } else {
+              print(
+                `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+
+            return payload.ok ? 0 : 1
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (jsonMode) {
+              print({ ok: false, command: 'run', error: message })
+            } else {
+              print(`Backfill run failed: ${message}`)
+            }
+
+            if (error instanceof BackfillConfigError) return 2
+            return 1
+          }
+        },
+      },
+      {
+        name: 'resume',
+        description: 'Resume a backfill run from last checkpoint',
+        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+          try {
+            const parsed = parseResumeArgs(args)
+            const effectiveOptions = mergeOptions(base, runtimeOptions)
+            validateBaseOptions(effectiveOptions)
+
+            const output = await resumeBackfillRun({
+              planId: parsed.planId,
+              config,
+              configPath,
+              options: effectiveOptions,
+              execution: {
+                replayDone: parsed.replayDone,
+                replayFailed: parsed.replayFailed,
+                forceOverlap: parsed.forceOverlap,
+              },
+            })
+
+            const payload = {
+              ...runPayload(output),
+              command: 'resume' as const,
+            }
+
+            if (jsonMode) {
+              print(payload)
+            } else {
+              print(
+                `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+
+            return payload.ok ? 0 : 1
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (jsonMode) {
+              print({ ok: false, command: 'resume', error: message })
+            } else {
+              print(`Backfill resume failed: ${message}`)
+            }
+
+            if (error instanceof BackfillConfigError) return 2
+            return 1
+          }
+        },
+      },
+      {
+        name: 'status',
+        description: 'Show checkpoint and chunk progress for a backfill run',
+        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+          try {
+            const parsed = parseStatusArgs(args)
+            const effectiveOptions = mergeOptions(base, runtimeOptions)
+            validateBaseOptions(effectiveOptions)
+
+            const summary = await getBackfillStatus({
+              planId: parsed.planId,
+              config,
+              configPath,
+              options: effectiveOptions,
+            })
+            const payload = statusPayload(summary)
+
+            if (jsonMode) {
+              print(payload)
+            } else {
+              print(
+                `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed})`
+              )
+            }
+
+            return payload.ok ? 0 : 1
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            if (jsonMode) {
+              print({ ok: false, command: 'status', error: message })
+            } else {
+              print(`Backfill status failed: ${message}`)
+            }
+
+            if (error instanceof BackfillConfigError) return 2
             return 1
           }
         },
