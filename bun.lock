@@ -45,6 +45,13 @@
       "name": "@chx/core",
       "version": "0.1.0",
     },
+    "packages/plugin-backfill": {
+      "name": "@chx/plugin-backfill",
+      "version": "0.1.0",
+      "dependencies": {
+        "@chx/core": "workspace:*",
+      },
+    },
     "packages/plugin-typegen": {
       "name": "@chx/plugin-typegen",
       "version": "0.1.0",
@@ -116,6 +123,8 @@
     "@chx/codegen": ["@chx/codegen@workspace:packages/codegen"],
 
     "@chx/core": ["@chx/core@workspace:packages/core"],
+
+    "@chx/plugin-backfill": ["@chx/plugin-backfill@workspace:packages/plugin-backfill"],
 
     "@chx/plugin-typegen": ["@chx/plugin-typegen@workspace:packages/plugin-typegen"],
 
