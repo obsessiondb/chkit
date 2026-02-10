@@ -1,262 +1,260 @@
 #!/usr/bin/env node
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
-import { pathToFileURL } from 'node:url'
 
-import fg from 'fast-glob'
+import { buildApplication, buildCommand, buildRouteMap, run } from '@stricli/core'
 
-import { generateArtifacts } from '@chx/codegen'
-import { createClickHouseExecutor } from '@chx/clickhouse'
-import {
-  collectDefinitionsFromModule,
-  defineConfig,
-  type ChxConfig,
-  type SchemaDefinition,
-} from '@chx/core'
-
-const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
-
-type Command = 'init' | 'generate' | 'migrate' | 'status' | 'help' | 'version'
+import { CLI_VERSION } from './lib.js'
+import { cmdCheck } from './commands/check.js'
+import { cmdDrift } from './commands/drift.js'
+import { cmdGenerate } from './commands/generate.js'
+import { cmdInit } from './commands/init.js'
+import { cmdMigrate } from './commands/migrate.js'
+import { cmdStatus } from './commands/status.js'
 
 function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--config <path>]
-  chx migrate [--config <path>] [--execute]
-  chx status [--config <path>]
+  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--interactive-renames] [--config <path>] [--dryrun] [--json]
+  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
+  chx status [--config <path>] [--json]
+  chx drift [--config <path>] [--json]
+  chx check [--config <path>] [--strict] [--json]
 
 Options:
-  --config <path>  Path to config file (default: ${DEFAULT_CONFIG_FILE})
+  --config <path>  Path to config file (default: clickhouse.config.ts)
   --name <name>    Migration name for generate
-  --execute        Execute pending migrations on ClickHouse
+  --migration-id <id>
+                   Deterministic migration file prefix override (e.g. 20260101010101)
+  --rename-table <old_db.old_table=new_db.new_table>
+                   Explicit table rename mapping (comma-separated values supported)
+  --rename-column <db.table.old_column=new_column>
+                   Explicit column rename mapping (comma-separated values supported)
+  --interactive-renames
+                   Prompt per heuristic rename suggestion during generate (TTY only)
+  --apply          Apply pending migrations on ClickHouse (no prompt)
+  --execute        Alias for --apply
+  --allow-destructive
+                   Required in non-interactive mode when pending migrations contain destructive operations
+  --dryrun         Print operation plan without writing artifacts
+  --strict         Force all check policies on for this invocation
+  --json           Emit machine-readable JSON output
   -h, --help       Show help
   -v, --version    Show version
 `)
 }
 
-function parseArg(flag: string, args: string[]): string | undefined {
-  const idx = args.findIndex((a) => a === flag)
-  if (idx === -1) return undefined
-  return args[idx + 1]
+function addStringFlag(args: string[], flag: string, value: string | undefined): void {
+  if (value === undefined || value.length === 0) return
+  args.push(flag, value)
 }
 
-async function loadConfig(configPathArg?: string): Promise<{ config: ChxConfig; path: string }> {
-  const configPath = resolve(process.cwd(), configPathArg ?? DEFAULT_CONFIG_FILE)
-  if (!existsSync(configPath)) {
-    throw new Error(`Config not found at ${configPath}. Run 'chx init' first.`)
-  }
+function addBooleanFlag(args: string[], flag: string, enabled: boolean | undefined): void {
+  if (enabled) args.push(flag)
+}
 
-  const mod = await import(pathToFileURL(configPath).href)
-  const candidate = (mod.default ?? mod.config) as ChxConfig | undefined
-  if (!candidate) {
-    throw new Error(`Config file ${configPath} must export a default object or "config" object`)
-  }
-  return {
-    config: defineConfig(candidate),
-    path: configPath,
+function exitIfNeeded(): void {
+  const code =
+    typeof process.exitCode === 'number'
+      ? process.exitCode
+      : process.exitCode
+        ? Number(process.exitCode)
+        : 0
+  if (Number.isFinite(code) && code > 0) {
+    process.exit(code)
   }
 }
 
-async function loadSchemaDefinitions(schemaGlobs: string | string[]): Promise<SchemaDefinition[]> {
-  const patterns = Array.isArray(schemaGlobs) ? schemaGlobs : [schemaGlobs]
-  const files = await fg(patterns, { cwd: process.cwd(), absolute: true })
+const optionalStringFlag = (brief: string, placeholder = 'value') => ({
+  kind: 'parsed' as const,
+  brief,
+  parse: (input: string): string => input,
+  optional: true as const,
+  placeholder,
+})
 
-  if (files.length === 0) {
-    throw new Error('No schema files matched. Check config.schema patterns.')
+const optionalBooleanFlag = (brief: string) => ({
+  kind: 'boolean' as const,
+  brief,
+  optional: true as const,
+})
+
+const app = buildApplication(
+  buildRouteMap({
+    docs: {
+      brief: 'ClickHouse schema and migration toolkit',
+    },
+    routes: {
+      init: buildCommand({
+        parameters: {},
+        docs: {
+          brief: 'Initialize config and schema starter files',
+        },
+        async func() {
+          await cmdInit()
+        },
+      }),
+      generate: buildCommand<{
+        config?: string
+        name?: string
+        migrationId?: string
+        renameTable?: string
+        renameColumn?: string
+        interactiveRenames?: boolean
+        dryrun?: boolean
+        json?: boolean
+      }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            name: optionalStringFlag('Migration name', 'name'),
+            migrationId: optionalStringFlag('Deterministic migration file prefix', 'id'),
+            renameTable: optionalStringFlag(
+              'Explicit table rename mapping old_db.old_table=new_db.new_table'
+            ),
+            renameColumn: optionalStringFlag(
+              'Explicit column rename mapping db.table.old_column=new_column'
+            ),
+            interactiveRenames: optionalBooleanFlag(
+              'Prompt per heuristic rename suggestion during generate'
+            ),
+            dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'Generate migration artifacts from schema definitions',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addStringFlag(args, '--name', flags.name)
+          addStringFlag(args, '--migration-id', flags.migrationId)
+          addStringFlag(args, '--rename-table', flags.renameTable)
+          addStringFlag(args, '--rename-column', flags.renameColumn)
+          addBooleanFlag(args, '--interactive-renames', flags.interactiveRenames)
+          addBooleanFlag(args, '--dryrun', flags.dryrun)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdGenerate(args)
+          exitIfNeeded()
+        },
+      }),
+      migrate: buildCommand<{
+        config?: string
+        apply?: boolean
+        execute?: boolean
+        allowDestructive?: boolean
+        json?: boolean
+      }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            apply: optionalBooleanFlag('Apply pending migrations on ClickHouse'),
+            execute: optionalBooleanFlag('Execute pending migrations on ClickHouse'),
+            allowDestructive: optionalBooleanFlag(
+              'Allow destructive migrations tagged with risk=danger'
+            ),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'Review or execute pending migrations',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--apply', flags.apply)
+          addBooleanFlag(args, '--execute', flags.execute)
+          addBooleanFlag(args, '--allow-destructive', flags.allowDestructive)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdMigrate(args)
+          exitIfNeeded()
+        },
+      }),
+      status: buildCommand<{ config?: string; json?: boolean }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'Show migration status and checksum mismatch information',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdStatus(args)
+          exitIfNeeded()
+        },
+      }),
+      drift: buildCommand<{ config?: string; json?: boolean }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'Compare snapshot state with current ClickHouse objects',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdDrift(args)
+          exitIfNeeded()
+        },
+      }),
+      check: buildCommand<{ config?: string; strict?: boolean; json?: boolean }>({
+        parameters: {
+          flags: {
+            config: optionalStringFlag('Path to config file', 'path'),
+            strict: optionalBooleanFlag('Enable all policy checks'),
+            json: optionalBooleanFlag('Emit machine-readable JSON output'),
+          },
+        },
+        docs: {
+          brief: 'Run policy checks for CI and release gates',
+        },
+        async func(flags) {
+          const args: string[] = []
+          addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--strict', flags.strict)
+          addBooleanFlag(args, '--json', flags.json)
+          await cmdCheck(args)
+          exitIfNeeded()
+        },
+      }),
+      help: buildCommand({
+        parameters: {},
+        docs: {
+          brief: 'Print help information',
+        },
+        func() {
+          printHelp()
+        },
+      }),
+      version: buildCommand({
+        parameters: {},
+        docs: {
+          brief: 'Print version information',
+        },
+        func() {
+          console.log(CLI_VERSION)
+        },
+      }),
+    },
+  }),
+  {
+    name: 'chx',
+    versionInfo: { currentVersion: CLI_VERSION },
+    scanner: { caseStyle: 'allow-kebab-for-camel' },
   }
+)
 
-  const all: SchemaDefinition[] = []
-  for (const file of files) {
-    const mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>
-    all.push(...collectDefinitionsFromModule(mod))
-  }
-
-  const dedup = new Map<string, SchemaDefinition>()
-  for (const def of all) {
-    dedup.set(`${def.kind}:${def.database}.${def.name}`, def)
-  }
-  return [...dedup.values()]
-}
-
-async function writeIfMissing(filePath: string, content: string): Promise<void> {
-  if (existsSync(filePath)) return
-  await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, content, 'utf8')
-}
-
-async function cmdInit(): Promise<void> {
-  const configPath = resolve(process.cwd(), DEFAULT_CONFIG_FILE)
-  const schemaPath = resolve(process.cwd(), 'src/db/schema/example.ts')
-
-  await writeIfMissing(
-    configPath,
-    `export default {\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chx',\n  migrationsDir: './chx/migrations',\n  metaDir: './chx/meta',\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n}\n`
-  )
-
-  await writeIfMissing(
-    schemaPath,
-    `import { schema, table } from '@chx/core'\n\nconst events = table({\n  database: 'default',\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`
-  )
-
-  console.log(`Initialized chx project files:`)
-  console.log(`- ${configPath}`)
-  console.log(`- ${schemaPath}`)
-}
-
-function resolveDirs(config: ChxConfig): { outDir: string; migrationsDir: string; metaDir: string } {
-  const outDir = resolve(process.cwd(), config.outDir ?? './chx')
-  const migrationsDir = resolve(process.cwd(), config.migrationsDir ?? join(outDir, 'migrations'))
-  const metaDir = resolve(process.cwd(), config.metaDir ?? join(outDir, 'meta'))
-  return { outDir, migrationsDir, metaDir }
-}
-
-async function cmdGenerate(args: string[]): Promise<void> {
-  const configPath = parseArg('--config', args)
-  const migrationName = parseArg('--name', args)
-
-  const { config } = await loadConfig(configPath)
-  const definitions = await loadSchemaDefinitions(config.schema)
-  const { migrationsDir, metaDir } = resolveDirs(config)
-
-  const result = await generateArtifacts({
-    definitions,
-    migrationsDir,
-    metaDir,
-    migrationName,
-  })
-
-  console.log(`Generated migration: ${result.migrationFile}`)
-  console.log(`Updated snapshot:   ${result.snapshotFile}`)
-  console.log(`Definitions:        ${definitions.length}`)
-}
-
-interface MigrationJournal {
-  applied: string[]
-}
-
-async function readJournal(metaDir: string): Promise<MigrationJournal> {
-  const file = join(metaDir, 'journal.json')
-  if (!existsSync(file)) return { applied: [] }
-  const raw = await readFile(file, 'utf8')
-  return JSON.parse(raw) as MigrationJournal
-}
-
-async function writeJournal(metaDir: string, journal: MigrationJournal): Promise<void> {
-  await mkdir(metaDir, { recursive: true })
-  const file = join(metaDir, 'journal.json')
-  await writeFile(file, JSON.stringify(journal, null, 2) + '\n', 'utf8')
-}
-
-async function listMigrations(migrationsDir: string): Promise<string[]> {
-  const files = await fg('*.sql', { cwd: migrationsDir, onlyFiles: true })
-  return files.sort()
-}
-
-async function cmdStatus(args: string[]): Promise<void> {
-  const configPath = parseArg('--config', args)
-  const { config } = await loadConfig(configPath)
-  const { migrationsDir, metaDir } = resolveDirs(config)
-
-  await mkdir(migrationsDir, { recursive: true })
-  const files = await listMigrations(migrationsDir)
-  const journal = await readJournal(metaDir)
-
-  const pending = files.filter((f) => !journal.applied.includes(f))
-
-  console.log(`Migrations directory: ${migrationsDir}`)
-  console.log(`Total migrations:     ${files.length}`)
-  console.log(`Applied:              ${journal.applied.length}`)
-  console.log(`Pending:              ${pending.length}`)
-
-  if (pending.length > 0) {
-    console.log('\nPending migrations:')
-    for (const item of pending) console.log(`- ${item}`)
-  }
-}
-
-async function cmdMigrate(args: string[]): Promise<void> {
-  const configPath = parseArg('--config', args)
-  const execute = args.includes('--execute')
-
-  const { config } = await loadConfig(configPath)
-  const { migrationsDir, metaDir } = resolveDirs(config)
-
-  await mkdir(migrationsDir, { recursive: true })
-  const files = await listMigrations(migrationsDir)
-  const journal = await readJournal(metaDir)
-  const pending = files.filter((f) => !journal.applied.includes(f))
-
-  if (pending.length === 0) {
-    console.log('No pending migrations.')
-    return
-  }
-
-  console.log(`Pending migrations: ${pending.length}`)
-  for (const file of pending) console.log(`- ${file}`)
-
-  if (!execute) {
-    console.log('\nPlan only. Re-run with --execute to apply and journal these migrations.')
-    return
-  }
-
-  if (!config.clickhouse) {
-    throw new Error('clickhouse config is required for --execute')
-  }
-
-  const db = createClickHouseExecutor(config.clickhouse)
-
-  for (const file of pending) {
-    const fullPath = join(migrationsDir, file)
-    const sql = await readFile(fullPath, 'utf8')
-    await db.execute(sql)
-    journal.applied.push(file)
-    console.log(`Applied: ${file}`)
-  }
-
-  await writeJournal(metaDir, journal)
-  console.log(`\nJournal updated: ${join(metaDir, 'journal.json')}`)
-}
-
-async function main(): Promise<void> {
-  const args = process.argv.slice(2)
-  const first = args[0]
-
-  if (!first || first === '-h' || first === '--help') {
-    printHelp()
-    return
-  }
-
-  if (first === '-v' || first === '--version' || first === 'version') {
-    console.log('0.1.0')
-    return
-  }
-
-  const command = first as Command
-  const rest = args.slice(1)
-
-  switch (command) {
-    case 'init':
-      await cmdInit()
-      return
-    case 'generate':
-      await cmdGenerate(rest)
-      return
-    case 'migrate':
-      await cmdMigrate(rest)
-      return
-    case 'status':
-      await cmdStatus(rest)
-      return
-    default:
-      printHelp()
-      throw new Error(`Unknown command: ${command}`)
-  }
-}
-
-main().catch((error) => {
+run(app, process.argv.slice(2), { process }).catch((error) => {
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(1)
 })
