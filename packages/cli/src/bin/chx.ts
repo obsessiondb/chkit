@@ -15,8 +15,8 @@ function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--plan] [--json]
-  chx migrate [--config <path>] [--execute] [--allow-destructive] [--plan] [--json]
+  chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]
+  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
   chx status [--config <path>] [--json]
   chx drift [--config <path>] [--json]
   chx check [--config <path>] [--strict] [--json]
@@ -26,10 +26,11 @@ Options:
   --name <name>    Migration name for generate
   --migration-id <id>
                    Deterministic migration file prefix override (e.g. 20260101010101)
-  --execute        Execute pending migrations on ClickHouse
+  --apply          Apply pending migrations on ClickHouse (no prompt)
+  --execute        Alias for --apply
   --allow-destructive
                    Required in non-interactive mode when pending migrations contain destructive operations
-  --plan           Print plan details for operation review
+  --dryrun         Print operation plan without writing artifacts
   --strict         Force all check policies on for this invocation
   --json           Emit machine-readable JSON output
   -h, --help       Show help
@@ -91,7 +92,7 @@ const app = buildApplication(
         config?: string
         name?: string
         migrationId?: string
-        plan?: boolean
+        dryrun?: boolean
         json?: boolean
       }>({
         parameters: {
@@ -99,7 +100,7 @@ const app = buildApplication(
             config: optionalStringFlag('Path to config file', 'path'),
             name: optionalStringFlag('Migration name', 'name'),
             migrationId: optionalStringFlag('Deterministic migration file prefix', 'id'),
-            plan: optionalBooleanFlag('Print plan details for operation review'),
+            dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
@@ -111,7 +112,7 @@ const app = buildApplication(
           addStringFlag(args, '--config', flags.config)
           addStringFlag(args, '--name', flags.name)
           addStringFlag(args, '--migration-id', flags.migrationId)
-          addBooleanFlag(args, '--plan', flags.plan)
+          addBooleanFlag(args, '--dryrun', flags.dryrun)
           addBooleanFlag(args, '--json', flags.json)
           await cmdGenerate(args)
           exitIfNeeded()
@@ -119,19 +120,19 @@ const app = buildApplication(
       }),
       migrate: buildCommand<{
         config?: string
+        apply?: boolean
         execute?: boolean
         allowDestructive?: boolean
-        plan?: boolean
         json?: boolean
       }>({
         parameters: {
           flags: {
             config: optionalStringFlag('Path to config file', 'path'),
+            apply: optionalBooleanFlag('Apply pending migrations on ClickHouse'),
             execute: optionalBooleanFlag('Execute pending migrations on ClickHouse'),
             allowDestructive: optionalBooleanFlag(
               'Allow destructive migrations tagged with risk=danger'
             ),
-            plan: optionalBooleanFlag('Print pending migration plan'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
@@ -141,9 +142,9 @@ const app = buildApplication(
         async func(flags) {
           const args: string[] = []
           addStringFlag(args, '--config', flags.config)
+          addBooleanFlag(args, '--apply', flags.apply)
           addBooleanFlag(args, '--execute', flags.execute)
           addBooleanFlag(args, '--allow-destructive', flags.allowDestructive)
-          addBooleanFlag(args, '--plan', flags.plan)
           addBooleanFlag(args, '--json', flags.json)
           await cmdMigrate(args)
           exitIfNeeded()

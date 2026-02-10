@@ -52,9 +52,8 @@ async function confirmDestructiveExecution(markers: DestructiveOperationMarker[]
 }
 
 export async function cmdMigrate(args: string[]): Promise<void> {
-  const execute = hasFlag('--execute', args)
+  const executeRequested = hasFlag('--apply', args) || hasFlag('--execute', args)
   const allowDestructive = hasFlag('--allow-destructive', args)
-  const planMode = hasFlag('--plan', args)
 
   const { config, dirs, jsonMode } = await getCommandContext(args)
   const { migrationsDir, metaDir } = dirs
@@ -69,7 +68,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   if (checksumMismatches.length > 0) {
     if (jsonMode) {
       emitJson('migrate', {
-        mode: execute ? 'execute' : 'plan',
+        mode: executeRequested ? 'execute' : 'plan',
         error: 'Checksum mismatch detected on applied migrations',
         checksumMismatches,
       })
@@ -85,7 +84,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
 
   if (pending.length === 0) {
     if (jsonMode) {
-      emitJson('migrate', { pending: [], applied: [], mode: execute ? 'execute' : 'plan' })
+      emitJson('migrate', { pending: [], applied: [], mode: executeRequested ? 'execute' : 'plan' })
     } else {
       console.log('No pending migrations.')
     }
@@ -93,21 +92,43 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   }
 
   const planned = {
-    mode: execute ? 'execute' : 'plan',
+    mode: executeRequested ? 'execute' : 'plan',
     pending,
   }
 
-  if (planMode || !execute) {
-    if (jsonMode) {
-      emitJson('migrate', planned)
-    } else {
-      console.log(`Pending migrations: ${pending.length}`)
-      for (const file of pending) console.log(`- ${file}`)
-      if (!execute) {
-        console.log('\nPlan only. Re-run with --execute to apply and journal these migrations.')
+  if (jsonMode && !executeRequested) {
+    emitJson('migrate', planned)
+    return
+  }
+
+  if (!jsonMode) {
+    console.log(`Pending migrations: ${pending.length}`)
+    for (const file of pending) console.log(`- ${file}`)
+  }
+
+  let shouldExecute = executeRequested
+  if (!shouldExecute) {
+    if (isBackgroundOrCI() || jsonMode) {
+      if (!jsonMode) {
+        console.log('\nPlan only. Re-run with --apply to apply and journal these migrations.')
       }
+      return
     }
-    if (!execute) return
+
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    try {
+      console.log('')
+      console.log('Type "yes" to continue. Any other input cancels.')
+      const response = await rl.question('Apply pending migrations now? [no/yes]: ')
+      shouldExecute = response.trim().toLowerCase() === 'yes'
+    } finally {
+      rl.close()
+    }
+
+    if (!shouldExecute) {
+      console.log('Migration apply cancelled by user.')
+      return
+    }
   }
 
   const destructiveMigrations: string[] = []
@@ -157,7 +178,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   }
 
   if (!config.clickhouse) {
-    throw new Error('clickhouse config is required for --execute')
+    throw new Error('clickhouse config is required for --apply')
   }
 
   const db = createClickHouseExecutor(config.clickhouse)

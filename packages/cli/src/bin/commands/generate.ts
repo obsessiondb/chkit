@@ -15,7 +15,7 @@ import {
 export async function cmdGenerate(args: string[]): Promise<void> {
   const migrationName = parseArg('--name', args)
   const migrationId = parseArg('--migration-id', args)
-  const planMode = hasFlag('--plan', args)
+  const planMode = hasFlag('--dryrun', args)
 
   const { config, dirs, jsonMode } = await getCommandContext(args)
   const definitions = await loadSchemaDefinitions(config.schema)
@@ -47,6 +47,7 @@ export async function cmdGenerate(args: string[]): Promise<void> {
       operationCount: plan.operations.length,
       riskSummary: plan.riskSummary,
       operations: plan.operations,
+      renameSuggestions: plan.renameSuggestions,
     }
 
     if (jsonMode) {
@@ -59,6 +60,16 @@ export async function cmdGenerate(args: string[]): Promise<void> {
       `Risk summary: safe=${payload.riskSummary.safe}, caution=${payload.riskSummary.caution}, danger=${payload.riskSummary.danger}`
     )
     for (const line of summarizePlan(plan.operations)) console.log(`- ${line}`)
+    if (payload.renameSuggestions.length > 0) {
+      console.log('\nRename suggestions (review and confirm manually):')
+      for (const suggestion of payload.renameSuggestions) {
+        console.log(
+          `- ${suggestion.kind} ${suggestion.database}.${suggestion.table}: ${suggestion.from} -> ${suggestion.to} [${suggestion.confidence}]`
+        )
+        console.log(`  ${suggestion.reason}`)
+        console.log(`  Confirm with: ${suggestion.confirmationSQL}`)
+      }
+    }
     return
   }
 
