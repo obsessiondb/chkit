@@ -136,6 +136,18 @@ Keys:
 5. `destructiveMigrations`
 6. `destructiveOperations`
 
+`destructiveOperations` item keys:
+
+1. `migration`
+2. `type`
+3. `key`
+4. `risk`
+5. `warningCode`
+6. `reason`
+7. `impact`
+8. `recommendation`
+9. `summary`
+
 ## Exit Codes
 
 1. `0`: success
