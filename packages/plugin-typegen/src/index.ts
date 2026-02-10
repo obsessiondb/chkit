@@ -4,11 +4,12 @@ import { dirname, join, resolve } from 'node:path'
 import fg from 'fast-glob'
 
 import {
+  type ChxInlinePluginRegistration,
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
-  type ChxConfig,
   type ColumnDefinition,
   type MaterializedViewDefinition,
+  type ResolvedChxConfig,
   type SchemaDefinition,
   type TableDefinition,
   type ViewDefinition,
@@ -28,7 +29,7 @@ export interface TypegenPluginCommandContext {
   args: string[]
   jsonMode: boolean
   options: Record<string, unknown>
-  config: ChxConfig
+  config: ResolvedChxConfig
   configPath: string
   print: (value: unknown) => void
 }
@@ -83,11 +84,13 @@ export interface GenerateTypeArtifactsOutput {
 
 export interface TypegenPluginCheckContext {
   command: 'check'
-  config: ChxConfig
+  config: ResolvedChxConfig
   configPath: string
   jsonMode: boolean
   options: Record<string, unknown>
 }
+
+export type TypegenPluginRegistration = ChxInlinePluginRegistration<TypegenPlugin, TypegenPluginOptions>
 
 export interface TypegenPluginCheckResult {
   plugin: string
@@ -739,5 +742,14 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
         print(`typegen check: failed${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`)
       },
     },
+  }
+}
+
+export function typegen(options: TypegenPluginOptions = {}): TypegenPluginRegistration {
+  return {
+    plugin: createTypegenPlugin(),
+    name: 'typegen',
+    enabled: true,
+    options,
   }
 }

@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { CLI_ENTRY, TYPEGEN_PLUGIN_ENTRY, createFixture, runCli } from './testkit.test'
+import { CLI_ENTRY, CORE_ENTRY, TYPEGEN_PLUGIN_ENTRY, createFixture, runCli } from './testkit.test'
 
 describe('plugin runtime', () => {
   test('generate --dryrun --json applies onPlanCreated hook output', async () => {
@@ -100,6 +100,32 @@ describe('plugin runtime', () => {
       const content = await readFile(outFile, 'utf8')
       expect(content).toContain('export interface AppUsersRow')
       expect(content.endsWith('\n')).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chx typegen writes output file with typed inline plugin registration', async () => {
+    const fixture = await createFixture()
+    const outFile = join(fixture.dir, 'src/generated/chx-types.ts')
+    try {
+      await writeFile(
+        fixture.configPath,
+        `import { defineConfig } from '${CORE_ENTRY}'\nimport { typegen } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default defineConfig({\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [typegen({ outFile: './src/generated/chx-types.ts' })],\n})\n`,
+        'utf8'
+      )
+
+      const result = runCli(['typegen', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        ok: boolean
+        outFile: string
+        mode: string
+      }
+      expect(payload.ok).toBe(true)
+      expect(payload.mode).toBe('write')
+      expect(payload.outFile).toBe(outFile)
+      expect(existsSync(outFile)).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

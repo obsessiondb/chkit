@@ -1,7 +1,14 @@
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { canonicalizeDefinitions, type ChxConfig, type MigrationPlan, type SchemaDefinition } from '@chx/core'
+import {
+  canonicalizeDefinitions,
+  type ChxLegacyPluginRegistration,
+  type ChxPluginRegistration,
+  type MigrationPlan,
+  type ResolvedChxConfig,
+  type SchemaDefinition,
+} from '@chx/core'
 
 import type {
   ChxOnCheckContext,
@@ -15,6 +22,7 @@ import type {
   ChxPluginCommand,
   ChxPluginCommandContext,
 } from '../plugins.js'
+import { isInlinePluginRegistration } from '../plugins.js'
 
 interface LoadedPlugin {
   options: Record<string, unknown>
@@ -47,26 +55,42 @@ function parseCliMajor(version: string): number {
 }
 
 function normalizePluginRegistration(
-  entry: NonNullable<ChxConfig['plugins']>[number]
+  entry: ChxPluginRegistration
 ): {
+  kind: 'legacy' | 'inline'
   resolvePath: string
+  inlinePlugin?: ChxPlugin
   nameHint?: string
   enabled: boolean
   options: Record<string, unknown>
 } {
   if (typeof entry === 'string') {
     return {
+      kind: 'legacy',
       resolvePath: entry,
       enabled: true,
       options: {},
     }
   }
 
+  if (isInlinePluginRegistration(entry)) {
+    return {
+      kind: 'inline',
+      resolvePath: '',
+      inlinePlugin: entry.plugin,
+      nameHint: entry.name,
+      enabled: entry.enabled !== false,
+      options: entry.options ?? {},
+    }
+  }
+
+  const legacy = entry as ChxLegacyPluginRegistration
   return {
-    resolvePath: entry.resolve,
-    nameHint: entry.name,
-    enabled: entry.enabled !== false,
-    options: entry.options ?? {},
+    kind: 'legacy',
+    resolvePath: legacy.resolve,
+    nameHint: legacy.name,
+    enabled: legacy.enabled !== false,
+    options: legacy.options ?? {},
   }
 }
 
@@ -116,7 +140,7 @@ async function importPluginModule(absolutePath: string): Promise<ChxPlugin> {
 }
 
 export async function loadPluginRuntime(input: {
-  config: ChxConfig
+  config: ResolvedChxConfig
   configPath: string
   cliVersion: string
 }): Promise<PluginRuntime> {
@@ -129,12 +153,21 @@ export async function loadPluginRuntime(input: {
     const normalized = normalizePluginRegistration(registration)
     if (!normalized.enabled) continue
 
-    const absolutePath = resolve(configDir, normalized.resolvePath)
-    const plugin = await importPluginModule(absolutePath)
-    validatePlugin(input.cliVersion, plugin, absolutePath)
+    const plugin =
+      normalized.kind === 'inline'
+        ? normalized.inlinePlugin
+        : await importPluginModule(resolve(configDir, normalized.resolvePath))
+    if (!plugin) continue
+
+    const sourceLabel =
+      normalized.kind === 'inline'
+        ? `inline registration${normalized.nameHint ? ` (${normalized.nameHint})` : ''}`
+        : resolve(configDir, normalized.resolvePath)
+    validatePlugin(input.cliVersion, plugin, sourceLabel)
+
     if (normalized.nameHint && normalized.nameHint !== plugin.manifest.name) {
       throw new Error(
-        `Plugin name mismatch for ${absolutePath}: configured "${normalized.nameHint}" but manifest is "${plugin.manifest.name}".`
+        `Plugin name mismatch for ${sourceLabel}: configured "${normalized.nameHint}" but manifest is "${plugin.manifest.name}".`
       )
     }
     if (byName.has(plugin.manifest.name)) {
