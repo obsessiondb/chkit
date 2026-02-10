@@ -24,6 +24,7 @@ const JSON_CONTRACT_VERSION = 1
 export type Command =
   | 'init'
   | 'generate'
+  | 'typegen'
   | 'migrate'
   | 'status'
   | 'drift'

@@ -24,6 +24,7 @@ export interface ChxPluginHookContextBase {
 
 export interface ChxOnConfigLoadedContext extends ChxPluginHookContextBase {
   configPath: string
+  options: Record<string, unknown>
 }
 
 export interface ChxOnSchemaLoadedContext extends ChxPluginHookContextBase {
@@ -46,9 +47,32 @@ export interface ChxOnAfterApplyContext extends ChxPluginHookContextBase {
   appliedAt: string
 }
 
+export interface ChxCheckFinding {
+  code: string
+  message: string
+  severity: 'info' | 'warn' | 'error'
+  metadata?: Record<string, unknown>
+}
+
+export interface ChxOnCheckContext extends ChxPluginHookContextBase {
+  command: 'check'
+  configPath: string
+  jsonMode: boolean
+  options: Record<string, unknown>
+}
+
+export interface ChxOnCheckResult {
+  plugin: string
+  evaluated: boolean
+  ok: boolean
+  findings: ChxCheckFinding[]
+  metadata?: Record<string, unknown>
+}
+
 export interface ChxPluginCommandContext {
   pluginName: string
   config: ChxConfig
+  configPath: string
   jsonMode: boolean
   args: string[]
   options: Record<string, unknown>
@@ -76,6 +100,11 @@ export interface ChxPluginHooks {
     | { statements?: string[] }
     | Promise<void | { statements?: string[] }>
   onAfterApply?: (context: ChxOnAfterApplyContext) => void | Promise<void>
+  onCheck?: (context: ChxOnCheckContext) => ChxOnCheckResult | void | Promise<ChxOnCheckResult | void>
+  onCheckReport?: (context: {
+    result: ChxOnCheckResult
+    print: (line: string) => void
+  }) => void | Promise<void>
 }
 
 export interface ChxPlugin {

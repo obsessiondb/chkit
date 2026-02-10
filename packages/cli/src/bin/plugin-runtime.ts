@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url'
 import { canonicalizeDefinitions, type ChxConfig, type MigrationPlan, type SchemaDefinition } from '@chx/core'
 
 import type {
+  ChxOnCheckContext,
+  ChxOnCheckResult,
   ChxOnAfterApplyContext,
   ChxOnBeforeApplyContext,
   ChxOnConfigLoadedContext,
@@ -22,11 +24,13 @@ interface LoadedPlugin {
 export interface PluginRuntime {
   plugins: ReadonlyArray<LoadedPlugin>
   getCommand(pluginName: string, commandName: string): { command: ChxPluginCommand; plugin: LoadedPlugin } | null
-  runOnConfigLoaded(context: ChxOnConfigLoadedContext): Promise<void>
+  runOnConfigLoaded(context: Omit<ChxOnConfigLoadedContext, 'options'>): Promise<void>
   runOnSchemaLoaded(context: ChxOnSchemaLoadedContext): Promise<SchemaDefinition[]>
   runOnPlanCreated(context: Omit<ChxOnPlanCreatedContext, 'plan'>, plan: MigrationPlan): Promise<MigrationPlan>
   runOnBeforeApply(context: ChxOnBeforeApplyContext): Promise<string[]>
   runOnAfterApply(context: ChxOnAfterApplyContext): Promise<void>
+  runOnCheck(context: Omit<ChxOnCheckContext, 'options'>): Promise<ChxOnCheckResult[]>
+  runOnCheckReport(results: ChxOnCheckResult[], print: (line: string) => void): Promise<void>
   runPluginCommand(
     pluginName: string,
     commandName: string,
@@ -159,7 +163,7 @@ export async function loadPluginRuntime(input: {
         const hook = item.plugin.hooks?.onConfigLoaded
         if (!hook) continue
         try {
-          await hook(context)
+          await hook({ ...context, options: item.options })
         } catch (error) {
           throw formatPluginError(item.plugin.manifest.name, 'onConfigLoaded', error)
         }
@@ -217,6 +221,40 @@ export async function loadPluginRuntime(input: {
           await hook(context)
         } catch (error) {
           throw formatPluginError(item.plugin.manifest.name, 'onAfterApply', error)
+        }
+      }
+    },
+    async runOnCheck(context) {
+      const results: ChxOnCheckResult[] = []
+      for (const item of loaded) {
+        const hook = item.plugin.hooks?.onCheck
+        if (!hook) continue
+        try {
+          const result = await hook({ ...context, options: item.options })
+          if (!result) continue
+          results.push({
+            plugin: result.plugin || item.plugin.manifest.name,
+            evaluated: result.evaluated,
+            ok: result.ok,
+            findings: result.findings,
+            metadata: result.metadata,
+          })
+        } catch (error) {
+          throw formatPluginError(item.plugin.manifest.name, 'onCheck', error)
+        }
+      }
+      return results
+    },
+    async runOnCheckReport(results, print) {
+      for (const result of results) {
+        const item = byName.get(result.plugin)
+        if (!item) continue
+        const hook = item.plugin.hooks?.onCheckReport
+        if (!hook) continue
+        try {
+          await hook({ result, print })
+        } catch (error) {
+          throw formatPluginError(item.plugin.manifest.name, 'onCheckReport', error)
         }
       }
     },

@@ -847,6 +847,7 @@ describe('@chx/cli command flows', () => {
         'failedChecks',
         'ok',
         'pendingCount',
+        'plugins',
         'policy',
         'schemaVersion',
         'strict',
