@@ -24,38 +24,31 @@ The plugin is designed so your existing CHX workflow can stay the same.
 
 ## Plugin setup
 
-In `clickhouse.config.ts`, register a plugin module whose manifest name is `typegen`.
+In `clickhouse.config.ts`, register `typegen(...)` from `@chx/plugin-typegen`.
 
-Typical local wrapper:
-
-```ts
-// plugins/typegen.ts
-import { createTypegenPlugin } from '@chx/plugin-typegen'
-
-export default createTypegenPlugin()
-```
-
-Config registration:
+Recommended typed setup:
 
 ```ts
-export default {
+import { defineConfig } from '@chx/core'
+import { typegen } from '@chx/plugin-typegen'
+
+export default defineConfig({
   schema: './src/db/schema/**/*.ts',
   plugins: [
-    {
-      resolve: './plugins/typegen.ts',
-      options: {
-        outFile: './src/generated/chx-types.ts',
-        emitZod: false,
-        tableNameStyle: 'pascal',
-        bigintMode: 'string',
-        includeViews: false,
-        runOnGenerate: true,
-        failOnUnsupportedType: true,
-      },
-    },
+    typegen({
+      outFile: './src/generated/chx-types.ts',
+      emitZod: false,
+      tableNameStyle: 'pascal',
+      bigintMode: 'string',
+      includeViews: false,
+      runOnGenerate: true,
+      failOnUnsupportedType: true,
+    }),
   ],
-}
+})
 ```
+
+Legacy path-based registration via `{ resolve: './plugins/typegen.ts', options: {...} }` remains supported.
 
 ## Options
 

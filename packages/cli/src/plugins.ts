@@ -1,4 +1,10 @@
-import type { ChxConfig, MigrationPlan, SchemaDefinition } from '@chx/core'
+import type {
+  ChxInlinePluginRegistration,
+  ChxPluginRegistration,
+  MigrationPlan,
+  ResolvedChxConfig,
+  SchemaDefinition,
+} from '@chx/core'
 
 export interface ChxPluginManifest {
   name: string
@@ -19,7 +25,7 @@ export interface ChxPluginRegistrationMeta {
 
 export interface ChxPluginHookContextBase {
   command: string
-  config: ChxConfig
+  config: ResolvedChxConfig
 }
 
 export interface ChxOnConfigLoadedContext extends ChxPluginHookContextBase {
@@ -71,7 +77,7 @@ export interface ChxOnCheckResult {
 
 export interface ChxPluginCommandContext {
   pluginName: string
-  config: ChxConfig
+  config: ResolvedChxConfig
   configPath: string
   jsonMode: boolean
   args: string[]
@@ -115,4 +121,18 @@ export interface ChxPlugin {
 
 export function definePlugin(plugin: ChxPlugin): ChxPlugin {
   return plugin
+}
+
+export function definePluginConfig<TOptions extends object = Record<string, unknown>>(
+  registration: Omit<ChxInlinePluginRegistration<ChxPlugin, TOptions>, 'plugin'> & {
+    plugin: ChxPlugin
+  }
+): ChxInlinePluginRegistration<ChxPlugin, TOptions> {
+  return registration
+}
+
+export function isInlinePluginRegistration(
+  registration: ChxPluginRegistration
+): registration is ChxInlinePluginRegistration<ChxPlugin> {
+  return typeof registration === 'object' && registration !== null && 'plugin' in registration
 }

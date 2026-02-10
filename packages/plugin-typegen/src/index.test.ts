@@ -4,13 +4,14 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 
-import { schema, table } from '@chx/core'
+import { resolveConfig, schema, table } from '@chx/core'
 
 import {
   createTypegenPlugin,
   generateTypeArtifacts,
   mapColumnType,
   normalizeTypegenOptions,
+  typegen,
 } from './index'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
@@ -36,6 +37,15 @@ describe('@chx/plugin-typegen options', () => {
     expect(options.includeViews).toBe(false)
     expect(options.runOnGenerate).toBe(true)
     expect(options.failOnUnsupportedType).toBe(true)
+  })
+
+  test('creates typed inline plugin registration', () => {
+    const registration = typegen({ emitZod: true })
+
+    expect(registration.name).toBe('typegen')
+    expect(registration.enabled).toBe(true)
+    expect(registration.options?.emitZod).toBe(true)
+    expect(registration.plugin.manifest.name).toBe('typegen')
   })
 })
 
@@ -213,7 +223,7 @@ describe('@chx/plugin-typegen check hook', () => {
 
       const first = await onCheck?.({
         command: 'check',
-        config: { schema: schemaPath },
+        config: resolveConfig({ schema: schemaPath }),
         configPath,
         jsonMode: true,
         options: {},
@@ -227,7 +237,7 @@ describe('@chx/plugin-typegen check hook', () => {
         args: [],
         jsonMode: true,
         options: {},
-        config: { schema: schemaPath },
+        config: resolveConfig({ schema: schemaPath }),
         configPath,
         print() {},
       })
@@ -235,7 +245,7 @@ describe('@chx/plugin-typegen check hook', () => {
 
       const second = await onCheck?.({
         command: 'check',
-        config: { schema: schemaPath },
+        config: resolveConfig({ schema: schemaPath }),
         configPath,
         jsonMode: true,
         options: {},
