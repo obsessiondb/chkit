@@ -1,0 +1,33 @@
+---
+title: CHX Documentation
+description: Public docs for chx, a ClickHouse schema and migration CLI for TypeScript projects.
+template: splash
+hero:
+  tagline: Run schema changes with confidence.
+  actions:
+    - text: Getting Started
+      link: /getting-started/
+      icon: right-arrow
+    - text: CLI Overview
+      link: /cli/overview/
+      icon: right-arrow
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you will find here
+
+<CardGrid stagger>
+	<Card title="Quick Start" icon="rocket">
+		Install chx with Bun and run your first migration workflow.
+	</Card>
+	<Card title="CLI Reference" icon="seti:terminal">
+		Learn each command, expected output, and operational behavior.
+	</Card>
+	<Card title="Config Guide" icon="setting">
+		Use `clickhouse.config.ts` to wire schema, migration paths, and safety settings.
+	</Card>
+	<Card title="Docs Structure" icon="tree-structure">
+		Public docs live here. Internal planning docs remain outside this app.
+	</Card>
+</CardGrid>
