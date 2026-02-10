@@ -86,19 +86,18 @@ This preserves existing company workflows by extending shared commands rather th
 
 ## Configuration Contract (v1)
 ```ts
+import { typegen } from '@chx/plugin-typegen'
+
 plugins: [
-  {
-    resolve: './plugins/typegen.ts',
-    options: {
-      outFile: './src/generated/chx-types.ts',
-      emitZod: true,
-      tableNameStyle: 'pascal', // pascal | camel | raw
-      bigintMode: 'string', // string | bigint
-      includeViews: false,
-      runOnGenerate: true,
-      failOnUnsupportedType: true,
-    },
-  },
+  typegen({
+    outFile: './src/generated/chx-types.ts',
+    emitZod: true,
+    tableNameStyle: 'pascal', // pascal | camel | raw
+    bigintMode: 'string', // string | bigint
+    includeViews: false,
+    runOnGenerate: true,
+    failOnUnsupportedType: true,
+  }),
 ]
 ```
 
@@ -252,10 +251,11 @@ When plugin is enabled:
 1. New package: `packages/plugin-typegen`
 2. Main exports:
 - `createTypegenPlugin(options)`
+- `typegen(options)` (typed config registration helper)
 - `generateTypeArtifacts(definitions, options)`
 - `mapColumnType(column, options)`
 3. Fixture tests co-located with package.
-4. Plugin entry in consumer projects remains local (`./plugins/typegen.ts`) and wraps package factory.
+4. Legacy local plugin wrappers remain supported for path-based registration.
 5. Plugin packages follow `plugin-*` naming for consistency across optional modules.
 
 ## Error Handling

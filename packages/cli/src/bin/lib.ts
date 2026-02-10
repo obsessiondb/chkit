@@ -10,9 +10,13 @@ import fg from 'fast-glob'
 import {
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
-  defineConfig,
+  resolveConfig,
   type ChxConfig,
+  type ChxConfigFn,
+  type ChxConfigInput,
+  type ChxConfigEnv,
   type MigrationOperation,
+  type ResolvedChxConfig,
   type SchemaDefinition,
   type Snapshot,
 } from '@chx/core'
@@ -63,7 +67,7 @@ export interface DestructiveOperationMarker {
 }
 
 export interface CommandContext {
-  config: ChxConfig
+  config: ResolvedChxConfig
   configPath: string
   dirs: { outDir: string; migrationsDir: string; metaDir: string }
   jsonMode: boolean
@@ -100,19 +104,31 @@ export function jsonPayload<T extends object>(command: Command, payload: T): T &
   }
 }
 
-export async function loadConfig(configPathArg?: string): Promise<{ config: ChxConfig; path: string }> {
+function isConfigFunction(candidate: ChxConfigInput): candidate is ChxConfigFn {
+  return typeof candidate === 'function'
+}
+
+export async function loadConfig(
+  configPathArg?: string,
+  env: ChxConfigEnv = {}
+): Promise<{ config: ResolvedChxConfig; path: string }> {
   const configPath = resolve(process.cwd(), configPathArg ?? DEFAULT_CONFIG_FILE)
   if (!existsSync(configPath)) {
     throw new Error(`Config not found at ${configPath}. Run 'chx init' first.`)
   }
 
   const mod = await import(pathToFileURL(configPath).href)
-  const candidate = (mod.default ?? mod.config) as ChxConfig | undefined
+  const candidate = (mod.default ?? mod.config) as ChxConfigInput | undefined
   if (!candidate) {
-    throw new Error(`Config file ${configPath} must export a default object or "config" object`)
+    throw new Error(
+      `Config file ${configPath} must export a default/config object or a function via defineConfig.`
+    )
   }
+
+  const userConfig = isConfigFunction(candidate) ? await candidate(env) : (candidate as ChxConfig)
+
   return {
-    config: defineConfig(candidate),
+    config: resolveConfig(userConfig),
     path: configPath,
   }
 }
@@ -140,10 +156,10 @@ export async function writeIfMissing(filePath: string, content: string): Promise
   await writeFile(filePath, content, 'utf8')
 }
 
-export function resolveDirs(config: ChxConfig): { outDir: string; migrationsDir: string; metaDir: string } {
-  const outDir = resolve(process.cwd(), config.outDir ?? './chx')
-  const migrationsDir = resolve(process.cwd(), config.migrationsDir ?? join(outDir, 'migrations'))
-  const metaDir = resolve(process.cwd(), config.metaDir ?? join(outDir, 'meta'))
+export function resolveDirs(config: ResolvedChxConfig): { outDir: string; migrationsDir: string; metaDir: string } {
+  const outDir = resolve(process.cwd(), config.outDir)
+  const migrationsDir = resolve(process.cwd(), config.migrationsDir)
+  const metaDir = resolve(process.cwd(), config.metaDir)
   return { outDir, migrationsDir, metaDir }
 }
 
