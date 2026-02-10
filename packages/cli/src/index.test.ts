@@ -259,7 +259,7 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('migrate danger gate can be overridden by safety.allowDestructive config', async () => {
+  test('migrate --execute --allow-destructive bypasses danger gate', async () => {
     const fixture = await createFixture()
     try {
       await mkdir(fixture.migrationsDir, { recursive: true })
@@ -268,16 +268,34 @@ describe('@chx/cli command flows', () => {
         '-- operation: drop_table key=table:app.users risk=danger\nDROP TABLE IF EXISTS app.users;\n',
         'utf8'
       )
-      await writeFile(
-        fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  safety: {\n    allowDestructive: true,\n  },\n}\n`,
-        'utf8'
-      )
 
-      const result = runCli(['migrate', '--config', fixture.configPath, '--execute', '--json'])
-      expect(result.exitCode).toBe(1)
-      expect(result.stderr).toContain('clickhouse config is required for --execute')
-      expect(result.stdout).not.toContain('Blocked dangerous migration execution')
+      const blocked = runCli(['migrate', '--config', fixture.configPath, '--execute', '--json'])
+      expect(blocked.exitCode).toBe(3)
+      const blockedPayload = JSON.parse(blocked.stdout) as {
+        command: string
+        schemaVersion: number
+        mode: string
+        error: string
+        dangerousMigrations: string[]
+      }
+      expect(blockedPayload.command).toBe('migrate')
+      expect(blockedPayload.schemaVersion).toBe(1)
+      expect(blockedPayload.mode).toBe('execute')
+      expect(blockedPayload.error).toContain('Blocked dangerous migration execution')
+      expect(blockedPayload.dangerousMigrations).toEqual(['20260101000000_drop_users.sql'])
+
+      const allowed = runCli([
+        'migrate',
+        '--config',
+        fixture.configPath,
+        '--execute',
+        '--allow-destructive',
+        '--json',
+      ])
+      expect(allowed.exitCode).toBe(1)
+      expect(allowed.stdout).toBe('')
+      expect(allowed.stderr).toContain('clickhouse config is required for --execute')
+      expect(allowed.stderr).not.toContain('Blocked dangerous migration execution')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

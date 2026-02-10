@@ -68,6 +68,11 @@ Shows migration counts and checksum mismatch status.
 
 Compares live ClickHouse objects to snapshot expectations and reports drift details.
 
+Drift reason codes you may see:
+
+- object-level: `missing_object`, `extra_object`, `kind_mismatch`
+- table-level: `missing_column`, `extra_column`, `changed_column`, `setting_mismatch`, `index_mismatch`, `ttl_mismatch`, `engine_mismatch`, `primary_key_mismatch`, `order_by_mismatch`, `unique_key_mismatch`, `partition_by_mismatch`, `projection_mismatch`
+
 ### `chx check`
 
 CI gate command. Evaluates:
