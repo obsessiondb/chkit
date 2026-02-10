@@ -58,7 +58,7 @@ Creates starter files if missing:
 - Maintains `meta/journal.json`
 - Blocks execution when:
   - applied-file checksums mismatch
-  - pending migration includes dangerous operations and `--allow-destructive` is not set
+  - pending migration includes destructive operations and `--allow-destructive` is not set in non-interactive mode (interactive mode prompts for explicit confirmation)
 
 ### `chx status`
 

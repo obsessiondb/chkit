@@ -40,6 +40,11 @@ export interface ChecksumMismatch {
   actual: string
 }
 
+export interface DestructiveOperationMarker {
+  migration: string
+  summary: string
+}
+
 export interface CommandContext {
   config: ChxConfig
   dirs: { outDir: string; migrationsDir: string; metaDir: string }
@@ -225,9 +230,25 @@ export function extractExecutableStatements(sql: string): string[] {
 }
 
 export function migrationContainsDangerOperation(sql: string): boolean {
+  return extractDestructiveOperationSummaries(sql).length > 0
+}
+
+export function extractDestructiveOperationSummaries(sql: string): string[] {
   return sql
     .split('\n')
-    .some((line) => line.trim().startsWith('-- operation:') && line.includes('risk=danger'))
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('-- operation:') && line.includes('risk=danger'))
+    .map((line) => line.replace(/^-- operation:\s*/, ''))
+}
+
+export function collectDestructiveOperationMarkers(
+  migration: string,
+  sql: string
+): DestructiveOperationMarker[] {
+  return extractDestructiveOperationSummaries(sql).map((summary) => ({
+    migration,
+    summary,
+  }))
 }
 
 function checksum(value: string): string {
