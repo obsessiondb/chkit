@@ -134,10 +134,11 @@
 
 ## Plugin Backlog (Post-Core)
 
-### Dependency Graph Plugin
-1. build graph from schema definitions.
-2. output text and Mermaid formats.
-3. cycle detection warnings.
+### Dependency Intelligence Plugin (Deferred Optional Module)
+1. build dependency index from schema definitions and MV targets.
+2. add dependency risk findings and policy gates (`generate`/`check`/optional `migrate`).
+3. add cycle detection and unresolved-reference warnings.
+4. defer graph export/visualization from initial version.
 
 ### Backfill Plugin
 1. MV destination truncate+insert workflow.
@@ -150,6 +151,12 @@
 1. generate zod and TS types from schema.
 2. safer handling for large integer ClickHouse types.
 3. support output customization.
+
+### Rename Heuristics Plugin (Very Low Priority)
+1. extract heuristic rename suggestion detection/scoring from core into an optional plugin.
+2. keep explicit rename intent and validation in core for deterministic behavior.
+3. provide suggestion-only mode first; interactive confirmation flow remains opt-in.
+4. defer implementation until recurring demand or maintenance pressure justifies extraction.
 
 ## Cross-Cutting Backlog
 

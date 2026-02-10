@@ -21,7 +21,17 @@ export const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
 export const CLI_VERSION = '0.1.0'
 const JSON_CONTRACT_VERSION = 1
 
-export type Command = 'init' | 'generate' | 'migrate' | 'status' | 'drift' | 'check' | 'help' | 'version'
+export type Command =
+  | 'init'
+  | 'generate'
+  | 'typegen'
+  | 'migrate'
+  | 'status'
+  | 'drift'
+  | 'check'
+  | 'plugin'
+  | 'help'
+  | 'version'
 
 export interface MigrationJournalEntry {
   name: string
@@ -54,6 +64,7 @@ export interface DestructiveOperationMarker {
 
 export interface CommandContext {
   config: ChxConfig
+  configPath: string
   dirs: { outDir: string; migrationsDir: string; metaDir: string }
   jsonMode: boolean
 }
@@ -139,10 +150,11 @@ export function resolveDirs(config: ChxConfig): { outDir: string; migrationsDir:
 export async function getCommandContext(args: string[]): Promise<CommandContext> {
   const configPath = parseArg('--config', args)
   const jsonMode = hasFlag('--json', args)
-  const { config } = await loadConfig(configPath)
+  const loaded = await loadConfig(configPath)
   return {
-    config,
-    dirs: resolveDirs(config),
+    config: loaded.config,
+    configPath: loaded.path,
+    dirs: resolveDirs(loaded.config),
     jsonMode,
   }
 }

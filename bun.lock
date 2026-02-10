@@ -45,6 +45,14 @@
       "name": "@chx/core",
       "version": "0.1.0",
     },
+    "packages/plugin-typegen": {
+      "name": "@chx/plugin-typegen",
+      "version": "0.1.0",
+      "dependencies": {
+        "@chx/core": "workspace:*",
+        "fast-glob": "^3.3.2",
+      },
+    },
   },
   "packages": {
     "@babel/runtime": ["@babel/runtime@7.28.6", "", {}, "sha512-05WQkdpL9COIMz4LjTxGpPNCdlpyimKppYNoJ5Di5EUObifl8t4tuLuUBBZEpoLYOmfvIWrsp9fCl0HoPRVTdA=="],
@@ -108,6 +116,8 @@
     "@chx/codegen": ["@chx/codegen@workspace:packages/codegen"],
 
     "@chx/core": ["@chx/core@workspace:packages/core"],
+
+    "@chx/plugin-typegen": ["@chx/plugin-typegen@workspace:packages/plugin-typegen"],
 
     "@clickhouse/client": ["@clickhouse/client@1.17.0", "", { "dependencies": { "@clickhouse/client-common": "1.17.0" } }, "sha512-Y3DQoamKZ/Iyosoq7Lj7lqpDkQDK4R/5mI52yJs4ZLPIO+d6/CYDqTbFBIb4No3C/AlXUYE4TKhj/kXDpe6rOA=="],
 

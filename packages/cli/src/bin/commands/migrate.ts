@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline/promises'
 import { createClickHouseExecutor } from '@chx/clickhouse'
 
 import {
+  CLI_VERSION,
   collectDestructiveOperationMarkers,
   type DestructiveOperationMarker,
   type MigrationJournalEntry,
@@ -20,6 +21,7 @@ import {
   readJournal,
   writeJournal,
 } from '../lib.js'
+import { loadPluginRuntime } from '../plugin-runtime.js'
 
 function isBackgroundOrCI(): boolean {
   return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY
@@ -55,7 +57,17 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   const executeRequested = hasFlag('--apply', args) || hasFlag('--execute', args)
   const allowDestructive = hasFlag('--allow-destructive', args)
 
-  const { config, dirs, jsonMode } = await getCommandContext(args)
+  const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
+  const pluginRuntime = await loadPluginRuntime({
+    config,
+    configPath,
+    cliVersion: CLI_VERSION,
+  })
+  await pluginRuntime.runOnConfigLoaded({
+    command: 'migrate',
+    config,
+    configPath,
+  })
   const { migrationsDir, metaDir } = dirs
 
   await mkdir(migrationsDir, { recursive: true })
@@ -187,7 +199,14 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   for (const file of pending) {
     const fullPath = join(migrationsDir, file)
     const sql = await readFile(fullPath, 'utf8')
-    const statements = extractExecutableStatements(sql)
+    const parsedStatements = extractExecutableStatements(sql)
+    const statements = await pluginRuntime.runOnBeforeApply({
+      command: 'migrate',
+      config,
+      migration: file,
+      sql,
+      statements: parsedStatements,
+    })
     for (const statement of statements) {
       await db.execute(statement)
     }
@@ -200,6 +219,13 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     journal.applied.push(entry)
     appliedNow.push(entry)
     await writeJournal(metaDir, journal)
+    await pluginRuntime.runOnAfterApply({
+      command: 'migrate',
+      config,
+      migration: file,
+      statements,
+      appliedAt: entry.appliedAt,
+    })
 
     if (!jsonMode) console.log(`Applied: ${file}`)
   }
