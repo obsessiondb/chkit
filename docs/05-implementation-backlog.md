@@ -134,10 +134,11 @@
 
 ## Plugin Backlog (Post-Core)
 
-### Dependency Graph Plugin
-1. build graph from schema definitions.
-2. output text and Mermaid formats.
-3. cycle detection warnings.
+### Dependency Intelligence Plugin (Deferred Optional Module)
+1. build dependency index from schema definitions and MV targets.
+2. add dependency risk findings and policy gates (`generate`/`check`/optional `migrate`).
+3. add cycle detection and unresolved-reference warnings.
+4. defer graph export/visualization from initial version.
 
 ### Backfill Plugin
 1. MV destination truncate+insert workflow.
