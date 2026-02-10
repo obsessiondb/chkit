@@ -7,6 +7,7 @@ import { createClickHouseExecutor } from '@chx/clickhouse'
 
 import {
   collectDestructiveOperationMarkers,
+  type DestructiveOperationMarker,
   type MigrationJournalEntry,
   checksumSQL,
   emitJson,
@@ -24,13 +25,23 @@ function isBackgroundOrCI(): boolean {
   return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY
 }
 
-async function confirmDestructiveExecution(markers: Array<{ migration: string; summary: string }>): Promise<boolean> {
+function printDestructiveOperationDetails(markers: DestructiveOperationMarker[]): void {
+  console.log('Destructive operations detected:')
+  for (const [index, marker] of markers.entries()) {
+    console.log(`${index + 1}. ${marker.migration}`)
+    console.log(`   operation: ${marker.type}`)
+    console.log(`   key: ${marker.key}`)
+    console.log(`   warning: ${marker.warningCode}`)
+    console.log(`   reason: ${marker.reason}`)
+    console.log(`   impact: ${marker.impact}`)
+    console.log(`   recommendation: ${marker.recommendation}`)
+  }
+}
+
+async function confirmDestructiveExecution(markers: DestructiveOperationMarker[]): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
-    console.log('Destructive operations detected:')
-    for (const marker of markers) {
-      console.log(`- ${marker.migration}: ${marker.summary}`)
-    }
+    printDestructiveOperationDetails(markers)
     console.log('')
     console.log('Type "yes" to continue. Any other input cancels.')
     const response = await rl.question('Apply destructive operations? [no/yes]: ')
@@ -100,7 +111,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   }
 
   const destructiveMigrations: string[] = []
-  const destructiveOperations: Array<{ migration: string; summary: string }> = []
+  const destructiveOperations: DestructiveOperationMarker[] = []
   for (const file of pending) {
     const sql = await readFile(join(migrationsDir, file), 'utf8')
     if (migrationContainsDangerOperation(sql)) {
@@ -125,6 +136,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     }
 
     if (isBackgroundOrCI()) {
+      printDestructiveOperationDetails(destructiveOperations)
       throw new Error(
         `${error}\nDestructive migrations: ${destructiveMigrations.join(', ')}\n` +
           'Non-interactive run detected. Pass --allow-destructive to proceed.'

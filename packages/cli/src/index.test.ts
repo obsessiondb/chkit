@@ -234,7 +234,15 @@ describe('@chx/cli command flows', () => {
         mode: string
         error: string
         destructiveMigrations: string[]
-        destructiveOperations: Array<{ migration: string; summary: string }>
+        destructiveOperations: Array<{
+          migration: string
+          type: string
+          key: string
+          warningCode: string
+          reason: string
+          impact: string
+          recommendation: string
+        }>
       }
       expect(payload.command).toBe('migrate')
       expect(payload.schemaVersion).toBe(1)
@@ -242,6 +250,10 @@ describe('@chx/cli command flows', () => {
       expect(payload.error).toContain('Blocked destructive migration execution')
       expect(payload.destructiveMigrations).toEqual(['20260101000000_drop_users.sql'])
       expect(payload.destructiveOperations.length).toBeGreaterThan(0)
+      expect(payload.destructiveOperations[0]?.type).toBe('drop_table')
+      expect(payload.destructiveOperations[0]?.warningCode).toBe('drop_table_data_loss')
+      expect(payload.destructiveOperations[0]?.reason).toContain('Dropping a table')
+      expect(payload.destructiveOperations[0]?.recommendation).toContain('Verify backups')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
