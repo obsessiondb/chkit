@@ -104,6 +104,7 @@ Duration: scheduled after core phases based on priority and real-world demand.
 1. `optional-feature-rename-assistance-flow.md`
 2. `optional-feature-clickhouse-compatibility-matrix.md`
 3. `optional-feature-engine-specific-validation.md`
+4. `optional-feature-dependency-intelligence-plugin.md`
 
 ### Exit Criteria
 1. Core phases (0-2) are stable and production-usable for target non-distributed workflows.
@@ -120,9 +121,8 @@ Duration: 3-6 weeks
 1. plugin API v1.
 2. plugin loading and isolation in CLI.
 3. first-party optional plugins:
-   - dependency graph
-   - backfill orchestration (preview)
    - type generation plugin
+   - backfill orchestration (preview)
 
 ### Tasks
 1. implement hook lifecycle.
@@ -200,7 +200,7 @@ Duration: ongoing
 
 ### Milestone M6 (Phase 4)
 1. plugin API release.
-2. first-party plugins preview.
+2. type generation plugin preview.
 
 ### Milestone M7 (v1.0 target)
 1. SemVer stability promise.

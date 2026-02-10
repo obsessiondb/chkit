@@ -11,6 +11,12 @@ Use this order when bootstrapping a new planning/execution context:
 7. `07-json-output-contract.md`
 8. `08-internal-structure.md`
 
+## Optional Feature Specs
+1. `optional-feature-clickhouse-compatibility-matrix.md`
+2. `optional-feature-engine-specific-validation.md`
+3. `optional-feature-dependency-intelligence-plugin.md`
+4. `optional-feature-rename-assistance-flow.md`
+
 ## Quick Prompt for New Context
 If you start a fresh context window, paste this:
 
