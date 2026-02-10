@@ -105,6 +105,7 @@ Duration: scheduled after core phases based on priority and real-world demand.
 2. `optional-feature-clickhouse-compatibility-matrix.md`
 3. `optional-feature-engine-specific-validation.md`
 4. `optional-feature-dependency-intelligence-plugin.md`
+5. `optional-feature-backfill-orchestration-plugin.md`
 
 ### Exit Criteria
 1. Core phases (0-2) are stable and production-usable for target non-distributed workflows.
