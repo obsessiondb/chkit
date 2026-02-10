@@ -105,6 +105,67 @@ describe('@chx/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  test('treats quoted string defaults and implicit engine settings as equivalent', () => {
+    const expected = table({
+      database: 'app',
+      name: 'users',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String', default: 'web' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      uniqueKey: undefined,
+      partitionBy: undefined,
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String', default: "'web'" },
+      ],
+      settings: {
+        index_granularity: '8192',
+        storage_policy: 'default',
+      },
+      indexes: [],
+      projections: [],
+      ttl: undefined,
+    })
+
+    expect(result).toBeNull()
+  })
+
+  test('treats SharedMergeTree and MergeTree as equivalent engine families', () => {
+    const expected = table({
+      database: 'app',
+      name: 'users',
+      engine: 'MergeTree()',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'SharedMergeTree',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      uniqueKey: undefined,
+      partitionBy: undefined,
+      columns: [{ name: 'id', type: 'UInt64' }],
+      settings: {},
+      indexes: [],
+      projections: [],
+      ttl: undefined,
+    })
+
+    expect(result).toBeNull()
+  })
+
   test('emits reason codes for semantic drift', () => {
     const expected = table({
       database: 'app',

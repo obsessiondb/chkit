@@ -112,6 +112,11 @@ async function createFixture(database: string): Promise<E2EFixture> {
 describe('@chx/cli drift depth env e2e', () => {
   const liveEnv = tryGetEnv()
 
+  test('validates required env variables are present', () => {
+    if (!liveEnv) return
+    expect(() => getRequiredEnv()).not.toThrow()
+  })
+
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
