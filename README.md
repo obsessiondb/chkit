@@ -15,8 +15,8 @@ bun run chx --help
 ```bash
 bun run chx init
 bun run chx generate --name init
-bun run chx migrate --plan
-bun run chx migrate --execute
+bun run chx migrate
+bun run chx migrate --apply
 bun run chx status
 bun run chx check
 ```
@@ -24,8 +24,8 @@ bun run chx check
 ## Commands
 
 - `chx init`
-- `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--plan] [--json]`
-- `chx migrate [--config <path>] [--execute] [--allow-destructive] [--plan] [--json]`
+- `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
+- `chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
 - `chx status [--config <path>] [--json]`
 - `chx drift [--config <path>] [--json]`
 - `chx check [--config <path>] [--strict] [--json]`
@@ -50,11 +50,13 @@ Creates starter files if missing:
 - Loads schema files from `config.schema`
 - Validates definitions
 - Diffs against `meta/snapshot.json`
-- Writes migration SQL + updates snapshot (unless `--plan`)
+- Writes migration SQL + updates snapshot (unless `--dryrun`)
 
 ### `chx migrate`
 
-- Applies pending migrations (with `--execute`)
+- Always prints pending migration plan first
+- Prompts for confirmation when run without `--apply` or `--execute`
+- Applies pending migrations immediately when run with `--apply` (or alias `--execute`)
 - Maintains `meta/journal.json`
 - Blocks execution when:
   - applied-file checksums mismatch

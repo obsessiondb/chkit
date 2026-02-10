@@ -23,7 +23,7 @@ Normal mode keys:
 6. `operationCount`
 7. `riskSummary`
 
-Plan mode (`--plan`) keys:
+Dry-run mode (`--dryrun`) keys:
 
 1. `command`
 2. `schemaVersion`
@@ -31,6 +31,7 @@ Plan mode (`--plan`) keys:
 4. `operationCount`
 5. `riskSummary`
 6. `operations`
+7. `renameSuggestions`
 
 ### `status`
 
@@ -152,7 +153,7 @@ Keys:
 
 1. `0`: success
 2. `1`: generic command failure, validation failure, or policy failure
-3. `3`: destructive migrate blocked by the safety gate (`migrate --execute` with pending `risk=danger` migration(s) and no `--allow-destructive`)
+3. `3`: destructive migrate blocked by the safety gate (`migrate --apply`/`--execute` with pending `risk=danger` migration(s) and no `--allow-destructive`)
 
 ## Compatibility Policy
 
