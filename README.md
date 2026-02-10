@@ -21,6 +21,13 @@ bun run chx status
 bun run chx check
 ```
 
+## Documentation
+
+- Public docs site (Astro + Starlight): `apps/docs`
+- Run locally: `bun run docs:dev`
+- Build: `bun run docs:build`
+- Internal planning/implementation docs: `docs/`
+
 ## Commands
 
 - `chx init`
