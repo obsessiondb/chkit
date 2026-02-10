@@ -25,6 +25,7 @@ bun run chx check
 
 - `chx init`
 - `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
+- `chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
 - `chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
 - `chx status [--config <path>] [--json]`
 - `chx drift [--config <path>] [--json]`
@@ -52,6 +53,14 @@ Creates starter files if missing:
 - Validates definitions
 - Diffs against `meta/snapshot.json`
 - Writes migration SQL + updates snapshot (unless `--dryrun`)
+- Runs `typegen` plugin automatically when configured with `runOnGenerate: true` (default)
+
+### `chx typegen`
+
+- Optional manual command to generate TypeScript types from schema definitions
+- `--check` verifies generated output is up-to-date (no write)
+- Supports optional Zod emission (`--emit-zod`)
+- Returns non-zero on stale/missing artifacts in check mode
 
 ### `chx migrate`
 
@@ -83,6 +92,7 @@ CI gate command. Evaluates:
 - pending migrations
 - checksum mismatches
 - schema drift
+- plugin checks (including `typegen` when configured)
 
 Returns non-zero when enabled checks fail.
 
@@ -132,6 +142,8 @@ Plugin modules should export `definePlugin(...)` from `@chx/cli`.
   - `onPlanCreated`
   - `onBeforeApply`
   - `onAfterApply`
+  - `onCheck`
+  - `onCheckReport`
 - Plugin command namespace:
   - `chx plugin`
   - `chx plugin <plugin-name>`
@@ -156,3 +168,4 @@ Under `migrationsDir`:
 
 - Internal architecture and repository structure: `docs/08-internal-structure.md`
 - Planning docs index: `docs/README.md`
+- Typegen plugin usage/configuration: `docs/typegen-plugin.md`

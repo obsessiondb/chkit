@@ -18,6 +18,9 @@ Use this order when bootstrapping a new planning/execution context:
 4. `optional-feature-dependency-intelligence-plugin.md`
 5. `optional-feature-rename-assistance-flow.md`
 
+## Implemented Usage Docs
+1. `typegen-plugin.md`
+
 ## Quick Prompt for New Context
 If you start a fresh context window, paste this:
 

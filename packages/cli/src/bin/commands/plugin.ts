@@ -42,6 +42,11 @@ export async function cmdPlugin(args: string[]): Promise<void> {
     configPath,
     cliVersion: CLI_VERSION,
   })
+  await runtime.runOnConfigLoaded({
+    command: 'plugin',
+    config,
+    configPath,
+  })
 
   if (runtime.plugins.length === 0) {
     if (jsonMode) {
@@ -131,6 +136,7 @@ export async function cmdPlugin(args: string[]): Promise<void> {
 
   const exitCode = await runtime.runPluginCommand(parsed.pluginName, parsed.commandName, {
     config,
+    configPath,
     jsonMode,
     args: parsed.commandArgs,
     print(value) {

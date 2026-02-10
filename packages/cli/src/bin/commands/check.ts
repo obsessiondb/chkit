@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 
 import { summarizeDriftReasons } from '../../drift.js'
 import {
+  CLI_VERSION,
   emitJson,
   findChecksumMismatches,
   getCommandContext,
@@ -10,11 +11,12 @@ import {
   readJournal,
   readSnapshot,
 } from '../lib.js'
+import { loadPluginRuntime } from '../plugin-runtime.js'
 import { buildDriftPayload } from './drift.js'
 
 export async function cmdCheck(args: string[]): Promise<void> {
   const strict = hasFlag('--strict', args)
-  const { config, dirs, jsonMode } = await getCommandContext(args)
+  const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
   const { migrationsDir, metaDir } = dirs
   await mkdir(migrationsDir, { recursive: true })
 
@@ -32,10 +34,33 @@ export async function cmdCheck(args: string[]): Promise<void> {
     failOnDrift: strict ? true : config.check?.failOnDrift ?? true,
   }
 
+  const runtime = await loadPluginRuntime({
+    config,
+    configPath,
+    cliVersion: CLI_VERSION,
+  })
+  await runtime.runOnConfigLoaded({
+    command: 'check',
+    config,
+    configPath,
+  })
+  const pluginResults = await runtime.runOnCheck({
+    command: 'check',
+    config,
+    configPath,
+    jsonMode,
+  })
+
   const failedChecks: string[] = []
   if (policy.failOnPending && pending.length > 0) failedChecks.push('pending_migrations')
   if (policy.failOnChecksumMismatch && checksumMismatches.length > 0) failedChecks.push('checksum_mismatch')
   if (policy.failOnDrift && drift?.drifted) failedChecks.push('schema_drift')
+  for (const result of pluginResults) {
+    const hasErrorFinding = result.findings.some((finding) => finding.severity === 'error')
+    if (result.evaluated && !result.ok && hasErrorFinding) {
+      failedChecks.push(`plugin:${result.plugin}`)
+    }
+  }
   const ok = failedChecks.length === 0
   const driftReasonSummary = drift
     ? summarizeDriftReasons({
@@ -59,6 +84,17 @@ export async function cmdCheck(args: string[]): Promise<void> {
       object: driftReasonSummary.object,
       table: driftReasonSummary.table,
     },
+    plugins: Object.fromEntries(
+      pluginResults.map((result) => [
+        result.plugin,
+        {
+          evaluated: result.evaluated,
+          ok: result.ok,
+          findingCodes: result.findings.map((finding) => finding.code),
+          ...(result.metadata ?? {}),
+        },
+      ])
+    ),
   }
 
   if (jsonMode) {
@@ -84,6 +120,18 @@ export async function cmdCheck(args: string[]): Promise<void> {
     console.log(
       `Drift reasons: total=${summary.total}, object=${summary.object}, table=${summary.table}`
     )
+  }
+  if (pluginResults.length > 0) {
+    console.log('Plugin checks:')
+    for (const result of pluginResults) {
+      const findingCodes = result.findings.map((finding) => finding.code)
+      console.log(
+        `- ${result.plugin}: ${result.ok ? 'ok' : 'failed'}${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`
+      )
+    }
+    await runtime.runOnCheckReport(pluginResults, (line) => {
+      console.log(line)
+    })
   }
   if (!ok) {
     console.log(`Failed checks: ${failedChecks.join(', ')}`)
