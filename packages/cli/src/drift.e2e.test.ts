@@ -86,6 +86,7 @@ function renderUniqueProjectionSchema(database: string): string {
 interface E2EFixture {
   dir: string
   configPath: string
+  schemaPath: string
 }
 
 async function createFixture(database: string): Promise<E2EFixture> {
@@ -105,7 +106,7 @@ async function createFixture(database: string): Promise<E2EFixture> {
     'utf8'
   )
 
-  return { dir, configPath }
+  return { dir, configPath, schemaPath }
 }
 
 describe('@chx/cli drift depth env e2e', () => {
@@ -206,7 +207,7 @@ describe('@chx/cli drift depth env e2e', () => {
           )
         }
 
-        await writeFile(fixture.dir + '/schema.ts', renderUniqueProjectionSchema(database), 'utf8')
+        await writeFile(fixture.schemaPath, renderUniqueProjectionSchema(database), 'utf8')
         const driftGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(driftGenerate.exitCode).toBe(0)
 
