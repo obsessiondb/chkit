@@ -5,6 +5,24 @@ import { table } from '@chx/core'
 import { compareSchemaObjects, compareTableShape, summarizeDriftReasons } from './drift'
 
 describe('@chx/cli drift comparer', () => {
+  test('emits missing_object reason code when expected object is absent', () => {
+    const result = compareSchemaObjects(
+      [{ kind: 'table', database: 'app', name: 'events' }],
+      [{ kind: 'table', database: 'app', name: 'users' }]
+    )
+
+    expect(result.missing).toEqual(['table:app.events'])
+    expect(result.objectDrift).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'missing_object',
+          object: 'table:app.events',
+          expectedKind: 'table',
+        }),
+      ])
+    )
+  })
+
   test('emits object-level drift reason codes', () => {
     const result = compareSchemaObjects(
       [
@@ -220,5 +238,41 @@ describe('@chx/cli drift comparer', () => {
     expect(result.orderByMismatch).toBe(true)
     expect(result.uniqueKeyMismatch).toBe(true)
     expect(result.projectionDiffs).toEqual(['p_fresh', 'p_recent'])
+  })
+
+  test('emits partition_by_mismatch when partition clause differs', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      partitionBy: 'toYYYYMM(ts)',
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      uniqueKey: undefined,
+      partitionBy: 'toYYYYMMDD(ts)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+      ttl: undefined,
+    })
+
+    expect(result).toBeTruthy()
+    if (!result) return
+    expect(result.reasonCodes).toContain('partition_by_mismatch')
+    expect(result.partitionByMismatch).toBe(true)
   })
 })

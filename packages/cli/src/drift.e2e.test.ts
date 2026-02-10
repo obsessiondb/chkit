@@ -247,4 +247,122 @@ describe('@chx/cli drift depth env e2e', () => {
     },
     240_000
   )
+
+  test(
+    'respects failOnDrift=false policy when drift exists',
+    async () => {
+      if (!liveEnv) return
+
+      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+      const database = `chx_e2e_drift_policy_${dbSuffix}`
+      const fixture = await createFixture(database)
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
+
+      try {
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(generated.exitCode).toBe(0)
+
+        const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        if (executed.exitCode !== 0) {
+          throw new Error(
+            `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
+          )
+        }
+
+        await runSql(
+          clickhouseUrl,
+          clickhouseUser,
+          clickhousePassword,
+          `ALTER TABLE ${database}.users ADD COLUMN rogue String`
+        )
+
+        await writeFile(
+          fixture.configPath,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${join(fixture.dir, 'chx/migrations')}',\n  metaDir: '${join(fixture.dir, 'chx/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          'utf8'
+        )
+
+        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'])
+        expect(checkResult.exitCode).toBe(0)
+        const checkPayload = JSON.parse(checkResult.stdout) as {
+          ok: boolean
+          drifted: boolean
+          failedChecks: string[]
+          policy: { failOnDrift: boolean }
+        }
+        expect(checkPayload.ok).toBe(true)
+        expect(checkPayload.drifted).toBe(true)
+        expect(checkPayload.policy.failOnDrift).toBe(false)
+        expect(checkPayload.failedChecks).not.toContain('schema_drift')
+      } finally {
+        try {
+          await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
+        } catch {
+          // best effort cleanup for shared env
+        }
+        await rm(fixture.dir, { recursive: true, force: true })
+      }
+    },
+    240_000
+  )
+
+  test(
+    'check --strict overrides failOnDrift=false when drift exists',
+    async () => {
+      if (!liveEnv) return
+
+      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+      const database = `chx_e2e_drift_strict_${dbSuffix}`
+      const fixture = await createFixture(database)
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
+
+      try {
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(generated.exitCode).toBe(0)
+
+        const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        if (executed.exitCode !== 0) {
+          throw new Error(
+            `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
+          )
+        }
+
+        await runSql(
+          clickhouseUrl,
+          clickhouseUser,
+          clickhousePassword,
+          `ALTER TABLE ${database}.users ADD COLUMN rogue String`
+        )
+
+        await writeFile(
+          fixture.configPath,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${join(fixture.dir, 'chx/migrations')}',\n  metaDir: '${join(fixture.dir, 'chx/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          'utf8'
+        )
+
+        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--strict', '--json'])
+        expect(checkResult.exitCode).toBe(1)
+        const checkPayload = JSON.parse(checkResult.stdout) as {
+          strict: boolean
+          ok: boolean
+          drifted: boolean
+          failedChecks: string[]
+          policy: { failOnDrift: boolean }
+        }
+        expect(checkPayload.strict).toBe(true)
+        expect(checkPayload.ok).toBe(false)
+        expect(checkPayload.drifted).toBe(true)
+        expect(checkPayload.policy.failOnDrift).toBe(true)
+        expect(checkPayload.failedChecks).toContain('schema_drift')
+      } finally {
+        try {
+          await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
+        } catch {
+          // best effort cleanup for shared env
+        }
+        await rm(fixture.dir, { recursive: true, force: true })
+      }
+    },
+    240_000
+  )
 })
