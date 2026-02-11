@@ -11,8 +11,9 @@ Use this order when bootstrapping a new planning/execution context:
 4. `03-delivery-playbook.md`
 5. `04-migration-from-zeus.md`
 6. `05-implementation-backlog.md`
-7. `07-json-output-contract.md`
-8. `08-internal-structure.md`
+7. `06-release-foundation-spec.md`
+8. `07-json-output-contract.md`
+9. `08-internal-structure.md`
 
 ## Optional Feature Specs
 1. `optional-feature-clickhouse-compatibility-matrix.md`
