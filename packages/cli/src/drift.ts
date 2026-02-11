@@ -1,4 +1,11 @@
-import type { ColumnDefinition, ProjectionDefinition, SkipIndexDefinition, TableDefinition } from '@chx/core'
+import {
+  normalizeSQLFragment,
+  type ColumnDefinition,
+  type ProjectionDefinition,
+  type SkipIndexDefinition,
+  type TableDefinition,
+} from '@chx/core'
+import { diffByName, diffNamedShapeMaps, diffSettings } from './drift-diff.js'
 
 export type TableDriftReasonCode =
   | 'missing_column'
@@ -170,10 +177,6 @@ export function summarizeDriftReasons(input: {
   }
 }
 
-function normalizeSQLFragment(value: string): string {
-  return value.replace(/\s+/g, ' ').trim()
-}
-
 function normalizeColumnShape(column: ColumnDefinition): string {
   const normalizeDefaultValue = (value: string): string => {
     const normalized = normalizeSQLFragment(value)
@@ -226,44 +229,23 @@ function normalizeEngine(value: string | undefined): string {
 }
 
 export function compareTableShape(expected: TableDefinition, actual: ActualTableShape): TableDriftDetail | null {
-  const expectedColumns = new Map(expected.columns.map((col) => [col.name, normalizeColumnShape(col)]))
-  const actualColumns = new Map(actual.columns.map((col) => [col.name, normalizeColumnShape(col)]))
+  const columnDiff = diffByName(
+    expected.columns,
+    actual.columns,
+    (column: ColumnDefinition) => column.name,
+    normalizeColumnShape
+  )
+  const missingColumns = columnDiff.missing
+  const extraColumns = columnDiff.extra
+  const changedColumns = columnDiff.changed
 
-  const missingColumns: string[] = []
-  const extraColumns: string[] = []
-  const changedColumns: string[] = []
-  for (const [name, expectedShape] of expectedColumns.entries()) {
-    const actualShape = actualColumns.get(name)
-    if (!actualShape) {
-      missingColumns.push(name)
-      continue
-    }
-    if (actualShape !== expectedShape) changedColumns.push(name)
-  }
-  for (const name of actualColumns.keys()) {
-    if (!expectedColumns.has(name)) extraColumns.push(name)
-  }
-
-  const expectedSettings = expected.settings ?? {}
-  const settingKeys = Object.keys(expectedSettings).sort()
-  const settingDiffs: string[] = []
-  for (const key of settingKeys) {
-    const left = key in expectedSettings ? String(expectedSettings[key]) : ''
-    const right = key in actual.settings ? String(actual.settings[key]) : ''
-    if (left !== right) settingDiffs.push(key)
-  }
+  const settingDiffs = diffSettings(expected.settings ?? {}, actual.settings)
 
   const expectedIndexes = new Map(
     (expected.indexes ?? []).map((idx) => [idx.name, normalizeIndexShape(idx)])
   )
   const actualIndexes = new Map(actual.indexes.map((idx) => [idx.name, normalizeIndexShape(idx)]))
-  const indexKeys = [...new Set([...expectedIndexes.keys(), ...actualIndexes.keys()])].sort()
-  const indexDiffs: string[] = []
-  for (const key of indexKeys) {
-    if ((expectedIndexes.get(key) ?? '') !== (actualIndexes.get(key) ?? '')) {
-      indexDiffs.push(key)
-    }
-  }
+  const indexDiffs = diffNamedShapeMaps(expectedIndexes, actualIndexes)
 
   const expectedTTL = expected.ttl ? normalizeSQLFragment(expected.ttl) : ''
   const actualTTL = actual.ttl ? normalizeSQLFragment(actual.ttl) : ''
@@ -292,13 +274,7 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   const actualProjections = new Map(
     actual.projections.map((projection) => [projection.name, normalizeProjectionShape(projection)])
   )
-  const projectionKeys = [...new Set([...expectedProjections.keys(), ...actualProjections.keys()])].sort()
-  const projectionDiffs: string[] = []
-  for (const key of projectionKeys) {
-    if ((expectedProjections.get(key) ?? '') !== (actualProjections.get(key) ?? '')) {
-      projectionDiffs.push(key)
-    }
-  }
+  const projectionDiffs = diffNamedShapeMaps(expectedProjections, actualProjections)
 
   const reasonCodes: TableDriftReasonCode[] = []
   if (missingColumns.length > 0) reasonCodes.push('missing_column')

@@ -20,5 +20,8 @@
     "lint": "biome lint src",
     "test": "bun test src",
     "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "fast-glob": "^3.3.2"
   }
 }

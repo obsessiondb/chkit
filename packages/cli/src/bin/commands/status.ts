@@ -1,12 +1,8 @@
 import { mkdir } from 'node:fs/promises'
 
-import {
-  emitJson,
-  findChecksumMismatches,
-  getCommandContext,
-  listMigrations,
-  readJournal,
-} from '../lib.js'
+import { getCommandContext } from '../config.js'
+import { emitJson } from '../json-output.js'
+import { findChecksumMismatches, listMigrations, readJournal } from '../migration-store.js'
 
 export async function cmdStatus(args: string[]): Promise<void> {
   const { dirs, jsonMode } = await getCommandContext(args)
