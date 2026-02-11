@@ -1,55 +1,28 @@
-import {
-  CLI_VERSION,
-  emitJson,
-  getCommandContext,
-  printOutput,
-} from '../lib.js'
-import { loadPluginRuntime } from '../plugin-runtime.js'
+import { emitJson } from '../json-output.js'
+import { buildPluginLikeContext, runPluginLikeCommand } from './plugin-like.js'
 
-function stripGlobalFlags(args: string[]): string[] {
-  const tokens: string[] = []
-  for (let i = 0; i < args.length; i += 1) {
-    const value = args[i]
-    if (!value) continue
-    if (value === '--json') continue
-    if (value === '--config') {
-      i += 1
-      continue
-    }
-    tokens.push(value)
-  }
-  return tokens
-}
-
-function parsePluginInvocation(args: string[]): {
+function parsePluginInvocation(commandArgs: string[]): {
   pluginName?: string
   commandName?: string
   commandArgs: string[]
 } {
-  const clean = stripGlobalFlags(args)
   return {
-    pluginName: clean[0],
-    commandName: clean[1],
-    commandArgs: clean.slice(2),
+    pluginName: commandArgs[0],
+    commandName: commandArgs[1],
+    commandArgs: commandArgs.slice(2),
   }
 }
 
 export async function cmdPlugin(args: string[]): Promise<void> {
-  const parsed = parsePluginInvocation(args)
-  const { config, configPath, jsonMode } = await getCommandContext(args)
-  const runtime = await loadPluginRuntime({
-    config,
-    configPath,
-    cliVersion: CLI_VERSION,
-  })
-  await runtime.runOnConfigLoaded({
+  const context = await buildPluginLikeContext({
+    args,
     command: 'plugin',
-    config,
-    configPath,
   })
+  if (!context) return
+  const parsed = parsePluginInvocation(context.commandArgs)
 
-  if (runtime.plugins.length === 0) {
-    if (jsonMode) {
+  if (context.runtime.plugins.length === 0) {
+    if (context.jsonMode) {
       emitJson('plugin', {
         error: 'No plugins configured. Add entries to config.plugins first.',
         plugins: [],
@@ -62,7 +35,7 @@ export async function cmdPlugin(args: string[]): Promise<void> {
 
   if (!parsed.pluginName) {
     const payload = {
-      plugins: runtime.plugins.map((entry) => ({
+      plugins: context.runtime.plugins.map((entry) => ({
         name: entry.plugin.manifest.name,
         version: entry.plugin.manifest.version ?? null,
         commands: (entry.plugin.commands ?? []).map((command) => ({
@@ -72,7 +45,7 @@ export async function cmdPlugin(args: string[]): Promise<void> {
       })),
     }
 
-    if (jsonMode) {
+    if (context.jsonMode) {
       emitJson('plugin', payload)
       return
     }
@@ -91,9 +64,11 @@ export async function cmdPlugin(args: string[]): Promise<void> {
     return
   }
 
-  const selectedPlugin = runtime.plugins.find((entry) => entry.plugin.manifest.name === parsed.pluginName)
+  const selectedPlugin = context.runtime.plugins.find(
+    (entry) => entry.plugin.manifest.name === parsed.pluginName
+  )
   if (!selectedPlugin) {
-    const known = runtime.plugins.map((entry) => entry.plugin.manifest.name).sort()
+    const known = context.runtime.plugins.map((entry) => entry.plugin.manifest.name).sort()
     throw new Error(
       `Unknown plugin "${parsed.pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
     )
@@ -109,7 +84,7 @@ export async function cmdPlugin(args: string[]): Promise<void> {
       commands,
     }
 
-    if (jsonMode) {
+    if (context.jsonMode) {
       emitJson('plugin', payload)
       return
     }
@@ -126,23 +101,10 @@ export async function cmdPlugin(args: string[]): Promise<void> {
     return
   }
 
-  const foundCommand = runtime.getCommand(parsed.pluginName, parsed.commandName)
-  if (!foundCommand) {
-    const commands = (selectedPlugin.plugin.commands ?? []).map((command) => command.name).sort()
-    throw new Error(
-      `Unknown command "${parsed.commandName}" for plugin "${parsed.pluginName}". Available: ${commands.length > 0 ? commands.join(', ') : '(none)'}.`
-    )
-  }
-
-  const exitCode = await runtime.runPluginCommand(parsed.pluginName, parsed.commandName, {
-    config,
-    configPath,
-    jsonMode,
-    args: parsed.commandArgs,
-    print(value) {
-      printOutput(value, jsonMode)
-    },
+  await runPluginLikeCommand({
+    context,
+    pluginName: parsed.pluginName,
+    commandName: parsed.commandName,
+    commandArgs: parsed.commandArgs,
   })
-
-  if (exitCode !== 0) process.exitCode = exitCode
 }
