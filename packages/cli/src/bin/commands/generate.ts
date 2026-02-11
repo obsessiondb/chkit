@@ -1,9 +1,7 @@
 import { generateArtifacts } from '@chx/codegen'
 import process from 'node:process'
-import { createInterface } from 'node:readline/promises'
 import {
   ChxValidationError,
-  type ColumnRenameSuggestion,
   type MigrationOperation,
   type MigrationPlan,
   type RiskLevel,
@@ -469,43 +467,10 @@ function assertCliColumnMappingsResolvable(
   }
 }
 
-function isInteractiveTerminal(): boolean {
-  return process.stdin.isTTY && process.stdout.isTTY && process.env.CI !== '1' && process.env.CI !== 'true'
-}
-
-async function promptRenameSuggestions(
-  suggestions: ColumnRenameSuggestion[]
-): Promise<ColumnRenameSuggestion[]> {
-  if (suggestions.length === 0) return []
-  if (!isInteractiveTerminal()) return []
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  const selected: ColumnRenameSuggestion[] = []
-  try {
-    console.log('\nRename suggestions detected:')
-    for (const [index, suggestion] of suggestions.entries()) {
-      console.log(
-        `${index + 1}. ${suggestion.database}.${suggestion.table}: ${suggestion.from} -> ${suggestion.to} [${suggestion.confidence}]`
-      )
-      console.log(`   ${suggestion.reason}`)
-      console.log(`   SQL: ${suggestion.confirmationSQL}`)
-      const response = await rl.question('   Accept this rename suggestion? [no/yes]: ')
-      if (response.trim().toLowerCase() === 'yes') {
-        selected.push(suggestion)
-      }
-    }
-  } finally {
-    rl.close()
-  }
-
-  return selected
-}
-
 export async function cmdGenerate(args: string[]): Promise<void> {
   const migrationName = parseArg('--name', args)
   const migrationId = parseArg('--migration-id', args)
   const planMode = hasFlag('--dryrun', args)
-  const interactiveRenames = hasFlag('--interactive-renames', args)
 
   const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
   const pluginRuntime = await loadPluginRuntime({
@@ -569,11 +534,6 @@ export async function cmdGenerate(args: string[]): Promise<void> {
     },
     plan
   )
-
-  if (!planMode && interactiveRenames) {
-    const selected = await promptRenameSuggestions(plan.renameSuggestions)
-    plan = applySelectedRenameSuggestions(plan, selected)
-  }
 
   if (planMode) {
     const payload = {
