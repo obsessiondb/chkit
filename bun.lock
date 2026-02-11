@@ -53,6 +53,9 @@
     "packages/core": {
       "name": "@chx/core",
       "version": "0.1.0",
+      "dependencies": {
+        "fast-glob": "^3.3.2",
+      },
     },
     "packages/plugin-backfill": {
       "name": "@chx/plugin-backfill",
@@ -159,8 +162,9 @@
 
     "@chx/core": ["@chx/core@workspace:packages/core"],
 
-    "@chx/plugin-backfill": ["@chx/plugin-backfill@workspace:packages/plugin-backfill"],
     "@chx/docs": ["@chx/docs@workspace:apps/docs"],
+
+    "@chx/plugin-backfill": ["@chx/plugin-backfill@workspace:packages/plugin-backfill"],
 
     "@chx/plugin-typegen": ["@chx/plugin-typegen@workspace:packages/plugin-typegen"],
 

@@ -8,10 +8,7 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { isSchemaDefinition } from './model.js'
-
-function normalizeSQLFragment(value: string): string {
-  return value.replace(/\s+/g, ' ').trim()
-}
+import { normalizeSQLFragment } from './sql-normalizer.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => a.name.localeCompare(b.name))
