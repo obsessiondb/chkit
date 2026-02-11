@@ -1,12 +1,10 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import fg from 'fast-glob'
-
 import {
   type ChxInlinePluginRegistration,
   canonicalizeDefinitions,
-  collectDefinitionsFromModule,
+  loadSchemaDefinitions,
   type ColumnDefinition,
   type MaterializedViewDefinition,
   type ResolvedChxConfig,
@@ -453,26 +451,6 @@ export function generateTypeArtifacts(
   }
 }
 
-async function loadSchemaDefinitions(
-  schemaGlobs: string | string[],
-  configDir: string
-): Promise<SchemaDefinition[]> {
-  const patterns = Array.isArray(schemaGlobs) ? schemaGlobs : [schemaGlobs]
-  const files = await fg(patterns, { cwd: configDir, absolute: true })
-
-  if (files.length === 0) {
-    throw new Error('No schema files matched. Check config.schema patterns.')
-  }
-
-  const all: SchemaDefinition[] = []
-  for (const file of files) {
-    const mod = (await import(file)) as Record<string, unknown>
-    all.push(...collectDefinitionsFromModule(mod))
-  }
-
-  return canonicalizeDefinitions(all)
-}
-
 function parseArgs(args: string[]): ParsedCommandArgs {
   const parsed: ParsedCommandArgs = {
     check: false,
@@ -645,7 +623,7 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
             const effectiveOptions = mergeOptions(base, runtimeOptions, parsedArgs)
             const configDir = resolve(configPath, '..')
             const outFile = resolve(configDir, effectiveOptions.outFile)
-            const definitions = await loadSchemaDefinitions(config.schema, configDir)
+            const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
             const generated = generateTypeArtifacts({
               definitions,
               options: effectiveOptions,
@@ -721,7 +699,7 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
         const effectiveOptions = mergeOptions(base, runtimeOptions, { check: false })
         const configDir = resolve(configPath, '..')
         const outFile = resolve(configDir, effectiveOptions.outFile)
-        const definitions = await loadSchemaDefinitions(config.schema, configDir)
+        const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
         const generated = generateTypeArtifacts({
           definitions,
           options: effectiveOptions,

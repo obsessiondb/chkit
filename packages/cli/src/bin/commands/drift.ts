@@ -9,11 +9,9 @@ import {
   type ObjectDriftDetail,
   type TableDriftDetail,
 } from '../../drift.js'
-import {
-  emitJson,
-  getCommandContext,
-  readSnapshot,
-} from '../lib.js'
+import { getCommandContext } from '../config.js'
+import { emitJson } from '../json-output.js'
+import { readSnapshot } from '../migration-store.js'
 
 export interface DriftPayload {
   snapshotFile: string

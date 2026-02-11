@@ -5,23 +5,24 @@ import { createInterface } from 'node:readline/promises'
 
 import { createClickHouseExecutor } from '@chx/clickhouse'
 
+import { CLI_VERSION } from '../version.js'
+import { getCommandContext, hasFlag } from '../config.js'
+import { emitJson } from '../json-output.js'
 import {
-  CLI_VERSION,
-  collectDestructiveOperationMarkers,
-  type DestructiveOperationMarker,
-  type MigrationJournalEntry,
   checksumSQL,
-  emitJson,
-  extractExecutableStatements,
   findChecksumMismatches,
-  getCommandContext,
-  hasFlag,
   listMigrations,
-  migrationContainsDangerOperation,
   readJournal,
+  type MigrationJournalEntry,
   writeJournal,
-} from '../lib.js'
+} from '../migration-store.js'
 import { loadPluginRuntime } from '../plugin-runtime.js'
+import {
+  collectDestructiveOperationMarkers,
+  extractExecutableStatements,
+  migrationContainsDangerOperation,
+  type DestructiveOperationMarker,
+} from '../safety-markers.js'
 
 function isBackgroundOrCI(): boolean {
   return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY

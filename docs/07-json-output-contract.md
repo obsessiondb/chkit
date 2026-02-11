@@ -37,7 +37,7 @@ Notes:
 
 1. `operations[].type` may include explicit rename operations:
    - `alter_table_rename_table` (from `--rename-table` or table `renamedFrom`)
-   - `alter_table_rename_column` (from `--rename-column`, column `renamedFrom`, or accepted heuristic suggestion in interactive mode)
+   - `alter_table_rename_column` (from `--rename-column` or column `renamedFrom`)
 2. `renameSuggestions` contains only heuristic suggestions that are not yet explicitly accepted.
 
 ### `status`

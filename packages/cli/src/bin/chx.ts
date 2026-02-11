@@ -17,7 +17,7 @@ function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--interactive-renames] [--config <path>] [--dryrun] [--json]
+  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--config <path>] [--dryrun] [--json]
   chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
   chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
   chx status [--config <path>] [--json]
@@ -34,8 +34,6 @@ Options:
                    Explicit table rename mapping (comma-separated values supported)
   --rename-column <db.table.old_column=new_column>
                    Explicit column rename mapping (comma-separated values supported)
-  --interactive-renames
-                   Prompt per heuristic rename suggestion during generate (TTY only)
   --apply          Apply pending migrations on ClickHouse (no prompt)
   --execute        Alias for --apply
   --allow-destructive
@@ -112,7 +110,6 @@ const app = buildApplication(
         migrationId?: string
         renameTable?: string
         renameColumn?: string
-        interactiveRenames?: boolean
         dryrun?: boolean
         json?: boolean
       }>({
@@ -126,9 +123,6 @@ const app = buildApplication(
             ),
             renameColumn: optionalStringFlag(
               'Explicit column rename mapping db.table.old_column=new_column'
-            ),
-            interactiveRenames: optionalBooleanFlag(
-              'Prompt per heuristic rename suggestion during generate'
             ),
             dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
@@ -144,7 +138,6 @@ const app = buildApplication(
           addStringFlag(args, '--migration-id', flags.migrationId)
           addStringFlag(args, '--rename-table', flags.renameTable)
           addStringFlag(args, '--rename-column', flags.renameColumn)
-          addBooleanFlag(args, '--interactive-renames', flags.interactiveRenames)
           addBooleanFlag(args, '--dryrun', flags.dryrun)
           addBooleanFlag(args, '--json', flags.json)
           await cmdGenerate(args)

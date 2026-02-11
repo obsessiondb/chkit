@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 
-import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../lib.js'
+import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../config.js'
 
 export async function cmdInit(): Promise<void> {
   const configPath = resolve(process.cwd(), DEFAULT_CONFIG_FILE)

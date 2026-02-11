@@ -1,16 +1,10 @@
 import { mkdir } from 'node:fs/promises'
 
 import { summarizeDriftReasons } from '../../drift.js'
-import {
-  CLI_VERSION,
-  emitJson,
-  findChecksumMismatches,
-  getCommandContext,
-  hasFlag,
-  listMigrations,
-  readJournal,
-  readSnapshot,
-} from '../lib.js'
+import { CLI_VERSION } from '../version.js'
+import { getCommandContext, hasFlag } from '../config.js'
+import { emitJson } from '../json-output.js'
+import { findChecksumMismatches, listMigrations, readJournal, readSnapshot } from '../migration-store.js'
 import { loadPluginRuntime } from '../plugin-runtime.js'
 import { buildDriftPayload } from './drift.js'
 

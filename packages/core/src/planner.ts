@@ -1,4 +1,5 @@
 import { canonicalizeDefinitions, definitionKey } from './canonical.js'
+import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
   ColumnRenameSuggestion,
@@ -111,12 +112,22 @@ function normalizeClauseList(value: string[] | undefined): string {
 }
 
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
-  if (oldDef.engine !== newDef.engine) return true
-  if (normalizeClauseList(oldDef.primaryKey) !== normalizeClauseList(newDef.primaryKey)) return true
-  if (normalizeClauseList(oldDef.orderBy) !== normalizeClauseList(newDef.orderBy)) return true
-  if ((oldDef.partitionBy ?? '') !== (newDef.partitionBy ?? '')) return true
-  if (normalizeClauseList(oldDef.uniqueKey) !== normalizeClauseList(newDef.uniqueKey)) return true
-  return false
+  return diffClauses([
+    { oldValue: oldDef.engine, newValue: newDef.engine },
+    {
+      oldValue: normalizeClauseList(oldDef.primaryKey),
+      newValue: normalizeClauseList(newDef.primaryKey),
+    },
+    {
+      oldValue: normalizeClauseList(oldDef.orderBy),
+      newValue: normalizeClauseList(newDef.orderBy),
+    },
+    { oldValue: oldDef.partitionBy ?? '', newValue: newDef.partitionBy ?? '' },
+    {
+      oldValue: normalizeClauseList(oldDef.uniqueKey),
+      newValue: normalizeClauseList(newDef.uniqueKey),
+    },
+  ])
 }
 
 interface TableDiffResult {
@@ -203,151 +214,130 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   }
 
   const ops: MigrationOperation[] = []
-  const addedColumns: ColumnDefinition[] = []
-  const droppedColumns: ColumnDefinition[] = []
-
-  const oldColumns = new Map(oldDef.columns.map((c) => [c.name, c]))
-  const newColumnNames = new Set(newDef.columns.map((c) => c.name))
-  for (const column of newDef.columns) {
-    const oldColumn = oldColumns.get(column.name)
-    if (!oldColumn) {
-      addedColumns.push(column)
-      addOperation(ops, {
-        type: 'alter_table_add_column',
-        key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
-        risk: 'safe',
-        sql: renderAlterAddColumn(newDef, column),
-      })
-      continue
-    }
-
-    if (JSON.stringify(normalizeColumn(oldColumn)) !== JSON.stringify(normalizeColumn(column))) {
-      addOperation(ops, {
-        type: 'alter_table_modify_column',
-        key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
-        risk: 'caution',
-        sql: renderAlterModifyColumn(newDef, column),
-      })
-    }
+  const columnDiff = diffByName(
+    oldDef.columns,
+    newDef.columns,
+    (column) => column.name,
+    (left, right) => JSON.stringify(normalizeColumn(left)) === JSON.stringify(normalizeColumn(right))
+  )
+  const addedColumns = columnDiff.added
+  const droppedColumns = columnDiff.removed
+  for (const column of columnDiff.added) {
+    addOperation(ops, {
+      type: 'alter_table_add_column',
+      key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
+      risk: 'safe',
+      sql: renderAlterAddColumn(newDef, column),
+    })
   }
-
-  for (const oldColumn of oldDef.columns) {
-    if (newColumnNames.has(oldColumn.name)) continue
-    droppedColumns.push(oldColumn)
+  for (const { name, newItem } of columnDiff.changed) {
+    addOperation(ops, {
+      type: 'alter_table_modify_column',
+      key: `table:${newDef.database}.${newDef.name}:column:${name}`,
+      risk: 'caution',
+      sql: renderAlterModifyColumn(newDef, newItem),
+    })
+  }
+  for (const column of columnDiff.removed) {
     addOperation(ops, {
       type: 'alter_table_drop_column',
-      key: `table:${newDef.database}.${newDef.name}:column:${oldColumn.name}`,
+      key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
       risk: 'danger',
-      sql: renderAlterDropColumn(newDef, oldColumn.name),
+      sql: renderAlterDropColumn(newDef, column.name),
     })
   }
 
-  const oldIndexes = new Map((oldDef.indexes ?? []).map((idx) => [idx.name, idx]))
-  const newIndexNames = new Set((newDef.indexes ?? []).map((idx) => idx.name))
-  for (const idx of newDef.indexes ?? []) {
-    const oldIdx = oldIndexes.get(idx.name)
-    if (!oldIdx) {
-      addOperation(ops, {
-        type: 'alter_table_add_index',
-        key: `table:${newDef.database}.${newDef.name}:index:${idx.name}`,
-        risk: 'caution',
-        sql: renderAlterAddIndex(newDef, idx),
-      })
-      continue
-    }
-
-    if (JSON.stringify(oldIdx) !== JSON.stringify(idx)) {
-      addOperation(ops, {
-        type: 'alter_table_drop_index',
-        key: `table:${newDef.database}.${newDef.name}:index:${idx.name}`,
-        risk: 'caution',
-        sql: renderAlterDropIndex(newDef, idx.name),
-      })
-      addOperation(ops, {
-        type: 'alter_table_add_index',
-        key: `table:${newDef.database}.${newDef.name}:index:${idx.name}`,
-        risk: 'caution',
-        sql: renderAlterAddIndex(newDef, idx),
-      })
-    }
+  const indexDiff = diffByName(
+    oldDef.indexes ?? [],
+    newDef.indexes ?? [],
+    (index) => index.name,
+    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+  )
+  for (const index of indexDiff.added) {
+    addOperation(ops, {
+      type: 'alter_table_add_index',
+      key: `table:${newDef.database}.${newDef.name}:index:${index.name}`,
+      risk: 'caution',
+      sql: renderAlterAddIndex(newDef, index),
+    })
   }
-
-  for (const oldIdx of oldDef.indexes ?? []) {
-    if (newIndexNames.has(oldIdx.name)) continue
+  for (const { name, newItem } of indexDiff.changed) {
     addOperation(ops, {
       type: 'alter_table_drop_index',
-      key: `table:${newDef.database}.${newDef.name}:index:${oldIdx.name}`,
+      key: `table:${newDef.database}.${newDef.name}:index:${name}`,
       risk: 'caution',
-      sql: renderAlterDropIndex(newDef, oldIdx.name),
+      sql: renderAlterDropIndex(newDef, name),
+    })
+    addOperation(ops, {
+      type: 'alter_table_add_index',
+      key: `table:${newDef.database}.${newDef.name}:index:${name}`,
+      risk: 'caution',
+      sql: renderAlterAddIndex(newDef, newItem),
+    })
+  }
+  for (const index of indexDiff.removed) {
+    addOperation(ops, {
+      type: 'alter_table_drop_index',
+      key: `table:${newDef.database}.${newDef.name}:index:${index.name}`,
+      risk: 'caution',
+      sql: renderAlterDropIndex(newDef, index.name),
     })
   }
 
-  const oldProjections = new Map((oldDef.projections ?? []).map((p) => [p.name, p]))
-  const newProjectionNames = new Set((newDef.projections ?? []).map((p) => p.name))
-  for (const projection of newDef.projections ?? []) {
-    const oldProjection = oldProjections.get(projection.name)
-    if (!oldProjection) {
-      addOperation(ops, {
-        type: 'alter_table_add_projection',
-        key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
-        risk: 'caution',
-        sql: renderAlterAddProjection(newDef, projection),
-      })
-      continue
-    }
-
-    if (JSON.stringify(oldProjection) !== JSON.stringify(projection)) {
-      addOperation(ops, {
-        type: 'alter_table_drop_projection',
-        key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
-        risk: 'caution',
-        sql: renderAlterDropProjection(newDef, projection.name),
-      })
-      addOperation(ops, {
-        type: 'alter_table_add_projection',
-        key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
-        risk: 'caution',
-        sql: renderAlterAddProjection(newDef, projection),
-      })
-    }
+  const projectionDiff = diffByName(
+    oldDef.projections ?? [],
+    newDef.projections ?? [],
+    (projection) => projection.name,
+    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+  )
+  for (const projection of projectionDiff.added) {
+    addOperation(ops, {
+      type: 'alter_table_add_projection',
+      key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
+      risk: 'caution',
+      sql: renderAlterAddProjection(newDef, projection),
+    })
   }
-
-  for (const oldProjection of oldDef.projections ?? []) {
-    if (newProjectionNames.has(oldProjection.name)) continue
+  for (const { name, newItem } of projectionDiff.changed) {
     addOperation(ops, {
       type: 'alter_table_drop_projection',
-      key: `table:${newDef.database}.${newDef.name}:projection:${oldProjection.name}`,
+      key: `table:${newDef.database}.${newDef.name}:projection:${name}`,
       risk: 'caution',
-      sql: renderAlterDropProjection(newDef, oldProjection.name),
+      sql: renderAlterDropProjection(newDef, name),
+    })
+    addOperation(ops, {
+      type: 'alter_table_add_projection',
+      key: `table:${newDef.database}.${newDef.name}:projection:${name}`,
+      risk: 'caution',
+      sql: renderAlterAddProjection(newDef, newItem),
+    })
+  }
+  for (const projection of projectionDiff.removed) {
+    addOperation(ops, {
+      type: 'alter_table_drop_projection',
+      key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
+      risk: 'caution',
+      sql: renderAlterDropProjection(newDef, projection.name),
     })
   }
 
-  const oldSettings = oldDef.settings ?? {}
-  const newSettings = newDef.settings ?? {}
-  const allSettings = [...new Set([...Object.keys(oldSettings), ...Object.keys(newSettings)])].sort()
-  for (const key of allSettings) {
-    const hadValue = key in oldSettings
-    const nextValue = newSettings[key]
-    if (nextValue === undefined) {
-      if (hadValue) {
-        addOperation(ops, {
-          type: 'alter_table_reset_setting',
-          key: `table:${newDef.database}.${newDef.name}:setting:${key}`,
-          risk: 'caution',
-          sql: renderAlterResetSetting(newDef, key),
-        })
-      }
+  const settingDiff = diffSettings(oldDef.settings ?? {}, newDef.settings ?? {})
+  for (const change of settingDiff.changes) {
+    if (change.kind === 'reset') {
+      addOperation(ops, {
+        type: 'alter_table_reset_setting',
+        key: `table:${newDef.database}.${newDef.name}:setting:${change.key}`,
+        risk: 'caution',
+        sql: renderAlterResetSetting(newDef, change.key),
+      })
       continue
     }
-
-    if (!hadValue || oldSettings[key] !== nextValue) {
-      addOperation(ops, {
-        type: 'alter_table_modify_setting',
-        key: `table:${newDef.database}.${newDef.name}:setting:${key}`,
-        risk: 'caution',
-        sql: renderAlterModifySetting(newDef, key, nextValue),
-      })
-    }
+    addOperation(ops, {
+      type: 'alter_table_modify_setting',
+      key: `table:${newDef.database}.${newDef.name}:setting:${change.key}`,
+      risk: 'caution',
+      sql: renderAlterModifySetting(newDef, change.key, change.value),
+    })
   }
 
   if ((oldDef.ttl ?? '') !== (newDef.ttl ?? '')) {
