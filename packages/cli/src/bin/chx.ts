@@ -3,7 +3,7 @@ import process from 'node:process'
 
 import { buildApplication, buildCommand, buildRouteMap, run } from '@stricli/core'
 
-import { CLI_VERSION } from './version.js'
+import { CLI_VERSION } from './lib.js'
 import { cmdCheck } from './commands/check.js'
 import { cmdDrift } from './commands/drift.js'
 import { cmdGenerate } from './commands/generate.js'
@@ -17,7 +17,7 @@ function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--config <path>] [--dryrun] [--json]
+  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--interactive-renames] [--config <path>] [--dryrun] [--json]
   chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
   chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
   chx status [--config <path>] [--json]
@@ -34,6 +34,8 @@ Options:
                    Explicit table rename mapping (comma-separated values supported)
   --rename-column <db.table.old_column=new_column>
                    Explicit column rename mapping (comma-separated values supported)
+  --interactive-renames
+                   Prompt per heuristic rename suggestion during generate (TTY only)
   --apply          Apply pending migrations on ClickHouse (no prompt)
   --execute        Alias for --apply
   --allow-destructive
@@ -110,6 +112,7 @@ const app = buildApplication(
         migrationId?: string
         renameTable?: string
         renameColumn?: string
+        interactiveRenames?: boolean
         dryrun?: boolean
         json?: boolean
       }>({
@@ -123,6 +126,9 @@ const app = buildApplication(
             ),
             renameColumn: optionalStringFlag(
               'Explicit column rename mapping db.table.old_column=new_column'
+            ),
+            interactiveRenames: optionalBooleanFlag(
+              'Prompt per heuristic rename suggestion during generate'
             ),
             dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
@@ -138,6 +144,7 @@ const app = buildApplication(
           addStringFlag(args, '--migration-id', flags.migrationId)
           addStringFlag(args, '--rename-table', flags.renameTable)
           addStringFlag(args, '--rename-column', flags.renameColumn)
+          addBooleanFlag(args, '--interactive-renames', flags.interactiveRenames)
           addBooleanFlag(args, '--dryrun', flags.dryrun)
           addBooleanFlag(args, '--json', flags.json)
           await cmdGenerate(args)
@@ -319,24 +326,28 @@ const app = buildApplication(
   }
 )
 
-async function dispatchCli(argv: string[]): Promise<void> {
-  if (argv[0] === 'plugin') {
-    await cmdPlugin(argv.slice(1))
-    exitIfNeeded()
-    return
-  }
-
-  if (argv[0] === 'typegen') {
-    await cmdTypegen(argv.slice(1))
-    exitIfNeeded()
-    return
-  }
-
-  await run(app, argv, { process })
-}
-
 const argv = process.argv.slice(2)
-dispatchCli(argv).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+if (argv[0] === 'plugin') {
+  cmdPlugin(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else if (argv[0] === 'typegen') {
+  cmdTypegen(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else {
+  run(app, argv, { process }).catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
+}
