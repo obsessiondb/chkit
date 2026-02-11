@@ -26,13 +26,9 @@ Duration: 1-2 weeks
 - [ ] Add Vitest across packages. (Bun test is used instead.)
 - [x] Add ESLint + Prettier or Biome with strict config.
 - [x] Add Changesets for versioning.
+- [x] Define release foundation spec (`docs/06-release-foundation-spec.md`).
 - [ ] Add release automation skeleton.
 - [x] Add dependency policy (`bun.lock` checks in CI).
-
-### Exit Criteria
-- [ ] CI green on PR. (Not directly verifiable from local checkout.)
-- [x] baseline tests in each package.
-- [x] contributor guide and architecture docs merged.
 
 ## Phase 1: MVP Core Migration Loop
 Duration: 2-4 weeks
@@ -61,11 +57,6 @@ Duration: 2-4 weeks
 - [x] Add dry-run planning and `--json` output modes.
 - [x] Add comprehensive unit tests for planner.
 
-### Exit Criteria
-- [ ] Two demo projects can use full loop end-to-end.
-- [x] deterministic output validated by tests.
-- [ ] no critical defects in additive migration flow. (Needs production signal.)
-
 ## Phase 2: Safety, Drift, and Schema Evolution Depth
 Duration: 3-5 weeks
 
@@ -90,11 +81,6 @@ Duration: 3-5 weeks
   - `allowDestructive`
 - [x] Add forced explicit flags for dangerous ops.
 - [x] Add operation-level validation and warnings.
-
-### Exit Criteria
-- [ ] Drift report trusted in at least one production-like environment.
-- [x] destructive operations always gated.
-- [x] no silent destructive SQL in default mode.
 
 ## Phase 3: Deferred Optional Features (Pick-and-Choose)
 Duration: scheduled after core phases based on priority and real-world demand.
@@ -140,6 +126,7 @@ Duration: 3-6 weeks
 
 ## Phase 5: DX and Ecosystem
 Duration: ongoing
+Execution note: deferred until end-game verification and real-project validation are complete.
 
 ### Objectives
 - [ ] Improve adoption and day-2 ergonomics.
@@ -166,16 +153,9 @@ Duration: ongoing
 ## Cross-Phase Tracks
 
 ### A. Quality Track
-- [ ] increase unit and integration coverage.
-- [ ] flaky test budget policy.
-- [x] deterministic fixture snapshots.
+- [ ] increase integration coverage around risky migration and drift workflows.
 
-### B. Security Track
-- [ ] secret redaction.
-- [ ] dependency audit checks.
-- [ ] secure defaults for CLI logging.
-
-### C. Release Track
+### B. Release Track
 - [ ] prerelease channels (`alpha`, `beta`).
 - [ ] release notes automation.
 - [x] migration format change warnings.
@@ -223,9 +203,3 @@ Duration: ongoing
 1. ClickHouse version differences in introspection output.
 2. ambiguous schema diffs for complex defaults and expressions.
 3. balancing safe defaults with operational flexibility.
-
-## Decision Gates
-At end of each phase, decide:
-1. proceed to next phase unchanged,
-2. stabilize and extend current phase,
-3. de-scope features to protect reliability.
