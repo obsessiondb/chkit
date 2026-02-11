@@ -2,6 +2,7 @@ import { generateArtifacts } from '@chx/codegen'
 import process from 'node:process'
 import {
   ChxValidationError,
+  type ColumnRenameSuggestion,
   type MigrationOperation,
   type MigrationPlan,
   type RiskLevel,
