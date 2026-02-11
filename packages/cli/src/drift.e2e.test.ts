@@ -29,14 +29,6 @@ function getRequiredEnv(): {
   return { clickhouseUrl, clickhouseUser, clickhousePassword }
 }
 
-function tryGetEnv(): ReturnType<typeof getRequiredEnv> | null {
-  try {
-    return getRequiredEnv()
-  } catch {
-    return null
-  }
-}
-
 function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync({
     cmd: ['bun', CLI_ENTRY, ...args],
@@ -110,18 +102,15 @@ async function createFixture(database: string): Promise<E2EFixture> {
 }
 
 describe('@chx/cli drift depth env e2e', () => {
-  const liveEnv = tryGetEnv()
+  const liveEnv = getRequiredEnv()
 
   test('validates required env variables are present', () => {
-    if (!liveEnv) return
     expect(() => getRequiredEnv()).not.toThrow()
   })
 
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
-      if (!liveEnv) return
-
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_drift_${dbSuffix}`
       const fixture = await createFixture(database)
@@ -194,8 +183,6 @@ describe('@chx/cli drift depth env e2e', () => {
   test(
     'detects unique-key and projection drift reasons and exposes them in check summary',
     async () => {
-      if (!liveEnv) return
-
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_drift_keys_${dbSuffix}`
       const fixture = await createFixture(database)
@@ -251,8 +238,6 @@ describe('@chx/cli drift depth env e2e', () => {
   test(
     'respects failOnDrift=false policy when drift exists',
     async () => {
-      if (!liveEnv) return
-
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_drift_policy_${dbSuffix}`
       const fixture = await createFixture(database)
@@ -309,8 +294,6 @@ describe('@chx/cli drift depth env e2e', () => {
   test(
     'check --strict overrides failOnDrift=false when drift exists',
     async () => {
-      if (!liveEnv) return
-
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_drift_strict_${dbSuffix}`
       const fixture = await createFixture(database)
