@@ -66,7 +66,7 @@ describe('@chx/cli command flows', () => {
     }
   })
 
-  test('generate --dryrun keeps heuristic suggestions as add/drop', async () => {
+  test('generate --dryrun without --interactive-renames keeps heuristic suggestions as add/drop', async () => {
     const fixture = await createFixture()
     try {
       runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
