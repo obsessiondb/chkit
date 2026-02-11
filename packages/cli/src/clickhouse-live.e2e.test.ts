@@ -29,14 +29,6 @@ function getRequiredEnv(): {
   return { clickhouseUrl, clickhouseUser, clickhousePassword }
 }
 
-function tryGetEnv(): ReturnType<typeof getRequiredEnv> | null {
-  try {
-    return getRequiredEnv()
-  } catch {
-    return null
-  }
-}
-
 function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync({
     cmd: ['bun', CLI_ENTRY, ...args],
@@ -103,17 +95,15 @@ async function createFixture(database: string): Promise<E2EFixture> {
 }
 
 describe('@chx/cli doppler env e2e', () => {
-  const liveEnv = tryGetEnv()
+  const liveEnv = getRequiredEnv()
 
   test('validates required env variables are present', () => {
-    if (!liveEnv) return
     expect(() => getRequiredEnv()).not.toThrow()
   })
 
   test(
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
-    if (!liveEnv) return
     const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
     const database = `chx_e2e_${dbSuffix}`
     const fixture = await createFixture(database)
@@ -183,7 +173,6 @@ describe('@chx/cli doppler env e2e', () => {
   test(
     'runs additive second migration cycle in a separate project flow',
     async () => {
-      if (!liveEnv) return
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_additive_${dbSuffix}`
       const fixture = await createFixture(database)
@@ -250,7 +239,6 @@ describe('@chx/cli doppler env e2e', () => {
   test(
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
-      if (!liveEnv) return
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const database = `chx_e2e_check_${dbSuffix}`
       const fixture = await createFixture(database)
