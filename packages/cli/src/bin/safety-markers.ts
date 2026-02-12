@@ -10,6 +10,13 @@ export interface DestructiveOperationMarker {
   summary: string
 }
 
+export interface MigrationOperationSummary {
+  type: string
+  key: string
+  risk: string
+  summary: string
+}
+
 export function extractExecutableStatements(sql: string): string[] {
   const nonCommentLines = sql
     .split('\n')
@@ -35,14 +42,7 @@ export function extractDestructiveOperationSummaries(sql: string): string[] {
     .map((line) => line.replace(/^-- operation:\s*/, ''))
 }
 
-interface ParsedOperationLine {
-  type: string
-  key: string
-  risk: string
-  summary: string
-}
-
-function parseOperationLine(summary: string): ParsedOperationLine | null {
+export function parseOperationLine(summary: string): MigrationOperationSummary | null {
   const match = summary.match(/^([a-z_]+)\s+key=([^\s]+)\s+risk=([a-z_]+)$/)
   if (!match) return null
   return {
@@ -51,6 +51,16 @@ function parseOperationLine(summary: string): ParsedOperationLine | null {
     risk: match[3] ?? 'unknown',
     summary,
   }
+}
+
+export function extractMigrationOperationSummaries(sql: string): MigrationOperationSummary[] {
+  return sql
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('-- operation:'))
+    .map((line) => line.replace(/^-- operation:\s*/, ''))
+    .map((summary) => parseOperationLine(summary))
+    .filter((item): item is MigrationOperationSummary => item !== null)
 }
 
 function describeDestructiveOperation(type: string): {
