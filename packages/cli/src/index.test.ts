@@ -15,6 +15,10 @@ function sortedKeys(payload: Record<string, unknown>): string[] {
   return Object.keys(payload).sort((a, b) => a.localeCompare(b))
 }
 
+function renderScopedSchema(): string {
+  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst events = table({\n  database: 'app',\n  name: 'events',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users, events)\n`
+}
+
 describe('@chx/cli command flows', () => {
   test('generate --dryrun --json emits operation plan payload', async () => {
     const fixture = await createFixture()
@@ -767,6 +771,7 @@ describe('@chx/cli command flows', () => {
         'operationCount',
         'riskSummary',
         'schemaVersion',
+        'scope',
         'snapshotFile',
       ])
     } finally {
@@ -825,7 +830,7 @@ describe('@chx/cli command flows', () => {
       const result = runCli(['migrate', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as Record<string, unknown>
-      expect(sortedKeys(payload)).toEqual(['command', 'mode', 'pending', 'schemaVersion'])
+      expect(sortedKeys(payload)).toEqual(['command', 'mode', 'pending', 'schemaVersion', 'scope'])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -877,6 +882,7 @@ describe('@chx/cli command flows', () => {
         'error',
         'mode',
         'schemaVersion',
+        'scope',
       ])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
@@ -900,6 +906,126 @@ describe('@chx/cli command flows', () => {
       const payload = JSON.parse(result.stdout) as { migrationFile: string | null }
       expect(payload.migrationFile).toBeTruthy()
       expect(basename(payload.migrationFile ?? '')).toBe('20260102030405_init.sql')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun --table scopes operations and emits scope payload', async () => {
+    const fixture = await createFixture(renderScopedSchema())
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n    { name: 'country', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst events = table({\n  database: 'app',\n  name: 'events',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users, events)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--table',
+        'app.users',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        scope: { enabled: boolean; selector: string; matchedTables: string[]; matchCount: number }
+        operations: Array<{ key: string }>
+      }
+      expect(payload.scope.enabled).toBe(true)
+      expect(payload.scope.selector).toBe('app.users')
+      expect(payload.scope.matchCount).toBe(1)
+      expect(payload.scope.matchedTables).toEqual(['app.users'])
+      expect(payload.operations.every((operation) => operation.key.startsWith('table:app.users'))).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun --table returns warning no-op for zero matches', async () => {
+    const fixture = await createFixture(renderScopedSchema())
+    try {
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--table',
+        'missing_*',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operationCount: number
+        warning: string
+        scope: { enabled: boolean; matchCount: number }
+      }
+      expect(payload.scope.enabled).toBe(true)
+      expect(payload.scope.matchCount).toBe(0)
+      expect(payload.operationCount).toBe(0)
+      expect(payload.warning).toContain('No tables matched selector')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('migrate --json --table only lists in-scope pending migrations', async () => {
+    const fixture = await createFixture(renderScopedSchema())
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      await mkdir(fixture.migrationsDir, { recursive: true })
+      await writeFile(
+        join(fixture.migrationsDir, '20260101001000_users.sql'),
+        '-- operation: alter_table_add_column key=table:app.users:column:country risk=safe\nALTER TABLE app.users ADD COLUMN country String;\n',
+        'utf8'
+      )
+      await writeFile(
+        join(fixture.migrationsDir, '20260101002000_events.sql'),
+        '-- operation: alter_table_add_column key=table:app.events:column:ingested_at risk=safe\nALTER TABLE app.events ADD COLUMN ingested_at DateTime;\n',
+        'utf8'
+      )
+
+      const result = runCli([
+        'migrate',
+        '--config',
+        fixture.configPath,
+        '--table',
+        'users',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        pending: string[]
+        scope: { enabled: boolean; matchCount: number; matchedTables: string[] }
+      }
+      expect(payload.scope.enabled).toBe(true)
+      expect(payload.scope.matchCount).toBe(1)
+      expect(payload.scope.matchedTables).toEqual(['app.users'])
+      expect(payload.pending).toContain('20260101001000_users.sql')
+      expect(payload.pending).not.toContain('20260101002000_events.sql')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('drift --json --table returns warning no-op for zero matches without clickhouse config', async () => {
+    const fixture = await createFixture(renderScopedSchema())
+    try {
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      const result = runCli(['drift', '--config', fixture.configPath, '--table', 'missing_*', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        drifted: boolean
+        warning: string
+        scope: { enabled: boolean; matchCount: number }
+      }
+      expect(payload.scope.enabled).toBe(true)
+      expect(payload.scope.matchCount).toBe(0)
+      expect(payload.drifted).toBe(false)
+      expect(payload.warning).toContain('No tables matched selector')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

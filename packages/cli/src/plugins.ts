@@ -5,6 +5,7 @@ import type {
   ResolvedChxConfig,
   SchemaDefinition,
 } from '@chx/core'
+import type { TableScope } from './bin/table-scope.js'
 
 export interface ChxPluginManifest {
   name: string
@@ -26,6 +27,7 @@ export interface ChxPluginRegistrationMeta {
 export interface ChxPluginHookContextBase {
   command: string
   config: ResolvedChxConfig
+  tableScope: TableScope
 }
 
 export interface ChxOnConfigLoadedContext extends ChxPluginHookContextBase {
@@ -82,6 +84,7 @@ export interface ChxPluginCommandContext {
   jsonMode: boolean
   args: string[]
   options: Record<string, unknown>
+  tableScope: TableScope
   print: (value: unknown) => void
 }
 

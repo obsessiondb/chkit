@@ -1,8 +1,10 @@
 import process from 'node:process'
 
-import { getCommandContext } from '../config.js'
+import { getCommandContext, parseArg } from '../config.js'
+import { loadSchemaDefinitions } from '../lib.js'
 import { printOutput } from '../json-output.js'
 import { type PluginRuntime, loadPluginRuntime } from '../plugin-runtime.js'
+import { resolveTableScope, tableKeysFromDefinitions, type TableScope } from '../table-scope.js'
 import { CLI_VERSION } from '../version.js'
 
 export interface PluginLikeContext {
@@ -11,6 +13,7 @@ export interface PluginLikeContext {
   jsonMode: boolean
   runtime: PluginRuntime
   commandArgs: string[]
+  tableScope: TableScope
 }
 
 interface BuildPluginLikeContextInput {
@@ -49,6 +52,10 @@ export function stripGlobalFlags(args: string[]): string[] {
       i += 1
       continue
     }
+    if (value === '--table') {
+      i += 1
+      continue
+    }
     tokens.push(value)
   }
   return tokens
@@ -59,6 +66,9 @@ export async function buildPluginLikeContext(
 ): Promise<PluginLikeContext | null> {
   const commandArgs = stripGlobalFlags(input.args)
   const { config, configPath, jsonMode } = await getCommandContext(input.args)
+  const selector = parseArg('--table', input.args)
+  const definitions = await loadSchemaDefinitions(config.schema)
+  const tableScope = resolveTableScope(selector, tableKeysFromDefinitions(definitions))
   const runtime = await loadPluginRuntime({
     config,
     configPath,
@@ -70,6 +80,7 @@ export async function buildPluginLikeContext(
       command: input.command,
       config,
       configPath,
+      tableScope,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -87,6 +98,7 @@ export async function buildPluginLikeContext(
     jsonMode,
     runtime,
     commandArgs,
+    tableScope,
   }
 }
 
@@ -127,6 +139,7 @@ export async function runPluginLikeCommand(input: RunPluginLikeCommandInput): Pr
     config: input.context.config,
     configPath: input.context.configPath,
     jsonMode: input.context.jsonMode,
+    tableScope: input.context.tableScope,
     args: input.commandArgs,
     print(value) {
       printOutput(value, input.context.jsonMode)
