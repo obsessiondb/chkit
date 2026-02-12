@@ -26,6 +26,7 @@ Teams often manage dozens of tables in one CHX project, but daily work is usuall
 Use a single shared flag on supported commands:
 
 1. `--table <selector>`
+2. No alias in v1 (`-t` and `--match` are not supported in CHX for this feature).
 
 Selector rules:
 1. Exact table target:
@@ -45,23 +46,30 @@ Wildcard semantics:
 1. `chx generate`
 2. `chx migrate`
 3. `chx push` (or equivalent apply/push command in this repo)
-4. `chx check`
+4. `chx drift`
 5. Optional plugins that operate on table-scoped actions (for example, backfill plugin commands)
+
+## Explicitly Out of Scope (Initial)
+1. `chx status` (migration-file/journal status is global and not table-targeted)
+2. `chx init`
+3. `chx typegen`
+4. `chx check` (keep global semantics in v1)
 
 ## Behavior Contract
 1. Resolve selector to a deterministic sorted set of table keys.
-2. Restrict planning/execution/checking to operations that affect selected tables.
+2. Restrict planning/execution to operations that affect selected tables.
 3. Preserve global safety checks that are independent of table scope.
 4. If no table matches selector:
-   - return non-zero exit code
-   - show explicit error with selector and available nearest matches
+   - show explicit warning with selector
+   - perform no-op
+   - return success exit code
 5. Print selected table set in CLI output and include it in JSON output.
 
 ## Scope Resolution Rules
 1. Normalize selector and schema keys to canonical `database.table` form for matching.
 2. If selector omits database:
-   - match across configured default database context
-   - if multiple databases are present and ambiguous, error with guidance
+   - match across all configured databases
+   - include fully-qualified matched targets in output
 3. Exact selector match takes precedence over prefix behavior.
 4. Prefix matching is lexical and case-sensitive unless repo-wide naming rules say otherwise.
 
@@ -71,12 +79,24 @@ Wildcard semantics:
 3. Mark out-of-scope operations as omitted in dry-run/debug views.
 4. Prevent destructive operations on out-of-scope tables.
 5. If scoped operations depend on missing prerequisites, fail with actionable diagnostics.
+6. If dependencies are detected for selected targets in interactive mode:
+   - list detected dependencies
+   - prompt whether to include dependencies
+   - default choice is selected targets only
+7. In non-interactive mode, default remains selected targets only.
 
 ## Plugin Integration
 1. Core passes resolved table scope to plugin hooks through runtime context.
-2. Plugins may narrow further but must not widen scope beyond core selection.
-3. Plugin findings should include whether they are scoped or global.
-4. Backfill-style plugins should accept the same selector grammar for consistent UX.
+2. Plugins should follow core scope behavior by default.
+3. Plugins may diverge when needed for plugin-specific semantics.
+4. Plugin findings should include whether they are scoped or global.
+5. Backfill-style plugins should accept the same selector grammar for consistent UX.
+
+## Artifact and State Model (v1)
+1. Use shared artifacts (single global migration and metadata state) for scoped and unscoped runs.
+2. Do not create scope-specific snapshot/journal files in v1.
+3. Record selector scope in CLI/JSON outputs for operator visibility.
+4. Keep follow-up room to add richer scope metadata in migration/journal records if needed.
 
 ## JSON Output Additions (Draft)
 ```json
@@ -97,9 +117,8 @@ Wildcard semantics:
 1. Invalid selector grammar:
    - `--table "*events"`
    - `--table "events*raw"`
-2. Ambiguous selector across databases when db omitted.
-3. Zero-match selector.
-4. Selector references object that is not a table (for example, view-only object) when command requires tables.
+2. Zero-match selector (warning + no-op).
+3. Selector references object that is not a table (for example, view-only object) when command requires tables.
 
 ## Rollout Plan
 1. Milestone A: selector parser + matcher utility in core CLI package.
@@ -116,7 +135,7 @@ Wildcard semantics:
 2. Integration tests:
    - `generate --table events_*` yields scoped operation list
    - `migrate --table events_raw` applies only relevant operations
-   - zero-match returns non-zero and actionable message
+   - zero-match returns warning + no-op + success exit
 3. Contract tests:
    - stable JSON `scope` object fields and ordering
 4. Regression tests:
