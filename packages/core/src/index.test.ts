@@ -55,6 +55,27 @@ describe('@chx/core smoke', () => {
     expect(sql).toContain('PROJECTION `p_recent` (SELECT id ORDER BY id DESC LIMIT 10)')
   })
 
+  test('normalizes comma-delimited key clauses in create table sql', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'org_id', type: 'String' },
+        { name: 'created_at', type: 'DateTime64(3)' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id, org_id'],
+      orderBy: ['org_id, created_at, id'],
+      uniqueKey: ['id, org_id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('PRIMARY KEY (`id`, `org_id`)')
+    expect(sql).toContain('ORDER BY (`org_id`, `created_at`, `id`)')
+    expect(sql).toContain('UNIQUE KEY (`id`, `org_id`)')
+  })
+
   test('collects and de-duplicates definitions from module exports', () => {
     const users = table({
       database: 'app',
@@ -71,6 +92,28 @@ describe('@chx/core smoke', () => {
     })
 
     expect(defs).toHaveLength(1)
+  })
+
+  test('canonicalizes comma-delimited key clauses to separate columns', () => {
+    const defs = canonicalizeDefinitions([
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'org_id', type: 'String' },
+          { name: 'created_at', type: 'DateTime64(3)' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id, org_id'],
+        orderBy: ['org_id, created_at, id'],
+      }),
+    ])
+
+    const events = defs[0]
+    if (!events || events.kind !== 'table') throw new Error('expected table definition')
+    expect(events.primaryKey).toEqual(['id', 'org_id'])
+    expect(events.orderBy).toEqual(['org_id', 'created_at', 'id'])
   })
 })
 
