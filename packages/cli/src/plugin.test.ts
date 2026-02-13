@@ -7,6 +7,7 @@ import {
   BACKFILL_PLUGIN_ENTRY,
   CLI_ENTRY,
   CORE_ENTRY,
+  PULL_PLUGIN_ENTRY,
   TYPEGEN_PLUGIN_ENTRY,
   createFixture,
   runCli,
@@ -71,6 +72,82 @@ describe('plugin runtime', () => {
       const payload = JSON.parse(result.stdout) as { ok: boolean; args: string[] }
       expect(payload.ok).toBe(true)
       expect(payload.args).toEqual(['alpha', 'beta'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('plugin pull schema command writes pulled schema artifact', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'pull-plugin.ts')
+    const outFile = join(fixture.dir, 'pulled-schema.ts')
+
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createPullPlugin } from '${PULL_PLUGIN_ENTRY}'\n\nexport default createPullPlugin({\n  outFile: '${outFile}',\n  databases: ['app'],\n  introspect: async () => [\n    {\n      database: 'app',\n      name: 'users',\n      engine: 'MergeTree()',\n      primaryKey: '(id)',\n      orderBy: '(id)',\n      columns: [\n        { name: 'id', type: 'UInt64' },\n        { name: 'email', type: 'String' },\n      ],\n      settings: {},\n      indexes: [],\n      projections: [],\n    },\n  ],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'plugin',
+        'pull',
+        'schema',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        ok: boolean
+        command: string
+        outFile: string
+        tableCount: number
+      }
+      expect(payload.ok).toBe(true)
+      expect(payload.command).toBe('schema')
+      expect(payload.outFile).toBe(outFile)
+      expect(payload.tableCount).toBe(1)
+      expect(existsSync(outFile)).toBe(true)
+      const content = await readFile(outFile, 'utf8')
+      expect(content).toContain('const app_users = table({')
+      expect(content).toContain('export default schema(app_users)')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('pull root command runs pull plugin schema command', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'pull-plugin.ts')
+    const outFile = join(fixture.dir, 'pulled-schema-root.ts')
+
+    try {
+      await writeFile(
+        pluginPath,
+        `import { createPullPlugin } from '${PULL_PLUGIN_ENTRY}'\n\nexport default createPullPlugin({\n  outFile: '${outFile}',\n  databases: ['app'],\n  introspect: async () => [\n    {\n      database: 'app',\n      name: 'events',\n      engine: 'MergeTree()',\n      primaryKey: '(id)',\n      orderBy: '(id)',\n      columns: [\n        { name: 'id', type: 'UInt64' },\n      ],\n      settings: {},\n      indexes: [],\n      projections: [],\n    },\n  ],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli(['pull', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { ok: boolean; command: string; tableCount: number }
+      expect(payload.ok).toBe(true)
+      expect(payload.command).toBe('schema')
+      expect(payload.tableCount).toBe(1)
+      expect(existsSync(outFile)).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -803,6 +880,17 @@ describe('plugin runtime', () => {
       const result = runCli(['typegen', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
       expect(result.stderr).toContain('Typegen plugin is not configured')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('pull root command fails when pull plugin is not configured', async () => {
+    const fixture = await createFixture()
+    try {
+      const result = runCli(['pull', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('Pull plugin is not configured')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
