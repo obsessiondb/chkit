@@ -10,6 +10,7 @@ import { cmdGenerate } from './commands/generate.js'
 import { cmdInit } from './commands/init.js'
 import { cmdMigrate } from './commands/migrate.js'
 import { cmdPlugin } from './commands/plugin.js'
+import { cmdPull } from './commands/pull.js'
 import { cmdStatus } from './commands/status.js'
 import { cmdTypegen } from './commands/typegen.js'
 
@@ -18,6 +19,7 @@ function printHelp(): void {
 Usage:
   chx init
   chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
+  chx pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]
   chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
   chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
   chx status [--config <path>] [--json]
@@ -43,7 +45,9 @@ Options:
   --dryrun         Print operation plan without writing artifacts
   --check          Validate generated type artifacts are up-to-date
   --out-file <path>
-                   Override typegen output file path for one run
+                   Override output file path for pull/typegen one run
+  --database <db>  Limit pull to one or more databases (repeat or comma-separate)
+  --force          Allow pull schema to overwrite existing output file
   --emit-zod       Enable Zod validator generation in typegen
   --no-emit-zod    Disable Zod validator generation in typegen
   --bigint-mode <mode>
@@ -341,6 +345,15 @@ if (argv[0] === 'plugin') {
     })
 } else if (argv[0] === 'typegen') {
   cmdTypegen(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else if (argv[0] === 'pull') {
+  cmdPull(argv.slice(1))
     .then(() => {
       exitIfNeeded()
     })

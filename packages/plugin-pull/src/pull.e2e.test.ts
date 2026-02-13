@@ -1,0 +1,205 @@
+import { describe, expect, test } from 'bun:test'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+import type { ResolvedChxConfig } from '@chx/core'
+
+import { createPullPlugin } from './index.js'
+
+function getRequiredEnv(): {
+  clickhouseUrl: string
+  clickhouseUser: string
+  clickhousePassword: string
+} {
+  const clickhouseHost = process.env.CLICKHOUSE_HOST?.trim()
+  const clickhouseUrl =
+    process.env.CLICKHOUSE_URL?.trim() || (clickhouseHost ? `https://${clickhouseHost}` : '')
+  const clickhouseUser = process.env.CLICKHOUSE_USER?.trim() || 'default'
+  const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
+
+  if (!clickhouseUrl) {
+    throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
+  }
+
+  if (!clickhousePassword) {
+    throw new Error('Missing CLICKHOUSE_PASSWORD')
+  }
+
+  return { clickhouseUrl, clickhouseUser, clickhousePassword }
+}
+
+async function runSql(url: string, username: string, password: string, sql: string): Promise<void> {
+  const auth = Buffer.from(`${username}:${password}`).toString('base64')
+  const response = await fetch(url, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20_000),
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'text/plain',
+    },
+    body: sql,
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`ClickHouse SQL failed (${response.status}): ${body}`)
+  }
+}
+
+async function dropDatabase(url: string, username: string, password: string, database: string): Promise<void> {
+  await runSql(url, username, password, `DROP DATABASE IF EXISTS ${database}`)
+}
+
+function createResolvedConfig(clickhouse: NonNullable<ResolvedChxConfig['clickhouse']>): ResolvedChxConfig {
+  return {
+    schema: ['./placeholder-schema.ts'],
+    outDir: './chx',
+    migrationsDir: './chx/migrations',
+    metaDir: './chx/meta',
+    plugins: [],
+    check: {
+      failOnPending: true,
+      failOnChecksumMismatch: true,
+      failOnDrift: true,
+    },
+    safety: {
+      allowDestructive: false,
+    },
+    clickhouse,
+  }
+}
+
+describe('@chx/plugin-pull live env e2e', () => {
+  const liveEnv = getRequiredEnv()
+
+  test('validates required env variables are present', () => {
+    expect(() => getRequiredEnv()).not.toThrow()
+  })
+
+  test(
+    'pulls table fixtures from dedicated database and excludes out-of-scope objects',
+    async () => {
+      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+      const targetDatabase = `chx_e2e_pull_${dbSuffix}`
+      const noiseDatabase = `chx_e2e_pull_noise_${dbSuffix}`
+      const dir = await mkdtemp(join(tmpdir(), 'chx-plugin-pull-e2e-'))
+      const pulledSchemaPath = join(dir, 'src/db/schema/pulled.ts')
+
+      const plugin = createPullPlugin({
+        outFile: pulledSchemaPath,
+        overwrite: true,
+      })
+      const command = plugin.commands[0]
+      if (!command) {
+        throw new Error('Pull plugin command not registered')
+      }
+
+      try {
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE DATABASE IF NOT EXISTS ${targetDatabase}`
+        )
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE DATABASE IF NOT EXISTS ${noiseDatabase}`
+        )
+
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE TABLE ${targetDatabase}.events (id UInt64, source String, received_at DateTime64(3) DEFAULT now64(3)) ENGINE = MergeTree() PARTITION BY toYYYYMM(received_at) PRIMARY KEY (id) ORDER BY (id) SETTINGS index_granularity = 8192`
+        )
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE TABLE ${targetDatabase}.accounts (id UInt64, email Nullable(String), updated_at DateTime DEFAULT now()) ENGINE = MergeTree() PRIMARY KEY (id) ORDER BY (id)`
+        )
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE VIEW ${targetDatabase}.events_view AS SELECT id, source FROM ${targetDatabase}.events`
+        )
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE TABLE ${noiseDatabase}.noise_table (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
+        )
+
+        const output: unknown[] = []
+        const exitCode = await command.run({
+          args: ['--database', targetDatabase],
+          jsonMode: true,
+          options: {},
+          configPath: join(dir, 'clickhouse.config.ts'),
+          config: createResolvedConfig({
+            url: liveEnv.clickhouseUrl,
+            username: liveEnv.clickhouseUser,
+            password: liveEnv.clickhousePassword,
+            database: 'default',
+            secure: liveEnv.clickhouseUrl.startsWith('https://'),
+          }),
+          print(value) {
+            output.push(value)
+          },
+        })
+
+        expect(exitCode).toBe(0)
+
+        const payload = output[0] as {
+          ok: boolean
+          command: string
+          outFile: string
+          tableCount: number
+          databases: string[]
+        }
+        expect(payload.ok).toBe(true)
+        expect(payload.command).toBe('schema')
+        expect(payload.tableCount).toBe(2)
+        expect(payload.databases).toEqual([targetDatabase])
+        expect(payload.outFile).toBe(pulledSchemaPath)
+
+        const pulledSchema = await readFile(pulledSchemaPath, 'utf8')
+        expect(pulledSchema).toContain(`database: "${targetDatabase}"`)
+        expect(pulledSchema).toContain('name: "events"')
+        expect(pulledSchema).toContain('name: "accounts"')
+        expect(pulledSchema).toContain('default: "fn:now64(3)"')
+        expect(pulledSchema).toContain('nullable: true')
+        expect(pulledSchema).toContain('partitionBy: "toYYYYMM(received_at)"')
+        expect(pulledSchema).not.toContain(noiseDatabase)
+        expect(pulledSchema).not.toContain('events_view')
+      } finally {
+        try {
+          await dropDatabase(
+            liveEnv.clickhouseUrl,
+            liveEnv.clickhouseUser,
+            liveEnv.clickhousePassword,
+            targetDatabase
+          )
+        } catch {
+          // Best-effort cleanup for shared e2e environment.
+        }
+        try {
+          await dropDatabase(
+            liveEnv.clickhouseUrl,
+            liveEnv.clickhouseUser,
+            liveEnv.clickhousePassword,
+            noiseDatabase
+          )
+        } catch {
+          // Best-effort cleanup for shared e2e environment.
+        }
+        await rm(dir, { recursive: true, force: true })
+      }
+    },
+    240_000
+  )
+})
