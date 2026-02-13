@@ -15,7 +15,7 @@
     "dev": "bun run src/bin/chx.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun test src",
+    "test": "bun test src --concurrent",
     "clean": "rm -rf dist"
   },
   "dependencies": {

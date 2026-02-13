@@ -6,6 +6,7 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from './model.js'
+import { normalizeKeyColumns } from './key-clause.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderDefault(value: string | number | boolean): string {
@@ -23,6 +24,12 @@ function renderColumn(col: ColumnDefinition): string {
   return out
 }
 
+function renderKeyClauseColumns(columns: string[]): string {
+  return normalizeKeyColumns(columns)
+    .map((column) => `\`${column}\``)
+    .join(', ')
+}
+
 function renderTableSQL(def: TableDefinition): string {
   const columns = def.columns.map(renderColumn)
   const indexes = (def.indexes ?? []).map(
@@ -36,10 +43,10 @@ function renderTableSQL(def: TableDefinition): string {
 
   const clauses: string[] = []
   if (def.partitionBy) clauses.push(`PARTITION BY ${def.partitionBy}`)
-  clauses.push(`PRIMARY KEY (${def.primaryKey.map((k) => `\`${k}\``).join(', ')})`)
-  clauses.push(`ORDER BY (${def.orderBy.map((k) => `\`${k}\``).join(', ')})`)
+  clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey)})`)
+  clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy)})`)
   if (def.uniqueKey && def.uniqueKey.length > 0) {
-    clauses.push(`UNIQUE KEY (${def.uniqueKey.map((k) => `\`${k}\``).join(', ')})`)
+    clauses.push(`UNIQUE KEY (${renderKeyClauseColumns(def.uniqueKey)})`)
   }
   if (def.ttl) clauses.push(`TTL ${def.ttl}`)
   if (def.settings && Object.keys(def.settings).length > 0) {
