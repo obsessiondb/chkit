@@ -331,7 +331,7 @@ describe('@chx/cli generate e2e', () => {
     }
   })
 
-  test('generate --json reports invalid multi-column orderBy expression as missing column', async () => {
+  test('generate --json accepts comma-delimited orderBy entry', async () => {
     const fixture = await createFixture()
     try {
       await writeFile(
@@ -341,21 +341,15 @@ describe('@chx/cli generate e2e', () => {
       )
 
       const result = runCli(['generate', '--config', fixture.configPath, '--json'])
-      expect(result.exitCode).toBe(1)
-
+      expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as {
         command: string
-        error: string
-        issues: Array<{ code: string; message: string }>
+        migrationFile: string | null
+        operationCount: number
       }
       expect(payload.command).toBe('generate')
-      expect(payload.error).toBe('validation_failed')
-      expect(payload.issues.some((issue) => issue.code === 'order_by_missing_column')).toBe(true)
-      expect(
-        payload.issues.some((issue) =>
-          issue.message.includes('"organization_id, session_date, session_id"')
-        )
-      ).toBe(true)
+      expect(payload.migrationFile).toBeTruthy()
+      expect(payload.operationCount).toBeGreaterThan(0)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

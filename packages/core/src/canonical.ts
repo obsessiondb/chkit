@@ -7,6 +7,7 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from './model.js'
+import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
 
@@ -68,9 +69,9 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
       : undefined,
     engine: def.engine.trim(),
     columns: def.columns.map(canonicalizeColumn),
-    primaryKey: [...def.primaryKey].map((k) => k.trim()),
-    orderBy: [...def.orderBy].map((k) => k.trim()),
-    uniqueKey: def.uniqueKey?.map((k) => k.trim()),
+    primaryKey: normalizeKeyColumns(def.primaryKey),
+    orderBy: normalizeKeyColumns(def.orderBy),
+    uniqueKey: def.uniqueKey ? normalizeKeyColumns(def.uniqueKey) : undefined,
     partitionBy: def.partitionBy ? normalizeSQLFragment(def.partitionBy) : undefined,
     ttl: def.ttl ? normalizeSQLFragment(def.ttl) : undefined,
     settings,

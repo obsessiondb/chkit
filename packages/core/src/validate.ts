@@ -1,4 +1,5 @@
 import { definitionKey } from './canonical.js'
+import { normalizeKeyColumns } from './key-clause.js'
 import type {
   SchemaDefinition,
   TableDefinition,
@@ -67,7 +68,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     projectionSeen.add(projection.name)
   }
 
-  for (const column of def.primaryKey) {
+  for (const column of normalizeKeyColumns(def.primaryKey)) {
     if (!columnSet.has(column)) {
       pushValidationIssue(
         issues,
@@ -78,7 +79,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     }
   }
 
-  for (const column of def.orderBy) {
+  for (const column of normalizeKeyColumns(def.orderBy)) {
     if (!columnSet.has(column)) {
       pushValidationIssue(
         issues,
