@@ -22,6 +22,7 @@ Use this order when bootstrapping a new planning/execution context:
 4. `optional-feature-dependency-intelligence-plugin.md`
 5. `optional-feature-rename-assistance-flow.md`
 6. `optional-feature-backfill-orchestration-plugin.md`
+7. `optional-feature-shared-table-filter-flag.md`
 
 ## Implemented Usage Docs
 1. `typegen-plugin.md`

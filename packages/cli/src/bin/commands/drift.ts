@@ -9,11 +9,13 @@ import {
   type ObjectDriftDetail,
   type TableDriftDetail,
 } from '../../drift.js'
-import { getCommandContext } from '../config.js'
+import { getCommandContext, parseArg } from '../config.js'
 import { emitJson } from '../json-output.js'
 import { readSnapshot } from '../migration-store.js'
+import { resolveTableScope, tableKeysFromDefinitions, type TableScope } from '../table-scope.js'
 
 export interface DriftPayload {
+  scope?: TableScope
   snapshotFile: string
   expectedCount: number
   actualCount: number
@@ -28,16 +30,25 @@ export interface DriftPayload {
 export async function buildDriftPayload(
   config: ChxConfig,
   metaDir: string,
-  snapshot: Snapshot
+  snapshot: Snapshot,
+  scope?: TableScope
 ): Promise<DriftPayload> {
+  const selectedTables =
+    scope?.enabled && scope.matchCount > 0 ? new Set(scope.matchedTables) : undefined
   if (!config.clickhouse) throw new Error('clickhouse config is required for drift checks')
   const db = createClickHouseExecutor(config.clickhouse)
   const actualObjects = await db.listSchemaObjects()
-  const expectedObjects = snapshot.definitions.map((def) => ({
-    kind: def.kind,
-    database: def.database,
-    name: def.name,
-  }))
+  const expectedObjects = snapshot.definitions
+    .filter((def) => {
+      if (!selectedTables) return true
+      if (def.kind !== 'table') return true
+      return selectedTables.has(`${def.database}.${def.name}`)
+    })
+    .map((def) => ({
+      kind: def.kind,
+      database: def.database,
+      name: def.name,
+    }))
   const expectedDatabases = new Set(expectedObjects.map((def) => def.database))
   const actualInScope = actualObjects.filter((item) => expectedDatabases.has(item.database))
 
@@ -46,7 +57,11 @@ export async function buildDriftPayload(
     actualInScope
   )
 
-  const expectedTables = snapshot.definitions.filter((def): def is TableDefinition => def.kind === 'table')
+  const expectedTables = snapshot.definitions.filter((def): def is TableDefinition => {
+    if (def.kind !== 'table') return false
+    if (!selectedTables) return true
+    return selectedTables.has(`${def.database}.${def.name}`)
+  })
   const expectedTableMap = new Map(
     expectedTables.map((table) => [`${table.database}.${table.name}`, table])
   )
@@ -67,6 +82,7 @@ export async function buildDriftPayload(
     objectDrift.length > 0 ||
     tableDrift.length > 0
   return {
+    scope,
     snapshotFile: join(metaDir, 'snapshot.json'),
     expectedCount: expectedObjects.length,
     actualCount: actualInScope.length,
@@ -80,13 +96,38 @@ export async function buildDriftPayload(
 }
 
 export async function cmdDrift(args: string[]): Promise<void> {
+  const tableSelector = parseArg('--table', args)
   const { config, dirs, jsonMode } = await getCommandContext(args)
   const { metaDir } = dirs
   const snapshot = await readSnapshot(metaDir)
   if (!snapshot) {
     throw new Error('Snapshot not found. Run `chx generate` before drift checks.')
   }
-  const payload = await buildDriftPayload(config, metaDir, snapshot)
+  const scope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot.definitions))
+  if (scope.enabled && scope.matchCount === 0) {
+    const payload: DriftPayload = {
+      scope,
+      snapshotFile: join(metaDir, 'snapshot.json'),
+      expectedCount: 0,
+      actualCount: 0,
+      drifted: false,
+      missing: [],
+      extra: [],
+      kindMismatches: [],
+      objectDrift: [],
+      tableDrift: [],
+    }
+    if (jsonMode) {
+      emitJson('drift', {
+        ...payload,
+        warning: `No tables matched selector "${scope.selector ?? ''}".`,
+      })
+      return
+    }
+    console.log(`No tables matched selector "${scope.selector ?? ''}". Drift check is a no-op.`)
+    return
+  }
+  const payload = await buildDriftPayload(config, metaDir, snapshot, scope)
 
   if (jsonMode) {
     emitJson('drift', payload)
@@ -96,6 +137,10 @@ export async function cmdDrift(args: string[]): Promise<void> {
   console.log(`Expected objects: ${payload.expectedCount}`)
   console.log(`Actual objects:   ${payload.actualCount}`)
   console.log(`Drifted:          ${payload.drifted ? 'yes' : 'no'}`)
+  if (payload.scope?.enabled) {
+    console.log(`Table scope:      ${payload.scope.selector ?? ''} (${payload.scope.matchCount} matched)`)
+    for (const table of payload.scope.matchedTables) console.log(`- ${table}`)
+  }
   if (payload.missing.length > 0) {
     console.log('\nMissing objects:')
     for (const item of payload.missing) console.log(`- ${item}`)
