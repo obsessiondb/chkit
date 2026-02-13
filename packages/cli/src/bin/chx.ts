@@ -17,11 +17,11 @@ function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--config <path>] [--dryrun] [--json]
+  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
   chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
-  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
+  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
   chx status [--config <path>] [--json]
-  chx drift [--config <path>] [--json]
+  chx drift [--config <path>] [--table <selector>] [--json]
   chx check [--config <path>] [--strict] [--json]
   chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
 
@@ -34,6 +34,8 @@ Options:
                    Explicit table rename mapping (comma-separated values supported)
   --rename-column <db.table.old_column=new_column>
                    Explicit column rename mapping (comma-separated values supported)
+  --table <selector>
+                   Limit command scope to tables by exact name or trailing wildcard prefix
   --apply          Apply pending migrations on ClickHouse (no prompt)
   --execute        Alias for --apply
   --allow-destructive
@@ -110,6 +112,7 @@ const app = buildApplication(
         migrationId?: string
         renameTable?: string
         renameColumn?: string
+        table?: string
         dryrun?: boolean
         json?: boolean
       }>({
@@ -124,6 +127,7 @@ const app = buildApplication(
             renameColumn: optionalStringFlag(
               'Explicit column rename mapping db.table.old_column=new_column'
             ),
+            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
             dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
@@ -138,6 +142,7 @@ const app = buildApplication(
           addStringFlag(args, '--migration-id', flags.migrationId)
           addStringFlag(args, '--rename-table', flags.renameTable)
           addStringFlag(args, '--rename-column', flags.renameColumn)
+          addStringFlag(args, '--table', flags.table)
           addBooleanFlag(args, '--dryrun', flags.dryrun)
           addBooleanFlag(args, '--json', flags.json)
           await cmdGenerate(args)
@@ -188,6 +193,7 @@ const app = buildApplication(
         apply?: boolean
         execute?: boolean
         allowDestructive?: boolean
+        table?: string
         json?: boolean
       }>({
         parameters: {
@@ -198,6 +204,7 @@ const app = buildApplication(
             allowDestructive: optionalBooleanFlag(
               'Allow destructive migrations tagged with risk=danger'
             ),
+            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
@@ -210,6 +217,7 @@ const app = buildApplication(
           addBooleanFlag(args, '--apply', flags.apply)
           addBooleanFlag(args, '--execute', flags.execute)
           addBooleanFlag(args, '--allow-destructive', flags.allowDestructive)
+          addStringFlag(args, '--table', flags.table)
           addBooleanFlag(args, '--json', flags.json)
           await cmdMigrate(args)
           exitIfNeeded()
@@ -233,10 +241,11 @@ const app = buildApplication(
           exitIfNeeded()
         },
       }),
-      drift: buildCommand<{ config?: string; json?: boolean }>({
+      drift: buildCommand<{ config?: string; table?: string; json?: boolean }>({
         parameters: {
           flags: {
             config: optionalStringFlag('Path to config file', 'path'),
+            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
@@ -246,6 +255,7 @@ const app = buildApplication(
         async func(flags) {
           const args: string[] = []
           addStringFlag(args, '--config', flags.config)
+          addStringFlag(args, '--table', flags.table)
           addBooleanFlag(args, '--json', flags.json)
           await cmdDrift(args)
           exitIfNeeded()
