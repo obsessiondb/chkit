@@ -32,6 +32,7 @@ bun run chx check
 
 - `chx init`
 - `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
+- `chx pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]`
 - `chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
 - `chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
 - `chx status [--config <path>] [--json]`
@@ -68,6 +69,12 @@ Creates starter files if missing:
 - `--check` verifies generated output is up-to-date (no write)
 - Supports optional Zod emission (`--emit-zod`)
 - Returns non-zero on stale/missing artifacts in check mode
+
+### `chx plugin pull schema`
+
+- Pulls live ClickHouse table metadata and writes a local CHX schema file
+- Supports `--out-file`, repeated `--database`, `--dryrun`, and `--force`
+- Shortcut: `chx pull ...` (equivalent to `chx plugin pull schema ...`)
 
 ### `chx migrate`
 
@@ -107,6 +114,7 @@ Returns non-zero when enabled checks fail.
 
 ```ts
 import { defineConfig } from '@chx/core'
+import { pull } from '@chx/plugin-pull'
 import { typegen } from '@chx/plugin-typegen'
 
 export default defineConfig({
@@ -115,6 +123,10 @@ export default defineConfig({
   migrationsDir: './chx/migrations',
   metaDir: './chx/meta',
   plugins: [
+    pull({
+      outFile: './src/db/schema/pulled.ts',
+    }),
+
     // Typed registration (recommended):
     typegen({
       outFile: './src/generated/chx-types.ts',

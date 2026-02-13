@@ -64,6 +64,14 @@
         "@chx/core": "workspace:*",
       },
     },
+    "packages/plugin-pull": {
+      "name": "@chx/plugin-pull",
+      "version": "0.1.0",
+      "dependencies": {
+        "@chx/clickhouse": "workspace:*",
+        "@chx/core": "workspace:*",
+      },
+    },
     "packages/plugin-typegen": {
       "name": "@chx/plugin-typegen",
       "version": "0.1.0",
@@ -165,6 +173,8 @@
     "@chx/docs": ["@chx/docs@workspace:apps/docs"],
 
     "@chx/plugin-backfill": ["@chx/plugin-backfill@workspace:packages/plugin-backfill"],
+
+    "@chx/plugin-pull": ["@chx/plugin-pull@workspace:packages/plugin-pull"],
 
     "@chx/plugin-typegen": ["@chx/plugin-typegen@workspace:packages/plugin-typegen"],
 
