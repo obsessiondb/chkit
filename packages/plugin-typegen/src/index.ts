@@ -313,6 +313,16 @@ function mapPrimitiveType(type: string, bigintMode: Required<TypegenPluginOption
   if (BOOLEAN_TYPES.has(type)) return 'boolean'
   if (NUMBER_TYPES.has(type)) return 'number'
   if (LARGE_INTEGER_TYPES.has(type)) return bigintMode
+
+  const parenIndex = type.indexOf('(')
+  if (parenIndex > 0) {
+    const baseType = type.slice(0, parenIndex)
+    if (STRING_TYPES.has(baseType)) return 'string'
+    if (BOOLEAN_TYPES.has(baseType)) return 'boolean'
+    if (NUMBER_TYPES.has(baseType)) return 'number'
+    if (LARGE_INTEGER_TYPES.has(baseType)) return bigintMode
+  }
+
   return null
 }
 

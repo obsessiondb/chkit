@@ -95,6 +95,47 @@ describe('@chx/plugin-typegen mapping', () => {
     ).toThrow('Unsupported column type')
   })
 
+  test('maps parameterized forms of known types', () => {
+    const dateTimeUtc = mapColumnType(
+      {
+        path: 'app.events.created_at',
+        column: { name: 'created_at', type: "DateTime('UTC')" },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(dateTimeUtc.tsType).toBe('string')
+
+    const dateTime64WithPrecisionAndTz = mapColumnType(
+      {
+        path: 'app.events.ts',
+        column: { name: 'ts', type: "DateTime64(3, 'UTC')" },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(dateTime64WithPrecisionAndTz.tsType).toBe('string')
+
+    const dateTime64WithPrecision = mapColumnType(
+      {
+        path: 'app.events.ts',
+        column: { name: 'ts', type: 'DateTime64(3)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(dateTime64WithPrecision.tsType).toBe('string')
+  })
+
+  test('parameterized unknown types still fail in strict mode', () => {
+    expect(() =>
+      mapColumnType(
+        {
+          path: 'app.users.tags',
+          column: { name: 'tags', type: 'Array(String)' },
+        },
+        { bigintMode: 'string', failOnUnsupportedType: true }
+      )
+    ).toThrow('Unsupported column type')
+  })
+
   test('emits unknown and finding for unsupported type in non-strict mode', () => {
     const mapped = mapColumnType(
       {
