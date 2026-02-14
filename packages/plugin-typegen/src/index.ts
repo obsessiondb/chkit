@@ -144,9 +144,28 @@ const NUMBER_TYPES = new Set([
   'UInt32',
   'Float32',
   'Float64',
+  'BFloat16',
 ])
 
-const STRING_TYPES = new Set(['String', 'Date', 'DateTime', 'DateTime64'])
+const STRING_TYPES = new Set([
+  'String',
+  'FixedString',
+  'Date',
+  'Date32',
+  'DateTime',
+  'DateTime64',
+  'UUID',
+  'IPv4',
+  'IPv6',
+  'Enum',
+  'Enum8',
+  'Enum16',
+  'Decimal',
+  'Decimal32',
+  'Decimal64',
+  'Decimal128',
+  'Decimal256',
+])
 
 const BOOLEAN_TYPES = new Set(['Bool', 'Boolean'])
 
@@ -308,29 +327,161 @@ function resolveTableNames(
   })
 }
 
-function mapPrimitiveType(type: string, bigintMode: Required<TypegenPluginOptions>['bigintMode']): string | null {
-  if (STRING_TYPES.has(type)) return 'string'
-  if (BOOLEAN_TYPES.has(type)) return 'boolean'
-  if (NUMBER_TYPES.has(type)) return 'number'
-  if (LARGE_INTEGER_TYPES.has(type)) return bigintMode
+function splitTopLevelArgs(input: string): string[] {
+  const args: string[] = []
+  let depth = 0
+  let start = 0
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    else if (ch === ',' && depth === 0) {
+      args.push(input.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+
+  const last = input.slice(start).trim()
+  if (last.length > 0) args.push(last)
+  return args
+}
+
+function parseClickHouseType(typeStr: string): { base: string; args: string[] } {
+  const trimmed = typeStr.trim()
+  const parenIndex = trimmed.indexOf('(')
+  if (parenIndex < 0) return { base: trimmed, args: [] }
+
+  const base = trimmed.slice(0, parenIndex)
+  const closingParen = trimmed.lastIndexOf(')')
+  if (closingParen <= parenIndex) return { base: trimmed, args: [] }
+
+  const inner = trimmed.slice(parenIndex + 1, closingParen)
+  if (inner.trim().length === 0) return { base, args: [] }
+  return { base, args: splitTopLevelArgs(inner) }
+}
+
+function mapScalarType(base: string, bigintMode: Required<TypegenPluginOptions>['bigintMode']): string | null {
+  if (STRING_TYPES.has(base)) return 'string'
+  if (BOOLEAN_TYPES.has(base)) return 'boolean'
+  if (NUMBER_TYPES.has(base)) return 'number'
+  if (LARGE_INTEGER_TYPES.has(base)) return bigintMode
   return null
+}
+
+function scalarToZod(mapped: string): string {
+  if (mapped === 'string') return 'z.string()'
+  if (mapped === 'number') return 'z.number()'
+  if (mapped === 'boolean') return 'z.boolean()'
+  if (mapped === 'bigint') return 'z.bigint()'
+  return 'z.unknown()'
+}
+
+function resolveInnerType(
+  typeStr: string,
+  bigintMode: Required<TypegenPluginOptions>['bigintMode']
+): { tsType: string; zodType: string } | null {
+  const parsed = parseClickHouseType(typeStr)
+
+  const scalar = mapScalarType(parsed.base, bigintMode)
+  if (scalar) return { tsType: scalar, zodType: scalarToZod(scalar) }
+
+  switch (parsed.base) {
+    case 'Nullable': {
+      const arg = parsed.args[0]
+      if (!arg) return null
+      const inner = resolveInnerType(arg, bigintMode)
+      if (!inner) return null
+      return { tsType: `${inner.tsType} | null`, zodType: `${inner.zodType}.nullable()` }
+    }
+    case 'LowCardinality': {
+      const arg = parsed.args[0]
+      if (!arg) return null
+      return resolveInnerType(arg, bigintMode)
+    }
+    case 'Array': {
+      const arg = parsed.args[0]
+      if (!arg) return null
+      const inner = resolveInnerType(arg, bigintMode)
+      if (!inner) return null
+      const needsWrap = inner.tsType.includes('|')
+      const tsType = needsWrap ? `(${inner.tsType})[]` : `${inner.tsType}[]`
+      return { tsType, zodType: `z.array(${inner.zodType})` }
+    }
+    case 'Map': {
+      const keyArg = parsed.args[0]
+      const valueArg = parsed.args[1]
+      if (!keyArg || !valueArg) return null
+      const key = resolveInnerType(keyArg, bigintMode)
+      const value = resolveInnerType(valueArg, bigintMode)
+      if (!key || !value) return null
+      return {
+        tsType: `Record<${key.tsType}, ${value.tsType}>`,
+        zodType: `z.record(${key.zodType}, ${value.zodType})`,
+      }
+    }
+    case 'Tuple': {
+      if (parsed.args.length === 0) return null
+      const elements = parsed.args.map((a) => resolveInnerType(a, bigintMode))
+      if (elements.some((e) => e === null)) return null
+      const valid = elements as { tsType: string; zodType: string }[]
+      return {
+        tsType: `[${valid.map((e) => e.tsType).join(', ')}]`,
+        zodType: `z.tuple([${valid.map((e) => e.zodType).join(', ')}])`,
+      }
+    }
+    case 'SimpleAggregateFunction': {
+      const lastArg = parsed.args[parsed.args.length - 1]
+      if (parsed.args.length < 2 || !lastArg) return null
+      return resolveInnerType(lastArg, bigintMode)
+    }
+    case 'JSON': {
+      return { tsType: 'Record<string, unknown>', zodType: 'z.record(z.string(), z.unknown())' }
+    }
+    default:
+      return null
+  }
+}
+
+function resolveColumnType(
+  typeStr: string,
+  bigintMode: Required<TypegenPluginOptions>['bigintMode']
+): { tsType: string; zodType: string; nullable: boolean } | null {
+  const parsed = parseClickHouseType(typeStr)
+
+  const firstArg = parsed.args[0]
+
+  if (parsed.base === 'LowCardinality' && firstArg) {
+    return resolveColumnType(firstArg, bigintMode)
+  }
+
+  if (parsed.base === 'Nullable' && firstArg) {
+    const inner = resolveColumnType(firstArg, bigintMode)
+    if (!inner) return null
+    return { tsType: inner.tsType, zodType: inner.zodType, nullable: true }
+  }
+
+  const resolved = resolveInnerType(typeStr, bigintMode)
+  if (!resolved) return null
+  return { tsType: resolved.tsType, zodType: resolved.zodType, nullable: false }
 }
 
 export function mapColumnType(
   input: { column: ColumnDefinition; path: string },
   options: Pick<Required<TypegenPluginOptions>, 'bigintMode' | 'failOnUnsupportedType'>
 ): MapColumnTypeResult {
-  const mapped = mapPrimitiveType(input.column.type, options.bigintMode)
-  const nullable = input.column.nullable === true
-  if (!mapped) {
+  const resolved = resolveColumnType(input.column.type, options.bigintMode)
+  const columnNullable = input.column.nullable === true
+
+  if (!resolved) {
     if (options.failOnUnsupportedType) {
       throw new UnsupportedTypeError(input.path, input.column.type)
     }
-    const unknownType = nullable ? 'unknown | null' : 'unknown'
+    const unknownType = columnNullable ? 'unknown | null' : 'unknown'
     return {
       tsType: unknownType,
       zodType: 'z.unknown()',
-      nullable,
+      nullable: columnNullable,
       finding: {
         code: 'typegen_unsupported_type',
         message: `Unsupported type "${input.column.type}" at ${input.path}; emitted unknown.`,
@@ -340,14 +491,9 @@ export function mapColumnType(
     }
   }
 
-  let zodType = 'z.unknown()'
-  if (mapped === 'string') zodType = 'z.string()'
-  if (mapped === 'number') zodType = 'z.number()'
-  if (mapped === 'boolean') zodType = 'z.boolean()'
-  if (mapped === 'bigint') zodType = 'z.bigint()'
-
-  const tsType = nullable ? `${mapped} | null` : mapped
-  return { tsType, zodType, nullable }
+  const nullable = columnNullable || resolved.nullable
+  const tsType = nullable ? `${resolved.tsType} | null` : resolved.tsType
+  return { tsType, zodType: resolved.zodType, nullable }
 }
 
 function renderHeader(toolVersion: string): string[] {
