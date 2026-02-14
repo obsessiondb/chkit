@@ -131,6 +131,18 @@ describe('@chx/plugin-pull live env e2e', () => {
           liveEnv.clickhouseUrl,
           liveEnv.clickhouseUser,
           liveEnv.clickhousePassword,
+          `CREATE TABLE ${targetDatabase}.events_rollup (id UInt64, c UInt64) ENGINE = MergeTree() ORDER BY (id)`
+        )
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
+          `CREATE MATERIALIZED VIEW ${targetDatabase}.events_mv TO ${targetDatabase}.events_rollup AS SELECT id, count() AS c FROM ${targetDatabase}.events GROUP BY id`
+        )
+        await runSql(
+          liveEnv.clickhouseUrl,
+          liveEnv.clickhouseUser,
+          liveEnv.clickhousePassword,
           `CREATE TABLE ${noiseDatabase}.noise_table (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
         )
 
@@ -158,12 +170,14 @@ describe('@chx/plugin-pull live env e2e', () => {
           ok: boolean
           command: string
           outFile: string
+          definitionCount: number
           tableCount: number
           databases: string[]
         }
         expect(payload.ok).toBe(true)
         expect(payload.command).toBe('schema')
-        expect(payload.tableCount).toBe(2)
+        expect(payload.definitionCount).toBe(5)
+        expect(payload.tableCount).toBe(3)
         expect(payload.databases).toEqual([targetDatabase])
         expect(payload.outFile).toBe(pulledSchemaPath)
 
@@ -174,8 +188,10 @@ describe('@chx/plugin-pull live env e2e', () => {
         expect(pulledSchema).toContain('default: "fn:now64(3)"')
         expect(pulledSchema).toContain('nullable: true')
         expect(pulledSchema).toContain('partitionBy: "toYYYYMM(received_at)"')
+        expect(pulledSchema).toContain('name: "events_view"')
+        expect(pulledSchema).toContain('name: "events_mv"')
+        expect(pulledSchema).toContain('materializedView({')
         expect(pulledSchema).not.toContain(noiseDatabase)
-        expect(pulledSchema).not.toContain('events_view')
       } finally {
         try {
           await dropDatabase(

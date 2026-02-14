@@ -12,3 +12,6 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description, use that skill for that turn.
 - Missing/blocked: If a named skill path cannot be read, say so briefly and continue with a fallback.
 - Keep context small: Read only what is needed from skill files and references.
+
+### Test command note
+- For running repo tests (including env-backed e2e through Turbo), use `bun run test:turbo`.

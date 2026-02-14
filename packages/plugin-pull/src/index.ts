@@ -2,13 +2,19 @@ import { access, mkdir, rename, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
-import { createClickHouseExecutor, type IntrospectedTable } from '@chx/clickhouse'
+import {
+  createClickHouseExecutor,
+  inferSchemaKindFromEngine,
+  type IntrospectedTable,
+} from '@chx/clickhouse'
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  type MaterializedViewDefinition,
   type ResolvedChxConfig,
   type SchemaDefinition,
   type TableDefinition,
+  type ViewDefinition,
 } from '@chx/core'
 
 export interface PullPluginOptions {
@@ -43,7 +49,7 @@ export interface PullPlugin {
 export type PullIntrospector = (input: {
   config: NonNullable<ResolvedChxConfig['clickhouse']>
   databases: string[]
-}) => Promise<IntrospectedTable[]>
+}) => Promise<IntrospectedObject[]>
 
 export type PullPluginRegistration = ChxInlinePluginRegistration<PullPlugin, PullPluginOptions>
 
@@ -56,11 +62,18 @@ interface ParsedCommandArgs {
 
 interface PullSchemaResult {
   outFile: string
+  definitionCount: number
   tableCount: number
   databases: string[]
   skippedObjects: Array<{ kind: string; count: number }>
   content: string
 }
+
+type IntrospectedObject =
+  | ({ kind: 'table' } & IntrospectedTable)
+  | ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as'>)
+  | ({ kind: 'materialized_view' } & Pick<MaterializedViewDefinition, 'database' | 'name' | 'to' | 'as'>)
+  | IntrospectedTable
 
 const DEFAULT_OPTIONS: Required<Omit<PullPluginOptions, 'introspect'>> = {
   outFile: './src/db/schema/pulled.ts',
@@ -109,6 +122,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               ok: true,
               command: 'schema' as const,
               outFile: pulled.outFile,
+              definitionCount: pulled.definitionCount,
               tableCount: pulled.tableCount,
               databases: pulled.databases,
               skippedObjects: pulled.skippedObjects,
@@ -122,11 +136,13 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
             }
 
             if (parsedArgs.dryrun) {
-              print(`Pull preview: ${pulled.tableCount} tables from ${pulled.databases.join(', ') || '(none)'}`)
+              print(
+                `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
+              )
               print(pulled.content)
             } else {
               print(
-                `Pulled ${pulled.tableCount} tables from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
+                `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
               )
             }
             return 0
@@ -294,27 +310,32 @@ async function pullSchema(input: {
 
   const outFile = resolve(process.cwd(), input.options.outFile)
   const introspector = input.options.introspect ?? defaultIntrospector
+  const usesDefaultIntrospector = introspector === defaultIntrospector
   let objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }> = []
   let selectedDatabases = input.options.databases
 
-  if (selectedDatabases.length === 0) {
+  if (usesDefaultIntrospector || selectedDatabases.length === 0) {
     const db = createClickHouseExecutor(input.config.clickhouse)
     objects = await db.listSchemaObjects()
-    selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+    if (selectedDatabases.length === 0) {
+      selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+    }
   }
 
-  const tables = await introspector({
+  const introspected = await introspector({
     config: input.config.clickhouse,
     databases: selectedDatabases,
   })
 
-  const definitions = canonicalizeDefinitions(tables.map(mapIntrospectedTableToDefinition))
+  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
   const content = renderSchemaFile(definitions)
-  const skippedObjects = summarizeSkippedObjects(objects)
+  const tableCount = definitions.filter((definition) => definition.kind === 'table').length
+  const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
 
   return {
     outFile,
-    tableCount: definitions.length,
+    definitionCount: definitions.length,
+    tableCount,
     databases: selectedDatabases,
     skippedObjects,
     content,
@@ -324,9 +345,14 @@ async function pullSchema(input: {
 async function defaultIntrospector(input: {
   config: NonNullable<ResolvedChxConfig['clickhouse']>
   databases: string[]
-}): Promise<IntrospectedTable[]> {
+}): Promise<IntrospectedObject[]> {
   const db = createClickHouseExecutor(input.config)
-  return db.listTableDetails(input.databases)
+  const tables = await db.listTableDetails(input.databases)
+  const nonTableRows = await listNonTableRows(db, input.databases)
+  const nonTableObjects = nonTableRows
+    .map(mapSystemTableRowToDefinition)
+    .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)
+  return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
 }
 
 function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefinition {
@@ -350,6 +376,28 @@ function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefini
   }
 }
 
+function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): SchemaDefinition {
+  if ('kind' in introspected) {
+    if (introspected.kind === 'table') return mapIntrospectedTableToDefinition(introspected)
+    if (introspected.kind === 'view') {
+      return {
+        kind: 'view',
+        database: introspected.database,
+        name: introspected.name,
+        as: introspected.as,
+      }
+    }
+    return {
+      kind: 'materialized_view',
+      database: introspected.database,
+      name: introspected.name,
+      to: introspected.to,
+      as: introspected.as,
+    }
+  }
+  return mapIntrospectedTableToDefinition(introspected)
+}
+
 function normalizeDefault(value: TableDefinition['columns'][number]['default']):
   | TableDefinition['columns'][number]['default']
   | undefined {
@@ -359,11 +407,20 @@ function normalizeDefault(value: TableDefinition['columns'][number]['default']):
 }
 
 function summarizeSkippedObjects(
-  objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }>
+  objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }>,
+  definitions: SchemaDefinition[],
+  selectedDatabases: string[]
 ): Array<{ kind: string; count: number }> {
+  if (objects.length === 0) return []
+
+  const scoped = objects.filter((object) => selectedDatabases.includes(object.database))
+  const includedKeys = new Set(
+    definitions.map((definition) => `${definition.kind}:${definition.database}.${definition.name}`)
+  )
   const counts = new Map<string, number>()
-  for (const object of objects) {
-    if (object.kind === 'table') continue
+  for (const object of scoped) {
+    const key = `${object.kind}:${object.database}.${object.name}`
+    if (includedKeys.has(key)) continue
     counts.set(object.kind, (counts.get(object.kind) ?? 0) + 1)
   }
   return [...counts.entries()]
@@ -445,13 +502,97 @@ function normalizeWrappedTuple(input: string): string {
   return trimmed.slice(1, -1).trim()
 }
 
-export function renderSchemaFile(definitions: SchemaDefinition[]): string {
-  const canonical = canonicalizeDefinitions(definitions).filter(
-    (definition): definition is TableDefinition => definition.kind === 'table'
+interface SystemTableRow {
+  database: string
+  name: string
+  engine: string
+  create_table_query?: string
+}
+
+async function listNonTableRows(
+  db: ReturnType<typeof createClickHouseExecutor>,
+  databases: string[]
+): Promise<SystemTableRow[]> {
+  if (databases.length === 0) return []
+  const quotedDatabases = databases.map((dbName) => `'${dbName.replace(/'/g, "''")}'`).join(', ')
+  return db.query<SystemTableRow>(
+    `SELECT database, name, engine, create_table_query
+FROM system.tables
+WHERE is_temporary = 0
+  AND database IN (${quotedDatabases})
+  AND engine IN ('View', 'MaterializedView')`
   )
+}
+
+function mapSystemTableRowToDefinition(
+  row: SystemTableRow
+): Exclude<IntrospectedObject, IntrospectedTable> | null {
+  const kind = inferSchemaKindFromEngine(row.engine)
+  if (kind === 'view') {
+    const as = parseAsClause(row.create_table_query)
+    if (!as) return null
+    return { kind: 'view', database: row.database, name: row.name, as }
+  }
+  if (kind === 'materialized_view') {
+    const as = parseAsClause(row.create_table_query)
+    const to = parseToClause(row.create_table_query, row.database)
+    if (!as || !to) return null
+    return { kind: 'materialized_view', database: row.database, name: row.name, to, as }
+  }
+  return null
+}
+
+function parseAsClause(query: string | undefined): string | null {
+  if (!query) return null
+  const match = /\bAS\b([\s\S]*)$/i.exec(query)
+  if (!match?.[1]) return null
+  const asClause = match[1].trim().replace(/;$/, '').trim()
+  return asClause.length > 0 ? asClause : null
+}
+
+function parseToClause(
+  query: string | undefined,
+  fallbackDatabase: string
+): { database: string; name: string } | null {
+  if (!query) return null
+  const identifier = /(?:^|\s)TO\s+((?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)(?:\.(?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+))?)/i.exec(
+    query
+  )?.[1]
+  if (!identifier) return null
+  const parts = identifier.split('.').map((part) => part.replace(/^[`"]|[`"]$/g, '').trim())
+  if (parts.length === 1) {
+    const name = parts[0] ?? ''
+    if (name.length === 0) return null
+    return { database: fallbackDatabase, name }
+  }
+  if (parts.length === 2) {
+    const database = parts[0] ?? fallbackDatabase
+    const name = parts[1] ?? ''
+    if (database.length === 0 || name.length === 0) return null
+    return { database, name }
+  }
+  return null
+}
+
+export const __testUtils = {
+  summarizeSkippedObjects,
+  parseAsClause,
+  parseToClause,
+  mapSystemTableRowToDefinition,
+}
+
+export function renderSchemaFile(definitions: SchemaDefinition[]): string {
+  const canonical = canonicalizeDefinitions(definitions)
   const declarationNames = new Map<string, number>()
+  const hasTable = canonical.some((definition) => definition.kind === 'table')
+  const hasView = canonical.some((definition) => definition.kind === 'view')
+  const hasMaterializedView = canonical.some((definition) => definition.kind === 'materialized_view')
+  const imports = ['schema']
+  if (hasTable) imports.push('table')
+  if (hasView) imports.push('view')
+  if (hasMaterializedView) imports.push('materializedView')
   const lines: string[] = [
-    "import { schema, table } from '@chx/core'",
+    `import { ${imports.join(', ')} } from '@chx/core'`,
     '',
     '// Pulled from live ClickHouse metadata via chx plugin pull schema',
     '',
@@ -463,63 +604,78 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
     const variableName = resolveTableVariableName(definition.database, definition.name, declarationNames)
     references.push(variableName)
 
-    lines.push(`const ${variableName} = table({`)
-    lines.push(`  database: ${renderString(definition.database)},`)
-    lines.push(`  name: ${renderString(definition.name)},`)
-    lines.push(`  engine: ${renderString(definition.engine)},`)
-    lines.push('  columns: [')
+    if (definition.kind === 'table') {
+      lines.push(`const ${variableName} = table({`)
+      lines.push(`  database: ${renderString(definition.database)},`)
+      lines.push(`  name: ${renderString(definition.name)},`)
+      lines.push(`  engine: ${renderString(definition.engine)},`)
+      lines.push('  columns: [')
 
-    for (const column of definition.columns) {
-      const parts: string[] = [
-        `name: ${renderString(column.name)}`,
-        `type: ${renderString(column.type)}`,
-      ]
-      if (column.nullable) parts.push('nullable: true')
-      if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
-      if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
-      lines.push(`    { ${parts.join(', ')} },`)
-    }
+      for (const column of definition.columns) {
+        const parts: string[] = [
+          `name: ${renderString(column.name)}`,
+          `type: ${renderString(column.type)}`,
+        ]
+        if (column.nullable) parts.push('nullable: true')
+        if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
+        if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
+        lines.push(`    { ${parts.join(', ')} },`)
+      }
 
-    lines.push('  ],')
-    lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
-    lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
-    if (definition.uniqueKey && definition.uniqueKey.length > 0) {
-      lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
-    }
-    if (definition.partitionBy) {
-      lines.push(`  partitionBy: ${renderString(definition.partitionBy)},`)
-    }
-    if (definition.ttl) {
-      lines.push(`  ttl: ${renderString(definition.ttl)},`)
-    }
-    if (definition.settings && Object.keys(definition.settings).length > 0) {
-      lines.push('  settings: {')
-      for (const key of Object.keys(definition.settings).sort()) {
-        const value = definition.settings[key]
-        if (value === undefined) continue
-        lines.push(`    ${renderKey(key)}: ${renderLiteral(value)},`)
-      }
-      lines.push('  },')
-    }
-    if (definition.indexes && definition.indexes.length > 0) {
-      lines.push('  indexes: [')
-      for (const index of definition.indexes) {
-        lines.push(
-          `    { name: ${renderString(index.name)}, expression: ${renderString(index.expression)}, type: ${renderString(index.type)}, granularity: ${index.granularity} },`
-        )
-      }
       lines.push('  ],')
-    }
-    if (definition.projections && definition.projections.length > 0) {
-      lines.push('  projections: [')
-      for (const projection of definition.projections) {
-        lines.push(
-          `    { name: ${renderString(projection.name)}, query: ${renderString(projection.query)} },`
-        )
+      lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
+      lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
+      if (definition.uniqueKey && definition.uniqueKey.length > 0) {
+        lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
       }
-      lines.push('  ],')
+      if (definition.partitionBy) {
+        lines.push(`  partitionBy: ${renderString(definition.partitionBy)},`)
+      }
+      if (definition.ttl) {
+        lines.push(`  ttl: ${renderString(definition.ttl)},`)
+      }
+      if (definition.settings && Object.keys(definition.settings).length > 0) {
+        lines.push('  settings: {')
+        for (const key of Object.keys(definition.settings).sort()) {
+          const value = definition.settings[key]
+          if (value === undefined) continue
+          lines.push(`    ${renderKey(key)}: ${renderLiteral(value)},`)
+        }
+        lines.push('  },')
+      }
+      if (definition.indexes && definition.indexes.length > 0) {
+        lines.push('  indexes: [')
+        for (const index of definition.indexes) {
+          lines.push(
+            `    { name: ${renderString(index.name)}, expression: ${renderString(index.expression)}, type: ${renderString(index.type)}, granularity: ${index.granularity} },`
+          )
+        }
+        lines.push('  ],')
+      }
+      if (definition.projections && definition.projections.length > 0) {
+        lines.push('  projections: [')
+        for (const projection of definition.projections) {
+          lines.push(
+            `    { name: ${renderString(projection.name)}, query: ${renderString(projection.query)} },`
+          )
+        }
+        lines.push('  ],')
+      }
+      lines.push('})')
+    } else if (definition.kind === 'view') {
+      lines.push(`const ${variableName} = view({`)
+      lines.push(`  database: ${renderString(definition.database)},`)
+      lines.push(`  name: ${renderString(definition.name)},`)
+      lines.push(`  as: ${renderString(definition.as)},`)
+      lines.push('})')
+    } else {
+      lines.push(`const ${variableName} = materializedView({`)
+      lines.push(`  database: ${renderString(definition.database)},`)
+      lines.push(`  name: ${renderString(definition.name)},`)
+      lines.push(`  to: { database: ${renderString(definition.to.database)}, name: ${renderString(definition.to.name)} },`)
+      lines.push(`  as: ${renderString(definition.as)},`)
+      lines.push('})')
     }
-    lines.push('})')
     lines.push('')
   }
 
