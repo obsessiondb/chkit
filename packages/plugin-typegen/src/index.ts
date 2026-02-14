@@ -388,27 +388,32 @@ function resolveInnerType(
 
   switch (parsed.base) {
     case 'Nullable': {
-      if (parsed.args.length < 1) return null
-      const inner = resolveInnerType(parsed.args[0], bigintMode)
+      const arg = parsed.args[0]
+      if (!arg) return null
+      const inner = resolveInnerType(arg, bigintMode)
       if (!inner) return null
       return { tsType: `${inner.tsType} | null`, zodType: `${inner.zodType}.nullable()` }
     }
     case 'LowCardinality': {
-      if (parsed.args.length < 1) return null
-      return resolveInnerType(parsed.args[0], bigintMode)
+      const arg = parsed.args[0]
+      if (!arg) return null
+      return resolveInnerType(arg, bigintMode)
     }
     case 'Array': {
-      if (parsed.args.length < 1) return null
-      const inner = resolveInnerType(parsed.args[0], bigintMode)
+      const arg = parsed.args[0]
+      if (!arg) return null
+      const inner = resolveInnerType(arg, bigintMode)
       if (!inner) return null
       const needsWrap = inner.tsType.includes('|')
       const tsType = needsWrap ? `(${inner.tsType})[]` : `${inner.tsType}[]`
       return { tsType, zodType: `z.array(${inner.zodType})` }
     }
     case 'Map': {
-      if (parsed.args.length < 2) return null
-      const key = resolveInnerType(parsed.args[0], bigintMode)
-      const value = resolveInnerType(parsed.args[1], bigintMode)
+      const keyArg = parsed.args[0]
+      const valueArg = parsed.args[1]
+      if (!keyArg || !valueArg) return null
+      const key = resolveInnerType(keyArg, bigintMode)
+      const value = resolveInnerType(valueArg, bigintMode)
       if (!key || !value) return null
       return {
         tsType: `Record<${key.tsType}, ${value.tsType}>`,
@@ -426,8 +431,9 @@ function resolveInnerType(
       }
     }
     case 'SimpleAggregateFunction': {
-      if (parsed.args.length < 2) return null
-      return resolveInnerType(parsed.args[parsed.args.length - 1], bigintMode)
+      const lastArg = parsed.args[parsed.args.length - 1]
+      if (parsed.args.length < 2 || !lastArg) return null
+      return resolveInnerType(lastArg, bigintMode)
     }
     case 'JSON': {
       return { tsType: 'Record<string, unknown>', zodType: 'z.record(z.string(), z.unknown())' }
@@ -443,12 +449,14 @@ function resolveColumnType(
 ): { tsType: string; zodType: string; nullable: boolean } | null {
   const parsed = parseClickHouseType(typeStr)
 
-  if (parsed.base === 'LowCardinality' && parsed.args.length >= 1) {
-    return resolveColumnType(parsed.args[0], bigintMode)
+  const firstArg = parsed.args[0]
+
+  if (parsed.base === 'LowCardinality' && firstArg) {
+    return resolveColumnType(firstArg, bigintMode)
   }
 
-  if (parsed.base === 'Nullable' && parsed.args.length >= 1) {
-    const inner = resolveColumnType(parsed.args[0], bigintMode)
+  if (parsed.base === 'Nullable' && firstArg) {
+    const inner = resolveColumnType(firstArg, bigintMode)
     if (!inner) return null
     return { tsType: inner.tsType, zodType: inner.zodType, nullable: true }
   }
