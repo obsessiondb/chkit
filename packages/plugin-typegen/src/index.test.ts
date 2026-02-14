@@ -87,8 +87,8 @@ describe('@chx/plugin-typegen mapping', () => {
     expect(() =>
       mapColumnType(
         {
-          path: 'app.users.payload',
-          column: { name: 'payload', type: 'Array(String)' },
+          path: 'app.users.state',
+          column: { name: 'state', type: 'AggregateFunction(sum, UInt64)' },
         },
         { bigintMode: 'string', failOnUnsupportedType: true }
       )
@@ -122,25 +122,115 @@ describe('@chx/plugin-typegen mapping', () => {
       { bigintMode: 'string', failOnUnsupportedType: true }
     )
     expect(dateTime64WithPrecision.tsType).toBe('string')
+
+    const uuid = mapColumnType(
+      {
+        path: 'app.events.id',
+        column: { name: 'id', type: 'UUID' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(uuid.tsType).toBe('string')
+
+    const decimal = mapColumnType(
+      {
+        path: 'app.events.amount',
+        column: { name: 'amount', type: 'Decimal(18, 4)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(decimal.tsType).toBe('string')
+
+    const enum8 = mapColumnType(
+      {
+        path: 'app.events.status',
+        column: { name: 'status', type: "Enum8('active' = 1, 'inactive' = 2)" },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(enum8.tsType).toBe('string')
   })
 
-  test('parameterized unknown types still fail in strict mode', () => {
-    expect(() =>
-      mapColumnType(
-        {
-          path: 'app.users.tags',
-          column: { name: 'tags', type: 'Array(String)' },
-        },
-        { bigintMode: 'string', failOnUnsupportedType: true }
-      )
-    ).toThrow('Unsupported column type')
+  test('maps composite types', () => {
+    const arrayString = mapColumnType(
+      {
+        path: 'app.events.tags',
+        column: { name: 'tags', type: 'Array(String)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(arrayString.tsType).toBe('string[]')
+    expect(arrayString.zodType).toBe('z.array(z.string())')
+
+    const mapStringString = mapColumnType(
+      {
+        path: 'app.events.metadata',
+        column: { name: 'metadata', type: 'Map(String, String)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(mapStringString.tsType).toBe('Record<string, string>')
+    expect(mapStringString.zodType).toBe('z.record(z.string(), z.string())')
+
+    const tuple = mapColumnType(
+      {
+        path: 'app.events.point',
+        column: { name: 'point', type: 'Tuple(Float64, Float64)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(tuple.tsType).toBe('[number, number]')
+    expect(tuple.zodType).toBe('z.tuple([z.number(), z.number()])')
+
+    const arrayNullable = mapColumnType(
+      {
+        path: 'app.events.values',
+        column: { name: 'values', type: 'Array(Nullable(String))' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(arrayNullable.tsType).toBe('(string | null)[]')
+    expect(arrayNullable.zodType).toBe('z.array(z.string().nullable())')
+    expect(arrayNullable.nullable).toBe(false)
+  })
+
+  test('unwraps LowCardinality and Nullable wrappers', () => {
+    const lowCardString = mapColumnType(
+      {
+        path: 'app.events.category',
+        column: { name: 'category', type: 'LowCardinality(String)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(lowCardString.tsType).toBe('string')
+    expect(lowCardString.nullable).toBe(false)
+
+    const lowCardNullable = mapColumnType(
+      {
+        path: 'app.events.region',
+        column: { name: 'region', type: 'LowCardinality(Nullable(String))' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(lowCardNullable.tsType).toBe('string | null')
+    expect(lowCardNullable.nullable).toBe(true)
+
+    const nullableType = mapColumnType(
+      {
+        path: 'app.events.note',
+        column: { name: 'note', type: 'Nullable(String)' },
+      },
+      { bigintMode: 'string', failOnUnsupportedType: true }
+    )
+    expect(nullableType.tsType).toBe('string | null')
+    expect(nullableType.nullable).toBe(true)
   })
 
   test('emits unknown and finding for unsupported type in non-strict mode', () => {
     const mapped = mapColumnType(
       {
-        path: 'app.users.payload',
-        column: { name: 'payload', type: 'Array(String)', nullable: true },
+        path: 'app.users.state',
+        column: { name: 'state', type: 'AggregateFunction(sum, UInt64)', nullable: true },
       },
       { bigintMode: 'string', failOnUnsupportedType: false }
     )
