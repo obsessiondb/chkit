@@ -13,6 +13,12 @@ import {
 } from '../lib.js'
 import { loadPluginRuntime } from '../plugin-runtime.js'
 import {
+  buildScopedSnapshotDefinitions,
+  filterPlanByTableScope,
+  resolveTableScope,
+  tableKeysFromDefinitions,
+} from '../table-scope.js'
+import {
   applyExplicitTableRenames,
   applySelectedRenameSuggestions,
   assertCliColumnMappingsResolvable,
@@ -35,6 +41,7 @@ import { emitGenerateApplyOutput, emitGeneratePlanOutput } from './generate/outp
 export async function cmdGenerate(args: string[]): Promise<void> {
   const migrationName = parseArg('--name', args)
   const migrationId = parseArg('--migration-id', args)
+  const tableSelector = parseArg('--table', args)
   const planMode = hasFlag('--dryrun', args)
 
   const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
@@ -48,12 +55,14 @@ export async function cmdGenerate(args: string[]): Promise<void> {
     command: 'generate',
     config,
     configPath,
+    tableScope: resolveTableScope(tableSelector, []),
   })
 
   let definitions = await loadSchemaDefinitions(config.schema)
   definitions = await pluginRuntime.runOnSchemaLoaded({
     command: 'generate',
     config,
+    tableScope: resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions)),
     definitions,
   })
 
@@ -65,6 +74,27 @@ export async function cmdGenerate(args: string[]): Promise<void> {
 
   const { migrationsDir, metaDir } = dirs
   const previousDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
+  const resolvedScope = resolveTableScope(tableSelector, [
+    ...tableKeysFromDefinitions(previousDefinitions),
+    ...tableKeysFromDefinitions(definitions),
+  ])
+
+  if (resolvedScope.enabled && resolvedScope.matchCount === 0) {
+    if (jsonMode) {
+      emitJson('generate', {
+        scope: resolvedScope,
+        mode: planMode ? 'plan' : 'apply',
+        operationCount: 0,
+        riskSummary: { safe: 0, caution: 0, danger: 0 },
+        operations: [],
+        renameSuggestions: [],
+        warning: `No tables matched selector "${resolvedScope.selector ?? ''}".`,
+      })
+    } else {
+      console.log(`No tables matched selector "${resolvedScope.selector ?? ''}". No changes planned.`)
+    }
+    return
+  }
 
   assertNoConflictingTableMappings(tableMappings)
   assertNoConflictingColumnMappings(columnMappings)
@@ -104,17 +134,33 @@ export async function cmdGenerate(args: string[]): Promise<void> {
     {
       command: 'generate',
       config,
+      tableScope: resolvedScope,
     },
     plan
   )
 
+  if (resolvedScope.enabled) {
+    plan = filterPlanByTableScope(plan, new Set(resolvedScope.matchedTables), {
+      renameMappings: activeTableMappings,
+    }).plan
+  }
+
   if (planMode) {
-    emitGeneratePlanOutput(plan, jsonMode)
+    emitGeneratePlanOutput(plan, jsonMode, resolvedScope)
     return
   }
 
+  const artifactDefinitions = resolvedScope.enabled
+    ? buildScopedSnapshotDefinitions({
+        previousDefinitions,
+        nextDefinitions: definitions,
+        matchedTables: new Set(resolvedScope.matchedTables),
+        renameMappings: activeTableMappings,
+      })
+    : definitions
+
   const result = await generateArtifacts({
-    definitions,
+    definitions: artifactDefinitions,
     migrationsDir,
     metaDir,
     migrationName,
@@ -130,6 +176,7 @@ export async function cmdGenerate(args: string[]): Promise<void> {
       config,
       configPath,
       jsonMode: false,
+      tableScope: resolvedScope,
       args: [],
       print() {},
     })
@@ -138,5 +185,5 @@ export async function cmdGenerate(args: string[]): Promise<void> {
     }
   }
 
-  emitGenerateApplyOutput(result, definitions, plan, jsonMode)
+  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope)
 }

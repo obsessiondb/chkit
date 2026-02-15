@@ -12,7 +12,7 @@
       "dependsOn": ["^lint"]
     },
     "test": {
-      "dependsOn": ["^build", "^test"],
+      "dependsOn": ["^build"],
       "passThroughEnv": [
         "CLICKHOUSE_HOST",
         "CLICKHOUSE_PASSWORD",

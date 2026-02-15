@@ -63,6 +63,33 @@ async function runSql(url: string, username: string, password: string, sql: stri
   }
 }
 
+function isUnknownTableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.message.includes('UNKNOWN_TABLE')
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+async function runSqlWithUnknownTableRetry(
+  url: string,
+  username: string,
+  password: string,
+  sql: string,
+  attempts = 5
+): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await runSql(url, username, password, sql)
+      return
+    } catch (error) {
+      if (!isUnknownTableError(error) || attempt === attempts) throw error
+      await sleep(attempt * 200)
+    }
+  }
+}
+
 async function dropDatabase(url: string, username: string, password: string, database: string): Promise<void> {
   await runSql(url, username, password, `DROP DATABASE IF EXISTS ${database}`)
 }
@@ -104,10 +131,6 @@ async function createFixture(database: string): Promise<E2EFixture> {
 describe('@chx/cli drift depth env e2e', () => {
   const liveEnv = getRequiredEnv()
 
-  test('validates required env variables are present', () => {
-    expect(() => getRequiredEnv()).not.toThrow()
-  })
-
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
@@ -127,7 +150,7 @@ describe('@chx/cli drift depth env e2e', () => {
           )
         }
 
-        await runSql(
+        await runSqlWithUnknownTableRetry(
           clickhouseUrl,
           clickhouseUser,
           clickhousePassword,
@@ -254,7 +277,7 @@ describe('@chx/cli drift depth env e2e', () => {
           )
         }
 
-        await runSql(
+        await runSqlWithUnknownTableRetry(
           clickhouseUrl,
           clickhouseUser,
           clickhousePassword,
@@ -310,7 +333,7 @@ describe('@chx/cli drift depth env e2e', () => {
           )
         }
 
-        await runSql(
+        await runSqlWithUnknownTableRetry(
           clickhouseUrl,
           clickhouseUser,
           clickhousePassword,

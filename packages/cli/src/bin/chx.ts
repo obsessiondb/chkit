@@ -10,6 +10,7 @@ import { cmdGenerate } from './commands/generate.js'
 import { cmdInit } from './commands/init.js'
 import { cmdMigrate } from './commands/migrate.js'
 import { cmdPlugin } from './commands/plugin.js'
+import { cmdPull } from './commands/pull.js'
 import { cmdStatus } from './commands/status.js'
 import { cmdTypegen } from './commands/typegen.js'
 
@@ -17,11 +18,12 @@ function printHelp(): void {
   console.log(`chx - ClickHouse toolkit\n
 Usage:
   chx init
-  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--config <path>] [--dryrun] [--json]
+  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
+  chx pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]
   chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
-  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]
+  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
   chx status [--config <path>] [--json]
-  chx drift [--config <path>] [--json]
+  chx drift [--config <path>] [--table <selector>] [--json]
   chx check [--config <path>] [--strict] [--json]
   chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
 
@@ -34,6 +36,8 @@ Options:
                    Explicit table rename mapping (comma-separated values supported)
   --rename-column <db.table.old_column=new_column>
                    Explicit column rename mapping (comma-separated values supported)
+  --table <selector>
+                   Limit command scope to tables by exact name or trailing wildcard prefix
   --apply          Apply pending migrations on ClickHouse (no prompt)
   --execute        Alias for --apply
   --allow-destructive
@@ -41,7 +45,9 @@ Options:
   --dryrun         Print operation plan without writing artifacts
   --check          Validate generated type artifacts are up-to-date
   --out-file <path>
-                   Override typegen output file path for one run
+                   Override output file path for pull/typegen one run
+  --database <db>  Limit pull to one or more databases (repeat or comma-separate)
+  --force          Allow pull schema to overwrite existing output file
   --emit-zod       Enable Zod validator generation in typegen
   --no-emit-zod    Disable Zod validator generation in typegen
   --bigint-mode <mode>
@@ -110,6 +116,7 @@ const app = buildApplication(
         migrationId?: string
         renameTable?: string
         renameColumn?: string
+        table?: string
         dryrun?: boolean
         json?: boolean
       }>({
@@ -124,6 +131,7 @@ const app = buildApplication(
             renameColumn: optionalStringFlag(
               'Explicit column rename mapping db.table.old_column=new_column'
             ),
+            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
             dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
@@ -138,6 +146,7 @@ const app = buildApplication(
           addStringFlag(args, '--migration-id', flags.migrationId)
           addStringFlag(args, '--rename-table', flags.renameTable)
           addStringFlag(args, '--rename-column', flags.renameColumn)
+          addStringFlag(args, '--table', flags.table)
           addBooleanFlag(args, '--dryrun', flags.dryrun)
           addBooleanFlag(args, '--json', flags.json)
           await cmdGenerate(args)
@@ -188,6 +197,7 @@ const app = buildApplication(
         apply?: boolean
         execute?: boolean
         allowDestructive?: boolean
+        table?: string
         json?: boolean
       }>({
         parameters: {
@@ -198,6 +208,7 @@ const app = buildApplication(
             allowDestructive: optionalBooleanFlag(
               'Allow destructive migrations tagged with risk=danger'
             ),
+            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
@@ -210,6 +221,7 @@ const app = buildApplication(
           addBooleanFlag(args, '--apply', flags.apply)
           addBooleanFlag(args, '--execute', flags.execute)
           addBooleanFlag(args, '--allow-destructive', flags.allowDestructive)
+          addStringFlag(args, '--table', flags.table)
           addBooleanFlag(args, '--json', flags.json)
           await cmdMigrate(args)
           exitIfNeeded()
@@ -233,10 +245,11 @@ const app = buildApplication(
           exitIfNeeded()
         },
       }),
-      drift: buildCommand<{ config?: string; json?: boolean }>({
+      drift: buildCommand<{ config?: string; table?: string; json?: boolean }>({
         parameters: {
           flags: {
             config: optionalStringFlag('Path to config file', 'path'),
+            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
@@ -246,6 +259,7 @@ const app = buildApplication(
         async func(flags) {
           const args: string[] = []
           addStringFlag(args, '--config', flags.config)
+          addStringFlag(args, '--table', flags.table)
           addBooleanFlag(args, '--json', flags.json)
           await cmdDrift(args)
           exitIfNeeded()
@@ -331,6 +345,15 @@ if (argv[0] === 'plugin') {
     })
 } else if (argv[0] === 'typegen') {
   cmdTypegen(argv.slice(1))
+    .then(() => {
+      exitIfNeeded()
+    })
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error))
+      process.exit(1)
+    })
+} else if (argv[0] === 'pull') {
+  cmdPull(argv.slice(1))
     .then(() => {
       exitIfNeeded()
     })

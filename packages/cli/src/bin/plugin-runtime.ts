@@ -23,26 +23,42 @@ import type {
   ChxPluginCommandContext,
 } from '../plugins.js'
 import { isInlinePluginRegistration } from '../plugins.js'
+import type { TableScope } from './table-scope.js'
 
 interface LoadedPlugin {
   options: Record<string, unknown>
   plugin: ChxPlugin
 }
 
+const UNFILTERED_TABLE_SCOPE: TableScope = {
+  enabled: false,
+  matchedTables: [],
+  matchCount: 0,
+}
+
 export interface PluginRuntime {
   plugins: ReadonlyArray<LoadedPlugin>
   getCommand(pluginName: string, commandName: string): { command: ChxPluginCommand; plugin: LoadedPlugin } | null
-  runOnConfigLoaded(context: Omit<ChxOnConfigLoadedContext, 'options'>): Promise<void>
+  runOnConfigLoaded(
+    context: Omit<ChxOnConfigLoadedContext, 'options' | 'tableScope'> & { tableScope?: TableScope }
+  ): Promise<void>
   runOnSchemaLoaded(context: ChxOnSchemaLoadedContext): Promise<SchemaDefinition[]>
-  runOnPlanCreated(context: Omit<ChxOnPlanCreatedContext, 'plan'>, plan: MigrationPlan): Promise<MigrationPlan>
+  runOnPlanCreated(
+    context: Omit<ChxOnPlanCreatedContext, 'plan' | 'tableScope'> & { tableScope?: TableScope },
+    plan: MigrationPlan
+  ): Promise<MigrationPlan>
   runOnBeforeApply(context: ChxOnBeforeApplyContext): Promise<string[]>
   runOnAfterApply(context: ChxOnAfterApplyContext): Promise<void>
-  runOnCheck(context: Omit<ChxOnCheckContext, 'options'>): Promise<ChxOnCheckResult[]>
+  runOnCheck(
+    context: Omit<ChxOnCheckContext, 'options' | 'tableScope'> & { tableScope?: TableScope }
+  ): Promise<ChxOnCheckResult[]>
   runOnCheckReport(results: ChxOnCheckResult[], print: (line: string) => void): Promise<void>
   runPluginCommand(
     pluginName: string,
     commandName: string,
-    context: Omit<ChxPluginCommandContext, 'pluginName' | 'options'>
+    context: Omit<ChxPluginCommandContext, 'pluginName' | 'options' | 'tableScope'> & {
+      tableScope?: TableScope
+    }
   ): Promise<number>
 }
 
@@ -192,11 +208,12 @@ export async function loadPluginRuntime(input: {
       return { plugin: item, command }
     },
     async runOnConfigLoaded(context) {
+      const tableScope = context.tableScope ?? UNFILTERED_TABLE_SCOPE
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onConfigLoaded
         if (!hook) continue
         try {
-          await hook({ ...context, options: item.options })
+          await hook({ ...context, options: item.options, tableScope })
         } catch (error) {
           throw formatPluginError(item.plugin.manifest.name, 'onConfigLoaded', error)
         }
@@ -219,12 +236,13 @@ export async function loadPluginRuntime(input: {
       return definitions
     },
     async runOnPlanCreated(context, initialPlan) {
+      const tableScope = context.tableScope ?? UNFILTERED_TABLE_SCOPE
       let plan = initialPlan
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onPlanCreated
         if (!hook) continue
         try {
-          const next = await hook({ ...context, plan })
+          const next = await hook({ ...context, tableScope, plan })
           if (next) plan = next
         } catch (error) {
           throw formatPluginError(item.plugin.manifest.name, 'onPlanCreated', error)
@@ -258,12 +276,13 @@ export async function loadPluginRuntime(input: {
       }
     },
     async runOnCheck(context) {
+      const tableScope = context.tableScope ?? UNFILTERED_TABLE_SCOPE
       const results: ChxOnCheckResult[] = []
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onCheck
         if (!hook) continue
         try {
-          const result = await hook({ ...context, options: item.options })
+          const result = await hook({ ...context, options: item.options, tableScope })
           if (!result) continue
           results.push({
             plugin: result.plugin || item.plugin.manifest.name,
@@ -301,6 +320,7 @@ export async function loadPluginRuntime(input: {
           ...context,
           pluginName,
           options: item.options,
+          tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
         })
         return typeof code === 'number' ? code : 0
       } catch (error) {

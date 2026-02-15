@@ -97,10 +97,6 @@ async function createFixture(database: string): Promise<E2EFixture> {
 describe('@chx/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
 
-  test('validates required env variables are present', () => {
-    expect(() => getRequiredEnv()).not.toThrow()
-  })
-
   test(
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
@@ -302,4 +298,5 @@ describe('@chx/cli doppler env e2e', () => {
     },
     240_000
   )
+
 })

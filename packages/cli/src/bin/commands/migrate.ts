@@ -6,13 +6,14 @@ import { createInterface } from 'node:readline/promises'
 import { createClickHouseExecutor } from '@chx/clickhouse'
 
 import { CLI_VERSION } from '../version.js'
-import { getCommandContext, hasFlag } from '../config.js'
+import { getCommandContext, hasFlag, parseArg } from '../config.js'
 import { emitJson } from '../json-output.js'
 import {
   checksumSQL,
   findChecksumMismatches,
   listMigrations,
   readJournal,
+  readSnapshot,
   type MigrationJournalEntry,
   writeJournal,
 } from '../migration-store.js'
@@ -20,9 +21,11 @@ import { loadPluginRuntime } from '../plugin-runtime.js'
 import {
   collectDestructiveOperationMarkers,
   extractExecutableStatements,
+  extractMigrationOperationSummaries,
   migrationContainsDangerOperation,
   type DestructiveOperationMarker,
 } from '../safety-markers.js'
+import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../table-scope.js'
 
 function isBackgroundOrCI(): boolean {
   return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY
@@ -54,11 +57,43 @@ async function confirmDestructiveExecution(markers: DestructiveOperationMarker[]
   }
 }
 
+async function filterPendingByScope(
+  migrationsDir: string,
+  pending: string[],
+  selectedTables: ReadonlySet<string>
+): Promise<string[]> {
+  const selectedDatabases = new Set([...selectedTables].map((table) => table.split('.')[0] ?? ''))
+
+  const inScope: string[] = []
+  for (const file of pending) {
+    const sql = await readFile(join(migrationsDir, file), 'utf8')
+    const operations = extractMigrationOperationSummaries(sql)
+    const matches = operations.some((operation) => {
+      const tableKey = tableKeyFromOperationKey(operation.key)
+      if (tableKey) return selectedTables.has(tableKey)
+
+      const database = databaseKeyFromOperationKey(operation.key)
+      if (database) return selectedDatabases.has(database)
+
+      return false
+    })
+
+    if (matches) inScope.push(file)
+  }
+
+  return inScope
+}
+
 export async function cmdMigrate(args: string[]): Promise<void> {
   const executeRequested = hasFlag('--apply', args) || hasFlag('--execute', args)
   const allowDestructive = hasFlag('--allow-destructive', args)
+  const tableSelector = parseArg('--table', args)
 
   const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
+  const { migrationsDir, metaDir } = dirs
+  const snapshot = await readSnapshot(metaDir)
+  const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
+
   const pluginRuntime = await loadPluginRuntime({
     config,
     configPath,
@@ -68,20 +103,21 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     command: 'migrate',
     config,
     configPath,
+    tableScope,
   })
-  const { migrationsDir, metaDir } = dirs
 
   await mkdir(migrationsDir, { recursive: true })
   const files = await listMigrations(migrationsDir)
   const journal = await readJournal(metaDir)
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
-  const pending = files.filter((f) => !appliedNames.has(f))
+  const pendingAll = files.filter((f) => !appliedNames.has(f))
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
 
   if (checksumMismatches.length > 0) {
     if (jsonMode) {
       emitJson('migrate', {
         mode: executeRequested ? 'execute' : 'plan',
+        scope: tableScope,
         error: 'Checksum mismatch detected on applied migrations',
         checksumMismatches,
       })
@@ -95,9 +131,33 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     )
   }
 
+  if (tableScope.enabled && tableScope.matchCount === 0) {
+    if (jsonMode) {
+      emitJson('migrate', {
+        mode: executeRequested ? 'execute' : 'plan',
+        scope: tableScope,
+        pending: [],
+        applied: [],
+        warning: `No tables matched selector "${tableScope.selector ?? ''}".`,
+      })
+    } else {
+      console.log(`No tables matched selector "${tableScope.selector ?? ''}". No migrations selected.`)
+    }
+    return
+  }
+
+  const pending = tableScope.enabled
+    ? await filterPendingByScope(migrationsDir, pendingAll, new Set(tableScope.matchedTables))
+    : pendingAll
+
   if (pending.length === 0) {
     if (jsonMode) {
-      emitJson('migrate', { pending: [], applied: [], mode: executeRequested ? 'execute' : 'plan' })
+      emitJson('migrate', {
+        mode: executeRequested ? 'execute' : 'plan',
+        scope: tableScope,
+        pending: [],
+        applied: [],
+      })
     } else {
       console.log('No pending migrations.')
     }
@@ -106,6 +166,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
 
   const planned = {
     mode: executeRequested ? 'execute' : 'plan',
+    scope: tableScope,
     pending,
   }
 
@@ -115,6 +176,10 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   }
 
   if (!jsonMode) {
+    if (tableScope.enabled) {
+      console.log(`Table scope: ${tableScope.selector ?? ''} (${tableScope.matchCount} matched)`)
+      for (const table of tableScope.matchedTables) console.log(`- ${table}`)
+    }
     console.log(`Pending migrations: ${pending.length}`)
     for (const file of pending) console.log(`- ${file}`)
   }
@@ -161,6 +226,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     if (jsonMode) {
       emitJson('migrate', {
         mode: 'execute',
+        scope: tableScope,
         error,
         destructiveMigrations,
         destructiveOperations,
@@ -204,6 +270,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     const statements = await pluginRuntime.runOnBeforeApply({
       command: 'migrate',
       config,
+      tableScope,
       migration: file,
       sql,
       statements: parsedStatements,
@@ -223,6 +290,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
     await pluginRuntime.runOnAfterApply({
       command: 'migrate',
       config,
+      tableScope,
       migration: file,
       statements,
       appliedAt: entry.appliedAt,
@@ -234,6 +302,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
   if (jsonMode) {
     emitJson('migrate', {
       mode: 'execute',
+      scope: tableScope,
       applied: appliedNow,
       journalFile: join(metaDir, 'journal.json'),
     })

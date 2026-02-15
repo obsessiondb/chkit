@@ -26,9 +26,12 @@ export {
 export { emitJson, jsonPayload, printOutput, type Command } from './json-output.js'
 export {
   collectDestructiveOperationMarkers,
+  extractMigrationOperationSummaries,
   extractDestructiveOperationSummaries,
   extractExecutableStatements,
   migrationContainsDangerOperation,
+  parseOperationLine,
+  type MigrationOperationSummary,
   type DestructiveOperationMarker,
 } from './safety-markers.js'
 export { loadSchemaDefinitions } from './schema-loader.js'

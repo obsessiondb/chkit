@@ -1,8 +1,10 @@
-import { type MigrationPlan, type SchemaDefinition } from '@chx/core'
+import type { MigrationPlan, SchemaDefinition } from '@chx/core'
 
 import { emitJson, summarizePlan } from '../../lib.js'
+import type { TableScope } from '../../table-scope.js'
 
 interface GeneratePlanPayload {
+  scope: TableScope
   mode: 'plan'
   operationCount: number
   riskSummary: MigrationPlan['riskSummary']
@@ -11,6 +13,7 @@ interface GeneratePlanPayload {
 }
 
 interface GenerateApplyPayload {
+  scope: TableScope
   migrationFile: string | null
   snapshotFile: string
   definitionCount: number
@@ -18,8 +21,9 @@ interface GenerateApplyPayload {
   riskSummary: MigrationPlan['riskSummary']
 }
 
-export function emitGeneratePlanOutput(plan: MigrationPlan, jsonMode: boolean): void {
+export function emitGeneratePlanOutput(plan: MigrationPlan, jsonMode: boolean, scope: TableScope): void {
   const payload: GeneratePlanPayload = {
+    scope,
     mode: 'plan',
     operationCount: plan.operations.length,
     riskSummary: plan.riskSummary,
@@ -53,9 +57,11 @@ export function emitGenerateApplyOutput(
   result: { migrationFile: string | null; snapshotFile: string },
   definitions: SchemaDefinition[],
   plan: MigrationPlan,
-  jsonMode: boolean
+  jsonMode: boolean,
+  scope: TableScope
 ): void {
   const payload: GenerateApplyPayload = {
+    scope,
     migrationFile: result.migrationFile,
     snapshotFile: result.snapshotFile,
     definitionCount: definitions.length,
@@ -72,6 +78,12 @@ export function emitGenerateApplyOutput(
     console.log(`Generated migration: ${result.migrationFile}`)
   } else {
     console.log('No migration generated: plan is empty.')
+  }
+  if (scope.enabled) {
+    console.log(`Table scope:        ${scope.selector ?? ''} (${scope.matchCount} matched)`)
+    for (const table of scope.matchedTables) {
+      console.log(`- ${table}`)
+    }
   }
   console.log(`Updated snapshot:   ${result.snapshotFile}`)
   console.log(`Definitions:        ${definitions.length}`)
