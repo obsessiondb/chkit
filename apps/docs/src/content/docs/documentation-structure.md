@@ -12,6 +12,7 @@ Location: `apps/docs/src/content/docs`
 Contains:
 - End-user guides
 - CLI and configuration reference
+- Plugin usage documentation
 - Operational usage and troubleshooting
 
 Rules:
@@ -19,21 +20,21 @@ Rules:
 - Prefer stable, task-oriented content
 - Avoid roadmap and speculative details
 
-## Internal Documentation
+## Internal Planning
 
-Location: `docs/`
+Location: `planning/`
 
 Contains:
-- Planning and roadmap material
+- Deferred feature specs
 - Internal architecture notes
-- Delivery playbooks and implementation backlog
+- Reference contracts (JSON output, internal structure)
 
 Rules:
 - Audience is maintainers/contributors
 - Can include in-progress ideas and execution notes
-- Not published by default in the public docs app
+- Not published in the public docs app
 
-## Migration Rule of Thumb
+## Rule of Thumb
 
-If a page answers “How do I use CHX?”, it belongs in public docs.
-If a page answers “How are we planning/building CHX internally?”, it belongs in internal docs.
+If a page answers "How do I use CHX?", it belongs in public docs.
+If a page answers "How are we planning/building CHX internally?", it belongs in planning.

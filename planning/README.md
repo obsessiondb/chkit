@@ -1,7 +1,6 @@
-# CHX Internal Planning Docs Index
+# CHX Internal Planning
 
-This `/docs` folder is for internal planning and implementation material.
-Public user-facing documentation now lives in `/apps/docs/src/content/docs`.
+Internal specs and planning material. User-facing docs live in `/apps/docs/`.
 
 ## Active References
 1. `07-json-output-contract.md` — JSON output contract reference
@@ -12,6 +11,3 @@ Public user-facing documentation now lives in `/apps/docs/src/content/docs`.
 2. `optional-feature-distributed.md`
 3. `optional-feature-engine-specific-validation.md`
 4. `optional-feature-dependency-intelligence-plugin.md`
-
-## Implemented Usage Docs
-1. `typegen-plugin.md`
