@@ -27,17 +27,17 @@ This playbook defines how to execute CHX implementation work consistently and sa
 ## Testing Pyramid
 
 ### Unit Tests
-- `@chx/core`:
+- `@chkit/core`:
   - normalization
   - diff planner
   - operation ordering
   - SQL rendering
-- `@chx/codegen`:
+- `@chkit/codegen`:
   - file naming
   - snapshots/journal semantics
 
 ### Integration Tests
-- `@chx/clickhouse` with real ClickHouse container:
+- `@chkit/clickhouse` with real ClickHouse container:
   - create/apply/select checks
   - introspection consistency
   - failure/retry behavior

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { createFixture, renderScopedSchema, runCli, sortedKeys } from './testkit.test'
 
-describe('@chx/cli migrate e2e', () => {
+describe('@chkit/cli migrate e2e', () => {
   test('migrate --json fails on checksum mismatch', async () => {
     const fixture = await createFixture()
     try {

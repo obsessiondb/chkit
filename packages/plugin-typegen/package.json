@@ -1,6 +1,6 @@
 {
-  "name": "@chx/plugin-typegen",
-  "version": "0.1.0",
+  "name": "@chkit/plugin-typegen",
+  "version": "0.1.0-beta.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,7 +22,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chx/core": "workspace:*",
+    "@chkit/core": "workspace:*",
     "fast-glob": "^3.3.2"
   }
 }

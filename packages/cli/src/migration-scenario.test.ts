@@ -3,7 +3,7 @@ import { rm, writeFile } from 'node:fs/promises'
 
 import { CORE_ENTRY, createFixture, renderUsersSchema, runCli } from './testkit.test'
 
-describe('@chx/cli migration scenario flows', () => {
+describe('@chkit/cli migration scenario flows', () => {
   test('start state + schema changes produce expected diff and migrate destructive gate', async () => {
     const fixture = await createFixture()
     try {

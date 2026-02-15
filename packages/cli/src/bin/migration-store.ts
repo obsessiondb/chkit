@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import fg from 'fast-glob'
 
-import { canonicalizeDefinitions, type MigrationOperation, type SchemaDefinition, type Snapshot } from '@chx/core'
+import { canonicalizeDefinitions, type MigrationOperation, type SchemaDefinition, type Snapshot } from '@chkit/core'
 
 export interface MigrationJournalEntry {
   name: string

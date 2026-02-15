@@ -41,7 +41,7 @@ Use strangler pattern:
 ## Step-by-Step Extraction Plan
 
 ### Step 1: Isolate Portable Domain Types
-1. extract table/view/mv definitions into `@chx/core` model.
+1. extract table/view/mv definitions into `@chkit/core` model.
 2. remove references to monorepo-internal libs (`pipe-shared`, `shared-util`).
 3. freeze stable type interfaces.
 

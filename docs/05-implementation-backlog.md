@@ -5,7 +5,7 @@
 2. Keep PRs small and vertically sliced.
 3. Prioritize by dependency order and risk.
 
-## Core Package Backlog (`@chx/core`)
+## Core Package Backlog (`@chkit/core`)
 
 ### Schema and Validation
 1. Add richer column type helpers and aliases.
@@ -43,7 +43,7 @@
 2. golden tests for SQL output determinism.
 3. property tests for normalization idempotency.
 
-## ClickHouse Adapter Backlog (`@chx/clickhouse`)
+## ClickHouse Adapter Backlog (`@chkit/clickhouse`)
 
 ### Connection and Execution
 1. configurable clickhouse settings per command.
@@ -70,7 +70,7 @@
 1. integration tests with ephemeral ClickHouse.
 2. compatibility tests across selected ClickHouse versions.
 
-## Codegen Backlog (`@chx/codegen`)
+## Codegen Backlog (`@chkit/codegen`)
 
 ### Migration Files
 1. migration file header metadata:
@@ -94,7 +94,7 @@
 1. fs-level tests (atomic writes, idempotent reads).
 2. corrupted journal/snapshot recovery tests.
 
-## CLI Backlog (`@chx/cli`)
+## CLI Backlog (`@chkit/cli`)
 
 ### Command UX
 1. robust argument parser upgrade (strict flags, typed options).

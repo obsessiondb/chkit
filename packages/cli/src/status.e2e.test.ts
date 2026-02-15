@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { createFixture, runCli, sortedKeys } from './testkit.test'
 
-describe('@chx/cli status e2e', () => {
+describe('@chkit/cli status e2e', () => {
   test('generate --json then status --json shows pending migration', async () => {
     const fixture = await createFixture()
     try {

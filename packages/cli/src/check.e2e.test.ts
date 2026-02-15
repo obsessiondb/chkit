@@ -4,7 +4,7 @@ import { basename, join } from 'node:path'
 
 import { createFixture, runCli, sortedKeys } from './testkit.test'
 
-describe('@chx/cli check e2e', () => {
+describe('@chkit/cli check e2e', () => {
   test('check --json fails when migrations are pending', async () => {
     const fixture = await createFixture()
     try {

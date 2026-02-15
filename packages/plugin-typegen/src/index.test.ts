@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 
-import { resolveConfig, schema, table } from '@chx/core'
+import { resolveConfig, schema, table } from '@chkit/core'
 
 import {
   createTypegenPlugin,
@@ -17,7 +17,7 @@ import {
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
 const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
-describe('@chx/plugin-typegen options', () => {
+describe('@chkit/plugin-typegen options', () => {
   test('exposes typegen manifest and command', () => {
     const plugin = createTypegenPlugin()
 
@@ -49,7 +49,7 @@ describe('@chx/plugin-typegen options', () => {
   })
 })
 
-describe('@chx/plugin-typegen mapping', () => {
+describe('@chkit/plugin-typegen mapping', () => {
   test('maps primitive, nullable, and large integer types', () => {
     const numberType = mapColumnType(
       {
@@ -241,7 +241,7 @@ describe('@chx/plugin-typegen mapping', () => {
   })
 })
 
-describe('@chx/plugin-typegen generation', () => {
+describe('@chkit/plugin-typegen generation', () => {
   test('generates deterministic TypeScript output', () => {
     const definitions = schema(
       table({
@@ -329,7 +329,7 @@ describe('@chx/plugin-typegen generation', () => {
   })
 })
 
-describe('@chx/plugin-typegen check hook', () => {
+describe('@chkit/plugin-typegen check hook', () => {
   test('onCheck reports missing and then up-to-date output', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chx-typegen-plugin-'))
     const schemaPath = join(dir, 'schema.ts')

@@ -1,4 +1,4 @@
-import { normalizeSQLFragment } from '@chx/core'
+import { normalizeSQLFragment } from '@chkit/core'
 
 interface ProjectionDefinitionShape {
   name: string

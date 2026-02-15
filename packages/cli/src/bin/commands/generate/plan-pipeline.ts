@@ -4,7 +4,7 @@ import {
   type MigrationPlan,
   type RiskLevel,
   type SchemaDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 
 import type { ColumnRenameMapping, TableRenameMapping } from './rename-mappings.js'
 

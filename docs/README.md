@@ -35,10 +35,10 @@ If you start a fresh context window, paste this:
 
 ## Current Repo Baseline
 - Monorepo scaffold exists with packages:
-  - `@chx/core`
-  - `@chx/clickhouse`
-  - `@chx/codegen`
-  - `@chx/cli`
+  - `@chkit/core`
+  - `@chkit/clickhouse`
+  - `@chkit/codegen`
+  - `@chkit/cli`
 - Commands currently present:
   - `chx init`
   - `chx generate`

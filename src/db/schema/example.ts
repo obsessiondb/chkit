@@ -1,4 +1,4 @@
-import { schema, table } from '@chx/core'
+import { schema, table } from '@chkit/core'
 
 const events = table({
   database: 'default',

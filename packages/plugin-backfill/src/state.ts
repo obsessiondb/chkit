@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import type { ResolvedChxConfig } from '@chx/core'
+import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
 import type {

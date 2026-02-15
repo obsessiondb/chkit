@@ -3,7 +3,7 @@ import { rm } from 'node:fs/promises'
 
 import { createFixture, renderScopedSchema, runCli } from './testkit.test'
 
-describe('@chx/cli drift command e2e', () => {
+describe('@chkit/cli drift command e2e', () => {
   test('drift --json fails with actionable error when clickhouse config is missing', async () => {
     const fixture = await createFixture()
     try {

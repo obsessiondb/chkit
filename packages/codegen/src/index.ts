@@ -6,7 +6,7 @@ import {
   type MigrationPlan,
   type SchemaDefinition,
   type Snapshot,
-} from '@chx/core'
+} from '@chkit/core'
 
 export interface GenerateArtifactsInput {
   definitions: SchemaDefinition[]

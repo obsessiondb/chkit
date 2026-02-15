@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { resolveConfig } from '@chx/core'
+import { resolveConfig } from '@chkit/core'
 
 import { normalizeBackfillOptions } from './options.js'
 import { buildBackfillPlan } from './planner.js'
@@ -16,7 +16,7 @@ import {
   resumeBackfillRun,
 } from './runtime.js'
 
-describe('@chx/plugin-backfill run lifecycle', () => {
+describe('@chkit/plugin-backfill run lifecycle', () => {
   test('runs plan chunks and reports completed status', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
@@ -269,7 +269,7 @@ describe('@chx/plugin-backfill run lifecycle', () => {
   })
 })
 
-describe('@chx/plugin-backfill check integration', () => {
+describe('@chkit/plugin-backfill check integration', () => {
   test('reports pending required backfills when plan exists but run is missing', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')

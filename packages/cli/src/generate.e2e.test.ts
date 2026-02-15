@@ -4,7 +4,7 @@ import { basename } from 'node:path'
 
 import { CORE_ENTRY, createFixture, renderScopedSchema, runCli, sortedKeys } from './testkit.test'
 
-describe('@chx/cli generate e2e', () => {
+describe('@chkit/cli generate e2e', () => {
   test('generate --dryrun --json emits operation plan payload', async () => {
     const fixture = await createFixture()
     try {

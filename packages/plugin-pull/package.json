@@ -1,6 +1,6 @@
 {
-  "name": "@chx/plugin-pull",
-  "version": "0.1.0",
+  "name": "@chkit/plugin-pull",
+  "version": "0.1.0-beta.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,7 +22,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chx/clickhouse": "workspace:*",
-    "@chx/core": "workspace:*"
+    "@chkit/clickhouse": "workspace:*",
+    "@chkit/core": "workspace:*"
   }
 }

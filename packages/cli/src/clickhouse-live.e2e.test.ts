@@ -94,7 +94,7 @@ async function createFixture(database: string): Promise<E2EFixture> {
   return { dir, configPath, migrationsDir, schemaPath }
 }
 
-describe('@chx/cli doppler env e2e', () => {
+describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
 
   test(
