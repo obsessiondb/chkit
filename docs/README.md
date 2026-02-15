@@ -3,10 +3,9 @@
 This `/docs` folder is for internal planning and implementation material.
 Public user-facing documentation now lives in `/apps/docs/src/content/docs`.
 
-## Active Specs
-1. `06-release-foundation-spec.md` — GitHub Actions release automation (not yet implemented)
-2. `07-json-output-contract.md` — JSON output contract reference
-3. `08-internal-structure.md` — contributor reference for codebase layout
+## Active References
+1. `07-json-output-contract.md` — JSON output contract reference
+2. `08-internal-structure.md` — contributor reference for codebase layout
 
 ## Deferred Optional Feature Specs
 1. `optional-feature-clickhouse-compatibility-matrix.md`
