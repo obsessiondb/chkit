@@ -1,4 +1,7 @@
-# Typegen Plugin
+---
+title: Typegen Plugin
+description: Generate TypeScript row types and optional Zod schemas from CHX schema definitions.
+---
 
 This document covers practical usage of the optional `typegen` plugin.
 

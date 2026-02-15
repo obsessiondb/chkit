@@ -26,7 +26,7 @@ bun run chx check
 - Public docs site (Astro + Starlight): `apps/docs`
 - Run locally: `bun run docs:dev`
 - Build: `bun run docs:build`
-- Internal planning/implementation docs: `docs/`
+- Internal planning docs: `planning/`
 
 ## Commands
 
@@ -193,10 +193,9 @@ Under `migrationsDir`:
 
 ## JSON Output Contract
 
-- Contract document: `docs/07-json-output-contract.md`
+- Contract document: `planning/07-json-output-contract.md`
 
 ## Contributor Docs
 
-- Internal architecture and repository structure: `docs/08-internal-structure.md`
-- Planning docs index: `docs/README.md`
-- Typegen plugin usage/configuration: `docs/typegen-plugin.md`
+- Internal architecture and repository structure: `planning/08-internal-structure.md`
+- Planning docs index: `planning/README.md`

@@ -53,5 +53,5 @@ This document is for contributors. The root `README.md` is user-facing.
 ## Stability Rules
 
 - JSON payload envelope is `command` + `schemaVersion`.
-- Stable payload keys are documented in `docs/07-json-output-contract.md`.
+- Stable payload keys are documented in `planning/07-json-output-contract.md`.
 - Backward-incompatible JSON shape changes require a schema version bump.
