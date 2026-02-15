@@ -25,6 +25,10 @@ export default defineConfig({
 					label: 'Configuration',
 					autogenerate: { directory: 'configuration' },
 				},
+				{
+					label: 'Plugins',
+					autogenerate: { directory: 'plugins' },
+				},
 			],
 		}),
 	],
