@@ -3,13 +3,13 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { resolveConfig } from '@chx/core'
+import { resolveConfig } from '@chkit/core'
 
 import { normalizeBackfillOptions } from './options.js'
 import { buildBackfillPlan } from './planner.js'
 import { computeBackfillStateDir } from './state.js'
 
-describe('@chx/plugin-backfill planning', () => {
+describe('@chkit/plugin-backfill planning', () => {
   test('builds deterministic plan id and chunks for identical input', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')

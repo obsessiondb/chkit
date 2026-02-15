@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
-import { createClickHouseExecutor } from '@chx/clickhouse'
+import { createClickHouseExecutor } from '@chkit/clickhouse'
 
 import { CLI_VERSION } from '../version.js'
 import { getCommandContext, hasFlag, parseArg } from '../config.js'

@@ -18,7 +18,7 @@ function renderDualTableSchema(input?: {
   return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' }${usersExtra},\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst events = table({\n  database: 'app',\n  name: 'events',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' }${eventsExtra},\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users, events)\n`
 }
 
-describe('@chx/cli table scope e2e', () => {
+describe('@chkit/cli table scope e2e', () => {
   test('scoped generate only writes selected-table migration and updates selected table snapshot state', async () => {
     const fixture = await createFixture(renderDualTableSchema())
     try {

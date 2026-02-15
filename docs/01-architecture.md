@@ -2,10 +2,10 @@
 
 ## Architectural Overview
 CHX uses a layered architecture:
-1. `@chx/core`: pure domain logic (definitions, canonicalization, diff planning, SQL rendering contracts).
-2. `@chx/clickhouse`: ClickHouse runtime adapter (introspection + execution).
-3. `@chx/codegen`: filesystem artifacts (snapshots, migration files, plan outputs).
-4. `@chx/cli`: command orchestration, prompts, config loading, UX.
+1. `@chkit/core`: pure domain logic (definitions, canonicalization, diff planning, SQL rendering contracts).
+2. `@chkit/clickhouse`: ClickHouse runtime adapter (introspection + execution).
+3. `@chkit/codegen`: filesystem artifacts (snapshots, migration files, plan outputs).
+4. `@chkit/cli`: command orchestration, prompts, config loading, UX.
 5. plugins: optional capabilities that hook into CLI and planning lifecycle.
 
 ## Design Constraints
@@ -17,7 +17,7 @@ CHX uses a layered architecture:
 
 ## Package Responsibilities
 
-### `@chx/core`
+### `@chkit/core`
 - schema DSL and types
 - canonical model normalization
 - diff planner
@@ -49,7 +49,7 @@ CHX uses a layered architecture:
 7. `errors/`
    - typed error hierarchy
 
-### `@chx/clickhouse`
+### `@chkit/clickhouse`
 - execute SQL statements
 - introspect DB metadata (tables/columns/settings/indexes)
 - detect drift against expected schema
@@ -62,7 +62,7 @@ CHX uses a layered architecture:
 4. `drift/` (db schema -> core model mapping)
 5. `errors/`
 
-### `@chx/codegen`
+### `@chkit/codegen`
 - write migration files
 - write snapshot and journals
 - support stable naming conventions
@@ -75,7 +75,7 @@ CHX uses a layered architecture:
 4. `snapshot/` (persist/load snapshots)
 5. `export/` (plan/report serialization)
 
-### `@chx/cli`
+### `@chkit/cli`
 - command parsing and routing
 - config discovery and loading
 - schema module discovery
@@ -163,7 +163,7 @@ Canonicalization is critical to avoid noisy diffs.
 
 ## Config Model (Target)
 ```ts
-import { defineConfig } from '@chx/core'
+import { defineConfig } from '@chkit/core'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',

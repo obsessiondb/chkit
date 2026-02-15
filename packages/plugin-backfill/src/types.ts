@@ -1,4 +1,4 @@
-import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chx/core'
+import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core'
 
 export interface BackfillPluginDefaults {
   chunkHours?: number

@@ -13,7 +13,7 @@ import {
   parseUniqueKeyFromCreateTableQuery,
 } from './index'
 
-describe('@chx/clickhouse smoke', () => {
+describe('@chkit/clickhouse smoke', () => {
   test('creates executor with execute/query methods', () => {
     const executor = createClickHouseExecutor({
       url: 'http://localhost:8123',

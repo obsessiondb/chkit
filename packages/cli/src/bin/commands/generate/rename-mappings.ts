@@ -1,4 +1,4 @@
-import { type SchemaDefinition, type TableDefinition } from '@chx/core'
+import { type SchemaDefinition, type TableDefinition } from '@chkit/core'
 
 export interface TableRenameMapping {
   oldDatabase: string

@@ -11,7 +11,7 @@ import {
   type ChxConfigFn,
   type ChxConfigInput,
   type ResolvedChxConfig,
-} from '@chx/core'
+} from '@chkit/core'
 
 export const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
 

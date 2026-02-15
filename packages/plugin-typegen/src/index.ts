@@ -11,7 +11,7 @@ import {
   type SchemaDefinition,
   type TableDefinition,
   type ViewDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 
 export interface TypegenPluginOptions {
   outFile?: string

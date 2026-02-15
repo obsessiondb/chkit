@@ -8,7 +8,7 @@ import {
   type MigrationPlan,
   type ResolvedChxConfig,
   type SchemaDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 
 import type {
   ChxOnCheckContext,

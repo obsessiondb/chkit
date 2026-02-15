@@ -1,13 +1,13 @@
 {
-  "name": "@chx/codegen",
-  "version": "0.1.0",
+  "name": "@chkit/codegen",
+  "version": "0.1.0-beta.0",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "files": [
@@ -22,6 +22,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chx/core": "workspace:*"
+    "@chkit/core": "workspace:*"
   }
 }

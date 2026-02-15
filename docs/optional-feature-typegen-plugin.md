@@ -86,7 +86,7 @@ This preserves existing company workflows by extending shared commands rather th
 
 ## Configuration Contract (v1)
 ```ts
-import { typegen } from '@chx/plugin-typegen'
+import { typegen } from '@chkit/plugin-typegen'
 
 plugins: [
   typegen({

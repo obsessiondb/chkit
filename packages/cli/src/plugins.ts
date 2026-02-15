@@ -4,7 +4,7 @@ import type {
   MigrationPlan,
   ResolvedChxConfig,
   SchemaDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 import type { TableScope } from './bin/table-scope.js'
 
 export interface ChxPluginManifest {

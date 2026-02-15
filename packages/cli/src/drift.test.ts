@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { table } from '@chx/core'
+import { table } from '@chkit/core'
 
 import { compareSchemaObjects, compareTableShape, summarizeDriftReasons } from './drift'
 
-describe('@chx/cli drift comparer', () => {
+describe('@chkit/cli drift comparer', () => {
   test('emits missing_object reason code when expected object is absent', () => {
     const result = compareSchemaObjects(
       [{ kind: 'table', database: 'app', name: 'events' }],
