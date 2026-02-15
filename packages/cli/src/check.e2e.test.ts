@@ -2,10 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
-import { sortedKeys } from './commands.e2e-helpers'
-import { createFixture, runCli } from './testkit.test'
+import { createFixture, runCli, sortedKeys } from './testkit.test'
 
-describe('@chx/cli check e2e', () => {
+describe('@chkit/cli check e2e', () => {
   test('check --json fails when migrations are pending', async () => {
     const fixture = await createFixture()
     try {

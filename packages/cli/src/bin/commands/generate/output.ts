@@ -1,4 +1,4 @@
-import type { MigrationPlan, SchemaDefinition } from '@chx/core'
+import type { MigrationPlan, SchemaDefinition } from '@chkit/core'
 
 import { emitJson, summarizePlan } from '../../lib.js'
 import type { TableScope } from '../../table-scope.js'

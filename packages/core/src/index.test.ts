@@ -13,7 +13,7 @@ import {
   view,
 } from './index'
 
-describe('@chx/core smoke', () => {
+describe('@chkit/core smoke', () => {
   test('builds table and view definitions', () => {
     const users = table({
       database: 'app',
@@ -117,7 +117,7 @@ describe('@chx/core smoke', () => {
   })
 })
 
-describe('@chx/core planner v1', () => {
+describe('@chkit/core planner v1', () => {
   test('canonicalizes deterministically by kind/database/name', () => {
     const defs = canonicalizeDefinitions([
       view({ database: 'z', name: 'v2', as: 'SELECT 1' }),

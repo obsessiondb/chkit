@@ -1,6 +1,6 @@
-import { generateArtifacts } from '@chx/codegen'
+import { generateArtifacts } from '@chkit/codegen'
 import process from 'node:process'
-import { ChxValidationError, planDiff } from '@chx/core'
+import { ChxValidationError, planDiff } from '@chkit/core'
 
 import {
   CLI_VERSION,

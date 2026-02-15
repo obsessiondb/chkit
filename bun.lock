@@ -13,7 +13,7 @@
       },
     },
     "apps/docs": {
-      "name": "@chx/docs",
+      "name": "@chkit/docs",
       "version": "0.0.1",
       "dependencies": {
         "@astrojs/starlight": "^0.37.6",
@@ -22,61 +22,61 @@
       },
     },
     "packages/cli": {
-      "name": "@chx/cli",
+      "name": "@chkit/cli",
       "version": "0.1.0",
       "bin": {
         "chx": "./dist/bin/chx.js",
       },
       "dependencies": {
-        "@chx/clickhouse": "workspace:*",
-        "@chx/codegen": "workspace:*",
-        "@chx/core": "workspace:*",
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/codegen": "workspace:*",
+        "@chkit/core": "workspace:*",
         "@stricli/core": "^1.2.5",
         "fast-glob": "^3.3.2",
       },
     },
     "packages/clickhouse": {
-      "name": "@chx/clickhouse",
+      "name": "@chkit/clickhouse",
       "version": "0.1.0",
       "dependencies": {
-        "@chx/core": "workspace:*",
+        "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
       },
     },
     "packages/codegen": {
-      "name": "@chx/codegen",
+      "name": "@chkit/codegen",
       "version": "0.1.0",
       "dependencies": {
-        "@chx/core": "workspace:*",
+        "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
-      "name": "@chx/core",
+      "name": "@chkit/core",
       "version": "0.1.0",
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
     },
     "packages/plugin-backfill": {
-      "name": "@chx/plugin-backfill",
+      "name": "@chkit/plugin-backfill",
       "version": "0.1.0",
       "dependencies": {
-        "@chx/core": "workspace:*",
+        "@chkit/core": "workspace:*",
       },
     },
     "packages/plugin-pull": {
-      "name": "@chx/plugin-pull",
+      "name": "@chkit/plugin-pull",
       "version": "0.1.0",
       "dependencies": {
-        "@chx/clickhouse": "workspace:*",
-        "@chx/core": "workspace:*",
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
       },
     },
     "packages/plugin-typegen": {
-      "name": "@chx/plugin-typegen",
+      "name": "@chkit/plugin-typegen",
       "version": "0.1.0",
       "dependencies": {
-        "@chx/core": "workspace:*",
+        "@chkit/core": "workspace:*",
         "fast-glob": "^3.3.2",
       },
     },
@@ -162,21 +162,21 @@
 
     "@changesets/write": ["@changesets/write@0.4.0", "", { "dependencies": { "@changesets/types": "^6.1.0", "fs-extra": "^7.0.1", "human-id": "^4.1.1", "prettier": "^2.7.1" } }, "sha512-CdTLvIOPiCNuH71pyDu3rA+Q0n65cmAbXnwWH84rKGiFumFzkmHNT8KHTMEchcxN+Kl8I54xGUhJ7l3E7X396Q=="],
 
-    "@chx/cli": ["@chx/cli@workspace:packages/cli"],
+    "@chkit/cli": ["@chkit/cli@workspace:packages/cli"],
 
-    "@chx/clickhouse": ["@chx/clickhouse@workspace:packages/clickhouse"],
+    "@chkit/clickhouse": ["@chkit/clickhouse@workspace:packages/clickhouse"],
 
-    "@chx/codegen": ["@chx/codegen@workspace:packages/codegen"],
+    "@chkit/codegen": ["@chkit/codegen@workspace:packages/codegen"],
 
-    "@chx/core": ["@chx/core@workspace:packages/core"],
+    "@chkit/core": ["@chkit/core@workspace:packages/core"],
 
-    "@chx/docs": ["@chx/docs@workspace:apps/docs"],
+    "@chkit/docs": ["@chkit/docs@workspace:apps/docs"],
 
-    "@chx/plugin-backfill": ["@chx/plugin-backfill@workspace:packages/plugin-backfill"],
+    "@chkit/plugin-backfill": ["@chkit/plugin-backfill@workspace:packages/plugin-backfill"],
 
-    "@chx/plugin-pull": ["@chx/plugin-pull@workspace:packages/plugin-pull"],
+    "@chkit/plugin-pull": ["@chkit/plugin-pull@workspace:packages/plugin-pull"],
 
-    "@chx/plugin-typegen": ["@chx/plugin-typegen@workspace:packages/plugin-typegen"],
+    "@chkit/plugin-typegen": ["@chkit/plugin-typegen@workspace:packages/plugin-typegen"],
 
     "@clickhouse/client": ["@clickhouse/client@1.17.0", "", { "dependencies": { "@clickhouse/client-common": "1.17.0" } }, "sha512-Y3DQoamKZ/Iyosoq7Lj7lqpDkQDK4R/5mI52yJs4ZLPIO+d6/CYDqTbFBIb4No3C/AlXUYE4TKhj/kXDpe6rOA=="],
 

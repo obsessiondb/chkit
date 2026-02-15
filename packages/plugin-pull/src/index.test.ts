@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 
 import { __testUtils, createPullPlugin, renderSchemaFile } from './index.js'
 
-describe('@chx/plugin-pull renderSchemaFile', () => {
+describe('@chkit/plugin-pull renderSchemaFile', () => {
   test('renders deterministic table definitions', () => {
     const content = renderSchemaFile([
       {
@@ -23,7 +23,7 @@ describe('@chx/plugin-pull renderSchemaFile', () => {
       },
     ])
 
-    expect(content).toContain("import { schema, table } from '@chx/core'")
+    expect(content).toContain("import { schema, table } from '@chkit/core'")
     expect(content).toContain('const app_events = table({')
     expect(content).toContain('default: "fn:now64(3)"')
     expect(content).toContain("export default schema(app_events)")
@@ -46,7 +46,7 @@ describe('@chx/plugin-pull renderSchemaFile', () => {
       },
     ])
 
-    expect(content).toContain("import { schema, view, materializedView } from '@chx/core'")
+    expect(content).toContain("import { schema, view, materializedView } from '@chkit/core'")
     expect(content).toContain('const app_events_view = view({')
     expect(content).toContain('const app_events_mv = materializedView({')
     expect(content).toContain('to: { database: "app", name: "events_rollup" }')
@@ -54,7 +54,7 @@ describe('@chx/plugin-pull renderSchemaFile', () => {
   })
 })
 
-describe('@chx/plugin-pull schema command', () => {
+describe('@chkit/plugin-pull schema command', () => {
   test('supports --dryrun with json payload', async () => {
     const plugin = createPullPlugin({
       databases: ['app'],
@@ -194,7 +194,7 @@ describe('@chx/plugin-pull schema command', () => {
     }
     expect(payload.definitionCount).toBe(3)
     expect(payload.tableCount).toBe(1)
-    expect(payload.content).toContain("import { schema, table, view, materializedView } from '@chx/core'")
+    expect(payload.content).toContain("import { schema, table, view, materializedView } from '@chkit/core'")
     expect(payload.content).toContain('const app_users_view = view({')
     expect(payload.content).toContain('const app_users_mv = materializedView({')
   })
@@ -279,7 +279,7 @@ describe('@chx/plugin-pull schema command', () => {
   })
 })
 
-describe('@chx/plugin-pull parser helpers', () => {
+describe('@chkit/plugin-pull parser helpers', () => {
   test('parseAsClause extracts trailing query and trims semicolon', () => {
     const asClause = __testUtils.parseAsClause(`CREATE VIEW app.v AS
 SELECT id
@@ -324,7 +324,7 @@ FROM app.users;`)
   })
 })
 
-describe('@chx/plugin-pull skipped objects summary', () => {
+describe('@chkit/plugin-pull skipped objects summary', () => {
   test('counts only unsupported or unparsed objects in selected databases', () => {
     const summary = __testUtils.summarizeSkippedObjects(
       [

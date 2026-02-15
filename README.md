@@ -113,9 +113,9 @@ Returns non-zero when enabled checks fail.
 ## Config (`clickhouse.config.ts`)
 
 ```ts
-import { defineConfig } from '@chx/core'
-import { pull } from '@chx/plugin-pull'
-import { typegen } from '@chx/plugin-typegen'
+import { defineConfig } from '@chkit/core'
+import { pull } from '@chkit/plugin-pull'
+import { typegen } from '@chkit/plugin-typegen'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',
@@ -159,9 +159,9 @@ export default defineConfig({
 
 ### Plugin API v1
 
-Plugin modules should export `definePlugin(...)` from `@chx/cli`.
+Plugin modules should export `definePlugin(...)` from `@chkit/cli`.
 
-For typed config registration, plugin packages can export helpers that return inline registrations (for example `typegen(...)` from `@chx/plugin-typegen`).
+For typed config registration, plugin packages can export helpers that return inline registrations (for example `typegen(...)` from `@chkit/plugin-typegen`).
 
 - `manifest.apiVersion` must be `1`.
 - Optional compatibility gates:

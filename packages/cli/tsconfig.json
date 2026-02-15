@@ -5,9 +5,9 @@
     "outDir": "dist",
     "baseUrl": ".",
     "paths": {
-      "@chx/core": ["../core/src/index", "../core/src"],
-      "@chx/clickhouse": ["../clickhouse/src/index", "../clickhouse/src"],
-      "@chx/codegen": ["../codegen/src/index", "../codegen/src"]
+      "@chkit/core": ["../core/src/index", "../core/src"],
+      "@chkit/clickhouse": ["../clickhouse/src/index", "../clickhouse/src"],
+      "@chkit/codegen": ["../codegen/src/index", "../codegen/src"]
     }
   },
   "include": ["src/**/*.ts"],

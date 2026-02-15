@@ -4,7 +4,7 @@ import {
   type ProjectionDefinition,
   type SkipIndexDefinition,
   type TableDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './drift-diff.js'
 
 export type TableDriftReasonCode =

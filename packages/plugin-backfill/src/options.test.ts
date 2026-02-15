@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { normalizeBackfillOptions } from './options.js'
 
-describe('@chx/plugin-backfill options', () => {
+describe('@chkit/plugin-backfill options', () => {
   test('normalizes documented defaults', () => {
     const options = normalizeBackfillOptions()
 

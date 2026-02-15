@@ -1,0 +1,17 @@
+{
+  "mode": "pre",
+  "tag": "beta",
+  "initialVersions": {
+    "@chkit/docs": "0.0.1",
+    "@chkit/cli": "0.0.0",
+    "@chkit/clickhouse": "0.0.0",
+    "@chkit/codegen": "0.0.0",
+    "@chkit/core": "0.0.0",
+    "@chkit/plugin-backfill": "0.0.0",
+    "@chkit/plugin-pull": "0.0.0",
+    "@chkit/plugin-typegen": "0.0.0"
+  },
+  "changesets": [
+    "late-moose-hang"
+  ]
+}

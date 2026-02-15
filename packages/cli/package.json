@@ -1,6 +1,6 @@
 {
-  "name": "@chx/cli",
-  "version": "0.1.0",
+  "name": "@chkit/cli",
+  "version": "0.1.0-beta.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -19,9 +19,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chx/clickhouse": "workspace:*",
-    "@chx/codegen": "workspace:*",
-    "@chx/core": "workspace:*",
+    "@chkit/clickhouse": "workspace:*",
+    "@chkit/codegen": "workspace:*",
+    "@chkit/core": "workspace:*",
     "@stricli/core": "^1.2.5",
     "fast-glob": "^3.3.2"
   }

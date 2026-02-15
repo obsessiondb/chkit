@@ -30,6 +30,9 @@ Define the minimum release system required to ship CHX safely and repeatedly:
   - `bun run version-packages`
   - `bun run release`
 - CI exists (`.github/workflows/ci.yml`) but no release workflow yet.
+- A Phase 0 local release script spec exists:
+  - `docs/06a-manual-release-script-spec.md`
+  - This should be implemented before CI workflow rollout.
 
 ## Requirements
 1. Every user-facing change must carry a changeset file unless explicitly skipped.

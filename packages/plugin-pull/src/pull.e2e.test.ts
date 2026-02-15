@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import type { ResolvedChxConfig } from '@chx/core'
+import type { ResolvedChxConfig } from '@chkit/core'
 
 import { createPullPlugin } from './index.js'
 
@@ -70,7 +70,7 @@ function createResolvedConfig(clickhouse: NonNullable<ResolvedChxConfig['clickho
   }
 }
 
-describe('@chx/plugin-pull live env e2e', () => {
+describe('@chkit/plugin-pull live env e2e', () => {
   const liveEnv = getRequiredEnv()
 
   test('validates required env variables are present', () => {

@@ -3,7 +3,7 @@ import type {
   MigrationPlan,
   SchemaDefinition,
   TableDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 
 interface ParsedTableSelector {
   database?: string

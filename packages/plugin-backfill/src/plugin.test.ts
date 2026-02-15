@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { backfill, createBackfillPlugin } from './plugin.js'
 
-describe('@chx/plugin-backfill plugin surface', () => {
+describe('@chkit/plugin-backfill plugin surface', () => {
   test('exposes commands and typed registration helper', () => {
     const plugin = createBackfillPlugin()
     const registration = backfill({ defaults: { chunkHours: 4 } })

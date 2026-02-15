@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 
-import type { ResolvedChxConfig } from '@chx/core'
+import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
 import {

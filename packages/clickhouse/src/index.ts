@@ -5,7 +5,7 @@ import {
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 import {
   parseEngineFromCreateTableQuery,
   parseOrderByFromCreateTableQuery,

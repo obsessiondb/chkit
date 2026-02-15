@@ -6,7 +6,7 @@ import {
   createClickHouseExecutor,
   inferSchemaKindFromEngine,
   type IntrospectedTable,
-} from '@chx/clickhouse'
+} from '@chkit/clickhouse'
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
@@ -15,7 +15,7 @@ import {
   type SchemaDefinition,
   type TableDefinition,
   type ViewDefinition,
-} from '@chx/core'
+} from '@chkit/core'
 
 export interface PullPluginOptions {
   outFile?: string
@@ -592,7 +592,7 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   if (hasView) imports.push('view')
   if (hasMaterializedView) imports.push('materializedView')
   const lines: string[] = [
-    `import { ${imports.join(', ')} } from '@chx/core'`,
+    `import { ${imports.join(', ')} } from '@chkit/core'`,
     '',
     '// Pulled from live ClickHouse metadata via chx plugin pull schema',
     '',

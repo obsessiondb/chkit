@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 
-import { createClickHouseExecutor } from '@chx/clickhouse'
-import type { ChxConfig, Snapshot, TableDefinition } from '@chx/core'
+import { createClickHouseExecutor } from '@chkit/clickhouse'
+import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
 
 import {
   compareSchemaObjects,

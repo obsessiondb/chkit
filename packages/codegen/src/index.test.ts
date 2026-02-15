@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os'
 
 import { describe, expect, test } from 'bun:test'
 
-import { planDiff, table } from '@chx/core'
+import { planDiff, table } from '@chkit/core'
 
 import { generateArtifacts } from './index'
 
-describe('@chx/codegen smoke', () => {
+describe('@chkit/codegen smoke', () => {
   test('writes migration and snapshot artifacts', async () => {
     const workdir = await mkdtemp(join(tmpdir(), 'chx-codegen-test-'))
 

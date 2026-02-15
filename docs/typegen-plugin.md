@@ -24,13 +24,13 @@ The plugin is designed so your existing CHX workflow can stay the same.
 
 ## Plugin setup
 
-In `clickhouse.config.ts`, register `typegen(...)` from `@chx/plugin-typegen`.
+In `clickhouse.config.ts`, register `typegen(...)` from `@chkit/plugin-typegen`.
 
 Recommended typed setup:
 
 ```ts
-import { defineConfig } from '@chx/core'
-import { typegen } from '@chx/plugin-typegen'
+import { defineConfig } from '@chkit/core'
+import { typegen } from '@chkit/plugin-typegen'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',

@@ -19,7 +19,7 @@ description: "clickhouse.config.ts structure and defaults."
 ## Example
 
 ```ts
-import { defineConfig } from '@chx/core'
+import { defineConfig } from '@chkit/core'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',

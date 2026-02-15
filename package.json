@@ -21,6 +21,7 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
+    "release:manual": "bun run ./scripts/manual-release.ts",
     "clean": "turbo run clean",
     "chx": "bun run ./packages/cli/src/bin/chx.ts"
   },
