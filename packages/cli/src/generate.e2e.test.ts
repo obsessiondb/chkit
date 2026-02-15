@@ -2,8 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 import { basename } from 'node:path'
 
-import { renderScopedSchema, sortedKeys } from './commands.e2e-helpers'
-import { CORE_ENTRY, createFixture, runCli } from './testkit.test'
+import { CORE_ENTRY, createFixture, renderScopedSchema, runCli, sortedKeys } from './testkit.test'
 
 describe('@chx/cli generate e2e', () => {
   test('generate --dryrun --json emits operation plan payload', async () => {

@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { rm } from 'node:fs/promises'
 
-import { renderScopedSchema } from './commands.e2e-helpers'
-import { createFixture, runCli } from './testkit.test'
+import { createFixture, renderScopedSchema, runCli } from './testkit.test'
 
 describe('@chx/cli drift command e2e', () => {
   test('drift --json fails with actionable error when clickhouse config is missing', async () => {

@@ -2,8 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { sortedKeys } from './commands.e2e-helpers'
-import { createFixture, runCli } from './testkit.test'
+import { createFixture, runCli, sortedKeys } from './testkit.test'
 
 describe('@chx/cli status e2e', () => {
   test('generate --json then status --json shows pending migration', async () => {

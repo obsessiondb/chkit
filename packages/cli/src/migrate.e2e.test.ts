@@ -2,8 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { renderScopedSchema, sortedKeys } from './commands.e2e-helpers'
-import { createFixture, runCli } from './testkit.test'
+import { createFixture, renderScopedSchema, runCli, sortedKeys } from './testkit.test'
 
 describe('@chx/cli migrate e2e', () => {
   test('migrate --json fails on checksum mismatch', async () => {
