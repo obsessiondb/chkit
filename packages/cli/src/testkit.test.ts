@@ -11,7 +11,7 @@ export const PULL_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-pull/src/
 
 export function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync({
-    cmd: ['bun', './packages/cli/src/bin/chx.ts', ...args],
+    cmd: ['bun', './packages/cli/src/bin/chkit.ts', ...args],
     cwd: WORKSPACE_ROOT,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -52,10 +52,10 @@ export async function createFixture(initialSchema?: string): Promise<{
   metaDir: string
   schemaPath: string
 }> {
-  const dir = await mkdtemp(join(tmpdir(), 'chx-cli-test-'))
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-test-'))
   const schemaPath = join(dir, 'schema.ts')
   const configPath = join(dir, 'clickhouse.config.ts')
-  const outDir = join(dir, 'chx')
+  const outDir = join(dir, 'chkit')
   const migrationsDir = join(outDir, 'migrations')
   const metaDir = join(outDir, 'meta')
 

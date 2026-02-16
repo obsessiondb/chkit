@@ -87,9 +87,9 @@ describe('@chkit/plugin-pull schema command', () => {
       configPath: '/tmp/clickhouse.config.ts',
       config: {
         schema: ['./schema.ts'],
-        outDir: './chx',
-        migrationsDir: './chx/migrations',
-        metaDir: './chx/meta',
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
         plugins: [],
         check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
         safety: { allowDestructive: false },
@@ -167,9 +167,9 @@ describe('@chkit/plugin-pull schema command', () => {
       configPath: '/tmp/clickhouse.config.ts',
       config: {
         schema: ['./schema.ts'],
-        outDir: './chx',
-        migrationsDir: './chx/migrations',
-        metaDir: './chx/meta',
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
         plugins: [],
         check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
         safety: { allowDestructive: false },
@@ -200,7 +200,7 @@ describe('@chkit/plugin-pull schema command', () => {
   })
 
   test('writes schema file and fails on existing file without --force', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-plugin-pull-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-'))
     const outFile = join(dir, 'schema.ts')
 
     const plugin = createPullPlugin({
@@ -233,9 +233,9 @@ describe('@chkit/plugin-pull schema command', () => {
         configPath: '/tmp/clickhouse.config.ts',
         config: {
           schema: ['./schema.ts'],
-          outDir: './chx',
-          migrationsDir: './chx/migrations',
-          metaDir: './chx/meta',
+          outDir: './chkit',
+          migrationsDir: './chkit/migrations',
+          metaDir: './chkit/meta',
           plugins: [],
           check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
           safety: { allowDestructive: false },

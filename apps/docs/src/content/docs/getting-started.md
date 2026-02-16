@@ -1,6 +1,6 @@
 ---
 title: Getting Started
-description: Install chx and run the first migration flow.
+description: Install chkit and run the first migration flow.
 ---
 
 ## Prerequisites
@@ -13,18 +13,18 @@ description: Install chx and run the first migration flow.
 ```bash
 bun install
 bun run build
-bun run chx --help
+bun run chkit --help
 ```
 
 ## Quick Start
 
 ```bash
-bun run chx init
-bun run chx generate --name init
-bun run chx migrate
-bun run chx migrate --apply
-bun run chx status
-bun run chx check
+bun run chkit init
+bun run chkit generate --name init
+bun run chkit migrate
+bun run chkit migrate --apply
+bun run chkit status
+bun run chkit check
 ```
 
 ## Next

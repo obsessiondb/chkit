@@ -26,7 +26,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './plan-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './plan-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -54,7 +54,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './commands-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './commands-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -91,7 +91,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -137,7 +137,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -153,7 +153,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx plugin backfill plan writes deterministic state artifact', async () => {
+  test('chkit plugin backfill plan writes deterministic state artifact', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -165,7 +165,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -224,7 +224,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx plugin backfill run and status complete planned chunks', async () => {
+  test('chkit plugin backfill run and status complete planned chunks', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -236,7 +236,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -300,7 +300,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx plugin backfill fail then resume without replaying done chunks', async () => {
+  test('chkit plugin backfill fail then resume without replaying done chunks', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -312,7 +312,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -395,7 +395,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx check --json includes backfill plugin result and fails on required pending backfill', async () => {
+  test('chkit check --json includes backfill plugin result and fails on required pending backfill', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -407,7 +407,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -456,7 +456,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx check --json passes backfill plugin when required backfill is completed', async () => {
+  test('chkit check --json passes backfill plugin when required backfill is completed', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -468,7 +468,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -528,7 +528,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx plugin backfill resume enforces compatibility check unless force override is provided', async () => {
+  test('chkit plugin backfill resume enforces compatibility check unless force override is provided', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -539,7 +539,7 @@ describe('plugin runtime', () => {
       )
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { chunkHours: 2, maxRetriesPerChunk: 1 } } }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { chunkHours: 2, maxRetriesPerChunk: 1 } } }],\n}\n`,
         'utf8'
       )
 
@@ -580,7 +580,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { chunkHours: 2, maxRetriesPerChunk: 5 } } }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { chunkHours: 2, maxRetriesPerChunk: 5 } } }],\n}\n`,
         'utf8'
       )
 
@@ -618,7 +618,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx plugin backfill cancel and doctor provide operator remediation flow', async () => {
+  test('chkit plugin backfill cancel and doctor provide operator remediation flow', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -629,7 +629,7 @@ describe('plugin runtime', () => {
       )
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -703,10 +703,10 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx typegen writes output file', async () => {
+  test('chkit typegen writes output file', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
-    const outFile = join(fixture.dir, 'src/generated/chx-types.ts')
+    const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
@@ -716,7 +716,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -739,13 +739,13 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx typegen writes output file with typed inline plugin registration', async () => {
+  test('chkit typegen writes output file with typed inline plugin registration', async () => {
     const fixture = await createFixture()
-    const outFile = join(fixture.dir, 'src/generated/chx-types.ts')
+    const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         fixture.configPath,
-        `import { defineConfig } from '${CORE_ENTRY}'\nimport { typegen } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default defineConfig({\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [typegen({ outFile: './src/generated/chx-types.ts' })],\n})\n`,
+        `import { defineConfig } from '${CORE_ENTRY}'\nimport { typegen } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default defineConfig({\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [typegen({ outFile: './src/generated/chkit-types.ts' })],\n})\n`,
         'utf8'
       )
 
@@ -765,10 +765,10 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx generate runs typegen plugin when runOnGenerate is enabled', async () => {
+  test('chkit generate runs typegen plugin when runOnGenerate is enabled', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
-    const outFile = join(fixture.dir, 'src/generated/chx-types.ts')
+    const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
@@ -778,7 +778,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -790,10 +790,10 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx generate skips typegen plugin when runOnGenerate is false', async () => {
+  test('chkit generate skips typegen plugin when runOnGenerate is false', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
-    const outFile = join(fixture.dir, 'src/generated/chx-types.ts')
+    const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
@@ -803,7 +803,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts', options: { runOnGenerate: false } }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts', options: { runOnGenerate: false } }],\n}\n`,
         'utf8'
       )
 
@@ -815,7 +815,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx typegen --check passes when output is up-to-date', async () => {
+  test('chkit typegen --check passes when output is up-to-date', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
     try {
@@ -827,7 +827,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -843,10 +843,10 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx typegen --check fails on drifted output', async () => {
+  test('chkit typegen --check fails on drifted output', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
-    const outFile = join(fixture.dir, 'src/generated/chx-types.ts')
+    const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
@@ -856,7 +856,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -908,7 +908,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts', options: { bigintMode: 'nope' } }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts', options: { bigintMode: 'nope' } }],\n}\n`,
         'utf8'
       )
 
@@ -922,7 +922,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx check --json includes typegen plugin result and fails when output is missing', async () => {
+  test('chkit check --json includes typegen plugin result and fails when output is missing', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
     try {
@@ -934,7 +934,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -962,7 +962,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chx check --json passes plugin:typegen when output is current', async () => {
+  test('chkit check --json passes plugin:typegen when output is current', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
     try {
@@ -974,7 +974,7 @@ describe('plugin runtime', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 

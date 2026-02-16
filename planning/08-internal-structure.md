@@ -1,4 +1,4 @@
-# CHX Internal Structure
+# chkit Internal Structure
 
 This document is for contributors. The root `README.md` is user-facing.
 
@@ -7,7 +7,7 @@ This document is for contributors. The root `README.md` is user-facing.
 - `packages/core`: schema model, DSL, canonicalization, validation, SQL rendering, migration planning.
 - `packages/clickhouse`: ClickHouse executor and schema introspection/parsing.
 - `packages/codegen`: migration artifact + snapshot generation.
-- `packages/cli`: command-line app (`chx`).
+- `packages/cli`: command-line app (`chkit`).
 
 ## Core Module Layout
 
@@ -21,14 +21,14 @@ This document is for contributors. The root `README.md` is user-facing.
 
 ## CLI Module Layout
 
-- `packages/cli/src/bin/chx.ts`: stricli app wiring and route/flag mapping.
+- `packages/cli/src/bin/chkit.ts`: stricli app wiring and route/flag mapping.
 - `packages/cli/src/bin/lib.ts`: shared CLI runtime helpers (config, dirs, json envelope, journal/snapshot helpers).
-- `packages/cli/src/bin/commands/init.ts`: `chx init`.
-- `packages/cli/src/bin/commands/generate.ts`: `chx generate`.
-- `packages/cli/src/bin/commands/migrate.ts`: `chx migrate`.
-- `packages/cli/src/bin/commands/status.ts`: `chx status`.
-- `packages/cli/src/bin/commands/drift.ts`: `chx drift` and drift payload builder.
-- `packages/cli/src/bin/commands/check.ts`: `chx check`.
+- `packages/cli/src/bin/commands/init.ts`: `chkit init`.
+- `packages/cli/src/bin/commands/generate.ts`: `chkit generate`.
+- `packages/cli/src/bin/commands/migrate.ts`: `chkit migrate`.
+- `packages/cli/src/bin/commands/status.ts`: `chkit status`.
+- `packages/cli/src/bin/commands/drift.ts`: `chkit drift` and drift payload builder.
+- `packages/cli/src/bin/commands/check.ts`: `chkit check`.
 - `packages/cli/src/drift.ts`: pure drift comparison logic + reason summaries.
 
 ## Test Layout

@@ -6,7 +6,7 @@
 - Re-evaluate after plugin runtime and typegen plugin are stable.
 
 ## Problem
-CHX currently provides deterministic operation ordering and risk tagging, but it does not model dependency impact deeply across tables, views, and materialized views. Teams with heavier derived-data pipelines need stronger preflight safety signals and dependency-aware execution guidance.
+chkit currently provides deterministic operation ordering and risk tagging, but it does not model dependency impact deeply across tables, views, and materialized views. Teams with heavier derived-data pipelines need stronger preflight safety signals and dependency-aware execution guidance.
 
 ## Goals
 1. Add dependency-aware safety checks without coupling core to advanced policy logic.
@@ -55,11 +55,11 @@ CHX currently provides deterministic operation ordering and risk tagging, but it
    - optional fail during `migrate --apply`.
 
 ## Proposed Plugin Commands
-1. `chx plugin deps check`
+1. `chkit plugin deps check`
    - run dependency analysis against current schema and latest plan/snapshot.
-2. `chx plugin deps impact --object <db.name>`
+2. `chkit plugin deps impact --object <db.name>`
    - list upstream/downstream impact for one object.
-3. `chx plugin deps doctor`
+3. `chkit plugin deps doctor`
    - print actionable remediation guidance for findings.
 
 ## Hook Usage Plan

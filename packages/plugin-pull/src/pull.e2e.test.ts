@@ -54,9 +54,9 @@ async function dropDatabase(url: string, username: string, password: string, dat
 function createResolvedConfig(clickhouse: NonNullable<ResolvedChxConfig['clickhouse']>): ResolvedChxConfig {
   return {
     schema: ['./placeholder-schema.ts'],
-    outDir: './chx',
-    migrationsDir: './chx/migrations',
-    metaDir: './chx/meta',
+    outDir: './chkit',
+    migrationsDir: './chkit/migrations',
+    metaDir: './chkit/meta',
     plugins: [],
     check: {
       failOnPending: true,
@@ -81,9 +81,9 @@ describe('@chkit/plugin-pull live env e2e', () => {
     'pulls table fixtures from dedicated database and excludes out-of-scope objects',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const targetDatabase = `chx_e2e_pull_${dbSuffix}`
-      const noiseDatabase = `chx_e2e_pull_noise_${dbSuffix}`
-      const dir = await mkdtemp(join(tmpdir(), 'chx-plugin-pull-e2e-'))
+      const targetDatabase = `chkit_e2e_pull_${dbSuffix}`
+      const noiseDatabase = `chkit_e2e_pull_noise_${dbSuffix}`
+      const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-e2e-'))
       const pulledSchemaPath = join(dir, 'src/db/schema/pulled.ts')
 
       const plugin = createPullPlugin({
