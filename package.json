@@ -23,7 +23,8 @@
     "release": "changeset publish",
     "release:manual": "bun run ./scripts/manual-release.ts",
     "clean": "turbo run clean",
-    "chkit": "bun run ./packages/cli/src/bin/chkit.ts"
+    "chkit": "bun run ./packages/cli/src/bin/chkit.ts",
+    "deploy": "turbo run deploy"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
