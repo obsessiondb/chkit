@@ -42,7 +42,7 @@ export async function loadConfig(
 ): Promise<{ config: ResolvedChxConfig; path: string }> {
   const configPath = resolve(process.cwd(), configPathArg ?? DEFAULT_CONFIG_FILE)
   if (!existsSync(configPath)) {
-    throw new Error(`Config not found at ${configPath}. Run 'chx init' first.`)
+    throw new Error(`Config not found at ${configPath}. Run 'chkit init' first.`)
   }
 
   const mod = await import(pathToFileURL(configPath).href)

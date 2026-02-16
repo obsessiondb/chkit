@@ -15,17 +15,17 @@ import { cmdStatus } from './commands/status.js'
 import { cmdTypegen } from './commands/typegen.js'
 
 function printHelp(): void {
-  console.log(`chx - ClickHouse toolkit\n
+  console.log(`chkit - ClickHouse toolkit\n
 Usage:
-  chx init
-  chx generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
-  chx pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]
-  chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
-  chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
-  chx status [--config <path>] [--json]
-  chx drift [--config <path>] [--table <selector>] [--json]
-  chx check [--config <path>] [--strict] [--json]
-  chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
+  chkit init
+  chkit generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
+  chkit pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]
+  chkit typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
+  chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
+  chkit status [--config <path>] [--json]
+  chkit drift [--config <path>] [--table <selector>] [--json]
+  chkit check [--config <path>] [--strict] [--json]
+  chkit plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
 
 Options:
   --config <path>  Path to config file (default: clickhouse.config.ts)
@@ -327,7 +327,7 @@ const app = buildApplication(
     },
   }),
   {
-    name: 'chx',
+    name: 'chkit',
     versionInfo: { currentVersion: CLI_VERSION },
     scanner: { caseStyle: 'allow-kebab-for-camel' },
   }

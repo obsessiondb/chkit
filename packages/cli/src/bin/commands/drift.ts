@@ -101,7 +101,7 @@ export async function cmdDrift(args: string[]): Promise<void> {
   const { metaDir } = dirs
   const snapshot = await readSnapshot(metaDir)
   if (!snapshot) {
-    throw new Error('Snapshot not found. Run `chx generate` before drift checks.')
+    throw new Error('Snapshot not found. Run `chkit generate` before drift checks.')
   }
   const scope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot.definitions))
   if (scope.enabled && scope.matchCount === 0) {

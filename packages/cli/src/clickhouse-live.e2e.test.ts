@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
-const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chx.ts')
+const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
 function getRequiredEnv(): {
@@ -74,10 +74,10 @@ interface E2EFixture {
 }
 
 async function createFixture(database: string): Promise<E2EFixture> {
-  const dir = await mkdtemp(join(tmpdir(), 'chx-cli-e2e-'))
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-e2e-'))
   const schemaPath = join(dir, 'schema.ts')
   const configPath = join(dir, 'clickhouse.config.ts')
-  const outDir = join(dir, 'chx')
+  const outDir = join(dir, 'chkit')
   const migrationsDir = join(outDir, 'migrations')
   const metaDir = join(outDir, 'meta')
 
@@ -101,7 +101,7 @@ describe('@chkit/cli doppler env e2e', () => {
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
     const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-    const database = `chx_e2e_${dbSuffix}`
+    const database = `chkit_e2e_${dbSuffix}`
     const fixture = await createFixture(database)
     const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
@@ -170,7 +170,7 @@ describe('@chkit/cli doppler env e2e', () => {
     'runs additive second migration cycle in a separate project flow',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chx_e2e_additive_${dbSuffix}`
+      const database = `chkit_e2e_additive_${dbSuffix}`
       const fixture = await createFixture(database)
       const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
@@ -236,7 +236,7 @@ describe('@chkit/cli doppler env e2e', () => {
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chx_e2e_check_${dbSuffix}`
+      const database = `chkit_e2e_check_${dbSuffix}`
       const fixture = await createFixture(database)
       const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 

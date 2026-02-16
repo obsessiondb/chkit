@@ -11,13 +11,13 @@ import { computeBackfillStateDir } from './state.js'
 
 describe('@chkit/plugin-backfill planning', () => {
   test('builds deterministic plan id and chunks for identical input', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
 
@@ -54,13 +54,13 @@ describe('@chkit/plugin-backfill planning', () => {
   })
 
   test('writes immutable plan state to plans directory', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
 
@@ -87,7 +87,7 @@ describe('@chkit/plugin-backfill planning', () => {
   test('computes state dir from config by default and plugin override', () => {
     const config = resolveConfig({
       schema: './schema.ts',
-      metaDir: './chx/meta',
+      metaDir: './chkit/meta',
     })
     const configPath = '/tmp/project/clickhouse.config.ts'
 
@@ -98,7 +98,7 @@ describe('@chkit/plugin-backfill planning', () => {
       normalizeBackfillOptions({ stateDir: './custom-state' })
     )
 
-    expect(defaultDir).toBe(resolve('/tmp/project/chx/meta/backfill'))
+    expect(defaultDir).toBe(resolve('/tmp/project/chkit/meta/backfill'))
     expect(overriddenDir).toBe(resolve('/tmp/project/custom-state'))
   })
 })

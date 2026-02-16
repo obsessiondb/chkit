@@ -1,19 +1,19 @@
 ---
 title: CLI Overview
-description: Command surface of the chx CLI.
+description: Command surface of the chkit CLI.
 ---
 
 ## Commands
 
-- `chx init`
-- `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
-- `chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
-- `chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
-- `chx status [--config <path>] [--json]`
-- `chx drift [--config <path>] [--json]`
-- `chx check [--config <path>] [--strict] [--json]`
-- `chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
-- `chx version`
+- `chkit init`
+- `chkit generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
+- `chkit typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
+- `chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
+- `chkit status [--config <path>] [--json]`
+- `chkit drift [--config <path>] [--json]`
+- `chkit check [--config <path>] [--strict] [--json]`
+- `chkit plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
+- `chkit version`
 
 ## Global Flags
 

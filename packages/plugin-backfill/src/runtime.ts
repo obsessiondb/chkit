@@ -551,24 +551,24 @@ export async function getBackfillDoctorReport(input: {
 
   if (status.status === 'planned') {
     issueCodes.push('backfill_plan_missing')
-    recommendations.push(`Run: chx plugin backfill run --plan-id ${status.planId}`)
+    recommendations.push(`Run: chkit plugin backfill run --plan-id ${status.planId}`)
   }
   if (status.status === 'failed') {
     issueCodes.push('backfill_chunk_failed_retry_exhausted')
-    recommendations.push(`Inspect status: chx plugin backfill status --plan-id ${status.planId}`)
+    recommendations.push(`Inspect status: chkit plugin backfill status --plan-id ${status.planId}`)
     recommendations.push(
-      `Retry failed chunks: chx plugin backfill resume --plan-id ${status.planId} --replay-failed`
+      `Retry failed chunks: chkit plugin backfill resume --plan-id ${status.planId} --replay-failed`
     )
   }
   if (status.status === 'cancelled') {
     issueCodes.push('backfill_required_pending')
     recommendations.push(
-      `Resume execution: chx plugin backfill resume --plan-id ${status.planId} --replay-failed`
+      `Resume execution: chkit plugin backfill resume --plan-id ${status.planId} --replay-failed`
     )
   }
   if (status.status === 'running') {
     issueCodes.push('backfill_required_pending')
-    recommendations.push(`Monitor progress: chx plugin backfill status --plan-id ${status.planId}`)
+    recommendations.push(`Monitor progress: chkit plugin backfill status --plan-id ${status.planId}`)
   }
   if (issueCodes.length === 0) {
     recommendations.push('No remediation required.')

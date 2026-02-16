@@ -18,13 +18,13 @@ import {
 
 describe('@chkit/plugin-backfill run lifecycle', () => {
   test('runs plan chunks and reports completed status', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
 
@@ -64,13 +64,13 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
   })
 
   test('supports fail then resume without replaying done chunks', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
         defaults: {
@@ -133,13 +133,13 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
   })
 
   test('blocks resume on compatibility mismatch unless forceCompatibility is enabled', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const planOptions = normalizeBackfillOptions({
         defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
@@ -193,13 +193,13 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
   })
 
   test('cancel marks run as cancelled and doctor reports actionable remediation', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
 
@@ -271,13 +271,13 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
 
 describe('@chkit/plugin-backfill check integration', () => {
   test('reports pending required backfills when plan exists but run is missing', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
 
@@ -307,13 +307,13 @@ describe('@chkit/plugin-backfill check integration', () => {
   })
 
   test('reports ok after completed run and emits no finding codes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chx-backfill-plugin-'))
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
     try {
       const config = resolveConfig({
         schema: './schema.ts',
-        metaDir: './chx/meta',
+        metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
 

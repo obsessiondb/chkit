@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
-const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chx.ts')
+const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
 function getRequiredEnv(): {
@@ -109,10 +109,10 @@ interface E2EFixture {
 }
 
 async function createFixture(database: string): Promise<E2EFixture> {
-  const dir = await mkdtemp(join(tmpdir(), 'chx-cli-drift-e2e-'))
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-drift-e2e-'))
   const schemaPath = join(dir, 'schema.ts')
   const configPath = join(dir, 'clickhouse.config.ts')
-  const outDir = join(dir, 'chx')
+  const outDir = join(dir, 'chkit')
   const migrationsDir = join(outDir, 'migrations')
   const metaDir = join(outDir, 'meta')
 
@@ -135,7 +135,7 @@ describe('@chkit/cli drift depth env e2e', () => {
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chx_e2e_drift_${dbSuffix}`
+      const database = `chkit_e2e_drift_${dbSuffix}`
       const fixture = await createFixture(database)
       const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
@@ -207,7 +207,7 @@ describe('@chkit/cli drift depth env e2e', () => {
     'detects unique-key and projection drift reasons and exposes them in check summary',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chx_e2e_drift_keys_${dbSuffix}`
+      const database = `chkit_e2e_drift_keys_${dbSuffix}`
       const fixture = await createFixture(database)
       const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
@@ -262,7 +262,7 @@ describe('@chkit/cli drift depth env e2e', () => {
     'respects failOnDrift=false policy when drift exists',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chx_e2e_drift_policy_${dbSuffix}`
+      const database = `chkit_e2e_drift_policy_${dbSuffix}`
       const fixture = await createFixture(database)
       const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
@@ -286,7 +286,7 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${join(fixture.dir, 'chx/migrations')}',\n  metaDir: '${join(fixture.dir, 'chx/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
           'utf8'
         )
 
@@ -318,7 +318,7 @@ describe('@chkit/cli drift depth env e2e', () => {
     'check --strict overrides failOnDrift=false when drift exists',
     async () => {
       const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chx_e2e_drift_strict_${dbSuffix}`
+      const database = `chkit_e2e_drift_strict_${dbSuffix}`
       const fixture = await createFixture(database)
       const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
 
@@ -342,7 +342,7 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${join(fixture.dir, 'chx/migrations')}',\n  metaDir: '${join(fixture.dir, 'chx/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
           'utf8'
         )
 

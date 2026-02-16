@@ -1,24 +1,24 @@
-# chx
+# chkit
 
-`chx` is a ClickHouse schema and migration CLI for TypeScript projects.
+`chkit` is a ClickHouse schema and migration CLI for TypeScript projects.
 
 ## Install & Run
 
 ```bash
 bun install
 bun run build
-bun run chx --help
+bun run chkit --help
 ```
 
 ## Quick Start
 
 ```bash
-bun run chx init
-bun run chx generate --name init
-bun run chx migrate
-bun run chx migrate --apply
-bun run chx status
-bun run chx check
+bun run chkit init
+bun run chkit generate --name init
+bun run chkit migrate
+bun run chkit migrate --apply
+bun run chkit status
+bun run chkit check
 ```
 
 ## Documentation
@@ -30,16 +30,16 @@ bun run chx check
 
 ## Commands
 
-- `chx init`
-- `chx generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
-- `chx pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]`
-- `chx typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
-- `chx migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
-- `chx status [--config <path>] [--json]`
-- `chx drift [--config <path>] [--json]`
-- `chx check [--config <path>] [--strict] [--json]`
-- `chx plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
-- `chx version`
+- `chkit init`
+- `chkit generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
+- `chkit pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]`
+- `chkit typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
+- `chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
+- `chkit status [--config <path>] [--json]`
+- `chkit drift [--config <path>] [--json]`
+- `chkit check [--config <path>] [--strict] [--json]`
+- `chkit plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
+- `chkit version`
 
 ## Global Flags
 
@@ -48,14 +48,14 @@ bun run chx check
 
 ## What Each Command Does
 
-### `chx init`
+### `chkit init`
 
 Creates starter files if missing:
 
 - `clickhouse.config.ts`
 - `src/db/schema/example.ts`
 
-### `chx generate`
+### `chkit generate`
 
 - Loads schema files from `config.schema`
 - Validates definitions
@@ -63,20 +63,20 @@ Creates starter files if missing:
 - Writes migration SQL + updates snapshot (unless `--dryrun`)
 - Runs `typegen` plugin automatically when configured with `runOnGenerate: true` (default)
 
-### `chx typegen`
+### `chkit typegen`
 
 - Optional manual command to generate TypeScript types from schema definitions
 - `--check` verifies generated output is up-to-date (no write)
 - Supports optional Zod emission (`--emit-zod`)
 - Returns non-zero on stale/missing artifacts in check mode
 
-### `chx plugin pull schema`
+### `chkit plugin pull schema`
 
-- Pulls live ClickHouse table metadata and writes a local CHX schema file
+- Pulls live ClickHouse table metadata and writes a local chkit schema file
 - Supports `--out-file`, repeated `--database`, `--dryrun`, and `--force`
-- Shortcut: `chx pull ...` (equivalent to `chx plugin pull schema ...`)
+- Shortcut: `chkit pull ...` (equivalent to `chkit plugin pull schema ...`)
 
-### `chx migrate`
+### `chkit migrate`
 
 - Always prints pending migration plan first
 - Prompts for confirmation when run without `--apply` or `--execute`
@@ -86,11 +86,11 @@ Creates starter files if missing:
   - applied-file checksums mismatch
   - pending migration includes destructive operations and `--allow-destructive` is not set in non-interactive mode (interactive mode prompts for explicit confirmation)
 
-### `chx status`
+### `chkit status`
 
 Shows migration counts and checksum mismatch status.
 
-### `chx drift`
+### `chkit drift`
 
 Compares live ClickHouse objects to snapshot expectations and reports drift details.
 
@@ -99,7 +99,7 @@ Drift reason codes you may see:
 - object-level: `missing_object`, `extra_object`, `kind_mismatch`
 - table-level: `missing_column`, `extra_column`, `changed_column`, `setting_mismatch`, `index_mismatch`, `ttl_mismatch`, `engine_mismatch`, `primary_key_mismatch`, `order_by_mismatch`, `unique_key_mismatch`, `partition_by_mismatch`, `projection_mismatch`
 
-### `chx check`
+### `chkit check`
 
 CI gate command. Evaluates:
 
@@ -119,9 +119,9 @@ import { typegen } from '@chkit/plugin-typegen'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',
-  outDir: './chx',
-  migrationsDir: './chx/migrations',
-  metaDir: './chx/meta',
+  outDir: './chkit',
+  migrationsDir: './chkit/migrations',
+  metaDir: './chkit/meta',
   plugins: [
     pull({
       outFile: './src/db/schema/pulled.ts',
@@ -129,7 +129,7 @@ export default defineConfig({
 
     // Typed registration (recommended):
     typegen({
-      outFile: './src/generated/chx-types.ts',
+      outFile: './src/generated/chkit-types.ts',
       emitZod: false,
     }),
 
@@ -176,9 +176,9 @@ For typed config registration, plugin packages can export helpers that return in
   - `onCheck`
   - `onCheckReport`
 - Plugin command namespace:
-  - `chx plugin`
-  - `chx plugin <plugin-name>`
-  - `chx plugin <plugin-name> <command> [args...]`
+  - `chkit plugin`
+  - `chkit plugin <plugin-name>`
+  - `chkit plugin <plugin-name> <command> [args...]`
 
 ## Output Artifacts
 

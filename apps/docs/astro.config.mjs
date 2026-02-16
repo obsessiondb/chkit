@@ -6,8 +6,8 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
 	integrations: [
 		starlight({
-			title: 'CHX Docs',
-			description: 'Public documentation for chx, the ClickHouse schema and migration CLI.',
+			title: 'chkit Docs',
+			description: 'Public documentation for chkit, the ClickHouse schema and migration CLI.',
 			sidebar: [
 				{
 					label: 'Overview',

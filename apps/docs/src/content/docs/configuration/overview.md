@@ -3,7 +3,7 @@ title: "Configuration Overview"
 description: "clickhouse.config.ts structure and defaults."
 ---
 
-`chx` is configured through `clickhouse.config.ts`.
+`chkit` is configured through `clickhouse.config.ts`.
 
 ## Core Fields
 
@@ -23,9 +23,9 @@ import { defineConfig } from '@chkit/core'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',
-  outDir: './chx',
-  migrationsDir: './chx/migrations',
-  metaDir: './chx/meta',
+  outDir: './chkit',
+  migrationsDir: './chkit/migrations',
+  metaDir: './chkit/meta',
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
     username: process.env.CLICKHOUSE_USER ?? 'default',

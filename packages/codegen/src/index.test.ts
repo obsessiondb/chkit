@@ -10,7 +10,7 @@ import { generateArtifacts } from './index'
 
 describe('@chkit/codegen smoke', () => {
   test('writes migration and snapshot artifacts', async () => {
-    const workdir = await mkdtemp(join(tmpdir(), 'chx-codegen-test-'))
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
 
     try {
       const migrationsDir = join(workdir, 'migrations')
@@ -53,7 +53,7 @@ describe('@chkit/codegen smoke', () => {
 
       expect(result.migrationFile.endsWith('20260102030405_smoke.sql')).toBe(true)
       expect(migrationFile).toContain('CREATE TABLE IF NOT EXISTS app.users')
-      expect(migrationFile).toContain('-- chx-migration-format: v1')
+      expect(migrationFile).toContain('-- chkit-migration-format: v1')
       expect(migrationFile).toContain('-- generated-at: 2026-01-02T03:04:05.678Z')
       expect(migrationFile).toContain('-- definition-count: 1')
       expect(migrationFile).toContain('-- rename-suggestion-count: 0')
@@ -65,7 +65,7 @@ describe('@chkit/codegen smoke', () => {
   })
 
   test('sanitizes custom migration id for file naming', async () => {
-    const workdir = await mkdtemp(join(tmpdir(), 'chx-codegen-test-'))
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
     try {
       const usersTable = table({
         database: 'app',
@@ -93,7 +93,7 @@ describe('@chkit/codegen smoke', () => {
   })
 
   test('renders rename suggestion hints in migration header comments', async () => {
-    const workdir = await mkdtemp(join(tmpdir(), 'chx-codegen-test-'))
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
     try {
       const oldTable = table({
         database: 'app',
@@ -141,7 +141,7 @@ describe('@chkit/codegen smoke', () => {
   })
 
   test('renders explicit rename table and rename column operations in migration content', async () => {
-    const workdir = await mkdtemp(join(tmpdir(), 'chx-codegen-test-'))
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
     try {
       const result = await generateArtifacts({
         definitions: [],

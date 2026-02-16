@@ -69,7 +69,7 @@ describe('@chkit/cli check e2e', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnPending: false,\n  },\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnPending: false,\n  },\n}\n`,
         'utf8'
       )
 
@@ -96,7 +96,7 @@ describe('@chkit/cli check e2e', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnPending: false,\n  },\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnPending: false,\n  },\n}\n`,
         'utf8'
       )
 
@@ -147,7 +147,7 @@ describe('@chkit/cli check e2e', () => {
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chx')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnChecksumMismatch: false,\n  },\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  check: {\n    failOnChecksumMismatch: false,\n  },\n}\n`,
         'utf8'
       )
 

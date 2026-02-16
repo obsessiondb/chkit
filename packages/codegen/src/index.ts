@@ -41,7 +41,7 @@ function buildMigrationContent(input: {
   plan: MigrationPlan
 }): string {
   const header = [
-    '-- chx-migration-format: v1',
+    '-- chkit-migration-format: v1',
     `-- generated-at: ${input.generatedAt}`,
     `-- cli-version: ${input.cliVersion}`,
     `-- definition-count: ${input.definitionCount}`,

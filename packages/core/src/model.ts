@@ -33,7 +33,7 @@ export function defineConfig<T extends ChxUserConfig>(config: ChxConfigInput<T>)
 }
 
 export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
-  const outDir = config.outDir ?? './chx'
+  const outDir = config.outDir ?? './chkit'
   const migrationsDir = config.migrationsDir ?? join(outDir, 'migrations')
   const metaDir = config.metaDir ?? join(outDir, 'meta')
 
