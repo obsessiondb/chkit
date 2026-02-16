@@ -1,27 +1,27 @@
 ---
 title: Typegen Plugin
-description: Generate TypeScript row types and optional Zod schemas from CHX schema definitions.
+description: Generate TypeScript row types and optional Zod schemas from chkit schema definitions.
 ---
 
 This document covers practical usage of the optional `typegen` plugin.
 
 ## What it does
 
-- Generates deterministic TypeScript row types from CHX schema definitions.
+- Generates deterministic TypeScript row types from chkit schema definitions.
 - Optionally generates Zod schemas from the same definitions.
 
 ## How it fits your workflow
 
-The plugin is designed so your existing CHX workflow can stay the same.
+The plugin is designed so your existing chkit workflow can stay the same.
 
-- `chx generate` integration:
+- `chkit generate` integration:
   - After a successful migration/snapshot generate, typegen runs automatically by default (`runOnGenerate: true`).
   - Result: migration artifacts and generated types stay in sync in normal dev flow.
-- `chx check` integration:
+- `chkit check` integration:
   - `check` evaluates typegen freshness via plugin hook.
   - If generated types are missing/stale, `failedChecks` includes `plugin:typegen`.
   - Result: CI enforcement works without adding a separate typegen step.
-- `chx typegen` command:
+- `chkit typegen` command:
   - Optional manual trigger.
   - Useful when you explicitly want to regenerate or run an isolated `--check`.
 
@@ -39,7 +39,7 @@ export default defineConfig({
   schema: './src/db/schema/**/*.ts',
   plugins: [
     typegen({
-      outFile: './src/generated/chx-types.ts',
+      outFile: './src/generated/chkit-types.ts',
       emitZod: false,
       tableNameStyle: 'pascal',
       bigintMode: 'string',
@@ -55,7 +55,7 @@ Legacy path-based registration via `{ resolve: './plugins/typegen.ts', options: 
 
 ## Options
 
-- `outFile` (default: `./src/generated/chx-types.ts`)
+- `outFile` (default: `./src/generated/chkit-types.ts`)
 - `emitZod` (default: `false`)
 - `tableNameStyle` (default: `pascal`) values: `pascal | camel | raw`
 - `bigintMode` (default: `string`) values: `string | bigint`
@@ -67,9 +67,9 @@ Invalid option values fail fast at startup via plugin config validation.
 
 ## Commands
 
-- `chx typegen`
+- `chkit typegen`
   - Optional manual command to generate and write output atomically.
-- `chx typegen --check`
+- `chkit typegen --check`
   - Optional manual check to validate output is current without writing.
   - Fails with:
     - `typegen_missing_output` (file missing)
@@ -84,15 +84,15 @@ Useful flags:
 
 ## CI / check integration
 
-When configured, `chx check` includes a `plugins.typegen` block in JSON output and can fail with `plugin:typegen`.
+When configured, `chkit check` includes a `plugins.typegen` block in JSON output and can fail with `plugin:typegen`.
 
 `plugin:typegen` is added to `failedChecks` when the plugin check returns an error finding (for example stale or missing generated artifacts).
 
 ## Generate integration
 
-When `runOnGenerate` is enabled (default), `chx generate` runs typegen after successful migration/snapshot generation.
+When `runOnGenerate` is enabled (default), `chkit generate` runs typegen after successful migration/snapshot generation.
 
-If typegen fails in that path, `chx generate` fails.
+If typegen fails in that path, `chkit generate` fails.
 
 ## Current limits
 

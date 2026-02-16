@@ -5,14 +5,14 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "chx": "./dist/bin/chx.js"
+    "chkit": "./dist/bin/chkit.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "bun run src/bin/chx.ts",
+    "dev": "bun run src/bin/chkit.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
     "test": "bun test src --concurrent",

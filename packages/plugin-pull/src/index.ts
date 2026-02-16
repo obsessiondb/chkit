@@ -100,7 +100,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
     commands: [
       {
         name: 'schema',
-        description: 'Pull live ClickHouse table schema and write CHX schema file',
+        description: 'Pull live ClickHouse table schema and write chkit schema file',
         async run({ args, jsonMode, print, options: runtimeOptions, config }) {
           try {
             const parsedArgs = parseArgs(args)
@@ -594,7 +594,7 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   const lines: string[] = [
     `import { ${imports.join(', ')} } from '@chkit/core'`,
     '',
-    '// Pulled from live ClickHouse metadata via chx plugin pull schema',
+    '// Pulled from live ClickHouse metadata via chkit plugin pull schema',
     '',
   ]
 

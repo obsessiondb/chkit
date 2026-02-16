@@ -46,7 +46,7 @@ function buildChunkSqlTemplate(chunk: {
   to: string
 }): string {
   return [
-    `/* chx backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`,
+    `/* chkit backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`,
     `INSERT INTO ${chunk.target}`,
     `SELECT *`,
     `FROM ${chunk.target}`,
