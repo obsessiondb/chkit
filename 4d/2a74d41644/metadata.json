@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "4d2a74d41644",
+  "strategy": "manual-commit",
+  "branch": "release-beta1",
+  "checkpoints_count": 9,
+  "files_touched": [
+    ".changeset/late-moose-hang.md",
+    ".changeset/rename-to-chkit.md",
+    "package.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4d/2a74d41644/0/metadata.json",
+      "transcript": "/4d/2a74d41644/0/full.jsonl",
+      "context": "/4d/2a74d41644/0/context.md",
+      "content_hash": "/4d/2a74d41644/0/content_hash.txt",
+      "prompt": "/4d/2a74d41644/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 56,
+    "cache_creation_tokens": 34895,
+    "cache_read_tokens": 1291248,
+    "output_tokens": 683,
+    "api_call_count": 32
+  }
+}

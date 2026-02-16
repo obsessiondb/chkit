@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "4d2a74d41644",
+  "session_id": "7c20cde9-3db9-4162-a059-828ca474c846",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-16T00:19:27.493507Z",
+  "branch": "release-beta1",
+  "checkpoints_count": 9,
+  "files_touched": [
+    ".changeset/late-moose-hang.md",
+    ".changeset/rename-to-chkit.md",
+    "package.json"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "e96db911-18ba-4071-b9ee-ab893d1ecdfd",
+  "token_usage": {
+    "input_tokens": 56,
+    "cache_creation_tokens": 34895,
+    "cache_read_tokens": 1291248,
+    "output_tokens": 683,
+    "api_call_count": 32
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-16T00:19:27.310688Z",
+    "agent_lines": 12,
+    "human_added": 65,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 77,
+    "agent_percentage": 15.584415584415584
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chx/7c20cde9-3db9-4162-a059-828ca474c846.jsonl"
+}
