@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "2c116c8bd5b9",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6439-setup-cd-for-documentation-site",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/ci.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2c/116c8bd5b9/0/metadata.json",
+      "transcript": "/2c/116c8bd5b9/0/full.jsonl",
+      "context": "/2c/116c8bd5b9/0/context.md",
+      "content_hash": "/2c/116c8bd5b9/0/content_hash.txt",
+      "prompt": "/2c/116c8bd5b9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 26,
+    "cache_creation_tokens": 51296,
+    "cache_read_tokens": 461719,
+    "output_tokens": 953,
+    "api_call_count": 18
+  }
+}
