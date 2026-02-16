@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "5e65c0783b5f",
+  "session_id": "ae3fbe71-2e30-4381-887b-bdbcbb548d8a",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-16T10:51:07.177147Z",
+  "branch": "marc/num-6439-setup-cd-for-documentation-site",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/tsconfig.json",
+    "packages/clickhouse/package.json",
+    "packages/clickhouse/tsconfig.json",
+    "packages/codegen/package.json",
+    "packages/codegen/tsconfig.json",
+    "packages/core/package.json",
+    "packages/plugin-backfill/package.json",
+    "packages/plugin-backfill/tsconfig.json",
+    "packages/plugin-pull/package.json",
+    "packages/plugin-typegen/package.json",
+    "packages/plugin-typegen/tsconfig.json",
+    "tsconfig.base.json"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "a196949a-6dc8-4316-847c-166fc549efdb",
+  "token_usage": {
+    "input_tokens": 44,
+    "cache_creation_tokens": 55312,
+    "cache_read_tokens": 1608902,
+    "output_tokens": 742,
+    "api_call_count": 38
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-16T10:51:07.03608Z",
+    "agent_lines": 12,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 12,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chx/ae3fbe71-2e30-4381-887b-bdbcbb548d8a.jsonl"
+}

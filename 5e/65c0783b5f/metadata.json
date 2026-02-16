@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "5e65c0783b5f",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6439-setup-cd-for-documentation-site",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/tsconfig.json",
+    "packages/clickhouse/package.json",
+    "packages/clickhouse/tsconfig.json",
+    "packages/codegen/package.json",
+    "packages/codegen/tsconfig.json",
+    "packages/core/package.json",
+    "packages/plugin-backfill/package.json",
+    "packages/plugin-backfill/tsconfig.json",
+    "packages/plugin-pull/package.json",
+    "packages/plugin-typegen/package.json",
+    "packages/plugin-typegen/tsconfig.json",
+    "tsconfig.base.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5e/65c0783b5f/0/metadata.json",
+      "transcript": "/5e/65c0783b5f/0/full.jsonl",
+      "context": "/5e/65c0783b5f/0/context.md",
+      "content_hash": "/5e/65c0783b5f/0/content_hash.txt",
+      "prompt": "/5e/65c0783b5f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 44,
+    "cache_creation_tokens": 55312,
+    "cache_read_tokens": 1608902,
+    "output_tokens": 742,
+    "api_call_count": 38
+  }
+}
