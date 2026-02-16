@@ -1,5 +1,11 @@
 # @chkit/core
 
+## 0.1.0-beta.1
+
+### Patch Changes
+
+- Rename internals and CLI binary from chx to chkit.
+
 ## 0.1.0-beta.0
 
 ### Minor Changes

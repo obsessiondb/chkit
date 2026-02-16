@@ -12,6 +12,6 @@
     "@chkit/plugin-typegen": "0.0.0"
   },
   "changesets": [
-    "late-moose-hang"
+    "rename-to-chkit"
   ]
 }
