@@ -25,5 +25,8 @@
   "dependencies": {
     "@chkit/core": "workspace:*",
     "fast-glob": "^3.3.2"
+  },
+  "devDependencies": {
+    "zod": "^4.3.6"
   }
 }
