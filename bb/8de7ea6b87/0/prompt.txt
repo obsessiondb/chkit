@@ -1,0 +1,35 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chx/tacoma directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is marc/num-6439-setup-cd-for-documentation-site. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+Use `git branch -m` to rename the branch.
+
+Do this immediately, before using any skills or any other tools. Do not check the current branch name, just rename it.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "KeKs0r/" before the name.
+
+</system-instruction>
+
+We have the problem that the release packages in this repo have dependencies for like workspace and then the asterisk, which doesn't work for published packages. So from another session I just updated the manual release script, but I think we aren't using it for the last time. So check out how the release flow works, check out the changes in the manual release thing and then guide me through a new release. @scripts/manual-release.ts
+
+---
+
+the changes might just be in the repository, but not committed (so just dirty file `/Users/marc/Workspace/chx/scripts/manual-release.ts`
+
+2. you need to create a new changeset
+3. research best practices with changeset publish vs bun publish. what does changeset publish give me on top? 
+
+also please make a `release.md` file in docs, to document how to do a release.
+
+---
+
+you can delete the @.changeset/fix-workspace-deps.md then commit the changes. Push then, create a PR, wait for the checks to pass and merge it. Let me know when finished.

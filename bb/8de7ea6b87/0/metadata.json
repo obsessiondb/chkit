@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "bb8de7ea6b87",
+  "session_id": "aa83b868-4a3c-4873-b371-b1e241c5a163",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-17T01:21:42.723529Z",
+  "branch": "KeKs0r/fix-workspace-deps",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/fix-workspace-deps.md",
+    "docs/release.md",
+    "scripts/manual-release.ts"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "5cca857e-9b99-4c38-8c70-10627c26abec",
+  "token_usage": {
+    "input_tokens": 2311,
+    "cache_creation_tokens": 50787,
+    "cache_read_tokens": 1165111,
+    "output_tokens": 246,
+    "api_call_count": 24
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-17T01:21:42.552482Z",
+    "agent_lines": 179,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 11,
+    "total_committed": 179,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chx-tacoma/aa83b868-4a3c-4873-b371-b1e241c5a163.jsonl"
+}
