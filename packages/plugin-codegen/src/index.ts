@@ -544,7 +544,7 @@ function renderTableInterface(
     if (mapped.finding) findings.push(mapped.finding)
     lines.push(`  ${renderPropertyName(column.name)}: ${mapped.tsType}`)
     const zodExpr = mapped.nullable ? `${mapped.zodType}.nullable()` : mapped.zodType
-    zodFields.push(`  ${renderPropertyName(column.name)}: ${zodExpr}`)
+    zodFields.push(`  ${renderPropertyName(column.name)}: ${zodExpr},`)
   }
 
   lines.push('}')
