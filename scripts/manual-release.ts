@@ -29,9 +29,6 @@ type PackageJson = {
 	name?: string
 	version?: string
 	private?: boolean
-	dependencies?: Record<string, string>
-	devDependencies?: Record<string, string>
-	peerDependencies?: Record<string, string>
 }
 
 const TMP_DIR = resolve('.tmp')
@@ -48,7 +45,6 @@ export async function main(): Promise<void> {
 	ensureRequiredTools()
 	ensureOnMainBranch()
 	ensureWorkingTreeClean()
-	ensureNpmAuth()
 
 	runQualityGates()
 	ensureBetaPrereleaseMode(args.dryRun)
@@ -70,29 +66,25 @@ export async function main(): Promise<void> {
 
 	runCommand('bun', ['run', 'version-packages'])
 
-	resolveWorkspaceVersions()
-
 	const confirmed = await confirmPublish()
 	if (!confirmed) {
 		fail('Publish cancelled by user.')
 	}
 
-	runCommand('bun', ['run', 'release', '--', '--tag', 'beta'])
+	publishWorkspacePackages()
 
 	logLine('Release publish finished.')
 	logLine('Follow-up: commit and push version/changelog changes on main.')
 }
 
 /**
- * Scans all workspace packages and replaces `workspace:*` dependency
- * references with the actual version from the referenced package.
+ * Publishes all non-private workspace packages using `bun publish`.
  *
- * This is necessary because `changeset publish` calls `npm publish`
- * under the hood, and npm does NOT resolve workspace protocol references.
+ * Unlike `npm publish`, `bun publish` resolves `workspace:*` references
+ * at publish time without modifying package.json on disk, so the working
+ * tree stays clean with workspace protocol references intact.
  */
-function resolveWorkspaceVersions(): void {
-	logLine('Resolving workspace:* references to actual versions...')
-
+function publishWorkspacePackages(): void {
 	const packagesDir = resolve('packages')
 	const packageDirs = readdirSync(packagesDir).filter((name) => {
 		const pkgJsonPath = join(packagesDir, name, 'package.json')
@@ -104,59 +96,23 @@ function resolveWorkspaceVersions(): void {
 		}
 	})
 
-	const versionMap = new Map<string, string>()
-	const packageJsonPaths = new Map<string, string>()
+	let published = 0
 
 	for (const dir of packageDirs) {
 		const pkgJsonPath = join(packagesDir, dir, 'package.json')
 		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
 
-		if (pkg.name && pkg.version) {
-			versionMap.set(pkg.name, pkg.version)
-			packageJsonPaths.set(pkg.name, pkgJsonPath)
-		}
+		if (pkg.private) continue
+		if (!pkg.name || !pkg.version) continue
+
+		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
+		runCommand('bun', ['publish', '--tag', 'beta', '--access', 'public'], {
+			cwd: join(packagesDir, dir),
+		})
+		published++
 	}
 
-	let totalResolved = 0
-
-	for (const [pkgName, pkgJsonPath] of packageJsonPaths) {
-		const raw = readFileSync(pkgJsonPath, 'utf8')
-		const pkg = JSON.parse(raw) as PackageJson
-		let changed = false
-
-		for (const depField of [
-			'dependencies',
-			'devDependencies',
-			'peerDependencies',
-		] as const) {
-			const deps = pkg[depField]
-			if (!deps) continue
-
-			for (const [depName, depVersion] of Object.entries(deps)) {
-				if (!depVersion.startsWith('workspace:')) continue
-
-				const resolvedVersion = versionMap.get(depName)
-				if (!resolvedVersion) {
-					fail(
-						`${pkgName}: cannot resolve workspace dependency ${depName} — not found in workspace`,
-					)
-				}
-
-				deps[depName] = resolvedVersion
-				changed = true
-				logLine(
-					`  ${pkgName}: ${depField}.${depName} workspace:* → ${resolvedVersion}`,
-				)
-				totalResolved++
-			}
-		}
-
-		if (changed) {
-			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, '\t')}\n`)
-		}
-	}
-
-	logLine(`Resolved ${totalResolved} workspace:* reference(s).`)
+	logLine(`Published ${published} package(s).`)
 }
 
 function parseArgs(argv: string[]): ReleaseArgs {
@@ -177,7 +133,6 @@ function parseArgs(argv: string[]): ReleaseArgs {
 function ensureRequiredTools(): void {
 	runCommand('bun', ['--version'])
 	runCommand('git', ['--version'])
-	runCommand('npm', ['--version'])
 	runCommand('bun', ['run', 'changeset', '--', '--version'])
 }
 
@@ -194,10 +149,6 @@ function ensureWorkingTreeClean(): void {
 	if (result.stdout.trim().length > 0) {
 		fail('Working tree is not clean. Commit or stash changes before releasing.')
 	}
-}
-
-function ensureNpmAuth(): void {
-	runCommand('npm', ['whoami'])
 }
 
 function runQualityGates(): void {
@@ -319,7 +270,7 @@ function parseReleaseEntry(
 async function confirmPublish(): Promise<boolean> {
 	const rl = createInterface({ input: stdin, output: stdout })
 	try {
-		const answer = await rl.question('Proceed with npm publish to beta? [y/N] ')
+		const answer = await rl.question('Proceed with bun publish to beta? [y/N] ')
 		const normalized = answer.trim().toLowerCase()
 		return normalized === 'y' || normalized === 'yes'
 	} finally {
@@ -327,12 +278,16 @@ async function confirmPublish(): Promise<boolean> {
 	}
 }
 
-function runCommand(command: string, args: string[]): CommandResult {
+function runCommand(
+	command: string,
+	args: string[],
+	options?: { cwd?: string },
+): CommandResult {
 	const renderedCommand = `${command} ${args.map(shellQuote).join(' ')}`
 	logLine(`$ ${renderedCommand}`)
 
 	const result = spawnSync(command, args, {
-		cwd: process.cwd(),
+		cwd: options?.cwd ?? process.cwd(),
 		encoding: 'utf8',
 		env: process.env,
 	})

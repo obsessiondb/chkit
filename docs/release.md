@@ -5,8 +5,8 @@ All packages are published to npm under the `@chkit` scope with the `beta` dist-
 ## Prerequisites
 
 - On the `main` branch with a clean working tree
-- Authenticated to npm (`npm whoami`)
-- `bun`, `git`, `npm` installed
+- Authenticated to npm (via `~/.npmrc` or `NPM_TOKEN`)
+- `bun`, `git` installed
 - At least one pending changeset in `.changeset/`
 
 ## Quick Reference
@@ -24,17 +24,15 @@ bun run release:manual
 The `release:manual` script (`scripts/manual-release.ts`) runs these steps:
 
 1. **Validate changesets** - confirms `.changeset/*.md` files exist and all bumps are `patch` (only patch is allowed during beta)
-2. **Check tools** - verifies bun, git, npm, changeset CLI are available
+2. **Check tools** - verifies bun, git, changeset CLI are available
 3. **Check branch** - must be on `main`
 4. **Check working tree** - must be clean
-5. **Check npm auth** - runs `npm whoami`
-6. **Quality gates** - runs lint, typecheck, test, build
-7. **Ensure beta prerelease mode** - enters changeset pre mode if not already active
-8. **Version packages** - runs `changeset version` to bump versions and update changelogs
-9. **Resolve workspace references** - replaces `workspace:*` in all package.json files with the actual version numbers (changeset publish uses npm under the hood, which does not resolve workspace protocol)
-10. **Confirm** - interactive prompt before publishing
-11. **Publish** - runs `changeset publish --tag beta`
-12. **Manual follow-up** - commit and push the version/changelog changes on main
+5. **Quality gates** - runs lint, typecheck, test, build
+6. **Ensure beta prerelease mode** - enters changeset pre mode if not already active
+7. **Version packages** - runs `changeset version` to bump versions and update changelogs
+8. **Confirm** - interactive prompt before publishing
+9. **Publish** - runs `bun publish --tag beta` for each non-private package
+10. **Manual follow-up** - commit and push the version/changelog changes on main
 
 ## After Publishing
 
@@ -67,11 +65,9 @@ Alternatively, create a file manually in `.changeset/` with this format:
 Description of the change.
 ```
 
-## Why workspace:* Resolution?
+## Why bun publish?
 
-This monorepo uses `workspace:*` for internal dependencies. When `changeset publish` runs, it delegates to `npm publish`, which does **not** resolve the `workspace:` protocol. Without the resolution step, published packages would contain literal `workspace:*` references and be broken for consumers.
-
-The release script resolves these to concrete versions (e.g., `workspace:*` becomes `0.1.0-beta.2`) after `changeset version` bumps the versions but before `changeset publish` packs and publishes.
+This monorepo uses `workspace:*` for internal dependencies. Unlike `npm publish`, `bun publish` resolves `workspace:*` references to concrete versions at publish time without modifying `package.json` on disk. This means the working tree stays clean with `workspace:*` intact after publishing, so the commit to main preserves workspace protocol references for development.
 
 ## Prerelease Mode
 
