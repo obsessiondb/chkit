@@ -1,5 +1,19 @@
 # @chkit/cli
 
+## 0.1.0-beta.5
+
+### Patch Changes
+
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chx to chkit.
+- Updated dependencies [f719c50]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+  - @chkit/clickhouse@0.1.0-beta.5
+  - @chkit/codegen@0.1.0-beta.5
+  - @chkit/core@0.1.0-beta.5
+
 ## 0.1.0-beta.4
 
 ### Patch Changes
