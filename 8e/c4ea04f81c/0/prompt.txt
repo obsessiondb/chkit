@@ -1,0 +1,155 @@
+i tried to publish via `bun release:manual` but got this error:\
+$ doppler run --project chx --config ci -- turbo run typecheck lint test
+• turbo 2.8.9
+$ bun run version-packages
+🦋  All files have been updated. Review them and commit at your leisure
+$ changeset version
+🦋  warn ===============================IMPORTANT!===============================
+🦋  warn You are in prerelease mode
+🦋  warn If you meant to do a normal release you should revert these changes and run `changeset pre exit`
+🦋  warn You can then run `changeset version` again to do a normal release
+🦋  warn ----------------------------------------------------------------------
+Proceed with bun publish to beta? [y/N] Y
+Publishing @chkit/clickhouse@0.1.0-beta.1...
+$ bun publish --tag beta --access public
+bun publish v1.3.5 (1e86cebd)
+
+packed 0.65KB package.json
+packed 1.1KB dist/create-table-parser.d.ts
+packed 0.84KB dist/create-table-parser.d.ts.map
+packed 6.16KB dist/create-table-parser.js
+packed 5.85KB dist/create-table-parser.js.map
+packed 1.44KB dist/index.d.ts
+packed 1.34KB dist/indcked 6.66KB dist/index.js
+packed 5.42KB dist/index.js.map
+
+Total files: 9
+Shasum: e875f6820792f0d9397e575ad327dd1797c16e77
+Integrity: sha512-LDDmzzwyB4J55[...]g7B0LF4q8+lNw==
+Unpacked size: 29.43KB
+Packed size: 6.44KB
+Tag: beta
+Access: public
+Registry: https://registry.npmjs.org/
+
+Authenticate your account at (press ENTER to open in browser):
+|---------------------------------------------------------------------|
+| https://www.npmjs.com/auth/cli/182834f5-216b-412b-bbbc-9ee03c65e199 |
+|---------------------------------------------------------------------|
+
+404 Not Found: https://registry.npmjs.org/-/v1/done?authId=***
+
+ - '@chkit/clickhouse@0.1.0-beta.1' does not exist in this registry
+ERROR: Command failed (1): bun publish --tag beta --access public
+error: script "release:manual" exited with code 1
+
+---
+
+why did the bun resolution not work?
+
+---
+
+okay so can i now try a publish just on this branch, or do I need to first merge all the changes you did into main?
+
+---
+
+reapply this fix one more time
+
+---
+
+i unfortunately discarded your changes
+
+---
+
+i think the @scripts/manual-release.ts is still doing bun publish, instead of npm publish
+
+---
+
+commit this file `scripts/manual-release.ts`
+
+---
+
+$ doppler run --project chx --config ci -- turbo run typecheck lint test
+• turbo 2.8.9
+$ bun run version-packages
+🦋  All files have been updated. Review them and commit at your leisure
+$ changeset version
+🦋  warn ===============================IMPORTANT!===============================
+🦋  warn You are in prerelease mode
+🦋  warn If you meant to do a normal release you should revert these changes and run `changeset pre exit`
+🦋  warn You can then run `changeset version` again to do a normal release
+🦋  warn ----------------------------------------------------------------------
+Resolving workspace:* references to actual versions...
+  @chkit/clickhouse: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/cli: dependencies.@chkit/clickhouse workspace:* → 0.1.0-beta.2
+  @chkit/cli: dependencies.@chkit/codegen workspace:* → 0.1.0-beta.2
+  @chkit/cli: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/codegen: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+ endencies.@chkit/clickhouse workspace:* → 0.1.0-beta.2
+  @chkit/plugin-pull: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/plugin-typegen: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/plugin-backfill: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+Resolved 9 workspace:* reference(s).
+Proceed with npm publish to beta? [y/N] Y
+Publishing @chkit/clickhouse@0.1.0-beta.2...
+$ npm publish --tag beta --access public
+npm notice
+npm notice 📦  @chkit/clickhouse@0.1.0-beta.2
+npm notice Tarball Contents
+npm notice 1.1kB dist/create-table-parser.d.ts
+npm notice 843B dist/create-table-parser.d.ts.map
+npm notice 6.2kB dist/create-table-parser.js
+npm notice 5.8kB dist/create-table-parser.js.map
+npm notice 1.4kB dist/index.d.ts
+npm notice 1.3kB dist/index.d.ts.map
+npm notice 6.7kB dist/index.js
+npm notice 5.4kB dist/index.js.map
+npm notice 602B package.json
+npm notice Tarball Details
+npm notice name: @chkit/clickhouse
+npm notice version: 0.1.0-beta.2
+npm notice filename: chkit--0.1.0-beta.2.tgz
+npm notice package size: 6.4 kB
+npm notice unpacked size: 29.4 kB
+npm notice shasum: 0526eba2a16377c1a8e44257c1fdb577049a55d3
+npm notice integrity: sha512-NBrHCmk6ZYuNW[...]QUpgm5NyFrSbg==
+npm notice total files: 9
+npm notice
+npm notice Publishing to https://registry.npmjs.org/ with tag beta and public access
+npm error code EOTP
+npm error This operation requires a one-time password from your authenticator.
+npm error You can provide a one-time password by passing --otp=<code> to the command you ran.
+npm error If you already provided a one-time password then it is likely that you either typoed
+npm error it, or it timed out. Please try again.
+npm error A complete log of this run can be found in: /Users/marc/.npm/_logs/2026-02-17T03_26_50_423Z-debug-0.log
+ERROR: Command failed (1): npm publish --tag beta --access public
+error: script "release:manual" exited with code 1\
+I think we need to before running the publish to ask for the OTP from the release script and pass it to the publish command
+
+---
+
+was this maybe also the issue with the bun publish before? so can we create a manual-release-bun.ts that is the same as the current script, but does not override the dependencies itself. This might make the script much simpler and I want to test this first. if it would work
+
+---
+
+this is not what I wanted, I wanted all the functionality that it had before. The only thing it shouldn't do is to resolve the workspace dependencies. That's the only difference. Everything else should be exactly the same. We need the TOTP, we need change set versioning, yes. And we want to run one publish for everything except for the app docs.
+
+---
+
+okay we need to commit the both release files, otherwise  the worktree is not clean and i cant test it
+
+---
+
+okay this worked, so we can delete manual-release and just do the manual-release-bun version.
+
+---
+
+Also, I just ran the script and looked at the work directory. Like making a release makes a lot of dirty files. Obviously, if I'm supposed to release from main, I need to be on main, run the script, and then the working directory is going to be dirty again. Like what is the best practice on how to do this workflow?
+
+---
+
+okay can you add the commit + push to the releaes scirpt, so it is automatically handlded?
+
+---
+
+great. now do a cmmit on this current dirty worktree and push it
