@@ -1,28 +1,28 @@
 {
-  "name": "@chkit/codegen",
-  "version": "0.1.0-beta.1",
-  "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "source": "./src/index.ts",
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
-  "files": [
-    "dist"
-  ],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome lint src",
-    "test": "bun test src",
-    "clean": "rm -rf dist"
-  },
-  "dependencies": {
-    "@chkit/core": "workspace:*"
-  }
+	"name": "@chkit/codegen",
+	"version": "0.1.0-beta.1",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"source": "./src/index.ts",
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"dev": "tsc -p tsconfig.json --watch",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"lint": "biome lint src",
+		"test": "bun test src",
+		"clean": "rm -rf dist"
+	},
+	"dependencies": {
+		"@chkit/core": "0.1.0-beta.1"
+	}
 }

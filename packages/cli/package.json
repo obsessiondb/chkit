@@ -1,28 +1,28 @@
 {
-  "name": "@chkit/cli",
-  "version": "0.1.0-beta.1",
-  "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "bin": {
-    "chkit": "./dist/bin/chkit.js"
-  },
-  "files": [
-    "dist"
-  ],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "bun run src/bin/chkit.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome lint src",
-    "test": "bun test src --concurrent",
-    "clean": "rm -rf dist"
-  },
-  "dependencies": {
-    "@chkit/clickhouse": "workspace:*",
-    "@chkit/codegen": "workspace:*",
-    "@chkit/core": "workspace:*",
-    "@stricli/core": "^1.2.5",
-    "fast-glob": "^3.3.2"
-  }
+	"name": "@chkit/cli",
+	"version": "0.1.0-beta.1",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"bin": {
+		"chkit": "./dist/bin/chkit.js"
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc -p tsconfig.json",
+		"dev": "bun run src/bin/chkit.ts",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"lint": "biome lint src",
+		"test": "bun test src --concurrent",
+		"clean": "rm -rf dist"
+	},
+	"dependencies": {
+		"@chkit/clickhouse": "0.1.0-beta.1",
+		"@chkit/codegen": "0.1.0-beta.1",
+		"@chkit/core": "0.1.0-beta.1",
+		"@stricli/core": "^1.2.5",
+		"fast-glob": "^3.3.2"
+	}
 }
