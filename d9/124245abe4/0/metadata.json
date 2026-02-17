@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "d9124245abe4",
+  "session_id": "fd5ac74f-6355-43f3-a0c8-66308abfdc7d",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-17T01:25:21.28465Z",
+  "branch": "gitignore-tmp",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 27886,
+    "cache_read_tokens": 170622,
+    "output_tokens": 71,
+    "api_call_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-17T01:25:21.257332Z",
+    "agent_lines": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chx/fd5ac74f-6355-43f3-a0c8-66308abfdc7d.jsonl"
+}
