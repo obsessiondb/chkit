@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "e84c6ae3901b",
+  "session_id": "5905150d-e45f-467d-b7b7-7f2fd21f04b6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-17T03:05:10.357178Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/fix-workspace-deps.md",
+    "docs/release.md",
+    "scripts/manual-release.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 647,
+    "cache_creation_tokens": 49208,
+    "cache_read_tokens": 1435913,
+    "output_tokens": 3730,
+    "api_call_count": 30
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-17T03:05:10.205321Z",
+    "agent_lines": 11,
+    "human_added": 0,
+    "human_modified": 15,
+    "human_removed": 105,
+    "total_committed": 26,
+    "agent_percentage": 42.30769230769231
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chx/5905150d-e45f-467d-b7b7-7f2fd21f04b6.jsonl"
+}
