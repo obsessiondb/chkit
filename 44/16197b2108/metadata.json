@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "4416197b2108",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/fix-zod-trailing-commas",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "packages/plugin-codegen/src/index.test.ts",
+    "packages/plugin-codegen/src/index.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/44/16197b2108/0/metadata.json",
+      "transcript": "/44/16197b2108/0/full.jsonl",
+      "context": "/44/16197b2108/0/context.md",
+      "content_hash": "/44/16197b2108/0/content_hash.txt",
+      "prompt": "/44/16197b2108/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 59,
+    "cache_creation_tokens": 101997,
+    "cache_read_tokens": 2041232,
+    "output_tokens": 575,
+    "api_call_count": 51
+  }
+}

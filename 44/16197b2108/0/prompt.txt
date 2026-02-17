@@ -1,0 +1,181 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chx/tallahassee directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+Use `git branch -m` to rename the branch.
+
+Do this immediately, before using any skills or any other tools. Do not check the current branch name, just rename it.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "KeKs0r/" before the name.
+
+</system-instruction>
+
+**Bug: codegen plugin emits Zod object properties without trailing commas, producing invalid JS**
+
+In `packages/plugin-codegen/src/index.ts`, the `renderTableInterface` function builds Zod schema fields without trailing commas. The generated output looks like:
+
+```typescript
+export const FooRowSchema = z.object({
+  name: z.string()
+  age: z.number()
+})
+```
+
+This is invalid JavaScript — `z.object({...})` takes a regular object literal, so properties need comma separation. The correct output should be:
+
+```typescript
+export const FooRowSchema = z.object({
+  name: z.string(),
+  age: z.number(),
+})
+```
+
+The bug is in the `zodFields.push` call inside `renderTableInterface` (~line 547) and the equivalent `zodExpr` line for nullable fields — they're missing a trailing comma.
+
+The same issue likely affects the `renderIngestFunction` — check if the generated ingest file also has similar comma issues in any object literals.
+
+**Tasks:**
+1. Add a test case in `packages/plugin-codegen/src/index.test.ts` that calls `generateTypeArtifacts` with `emitZod: true` on a simple schema with multiple columns, and asserts the generated Zod object has valid syntax (contains trailing commas on property lines)
+2. Fix the bug by adding trailing commas to the `zodFields.push` line in `renderTableInterface`
+3. Run the existing tests to make sure nothing else breaks
+
+---
+
+Base directory for this skill: /Users/marc/.claude/plugins/cache/numiadata-ai-tools/code/1.0.8/skills/testing-vitest
+
+# Testing Standards (Vitest)
+
+## Framework
+- Use `vitest` (not jest or bun test)
+- Use `@cloudflare/vitest-pool-workers` for Cloudflare Workers
+- **CRITICAL**: Always use `pnpm test`, NEVER standalone test runners
+
+## CRITICAL Rules
+
+### 1. Never Use Try-Catch in Positive Tests
+```ts
+// ❌ Bad - Hides real errors
+it('should create user', async () => {
+  try {
+    const user = await createUser(userData)
+    expect(user.id).toBeTruthy()
+  } catch (error) {
+    console.error('Unexpected error:', error)
+  }
+})
+
+// ✅ Good - Let test framework handle errors
+it('should create user', async () => {
+  const user = await createUser(userData)
+  expect(user.id).toBeTruthy()
+})
+
+// ✅ Good - Only for testing specific errors
+it('should throw error', async () => {
+  await expect(createUser(invalid)).rejects.toThrow('Invalid email')
+})
+```
+
+### 2. Never Use Early Returns
+```ts
+// ❌ Bad - Silently skips test
+it('should test API', async () => {
+  if (!hasValidCredentials) return
+  const result = await apiCall()
+})
+
+// ✅ Good - Fail when preconditions missing
+it('should test API', async () => {
+  expect(hasValidCredentials).toBe(true)
+  const result = await apiCall()
+})
+```
+
+### 3. Never Skip Tests for Missing Env Vars
+```ts
+// ❌ Bad
+describe.skipIf(!process.env.CLICKHOUSE_URL)('Database Tests', () => {})
+
+// ✅ Good - Let tests fail if env not configured
+describe('Database Tests', () => {
+  const env = DatabaseEnvSchema.parse(process.env)
+  const client = createClientFromEnv(env)
+})
+```
+
+### 4. Initialize Inline, Not in beforeEach
+```ts
+// ❌ Bad - Unnecessary beforeEach
+describe('Tests', () => {
+  let queryBuilder: QueryBuilder
+  beforeEach(() => {
+    queryBuilder = new QueryBuilder(schema)
+  })
+})
+
+// ✅ Good - Inline initialization
+describe('Tests', () => {
+  const queryBuilder = new QueryBuilder(schema)
+})
+
+// ✅ Good - Use beforeEach only for async cleanup
+beforeEach(async () => {
+  await client.query('DELETE FROM test_table')
+})
+```
+
+## Best Practices
+
+### Use assert() for Type Narrowing
+```ts
+// ✅ Good - Provides type narrowing
+assert(checkoutRecord)
+```
+
+### Use vi.waitFor() for Async Tests
+```ts
+await vi.waitFor(
+  async () => {
+    const result = await clickhouse.query('...')
+    expect(records).toHaveLength(2)
+  },
+  { timeout: 5000, interval: 500 }
+)
+```
+
+### Don't Assert Env Vars in Tests
+Already validated in `vitest.config.ts`. Trust the config.
+
+### Automatic State Reset (Cloudflare Workers)
+Vitest automatically resets D1, KV, R2, Durable Objects between tests.
+
+Only clean up external services (ClickHouse, external APIs).
+
+## Test Scripts Organization
+Place test scripts, utilities, one-off scripts in `repl/` folder at package root.
+
+## Environment Variables
+When adding new env vars for tests, update:
+1. Package's `turbo.json` → `passThroughEnv` array
+2. `.github/workflows/ci.yml` → `env` section
+
+---
+
+retry
+
+---
+
+we dont need to specificallytest the trailing commas. just test that the output is valid typescript and can be imported and "used"
+
+---
+
+commit, push, create PR monitor the pr and then merge when passing
