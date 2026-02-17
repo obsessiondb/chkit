@@ -29,6 +29,9 @@ type PackageJson = {
 	name?: string
 	version?: string
 	private?: boolean
+	dependencies?: Record<string, string>
+	devDependencies?: Record<string, string>
+	peerDependencies?: Record<string, string>
 }
 
 const TMP_DIR = resolve('.tmp')
@@ -45,6 +48,7 @@ export async function main(): Promise<void> {
 	ensureRequiredTools()
 	ensureOnMainBranch()
 	ensureWorkingTreeClean()
+	ensureNpmAuth()
 
 	runQualityGates()
 	ensureBetaPrereleaseMode(args.dryRun)
@@ -66,6 +70,8 @@ export async function main(): Promise<void> {
 
 	runCommand('bun', ['run', 'version-packages'])
 
+	resolveWorkspaceVersions()
+
 	const confirmed = await confirmPublish()
 	if (!confirmed) {
 		fail('Publish cancelled by user.')
@@ -78,11 +84,91 @@ export async function main(): Promise<void> {
 }
 
 /**
+ * Resolves `workspace:*` dependency references to concrete versions
+ * in all workspace packages before publishing.
+ *
+ * This is necessary because `bun publish` has a known bug where it
+ * does not reliably resolve `workspace:*` references at publish time
+ * (see https://github.com/oven-sh/bun/issues/24687).
+ *
+ * The resolved versions are written to disk so `bun publish` picks
+ * them up. The changes are included in the post-release commit
+ * alongside bumped versions and changelogs.
+ */
+function resolveWorkspaceVersions(): void {
+	logLine('Resolving workspace:* references to actual versions...')
+
+	const packagesDir = resolve('packages')
+	const packageDirs = readdirSync(packagesDir).filter((name) => {
+		const pkgJsonPath = join(packagesDir, name, 'package.json')
+		try {
+			statSync(pkgJsonPath)
+			return true
+		} catch {
+			return false
+		}
+	})
+
+	const versionMap = new Map<string, string>()
+	const packageJsonPaths = new Map<string, string>()
+
+	for (const dir of packageDirs) {
+		const pkgJsonPath = join(packagesDir, dir, 'package.json')
+		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
+
+		if (pkg.name && pkg.version) {
+			versionMap.set(pkg.name, pkg.version)
+			packageJsonPaths.set(pkg.name, pkgJsonPath)
+		}
+	}
+
+	let totalResolved = 0
+
+	for (const [pkgName, pkgJsonPath] of packageJsonPaths) {
+		const raw = readFileSync(pkgJsonPath, 'utf8')
+		const pkg = JSON.parse(raw) as PackageJson
+		let changed = false
+
+		for (const depField of [
+			'dependencies',
+			'devDependencies',
+			'peerDependencies',
+		] as const) {
+			const deps = pkg[depField]
+			if (!deps) continue
+
+			for (const [depName, depVersion] of Object.entries(deps)) {
+				if (!depVersion.startsWith('workspace:')) continue
+
+				const resolvedVersion = versionMap.get(depName)
+				if (!resolvedVersion) {
+					fail(
+						`${pkgName}: cannot resolve workspace dependency ${depName} — not found in workspace`,
+					)
+				}
+
+				deps[depName] = resolvedVersion
+				changed = true
+				logLine(
+					`  ${pkgName}: ${depField}.${depName} workspace:* → ${resolvedVersion}`,
+				)
+				totalResolved++
+			}
+		}
+
+		if (changed) {
+			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, '\t')}\n`)
+		}
+	}
+
+	logLine(`Resolved ${totalResolved} workspace:* reference(s).`)
+}
+
+/**
  * Publishes all non-private workspace packages using `bun publish`.
  *
- * Unlike `npm publish`, `bun publish` resolves `workspace:*` references
- * at publish time without modifying package.json on disk, so the working
- * tree stays clean with workspace protocol references intact.
+ * Workspace references must already be resolved to concrete versions
+ * by `resolveWorkspaceVersions()` before calling this function.
  */
 function publishWorkspacePackages(): void {
 	const packagesDir = resolve('packages')
@@ -133,6 +219,7 @@ function parseArgs(argv: string[]): ReleaseArgs {
 function ensureRequiredTools(): void {
 	runCommand('bun', ['--version'])
 	runCommand('git', ['--version'])
+	runCommand('npm', ['--version'])
 	runCommand('bun', ['run', 'changeset', '--', '--version'])
 }
 
@@ -149,6 +236,10 @@ function ensureWorkingTreeClean(): void {
 	if (result.stdout.trim().length > 0) {
 		fail('Working tree is not clean. Commit or stash changes before releasing.')
 	}
+}
+
+function ensureNpmAuth(): void {
+	runCommand('npm', ['whoami'])
 }
 
 function runQualityGates(): void {
