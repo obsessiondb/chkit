@@ -26,7 +26,7 @@
     },
     "packages/cli": {
       "name": "@chkit/cli",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -40,7 +40,7 @@
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
@@ -48,28 +48,28 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "fast-glob": "^3.3.2",
@@ -77,7 +77,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",

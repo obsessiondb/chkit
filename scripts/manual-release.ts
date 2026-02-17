@@ -1,7 +1,21 @@
 #!/usr/bin/env bun
+/**
+ * Experimental release script using `bun publish` instead of `npm publish`.
+ *
+ * Identical to manual-release.ts but relies on `bun publish` to resolve
+ * `workspace:*` references at publish time (no manual resolution step).
+ *
+ * Usage: bun run ./scripts/manual-release-bun.ts
+ */
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import {
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs'
+import { join, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
@@ -19,9 +33,15 @@ type ChangesetValidationResult = {
 	invalidEntries: string[]
 }
 
+type PackageJson = {
+	name?: string
+	version?: string
+	private?: boolean
+}
+
 const TMP_DIR = resolve('.tmp')
-const LOG_FILE = resolve(TMP_DIR, `release-manual-${Date.now()}.log`)
-const STATUS_FILE = resolve(TMP_DIR, `release-manual-status-${Date.now()}.json`)
+const LOG_FILE = resolve(TMP_DIR, `release-bun-${Date.now()}.log`)
+const STATUS_FILE = resolve(TMP_DIR, `release-bun-status-${Date.now()}.json`)
 
 export async function main(): Promise<void> {
 	mkdirSync(TMP_DIR, { recursive: true })
@@ -55,15 +75,59 @@ export async function main(): Promise<void> {
 
 	runCommand('bun', ['run', 'version-packages'])
 
-	const confirmed = await confirmPublish()
-	if (!confirmed) {
-		fail('Publish cancelled by user.')
-	}
+	const otp = await promptForOtp()
 
-	runCommand('bun', ['run', 'release', '--', '--tag', 'beta'])
+	publishWorkspacePackages(otp)
+
+	commitAndPush()
 
 	logLine('Release publish finished.')
-	logLine('Follow-up: commit and push version/changelog changes on main.')
+}
+
+/**
+ * Publishes all non-private workspace packages using `bun publish`.
+ *
+ * Relies on `bun publish` to resolve `workspace:*` references
+ * at publish time without modifying package.json on disk.
+ */
+function publishWorkspacePackages(otp: string): void {
+	const packagesDir = resolve('packages')
+	const packageDirs = readdirSync(packagesDir).filter((name) => {
+		const pkgJsonPath = join(packagesDir, name, 'package.json')
+		try {
+			statSync(pkgJsonPath)
+			return true
+		} catch {
+			return false
+		}
+	})
+
+	let published = 0
+
+	for (const dir of packageDirs) {
+		const pkgJsonPath = join(packagesDir, dir, 'package.json')
+		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
+
+		if (pkg.private) continue
+		if (!pkg.name || !pkg.version) continue
+
+		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
+		runCommand(
+			'bun',
+			['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
+			{ cwd: join(packagesDir, dir) },
+		)
+		published++
+	}
+
+	logLine(`Published ${published} package(s).`)
+}
+
+function commitAndPush(): void {
+	logLine('Committing version changes...')
+	runCommand('git', ['add', '-A'])
+	runCommand('git', ['commit', '-m', 'chore: version packages'])
+	runCommand('git', ['push', 'origin', 'main'])
 }
 
 function parseArgs(argv: string[]): ReleaseArgs {
@@ -108,10 +172,7 @@ function ensureNpmAuth(): void {
 }
 
 function runQualityGates(): void {
-	runCommand('bun', ['run', 'lint'])
-	runCommand('bun', ['run', 'typecheck'])
-	runCommand('bun', ['run', 'test'])
-	runCommand('bun', ['run', 'build'])
+	runCommand('bun', ['run', 'verify'])
 }
 
 function ensureBetaPrereleaseMode(dryRun: boolean): void {
@@ -226,23 +287,30 @@ function parseReleaseEntry(
 	}
 }
 
-async function confirmPublish(): Promise<boolean> {
+async function promptForOtp(): Promise<string> {
 	const rl = createInterface({ input: stdin, output: stdout })
 	try {
-		const answer = await rl.question('Proceed with npm publish to beta? [y/N] ')
-		const normalized = answer.trim().toLowerCase()
-		return normalized === 'y' || normalized === 'yes'
+		const otp = await rl.question('Enter npm OTP to publish: ')
+		const trimmed = otp.trim()
+		if (trimmed.length === 0) {
+			fail('No OTP provided. Publish cancelled.')
+		}
+		return trimmed
 	} finally {
 		rl.close()
 	}
 }
 
-function runCommand(command: string, args: string[]): CommandResult {
+function runCommand(
+	command: string,
+	args: string[],
+	options?: { cwd?: string },
+): CommandResult {
 	const renderedCommand = `${command} ${args.map(shellQuote).join(' ')}`
 	logLine(`$ ${renderedCommand}`)
 
 	const result = spawnSync(command, args, {
-		cwd: process.cwd(),
+		cwd: options?.cwd ?? process.cwd(),
 		encoding: 'utf8',
 		env: process.env,
 	})
