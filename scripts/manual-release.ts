@@ -1,7 +1,13 @@
 #!/usr/bin/env bun
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import {
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs'
+import { join, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
@@ -17,6 +23,15 @@ type CommandResult = {
 type ChangesetValidationResult = {
 	files: string[]
 	invalidEntries: string[]
+}
+
+type PackageJson = {
+	name?: string
+	version?: string
+	private?: boolean
+	dependencies?: Record<string, string>
+	devDependencies?: Record<string, string>
+	peerDependencies?: Record<string, string>
 }
 
 const TMP_DIR = resolve('.tmp')
@@ -55,6 +70,8 @@ export async function main(): Promise<void> {
 
 	runCommand('bun', ['run', 'version-packages'])
 
+	resolveWorkspaceVersions()
+
 	const confirmed = await confirmPublish()
 	if (!confirmed) {
 		fail('Publish cancelled by user.')
@@ -64,6 +81,82 @@ export async function main(): Promise<void> {
 
 	logLine('Release publish finished.')
 	logLine('Follow-up: commit and push version/changelog changes on main.')
+}
+
+/**
+ * Scans all workspace packages and replaces `workspace:*` dependency
+ * references with the actual version from the referenced package.
+ *
+ * This is necessary because `changeset publish` calls `npm publish`
+ * under the hood, and npm does NOT resolve workspace protocol references.
+ */
+function resolveWorkspaceVersions(): void {
+	logLine('Resolving workspace:* references to actual versions...')
+
+	const packagesDir = resolve('packages')
+	const packageDirs = readdirSync(packagesDir).filter((name) => {
+		const pkgJsonPath = join(packagesDir, name, 'package.json')
+		try {
+			statSync(pkgJsonPath)
+			return true
+		} catch {
+			return false
+		}
+	})
+
+	const versionMap = new Map<string, string>()
+	const packageJsonPaths = new Map<string, string>()
+
+	for (const dir of packageDirs) {
+		const pkgJsonPath = join(packagesDir, dir, 'package.json')
+		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
+
+		if (pkg.name && pkg.version) {
+			versionMap.set(pkg.name, pkg.version)
+			packageJsonPaths.set(pkg.name, pkgJsonPath)
+		}
+	}
+
+	let totalResolved = 0
+
+	for (const [pkgName, pkgJsonPath] of packageJsonPaths) {
+		const raw = readFileSync(pkgJsonPath, 'utf8')
+		const pkg = JSON.parse(raw) as PackageJson
+		let changed = false
+
+		for (const depField of [
+			'dependencies',
+			'devDependencies',
+			'peerDependencies',
+		] as const) {
+			const deps = pkg[depField]
+			if (!deps) continue
+
+			for (const [depName, depVersion] of Object.entries(deps)) {
+				if (!depVersion.startsWith('workspace:')) continue
+
+				const resolvedVersion = versionMap.get(depName)
+				if (!resolvedVersion) {
+					fail(
+						`${pkgName}: cannot resolve workspace dependency ${depName} — not found in workspace`,
+					)
+				}
+
+				deps[depName] = resolvedVersion
+				changed = true
+				logLine(
+					`  ${pkgName}: ${depField}.${depName} workspace:* → ${resolvedVersion}`,
+				)
+				totalResolved++
+			}
+		}
+
+		if (changed) {
+			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, '\t')}\n`)
+		}
+	}
+
+	logLine(`Resolved ${totalResolved} workspace:* reference(s).`)
 }
 
 function parseArgs(argv: string[]): ReleaseArgs {
