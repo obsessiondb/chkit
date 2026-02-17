@@ -1,0 +1,57 @@
+this happens when I do a release in here `bun run release:manual`\
+<Logs>\
+$ doppler run --project chx --config ci -- turbo run typecheck lint test
+• turbo 2.8.9
+$ bun run version-packages
+🦋  All files have been updated. Review them and commit at your leisure
+$ changeset version
+🦋  warn ===============================IMPORTANT!===============================
+🦋  warn You are in prerelease mode
+🦋  warn If you meant to do a normal release you should revert these changes and run `changeset pre exit`
+🦋  warn You can then run `changeset version` again to do a normal release
+🦋  warn ----------------------------------------------------------------------
+Resolving workspace:* references to actual versions...
+  @chkit/clickhouse: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/cli: dependencies.@chkit/clickhouse workspace:* → 0.1.0-beta.2
+  @chkit/cli: dependencies.@chkit/codegen workspace:* → 0.1.0-beta.2
+  @chkit/cli: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/codegen: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/plugin-pull: dependencies.@chkit/clickhouse workspace:* → 0.1.0-beta.2
+  @chkit/plugin-pull: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/plugin-typegen: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+  @chkit/plugin-backfill: dependencies.@chkit/core workspace:* → 0.1.0-beta.2
+Resolved 9 workspace:* reference(s).
+Proceed with bun publish to beta? [y/N] Y
+Publishing @chkit/clickhouse@0.1.0-beta.2...
+$ bun publish --tag beta --access public
+bun publish v1.3.5 (1e86cebd)
+
+packed 0.60KB package.json
+packed 1.1KB dist/create-table-parser.d.ts
+packed 0.84KB dist/create-table-parser.d.ts.map
+packed 6.16KB dist/create-table-parser.js
+packed 5.85KB dist/create-table-parser.js.map
+packed 1.44KB dist/index.d.ts
+packed 1.34KB dist/index.d.ts.map
+packed 6.66KB dist/index.js
+packed 5.42KB dist/index.js.map
+
+Total files: 9
+Shasum: daef2edd85de6cce5488e8662d9d3f321fd35eef
+Integrity: sha512-n4smplHqLrUFP[...]s1p0WEdyQoK5w==
+Unpacked size: 29.38KB
+Packed size: 6.45KB
+Tag: beta
+Access: public
+Registry: https://registry.npmjs.org/
+
+Authenticate your account at (press ENTER to open in browser):
+|---------------------------------------------------------------------|
+| https://www.npmjs.com/auth/cli/012a2fd6-36f9-4b56-806a-82f5712b7846 |
+|---------------------------------------------------------------------|
+
+404 Not Found: https://registry.npmjs.org/-/v1/done?authId=***
+
+ - '@chkit/clickhouse@0.1.0-beta.2' does not exist in this registry\
+</Logs>\
+I can tauthenticate with npm login, but when running npm whoami, i am already authenticated

@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "47463d43223b",
+  "session_id": "dc1197f6-6ed5-45a1-9a4e-2d27a91bb9d1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-17T03:25:55.595694Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "scripts/manual-release.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 18227,
+    "cache_read_tokens": 90818,
+    "output_tokens": 30,
+    "api_call_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-17T03:25:55.555056Z",
+    "agent_lines": 0,
+    "human_added": 58,
+    "human_modified": 160,
+    "human_removed": 0,
+    "total_committed": 61,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chx/dc1197f6-6ed5-45a1-9a4e-2d27a91bb9d1.jsonl"
+}
