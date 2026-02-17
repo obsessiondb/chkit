@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 export const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
 export const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 export const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/index.ts')
-export const TYPEGEN_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-typegen/src/index.ts')
+export const CODEGEN_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-codegen/src/index.ts')
 export const BACKFILL_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-backfill/src/index.ts')
 export const PULL_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-pull/src/index.ts')
 

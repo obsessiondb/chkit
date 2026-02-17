@@ -20,6 +20,7 @@ import {
 export interface ClickHouseExecutor {
   execute(sql: string): Promise<void>
   query<T>(sql: string): Promise<T[]>
+  insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
   listTableDetails(databases: string[]): Promise<IntrospectedTable[]>
 }
@@ -144,6 +145,13 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     async query<T>(sql: string): Promise<T[]> {
       const result = await client.query({ query: sql, format: 'JSONEachRow' })
       return result.json<T>()
+    },
+    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void> {
+      await client.insert({
+        table: params.table,
+        values: params.values,
+        format: 'JSONEachRow',
+      })
     },
     async listSchemaObjects(): Promise<SchemaObjectRef[]> {
       const rows = await this.query<SystemTableRow>(

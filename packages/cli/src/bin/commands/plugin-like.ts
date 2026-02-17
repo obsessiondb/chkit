@@ -18,7 +18,7 @@ export interface PluginLikeContext {
 
 interface BuildPluginLikeContextInput {
   args: string[]
-  command: 'plugin' | 'typegen' | 'pull'
+  command: 'plugin' | 'codegen' | 'pull'
   handleInvalidPluginOptions?: boolean
 }
 

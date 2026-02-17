@@ -8,7 +8,7 @@ export async function cmdInit(): Promise<void> {
 
   await writeIfMissing(
     configPath,
-    `import { defineConfig } from '@chkit/core'\n\nexport default defineConfig({\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [\n    // Typed plugin registration (recommended):\n    // import { typegen } from '@chkit/plugin-typegen'\n    // typegen({ emitZod: true }),\n\n    // Legacy path-based registration (still supported):\n    // { resolve: './plugins/example-plugin.ts', options: {}, enabled: true },\n  ],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n})\n`
+    `import { defineConfig } from '@chkit/core'\n\nexport default defineConfig({\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [\n    // Typed plugin registration (recommended):\n    // import { codegen } from '@chkit/plugin-codegen'\n    // codegen({ emitZod: true }),\n\n    // Legacy path-based registration (still supported):\n    // { resolve: './plugins/example-plugin.ts', options: {}, enabled: true },\n  ],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n})\n`
   )
 
   await writeIfMissing(
