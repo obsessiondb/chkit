@@ -5,9 +5,9 @@ All packages are published to npm under the `@chkit` scope with the `beta` dist-
 ## Prerequisites
 
 - On the `main` branch with a clean working tree
-- Authenticated to npm (via `~/.npmrc` or `NPM_TOKEN`)
-- `bun`, `git` installed
-- At least one pending changeset in `.changeset/`
+- Authenticated to npm (`npm login` — bun reads auth from `~/.npmrc`)
+- `bun`, `git`, `npm` installed
+- At least one **new** pending changeset in `.changeset/` (see [Adding a Changeset](#adding-a-changeset) below)
 
 ## Quick Reference
 
@@ -24,15 +24,17 @@ bun run release:manual
 The `release:manual` script (`scripts/manual-release.ts`) runs these steps:
 
 1. **Validate changesets** - confirms `.changeset/*.md` files exist and all bumps are `patch` (only patch is allowed during beta)
-2. **Check tools** - verifies bun, git, changeset CLI are available
+2. **Check tools** - verifies bun, git, npm, changeset CLI are available
 3. **Check branch** - must be on `main`
 4. **Check working tree** - must be clean
-5. **Quality gates** - runs lint, typecheck, test, build
-6. **Ensure beta prerelease mode** - enters changeset pre mode if not already active
-7. **Version packages** - runs `changeset version` to bump versions and update changelogs
-8. **Confirm** - interactive prompt before publishing
-9. **Publish** - runs `bun publish --tag beta` for each non-private package
-10. **Manual follow-up** - commit and push the version/changelog changes on main
+5. **Check npm auth** - verifies `npm whoami` succeeds (run `npm login` first if needed)
+6. **Quality gates** - runs lint, typecheck, test, build
+7. **Ensure beta prerelease mode** - enters changeset pre mode if not already active
+8. **Version packages** - runs `changeset version` to bump versions and update changelogs
+9. **Resolve workspace deps** - replaces `workspace:*` with concrete versions in package.json files
+10. **Confirm** - interactive prompt before publishing
+11. **Publish** - runs `bun publish --tag beta` for each non-private package
+12. **Manual follow-up** - commit and push the version/changelog changes on main
 
 ## After Publishing
 
@@ -46,7 +48,7 @@ git push origin main
 
 ## Adding a Changeset
 
-Before releasing, add a changeset describing your changes:
+You **must** create at least one changeset before running `release:manual`. Without a new changeset, `changeset version` has nothing to bump, and the script will attempt to re-publish an already-published version.
 
 ```bash
 bun run changeset
@@ -67,7 +69,19 @@ Description of the change.
 
 ## Why bun publish?
 
-This monorepo uses `workspace:*` for internal dependencies. Unlike `npm publish`, `bun publish` resolves `workspace:*` references to concrete versions at publish time without modifying `package.json` on disk. This means the working tree stays clean with `workspace:*` intact after publishing, so the commit to main preserves workspace protocol references for development.
+This monorepo uses `workspace:*` for internal dependencies. `bun publish` is used instead of `npm publish` because it handles scoped packages and `--tag` more reliably.
+
+**Note:** `bun publish` is supposed to resolve `workspace:*` references automatically, but has a [known bug](https://github.com/oven-sh/bun/issues/24687) where this does not work. The release script works around this by resolving `workspace:*` to concrete versions in the package.json files before publishing. These resolved versions are included in the post-release commit.
+
+## Authentication
+
+`bun publish` reads npm auth from `~/.npmrc`. Run `npm login` to authenticate:
+
+```bash
+npm login
+```
+
+This writes a token to `~/.npmrc` that both `npm` and `bun` will use. The release script verifies auth with `npm whoami` before proceeding.
 
 ## Prerelease Mode
 
