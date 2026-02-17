@@ -165,7 +165,7 @@ function resolveWorkspaceVersions(): void {
 }
 
 /**
- * Publishes all non-private workspace packages using `bun publish`.
+ * Publishes all non-private workspace packages using `npm publish`.
  *
  * Workspace references must already be resolved to concrete versions
  * by `resolveWorkspaceVersions()` before calling this function.
@@ -192,7 +192,7 @@ function publishWorkspacePackages(): void {
 		if (!pkg.name || !pkg.version) continue
 
 		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
-		runCommand('bun', ['publish', '--tag', 'beta', '--access', 'public'], {
+		runCommand('npm', ['publish', '--tag', 'beta', '--access', 'public'], {
 			cwd: join(packagesDir, dir),
 		})
 		published++
@@ -361,7 +361,7 @@ function parseReleaseEntry(
 async function confirmPublish(): Promise<boolean> {
 	const rl = createInterface({ input: stdin, output: stdout })
 	try {
-		const answer = await rl.question('Proceed with bun publish to beta? [y/N] ')
+		const answer = await rl.question('Proceed with npm publish to beta? [y/N] ')
 		const normalized = answer.trim().toLowerCase()
 		return normalized === 'y' || normalized === 'yes'
 	} finally {
