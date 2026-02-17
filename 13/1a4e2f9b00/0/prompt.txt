@@ -1,0 +1,23 @@
+run `bun verify` to check if main is passing
+
+---
+
+when trying to run `bun release:manual` i am getting this error:\
+
+$ doppler run --project chx --config ci -- turbo run typecheck lint test
+• turbo 2.8.9
+$ bun run version-packages
+$ changeset version
+🦋  warn ===============================IMPORTANT!===============================
+🦋  warn You are in prerelease mode
+🦋  warn If you meant to do a normal release you should revert these changes and run `changeset pre exit`
+🦋  warn You can then run `changeset version` again to do a normal release
+🦋  warn ----------------------------------------------------------------------
+🦋  error Error: Found changeset fix-workspace-deps for package @chkit/plugin-typegen which is not in the workspace
+🦋  error     at getRelevantChangesets (/Users/marc/Workspace/chx/node_modules/.bun/@changesets+assemble-release-plan@6.0.9/node_modules/@changesets/assemble-release-plan/dist/changesets-assemble-release-plan.cjs.js:564:15)
+🦋  error     at Object.assembleReleasePlan [as default] (/Users/marc/Workspace/chx/node_modules/.bun/@changesets+assemble-release-plan@6.0.9/nosets/assemble-release-plan/dist/changesets-assemble-release-plan.cjs.js:493:30)
+🦋  error     at version (/Users/marc/Workspace/chx/node_modules/.bun/@changesets+cli@2.29.8+9e05f918cd356987/node_modules/@changesets/cli/dist/changesets-cli.cjs.js:1174:60)
+🦋  error     at async run (/Users/marc/Workspace/chx/node_modules/.bun/@changesets+cli@2.29.8+9e05f918cd356987/node_modules/@changesets/cli/dist/changesets-cli.cjs.js:1339:11)
+error: script "version-packages" exited with code 1
+ERROR: Command failed (1): bun run version-packages
+error: script "release:manual" exited with code 1
