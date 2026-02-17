@@ -1,0 +1,11 @@
+---
+"@chkit/cli": patch
+"@chkit/clickhouse": patch
+"@chkit/codegen": patch
+"@chkit/core": patch
+"@chkit/plugin-backfill": patch
+"@chkit/plugin-pull": patch
+"@chkit/plugin-codegen": patch
+---
+
+Rename plugin-typegen to plugin-codegen and add ingestion functions.
