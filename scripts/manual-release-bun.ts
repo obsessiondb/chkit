@@ -1,4 +1,12 @@
 #!/usr/bin/env bun
+/**
+ * Experimental release script using `bun publish` instead of `npm publish`.
+ *
+ * Identical to manual-release.ts but relies on `bun publish` to resolve
+ * `workspace:*` references at publish time (no manual resolution step).
+ *
+ * Usage: bun run ./scripts/manual-release-bun.ts
+ */
 import { spawnSync } from 'node:child_process'
 import {
 	mkdirSync,
@@ -29,14 +37,11 @@ type PackageJson = {
 	name?: string
 	version?: string
 	private?: boolean
-	dependencies?: Record<string, string>
-	devDependencies?: Record<string, string>
-	peerDependencies?: Record<string, string>
 }
 
 const TMP_DIR = resolve('.tmp')
-const LOG_FILE = resolve(TMP_DIR, `release-manual-${Date.now()}.log`)
-const STATUS_FILE = resolve(TMP_DIR, `release-manual-status-${Date.now()}.json`)
+const LOG_FILE = resolve(TMP_DIR, `release-bun-${Date.now()}.log`)
+const STATUS_FILE = resolve(TMP_DIR, `release-bun-status-${Date.now()}.json`)
 
 export async function main(): Promise<void> {
 	mkdirSync(TMP_DIR, { recursive: true })
@@ -70,8 +75,6 @@ export async function main(): Promise<void> {
 
 	runCommand('bun', ['run', 'version-packages'])
 
-	resolveWorkspaceVersions()
-
 	const otp = await promptForOtp()
 
 	publishWorkspacePackages(otp)
@@ -81,91 +84,10 @@ export async function main(): Promise<void> {
 }
 
 /**
- * Resolves `workspace:*` dependency references to concrete versions
- * in all workspace packages before publishing.
+ * Publishes all non-private workspace packages using `bun publish`.
  *
- * This is necessary because `bun publish` has a known bug where it
- * does not reliably resolve `workspace:*` references at publish time
- * (see https://github.com/oven-sh/bun/issues/24687).
- *
- * The resolved versions are written to disk so `bun publish` picks
- * them up. The changes are included in the post-release commit
- * alongside bumped versions and changelogs.
- */
-function resolveWorkspaceVersions(): void {
-	logLine('Resolving workspace:* references to actual versions...')
-
-	const packagesDir = resolve('packages')
-	const packageDirs = readdirSync(packagesDir).filter((name) => {
-		const pkgJsonPath = join(packagesDir, name, 'package.json')
-		try {
-			statSync(pkgJsonPath)
-			return true
-		} catch {
-			return false
-		}
-	})
-
-	const versionMap = new Map<string, string>()
-	const packageJsonPaths = new Map<string, string>()
-
-	for (const dir of packageDirs) {
-		const pkgJsonPath = join(packagesDir, dir, 'package.json')
-		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
-
-		if (pkg.name && pkg.version) {
-			versionMap.set(pkg.name, pkg.version)
-			packageJsonPaths.set(pkg.name, pkgJsonPath)
-		}
-	}
-
-	let totalResolved = 0
-
-	for (const [pkgName, pkgJsonPath] of packageJsonPaths) {
-		const raw = readFileSync(pkgJsonPath, 'utf8')
-		const pkg = JSON.parse(raw) as PackageJson
-		let changed = false
-
-		for (const depField of [
-			'dependencies',
-			'devDependencies',
-			'peerDependencies',
-		] as const) {
-			const deps = pkg[depField]
-			if (!deps) continue
-
-			for (const [depName, depVersion] of Object.entries(deps)) {
-				if (!depVersion.startsWith('workspace:')) continue
-
-				const resolvedVersion = versionMap.get(depName)
-				if (!resolvedVersion) {
-					fail(
-						`${pkgName}: cannot resolve workspace dependency ${depName} — not found in workspace`,
-					)
-				}
-
-				deps[depName] = resolvedVersion
-				changed = true
-				logLine(
-					`  ${pkgName}: ${depField}.${depName} workspace:* → ${resolvedVersion}`,
-				)
-				totalResolved++
-			}
-		}
-
-		if (changed) {
-			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, '\t')}\n`)
-		}
-	}
-
-	logLine(`Resolved ${totalResolved} workspace:* reference(s).`)
-}
-
-/**
- * Publishes all non-private workspace packages using `npm publish`.
- *
- * Workspace references must already be resolved to concrete versions
- * by `resolveWorkspaceVersions()` before calling this function.
+ * Relies on `bun publish` to resolve `workspace:*` references
+ * at publish time without modifying package.json on disk.
  */
 function publishWorkspacePackages(otp: string): void {
 	const packagesDir = resolve('packages')
@@ -190,7 +112,7 @@ function publishWorkspacePackages(otp: string): void {
 
 		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
 		runCommand(
-			'npm',
+			'bun',
 			['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
 			{ cwd: join(packagesDir, dir) },
 		)
