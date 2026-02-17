@@ -201,10 +201,7 @@ function ensureNpmAuth(): void {
 }
 
 function runQualityGates(): void {
-	runCommand('bun', ['run', 'lint'])
-	runCommand('bun', ['run', 'typecheck'])
-	runCommand('bun', ['run', 'test'])
-	runCommand('bun', ['run', 'build'])
+	runCommand('bun', ['run', 'verify'])
 }
 
 function ensureBetaPrereleaseMode(dryRun: boolean): void {
