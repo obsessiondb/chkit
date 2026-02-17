@@ -63,7 +63,7 @@ export async function main(): Promise<void> {
 	// 2. Enter beta prerelease mode if not already active
 	ensureBetaPrereleaseMode()
 
-	// 3. Apply pending changesets or detect already-bumped versions
+	// 3. Apply pending changesets (auto-recovers from prior failed releases)
 	const hadPendingChangesets = applyPendingChangesets(args.dryRun)
 
 	if (args.dryRun) {
@@ -71,16 +71,8 @@ export async function main(): Promise<void> {
 		return
 	}
 
-	if (!hadPendingChangesets && !hasUncommittedChanges()) {
-		fail(
-			'Nothing to release: no pending changesets and no uncommitted version changes.',
-		)
-	}
-
 	if (!hadPendingChangesets) {
-		logLine(
-			'No pending changesets found, but detected uncommitted version changes. Proceeding.',
-		)
+		fail('Nothing to release: no pending changeset files found in .changeset/.')
 	}
 
 	// 4. Quality gates (typecheck, lint, test, build)
@@ -102,8 +94,12 @@ export async function main(): Promise<void> {
 
 /**
  * Checks for pending changeset files. If found, validates them and runs
- * `changeset version` to bump package versions. Returns whether changesets
- * were applied.
+ * `changeset version` to bump package versions.
+ *
+ * Handles the recovery scenario where a previous release attempt already
+ * consumed the changesets (recorded in pre.json) but publishing failed.
+ * In that case, the consumed entries are cleared from pre.json so
+ * `changeset version` re-processes them and bumps to the next beta.
  */
 function applyPendingChangesets(dryRun: boolean): boolean {
 	const result = collectChangesetValidation()
@@ -118,6 +114,8 @@ function applyPendingChangesets(dryRun: boolean): boolean {
 			`Only patch changesets are allowed for this phase. Found non-patch entries:\n${result.invalidEntries.join('\n')}`,
 		)
 	}
+
+	resetConsumedChangesets(result.files)
 
 	logLine(
 		`Found ${result.files.length} pending changeset(s). Bumping versions...`,
@@ -139,6 +137,50 @@ function applyPendingChangesets(dryRun: boolean): boolean {
 
 	runCommand('bun', ['run', 'version-packages'])
 	return true
+}
+
+/**
+ * In prerelease mode, `changeset version` keeps .md files on disk but records
+ * them in pre.json's `changesets` array as consumed. If a prior release
+ * attempt consumed them but publishing failed, `changeset version` won't
+ * process them again — it thinks they're done.
+ *
+ * This function detects that scenario and removes the consumed entries from
+ * pre.json so `changeset version` re-processes them (bumping to the next beta).
+ */
+function resetConsumedChangesets(changesetFiles: string[]): void {
+	const preFile = resolve('.changeset/pre.json')
+
+	let preState: { mode?: string; tag?: string; changesets?: string[] }
+	try {
+		preState = JSON.parse(readFileSync(preFile, 'utf8'))
+	} catch {
+		return
+	}
+
+	const consumed = preState.changesets ?? []
+	if (consumed.length === 0) return
+
+	const changesetNames = changesetFiles.map((f) => {
+		const base = f.split('/').pop() ?? ''
+		return base.replace(/\.md$/, '')
+	})
+
+	const alreadyConsumed = changesetNames.filter((name) =>
+		consumed.includes(name),
+	)
+
+	if (alreadyConsumed.length === 0) return
+
+	logLine(
+		`Detected ${alreadyConsumed.length} changeset(s) already consumed from a prior release attempt. Resetting for re-processing...`,
+	)
+
+	preState.changesets = consumed.filter(
+		(name) => !alreadyConsumed.includes(name),
+	)
+
+	writeFileSync(preFile, `${JSON.stringify(preState, null, 2)}\n`)
 }
 
 function collectChangesetValidation(): ChangesetValidationResult {
@@ -254,6 +296,7 @@ function publishWorkspacePackages(otp: string): void {
 	})
 
 	let published = 0
+	let skipped = 0
 
 	for (const dir of packageDirs) {
 		const pkgJsonPath = join(packagesDir, dir, 'package.json')
@@ -261,6 +304,12 @@ function publishWorkspacePackages(otp: string): void {
 
 		if (pkg.private) continue
 		if (!pkg.name || !pkg.version) continue
+
+		if (isVersionPublished(pkg.name, pkg.version)) {
+			logLine(`Skipping ${pkg.name}@${pkg.version} (already published)`)
+			skipped++
+			continue
+		}
 
 		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
 		runCommand(
@@ -271,7 +320,22 @@ function publishWorkspacePackages(otp: string): void {
 		published++
 	}
 
-	logLine(`Published ${published} package(s).`)
+	if (published === 0 && skipped > 0) {
+		fail(
+			`All ${skipped} package version(s) are already published on npm. Nothing to do.`,
+		)
+	}
+
+	logLine(`Published ${published} package(s), skipped ${skipped}.`)
+}
+
+function isVersionPublished(name: string, version: string): boolean {
+	const result = spawnSync('npm', ['view', `${name}@${version}`, 'version'], {
+		encoding: 'utf8',
+		env: process.env,
+	})
+
+	return result.status === 0 && result.stdout.trim() === version
 }
 
 // ---------------------------------------------------------------------------
@@ -290,11 +354,6 @@ function commitAndPush(): void {
 
 	runCommand('git', ['commit', '-m', 'chore: version packages'])
 	runCommand('git', ['push', 'origin', 'main'])
-}
-
-function hasUncommittedChanges(): boolean {
-	const result = runCommand('git', ['status', '--porcelain'])
-	return result.stdout.trim().length > 0
 }
 
 // ---------------------------------------------------------------------------
