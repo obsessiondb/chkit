@@ -1,11 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Experimental release script using `bun publish` instead of `npm publish`.
+ * Single-command release script.
  *
- * Identical to manual-release.ts but relies on `bun publish` to resolve
- * `workspace:*` references at publish time (no manual resolution step).
+ * Handles the full release lifecycle:
+ *   1. Prerequisite checks (tools, branch, npm auth)
+ *   2. Enters beta prerelease mode if needed
+ *   3. Applies pending changesets (version bump) if they exist,
+ *      or detects already-bumped versions from a prior run
+ *   4. Runs quality gates (typecheck, lint, test, build)
+ *   5. Publishes all public workspace packages via `bun publish`
+ *   6. Commits version changes and pushes to origin/main
  *
- * Usage: bun run ./scripts/manual-release-bun.ts
+ * Usage: bun run ./scripts/manual-release.ts [--dry-run]
  */
 import { spawnSync } from 'node:child_process'
 import {
@@ -40,8 +46,8 @@ type PackageJson = {
 }
 
 const TMP_DIR = resolve('.tmp')
-const LOG_FILE = resolve(TMP_DIR, `release-bun-${Date.now()}.log`)
-const STATUS_FILE = resolve(TMP_DIR, `release-bun-status-${Date.now()}.json`)
+const LOG_FILE = resolve(TMP_DIR, `release-${Date.now()}.log`)
+const STATUS_FILE = resolve(TMP_DIR, `release-status-${Date.now()}.json`)
 
 export async function main(): Promise<void> {
 	mkdirSync(TMP_DIR, { recursive: true })
@@ -49,17 +55,75 @@ export async function main(): Promise<void> {
 
 	const args = parseArgs(process.argv.slice(2))
 
-	validateChangesets()
+	// 1. Prerequisites
 	ensureRequiredTools()
 	ensureOnMainBranch()
-	ensureWorkingTreeClean()
 	ensureNpmAuth()
 
-	runQualityGates()
-	buildPackages()
-	ensureBetaPrereleaseMode(args.dryRun)
+	// 2. Enter beta prerelease mode if not already active
+	ensureBetaPrereleaseMode()
+
+	// 3. Apply pending changesets or detect already-bumped versions
+	const hadPendingChangesets = applyPendingChangesets(args.dryRun)
 
 	if (args.dryRun) {
+		logLine('Dry-run complete. No publish performed.')
+		return
+	}
+
+	if (!hadPendingChangesets && !hasUncommittedChanges()) {
+		fail(
+			'Nothing to release: no pending changesets and no uncommitted version changes.',
+		)
+	}
+
+	if (!hadPendingChangesets) {
+		logLine(
+			'No pending changesets found, but detected uncommitted version changes. Proceeding.',
+		)
+	}
+
+	// 4. Quality gates (typecheck, lint, test, build)
+	runQualityGates()
+
+	// 5. Publish
+	const otp = await promptForOtp()
+	publishWorkspacePackages(otp)
+
+	// 6. Commit and push
+	commitAndPush()
+
+	logLine('Release complete.')
+}
+
+// ---------------------------------------------------------------------------
+// Changesets
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks for pending changeset files. If found, validates them and runs
+ * `changeset version` to bump package versions. Returns whether changesets
+ * were applied.
+ */
+function applyPendingChangesets(dryRun: boolean): boolean {
+	const result = collectChangesetValidation()
+
+	if (result.files.length === 0) {
+		logLine('No pending changeset files found.')
+		return false
+	}
+
+	if (result.invalidEntries.length > 0) {
+		fail(
+			`Only patch changesets are allowed for this phase. Found non-patch entries:\n${result.invalidEntries.join('\n')}`,
+		)
+	}
+
+	logLine(
+		`Found ${result.files.length} pending changeset(s). Bumping versions...`,
+	)
+
+	if (dryRun) {
 		runCommand('bun', [
 			'run',
 			'changeset',
@@ -69,169 +133,12 @@ export async function main(): Promise<void> {
 			'--output',
 			STATUS_FILE,
 		])
-		logLine('Dry-run complete. No publish performed.')
 		logLine(`Changeset status report: ${STATUS_FILE}`)
-		return
+		return true
 	}
 
 	runCommand('bun', ['run', 'version-packages'])
-
-	const otp = await promptForOtp()
-
-	publishWorkspacePackages(otp)
-
-	commitAndPush()
-
-	logLine('Release publish finished.')
-}
-
-/**
- * Publishes all non-private workspace packages using `bun publish`.
- *
- * Relies on `bun publish` to resolve `workspace:*` references
- * at publish time without modifying package.json on disk.
- */
-function publishWorkspacePackages(otp: string): void {
-	const packagesDir = resolve('packages')
-	const packageDirs = readdirSync(packagesDir).filter((name) => {
-		const pkgJsonPath = join(packagesDir, name, 'package.json')
-		try {
-			statSync(pkgJsonPath)
-			return true
-		} catch {
-			return false
-		}
-	})
-
-	let published = 0
-
-	for (const dir of packageDirs) {
-		const pkgJsonPath = join(packagesDir, dir, 'package.json')
-		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
-
-		if (pkg.private) continue
-		if (!pkg.name || !pkg.version) continue
-
-		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
-		runCommand(
-			'bun',
-			['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
-			{ cwd: join(packagesDir, dir) },
-		)
-		published++
-	}
-
-	logLine(`Published ${published} package(s).`)
-}
-
-function commitAndPush(): void {
-	logLine('Committing version changes...')
-	runCommand('git', ['add', '-A'])
-	runCommand('git', ['commit', '-m', 'chore: version packages'])
-	runCommand('git', ['push', 'origin', 'main'])
-}
-
-function parseArgs(argv: string[]): ReleaseArgs {
-	let dryRun = false
-
-	for (const arg of argv) {
-		if (arg === '--dry-run') {
-			dryRun = true
-			continue
-		}
-
-		fail(`Unknown argument: ${arg}. Supported args: --dry-run`)
-	}
-
-	return { dryRun }
-}
-
-function ensureRequiredTools(): void {
-	runCommand('bun', ['--version'])
-	runCommand('git', ['--version'])
-	runCommand('npm', ['--version'])
-	runCommand('bun', ['run', 'changeset', '--', '--version'])
-}
-
-function ensureOnMainBranch(): void {
-	const result = runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'])
-	const branch = result.stdout.trim()
-	if (branch !== 'main') {
-		fail(`Release must run on main. Current branch: ${branch}`)
-	}
-}
-
-function ensureWorkingTreeClean(): void {
-	const result = runCommand('git', ['status', '--porcelain'])
-	if (result.stdout.trim().length > 0) {
-		fail('Working tree is not clean. Commit or stash changes before releasing.')
-	}
-}
-
-function ensureNpmAuth(): void {
-	runCommand('npm', ['whoami'])
-}
-
-function runQualityGates(): void {
-	runCommand('bun', ['run', 'verify'])
-}
-
-function buildPackages(): void {
-	logLine('Building all packages...')
-	runCommand('bun', ['run', 'build'])
-}
-
-function ensureBetaPrereleaseMode(dryRun: boolean): void {
-	const preState = getPreState()
-
-	if (preState === null) {
-		if (dryRun) {
-			logLine(
-				'Dry-run: prerelease mode not active; would run: bun run changeset -- pre enter beta',
-			)
-			return
-		}
-
-		runCommand('bun', ['run', 'changeset', '--', 'pre', 'enter', 'beta'])
-		return
-	}
-
-	if (preState.mode !== 'pre') {
-		fail(
-			`Unsupported prerelease mode value in .changeset/pre.json: ${preState.mode}`,
-		)
-	}
-
-	if (preState.tag !== 'beta') {
-		fail(
-			`Prerelease mode already active for '${preState.tag}'. Expected 'beta'.`,
-		)
-	}
-}
-
-function getPreState(): { mode?: string; tag?: string } | null {
-	const preFile = resolve('.changeset/pre.json')
-
-	try {
-		const raw = readFileSync(preFile, 'utf8')
-		return JSON.parse(raw) as { mode?: string; tag?: string }
-	} catch {
-		return null
-	}
-}
-
-function validateChangesets(): void {
-	const result = collectChangesetValidation()
-
-	if (result.files.length === 0) {
-		fail('No pending changeset files found in .changeset/*.md.')
-	}
-
-	if (result.invalidEntries.length > 0) {
-		fail(
-			`Only patch changesets are allowed for this phase. Found non-patch entries:\n${result.invalidEntries.join('\n')}`,
-		)
-	}
+	return true
 }
 
 function collectChangesetValidation(): ChangesetValidationResult {
@@ -292,6 +199,150 @@ function parseReleaseEntry(
 		bumpType: match[2],
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Prerelease mode
+// ---------------------------------------------------------------------------
+
+function ensureBetaPrereleaseMode(): void {
+	const preState = getPreState()
+
+	if (preState === null) {
+		logLine('Entering beta prerelease mode...')
+		runCommand('bun', ['run', 'changeset', '--', 'pre', 'enter', 'beta'])
+		return
+	}
+
+	if (preState.mode !== 'pre') {
+		fail(
+			`Unsupported prerelease mode value in .changeset/pre.json: ${preState.mode}`,
+		)
+	}
+
+	if (preState.tag !== 'beta') {
+		fail(
+			`Prerelease mode already active for '${preState.tag}'. Expected 'beta'.`,
+		)
+	}
+}
+
+function getPreState(): { mode?: string; tag?: string } | null {
+	const preFile = resolve('.changeset/pre.json')
+
+	try {
+		const raw = readFileSync(preFile, 'utf8')
+		return JSON.parse(raw) as { mode?: string; tag?: string }
+	} catch {
+		return null
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Publishing
+// ---------------------------------------------------------------------------
+
+function publishWorkspacePackages(otp: string): void {
+	const packagesDir = resolve('packages')
+	const packageDirs = readdirSync(packagesDir).filter((name) => {
+		const pkgJsonPath = join(packagesDir, name, 'package.json')
+		try {
+			statSync(pkgJsonPath)
+			return true
+		} catch {
+			return false
+		}
+	})
+
+	let published = 0
+
+	for (const dir of packageDirs) {
+		const pkgJsonPath = join(packagesDir, dir, 'package.json')
+		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
+
+		if (pkg.private) continue
+		if (!pkg.name || !pkg.version) continue
+
+		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
+		runCommand(
+			'bun',
+			['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
+			{ cwd: join(packagesDir, dir) },
+		)
+		published++
+	}
+
+	logLine(`Published ${published} package(s).`)
+}
+
+// ---------------------------------------------------------------------------
+// Git
+// ---------------------------------------------------------------------------
+
+function commitAndPush(): void {
+	logLine('Committing version changes...')
+	runCommand('git', ['add', '-A'])
+
+	const result = runCommand('git', ['status', '--porcelain'])
+	if (result.stdout.trim().length === 0) {
+		logLine('No changes to commit.')
+		return
+	}
+
+	runCommand('git', ['commit', '-m', 'chore: version packages'])
+	runCommand('git', ['push', 'origin', 'main'])
+}
+
+function hasUncommittedChanges(): boolean {
+	const result = runCommand('git', ['status', '--porcelain'])
+	return result.stdout.trim().length > 0
+}
+
+// ---------------------------------------------------------------------------
+// Preconditions
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv: string[]): ReleaseArgs {
+	let dryRun = false
+
+	for (const arg of argv) {
+		if (arg === '--dry-run') {
+			dryRun = true
+			continue
+		}
+
+		fail(`Unknown argument: ${arg}. Supported args: --dry-run`)
+	}
+
+	return { dryRun }
+}
+
+function ensureRequiredTools(): void {
+	runCommand('bun', ['--version'])
+	runCommand('git', ['--version'])
+	runCommand('npm', ['--version'])
+	runCommand('bun', ['run', 'changeset', '--', '--version'])
+}
+
+function ensureOnMainBranch(): void {
+	const result = runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'])
+	const branch = result.stdout.trim()
+	if (branch !== 'main') {
+		fail(`Release must run on main. Current branch: ${branch}`)
+	}
+}
+
+function ensureNpmAuth(): void {
+	runCommand('npm', ['whoami'])
+}
+
+function runQualityGates(): void {
+	logLine('Running quality gates (typecheck, lint, test, build)...')
+	runCommand('bun', ['run', 'verify'])
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
 
 async function promptForOtp(): Promise<string> {
 	const rl = createInterface({ input: stdin, output: stdout })
