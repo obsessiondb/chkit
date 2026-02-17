@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "23252ba5ef6b",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6439-setup-cd-for-documentation-site",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".changeset/pre.json",
+    ".changeset/rename-to-chkit.md",
+    "README.md",
+    "apps/docs/src/content/docs/cli/overview.md",
+    "apps/docs/src/content/docs/plugins/codegen.md",
+    "apps/docs/src/content/docs/plugins/typegen.md",
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/commands/codegen.ts",
+    "packages/cli/src/bin/commands/generate.ts",
+    "packages/cli/src/bin/commands/init.ts",
+    "packages/cli/src/bin/commands/plugin-like.ts",
+    "packages/cli/src/bin/commands/typegen.ts",
+    "packages/cli/src/bin/json-output.ts",
+    "packages/cli/src/plugin.test.ts",
+    "packages/cli/src/testkit.test.ts",
+    "packages/clickhouse/src/index.ts",
+    "packages/plugin-codegen/package.json",
+    "packages/plugin-codegen/src/index.test.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-typegen/CHANGELOG.md",
+    "packages/plugin-typegen/package.json",
+    "packages/plugin-typegen/src/index.test.ts",
+    "packages/plugin-typegen/src/index.ts",
+    "packages/plugin-typegen/tsconfig.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/23/252ba5ef6b/0/metadata.json",
+      "transcript": "/23/252ba5ef6b/0/full.jsonl",
+      "context": "/23/252ba5ef6b/0/context.md",
+      "content_hash": "/23/252ba5ef6b/0/content_hash.txt",
+      "prompt": "/23/252ba5ef6b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 136,
+    "cache_creation_tokens": 215911,
+    "cache_read_tokens": 11315087,
+    "output_tokens": 1649,
+    "api_call_count": 128
+  }
+}
