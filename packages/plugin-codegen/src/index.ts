@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 
 import {
   type ChxInlinePluginRegistration,
@@ -13,7 +13,7 @@ import {
   type ViewDefinition,
 } from '@chkit/core'
 
-export interface TypegenPluginOptions {
+export interface CodegenPluginOptions {
   outFile?: string
   emitZod?: boolean
   tableNameStyle?: 'pascal' | 'camel' | 'raw'
@@ -21,9 +21,11 @@ export interface TypegenPluginOptions {
   includeViews?: boolean
   runOnGenerate?: boolean
   failOnUnsupportedType?: boolean
+  emitIngest?: boolean
+  ingestOutFile?: string
 }
 
-export interface TypegenPluginCommandContext {
+export interface CodegenPluginCommandContext {
   args: string[]
   jsonMode: boolean
   options: Record<string, unknown>
@@ -32,28 +34,33 @@ export interface TypegenPluginCommandContext {
   print: (value: unknown) => void
 }
 
-export interface TypegenPlugin {
+export interface CodegenPlugin {
   manifest: {
-    name: 'typegen'
+    name: 'codegen'
     apiVersion: 1
     version?: string
   }
   commands: Array<{
-    name: 'typegen'
+    name: 'codegen'
     description: string
-    run: (context: TypegenPluginCommandContext) => undefined | number | Promise<undefined | number>
+    run: (context: CodegenPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
   hooks?: {
     onConfigLoaded?: (context: { command: string; configPath: string; options: Record<string, unknown> }) => void
     onCheck?: (
-      context: TypegenPluginCheckContext
-    ) => TypegenPluginCheckResult | undefined | Promise<TypegenPluginCheckResult | undefined>
-    onCheckReport?: (context: { result: TypegenPluginCheckResult; print: (line: string) => void }) => void | Promise<void>
+      context: CodegenPluginCheckContext
+    ) => CodegenPluginCheckResult | undefined | Promise<CodegenPluginCheckResult | undefined>
+    onCheckReport?: (context: { result: CodegenPluginCheckResult; print: (line: string) => void }) => void | Promise<void>
   }
 }
 
-export interface TypegenFinding {
-  code: 'typegen_unsupported_type' | 'typegen_stale_output' | 'typegen_missing_output'
+export interface CodegenFinding {
+  code:
+    | 'codegen_unsupported_type'
+    | 'codegen_stale_output'
+    | 'codegen_missing_output'
+    | 'codegen_stale_ingest_output'
+    | 'codegen_missing_ingest_output'
   message: string
   severity: 'warn' | 'error'
   path?: string
@@ -63,12 +70,12 @@ export interface MapColumnTypeResult {
   tsType: string
   zodType: string
   nullable: boolean
-  finding?: TypegenFinding
+  finding?: CodegenFinding
 }
 
 export interface GenerateTypeArtifactsInput {
   definitions: SchemaDefinition[]
-  options?: TypegenPluginOptions
+  options?: CodegenPluginOptions
   now?: Date
   toolVersion?: string
 }
@@ -77,10 +84,22 @@ export interface GenerateTypeArtifactsOutput {
   content: string
   outFile: string
   declarationCount: number
-  findings: TypegenFinding[]
+  findings: CodegenFinding[]
 }
 
-export interface TypegenPluginCheckContext {
+export interface GenerateIngestArtifactsInput {
+  definitions: SchemaDefinition[]
+  options?: CodegenPluginOptions
+  toolVersion?: string
+}
+
+export interface GenerateIngestArtifactsOutput {
+  content: string
+  outFile: string
+  functionCount: number
+}
+
+export interface CodegenPluginCheckContext {
   command: 'check'
   config: ResolvedChxConfig
   configPath: string
@@ -88,9 +107,9 @@ export interface TypegenPluginCheckContext {
   options: Record<string, unknown>
 }
 
-export type TypegenPluginRegistration = ChxInlinePluginRegistration<TypegenPlugin, TypegenPluginOptions>
+export type CodegenPluginRegistration = ChxInlinePluginRegistration<CodegenPlugin, CodegenPluginOptions>
 
-export interface TypegenPluginCheckResult {
+export interface CodegenPluginCheckResult {
   plugin: string
   evaluated: boolean
   ok: boolean
@@ -109,6 +128,8 @@ interface ParsedCommandArgs {
   emitZod?: boolean
   bigintMode?: 'string' | 'bigint'
   includeViews?: boolean
+  emitIngest?: boolean
+  ingestOutFile?: string
 }
 
 interface ResolvedTableName {
@@ -116,7 +137,7 @@ interface ResolvedTableName {
   interfaceName: string
 }
 
-const DEFAULT_OPTIONS: Required<TypegenPluginOptions> = {
+const DEFAULT_OPTIONS: Required<CodegenPluginOptions> = {
   outFile: './src/generated/chkit-types.ts',
   emitZod: false,
   tableNameStyle: 'pascal',
@@ -124,6 +145,8 @@ const DEFAULT_OPTIONS: Required<TypegenPluginOptions> = {
   includeViews: false,
   runOnGenerate: true,
   failOnUnsupportedType: true,
+  emitIngest: false,
+  ingestOutFile: './src/generated/chkit-ingest.ts',
 }
 
 const LARGE_INTEGER_TYPES = new Set([
@@ -169,10 +192,10 @@ const STRING_TYPES = new Set([
 
 const BOOLEAN_TYPES = new Set(['Bool', 'Boolean'])
 
-class TypegenConfigError extends Error {
+class CodegenConfigError extends Error {
   constructor(message: string) {
     super(message)
-    this.name = 'TypegenConfigError'
+    this.name = 'CodegenConfigError'
   }
 }
 
@@ -192,25 +215,25 @@ class UnsupportedTypeError extends Error {
 
 function parseBooleanOption(
   options: Record<string, unknown>,
-  key: keyof TypegenPluginOptions
+  key: keyof CodegenPluginOptions
 ): boolean | undefined {
   const value = options[key]
   if (value === undefined) return undefined
   if (typeof value === 'boolean') return value
-  throw new TypegenConfigError(`Invalid plugin option "${key}". Expected boolean.`)
+  throw new CodegenConfigError(`Invalid plugin option "${key}". Expected boolean.`)
 }
 
 function parseStringOption(
   options: Record<string, unknown>,
-  key: keyof TypegenPluginOptions
+  key: keyof CodegenPluginOptions
 ): string | undefined {
   const value = options[key]
   if (value === undefined) return undefined
   if (typeof value === 'string' && value.length > 0) return value
-  throw new TypegenConfigError(`Invalid plugin option "${key}". Expected non-empty string.`)
+  throw new CodegenConfigError(`Invalid plugin option "${key}". Expected non-empty string.`)
 }
 
-function normalizeRuntimeOptions(options: Record<string, unknown>): TypegenPluginOptions {
+function normalizeRuntimeOptions(options: Record<string, unknown>): CodegenPluginOptions {
   const rawTableNameStyle = options.tableNameStyle
   if (
     rawTableNameStyle !== undefined &&
@@ -218,24 +241,26 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): TypegenPlugi
     rawTableNameStyle !== 'camel' &&
     rawTableNameStyle !== 'raw'
   ) {
-    throw new TypegenConfigError(
+    throw new CodegenConfigError(
       'Invalid plugin option "tableNameStyle". Expected one of: pascal, camel, raw.'
     )
   }
 
   const rawBigintMode = options.bigintMode
   if (rawBigintMode !== undefined && rawBigintMode !== 'string' && rawBigintMode !== 'bigint') {
-    throw new TypegenConfigError(
+    throw new CodegenConfigError(
       'Invalid plugin option "bigintMode". Expected one of: string, bigint.'
     )
   }
 
-  const normalized: TypegenPluginOptions = {}
+  const normalized: CodegenPluginOptions = {}
   const outFile = parseStringOption(options, 'outFile')
   const emitZod = parseBooleanOption(options, 'emitZod')
   const includeViews = parseBooleanOption(options, 'includeViews')
   const runOnGenerate = parseBooleanOption(options, 'runOnGenerate')
   const failOnUnsupportedType = parseBooleanOption(options, 'failOnUnsupportedType')
+  const emitIngest = parseBooleanOption(options, 'emitIngest')
+  const ingestOutFile = parseStringOption(options, 'ingestOutFile')
 
   if (outFile !== undefined) normalized.outFile = outFile
   if (emitZod !== undefined) normalized.emitZod = emitZod
@@ -244,11 +269,13 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): TypegenPlugi
   if (includeViews !== undefined) normalized.includeViews = includeViews
   if (runOnGenerate !== undefined) normalized.runOnGenerate = runOnGenerate
   if (failOnUnsupportedType !== undefined) normalized.failOnUnsupportedType = failOnUnsupportedType
+  if (emitIngest !== undefined) normalized.emitIngest = emitIngest
+  if (ingestOutFile !== undefined) normalized.ingestOutFile = ingestOutFile
 
   return normalized
 }
 
-export function normalizeTypegenOptions(options: TypegenPluginOptions = {}): Required<TypegenPluginOptions> {
+export function normalizeCodegenOptions(options: CodegenPluginOptions = {}): Required<CodegenPluginOptions> {
   return {
     ...DEFAULT_OPTIONS,
     ...options,
@@ -293,7 +320,7 @@ function renderPropertyName(name: string): string {
 
 function baseRowTypeName(
   definition: Pick<TableDefinition | ViewDefinition | MaterializedViewDefinition, 'database' | 'name'>,
-  style: Required<TypegenPluginOptions>['tableNameStyle']
+  style: Required<CodegenPluginOptions>['tableNameStyle']
 ): string {
   const combined = `${definition.database}_${definition.name}`
   if (style === 'raw') {
@@ -308,7 +335,7 @@ function baseRowTypeName(
 
 function resolveTableNames(
   definitions: Array<TableDefinition | ViewDefinition | MaterializedViewDefinition>,
-  style: Required<TypegenPluginOptions>['tableNameStyle']
+  style: Required<CodegenPluginOptions>['tableNameStyle']
 ): ResolvedTableName[] {
   const baseNames = definitions.map((definition) => ({
     definition,
@@ -361,7 +388,7 @@ function parseClickHouseType(typeStr: string): { base: string; args: string[] } 
   return { base, args: splitTopLevelArgs(inner) }
 }
 
-function mapScalarType(base: string, bigintMode: Required<TypegenPluginOptions>['bigintMode']): string | null {
+function mapScalarType(base: string, bigintMode: Required<CodegenPluginOptions>['bigintMode']): string | null {
   if (STRING_TYPES.has(base)) return 'string'
   if (BOOLEAN_TYPES.has(base)) return 'boolean'
   if (NUMBER_TYPES.has(base)) return 'number'
@@ -379,7 +406,7 @@ function scalarToZod(mapped: string): string {
 
 function resolveInnerType(
   typeStr: string,
-  bigintMode: Required<TypegenPluginOptions>['bigintMode']
+  bigintMode: Required<CodegenPluginOptions>['bigintMode']
 ): { tsType: string; zodType: string } | null {
   const parsed = parseClickHouseType(typeStr)
 
@@ -445,7 +472,7 @@ function resolveInnerType(
 
 function resolveColumnType(
   typeStr: string,
-  bigintMode: Required<TypegenPluginOptions>['bigintMode']
+  bigintMode: Required<CodegenPluginOptions>['bigintMode']
 ): { tsType: string; zodType: string; nullable: boolean } | null {
   const parsed = parseClickHouseType(typeStr)
 
@@ -468,7 +495,7 @@ function resolveColumnType(
 
 export function mapColumnType(
   input: { column: ColumnDefinition; path: string },
-  options: Pick<Required<TypegenPluginOptions>, 'bigintMode' | 'failOnUnsupportedType'>
+  options: Pick<Required<CodegenPluginOptions>, 'bigintMode' | 'failOnUnsupportedType'>
 ): MapColumnTypeResult {
   const resolved = resolveColumnType(input.column.type, options.bigintMode)
   const columnNullable = input.column.nullable === true
@@ -483,7 +510,7 @@ export function mapColumnType(
       zodType: 'z.unknown()',
       nullable: columnNullable,
       finding: {
-        code: 'typegen_unsupported_type',
+        code: 'codegen_unsupported_type',
         message: `Unsupported type "${input.column.type}" at ${input.path}; emitted unknown.`,
         severity: 'warn',
         path: input.path,
@@ -497,18 +524,18 @@ export function mapColumnType(
 }
 
 function renderHeader(toolVersion: string): string[] {
-  const lines = ['// Generated by chkit typegen plugin']
-  lines.push(`// chkit-typegen-version: ${toolVersion}`)
+  const lines = ['// Generated by chkit codegen plugin']
+  lines.push(`// chkit-codegen-version: ${toolVersion}`)
   return lines
 }
 
 function renderTableInterface(
   table: TableDefinition,
   interfaceName: string,
-  options: Required<TypegenPluginOptions>
-): { lines: string[]; findings: TypegenFinding[] } {
+  options: Required<CodegenPluginOptions>
+): { lines: string[]; findings: CodegenFinding[] } {
   const lines: string[] = [`export interface ${interfaceName} {`]
-  const findings: TypegenFinding[] = []
+  const findings: CodegenFinding[] = []
   const zodFields: string[] = []
 
   for (const column of table.columns) {
@@ -536,7 +563,7 @@ function renderTableInterface(
 function renderViewInterface(
   definition: ViewDefinition | MaterializedViewDefinition,
   interfaceName: string
-): { lines: string[]; findings: TypegenFinding[] } {
+): { lines: string[]; findings: CodegenFinding[] } {
   const kind = definition.kind === 'view' ? 'view' : 'materialized_view'
   return {
     lines: [
@@ -553,7 +580,7 @@ function renderViewInterface(
 export function generateTypeArtifacts(
   input: GenerateTypeArtifactsInput
 ): GenerateTypeArtifactsOutput {
-  const normalized = normalizeTypegenOptions(input.options)
+  const normalized = normalizeCodegenOptions(input.options)
   const definitions = canonicalizeDefinitions(input.definitions)
   const sortedDefinitions = definitions
     .filter((definition): definition is TableDefinition | ViewDefinition | MaterializedViewDefinition => {
@@ -567,7 +594,7 @@ export function generateTypeArtifacts(
     })
 
   const resolved = resolveTableNames(sortedDefinitions, normalized.tableNameStyle)
-  const findings: TypegenFinding[] = []
+  const findings: CodegenFinding[] = []
   const bodyLines: string[] = []
 
   for (const entry of resolved) {
@@ -594,6 +621,104 @@ export function generateTypeArtifacts(
     outFile: normalized.outFile,
     declarationCount: resolved.length,
     findings,
+  }
+}
+
+function computeRelativeImportPath(fromFile: string, toFile: string): string {
+  const fromDir = dirname(fromFile)
+  let rel = relative(fromDir, toFile)
+  if (!rel.startsWith('.')) rel = `./${rel}`
+  // Replace .ts extension with .js for ESM imports
+  return rel.replace(/\.ts$/, '.js')
+}
+
+function stripRowSuffix(name: string): string {
+  if (name.endsWith('Row')) return name.slice(0, -3)
+  if (name.endsWith('_row')) return name.slice(0, -4)
+  return name
+}
+
+function renderIngestFunction(
+  table: TableDefinition,
+  interfaceName: string,
+  emitZod: boolean
+): string[] {
+  const funcName = `ingest${stripRowSuffix(interfaceName)}`
+  const tableFqn = `${table.database}.${table.name}`
+  const lines: string[] = []
+
+  if (emitZod) {
+    lines.push(`export async function ${funcName}(`)
+    lines.push(`  ingestor: Ingestor,`)
+    lines.push(`  rows: ${interfaceName}[],`)
+    lines.push(`  options?: { validate?: boolean }`)
+    lines.push(`): Promise<void> {`)
+    lines.push(`  const data = options?.validate ? rows.map(row => ${interfaceName}Schema.parse(row)) : rows`)
+    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: data })`)
+    lines.push(`}`)
+  } else {
+    lines.push(`export async function ${funcName}(`)
+    lines.push(`  ingestor: Ingestor,`)
+    lines.push(`  rows: ${interfaceName}[]`)
+    lines.push(`): Promise<void> {`)
+    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: rows })`)
+    lines.push(`}`)
+  }
+
+  return lines
+}
+
+export function generateIngestArtifacts(
+  input: GenerateIngestArtifactsInput
+): GenerateIngestArtifactsOutput {
+  const normalized = normalizeCodegenOptions(input.options)
+  const definitions = canonicalizeDefinitions(input.definitions)
+  const tables = definitions
+    .filter((definition): definition is TableDefinition => definition.kind === 'table')
+    .sort((a, b) => {
+      if (a.database !== b.database) return a.database.localeCompare(b.database)
+      return a.name.localeCompare(b.name)
+    })
+
+  const resolved = resolveTableNames(tables, normalized.tableNameStyle)
+  const importPath = computeRelativeImportPath(normalized.ingestOutFile, normalized.outFile)
+
+  const typeImports: string[] = []
+  const valueImports: string[] = []
+  for (const entry of resolved) {
+    typeImports.push(entry.interfaceName)
+    if (normalized.emitZod) {
+      valueImports.push(`${entry.interfaceName}Schema`)
+    }
+  }
+
+  const header = renderHeader(input.toolVersion ?? '0.1.0')
+  const lines = [...header, '']
+
+  if (typeImports.length > 0) {
+    lines.push(`import type { ${typeImports.join(', ')} } from '${importPath}'`)
+  }
+  if (valueImports.length > 0) {
+    lines.push(`import { ${valueImports.join(', ')} } from '${importPath}'`)
+  }
+
+  lines.push('')
+  lines.push('export interface Ingestor {')
+  lines.push('  insert(params: { table: string; values: Record<string, unknown>[] }): Promise<void>')
+  lines.push('}')
+
+  for (const entry of resolved) {
+    if (entry.definition.kind !== 'table') continue
+    lines.push('')
+    lines.push(...renderIngestFunction(entry.definition, entry.interfaceName, normalized.emitZod))
+  }
+
+  const content = `${lines.join('\n').trimEnd()}\n`
+
+  return {
+    content,
+    outFile: normalized.ingestOutFile,
+    functionCount: resolved.length,
   }
 }
 
@@ -626,12 +751,32 @@ function parseArgs(args: string[]): ParsedCommandArgs {
       continue
     }
 
+    if (token === '--emit-ingest') {
+      parsed.emitIngest = true
+      continue
+    }
+
+    if (token === '--no-emit-ingest') {
+      parsed.emitIngest = false
+      continue
+    }
+
     if (token === '--out-file') {
       const value = args[i + 1]
       if (!value || value.startsWith('--')) {
-        throw new TypegenConfigError('Missing value for --out-file')
+        throw new CodegenConfigError('Missing value for --out-file')
       }
       parsed.outFile = value
+      i += 1
+      continue
+    }
+
+    if (token === '--ingest-out-file') {
+      const value = args[i + 1]
+      if (!value || value.startsWith('--')) {
+        throw new CodegenConfigError('Missing value for --ingest-out-file')
+      }
+      parsed.ingestOutFile = value
       i += 1
       continue
     }
@@ -639,7 +784,7 @@ function parseArgs(args: string[]): ParsedCommandArgs {
     if (token === '--bigint-mode') {
       const value = args[i + 1]
       if (value !== 'string' && value !== 'bigint') {
-        throw new TypegenConfigError('Invalid value for --bigint-mode. Expected string or bigint.')
+        throw new CodegenConfigError('Invalid value for --bigint-mode. Expected string or bigint.')
       }
       parsed.bigintMode = value
       i += 1
@@ -650,28 +795,30 @@ function parseArgs(args: string[]): ParsedCommandArgs {
 }
 
 function mergeOptions(
-  baseOptions: Required<TypegenPluginOptions>,
+  baseOptions: Required<CodegenPluginOptions>,
   runtimeOptions: Record<string, unknown>,
   argOptions: ParsedCommandArgs
-): Required<TypegenPluginOptions> {
+): Required<CodegenPluginOptions> {
   const fromRuntime = normalizeRuntimeOptions(runtimeOptions)
-  const withRuntime = normalizeTypegenOptions({ ...baseOptions, ...fromRuntime })
+  const withRuntime = normalizeCodegenOptions({ ...baseOptions, ...fromRuntime })
 
-  return normalizeTypegenOptions({
+  return normalizeCodegenOptions({
     ...withRuntime,
     outFile: argOptions.outFile ?? withRuntime.outFile,
     emitZod: argOptions.emitZod ?? withRuntime.emitZod,
     bigintMode: argOptions.bigintMode ?? withRuntime.bigintMode,
     includeViews: argOptions.includeViews ?? withRuntime.includeViews,
+    emitIngest: argOptions.emitIngest ?? withRuntime.emitIngest,
+    ingestOutFile: argOptions.ingestOutFile ?? withRuntime.ingestOutFile,
   })
 }
 
 export function isRunOnGenerateEnabled(
-  baseOptions: Required<TypegenPluginOptions>,
+  baseOptions: Required<CodegenPluginOptions>,
   runtimeOptions: Record<string, unknown>
 ): boolean {
   const fromRuntime = normalizeRuntimeOptions(runtimeOptions)
-  const effective = normalizeTypegenOptions({ ...baseOptions, ...fromRuntime })
+  const effective = normalizeCodegenOptions({ ...baseOptions, ...fromRuntime })
   return effective.runOnGenerate
 }
 
@@ -691,19 +838,22 @@ async function readMaybe(path: string): Promise<string | null> {
 }
 
 function checkGeneratedOutput(input: {
+  label: string
   outFile: string
   expected: string
   current: string | null
-}): TypegenPluginCheckResult {
+  missingCode: string
+  staleCode: string
+}): CodegenPluginCheckResult {
   if (input.current === null) {
     return {
-      plugin: 'typegen',
+      plugin: 'codegen',
       evaluated: true,
       ok: false,
       findings: [
         {
-          code: 'typegen_missing_output',
-          message: `Typegen output file is missing: ${input.outFile}`,
+          code: input.missingCode,
+          message: `${input.label} output file is missing: ${input.outFile}`,
           severity: 'error',
           metadata: { outFile: input.outFile },
         },
@@ -716,13 +866,13 @@ function checkGeneratedOutput(input: {
 
   if (input.current !== input.expected) {
     return {
-      plugin: 'typegen',
+      plugin: 'codegen',
       evaluated: true,
       ok: false,
       findings: [
         {
-          code: 'typegen_stale_output',
-          message: `Typegen output is stale: ${input.outFile}`,
+          code: input.staleCode,
+          message: `${input.label} output is stale: ${input.outFile}`,
           severity: 'error',
           metadata: { outFile: input.outFile },
         },
@@ -734,7 +884,7 @@ function checkGeneratedOutput(input: {
   }
 
   return {
-    plugin: 'typegen',
+    plugin: 'codegen',
     evaluated: true,
     ok: true,
     findings: [],
@@ -744,17 +894,29 @@ function checkGeneratedOutput(input: {
   }
 }
 
-export function createTypegenPlugin(options: TypegenPluginOptions = {}): TypegenPlugin {
-  const base = normalizeTypegenOptions(options)
+function mergeCheckResults(results: CodegenPluginCheckResult[]): CodegenPluginCheckResult {
+  const allFindings = results.flatMap((r) => r.findings)
+  const allOk = results.every((r) => r.ok)
+  return {
+    plugin: 'codegen',
+    evaluated: true,
+    ok: allOk,
+    findings: allFindings,
+    metadata: results.reduce((acc, r) => ({ ...acc, ...r.metadata }), {}),
+  }
+}
+
+export function createCodegenPlugin(options: CodegenPluginOptions = {}): CodegenPlugin {
+  const base = normalizeCodegenOptions(options)
 
   return {
     manifest: {
-      name: 'typegen',
+      name: 'codegen',
       apiVersion: 1,
     },
     commands: [
       {
-        name: 'typegen',
+        name: 'codegen',
         description: 'Generate TypeScript artifacts from chkit schema definitions',
         async run({
           args,
@@ -775,13 +937,42 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
               options: effectiveOptions,
             })
 
+            let ingestGenerated: GenerateIngestArtifactsOutput | null = null
+            let ingestOutFile: string | null = null
+            if (effectiveOptions.emitIngest) {
+              ingestGenerated = generateIngestArtifacts({
+                definitions,
+                options: effectiveOptions,
+              })
+              ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
+            }
+
             if (parsedArgs.check) {
               const current = await readMaybe(outFile)
-              const checkResult = checkGeneratedOutput({
+              const typeCheckResult = checkGeneratedOutput({
+                label: 'Codegen',
                 outFile,
                 expected: generated.content,
                 current,
+                missingCode: 'codegen_missing_output',
+                staleCode: 'codegen_stale_output',
               })
+
+              const results = [typeCheckResult]
+
+              if (ingestGenerated && ingestOutFile) {
+                const ingestCurrent = await readMaybe(ingestOutFile)
+                results.push(checkGeneratedOutput({
+                  label: 'Codegen ingest',
+                  outFile: ingestOutFile,
+                  expected: ingestGenerated.content,
+                  current: ingestCurrent,
+                  missingCode: 'codegen_missing_ingest_output',
+                  staleCode: 'codegen_stale_ingest_output',
+                }))
+              }
+
+              const checkResult = mergeCheckResults(results)
               const payload = {
                 ok: checkResult.ok,
                 findingCodes: checkResult.findings.map((finding) => finding.code),
@@ -793,16 +984,21 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
                 print(payload)
               } else {
                 if (checkResult.ok) {
-                  print(`Typegen up-to-date: ${outFile}`)
+                  print(`Codegen up-to-date: ${outFile}`)
                 } else {
-                  const firstCode = checkResult.findings[0]?.code ?? 'typegen_stale_output'
-                  print(`Typegen check failed (${firstCode}): ${outFile}`)
+                  const firstCode = checkResult.findings[0]?.code ?? 'codegen_stale_output'
+                  print(`Codegen check failed (${firstCode}): ${outFile}`)
                 }
               }
               return checkResult.ok ? 0 : 1
             }
 
             await writeAtomic(outFile, generated.content)
+
+            if (ingestGenerated && ingestOutFile) {
+              await writeAtomic(ingestOutFile, ingestGenerated.content)
+            }
+
             const payload = {
               ok: true,
               outFile,
@@ -814,7 +1010,7 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
             if (jsonMode) {
               print(payload)
             } else {
-              print(`Typegen wrote ${outFile} (${generated.declarationCount} declarations)`)
+              print(`Codegen wrote ${outFile} (${generated.declarationCount} declarations)`)
             }
 
             return 0
@@ -826,10 +1022,10 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
                 error: message,
               })
             } else {
-              print(`Typegen failed: ${message}`)
+              print(`Codegen failed: ${message}`)
             }
 
-            if (error instanceof TypegenConfigError) {
+            if (error instanceof CodegenConfigError) {
               return 2
             }
             return 1
@@ -851,28 +1047,52 @@ export function createTypegenPlugin(options: TypegenPluginOptions = {}): Typegen
           options: effectiveOptions,
         })
         const current = await readMaybe(outFile)
-        return checkGeneratedOutput({
+        const typeResult = checkGeneratedOutput({
+          label: 'Codegen',
           outFile,
           expected: generated.content,
           current,
+          missingCode: 'codegen_missing_output',
+          staleCode: 'codegen_stale_output',
         })
+
+        if (!effectiveOptions.emitIngest) {
+          return typeResult
+        }
+
+        const ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
+        const ingestGenerated = generateIngestArtifacts({
+          definitions,
+          options: effectiveOptions,
+        })
+        const ingestCurrent = await readMaybe(ingestOutFile)
+        const ingestResult = checkGeneratedOutput({
+          label: 'Codegen ingest',
+          outFile: ingestOutFile,
+          expected: ingestGenerated.content,
+          current: ingestCurrent,
+          missingCode: 'codegen_missing_ingest_output',
+          staleCode: 'codegen_stale_ingest_output',
+        })
+
+        return mergeCheckResults([typeResult, ingestResult])
       },
       onCheckReport({ result, print }) {
         const findingCodes = result.findings.map((finding) => finding.code)
         if (result.ok) {
-          print(`typegen check: ok`)
+          print(`codegen check: ok`)
           return
         }
-        print(`typegen check: failed${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`)
+        print(`codegen check: failed${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`)
       },
     },
   }
 }
 
-export function typegen(options: TypegenPluginOptions = {}): TypegenPluginRegistration {
+export function codegen(options: CodegenPluginOptions = {}): CodegenPluginRegistration {
   return {
-    plugin: createTypegenPlugin(),
-    name: 'typegen',
+    plugin: createCodegenPlugin(),
+    name: 'codegen',
     enabled: true,
     options,
   }

@@ -7,7 +7,7 @@ description: Command surface of the chkit CLI.
 
 - `chkit init`
 - `chkit generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
-- `chkit typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
+- `chkit codegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--emit-ingest] [--no-emit-ingest] [--ingest-out-file <path>] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
 - `chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
 - `chkit status [--config <path>] [--json]`
 - `chkit drift [--config <path>] [--json]`

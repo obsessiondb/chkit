@@ -8,7 +8,7 @@ import {
   CLI_ENTRY,
   CORE_ENTRY,
   PULL_PLUGIN_ENTRY,
-  TYPEGEN_PLUGIN_ENTRY,
+  CODEGEN_PLUGIN_ENTRY,
   createFixture,
   runCli,
 } from './testkit.test'
@@ -703,24 +703,24 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit typegen writes output file', async () => {
+  test('chkit codegen writes output file', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
-      const result = runCli(['typegen', '--config', fixture.configPath, '--json'])
+      const result = runCli(['codegen', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as {
         ok: boolean
@@ -739,17 +739,17 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit typegen writes output file with typed inline plugin registration', async () => {
+  test('chkit codegen writes output file with typed inline plugin registration', async () => {
     const fixture = await createFixture()
     const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         fixture.configPath,
-        `import { defineConfig } from '${CORE_ENTRY}'\nimport { typegen } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default defineConfig({\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [typegen({ outFile: './src/generated/chkit-types.ts' })],\n})\n`,
+        `import { defineConfig } from '${CORE_ENTRY}'\nimport { codegen } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default defineConfig({\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [codegen({ outFile: './src/generated/chkit-types.ts' })],\n})\n`,
         'utf8'
       )
 
-      const result = runCli(['typegen', '--config', fixture.configPath, '--json'])
+      const result = runCli(['codegen', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as {
         ok: boolean
@@ -765,20 +765,20 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit generate runs typegen plugin when runOnGenerate is enabled', async () => {
+  test('chkit generate runs codegen plugin when runOnGenerate is enabled', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -790,20 +790,20 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit generate skips typegen plugin when runOnGenerate is false', async () => {
+  test('chkit generate skips codegen plugin when runOnGenerate is false', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts', options: { runOnGenerate: false } }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts', options: { runOnGenerate: false } }],\n}\n`,
         'utf8'
       )
 
@@ -815,24 +815,24 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit typegen --check passes when output is up-to-date', async () => {
+  test('chkit codegen --check passes when output is up-to-date', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
-      runCli(['typegen', '--config', fixture.configPath, '--json'])
-      const result = runCli(['typegen', '--check', '--config', fixture.configPath, '--json'])
+      runCli(['codegen', '--config', fixture.configPath, '--json'])
+      const result = runCli(['codegen', '--check', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as { ok: boolean; mode: string; findingCodes: string[] }
       expect(payload.ok).toBe(true)
@@ -843,43 +843,43 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit typegen --check fails on drifted output', async () => {
+  test('chkit codegen --check fails on drifted output', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
-      runCli(['typegen', '--config', fixture.configPath, '--json'])
+      runCli(['codegen', '--config', fixture.configPath, '--json'])
       await writeFile(outFile, '// drifted\n', 'utf8')
-      const result = runCli(['typegen', '--check', '--config', fixture.configPath, '--json'])
+      const result = runCli(['codegen', '--check', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
       const payload = JSON.parse(result.stdout) as { ok: boolean; findingCodes: string[]; mode: string }
       expect(payload.ok).toBe(false)
       expect(payload.mode).toBe('check')
       expect(payload.findingCodes.length).toBe(1)
-      expect(['typegen_stale_output', 'typegen_missing_output']).toContain(payload.findingCodes[0])
+      expect(['codegen_stale_output', 'codegen_missing_output']).toContain(payload.findingCodes[0])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
 
-  test('typegen root command fails when typegen plugin is not configured', async () => {
+  test('codegen root command fails when codegen plugin is not configured', async () => {
     const fixture = await createFixture()
     try {
-      const result = runCli(['typegen', '--config', fixture.configPath, '--json'])
+      const result = runCli(['codegen', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
-      expect(result.stderr).toContain('Typegen plugin is not configured')
+      expect(result.stderr).toContain('Codegen plugin is not configured')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -896,23 +896,23 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('typegen returns exit code 2 for invalid plugin options', async () => {
+  test('codegen returns exit code 2 for invalid plugin options', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts', options: { bigintMode: 'nope' } }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts', options: { bigintMode: 'nope' } }],\n}\n`,
         'utf8'
       )
 
-      const result = runCli(['typegen', '--config', fixture.configPath, '--json'])
+      const result = runCli(['codegen', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(2)
       const payload = JSON.parse(result.stdout) as { ok: boolean; error: string }
       expect(payload.ok).toBe(false)
@@ -922,19 +922,19 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit check --json includes typegen plugin result and fails when output is missing', async () => {
+  test('chkit check --json includes codegen plugin result and fails when output is missing', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
@@ -944,7 +944,7 @@ describe('plugin runtime', () => {
         ok: boolean
         failedChecks: string[]
         plugins: {
-          typegen?: {
+          codegen?: {
             evaluated: boolean
             ok: boolean
             findingCodes: string[]
@@ -953,39 +953,39 @@ describe('plugin runtime', () => {
         }
       }
       expect(payload.ok).toBe(false)
-      expect(payload.failedChecks).toContain('plugin:typegen')
-      expect(payload.plugins.typegen?.evaluated).toBe(true)
-      expect(payload.plugins.typegen?.ok).toBe(false)
-      expect(payload.plugins.typegen?.findingCodes).toContain('typegen_missing_output')
+      expect(payload.failedChecks).toContain('plugin:codegen')
+      expect(payload.plugins.codegen?.evaluated).toBe(true)
+      expect(payload.plugins.codegen?.ok).toBe(false)
+      expect(payload.plugins.codegen?.findingCodes).toContain('codegen_missing_output')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
 
-  test('chkit check --json passes plugin:typegen when output is current', async () => {
+  test('chkit check --json passes plugin:codegen when output is current', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'typegen-plugin.ts')
+    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     try {
       await writeFile(
         pluginPath,
-        `import { createTypegenPlugin } from '${TYPEGEN_PLUGIN_ENTRY}'\n\nexport default createTypegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './typegen-plugin.ts' }],\n}\n`,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
         'utf8'
       )
 
-      runCli(['typegen', '--config', fixture.configPath, '--json'])
+      runCli(['codegen', '--config', fixture.configPath, '--json'])
       const result = runCli(['check', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as {
         ok: boolean
         failedChecks: string[]
         plugins: {
-          typegen?: {
+          codegen?: {
             evaluated: boolean
             ok: boolean
             findingCodes: string[]
@@ -993,10 +993,10 @@ describe('plugin runtime', () => {
         }
       }
       expect(payload.ok).toBe(true)
-      expect(payload.failedChecks).not.toContain('plugin:typegen')
-      expect(payload.plugins.typegen?.evaluated).toBe(true)
-      expect(payload.plugins.typegen?.ok).toBe(true)
-      expect(payload.plugins.typegen?.findingCodes).toEqual([])
+      expect(payload.failedChecks).not.toContain('plugin:codegen')
+      expect(payload.plugins.codegen?.evaluated).toBe(true)
+      expect(payload.plugins.codegen?.ok).toBe(true)
+      expect(payload.plugins.codegen?.findingCodes).toEqual([])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

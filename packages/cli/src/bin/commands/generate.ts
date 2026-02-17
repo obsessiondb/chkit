@@ -169,10 +169,10 @@ export async function cmdGenerate(args: string[]): Promise<void> {
     cliVersion: CLI_VERSION,
   })
 
-  const typegenPlugin = pluginRuntime.plugins.find((entry) => entry.plugin.manifest.name === 'typegen')
-  const typegenRunOnGenerate = typegenPlugin ? typegenPlugin.options.runOnGenerate !== false : false
-  if (typegenPlugin && typegenRunOnGenerate) {
-    const typegenExitCode = await pluginRuntime.runPluginCommand('typegen', 'typegen', {
+  const codegenPlugin = pluginRuntime.plugins.find((entry) => entry.plugin.manifest.name === 'codegen')
+  const codegenRunOnGenerate = codegenPlugin ? codegenPlugin.options.runOnGenerate !== false : false
+  if (codegenPlugin && codegenRunOnGenerate) {
+    const codegenExitCode = await pluginRuntime.runPluginCommand('codegen', 'codegen', {
       config,
       configPath,
       jsonMode: false,
@@ -180,8 +180,8 @@ export async function cmdGenerate(args: string[]): Promise<void> {
       args: [],
       print() {},
     })
-    if (typegenExitCode !== 0) {
-      throw new Error(`Plugin "typegen" failed in generate integration with exit code ${typegenExitCode}.`)
+    if (codegenExitCode !== 0) {
+      throw new Error(`Plugin "codegen" failed in generate integration with exit code ${codegenExitCode}.`)
     }
   }
 

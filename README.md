@@ -33,7 +33,7 @@ bun run chkit check
 - `chkit init`
 - `chkit generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
 - `chkit pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]`
-- `chkit typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
+- `chkit codegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--emit-ingest] [--no-emit-ingest] [--ingest-out-file <path>] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
 - `chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
 - `chkit status [--config <path>] [--json]`
 - `chkit drift [--config <path>] [--json]`
@@ -61,13 +61,13 @@ Creates starter files if missing:
 - Validates definitions
 - Diffs against `meta/snapshot.json`
 - Writes migration SQL + updates snapshot (unless `--dryrun`)
-- Runs `typegen` plugin automatically when configured with `runOnGenerate: true` (default)
+- Runs `codegen` plugin automatically when configured with `runOnGenerate: true` (default)
 
-### `chkit typegen`
+### `chkit codegen`
 
-- Optional manual command to generate TypeScript types from schema definitions
+- Optional manual command to generate TypeScript types and ingestion functions from schema definitions
 - `--check` verifies generated output is up-to-date (no write)
-- Supports optional Zod emission (`--emit-zod`)
+- Supports optional Zod emission (`--emit-zod`) and ingestion function emission (`--emit-ingest`)
 - Returns non-zero on stale/missing artifacts in check mode
 
 ### `chkit plugin pull schema`
@@ -106,7 +106,7 @@ CI gate command. Evaluates:
 - pending migrations
 - checksum mismatches
 - schema drift
-- plugin checks (including `typegen` when configured)
+- plugin checks (including `codegen` when configured)
 
 Returns non-zero when enabled checks fail.
 
@@ -115,7 +115,7 @@ Returns non-zero when enabled checks fail.
 ```ts
 import { defineConfig } from '@chkit/core'
 import { pull } from '@chkit/plugin-pull'
-import { typegen } from '@chkit/plugin-typegen'
+import { codegen } from '@chkit/plugin-codegen'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',
@@ -128,9 +128,10 @@ export default defineConfig({
     }),
 
     // Typed registration (recommended):
-    typegen({
+    codegen({
       outFile: './src/generated/chkit-types.ts',
       emitZod: false,
+      emitIngest: false,
     }),
 
     // Legacy path-based registration (still supported):
@@ -161,7 +162,7 @@ export default defineConfig({
 
 Plugin modules should export `definePlugin(...)` from `@chkit/cli`.
 
-For typed config registration, plugin packages can export helpers that return inline registrations (for example `typegen(...)` from `@chkit/plugin-typegen`).
+For typed config registration, plugin packages can export helpers that return inline registrations (for example `codegen(...)` from `@chkit/plugin-codegen`).
 
 - `manifest.apiVersion` must be `1`.
 - Optional compatibility gates:

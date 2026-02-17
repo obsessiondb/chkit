@@ -1,7 +1,7 @@
 export type Command =
   | 'init'
   | 'generate'
-  | 'typegen'
+  | 'codegen'
   | 'migrate'
   | 'status'
   | 'drift'
