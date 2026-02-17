@@ -56,6 +56,7 @@ export async function main(): Promise<void> {
 	ensureNpmAuth()
 
 	runQualityGates()
+	buildPackages()
 	ensureBetaPrereleaseMode(args.dryRun)
 
 	if (args.dryRun) {
@@ -173,6 +174,11 @@ function ensureNpmAuth(): void {
 
 function runQualityGates(): void {
 	runCommand('bun', ['run', 'verify'])
+}
+
+function buildPackages(): void {
+	logLine('Building all packages...')
+	runCommand('bun', ['run', 'build'])
 }
 
 function ensureBetaPrereleaseMode(dryRun: boolean): void {
