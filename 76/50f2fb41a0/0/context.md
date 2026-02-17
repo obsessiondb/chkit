@@ -1,0 +1,12 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+the `bun release:manual` command does not work properly. Because it replaces the internal dependencies with real versions, so in the package.json it's updated to the real version, which makes the working tree dirty and then I can't release that version. But I also don't want to commit and merge to main with the specific version because in development the dependencies should still be workspace dependencies. So what is the best approach to unlock this.
+
+### Prompt 2
+
+i think the actual publihs needs to be run with `bun publish` to resolve exactly the issue with the version resolution. can we try it. instead of npm publish
+
