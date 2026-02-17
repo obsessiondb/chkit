@@ -1,0 +1,8 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+make in the release process instead of running lint typecheck etc individually just run `bun verify` on the root. it runs verything via turborepo
+
