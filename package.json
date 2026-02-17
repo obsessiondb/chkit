@@ -18,6 +18,7 @@
     "test": "turbo run test",
     "test:turbo": "turbo run test",
     "test:env": "doppler run --project chx --config ci -- bun run test",
+    "verify": "doppler run --project chx --config ci -- turbo run typecheck lint test",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "changeset publish",
