@@ -13,6 +13,7 @@
   },
   "changesets": [
     "fix-workspace-deps",
+    "rename-plugin-codegen",
     "rename-to-chkit"
   ]
 }

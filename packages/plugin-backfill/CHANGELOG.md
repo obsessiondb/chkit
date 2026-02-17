@@ -1,5 +1,13 @@
 # @chkit/plugin-backfill
 
+## 0.1.0-beta.3
+
+### Patch Changes
+
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- Updated dependencies [a3a09cf]
+  - @chkit/core@0.1.0-beta.3
+
 ## 0.1.0-beta.2
 
 ### Patch Changes
