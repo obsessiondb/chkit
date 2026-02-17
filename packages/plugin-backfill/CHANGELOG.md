@@ -1,5 +1,13 @@
 # @chkit/plugin-backfill
 
+## 0.1.0-beta.2
+
+### Patch Changes
+
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- Updated dependencies [f719c50]
+  - @chkit/core@0.1.0-beta.2
+
 ## 0.1.0-beta.1
 
 ### Patch Changes

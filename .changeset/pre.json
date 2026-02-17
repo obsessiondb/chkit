@@ -12,6 +12,7 @@
     "@chkit/plugin-typegen": "0.0.0"
   },
   "changesets": [
+    "fix-workspace-deps",
     "rename-to-chkit"
   ]
 }
