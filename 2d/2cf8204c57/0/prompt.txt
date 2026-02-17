@@ -1,0 +1,6 @@
+Note: The @chkit/plugin-codegen@0.1.0-beta.3 npm package was published without the dist directory (only package.json in the tarball). The generated files were produced based on the local source at /Users/marc/Workspace/chx/packages/plugin-codegen/. You’ll want to rebuild and republish that package to fix the npm distribution.
+
+---
+
+i just tried to make a new version. aka release a new version, but its fucking annoying because it did not update. Can we make part of the manual-relaese process to verify if the new version was bumped via changeset, and if not run it? \
+i want this as streamlined as possible, i dont want to need to remember 5 commands to manually run. it needs to be 1 flow.
