@@ -32,5 +32,8 @@
     "@types/node": "^24.0.0",
     "turbo": "^2.1.0",
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "wrangler": "^4.65.0"
   }
 }
