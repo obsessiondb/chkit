@@ -31,20 +31,9 @@ The `release:manual` script (`scripts/manual-release.ts`) runs these steps:
 6. **Quality gates** - runs lint, typecheck, test, build
 7. **Ensure beta prerelease mode** - enters changeset pre mode if not already active
 8. **Version packages** - runs `changeset version` to bump versions and update changelogs
-9. **Resolve workspace deps** - replaces `workspace:*` with concrete versions in package.json files
-10. **Confirm** - interactive prompt before publishing
-11. **Publish** - runs `bun publish --tag beta` for each non-private package
-12. **Manual follow-up** - commit and push the version/changelog changes on main
-
-## After Publishing
-
-The script leaves uncommitted changes (bumped versions, updated changelogs, consumed changesets). You must:
-
-```bash
-git add -A
-git commit -m "chore: version packages"
-git push origin main
-```
+9. **OTP prompt** - asks for npm one-time password (2FA)
+10. **Publish** - runs `bun publish --tag beta` for each non-private package
+11. **Commit and push** - commits version/changelog changes and pushes to `origin/main`
 
 ## Adding a Changeset
 
@@ -69,19 +58,17 @@ Description of the change.
 
 ## Why bun publish?
 
-This monorepo uses `workspace:*` for internal dependencies. `bun publish` is used instead of `npm publish` because it handles scoped packages and `--tag` more reliably.
-
-**Note:** `bun publish` is supposed to resolve `workspace:*` references automatically, but has a [known bug](https://github.com/oven-sh/bun/issues/24687) where this does not work. The release script works around this by resolving `workspace:*` to concrete versions in the package.json files before publishing. These resolved versions are included in the post-release commit.
+This monorepo uses `workspace:*` for internal dependencies. `bun publish` resolves `workspace:*` references to concrete versions at publish time without modifying `package.json` on disk, keeping the working tree clean with workspace protocol references intact for development.
 
 ## Authentication
 
-`bun publish` reads npm auth from `~/.npmrc`. Run `npm login` to authenticate:
+Run `npm login` to authenticate before publishing:
 
 ```bash
 npm login
 ```
 
-This writes a token to `~/.npmrc` that both `npm` and `bun` will use. The release script verifies auth with `npm whoami` before proceeding.
+The release script verifies auth with `npm whoami` before proceeding. Your npm account must have 2FA enabled — the script will prompt for an OTP code.
 
 ## Prerelease Mode
 
