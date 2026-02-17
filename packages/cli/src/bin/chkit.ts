@@ -12,7 +12,7 @@ import { cmdMigrate } from './commands/migrate.js'
 import { cmdPlugin } from './commands/plugin.js'
 import { cmdPull } from './commands/pull.js'
 import { cmdStatus } from './commands/status.js'
-import { cmdTypegen } from './commands/typegen.js'
+import { cmdCodegen } from './commands/codegen.js'
 
 function printHelp(): void {
   console.log(`chkit - ClickHouse toolkit\n
@@ -20,7 +20,7 @@ Usage:
   chkit init
   chkit generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
   chkit pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]
-  chkit typegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
+  chkit codegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--emit-ingest] [--no-emit-ingest] [--ingest-out-file <path>] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
   chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
   chkit status [--config <path>] [--json]
   chkit drift [--config <path>] [--table <selector>] [--json]
@@ -45,14 +45,18 @@ Options:
   --dryrun         Print operation plan without writing artifacts
   --check          Validate generated type artifacts are up-to-date
   --out-file <path>
-                   Override output file path for pull/typegen one run
+                   Override output file path for pull/codegen one run
   --database <db>  Limit pull to one or more databases (repeat or comma-separate)
   --force          Allow pull schema to overwrite existing output file
-  --emit-zod       Enable Zod validator generation in typegen
-  --no-emit-zod    Disable Zod validator generation in typegen
+  --emit-zod       Enable Zod validator generation in codegen
+  --no-emit-zod    Disable Zod validator generation in codegen
+  --emit-ingest    Enable ingestion function generation in codegen
+  --no-emit-ingest Disable ingestion function generation in codegen
+  --ingest-out-file <path>
+                   Override ingestion output file path for codegen
   --bigint-mode <mode>
-                   Set large integer mapping mode for typegen (string|bigint)
-  --include-views  Include views in typegen output
+                   Set large integer mapping mode for codegen (string|bigint)
+  --include-views  Include views in codegen output
   --strict         Force all check policies on for this invocation
   --json           Emit machine-readable JSON output
   -h, --help       Show help
@@ -153,12 +157,15 @@ const app = buildApplication(
           exitIfNeeded()
         },
       }),
-      typegen: buildCommand<{
+      codegen: buildCommand<{
         config?: string
         check?: boolean
         outFile?: string
         emitZod?: boolean
         noEmitZod?: boolean
+        emitIngest?: boolean
+        noEmitIngest?: boolean
+        ingestOutFile?: string
         bigintMode?: string
         includeViews?: boolean
         json?: boolean
@@ -170,13 +177,16 @@ const app = buildApplication(
             outFile: optionalStringFlag('Output file path override', 'path'),
             emitZod: optionalBooleanFlag('Emit Zod validators'),
             noEmitZod: optionalBooleanFlag('Disable Zod validator emission'),
+            emitIngest: optionalBooleanFlag('Emit ingestion functions'),
+            noEmitIngest: optionalBooleanFlag('Disable ingestion function emission'),
+            ingestOutFile: optionalStringFlag('Ingestion output file path override', 'path'),
             bigintMode: optionalStringFlag('Bigint type mode: string or bigint', 'mode'),
             includeViews: optionalBooleanFlag('Include views in generated types'),
             json: optionalBooleanFlag('Emit machine-readable JSON output'),
           },
         },
         docs: {
-          brief: 'Run type generation plugin workflow',
+          brief: 'Run code generation plugin workflow',
         },
         async func(flags) {
           const args: string[] = []
@@ -185,10 +195,13 @@ const app = buildApplication(
           addStringFlag(args, '--out-file', flags.outFile)
           addBooleanFlag(args, '--emit-zod', flags.emitZod)
           addBooleanFlag(args, '--no-emit-zod', flags.noEmitZod)
+          addBooleanFlag(args, '--emit-ingest', flags.emitIngest)
+          addBooleanFlag(args, '--no-emit-ingest', flags.noEmitIngest)
+          addStringFlag(args, '--ingest-out-file', flags.ingestOutFile)
           addStringFlag(args, '--bigint-mode', flags.bigintMode)
           addBooleanFlag(args, '--include-views', flags.includeViews)
           addBooleanFlag(args, '--json', flags.json)
-          await cmdTypegen(args)
+          await cmdCodegen(args)
           exitIfNeeded()
         },
       }),
@@ -343,8 +356,8 @@ if (argv[0] === 'plugin') {
       console.error(error instanceof Error ? error.message : String(error))
       process.exit(1)
     })
-} else if (argv[0] === 'typegen') {
-  cmdTypegen(argv.slice(1))
+} else if (argv[0] === 'codegen') {
+  cmdCodegen(argv.slice(1))
     .then(() => {
       exitIfNeeded()
     })

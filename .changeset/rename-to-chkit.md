@@ -5,7 +5,7 @@
 "@chkit/core": patch
 "@chkit/plugin-backfill": patch
 "@chkit/plugin-pull": patch
-"@chkit/plugin-typegen": patch
+"@chkit/plugin-codegen": patch
 ---
 
 Rename internals and CLI binary from chx to chkit.
