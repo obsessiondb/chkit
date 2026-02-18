@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "ec8c7839d60e",
+  "strategy": "manual-commit",
+  "branch": "rename-chkit",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/package.json",
+    "packages/plugin-pull/src/pull.e2e.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ec/8c7839d60e/0/metadata.json",
+      "transcript": "/ec/8c7839d60e/0/full.jsonl",
+      "context": "/ec/8c7839d60e/0/context.md",
+      "content_hash": "/ec/8c7839d60e/0/content_hash.txt",
+      "prompt": "/ec/8c7839d60e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 38,
+    "cache_creation_tokens": 64468,
+    "cache_read_tokens": 1532794,
+    "output_tokens": 4318,
+    "api_call_count": 36
+  }
+}
