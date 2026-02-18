@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "fb3e77248c52",
+  "session_id": "662a8b4f-854a-49a3-aaba-af2b36a343eb",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-18T08:16:11.185248Z",
+  "branch": "rename-chkit",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "packages/cli/bunfig.toml"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "7270fc41-5d3e-4db7-b91c-73836feb4875",
+  "token_usage": {
+    "input_tokens": 736,
+    "cache_creation_tokens": 68777,
+    "cache_read_tokens": 2019517,
+    "output_tokens": 1529,
+    "api_call_count": 36
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-18T08:16:11.068263Z",
+    "agent_lines": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chkit/662a8b4f-854a-49a3-aaba-af2b36a343eb.jsonl"
+}

@@ -1,0 +1,13 @@
+why is CI failing?
+
+---
+
+I actually just also added a CLICKHOUSE_DB make sure its exposed in GH actions
+
+---
+
+also increase the default timeout to 15 secons
+
+---
+
+commit and push those changes
