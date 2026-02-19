@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "312b31a3d2f9",
+  "strategy": "manual-commit",
+  "branch": "flaky-e2e-test",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "packages/cli/src/drift.e2e.test.ts",
+    "scripts/manual-release.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/31/2b31a3d2f9/0/metadata.json",
+      "transcript": "/31/2b31a3d2f9/0/full.jsonl",
+      "context": "/31/2b31a3d2f9/0/context.md",
+      "content_hash": "/31/2b31a3d2f9/0/content_hash.txt",
+      "prompt": "/31/2b31a3d2f9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 37,
+    "cache_creation_tokens": 57314,
+    "cache_read_tokens": 946958,
+    "output_tokens": 3699,
+    "api_call_count": 25
+  }
+}

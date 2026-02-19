@@ -1,0 +1,38 @@
+i just ran publish, but chkit was published with dependencies linking to workspace:* instead fo the published version
+
+---
+
+can you unpublish chkit beta5 for me
+
+---
+
+is it not better, to have all at the same version? beta.6 ?
+
+---
+
+the ` (fail) @chkit/cli drift depth env e2e > respects failOnDrift=false policy when drift exists [8498.92ms]` test fails. i have a lot of trouble with the tests on this repo for releases. this test seems to be flaky, check why. dont necessary fix it, just check it let me know why its flaky, and why its importqnt
+
+---
+
+but that alone should not lead to flaky tests. our remote clickhouse is super stable.\
+This was the error:\
+```\
+@chkit/plugin-pull:test: Ran 14 tests across 2 files. [5.73s]
+chkit:test: 270 |         const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+chkit:test: 271 |         expect(generated.exitCode).toBe(0)
+chkit:test: 272 | 
+chkit:test: 273 |         const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+chkit:test: 274 |         if (executed.exitCode !== 0) {
+chkit:test: 275 |           throw new Error(
+chkit:test:                           ^
+chkit:test: error: migrate --execute failed (exit=1)
+chkit:test: stdout:
+chkit:test: 
+chkit:test: stderr:
+chkit:test: Command failed, Error: Database chkit_e2e_drift_policy_1771510956210_46312 does not exist. 
+chkit:test:     at parseError (/Users/marc/Workspace/chkit/node_modules/.bun/@clickhouse+client-common@1.17.0/node_modules/@clickhouse/client-common/dist/error/error.js:38:20)
+chkit:test:     at <anonymous> (/Users/marc/Workspace/chkit/node_modules/.bun/@clickhouse+client@1.17.0/node_modules/@clickhouse/client/dist/connection/node_base_connection.js:459:96)
+chkit:test:     at processTicksAndRejections (native:7:39)
+chkit:test: 
+chkit:test:       at <anonymous> (/Users/marc/Workspace/chkit/packages/cli/src/drift.e2e.test.ts:275:21)\
+```
