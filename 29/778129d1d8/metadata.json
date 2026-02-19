@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "29778129d1d8",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".context/plan-cicd-guide.md",
+    ".context/plan-command-pages.md",
+    ".context/plan-obsessiondb-integration.md",
+    ".context/plan-plugin-docs.md",
+    ".context/plan-root-readme.md",
+    ".context/plan-schema-dsl-reference.md",
+    "apps/docs/public/fonts/Geist-Variable.woff2",
+    "apps/docs/public/fonts/GeistMono-Variable.woff2",
+    "apps/docs/src/styles/custom.css"
+  ],
+  "sessions": [
+    {
+      "metadata": "/29/778129d1d8/0/metadata.json",
+      "transcript": "/29/778129d1d8/0/full.jsonl",
+      "context": "/29/778129d1d8/0/context.md",
+      "content_hash": "/29/778129d1d8/0/content_hash.txt",
+      "prompt": "/29/778129d1d8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 82413,
+    "cache_read_tokens": 240023,
+    "output_tokens": 64,
+    "api_call_count": 7
+  }
+}
