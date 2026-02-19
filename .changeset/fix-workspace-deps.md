@@ -1,5 +1,5 @@
 ---
-"@chkit/cli": patch
+"chkit": patch
 "@chkit/clickhouse": patch
 "@chkit/codegen": patch
 "@chkit/core": patch

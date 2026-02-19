@@ -1,4 +1,4 @@
-# @chkit/cli
+# chkit
 
 ClickHouse schema and migration CLI for TypeScript projects.
 
@@ -7,7 +7,7 @@ Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo.
 ## Install
 
 ```bash
-bun add -d @chkit/cli @chkit/core
+bun add -d chkit @chkit/core
 ```
 
 ## Usage

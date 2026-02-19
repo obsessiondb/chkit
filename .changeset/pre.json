@@ -3,7 +3,7 @@
   "tag": "beta",
   "initialVersions": {
     "@chkit/docs": "0.0.1",
-    "@chkit/cli": "0.0.0",
+    "chkit": "0.0.0",
     "@chkit/clickhouse": "0.0.0",
     "@chkit/codegen": "0.0.0",
     "@chkit/core": "0.0.0",
