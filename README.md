@@ -2,7 +2,7 @@
 
 **ClickHouse schema and migration CLI for TypeScript projects.**
 
-[![npm version](https://img.shields.io/npm/v/@chkit/cli?label=npm)](https://www.npmjs.com/package/@chkit/cli)
+[![npm version](https://img.shields.io/npm/v/chkit?label=npm)](https://www.npmjs.com/package/chkit)
 [![CI](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml/badge.svg)](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-chkit.obsessiondb.com-blue)](https://chkit.obsessiondb.com)
 
@@ -22,7 +22,7 @@ Define your ClickHouse tables, views, and materialized views in TypeScript. chki
 ## Quick Start
 
 ```bash
-bun add -d @chkit/cli @chkit/core
+bun add -d chkit @chkit/core
 bunx chkit init
 ```
 
@@ -101,7 +101,7 @@ See the [configuration docs](https://chkit.obsessiondb.com/configuration/overvie
 
 | Package | Description |
 |---------|-------------|
-| [`@chkit/cli`](packages/cli) | CLI binary and command implementations |
+| [`chkit`](packages/cli) | CLI binary and command implementations |
 | [`@chkit/core`](packages/core) | Schema DSL, config, and diff engine |
 | [`@chkit/clickhouse`](packages/clickhouse) | ClickHouse client wrapper |
 | [`@chkit/codegen`](packages/codegen) | TypeScript type generation engine |

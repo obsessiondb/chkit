@@ -1,4 +1,4 @@
-# @chkit/cli
+# chkit
 
 ## 0.1.0-beta.5
 
