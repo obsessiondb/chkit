@@ -21,8 +21,7 @@
     "verify": "doppler run --project chkit --config ci -- turbo run typecheck lint test build",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "changeset publish",
-    "release:manual": "bun run ./scripts/manual-release.ts",
+    "release": "bun run ./scripts/manual-release.ts",
     "clean": "turbo run clean",
     "chkit": "bun run ./packages/cli/src/bin/chkit.ts",
     "deploy": "turbo run deploy"
