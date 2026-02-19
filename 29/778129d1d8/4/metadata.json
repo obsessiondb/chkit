@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "29778129d1d8",
+  "session_id": "7966fdbc-da01-4305-9259-a3eaa98e1811",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-19T09:07:42.199809Z",
+  "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "apps/docs/astro.config.mjs",
+    "apps/docs/src/content/docs/cli/drift.md",
+    "apps/docs/src/content/docs/configuration/overview.md",
+    "apps/docs/src/content/docs/getting-started.md",
+    "apps/docs/src/content/docs/index.mdx",
+    "apps/docs/src/content/docs/schema/dsl-reference.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 23,
+    "cache_creation_tokens": 31894,
+    "cache_read_tokens": 752548,
+    "output_tokens": 283,
+    "api_call_count": 20
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-19T09:07:42.122726Z",
+    "agent_lines": 452,
+    "human_added": 2247,
+    "human_modified": 12,
+    "human_removed": 0,
+    "total_committed": 2711,
+    "agent_percentage": 16.672814459609
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-davao/7966fdbc-da01-4305-9259-a3eaa98e1811.jsonl"
+}

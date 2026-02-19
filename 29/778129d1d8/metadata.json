@@ -3,7 +3,7 @@
   "checkpoint_id": "29778129d1d8",
   "strategy": "manual-commit",
   "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
-  "checkpoints_count": 10,
+  "checkpoints_count": 12,
   "files_touched": [
     ".context/plan-cicd-guide.md",
     ".context/plan-command-pages.md",
@@ -21,6 +21,8 @@
     "apps/docs/src/content/docs/cli/drift.md",
     "apps/docs/src/content/docs/cli/plugin.md",
     "apps/docs/src/content/docs/cli/pull.md",
+    "apps/docs/src/content/docs/configuration/overview.md",
+    "apps/docs/src/content/docs/getting-started.md",
     "apps/docs/src/content/docs/guides/ci-cd.md",
     "apps/docs/src/content/docs/index.mdx",
     "apps/docs/src/content/docs/plugins/pull.md",
@@ -62,13 +64,20 @@
       "context": "/29/778129d1d8/3/context.md",
       "content_hash": "/29/778129d1d8/3/content_hash.txt",
       "prompt": "/29/778129d1d8/3/prompt.txt"
+    },
+    {
+      "metadata": "/29/778129d1d8/4/metadata.json",
+      "transcript": "/29/778129d1d8/4/full.jsonl",
+      "context": "/29/778129d1d8/4/context.md",
+      "content_hash": "/29/778129d1d8/4/content_hash.txt",
+      "prompt": "/29/778129d1d8/4/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 5664,
-    "cache_creation_tokens": 208372,
-    "cache_read_tokens": 3570437,
-    "output_tokens": 6904,
-    "api_call_count": 83
+    "input_tokens": 5687,
+    "cache_creation_tokens": 240266,
+    "cache_read_tokens": 4322985,
+    "output_tokens": 7187,
+    "api_call_count": 103
   }
 }
