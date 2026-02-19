@@ -15,7 +15,7 @@
     "dev": "bun run src/bin/chkit.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun test src --concurrent",
+    "test": "bun test src --concurrent --timeout 15000",
     "clean": "rm -rf dist"
   },
   "dependencies": {

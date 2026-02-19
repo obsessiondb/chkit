@@ -7,7 +7,7 @@ description: "clickhouse.config.ts structure and defaults."
 
 ## Core Fields
 
-- `schema`: glob path to schema files
+- `schema`: glob path to [schema files](/schema/dsl-reference/)
 - `outDir`: root folder for generated artifacts
 - `migrationsDir`: SQL migration file folder
 - `metaDir`: state folder (`snapshot.json`, `journal.json`)

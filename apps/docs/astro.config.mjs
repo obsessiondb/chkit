@@ -8,6 +8,7 @@ export default defineConfig({
 		starlight({
 			title: 'chkit Docs',
 			description: 'Public documentation for chkit, the ClickHouse schema and migration CLI.',
+			customCss: ['./src/styles/custom.css'],
 			sidebar: [
 				{
 					label: 'Overview',
@@ -24,6 +25,14 @@ export default defineConfig({
 				{
 					label: 'Configuration',
 					autogenerate: { directory: 'configuration' },
+				},
+				{
+					label: 'Guides',
+					autogenerate: { directory: 'guides' },
+				},
+				{
+					label: 'Schema',
+					autogenerate: { directory: 'schema' },
 				},
 				{
 					label: 'Plugins',

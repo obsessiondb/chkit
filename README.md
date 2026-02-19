@@ -1,118 +1,80 @@
 # chkit
 
-`chkit` is a ClickHouse schema and migration CLI for TypeScript projects.
+**ClickHouse schema and migration CLI for TypeScript projects.**
 
-## Install & Run
+[![npm version](https://img.shields.io/npm/v/@chkit/cli?label=npm)](https://www.npmjs.com/package/@chkit/cli)
+[![CI](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml/badge.svg)](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-chkit.obsessiondb.com-blue)](https://chkit.obsessiondb.com)
 
-```bash
-bun install
-bun run build
-bun run chkit --help
-```
+Define your ClickHouse tables, views, and materialized views in TypeScript. chkit diffs your schema, generates migration SQL, applies it safely, and keeps your dev and production databases in sync -- all from the command line.
+
+## Key Features
+
+- **TypeScript-native schema definitions** -- tables, views, materialized views
+- **Automatic migration generation** -- diff-based SQL from your schema changes
+- **Safe migration execution** -- preview first, destructive-operation blocking
+- **Schema drift detection** -- compare live database to expected state
+- **CI gate command** -- `chkit check` fails your build on pending migrations or drift
+- **TypeScript codegen** -- row types and optional Zod schemas from your schema
+- **Plugin system** -- pull, codegen, backfill, or write your own
+- **JSON output mode** -- `--json` on every command for scripting
 
 ## Quick Start
 
 ```bash
-bun run chkit init
-bun run chkit generate --name init
-bun run chkit migrate
-bun run chkit migrate --apply
-bun run chkit status
-bun run chkit check
+bun add -d @chkit/cli @chkit/core
+bunx chkit init
 ```
 
-## Documentation
+Define a table in `src/db/schema/example.ts`:
 
-- Public docs site (Astro + Starlight): `apps/docs`
-- Run locally: `bun run docs:dev`
-- Build: `bun run docs:build`
-- Internal planning docs: `planning/`
+```ts
+import { schema, table } from '@chkit/core'
+
+const events = table({
+  database: 'default',
+  name: 'events',
+  engine: 'MergeTree',
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'source', type: 'String' },
+    { name: 'ingested_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+  ],
+  primaryKey: ['id'],
+  orderBy: ['id'],
+  partitionBy: 'toYYYYMM(ingested_at)',
+})
+
+export default schema(events)
+```
+
+Generate and apply your first migration:
+
+```bash
+bunx chkit generate --name init
+bunx chkit migrate --apply
+bunx chkit status
+```
 
 ## Commands
 
-- `chkit init`
-- `chkit generate [--name <migration-name>] [--migration-id <id>] [--config <path>] [--dryrun] [--json]`
-- `chkit pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]`
-- `chkit codegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--emit-ingest] [--no-emit-ingest] [--ingest-out-file <path>] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]`
-- `chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--json]`
-- `chkit status [--config <path>] [--json]`
-- `chkit drift [--config <path>] [--json]`
-- `chkit check [--config <path>] [--strict] [--json]`
-- `chkit plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]`
-- `chkit version`
+| Command | Description |
+|---------|-------------|
+| `chkit init` | Scaffold config and example schema |
+| `chkit generate` | Diff schema and generate migration SQL |
+| `chkit migrate` | Preview and apply pending migrations |
+| `chkit status` | Show migration counts and checksum status |
+| `chkit drift` | Compare live database to expected schema |
+| `chkit check` | CI gate: fail on pending/drift/mismatch |
+| `chkit codegen` | Generate TypeScript types from schema |
+| `chkit pull` | Pull existing ClickHouse schema to local files |
 
-## Global Flags
+All commands support `--json` for machine-readable output. See the [full CLI reference](https://chkit.obsessiondb.com/cli/overview/) for details.
 
-- `--config <path>`: config file path (default: `clickhouse.config.ts`)
-- `--json`: machine-readable command output
-
-## What Each Command Does
-
-### `chkit init`
-
-Creates starter files if missing:
-
-- `clickhouse.config.ts`
-- `src/db/schema/example.ts`
-
-### `chkit generate`
-
-- Loads schema files from `config.schema`
-- Validates definitions
-- Diffs against `meta/snapshot.json`
-- Writes migration SQL + updates snapshot (unless `--dryrun`)
-- Runs `codegen` plugin automatically when configured with `runOnGenerate: true` (default)
-
-### `chkit codegen`
-
-- Optional manual command to generate TypeScript types and ingestion functions from schema definitions
-- `--check` verifies generated output is up-to-date (no write)
-- Supports optional Zod emission (`--emit-zod`) and ingestion function emission (`--emit-ingest`)
-- Returns non-zero on stale/missing artifacts in check mode
-
-### `chkit plugin pull schema`
-
-- Pulls live ClickHouse table metadata and writes a local chkit schema file
-- Supports `--out-file`, repeated `--database`, `--dryrun`, and `--force`
-- Shortcut: `chkit pull ...` (equivalent to `chkit plugin pull schema ...`)
-
-### `chkit migrate`
-
-- Always prints pending migration plan first
-- Prompts for confirmation when run without `--apply` or `--execute`
-- Applies pending migrations immediately when run with `--apply` (or alias `--execute`)
-- Maintains `meta/journal.json`
-- Blocks execution when:
-  - applied-file checksums mismatch
-  - pending migration includes destructive operations and `--allow-destructive` is not set in non-interactive mode (interactive mode prompts for explicit confirmation)
-
-### `chkit status`
-
-Shows migration counts and checksum mismatch status.
-
-### `chkit drift`
-
-Compares live ClickHouse objects to snapshot expectations and reports drift details.
-
-Drift reason codes you may see:
-
-- object-level: `missing_object`, `extra_object`, `kind_mismatch`
-- table-level: `missing_column`, `extra_column`, `changed_column`, `setting_mismatch`, `index_mismatch`, `ttl_mismatch`, `engine_mismatch`, `primary_key_mismatch`, `order_by_mismatch`, `unique_key_mismatch`, `partition_by_mismatch`, `projection_mismatch`
-
-### `chkit check`
-
-CI gate command. Evaluates:
-
-- pending migrations
-- checksum mismatches
-- schema drift
-- plugin checks (including `codegen` when configured)
-
-Returns non-zero when enabled checks fail.
-
-## Config (`clickhouse.config.ts`)
+## Configuration
 
 ```ts
+// clickhouse.config.ts
 import { defineConfig } from '@chkit/core'
 import { pull } from '@chkit/plugin-pull'
 import { codegen } from '@chkit/plugin-codegen'
@@ -120,83 +82,45 @@ import { codegen } from '@chkit/plugin-codegen'
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',
   outDir: './chkit',
-  migrationsDir: './chkit/migrations',
-  metaDir: './chkit/meta',
   plugins: [
-    pull({
-      outFile: './src/db/schema/pulled.ts',
-    }),
-
-    // Typed registration (recommended):
-    codegen({
-      outFile: './src/generated/chkit-types.ts',
-      emitZod: false,
-      emitIngest: false,
-    }),
-
-    // Legacy path-based registration (still supported):
-    // './plugins/my-plugin.ts',
-    // { resolve: './plugins/my-plugin.ts', options: { dryRun: true }, enabled: true },
+    pull({ outFile: './src/db/schema/pulled.ts' }),
+    codegen({ outFile: './src/generated/chkit-types.ts' }),
   ],
-
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
     username: process.env.CLICKHOUSE_USER ?? 'default',
     password: process.env.CLICKHOUSE_PASSWORD ?? '',
     database: process.env.CLICKHOUSE_DB ?? 'default',
   },
-
-  check: {
-    failOnPending: true,
-    failOnChecksumMismatch: true,
-    failOnDrift: true,
-  },
-
-  safety: {
-    allowDestructive: false,
-  },
 })
 ```
 
-### Plugin API v1
+See the [configuration docs](https://chkit.obsessiondb.com/configuration/overview/) for all options.
 
-Plugin modules should export `definePlugin(...)` from `@chkit/cli`.
+## Packages
 
-For typed config registration, plugin packages can export helpers that return inline registrations (for example `codegen(...)` from `@chkit/plugin-codegen`).
+| Package | Description |
+|---------|-------------|
+| [`@chkit/cli`](packages/cli) | CLI binary and command implementations |
+| [`@chkit/core`](packages/core) | Schema DSL, config, and diff engine |
+| [`@chkit/clickhouse`](packages/clickhouse) | ClickHouse client wrapper |
+| [`@chkit/codegen`](packages/codegen) | TypeScript type generation engine |
+| [`@chkit/plugin-pull`](packages/plugin-pull) | Pull live schema into local files |
+| [`@chkit/plugin-codegen`](packages/plugin-codegen) | Codegen plugin for the CLI |
+| [`@chkit/plugin-backfill`](packages/plugin-backfill) | Backfill plugin for data migrations |
 
-- `manifest.apiVersion` must be `1`.
-- Optional compatibility gates:
-  - `manifest.compatibility.cli.minMajor`
-  - `manifest.compatibility.cli.maxMajor`
-- Lifecycle hooks:
-  - `onConfigLoaded`
-  - `onSchemaLoaded`
-  - `onPlanCreated`
-  - `onBeforeApply`
-  - `onAfterApply`
-  - `onCheck`
-  - `onCheckReport`
-- Plugin command namespace:
-  - `chkit plugin`
-  - `chkit plugin <plugin-name>`
-  - `chkit plugin <plugin-name> <command> [args...]`
+## Documentation
 
-## Output Artifacts
+Full documentation is available at **[chkit.obsessiondb.com](https://chkit.obsessiondb.com)**.
 
-Under `metaDir`:
+## ObsessionDB
 
-- `snapshot.json`: canonical schema snapshot
-- `journal.json`: applied migration journal
+> Need a managed ClickHouse database? [ObsessionDB](https://obsessiondb.com) provides hosted ClickHouse with chkit integration built in.
 
-Under `migrationsDir`:
+## Contributing
 
-- `YYYYMMDDHHMMSS_<name>.sql`
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
-## JSON Output Contract
+## License
 
-- Contract document: `planning/07-json-output-contract.md`
-
-## Contributor Docs
-
-- Internal architecture and repository structure: `planning/08-internal-structure.md`
-- Planning docs index: `planning/README.md`
+[MIT](LICENSE)

@@ -15,14 +15,14 @@ This document covers practical usage of the optional `codegen` plugin.
 
 The plugin is designed so your existing chkit workflow can stay the same.
 
-- `chkit generate` integration:
+- [`chkit generate`](/cli/generate/) integration:
   - After a successful migration/snapshot generate, codegen runs automatically by default (`runOnGenerate: true`).
   - Result: migration artifacts and generated types stay in sync in normal dev flow.
-- `chkit check` integration:
+- [`chkit check`](/cli/check/) integration:
   - `check` evaluates codegen freshness via plugin hook.
   - If generated types are missing/stale, `failedChecks` includes `plugin:codegen`.
   - Result: CI enforcement works without adding a separate codegen step.
-- `chkit codegen` command:
+- [`chkit codegen`](/cli/codegen/) command:
   - Optional manual trigger.
   - Useful when you explicitly want to regenerate or run an isolated `--check`.
 
@@ -72,9 +72,9 @@ Invalid option values fail fast at startup via plugin config validation.
 
 ## Commands
 
-- `chkit codegen`
+- [`chkit codegen`](/cli/codegen/)
   - Optional manual command to generate and write output atomically.
-- `chkit codegen --check`
+- [`chkit codegen --check`](/cli/codegen/)
   - Optional manual check to validate output is current without writing.
   - Fails with:
     - `codegen_missing_output` (types file missing)
@@ -93,13 +93,13 @@ Useful flags:
 
 ## CI / check integration
 
-When configured, `chkit check` includes a `plugins.codegen` block in JSON output and can fail with `plugin:codegen`.
+When configured, [`chkit check`](/cli/check/) includes a `plugins.codegen` block in JSON output and can fail with `plugin:codegen`.
 
 `plugin:codegen` is added to `failedChecks` when the plugin check returns an error finding (for example stale or missing generated artifacts).
 
 ## Generate integration
 
-When `runOnGenerate` is enabled (default), `chkit generate` runs codegen after successful migration/snapshot generation.
+When `runOnGenerate` is enabled (default), [`chkit generate`](/cli/generate/) runs codegen after successful migration/snapshot generation.
 
 If codegen fails in that path, `chkit generate` fails.
 

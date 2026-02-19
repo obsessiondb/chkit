@@ -13,21 +13,14 @@ hero:
       icon: right-arrow
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 
 ## What you will find here
 
 <CardGrid stagger>
-	<Card title="Quick Start" icon="rocket">
-		Install chkit with Bun and run your first migration workflow.
-	</Card>
-	<Card title="CLI Reference" icon="seti:terminal">
-		Learn each command, expected output, and operational behavior.
-	</Card>
-	<Card title="Config Guide" icon="setting">
-		Use `clickhouse.config.ts` to wire schema, migration paths, and safety settings.
-	</Card>
-	<Card title="Docs Structure" icon="tree-structure">
-		Public docs live here. Internal planning docs remain outside this app.
-	</Card>
+	<LinkCard title="Quick Start" href="/getting-started/" description="Install chkit with Bun and run your first migration workflow." />
+	<LinkCard title="CLI Reference" href="/cli/overview/" description="Learn each command, expected output, and operational behavior." />
+	<LinkCard title="Config Guide" href="/configuration/overview/" description="Use clickhouse.config.ts to wire schema, migration paths, and safety settings." />
+	<LinkCard title="Schema Reference" href="/schema/dsl-reference/" description="Define tables, views, and materialized views with the TypeScript DSL." />
+	<LinkCard title="CI/CD Integration" href="/guides/ci-cd/" description="Run schema validation and migration deployment in CI pipelines." />
 </CardGrid>

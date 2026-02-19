@@ -51,6 +51,18 @@ async function dropDatabase(url: string, username: string, password: string, dat
   await runSql(url, username, password, `DROP DATABASE IF EXISTS ${database}`)
 }
 
+async function retry(attempts: number, delayMs: number, fn: () => Promise<void>): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await fn()
+      return
+    } catch (err) {
+      if (i === attempts - 1) throw err
+      await new Promise((r) => setTimeout(r, delayMs))
+    }
+  }
+}
+
 function createResolvedConfig(clickhouse: NonNullable<ResolvedChxConfig['clickhouse']>): ResolvedChxConfig {
   return {
     schema: ['./placeholder-schema.ts'],
@@ -133,11 +145,16 @@ describe('@chkit/plugin-pull live env e2e', () => {
           liveEnv.clickhousePassword,
           `CREATE TABLE ${targetDatabase}.events_rollup (id UInt64, c UInt64) ENGINE = MergeTree() ORDER BY (id)`
         )
-        await runSql(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
-          `CREATE MATERIALIZED VIEW ${targetDatabase}.events_mv TO ${targetDatabase}.events_rollup AS SELECT id, count() AS c FROM ${targetDatabase}.events GROUP BY id`
+        // ClickHouse Cloud DDL is eventually consistent — the target table
+        // may not be visible immediately when creating a materialized view
+        // with a TO clause, so we retry a few times.
+        await retry(3, 2000, () =>
+          runSql(
+            liveEnv.clickhouseUrl,
+            liveEnv.clickhouseUser,
+            liveEnv.clickhousePassword,
+            `CREATE MATERIALIZED VIEW ${targetDatabase}.events_mv TO ${targetDatabase}.events_rollup AS SELECT id, count() AS c FROM ${targetDatabase}.events GROUP BY id`
+          )
         )
         await runSql(
           liveEnv.clickhouseUrl,
