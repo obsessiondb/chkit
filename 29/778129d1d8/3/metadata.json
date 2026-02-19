@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "29778129d1d8",
+  "session_id": "780599f3-663c-4d64-8405-48377172a340",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-19T09:07:42.061122Z",
+  "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
+  "checkpoints_count": 6,
+  "files_touched": [
+    ".context/plan-cicd-guide.md",
+    ".context/plan-command-pages.md",
+    ".context/plan-obsessiondb-integration.md",
+    ".context/plan-plugin-docs.md",
+    ".context/plan-root-readme.md",
+    ".context/plan-schema-dsl-reference.md",
+    "apps/docs/astro.config.mjs",
+    "apps/docs/public/fonts/Geist-Variable.woff2",
+    "apps/docs/public/fonts/GeistMono-Variable.woff2",
+    "apps/docs/src/content/docs/cli/check.md",
+    "apps/docs/src/content/docs/cli/codegen.md",
+    "apps/docs/src/content/docs/cli/drift.md",
+    "apps/docs/src/content/docs/cli/plugin.md",
+    "apps/docs/src/content/docs/cli/pull.md",
+    "apps/docs/src/content/docs/index.mdx",
+    "apps/docs/src/content/docs/plugins/pull.md",
+    "apps/docs/src/content/docs/schema/dsl-reference.md",
+    "apps/docs/src/styles/custom.css"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 4532,
+    "cache_creation_tokens": 60071,
+    "cache_read_tokens": 2201967,
+    "output_tokens": 384,
+    "api_call_count": 41
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-19T09:07:41.750816Z",
+    "agent_lines": 1193,
+    "human_added": 484,
+    "human_modified": 1034,
+    "human_removed": 0,
+    "total_committed": 2711,
+    "agent_percentage": 44.00590188122464
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-davao/780599f3-663c-4d64-8405-48377172a340.jsonl"
+}
