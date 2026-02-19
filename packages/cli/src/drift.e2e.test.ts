@@ -90,6 +90,20 @@ async function runSqlWithUnknownTableRetry(
   }
 }
 
+async function runCliWithRetry(
+  cwd: string,
+  args: string[],
+  { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const result = runCli(cwd, args)
+    if (result.exitCode === 0) return result
+    if (attempt === maxAttempts) return result
+    await sleep(delayMs)
+  }
+  return runCli(cwd, args)
+}
+
 async function dropDatabase(url: string, username: string, password: string, database: string): Promise<void> {
   await runSql(url, username, password, `DROP DATABASE IF EXISTS ${database}`)
 }
@@ -143,7 +157,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(generated.exitCode).toBe(0)
 
-        const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -215,7 +229,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(generated.exitCode).toBe(0)
 
-        const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -270,7 +284,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(generated.exitCode).toBe(0)
 
-        const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -326,7 +340,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(generated.exitCode).toBe(0)
 
-        const executed = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`

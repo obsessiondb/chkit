@@ -43,6 +43,8 @@ type PackageJson = {
 	name?: string
 	version?: string
 	private?: boolean
+	dependencies?: Record<string, string>
+	devDependencies?: Record<string, string>
 }
 
 const TMP_DIR = resolve('.tmp')
@@ -295,6 +297,16 @@ function publishWorkspacePackages(otp: string): void {
 		}
 	})
 
+	// Build a map of workspace package names to their current versions
+	const workspaceVersions = new Map<string, string>()
+	for (const dir of packageDirs) {
+		const pkgJsonPath = join(packagesDir, dir, 'package.json')
+		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
+		if (pkg.name && pkg.version) {
+			workspaceVersions.set(pkg.name, pkg.version)
+		}
+	}
+
 	let published = 0
 	let skipped = 0
 
@@ -311,13 +323,27 @@ function publishWorkspacePackages(otp: string): void {
 			continue
 		}
 
-		logLine(`Publishing ${pkg.name}@${pkg.version}...`)
-		runCommand(
-			'bun',
-			['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
-			{ cwd: join(packagesDir, dir) },
-		)
-		published++
+		// Resolve workspace:* references to actual versions before publishing
+		const originalContent = readFileSync(pkgJsonPath, 'utf8')
+		const resolved = resolveWorkspaceDeps(pkg, workspaceVersions)
+		if (resolved) {
+			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`)
+		}
+
+		try {
+			logLine(`Publishing ${pkg.name}@${pkg.version}...`)
+			runCommand(
+				'bun',
+				['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
+				{ cwd: join(packagesDir, dir) },
+			)
+			published++
+		} finally {
+			// Restore original package.json with workspace:* references
+			if (resolved) {
+				writeFileSync(pkgJsonPath, originalContent)
+			}
+		}
 	}
 
 	if (published === 0 && skipped > 0) {
@@ -327,6 +353,39 @@ function publishWorkspacePackages(otp: string): void {
 	}
 
 	logLine(`Published ${published} package(s), skipped ${skipped}.`)
+}
+
+/**
+ * Replaces `workspace:*` dependency specifiers with the actual version from
+ * the workspace. Mutates the package object in place.
+ * Returns true if any replacements were made.
+ */
+function resolveWorkspaceDeps(
+	pkg: PackageJson,
+	workspaceVersions: Map<string, string>,
+): boolean {
+	let changed = false
+
+	for (const depField of ['dependencies', 'devDependencies'] as const) {
+		const deps = pkg[depField]
+		if (!deps) continue
+
+		for (const [name, specifier] of Object.entries(deps)) {
+			if (!specifier.startsWith('workspace:')) continue
+
+			const version = workspaceVersions.get(name)
+			if (!version) {
+				fail(
+					`Cannot resolve ${depField}["${name}"]: workspace:* used but no matching workspace package found.`,
+				)
+			}
+
+			deps[name] = version
+			changed = true
+		}
+	}
+
+	return changed
 }
 
 function isVersionPublished(name: string, version: string): boolean {
