@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "29778129d1d8",
+  "session_id": "a88d2249-7968-42c6-b6be-b9a55fa91099",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-19T09:07:42.524136Z",
+  "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "apps/docs/src/content/docs/plugins/backfill.md",
+    "apps/docs/src/content/docs/plugins/pull.md",
+    "apps/docs/src/content/docs/schema/dsl-reference.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 21876,
+    "cache_read_tokens": 208529,
+    "output_tokens": 47,
+    "api_call_count": 7
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-19T09:07:42.280727Z",
+    "agent_lines": 630,
+    "human_added": 2093,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2723,
+    "agent_percentage": 23.13624678663239
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-davao/a88d2249-7968-42c6-b6be-b9a55fa91099.jsonl"
+}
