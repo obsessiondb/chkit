@@ -3,7 +3,7 @@
   "checkpoint_id": "29778129d1d8",
   "strategy": "manual-commit",
   "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
-  "checkpoints_count": 13,
+  "checkpoints_count": 14,
   "files_touched": [
     ".context/plan-cicd-guide.md",
     ".context/plan-command-pages.md",
@@ -19,13 +19,19 @@
     "apps/docs/src/content/docs/cli/check.md",
     "apps/docs/src/content/docs/cli/codegen.md",
     "apps/docs/src/content/docs/cli/drift.md",
+    "apps/docs/src/content/docs/cli/generate.md",
+    "apps/docs/src/content/docs/cli/init.md",
+    "apps/docs/src/content/docs/cli/migrate.md",
+    "apps/docs/src/content/docs/cli/overview.md",
     "apps/docs/src/content/docs/cli/plugin.md",
     "apps/docs/src/content/docs/cli/pull.md",
+    "apps/docs/src/content/docs/cli/status.md",
     "apps/docs/src/content/docs/configuration/overview.md",
     "apps/docs/src/content/docs/getting-started.md",
     "apps/docs/src/content/docs/guides/ci-cd.md",
     "apps/docs/src/content/docs/index.mdx",
     "apps/docs/src/content/docs/plugins/backfill.md",
+    "apps/docs/src/content/docs/plugins/codegen.md",
     "apps/docs/src/content/docs/plugins/pull.md",
     "apps/docs/src/content/docs/schema/dsl-reference.md",
     "apps/docs/src/styles/custom.css",
@@ -79,13 +85,20 @@
       "context": "/29/778129d1d8/5/context.md",
       "content_hash": "/29/778129d1d8/5/content_hash.txt",
       "prompt": "/29/778129d1d8/5/prompt.txt"
+    },
+    {
+      "metadata": "/29/778129d1d8/6/metadata.json",
+      "transcript": "/29/778129d1d8/6/full.jsonl",
+      "context": "/29/778129d1d8/6/context.md",
+      "content_hash": "/29/778129d1d8/6/content_hash.txt",
+      "prompt": "/29/778129d1d8/6/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 5697,
-    "cache_creation_tokens": 262142,
-    "cache_read_tokens": 4531514,
-    "output_tokens": 7234,
-    "api_call_count": 110
+    "input_tokens": 5764,
+    "cache_creation_tokens": 351593,
+    "cache_read_tokens": 8353582,
+    "output_tokens": 8220,
+    "api_call_count": 168
   }
 }

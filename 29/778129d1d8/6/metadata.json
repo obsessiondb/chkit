@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "29778129d1d8",
+  "session_id": "d53f3480-d408-4317-8b9e-a24b85778231",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-19T09:07:44.104768Z",
+  "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "apps/docs/src/content/docs/cli/check.md",
+    "apps/docs/src/content/docs/cli/codegen.md",
+    "apps/docs/src/content/docs/cli/drift.md",
+    "apps/docs/src/content/docs/cli/generate.md",
+    "apps/docs/src/content/docs/cli/init.md",
+    "apps/docs/src/content/docs/cli/migrate.md",
+    "apps/docs/src/content/docs/cli/overview.md",
+    "apps/docs/src/content/docs/cli/plugin.md",
+    "apps/docs/src/content/docs/cli/pull.md",
+    "apps/docs/src/content/docs/cli/status.md",
+    "apps/docs/src/content/docs/plugins/backfill.md",
+    "apps/docs/src/content/docs/plugins/codegen.md",
+    "apps/docs/src/content/docs/plugins/pull.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 67,
+    "cache_creation_tokens": 89451,
+    "cache_read_tokens": 3822068,
+    "output_tokens": 986,
+    "api_call_count": 58
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-19T09:07:42.651529Z",
+    "agent_lines": 1373,
+    "human_added": 1350,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2723,
+    "agent_percentage": 50.42232831435916
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-davao/d53f3480-d408-4317-8b9e-a24b85778231.jsonl"
+}
