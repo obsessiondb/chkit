@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "30422b843a4e",
+  "session_id": "a496f16a-4c2e-4eae-93e8-28355828515e",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-19T10:26:00.557952Z",
+  "branch": "KeKs0r/explore-build-system",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/fix-workspace-deps.md",
+    ".changeset/pre.json",
+    ".changeset/rename-plugin-codegen.md",
+    ".changeset/rename-to-chkit.md",
+    "README.md",
+    "packages/cli/CHANGELOG.md",
+    "packages/cli/README.md",
+    "packages/cli/package.json",
+    "packages/clickhouse/README.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "7f9f733d-1daf-4dd7-97ce-b47125e7cc8a",
+  "token_usage": {
+    "input_tokens": 53,
+    "cache_creation_tokens": 52770,
+    "cache_read_tokens": 686035,
+    "output_tokens": 270,
+    "api_call_count": 21
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-19T10:26:00.083681Z",
+    "agent_lines": 12,
+    "human_added": 10,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 22,
+    "agent_percentage": 54.54545454545454
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-munich/a496f16a-4c2e-4eae-93e8-28355828515e.jsonl"
+}
