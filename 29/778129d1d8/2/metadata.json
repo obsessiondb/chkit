@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "29778129d1d8",
+  "session_id": "6c511b63-36bf-457d-a4ae-874351cacb38",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-19T09:07:41.651101Z",
+  "branch": "marc/num-6437-create-documentation-website-on-chkitobsessiondbcom",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "LICENSE",
+    "apps/docs/astro.config.mjs",
+    "apps/docs/src/content/docs/guides/ci-cd.md",
+    "apps/docs/src/content/docs/index.mdx",
+    "packages/cli/README.md",
+    "packages/clickhouse/README.md",
+    "packages/codegen/README.md",
+    "packages/core/README.md",
+    "packages/plugin-backfill/README.md",
+    "packages/plugin-codegen/README.md",
+    "packages/plugin-pull/README.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 490,
+    "cache_creation_tokens": 26004,
+    "cache_read_tokens": 597518,
+    "output_tokens": 4004,
+    "api_call_count": 18
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-19T09:07:41.497768Z",
+    "agent_lines": 714,
+    "human_added": 2009,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2723,
+    "agent_percentage": 26.221079691516707
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-davao/6c511b63-36bf-457d-a4ae-874351cacb38.jsonl"
+}
