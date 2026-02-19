@@ -8,4 +8,4 @@
 "@chkit/plugin-codegen": patch
 ---
 
-Rename internals and CLI binary from chx to chkit.
+Rename internals and CLI binary from chkit to chkit.

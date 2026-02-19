@@ -31,3 +31,4 @@ bun run chkit check
 
 - Continue to [CLI Overview](/cli/overview/)
 - Continue to [Config Overview](/configuration/overview/)
+- Continue to [Schema DSL Reference](/schema/dsl-reference/)

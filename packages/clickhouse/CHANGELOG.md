@@ -6,7 +6,7 @@
 
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
-- d983fdf: Rename internals and CLI binary from chx to chkit.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
 - Updated dependencies [f719c50]
 - Updated dependencies [a3a09cf]
 - Updated dependencies [d983fdf]
@@ -18,7 +18,7 @@
 
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
-- d983fdf: Rename internals and CLI binary from chx to chkit.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
 - Updated dependencies [f719c50]
 - Updated dependencies [a3a09cf]
 - Updated dependencies [d983fdf]
@@ -44,7 +44,7 @@
 
 ### Patch Changes
 
-- Rename internals and CLI binary from chx to chkit.
+- Rename internals and CLI binary from chkit to chkit.
 - Updated dependencies
   - @chkit/core@0.1.0-beta.1
 

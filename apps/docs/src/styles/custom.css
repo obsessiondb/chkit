@@ -1,0 +1,242 @@
+/* ── Geist font faces ──────────────────────────────── */
+
+@font-face {
+	font-family: 'Geist';
+	src: url('/fonts/Geist-Variable.woff2') format('woff2');
+	font-weight: 100 900;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Geist Mono';
+	src: url('/fonts/GeistMono-Variable.woff2') format('woff2');
+	font-weight: 100 900;
+	font-display: swap;
+}
+
+/* ── ObsessionDB theme for Starlight ──────────────── */
+/* Colors derived from ob-db landing page:
+   --color-ob-bg:        #0D0D0D  (near-black background)
+   --color-ob-light:     #E8E7E3  (warm off-white)
+   --color-ob-dark:      #272727  (dark surface)
+   --color-ob-text-dark: #170A16  (text on light)
+   --color-ob-subtitle:  #808080  (muted text)
+   accent:               #FE007A  (pink/magenta)
+*/
+
+:root {
+	/* Font overrides */
+	--sl-font: 'Geist', sans-serif;
+	--sl-font-mono: 'Geist Mono', monospace;
+
+	/* Dark mode color scale (ob-db palette) */
+	--sl-color-white: #E8E7E3;
+	--sl-color-gray-1: #BFBEBB;
+	--sl-color-gray-2: #9A9996;
+	--sl-color-gray-3: #808080;
+	--sl-color-gray-4: #525252;
+	--sl-color-gray-5: #2A2A2A;
+	--sl-color-gray-6: #1A1A1A;
+	--sl-color-black: #0D0D0D;
+
+	/* Accent — muted, using ob-light warm white for links/accents */
+	--sl-color-accent-low: #1E1E1E;
+	--sl-color-accent: #9A9996;
+	--sl-color-accent-high: #E8E7E3;
+
+	/* Neutralize the color palette — no colorful icons/badges */
+	--sl-color-orange-low: #1E1E1E;
+	--sl-color-orange: #808080;
+	--sl-color-orange-high: #E8E7E3;
+	--sl-color-green-low: #1E1E1E;
+	--sl-color-green: #808080;
+	--sl-color-green-high: #E8E7E3;
+	--sl-color-blue-low: #1E1E1E;
+	--sl-color-blue: #808080;
+	--sl-color-blue-high: #E8E7E3;
+	--sl-color-purple-low: #1E1E1E;
+	--sl-color-purple: #808080;
+	--sl-color-purple-high: #E8E7E3;
+	--sl-color-red-low: #1E1E1E;
+	--sl-color-red: #808080;
+	--sl-color-red-high: #E8E7E3;
+
+	/* Semantic mappings */
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-accent: var(--sl-color-accent-high);
+	--sl-color-bg: var(--sl-color-black);
+	--sl-color-bg-nav: #141414;
+	--sl-color-bg-sidebar: #141414;
+	--sl-color-bg-inline-code: #1E1E1E;
+	--sl-color-bg-accent: var(--sl-color-accent);
+	--sl-color-hairline-light: rgba(255, 255, 255, 0.08);
+	--sl-color-hairline: rgba(255, 255, 255, 0.06);
+	--sl-color-hairline-shade: rgba(0, 0, 0, 0.4);
+
+	/* Shadows — subtle, matching ob-db's dark UI */
+	--sl-shadow-sm: 0px 1px 2px rgba(0, 0, 0, 0.3);
+	--sl-shadow-md: 0px 4px 12px rgba(0, 0, 0, 0.4);
+	--sl-shadow-lg: 0px 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Force dark mode even when system prefers light */
+:root[data-theme='light'] {
+	--sl-color-white: #E8E7E3;
+	--sl-color-gray-1: #BFBEBB;
+	--sl-color-gray-2: #9A9996;
+	--sl-color-gray-3: #808080;
+	--sl-color-gray-4: #525252;
+	--sl-color-gray-5: #2A2A2A;
+	--sl-color-gray-6: #1A1A1A;
+	--sl-color-black: #0D0D0D;
+
+	--sl-color-accent-high: #E8E7E3;
+	--sl-color-accent: #9A9996;
+	--sl-color-accent-low: #1E1E1E;
+
+	--sl-color-orange-low: #1E1E1E;
+	--sl-color-orange: #808080;
+	--sl-color-orange-high: #E8E7E3;
+	--sl-color-green-low: #1E1E1E;
+	--sl-color-green: #808080;
+	--sl-color-green-high: #E8E7E3;
+	--sl-color-blue-low: #1E1E1E;
+	--sl-color-blue: #808080;
+	--sl-color-blue-high: #E8E7E3;
+	--sl-color-purple-low: #1E1E1E;
+	--sl-color-purple: #808080;
+	--sl-color-purple-high: #E8E7E3;
+	--sl-color-red-low: #1E1E1E;
+	--sl-color-red: #808080;
+	--sl-color-red-high: #E8E7E3;
+
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-accent: var(--sl-color-accent-high);
+	--sl-color-text-invert: var(--sl-color-black);
+	--sl-color-bg: var(--sl-color-black);
+	--sl-color-bg-nav: #141414;
+	--sl-color-bg-sidebar: #141414;
+	--sl-color-bg-inline-code: #1E1E1E;
+	--sl-color-bg-accent: var(--sl-color-accent);
+	--sl-color-hairline-light: rgba(255, 255, 255, 0.08);
+	--sl-color-hairline: rgba(255, 255, 255, 0.06);
+	--sl-color-hairline-shade: rgba(0, 0, 0, 0.4);
+
+	--sl-shadow-sm: 0px 1px 2px rgba(0, 0, 0, 0.3);
+	--sl-shadow-md: 0px 4px 12px rgba(0, 0, 0, 0.4);
+	--sl-shadow-lg: 0px 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Hide theme toggle — dark-only site */
+starlight-theme-select {
+	display: none;
+}
+
+/* ── Typography refinements ───────────────────────── */
+
+:root {
+	--sl-line-height: 1.65;
+	--sl-line-height-headings: 1.1;
+}
+
+/* Tighter heading tracking (matches ob-db's tracking-[-0.03em]) */
+h1, h2, h3, h4, h5, h6 {
+	letter-spacing: -0.03em;
+	font-weight: 600;
+}
+
+/* ── Navigation & sidebar polish ──────────────────── */
+
+.sidebar-content a[aria-current='page'] {
+	font-weight: 600;
+}
+
+/* Subtle border on nav matching ob-db's border-white/[0.08] */
+nav.header {
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Card styling to match ob-db panels ───────────── */
+
+.card {
+	background: #141414;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 12px;
+}
+
+.card:hover {
+	border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Monochrome card icons — override Starlight's color cycling */
+.card .icon {
+	border-color: rgba(255, 255, 255, 0.1) !important;
+	background-color: #1E1E1E !important;
+	color: #808080;
+}
+
+/* ── Hero buttons — match ob-db button style ─────── */
+
+.sl-link-button.primary {
+	background: #E8E7E3;
+	border-color: #E8E7E3;
+	color: #170A16;
+	box-shadow: inset 0px -2px 4px rgba(0, 0, 0, 0.08), inset 0px 1px 1.1px rgba(255, 255, 255, 0.35);
+}
+
+.sl-link-button.primary:hover {
+	background: #F0EFEB;
+	transform: translateY(-1px);
+	filter: brightness(1.05);
+}
+
+.sl-link-button.secondary {
+	border-color: rgba(255, 255, 255, 0.12);
+	color: #E8E7E3;
+	background: #272727;
+	box-shadow: inset 0px -2px 4px rgba(0, 0, 0, 0.29), inset 0px 1px 1.1px rgba(255, 255, 255, 0.19);
+}
+
+.sl-link-button.secondary:hover {
+	border-color: rgba(255, 255, 255, 0.18);
+	transform: translateY(-1px);
+	filter: brightness(1.1);
+}
+
+/* ── Code blocks — match ob-db terminal aesthetic ─── */
+
+pre {
+	background: #141414 !important;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 10px;
+}
+
+/* ── Link styling ─────────────────────────────────── */
+
+a:not([class]) {
+	text-decoration-color: rgba(232, 231, 227, 0.3);
+}
+
+a:not([class]):hover {
+	text-decoration-color: #E8E7E3;
+}
+
+/* ── Hero section styling ─────────────────────────── */
+
+.hero {
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Smooth scrolling (matches ob-db behavior) ────── */
+
+html {
+	scroll-behavior: smooth;
+}
+
+/* ── Reduced motion ───────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+	html {
+		scroll-behavior: auto;
+	}
+}
