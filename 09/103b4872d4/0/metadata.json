@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "09103b4872d4",
+  "session_id": "7571ad77-3464-4792-86bf-85bb3c310207",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-20T02:23:36.328375Z",
+  "branch": "KeKs0r/pkg-readme-links",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".changeset/add-pkg-links.md",
+    "CLAUDE.md",
+    "packages/cli/README.md",
+    "packages/cli/package.json",
+    "packages/clickhouse/README.md",
+    "packages/clickhouse/package.json",
+    "packages/codegen/README.md",
+    "packages/codegen/package.json",
+    "packages/core/README.md",
+    "packages/core/package.json",
+    "packages/plugin-backfill/README.md",
+    "packages/plugin-backfill/package.json",
+    "packages/plugin-codegen/README.md",
+    "packages/plugin-codegen/package.json",
+    "packages/plugin-pull/README.md",
+    "packages/plugin-pull/package.json"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 465,
+    "cache_creation_tokens": 128466,
+    "cache_read_tokens": 1571645,
+    "output_tokens": 461,
+    "api_call_count": 37
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-20T02:23:35.679147Z",
+    "agent_lines": 159,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 159,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-denpasar/7571ad77-3464-4792-86bf-85bb3c310207.jsonl"
+}
