@@ -2,7 +2,7 @@
 
 Plugin to pull existing ClickHouse table schemas into local chkit schema files.
 
-Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo.
+Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This plugin extends the [`chkit`](https://www.npmjs.com/package/chkit) CLI with schema pulling from existing ClickHouse databases.
 
 ## Install
 
