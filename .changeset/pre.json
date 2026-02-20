@@ -12,6 +12,7 @@
     "@chkit/plugin-codegen": "0.0.0"
   },
   "changesets": [
+    "add-pkg-links",
     "fix-workspace-deps",
     "rename-plugin-codegen",
     "rename-to-chkit"
