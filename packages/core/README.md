@@ -2,7 +2,7 @@
 
 Schema DSL, configuration, and diff engine for chkit.
 
-Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo.
+Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This package is typically used together with the [`chkit`](https://www.npmjs.com/package/chkit) CLI.
 
 ## Install
 

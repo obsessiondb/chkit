@@ -1,6 +1,12 @@
 {
   "name": "@chkit/plugin-codegen",
   "version": "0.1.0-beta.6",
+  "homepage": "https://chkit.obsessiondb.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/obsessiondb/chkit.git",
+    "directory": "packages/plugin-codegen"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

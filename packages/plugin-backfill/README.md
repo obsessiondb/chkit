@@ -2,7 +2,7 @@
 
 Plugin for data backfill operations in chkit.
 
-Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo.
+Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This plugin extends the [`chkit`](https://www.npmjs.com/package/chkit) CLI with data backfill commands.
 
 ## Install
 
