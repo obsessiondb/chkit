@@ -2,7 +2,7 @@
 
 Plugin to generate TypeScript row types and optional Zod schemas from your chkit schema definitions.
 
-Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo.
+Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This plugin extends the [`chkit`](https://www.npmjs.com/package/chkit) CLI with TypeScript code generation.
 
 ## Install
 
