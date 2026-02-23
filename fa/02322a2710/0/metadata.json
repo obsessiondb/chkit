@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "fa02322a2710",
+  "session_id": "92354ed8-573d-4942-a80a-abc6e37b7543",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-23T09:07:06.8874Z",
+  "branch": "KeKs0r/obsessiondb-plugin",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "packages/cli/package.json",
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/command-registry.ts",
+    "packages/cli/src/bin/commands/check.ts",
+    "packages/cli/src/bin/commands/codegen.ts",
+    "packages/cli/src/bin/commands/drift.ts",
+    "packages/cli/src/bin/commands/generate.ts",
+    "packages/cli/src/bin/commands/generate/rename-mappings.ts",
+    "packages/cli/src/bin/commands/init.ts",
+    "packages/cli/src/bin/commands/migrate.ts",
+    "packages/cli/src/bin/commands/plugin-like.ts",
+    "packages/cli/src/bin/commands/plugin.ts",
+    "packages/cli/src/bin/commands/pull.ts",
+    "packages/cli/src/bin/commands/status.ts",
+    "packages/cli/src/bin/config.ts",
+    "packages/cli/src/bin/help.ts",
+    "packages/cli/src/bin/lib.ts",
+    "packages/cli/src/bin/parse-flags.test.ts",
+    "packages/cli/src/bin/parse-flags.ts",
+    "packages/cli/src/plugins.ts"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "43cff11d-50fc-4971-87d7-781aa0f7799d",
+  "token_usage": {
+    "input_tokens": 175,
+    "cache_creation_tokens": 442912,
+    "cache_read_tokens": 14082657,
+    "output_tokens": 1353,
+    "api_call_count": 122
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-23T09:07:06.273109Z",
+    "agent_lines": 0,
+    "human_added": 4360,
+    "human_modified": 699,
+    "human_removed": 0,
+    "total_committed": 4448,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-amman/92354ed8-573d-4942-a80a-abc6e37b7543.jsonl"
+}
