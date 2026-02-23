@@ -1,0 +1,79 @@
+import { describe, expect, it } from 'bun:test'
+
+import type { FlagDef } from '../plugins.js'
+import { MissingFlagValueError, UnknownFlagError, parseFlags } from './parse-flags.js'
+
+describe('parseFlags', () => {
+  const defs: FlagDef[] = [
+    { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },
+    { name: '--dryrun', type: 'boolean', description: 'Dry run' },
+    { name: '--json', type: 'boolean', description: 'JSON output' },
+    { name: '--database', type: 'string[]', description: 'Databases' },
+    { name: '--emit-zod', type: 'boolean', description: 'Emit Zod', negation: true },
+  ]
+
+  it('parses string flags', () => {
+    const result = parseFlags(['--name', 'my-migration'], defs)
+    expect(result['--name']).toBe('my-migration')
+  })
+
+  it('parses boolean flags', () => {
+    const result = parseFlags(['--dryrun', '--json'], defs)
+    expect(result['--dryrun']).toBe(true)
+    expect(result['--json']).toBe(true)
+  })
+
+  it('parses string[] flags with comma splitting', () => {
+    const result = parseFlags(['--database', 'db1,db2'], defs)
+    expect(result['--database']).toEqual(['db1', 'db2'])
+  })
+
+  it('accumulates repeated string[] flags', () => {
+    const result = parseFlags(['--database', 'db1', '--database', 'db2,db3'], defs)
+    expect(result['--database']).toEqual(['db1', 'db2', 'db3'])
+  })
+
+  it('parses negation flags', () => {
+    const result = parseFlags(['--no-emit-zod'], defs)
+    expect(result['--emit-zod']).toBe(false)
+  })
+
+  it('positive overrides negation', () => {
+    const result = parseFlags(['--no-emit-zod', '--emit-zod'], defs)
+    expect(result['--emit-zod']).toBe(true)
+  })
+
+  it('returns empty for no flags', () => {
+    const result = parseFlags([], defs)
+    expect(result).toEqual({})
+  })
+
+  it('ignores positional args', () => {
+    const result = parseFlags(['generate', '--name', 'foo', 'extra'], defs)
+    expect(result['--name']).toBe('foo')
+  })
+
+  it('throws UnknownFlagError for unknown flags', () => {
+    expect(() => parseFlags(['--typo'], defs)).toThrow(UnknownFlagError)
+  })
+
+  it('throws MissingFlagValueError for string flag without value', () => {
+    expect(() => parseFlags(['--name'], defs)).toThrow(MissingFlagValueError)
+  })
+
+  it('throws MissingFlagValueError when next token is a flag', () => {
+    expect(() => parseFlags(['--name', '--dryrun'], defs)).toThrow(MissingFlagValueError)
+  })
+
+  it('handles mixed flags and positionals', () => {
+    const result = parseFlags(['generate', '--dryrun', '--name', 'test', '--database', 'a,b'], defs)
+    expect(result['--dryrun']).toBe(true)
+    expect(result['--name']).toBe('test')
+    expect(result['--database']).toEqual(['a', 'b'])
+  })
+
+  it('last string flag wins', () => {
+    const result = parseFlags(['--name', 'first', '--name', 'second'], defs)
+    expect(result['--name']).toBe('second')
+  })
+})

@@ -5,8 +5,7 @@ import { createInterface } from 'node:readline/promises'
 
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 
-import { CLI_VERSION } from '../version.js'
-import { getCommandContext, hasFlag, parseArg } from '../config.js'
+import type { CommandDef, CommandRunContext } from '../../plugins.js'
 import { emitJson } from '../json-output.js'
 import {
   checksumSQL,
@@ -17,7 +16,6 @@ import {
   type MigrationJournalEntry,
   writeJournal,
 } from '../migration-store.js'
-import { loadPluginRuntime } from '../plugin-runtime.js'
 import {
   collectDestructiveOperationMarkers,
   extractExecutableStatements,
@@ -26,6 +24,17 @@ import {
   type DestructiveOperationMarker,
 } from '../safety-markers.js'
 import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../table-scope.js'
+
+export const migrateCommand: CommandDef = {
+  name: 'migrate',
+  description: 'Review or execute pending migrations',
+  flags: [
+    { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
+    { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
+    { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
+  ],
+  run: cmdMigrate,
+}
 
 function isBackgroundOrCI(): boolean {
   return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY
@@ -84,26 +93,23 @@ async function filterPendingByScope(
   return inScope
 }
 
-export async function cmdMigrate(args: string[]): Promise<void> {
-  const executeRequested = hasFlag('--apply', args) || hasFlag('--execute', args)
-  const allowDestructive = hasFlag('--allow-destructive', args)
-  const tableSelector = parseArg('--table', args)
+async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
+  const { flags, config, configPath, dirs, pluginRuntime } = ctx
+  const executeRequested = flags['--apply'] === true || flags['--execute'] === true
+  const allowDestructive = flags['--allow-destructive'] === true
+  const tableSelector = flags['--table'] as string | undefined
+  const jsonMode = flags['--json'] === true
 
-  const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
   const { migrationsDir, metaDir } = dirs
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
 
-  const pluginRuntime = await loadPluginRuntime({
-    config,
-    configPath,
-    cliVersion: CLI_VERSION,
-  })
   await pluginRuntime.runOnConfigLoaded({
     command: 'migrate',
     config,
     configPath,
     tableScope,
+    flags,
   })
 
   await mkdir(migrationsDir, { recursive: true })
@@ -271,6 +277,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
       command: 'migrate',
       config,
       tableScope,
+      flags,
       migration: file,
       sql,
       statements: parsedStatements,
@@ -291,6 +298,7 @@ export async function cmdMigrate(args: string[]): Promise<void> {
       command: 'migrate',
       config,
       tableScope,
+      flags,
       migration: file,
       statements,
       appliedAt: entry.appliedAt,

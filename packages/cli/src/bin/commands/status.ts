@@ -1,11 +1,19 @@
 import { mkdir } from 'node:fs/promises'
 
-import { getCommandContext } from '../config.js'
+import type { CommandDef, CommandRunContext } from '../../plugins.js'
 import { emitJson } from '../json-output.js'
 import { findChecksumMismatches, listMigrations, readJournal } from '../migration-store.js'
 
-export async function cmdStatus(args: string[]): Promise<void> {
-  const { dirs, jsonMode } = await getCommandContext(args)
+export const statusCommand: CommandDef = {
+  name: 'status',
+  description: 'Show migration status and checksum mismatch information',
+  flags: [],
+  run: cmdStatus,
+}
+
+async function cmdStatus(ctx: CommandRunContext): Promise<void> {
+  const { flags, dirs } = ctx
+  const jsonMode = flags['--json'] === true
   const { migrationsDir, metaDir } = dirs
 
   await mkdir(migrationsDir, { recursive: true })
