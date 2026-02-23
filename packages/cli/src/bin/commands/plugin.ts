@@ -1,28 +1,41 @@
-import { emitJson } from '../json-output.js'
-import { buildPluginLikeContext, runPluginLikeCommand } from './plugin-like.js'
+import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import { emitJson, printOutput } from '../json-output.js'
+import { resolveTableScope, tableKeysFromDefinitions } from '../table-scope.js'
+import { loadSchemaDefinitions } from '../schema-loader.js'
 
-function parsePluginInvocation(commandArgs: string[]): {
-  pluginName?: string
-  commandName?: string
-  commandArgs: string[]
-} {
-  return {
-    pluginName: commandArgs[0],
-    commandName: commandArgs[1],
-    commandArgs: commandArgs.slice(2),
-  }
+export const pluginCommand: CommandDef = {
+  name: 'plugin',
+  description: 'List plugins and run plugin namespace commands',
+  flags: [],
+  run: cmdPlugin,
 }
 
-export async function cmdPlugin(args: string[]): Promise<void> {
-  const context = await buildPluginLikeContext({
-    args,
-    command: 'plugin',
-  })
-  if (!context) return
-  const parsed = parsePluginInvocation(context.commandArgs)
+const GLOBAL_STRING_FLAGS = new Set(['--config', '--table'])
+const GLOBAL_BOOLEAN_FLAGS = new Set(['--json', '-h', '--help'])
 
-  if (context.runtime.plugins.length === 0) {
-    if (context.jsonMode) {
+async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
+  const { flags, config, configPath, pluginRuntime } = ctx
+  const jsonMode = flags['--json'] === true
+
+  const argv = process.argv.slice(2)
+  const pluginIdx = argv.indexOf('plugin')
+  const afterPlugin = pluginIdx >= 0 ? argv.slice(pluginIdx + 1) : []
+  const filtered: string[] = []
+  for (let i = 0; i < afterPlugin.length; i++) {
+    const token = afterPlugin[i]!
+    if (GLOBAL_BOOLEAN_FLAGS.has(token)) continue
+    if (GLOBAL_STRING_FLAGS.has(token)) {
+      i++
+      continue
+    }
+    filtered.push(token)
+  }
+  const pluginName = filtered[0]
+  const commandName = filtered[1]
+  const commandArgs = filtered.slice(2)
+
+  if (pluginRuntime.plugins.length === 0) {
+    if (jsonMode) {
       emitJson('plugin', {
         error: 'No plugins configured. Add entries to config.plugins first.',
         plugins: [],
@@ -33,9 +46,9 @@ export async function cmdPlugin(args: string[]): Promise<void> {
     throw new Error('No plugins configured. Add entries to config.plugins first.')
   }
 
-  if (!parsed.pluginName) {
+  if (!pluginName) {
     const payload = {
-      plugins: context.runtime.plugins.map((entry) => ({
+      plugins: pluginRuntime.plugins.map((entry) => ({
         name: entry.plugin.manifest.name,
         version: entry.plugin.manifest.version ?? null,
         commands: (entry.plugin.commands ?? []).map((command) => ({
@@ -45,7 +58,7 @@ export async function cmdPlugin(args: string[]): Promise<void> {
       })),
     }
 
-    if (context.jsonMode) {
+    if (jsonMode) {
       emitJson('plugin', payload)
       return
     }
@@ -64,17 +77,17 @@ export async function cmdPlugin(args: string[]): Promise<void> {
     return
   }
 
-  const selectedPlugin = context.runtime.plugins.find(
-    (entry) => entry.plugin.manifest.name === parsed.pluginName
+  const selectedPlugin = pluginRuntime.plugins.find(
+    (entry) => entry.plugin.manifest.name === pluginName
   )
   if (!selectedPlugin) {
-    const known = context.runtime.plugins.map((entry) => entry.plugin.manifest.name).sort()
+    const known = pluginRuntime.plugins.map((entry) => entry.plugin.manifest.name).sort()
     throw new Error(
-      `Unknown plugin "${parsed.pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
+      `Unknown plugin "${pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
     )
   }
 
-  if (!parsed.commandName) {
+  if (!commandName) {
     const commands = (selectedPlugin.plugin.commands ?? []).map((command) => ({
       name: command.name,
       description: command.description ?? '',
@@ -84,7 +97,7 @@ export async function cmdPlugin(args: string[]): Promise<void> {
       commands,
     }
 
-    if (context.jsonMode) {
+    if (jsonMode) {
       emitJson('plugin', payload)
       return
     }
@@ -101,10 +114,26 @@ export async function cmdPlugin(args: string[]): Promise<void> {
     return
   }
 
-  await runPluginLikeCommand({
-    context,
-    pluginName: parsed.pluginName,
-    commandName: parsed.commandName,
-    commandArgs: parsed.commandArgs,
+  const tableSelector = flags['--table'] as string | undefined
+  let tableScope: ReturnType<typeof resolveTableScope>
+  try {
+    const definitions = await loadSchemaDefinitions(ctx.config.schema)
+    tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
+  } catch {
+    tableScope = resolveTableScope(tableSelector, [])
+  }
+
+  const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {
+    config,
+    configPath,
+    jsonMode,
+    tableScope,
+    args: commandArgs,
+    flags,
+    print(value) {
+      printOutput(value, jsonMode)
+    },
   })
+
+  if (exitCode !== 0) process.exitCode = exitCode
 }

@@ -1,16 +1,24 @@
 import { mkdir } from 'node:fs/promises'
 
 import { summarizeDriftReasons } from '../../drift.js'
-import { CLI_VERSION } from '../version.js'
-import { getCommandContext, hasFlag } from '../config.js'
+import type { CommandDef, CommandRunContext } from '../../plugins.js'
 import { emitJson } from '../json-output.js'
 import { findChecksumMismatches, listMigrations, readJournal, readSnapshot } from '../migration-store.js'
-import { loadPluginRuntime } from '../plugin-runtime.js'
 import { buildDriftPayload } from './drift.js'
 
-export async function cmdCheck(args: string[]): Promise<void> {
-  const strict = hasFlag('--strict', args)
-  const { config, configPath, dirs, jsonMode } = await getCommandContext(args)
+export const checkCommand: CommandDef = {
+  name: 'check',
+  description: 'Run policy checks for CI and release gates',
+  flags: [
+    { name: '--strict', type: 'boolean', description: 'Enable all policy checks' },
+  ],
+  run: cmdCheck,
+}
+
+async function cmdCheck(ctx: CommandRunContext): Promise<void> {
+  const { flags, config, configPath, dirs, pluginRuntime } = ctx
+  const strict = flags['--strict'] === true
+  const jsonMode = flags['--json'] === true
   const { migrationsDir, metaDir } = dirs
   await mkdir(migrationsDir, { recursive: true })
 
@@ -28,21 +36,18 @@ export async function cmdCheck(args: string[]): Promise<void> {
     failOnDrift: strict ? true : config.check?.failOnDrift ?? true,
   }
 
-  const runtime = await loadPluginRuntime({
-    config,
-    configPath,
-    cliVersion: CLI_VERSION,
-  })
-  await runtime.runOnConfigLoaded({
+  await pluginRuntime.runOnConfigLoaded({
     command: 'check',
     config,
     configPath,
+    flags,
   })
-  const pluginResults = await runtime.runOnCheck({
+  const pluginResults = await pluginRuntime.runOnCheck({
     command: 'check',
     config,
     configPath,
     jsonMode,
+    flags,
   })
 
   const failedChecks: string[] = []
@@ -123,7 +128,7 @@ export async function cmdCheck(args: string[]): Promise<void> {
         `- ${result.plugin}: ${result.ok ? 'ok' : 'failed'}${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`
       )
     }
-    await runtime.runOnCheckReport(pluginResults, (line) => {
+    await pluginRuntime.runOnCheckReport(pluginResults, (line) => {
       console.log(line)
     })
   }

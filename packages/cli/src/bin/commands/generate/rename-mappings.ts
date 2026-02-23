@@ -16,8 +16,8 @@ export interface ColumnRenameMapping {
   source: 'cli' | 'schema'
 }
 
-export function parseRenameTableMappings(args: string[]): TableRenameMapping[] {
-  return parseFlagValues('--rename-table', args).map((mapping) => {
+export function parseRenameTableMappings(values: string[]): TableRenameMapping[] {
+  return values.map((mapping) => {
     const [fromRaw, toRaw, ...rest] = mapping.split('=').map((part) => part.trim())
     if (!fromRaw || !toRaw || rest.length > 0) {
       throw new Error(
@@ -36,8 +36,8 @@ export function parseRenameTableMappings(args: string[]): TableRenameMapping[] {
   })
 }
 
-export function parseRenameColumnMappings(args: string[]): ColumnRenameMapping[] {
-  return parseFlagValues('--rename-column', args).map((mapping) => {
+export function parseRenameColumnMappings(values: string[]): ColumnRenameMapping[] {
+  return values.map((mapping) => {
     const [fromRaw, toRaw, ...rest] = mapping.split('=').map((part) => part.trim())
     if (!fromRaw || !toRaw || rest.length > 0) {
       throw new Error(
@@ -246,17 +246,6 @@ export function remapOldDefinitionsForTableRenames(
     }
     return remapped
   })
-}
-
-function parseFlagValues(flag: string, args: string[]): string[] {
-  const values: string[] = []
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] !== flag) continue
-    const value = args[i + 1]
-    if (!value || value.startsWith('--')) continue
-    values.push(...value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0))
-  }
-  return values
 }
 
 function parseQualifiedTable(input: string): { database: string; name: string } {

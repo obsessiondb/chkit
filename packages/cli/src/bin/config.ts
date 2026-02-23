@@ -15,23 +15,6 @@ import {
 
 export const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
 
-export interface CommandContext {
-  config: ResolvedChxConfig
-  configPath: string
-  dirs: { outDir: string; migrationsDir: string; metaDir: string }
-  jsonMode: boolean
-}
-
-export function parseArg(flag: string, args: string[]): string | undefined {
-  const idx = args.indexOf(flag)
-  if (idx === -1) return undefined
-  return args[idx + 1]
-}
-
-export function hasFlag(flag: string, args: string[]): boolean {
-  return args.includes(flag)
-}
-
 function isConfigFunction(candidate: ChxConfigInput): candidate is ChxConfigFn {
   return typeof candidate === 'function'
 }
@@ -72,16 +55,4 @@ export function resolveDirs(config: ResolvedChxConfig): { outDir: string; migrat
   const migrationsDir = resolve(process.cwd(), config.migrationsDir)
   const metaDir = resolve(process.cwd(), config.metaDir)
   return { outDir, migrationsDir, metaDir }
-}
-
-export async function getCommandContext(args: string[]): Promise<CommandContext> {
-  const configPath = parseArg('--config', args)
-  const jsonMode = hasFlag('--json', args)
-  const loaded = await loadConfig(configPath)
-  return {
-    config: loaded.config,
-    configPath: loaded.path,
-    dirs: resolveDirs(loaded.config),
-    jsonMode,
-  }
 }

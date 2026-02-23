@@ -1,76 +1,69 @@
 #!/usr/bin/env node
 import process from 'node:process'
 
-import { buildApplication, buildCommand, buildRouteMap, run } from '@stricli/core'
-
-import { CLI_VERSION } from './lib.js'
-import { cmdCheck } from './commands/check.js'
-import { cmdDrift } from './commands/drift.js'
-import { cmdGenerate } from './commands/generate.js'
+import type { FlagDef, ParsedFlags } from '../plugins.js'
+import { createCommandRegistry } from './command-registry.js'
+import { generateCommand } from './commands/generate.js'
+import { migrateCommand } from './commands/migrate.js'
+import { statusCommand } from './commands/status.js'
+import { driftCommand } from './commands/drift.js'
+import { checkCommand } from './commands/check.js'
+import { pluginCommand } from './commands/plugin.js'
 import { cmdInit } from './commands/init.js'
-import { cmdMigrate } from './commands/migrate.js'
-import { cmdPlugin } from './commands/plugin.js'
-import { cmdPull } from './commands/pull.js'
-import { cmdStatus } from './commands/status.js'
-import { cmdCodegen } from './commands/codegen.js'
+import { loadConfig, resolveDirs } from './config.js'
+import { formatGlobalHelp, formatCommandHelp } from './help.js'
+import { parseFlags, UnknownFlagError, MissingFlagValueError } from './parse-flags.js'
+import { loadPluginRuntime } from './plugin-runtime.js'
+import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
+import { loadSchemaDefinitions } from './schema-loader.js'
+import { CLI_VERSION } from './version.js'
 
-function printHelp(): void {
-  console.log(`chkit - ClickHouse toolkit\n
-Usage:
-  chkit init
-  chkit generate [--name <migration-name>] [--migration-id <id>] [--rename-table <old_db.old_table=new_db.new_table>] [--rename-column <db.table.old_column=new_column>] [--table <selector>] [--config <path>] [--dryrun] [--json]
-  chkit pull [--out-file <path>] [--database <db>] [--dryrun] [--force] [--config <path>] [--json]
-  chkit codegen [--check] [--out-file <path>] [--emit-zod] [--no-emit-zod] [--emit-ingest] [--no-emit-ingest] [--ingest-out-file <path>] [--bigint-mode <string|bigint>] [--include-views] [--config <path>] [--json]
-  chkit migrate [--config <path>] [--apply|--execute] [--allow-destructive] [--table <selector>] [--json]
-  chkit status [--config <path>] [--json]
-  chkit drift [--config <path>] [--table <selector>] [--json]
-  chkit check [--config <path>] [--strict] [--json]
-  chkit plugin [<plugin-name> [<command> ...]] [--config <path>] [--json]
+const GLOBAL_FLAGS: FlagDef[] = [
+  { name: '--config', type: 'string', description: 'Path to config file', placeholder: '<path>' },
+  { name: '--json', type: 'boolean', description: 'Emit machine-readable JSON output' },
+  { name: '--table', type: 'string', description: 'Limit command scope to tables by exact name or trailing wildcard prefix', placeholder: '<selector>' },
+]
 
-Options:
-  --config <path>  Path to config file (default: clickhouse.config.ts)
-  --name <name>    Migration name for generate
-  --migration-id <id>
-                   Deterministic migration file prefix override (e.g. 20260101010101)
-  --rename-table <old_db.old_table=new_db.new_table>
-                   Explicit table rename mapping (comma-separated values supported)
-  --rename-column <db.table.old_column=new_column>
-                   Explicit column rename mapping (comma-separated values supported)
-  --table <selector>
-                   Limit command scope to tables by exact name or trailing wildcard prefix
-  --apply          Apply pending migrations on ClickHouse (no prompt)
-  --execute        Alias for --apply
-  --allow-destructive
-                   Required in non-interactive mode when pending migrations contain destructive operations
-  --dryrun         Print operation plan without writing artifacts
-  --check          Validate generated type artifacts are up-to-date
-  --out-file <path>
-                   Override output file path for pull/codegen one run
-  --database <db>  Limit pull to one or more databases (repeat or comma-separate)
-  --force          Allow pull schema to overwrite existing output file
-  --emit-zod       Enable Zod validator generation in codegen
-  --no-emit-zod    Disable Zod validator generation in codegen
-  --emit-ingest    Enable ingestion function generation in codegen
-  --no-emit-ingest Disable ingestion function generation in codegen
-  --ingest-out-file <path>
-                   Override ingestion output file path for codegen
-  --bigint-mode <mode>
-                   Set large integer mapping mode for codegen (string|bigint)
-  --include-views  Include views in codegen output
-  --strict         Force all check policies on for this invocation
-  --json           Emit machine-readable JSON output
-  -h, --help       Show help
-  -v, --version    Show version
-`)
+const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
+  codegen: 'Codegen',
+  pull: 'Pull',
 }
 
-function addStringFlag(args: string[], flag: string, value: string | undefined): void {
-  if (value === undefined || value.length === 0) return
-  args.push(flag, value)
+function extractConfigPath(argv: string[]): string | undefined {
+  const idx = argv.indexOf('--config')
+  if (idx === -1) return undefined
+  return argv[idx + 1]
 }
 
-function addBooleanFlag(args: string[], flag: string, enabled: boolean | undefined): void {
-  if (enabled) args.push(flag)
+/** Strip global flags (--config, --json, --table) from argv, returning their values and the rest. */
+function stripGlobalFlags(argv: string[]): {
+  jsonMode: boolean
+  tableSelector: string | undefined
+  rest: string[]
+} {
+  const rest: string[] = []
+  let jsonMode = false
+  let tableSelector: string | undefined
+
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!
+    if (token === '--json') {
+      jsonMode = true
+      continue
+    }
+    if (token === '--config' && i + 1 < argv.length) {
+      i++
+      continue
+    }
+    if (token === '--table' && i + 1 < argv.length) {
+      tableSelector = argv[i + 1]
+      i++
+      continue
+    }
+    rest.push(token)
+  }
+
+  return { jsonMode, tableSelector, rest }
 }
 
 function exitIfNeeded(): void {
@@ -85,298 +78,226 @@ function exitIfNeeded(): void {
   }
 }
 
-const optionalStringFlag = (brief: string, placeholder = 'value') => ({
-  kind: 'parsed' as const,
-  brief,
-  parse: (input: string): string => input,
-  optional: true as const,
-  placeholder,
-})
-
-const optionalBooleanFlag = (brief: string) => ({
-  kind: 'boolean' as const,
-  brief,
-  optional: true as const,
-})
-
-const app = buildApplication(
-  buildRouteMap({
-    docs: {
-      brief: 'ClickHouse schema and migration toolkit',
-    },
-    routes: {
-      init: buildCommand({
-        parameters: {},
-        docs: {
-          brief: 'Initialize config and schema starter files',
-        },
-        async func() {
-          await cmdInit()
-        },
-      }),
-      generate: buildCommand<{
-        config?: string
-        name?: string
-        migrationId?: string
-        renameTable?: string
-        renameColumn?: string
-        table?: string
-        dryrun?: boolean
-        json?: boolean
-      }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            name: optionalStringFlag('Migration name', 'name'),
-            migrationId: optionalStringFlag('Deterministic migration file prefix', 'id'),
-            renameTable: optionalStringFlag(
-              'Explicit table rename mapping old_db.old_table=new_db.new_table'
-            ),
-            renameColumn: optionalStringFlag(
-              'Explicit column rename mapping db.table.old_column=new_column'
-            ),
-            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
-            dryrun: optionalBooleanFlag('Print operation plan without writing artifacts'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'Generate migration artifacts from schema definitions',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addStringFlag(args, '--name', flags.name)
-          addStringFlag(args, '--migration-id', flags.migrationId)
-          addStringFlag(args, '--rename-table', flags.renameTable)
-          addStringFlag(args, '--rename-column', flags.renameColumn)
-          addStringFlag(args, '--table', flags.table)
-          addBooleanFlag(args, '--dryrun', flags.dryrun)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdGenerate(args)
-          exitIfNeeded()
-        },
-      }),
-      codegen: buildCommand<{
-        config?: string
-        check?: boolean
-        outFile?: string
-        emitZod?: boolean
-        noEmitZod?: boolean
-        emitIngest?: boolean
-        noEmitIngest?: boolean
-        ingestOutFile?: string
-        bigintMode?: string
-        includeViews?: boolean
-        json?: boolean
-      }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            check: optionalBooleanFlag('Check for stale generated artifacts without writing'),
-            outFile: optionalStringFlag('Output file path override', 'path'),
-            emitZod: optionalBooleanFlag('Emit Zod validators'),
-            noEmitZod: optionalBooleanFlag('Disable Zod validator emission'),
-            emitIngest: optionalBooleanFlag('Emit ingestion functions'),
-            noEmitIngest: optionalBooleanFlag('Disable ingestion function emission'),
-            ingestOutFile: optionalStringFlag('Ingestion output file path override', 'path'),
-            bigintMode: optionalStringFlag('Bigint type mode: string or bigint', 'mode'),
-            includeViews: optionalBooleanFlag('Include views in generated types'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'Run code generation plugin workflow',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addBooleanFlag(args, '--check', flags.check)
-          addStringFlag(args, '--out-file', flags.outFile)
-          addBooleanFlag(args, '--emit-zod', flags.emitZod)
-          addBooleanFlag(args, '--no-emit-zod', flags.noEmitZod)
-          addBooleanFlag(args, '--emit-ingest', flags.emitIngest)
-          addBooleanFlag(args, '--no-emit-ingest', flags.noEmitIngest)
-          addStringFlag(args, '--ingest-out-file', flags.ingestOutFile)
-          addStringFlag(args, '--bigint-mode', flags.bigintMode)
-          addBooleanFlag(args, '--include-views', flags.includeViews)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdCodegen(args)
-          exitIfNeeded()
-        },
-      }),
-      migrate: buildCommand<{
-        config?: string
-        apply?: boolean
-        execute?: boolean
-        allowDestructive?: boolean
-        table?: string
-        json?: boolean
-      }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            apply: optionalBooleanFlag('Apply pending migrations on ClickHouse'),
-            execute: optionalBooleanFlag('Execute pending migrations on ClickHouse'),
-            allowDestructive: optionalBooleanFlag(
-              'Allow destructive migrations tagged with risk=danger'
-            ),
-            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'Review or execute pending migrations',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addBooleanFlag(args, '--apply', flags.apply)
-          addBooleanFlag(args, '--execute', flags.execute)
-          addBooleanFlag(args, '--allow-destructive', flags.allowDestructive)
-          addStringFlag(args, '--table', flags.table)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdMigrate(args)
-          exitIfNeeded()
-        },
-      }),
-      status: buildCommand<{ config?: string; json?: boolean }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'Show migration status and checksum mismatch information',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdStatus(args)
-          exitIfNeeded()
-        },
-      }),
-      drift: buildCommand<{ config?: string; table?: string; json?: boolean }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            table: optionalStringFlag('Table selector (exact or trailing wildcard prefix)'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'Compare snapshot state with current ClickHouse objects',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addStringFlag(args, '--table', flags.table)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdDrift(args)
-          exitIfNeeded()
-        },
-      }),
-      check: buildCommand<{ config?: string; strict?: boolean; json?: boolean }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            strict: optionalBooleanFlag('Enable all policy checks'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'Run policy checks for CI and release gates',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addBooleanFlag(args, '--strict', flags.strict)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdCheck(args)
-          exitIfNeeded()
-        },
-      }),
-      plugin: buildCommand<{
-        config?: string
-        json?: boolean
-      }>({
-        parameters: {
-          flags: {
-            config: optionalStringFlag('Path to config file', 'path'),
-            json: optionalBooleanFlag('Emit machine-readable JSON output'),
-          },
-        },
-        docs: {
-          brief: 'List plugins and run plugin namespace commands',
-        },
-        async func(flags) {
-          const args: string[] = []
-          addStringFlag(args, '--config', flags.config)
-          addBooleanFlag(args, '--json', flags.json)
-          await cmdPlugin(args)
-          exitIfNeeded()
-        },
-      }),
-      help: buildCommand({
-        parameters: {},
-        docs: {
-          brief: 'Print help information',
-        },
-        func() {
-          printHelp()
-        },
-      }),
-      version: buildCommand({
-        parameters: {},
-        docs: {
-          brief: 'Print version information',
-        },
-        func() {
-          console.log(CLI_VERSION)
-        },
-      }),
-    },
-  }),
-  {
-    name: 'chkit',
-    versionInfo: { currentVersion: CLI_VERSION },
-    scanner: { caseStyle: 'allow-kebab-for-camel' },
-  }
-)
-
-const argv = process.argv.slice(2)
-if (argv[0] === 'plugin') {
-  cmdPlugin(argv.slice(1))
-    .then(() => {
-      exitIfNeeded()
-    })
-    .catch((error) => {
-      console.error(error instanceof Error ? error.message : String(error))
-      process.exit(1)
-    })
-} else if (argv[0] === 'codegen') {
-  cmdCodegen(argv.slice(1))
-    .then(() => {
-      exitIfNeeded()
-    })
-    .catch((error) => {
-      console.error(error instanceof Error ? error.message : String(error))
-      process.exit(1)
-    })
-} else if (argv[0] === 'pull') {
-  cmdPull(argv.slice(1))
-    .then(() => {
-      exitIfNeeded()
-    })
-    .catch((error) => {
-      console.error(error instanceof Error ? error.message : String(error))
-      process.exit(1)
-    })
-} else {
-  run(app, argv, { process }).catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error))
-    process.exit(1)
-  })
+function collectExtensions(runtime: Awaited<ReturnType<typeof loadPluginRuntime>>) {
+  return runtime.plugins
+    .filter((p) => p.plugin.extendCommands && p.plugin.extendCommands.length > 0)
+    .map((p) => ({
+      pluginName: p.plugin.manifest.name,
+      extensions: p.plugin.extendCommands!,
+    }))
 }
+
+function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRuntime>>) {
+  return runtime.plugins
+    .filter((p) => p.plugin.commands && p.plugin.commands.length > 0)
+    .map((p) => ({
+      pluginName: p.plugin.manifest.name,
+      commands: p.plugin.commands!,
+      manifestName: p.plugin.manifest.name,
+    }))
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2)
+  const commandName = argv[0]
+
+  if (!commandName || commandName === '-h' || commandName === '--help') {
+    const configPathArg = extractConfigPath(argv)
+    try {
+      const { config, path: configPath } = await loadConfig(configPathArg)
+      const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
+      const registry = createCommandRegistry({
+        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+        globalFlags: GLOBAL_FLAGS,
+        pluginExtensions: collectExtensions(pluginRuntime),
+        pluginCommands: collectPluginCommands(pluginRuntime),
+      })
+      console.log(formatGlobalHelp(registry, CLI_VERSION))
+    } catch {
+      const registry = createCommandRegistry({
+        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+        globalFlags: GLOBAL_FLAGS,
+        pluginExtensions: [],
+        pluginCommands: [],
+      })
+      console.log(formatGlobalHelp(registry, CLI_VERSION))
+    }
+    return
+  }
+
+  if (commandName === '-v' || commandName === '--version') {
+    console.log(CLI_VERSION)
+    return
+  }
+
+  if (commandName === 'init') {
+    await cmdInit()
+    return
+  }
+
+  const configPathArg = extractConfigPath(argv)
+  const { config, path: configPath } = await loadConfig(configPathArg)
+  const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
+
+  const registry = createCommandRegistry({
+    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+    globalFlags: GLOBAL_FLAGS,
+    pluginExtensions: collectExtensions(pluginRuntime),
+    pluginCommands: collectPluginCommands(pluginRuntime),
+  })
+
+  const resolved = registry.get(commandName)
+
+  if (!resolved) {
+    const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
+    if (wellKnown) {
+      console.error(`${wellKnown} plugin is not configured. Add it to config.plugins first.`)
+      process.exitCode = 1
+      return
+    }
+    console.error(`Unknown command: ${commandName}`)
+    console.log('')
+    console.log(formatGlobalHelp(registry, CLI_VERSION))
+    process.exitCode = 1
+    return
+  }
+
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(formatCommandHelp(resolved, registry.globalFlags))
+    return
+  }
+
+  if (resolved.isPlugin && !resolved.run) {
+    const { jsonMode, tableSelector, rest } = stripGlobalFlags(argv.slice(1))
+    let subcommandName: string | undefined
+    let pluginArgs: string[]
+
+    if (resolved.subcommands) {
+      const candidate = rest[0]
+      if (candidate && !candidate.startsWith('--')) {
+        const sub = resolved.subcommands.find((s) => s.name === candidate)
+        if (sub) {
+          subcommandName = candidate
+          pluginArgs = rest.slice(1)
+        } else {
+          console.error(`Unknown subcommand: ${commandName} ${candidate}`)
+          console.log(formatCommandHelp(resolved, registry.globalFlags))
+          process.exitCode = 1
+          return
+        }
+      } else if (resolved.subcommands.length === 1) {
+        subcommandName = resolved.subcommands[0]!.name
+        pluginArgs = rest
+      } else {
+        console.log(formatCommandHelp(resolved, registry.globalFlags))
+        return
+      }
+    } else {
+      pluginArgs = rest
+    }
+
+    let tableScope: ReturnType<typeof resolveTableScope>
+    try {
+      const definitions = await loadSchemaDefinitions(config.schema)
+      tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
+    } catch {
+      tableScope = resolveTableScope(tableSelector, [])
+    }
+
+    const flags: ParsedFlags = {}
+    if (jsonMode) flags['--json'] = true
+    if (tableSelector) flags['--table'] = tableSelector
+
+    try {
+      await pluginRuntime.runOnConfigLoaded({
+        command: commandName,
+        config,
+        configPath,
+        tableScope,
+        flags,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (jsonMode) {
+        console.log(JSON.stringify({ ok: false, error: message }))
+      } else {
+        console.error(message)
+      }
+      process.exitCode = 2
+      exitIfNeeded()
+      return
+    }
+
+    const pluginName = resolved.pluginName ?? commandName
+    const pluginCommandName = subcommandName ?? commandName
+
+    const { printOutput } = await import('./json-output.js')
+    const exitCode = await pluginRuntime.runPluginCommand(pluginName, pluginCommandName, {
+      config,
+      configPath,
+      jsonMode,
+      tableScope,
+      args: pluginArgs,
+      flags,
+      print(value) {
+        printOutput(value, jsonMode)
+      },
+    })
+
+    if (exitCode !== 0) process.exitCode = exitCode
+    exitIfNeeded()
+    return
+  }
+
+  // For the 'plugin' command, use lenient flag extraction since plugin-specific
+  // flags are handled by the plugin's own parser
+  if (commandName === 'plugin') {
+    const { jsonMode, tableSelector } = stripGlobalFlags(argv.slice(1))
+    const flags: ParsedFlags = {}
+    if (jsonMode) flags['--json'] = true
+    if (tableSelector) flags['--table'] = tableSelector
+
+    const dirs = resolveDirs(config)
+    await resolved.run!({
+      command: commandName,
+      flags,
+      config,
+      configPath,
+      dirs,
+      pluginRuntime,
+    })
+    exitIfNeeded()
+    return
+  }
+
+  const allFlags = registry.resolveFlags(commandName)
+  let flags: ParsedFlags
+  try {
+    flags = parseFlags(argv.slice(1), allFlags)
+  } catch (error) {
+    if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
+      console.error(error.message)
+      process.exitCode = 1
+      return
+    }
+    throw error
+  }
+
+  const dirs = resolveDirs(config)
+
+  await resolved.run!({
+    command: commandName,
+    flags,
+    config,
+    configPath,
+    dirs,
+    pluginRuntime,
+  })
+
+  exitIfNeeded()
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error))
+  process.exit(1)
+})
