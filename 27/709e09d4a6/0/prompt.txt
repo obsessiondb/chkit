@@ -1,0 +1,37 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/philadelphia directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+To do immediately, before using any skills or any other tools (one time only):
+
+Rename the branch using `git branch -m`. Do not check the current branch name.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "KeKs0r/" before the name.
+
+</system-instruction>
+
+In packages/cli/src/clickhouse-live.e2e.test.ts, the e2e tests are flaky because they reference a database that doesn’t exist yet when migrate --execute runs. The createFixture function (line 76) sets up temp dirs, schema, and config, but never creates the actual ClickHouse database.
+
+Fix: Add a CREATE DATABASE IF NOT EXISTS call inside createFixture (after line 93, before the return) using the same HTTP fetch pattern already used by dropDatabase (line 48-59). This ensures the database exists before any migrations run against it.
+
+There’s already a dropDatabase helper — model the new call on that. Don’t extract a shared helper; just inline the fetch call.
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/philadelphia/.context/attachments/PR instructions.md
+</system_instruction>
+
+
+
+Create a PR

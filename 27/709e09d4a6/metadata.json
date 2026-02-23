@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "27709e09d4a6",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/fix-e2e-create-db",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/clickhouse-live.e2e.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/27/709e09d4a6/0/metadata.json",
+      "transcript": "/27/709e09d4a6/0/full.jsonl",
+      "context": "/27/709e09d4a6/0/context.md",
+      "content_hash": "/27/709e09d4a6/0/content_hash.txt",
+      "prompt": "/27/709e09d4a6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 63,
+    "cache_creation_tokens": 26544,
+    "cache_read_tokens": 267706,
+    "output_tokens": 45,
+    "api_call_count": 10
+  }
+}
