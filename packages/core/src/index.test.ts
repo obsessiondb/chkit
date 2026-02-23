@@ -694,4 +694,49 @@ describe('@chkit/core planner v1', () => {
     )
     expect(planA.riskSummary).toEqual(planB.riskSummary)
   })
+
+  test('creates tables before views and materialized views', () => {
+    const oldDefs: Parameters<typeof planDiff>[0] = []
+
+    const newDefs = [
+      materializedView({
+        database: 'app',
+        name: 'mv_events',
+        to: { database: 'app', name: 'events_rollup' },
+        as: 'SELECT id FROM app.events',
+      }),
+      view({
+        database: 'app',
+        name: 'events_view',
+        as: 'SELECT id FROM app.events',
+      }),
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+      table({
+        database: 'app',
+        name: 'events_rollup',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    const types = plan.operations.map((op) => op.type)
+    const createTypes = types.filter((t) => t.startsWith('create_') && t !== 'create_database')
+
+    expect(createTypes).toEqual([
+      'create_table',
+      'create_table',
+      'create_view',
+      'create_materialized_view',
+    ])
+  })
 })
