@@ -2,13 +2,9 @@ export { CLI_VERSION } from './version.js'
 
 export {
   DEFAULT_CONFIG_FILE,
-  getCommandContext,
-  hasFlag,
   loadConfig,
-  parseArg,
   resolveDirs,
   writeIfMissing,
-  type CommandContext,
 } from './config.js'
 export {
   checksumSQL,
