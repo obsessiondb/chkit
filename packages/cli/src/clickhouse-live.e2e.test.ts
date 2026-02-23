@@ -91,6 +91,17 @@ async function createFixture(database: string): Promise<E2EFixture> {
     'utf8'
   )
 
+  const auth = Buffer.from(`${clickhouseUser}:${clickhousePassword}`).toString('base64')
+  await fetch(clickhouseUrl, {
+    method: 'POST',
+    signal: AbortSignal.timeout(10_000),
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'text/plain',
+    },
+    body: `CREATE DATABASE IF NOT EXISTS ${database}`,
+  })
+
   return { dir, configPath, migrationsDir, schemaPath }
 }
 
