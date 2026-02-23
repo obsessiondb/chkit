@@ -430,7 +430,9 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
       if (op.type.startsWith('drop_')) return 0
       if (op.type.startsWith('alter_')) return 1
       if (op.type === 'create_database') return 2
-      return 3
+      if (op.type === 'create_table') return 3
+      if (op.type === 'create_view') return 4
+      return 5
     }
     const rankOrder = rank(a) - rank(b)
     if (rankOrder !== 0) return rankOrder

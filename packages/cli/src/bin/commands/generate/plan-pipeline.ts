@@ -169,7 +169,9 @@ function rankOperation(op: MigrationOperation): number {
   if (op.type === 'create_database') return 1
   if (op.type === 'alter_table_rename_table') return 2
   if (op.type.startsWith('alter_')) return 3
-  return 4
+  if (op.type === 'create_table') return 4
+  if (op.type === 'create_view') return 5
+  return 6
 }
 
 function summarizeRisk(operations: MigrationOperation[]): Record<RiskLevel, number> {
