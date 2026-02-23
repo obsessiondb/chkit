@@ -28,7 +28,6 @@
     "@chkit/clickhouse": "workspace:*",
     "@chkit/codegen": "workspace:*",
     "@chkit/core": "workspace:*",
-    "@stricli/core": "^1.2.5",
     "fast-glob": "^3.3.2"
   }
 }

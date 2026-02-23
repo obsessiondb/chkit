@@ -3,13 +3,13 @@ import { join } from 'node:path'
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
 
+import type { CommandDef, CommandRunContext } from '../../plugins.js'
 import {
   compareSchemaObjects,
   compareTableShape,
   type ObjectDriftDetail,
   type TableDriftDetail,
 } from '../../drift.js'
-import { getCommandContext, parseArg } from '../config.js'
 import { emitJson } from '../json-output.js'
 import { readSnapshot } from '../migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions, type TableScope } from '../table-scope.js'
@@ -25,6 +25,13 @@ export interface DriftPayload {
   kindMismatches: Array<{ expected: string; actual: string; object: string }>
   objectDrift: ObjectDriftDetail[]
   tableDrift: TableDriftDetail[]
+}
+
+export const driftCommand: CommandDef = {
+  name: 'drift',
+  description: 'Compare snapshot state with current ClickHouse objects',
+  flags: [],
+  run: cmdDrift,
 }
 
 export async function buildDriftPayload(
@@ -95,9 +102,10 @@ export async function buildDriftPayload(
   }
 }
 
-export async function cmdDrift(args: string[]): Promise<void> {
-  const tableSelector = parseArg('--table', args)
-  const { config, dirs, jsonMode } = await getCommandContext(args)
+async function cmdDrift(ctx: CommandRunContext): Promise<void> {
+  const { flags, config, dirs } = ctx
+  const tableSelector = flags['--table'] as string | undefined
+  const jsonMode = flags['--json'] === true
   const { metaDir } = dirs
   const snapshot = await readSnapshot(metaDir)
   if (!snapshot) {
