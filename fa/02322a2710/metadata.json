@@ -3,7 +3,7 @@
   "checkpoint_id": "fa02322a2710",
   "strategy": "manual-commit",
   "branch": "KeKs0r/obsessiondb-plugin",
-  "checkpoints_count": 3,
+  "checkpoints_count": 5,
   "files_touched": [
     "packages/cli/package.json",
     "packages/cli/src/bin/chkit.ts",
@@ -33,13 +33,20 @@
       "context": "/fa/02322a2710/0/context.md",
       "content_hash": "/fa/02322a2710/0/content_hash.txt",
       "prompt": "/fa/02322a2710/0/prompt.txt"
+    },
+    {
+      "metadata": "/fa/02322a2710/1/metadata.json",
+      "transcript": "/fa/02322a2710/1/full.jsonl",
+      "context": "/fa/02322a2710/1/context.md",
+      "content_hash": "/fa/02322a2710/1/content_hash.txt",
+      "prompt": "/fa/02322a2710/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 175,
-    "cache_creation_tokens": 442912,
-    "cache_read_tokens": 14082657,
-    "output_tokens": 1353,
-    "api_call_count": 122
+    "input_tokens": 1039,
+    "cache_creation_tokens": 559243,
+    "cache_read_tokens": 15057288,
+    "output_tokens": 1488,
+    "api_call_count": 142
   }
 }

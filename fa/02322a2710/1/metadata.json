@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "fa02322a2710",
+  "session_id": "e8a47947-c237-4f6c-b8a3-e8a20e2e4a0a",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-23T09:07:38.980633Z",
+  "branch": "KeKs0r/obsessiondb-plugin",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/commands/codegen.ts",
+    "packages/cli/src/bin/commands/plugin-like.ts",
+    "packages/cli/src/bin/commands/plugin.ts",
+    "packages/cli/src/bin/commands/pull.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 864,
+    "cache_creation_tokens": 116331,
+    "cache_read_tokens": 974631,
+    "output_tokens": 135,
+    "api_call_count": 20
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-23T09:07:38.265217Z",
+    "agent_lines": 334,
+    "human_added": 3316,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 3650,
+    "agent_percentage": 9.150684931506849
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-amman/e8a47947-c237-4f6c-b8a3-e8a20e2e4a0a.jsonl"
+}
