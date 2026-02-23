@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "716e7e29011c",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/fix-mv-table-ordering",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/commands/generate/plan-pipeline.ts",
+    "packages/core/src/index.test.ts",
+    "packages/core/src/planner.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/71/6e7e29011c/0/metadata.json",
+      "transcript": "/71/6e7e29011c/0/full.jsonl",
+      "context": "/71/6e7e29011c/0/context.md",
+      "content_hash": "/71/6e7e29011c/0/content_hash.txt",
+      "prompt": "/71/6e7e29011c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 85,
+    "cache_creation_tokens": 47990,
+    "cache_read_tokens": 796820,
+    "output_tokens": 193,
+    "api_call_count": 25
+  }
+}

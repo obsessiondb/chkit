@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "716e7e29011c",
+  "session_id": "2717e50c-748d-4079-b805-7cbe5da1a840",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-23T01:45:46.539631Z",
+  "branch": "KeKs0r/fix-mv-table-ordering",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/commands/generate/plan-pipeline.ts",
+    "packages/core/src/index.test.ts",
+    "packages/core/src/planner.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 85,
+    "cache_creation_tokens": 47990,
+    "cache_read_tokens": 796820,
+    "output_tokens": 193,
+    "api_call_count": 25
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-23T01:45:46.391729Z",
+    "agent_lines": 51,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 51,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-perth/2717e50c-748d-4079-b805-7cbe5da1a840.jsonl"
+}
