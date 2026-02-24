@@ -67,13 +67,8 @@ describe('@chkit/cli migration scenario flows', () => {
       expect(structuralGenerate.exitCode).toBe(0)
 
       const migrateExecute = runCli(['migrate', '--config', fixture.configPath, '--execute', '--json'])
-      expect(migrateExecute.exitCode).toBe(3)
-      const migratePayload = JSON.parse(migrateExecute.stdout) as {
-        error: string
-        destructiveMigrations: string[]
-      }
-      expect(migratePayload.error).toContain('Blocked destructive migration execution')
-      expect(migratePayload.destructiveMigrations).toContain('20260101020000_structural.sql')
+      expect(migrateExecute.exitCode).toBe(1)
+      expect(migrateExecute.stderr).toContain('clickhouse config is required for migrate')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

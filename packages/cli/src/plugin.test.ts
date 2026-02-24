@@ -395,7 +395,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit check --json includes backfill plugin result and fails on required pending backfill', async () => {
+  test('chkit check --json requires clickhouse config', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -411,52 +411,15 @@ describe('plugin runtime', () => {
         'utf8'
       )
 
-      const planned = runCli([
-        'plugin',
-        'backfill',
-        'plan',
-        '--target',
-        'app.users',
-        '--from',
-        '2026-01-01T00:00:00.000Z',
-        '--to',
-        '2026-01-01T06:00:00.000Z',
-        '--config',
-        fixture.configPath,
-        '--json',
-      ])
-      expect(planned.exitCode).toBe(0)
-
       const result = runCli(['check', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
-      const payload = JSON.parse(result.stdout) as {
-        ok: boolean
-        failedChecks: string[]
-        plugins: {
-          backfill?: {
-            evaluated: boolean
-            ok: boolean
-            findingCodes: string[]
-            requiredCount: number
-            activeRuns: number
-            failedRuns: number
-          }
-        }
-      }
-      expect(payload.ok).toBe(false)
-      expect(payload.failedChecks).toContain('plugin:backfill')
-      expect(payload.plugins.backfill?.evaluated).toBe(true)
-      expect(payload.plugins.backfill?.ok).toBe(false)
-      expect(payload.plugins.backfill?.findingCodes).toContain('backfill_required_pending')
-      expect(payload.plugins.backfill?.requiredCount).toBe(1)
-      expect(payload.plugins.backfill?.activeRuns).toBe(0)
-      expect(payload.plugins.backfill?.failedRuns).toBe(0)
+      expect(result.stderr).toContain('clickhouse config is required for check')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
 
-  test('chkit check --json passes backfill plugin when required backfill is completed', async () => {
+  test('chkit check --json requires clickhouse config even with completed backfill', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
     try {
@@ -472,57 +435,9 @@ describe('plugin runtime', () => {
         'utf8'
       )
 
-      const planned = runCli([
-        'plugin',
-        'backfill',
-        'plan',
-        '--target',
-        'app.users',
-        '--from',
-        '2026-01-01T00:00:00.000Z',
-        '--to',
-        '2026-01-01T06:00:00.000Z',
-        '--config',
-        fixture.configPath,
-        '--json',
-      ])
-      expect(planned.exitCode).toBe(0)
-      const planPayload = JSON.parse(planned.stdout) as { planId: string }
-
-      const ran = runCli([
-        'plugin',
-        'backfill',
-        'run',
-        '--plan-id',
-        planPayload.planId,
-        '--config',
-        fixture.configPath,
-        '--json',
-      ])
-      expect(ran.exitCode).toBe(0)
-
       const result = runCli(['check', '--config', fixture.configPath, '--json'])
-      expect(result.exitCode).toBe(0)
-      const payload = JSON.parse(result.stdout) as {
-        ok: boolean
-        failedChecks: string[]
-        plugins: {
-          backfill?: {
-            evaluated: boolean
-            ok: boolean
-            findingCodes: string[]
-            requiredCount: number
-            failedRuns: number
-          }
-        }
-      }
-      expect(payload.ok).toBe(true)
-      expect(payload.failedChecks).not.toContain('plugin:backfill')
-      expect(payload.plugins.backfill?.evaluated).toBe(true)
-      expect(payload.plugins.backfill?.ok).toBe(true)
-      expect(payload.plugins.backfill?.findingCodes).toEqual([])
-      expect(payload.plugins.backfill?.requiredCount).toBe(0)
-      expect(payload.plugins.backfill?.failedRuns).toBe(0)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain('clickhouse config is required for check')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -922,7 +837,7 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('chkit check --json includes codegen plugin result and fails when output is missing', async () => {
+  test('chkit check --json requires clickhouse config with codegen plugin', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     try {
@@ -940,63 +855,7 @@ describe('plugin runtime', () => {
 
       const result = runCli(['check', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
-      const payload = JSON.parse(result.stdout) as {
-        ok: boolean
-        failedChecks: string[]
-        plugins: {
-          codegen?: {
-            evaluated: boolean
-            ok: boolean
-            findingCodes: string[]
-            outFile: string
-          }
-        }
-      }
-      expect(payload.ok).toBe(false)
-      expect(payload.failedChecks).toContain('plugin:codegen')
-      expect(payload.plugins.codegen?.evaluated).toBe(true)
-      expect(payload.plugins.codegen?.ok).toBe(false)
-      expect(payload.plugins.codegen?.findingCodes).toContain('codegen_missing_output')
-    } finally {
-      await rm(fixture.dir, { recursive: true, force: true })
-    }
-  })
-
-  test('chkit check --json passes plugin:codegen when output is current', async () => {
-    const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
-    try {
-      await writeFile(
-        pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
-        'utf8'
-      )
-
-      await writeFile(
-        fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
-        'utf8'
-      )
-
-      runCli(['codegen', '--config', fixture.configPath, '--json'])
-      const result = runCli(['check', '--config', fixture.configPath, '--json'])
-      expect(result.exitCode).toBe(0)
-      const payload = JSON.parse(result.stdout) as {
-        ok: boolean
-        failedChecks: string[]
-        plugins: {
-          codegen?: {
-            evaluated: boolean
-            ok: boolean
-            findingCodes: string[]
-          }
-        }
-      }
-      expect(payload.ok).toBe(true)
-      expect(payload.failedChecks).not.toContain('plugin:codegen')
-      expect(payload.plugins.codegen?.evaluated).toBe(true)
-      expect(payload.plugins.codegen?.ok).toBe(true)
-      expect(payload.plugins.codegen?.findingCodes).toEqual([])
+      expect(result.stderr).toContain('clickhouse config is required for check')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

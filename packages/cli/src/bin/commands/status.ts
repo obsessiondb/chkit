@@ -2,7 +2,8 @@ import { mkdir } from 'node:fs/promises'
 
 import type { CommandDef, CommandRunContext } from '../../plugins.js'
 import { emitJson } from '../json-output.js'
-import { findChecksumMismatches, listMigrations, readJournal } from '../migration-store.js'
+import { createJournalStoreFromConfig } from '../journal-store.js'
+import { findChecksumMismatches, listMigrations } from '../migration-store.js'
 
 export const statusCommand: CommandDef = {
   name: 'status',
@@ -12,13 +13,19 @@ export const statusCommand: CommandDef = {
 }
 
 async function cmdStatus(ctx: CommandRunContext): Promise<void> {
-  const { flags, dirs } = ctx
+  const { flags, config, dirs } = ctx
   const jsonMode = flags['--json'] === true
-  const { migrationsDir, metaDir } = dirs
+  const { migrationsDir } = dirs
+
+  if (!config.clickhouse) {
+    throw new Error('clickhouse config is required for status (journal is stored in ClickHouse)')
+  }
+
+  const { journalStore } = createJournalStoreFromConfig(config.clickhouse)
 
   await mkdir(migrationsDir, { recursive: true })
   const files = await listMigrations(migrationsDir)
-  const journal = await readJournal(metaDir)
+  const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pending = files.filter((f) => !appliedNames.has(f))
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)

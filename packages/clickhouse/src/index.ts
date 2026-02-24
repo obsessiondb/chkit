@@ -134,8 +134,10 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     username: config.username,
     password: config.password,
     database: config.database,
+    session_id: crypto.randomUUID(),
     clickhouse_settings: {
       wait_end_of_query: 1,
+      async_insert: 0,
     },
   })
 
@@ -162,7 +164,8 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         `SELECT database, name, engine
 FROM system.tables
 WHERE is_temporary = 0
-  AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')`
+  AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
+  AND name NOT LIKE '_chkit_%'`
       )
 
       const out: SchemaObjectRef[] = []
