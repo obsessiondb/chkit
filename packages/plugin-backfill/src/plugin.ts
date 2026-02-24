@@ -1,6 +1,17 @@
 import { wrapPluginRun } from '@chkit/core'
 
-import { parseCancelArgs, parseDoctorArgs, parsePlanArgs, parseResumeArgs, parseRunArgs, parseStatusArgs } from './args.js'
+import {
+  PLAN_FLAGS,
+  PLAN_ID_FLAGS,
+  RESUME_FLAGS,
+  RUN_FLAGS,
+  parseCancelArgs,
+  parseDoctorArgs,
+  parsePlanArgs,
+  parseResumeArgs,
+  parseRunArgs,
+  parseStatusArgs,
+} from './args.js'
 import { BackfillConfigError } from './errors.js'
 import { normalizeBackfillOptions, mergeOptions, validateBaseOptions } from './options.js'
 import { planPayload, runPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
@@ -14,36 +25,6 @@ import {
   resumeBackfillRun,
 } from './runtime.js'
 import type { BackfillPlugin, BackfillPluginOptions, BackfillPluginRegistration } from './types.js'
-
-const PLAN_FLAGS = [
-  { name: '--target', type: 'string' as const, description: 'Target table (database.table)', placeholder: '<database.table>' },
-  { name: '--from', type: 'string' as const, description: 'Start timestamp', placeholder: '<timestamp>' },
-  { name: '--to', type: 'string' as const, description: 'End timestamp', placeholder: '<timestamp>' },
-  { name: '--chunk-hours', type: 'string' as const, description: 'Hours per chunk', placeholder: '<hours>' },
-  { name: '--force-large-window', type: 'boolean' as const, description: 'Allow large time windows without confirmation' },
-]
-
-const RUN_FLAGS = [
-  { name: '--plan-id', type: 'string' as const, description: 'Plan ID to execute', placeholder: '<id>' },
-  { name: '--replay-done', type: 'boolean' as const, description: 'Re-execute already completed chunks' },
-  { name: '--replay-failed', type: 'boolean' as const, description: 'Re-execute failed chunks' },
-  { name: '--force-overlap', type: 'boolean' as const, description: 'Allow overlapping runs' },
-  { name: '--force-compatibility', type: 'boolean' as const, description: 'Skip compatibility checks' },
-  { name: '--simulate-fail-chunk', type: 'string' as const, description: 'Simulate failure on chunk', placeholder: '<chunk-id>' },
-  { name: '--simulate-fail-count', type: 'string' as const, description: 'Number of simulated failures', placeholder: '<count>' },
-]
-
-const RESUME_FLAGS = [
-  { name: '--plan-id', type: 'string' as const, description: 'Plan ID to resume', placeholder: '<id>' },
-  { name: '--replay-done', type: 'boolean' as const, description: 'Re-execute already completed chunks' },
-  { name: '--replay-failed', type: 'boolean' as const, description: 'Re-execute failed chunks' },
-  { name: '--force-overlap', type: 'boolean' as const, description: 'Allow overlapping runs' },
-  { name: '--force-compatibility', type: 'boolean' as const, description: 'Skip compatibility checks' },
-]
-
-const PLAN_ID_FLAGS = [
-  { name: '--plan-id', type: 'string' as const, description: 'Plan ID', placeholder: '<id>' },
-]
 
 export function createBackfillPlugin(options: BackfillPluginOptions = {}): BackfillPlugin {
   const base = normalizeBackfillOptions(options)

@@ -43,7 +43,7 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
   return lines.join('\n')
 }
 
-export function formatCommandHelp(command: RegisteredCommand, globalFlags: FlagDef[]): string {
+export function formatCommandHelp(command: RegisteredCommand, globalFlags: readonly FlagDef[]): string {
   const lines: string[] = []
 
   if (command.subcommands) {

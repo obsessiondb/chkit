@@ -1,4 +1,33 @@
-import type { FlagDef, ParsedFlags } from '../plugins.js'
+export interface FlagDef {
+  name: string
+  type: 'boolean' | 'string' | 'string[]'
+  description: string
+  placeholder?: string
+  negation?: boolean
+}
+
+export type ParsedFlags = Record<string, string | string[] | boolean | undefined>
+
+type FlagTypeMap = {
+  boolean: boolean | undefined
+  string: string | undefined
+  'string[]': string[] | undefined
+}
+
+export type InferFlags<T extends readonly FlagDef[]> = {
+  [K in T[number] as K['name']]: FlagTypeMap[K['type']]
+}
+
+export function defineFlags<const T extends readonly FlagDef[]>(defs: T): T {
+  return defs
+}
+
+export function typedFlags<const T extends readonly FlagDef[]>(
+  flags: ParsedFlags,
+  _defs: T
+): InferFlags<T> {
+  return flags as InferFlags<T>
+}
 
 export class UnknownFlagError extends Error {
   readonly flag: string
@@ -18,7 +47,7 @@ export class MissingFlagValueError extends Error {
   }
 }
 
-export function parseFlags(argv: string[], flagDefs: FlagDef[]): ParsedFlags {
+export function parseFlags<const T extends readonly FlagDef[]>(argv: string[], flagDefs: T): InferFlags<T> {
   const lookup = new Map<string, FlagDef>()
   const negationMap = new Map<string, string>()
 
@@ -75,5 +104,5 @@ export function parseFlags(argv: string[], flagDefs: FlagDef[]): ParsedFlags {
     }
   }
 
-  return flags
+  return flags as InferFlags<T>
 }

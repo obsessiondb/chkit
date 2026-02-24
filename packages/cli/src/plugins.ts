@@ -1,27 +1,30 @@
 import type {
   ChxInlinePluginRegistration,
   ChxPluginRegistration,
+  FlagDef,
   MigrationPlan,
+  ParsedFlags,
   ResolvedChxConfig,
   SchemaDefinition,
 } from '@chkit/core'
 import type { PluginRuntime } from './bin/plugin-runtime.js'
 import type { TableScope } from './bin/table-scope.js'
 
-export interface FlagDef {
-  name: string
-  type: 'boolean' | 'string' | 'string[]'
-  description: string
-  placeholder?: string
-  negation?: boolean
-}
-
-export type ParsedFlags = Record<string, string | string[] | boolean | undefined>
+export {
+  defineFlags,
+  parseFlags,
+  typedFlags,
+  MissingFlagValueError,
+  UnknownFlagError,
+  type FlagDef,
+  type InferFlags,
+  type ParsedFlags,
+} from '@chkit/core'
 
 export interface CommandDef {
   name: string
   description: string
-  flags: FlagDef[]
+  flags: readonly FlagDef[]
   run: (ctx: CommandRunContext) => Promise<void>
 }
 
@@ -36,7 +39,7 @@ export interface CommandRunContext {
 
 export interface CommandExtension {
   command: string | string[]
-  flags: FlagDef[]
+  flags: readonly FlagDef[]
 }
 
 export interface ChxPluginManifest {
@@ -120,7 +123,7 @@ export interface ChxPluginCommandContext {
 export interface ChxPluginCommand {
   name: string
   description?: string
-  flags?: FlagDef[]
+  flags?: readonly FlagDef[]
   run: (context: ChxPluginCommandContext) => void | number | Promise<void | number>
 }
 
