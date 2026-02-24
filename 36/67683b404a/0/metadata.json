@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "3667683b404a",
+  "session_id": "26b58110-2752-4811-b5d9-a7962b2affd1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T03:05:38.306644Z",
+  "branch": "KeKs0r/add-obsessiondb-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/plugin-obsessiondb/src/index.test.ts",
+    "packages/plugin-obsessiondb/src/index.ts"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "514202f5-110b-4f23-9f3b-922ca3b0c4ba",
+  "token_usage": {
+    "input_tokens": 79,
+    "cache_creation_tokens": 149966,
+    "cache_read_tokens": 2127464,
+    "output_tokens": 374,
+    "api_call_count": 41
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T03:05:38.01089Z",
+    "agent_lines": 5,
+    "human_added": 189,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 194,
+    "agent_percentage": 2.5773195876288657
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-karachi/26b58110-2752-4811-b5d9-a7962b2affd1.jsonl"
+}

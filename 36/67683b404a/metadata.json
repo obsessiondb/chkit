@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "3667683b404a",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/add-obsessiondb-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/plugin-obsessiondb/src/index.test.ts",
+    "packages/plugin-obsessiondb/src/index.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/36/67683b404a/0/metadata.json",
+      "transcript": "/36/67683b404a/0/full.jsonl",
+      "context": "/36/67683b404a/0/context.md",
+      "content_hash": "/36/67683b404a/0/content_hash.txt",
+      "prompt": "/36/67683b404a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 79,
+    "cache_creation_tokens": 149966,
+    "cache_read_tokens": 2127464,
+    "output_tokens": 374,
+    "api_call_count": 41
+  }
+}
