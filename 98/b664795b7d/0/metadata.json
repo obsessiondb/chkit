@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "98b664795b7d",
+  "session_id": "38a78b09-ed97-450b-b09b-a05e377a53b1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T04:20:32.264326Z",
+  "branch": "marc/typed-flag-parser",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".context/code-review.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "906b2d58-490f-4987-843f-265f4eedfe7e",
+  "checkpoint_transcript_start": 841,
+  "transcript_lines_at_start": 841,
+  "token_usage": {
+    "input_tokens": 10,
+    "cache_creation_tokens": 15743,
+    "cache_read_tokens": 859515,
+    "output_tokens": 105,
+    "api_call_count": 6
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T04:20:30.834248Z",
+    "agent_lines": 2,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 2,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-belo-horizonte-v1/38a78b09-ed97-450b-b09b-a05e377a53b1.jsonl"
+}
