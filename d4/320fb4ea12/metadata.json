@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "d4320fb4ea12",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/code-review-doc",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/clickhouse-live.e2e.test.ts",
+    "packages/core/src/plugin-error.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d4/320fb4ea12/0/metadata.json",
+      "transcript": "/d4/320fb4ea12/0/full.jsonl",
+      "context": "/d4/320fb4ea12/0/context.md",
+      "content_hash": "/d4/320fb4ea12/0/content_hash.txt",
+      "prompt": "/d4/320fb4ea12/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 100,
+    "cache_creation_tokens": 90514,
+    "cache_read_tokens": 6808711,
+    "output_tokens": 1389,
+    "api_call_count": 94
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "d4320fb4ea12",
+  "session_id": "c2820dd1-3752-44ed-b43d-cb70bb3e7307",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T02:54:01.752797Z",
+  "branch": "KeKs0r/code-review-doc",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/clickhouse-live.e2e.test.ts",
+    "packages/core/src/plugin-error.ts"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "e6eb337b-6782-4ae6-ba46-b0ae166bdf08",
+  "token_usage": {
+    "input_tokens": 100,
+    "cache_creation_tokens": 90514,
+    "cache_read_tokens": 6808711,
+    "output_tokens": 1389,
+    "api_call_count": 94
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T02:54:01.568293Z",
+    "agent_lines": 20,
+    "human_added": 936,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 957,
+    "agent_percentage": 2.089864158829676
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-kabul/c2820dd1-3752-44ed-b43d-cb70bb3e7307.jsonl"
+}
