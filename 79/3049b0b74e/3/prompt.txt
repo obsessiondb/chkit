@@ -1,0 +1,1425 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/kabul directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+To do immediately, before using any skills or any other tools (one time only):
+
+Rename the branch using `git branch -m`. Do not check the current branch name.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "KeKs0r/" before the name.
+
+</system-instruction>
+
+Review the architecture and structure of this repository. DO it in subagents and give feedback. Goals are simplicity, extendability and type safety, in a sense that its easily verifyable by agents. 
+Also flag use of any casts, since we dont like them. they should be the exception. 
+Also rview the test cases,  they should test the results, not meaningless implementaiton. prefer integrationt ests that test overall behaviour. But they should also be reliable,  Make a full review report
+
+---
+
+<task-notification>
+<task-id>a98a574</task-id>
+<status>completed</status>
+<summary>Agent "Test quality review" completed</summary>
+<result>Now I have a comprehensive picture. Let me compile the full analysis.
+
+---
+
+## Analysis: Test Suite Review for the chkit Monorepo
+
+### Overview
+
+The chkit monorepo contains **24 test files** across 7 packages, totaling approximately 3,800 lines of test code. All tests use `bun:test` as the test runner. The suite is split between **unit tests** (testing pure functions directly), **integration tests** (exercising the CLI via subprocess spawning against the filesystem), and **live environment e2e tests** (requiring a real ClickHouse instance). There are **zero mocks, zero spies, zero snapshot tests**, and **zero `beforeEach`/`afterEach` hooks** across the entire codebase.
+
+---
+
+### Test File Inventory
+
+| Package | File | Type | Lines |
+|---------|------|------|-------|
+| `cli` | `parse-flags.test.ts` | Unit | 79 |
+| `cli` | `table-scope.test.ts` | Unit | 96 |
+| `cli` | `drift.test.ts` | Unit | 278 |
+| `cli` | `testkit.test.ts` | Shared fixture | 71 |
+| `cli` | `generate.e2e.test.ts` | Integration (filesystem) | 485 |
+| `cli` | `migrate.e2e.test.ts` | Integration (filesystem) | 235 |
+| `cli` | `status.e2e.test.ts` | Integration (filesystem) | 104 |
+| `cli` | `check.e2e.test.ts` | Integration (filesystem) | 171 |
+| `cli` | `table-scope.e2e.test.ts` | Integration (filesystem) | 185 |
+| `cli` | `drift-command.e2e.test.ts` | Integration (filesystem) | 40 |
+| `cli` | `migration-scenario.test.ts` | Integration (filesystem) | 118 |
+| `cli` | `plugin.test.ts` | Integration (filesystem) | 1004 |
+| `cli` | `clickhouse-live.e2e.test.ts` | Live ClickHouse e2e | 313 |
+| `cli` | `drift.e2e.test.ts` | Live ClickHouse e2e | 388 |
+| `clickhouse` | `index.test.ts` | Unit | 102 |
+| `codegen` | `index.test.ts` | Integration (filesystem) | 184 |
+| `core` | `index.test.ts` | Unit | 742 |
+| `plugin-backfill` | `options.test.ts` | Unit | 20 |
+| `plugin-backfill` | `planner.test.ts` | Integration (filesystem) | 104 |
+| `plugin-backfill` | `plugin.test.ts` | Unit | 24 |
+| `plugin-backfill` | `runtime.test.ts` | Integration (filesystem) | 349 |
+| `plugin-codegen` | `index.test.ts` | Unit + Integration | 552 |
+| `plugin-pull` | `index.test.ts` | Unit + Integration | 361 |
+| `plugin-pull` | `pull.e2e.test.ts` | Live ClickHouse e2e | 239 |
+
+---
+
+### 1. Testing Approach: Behavior vs. Implementation Details
+
+#### Behavior-Focused Tests (the dominant pattern)
+
+The vast majority of tests verify **observable outcomes** rather than internal implementation details. The primary pattern is:
+
+**CLI integration tests** spawn the actual CLI binary via `Bun.spawnSync` and assert on **exit codes + JSON stdout payloads**. For example, at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/generate.e2e.test.ts:8-27`:
+
+```typescript
+test('generate --dryrun --json emits operation plan payload', async () => {
+  const fixture = await createFixture()
+  try {
+    const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+    expect(result.exitCode).toBe(0)
+    const payload = JSON.parse(result.stdout) as { ... }
+    expect(payload.command).toBe('generate')
+    expect(payload.operationCount).toBeGreaterThan(0)
+    expect(payload.operations.some((op) => op.type === 'create_table')).toBe(true)
+  } finally {
+    await rm(fixture.dir, { recursive: true, force: true })
+  }
+})
+```
+
+This pattern treats the CLI as a black box -- tests exercise the **public contract** (command name, flags, JSON output shape, exit code). Refactoring internal implementation would not break these tests as long as the CLI's observable behavior stays the same.
+
+**Core diff planner tests** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/index.test.ts:151-186` call `planDiff()` with concrete schema objects and assert on the resulting operations list and risk summary:
+
+```typescript
+test('plans create/drop with danger/safe risks', () => {
+  const plan = planDiff(oldDefs, newDefs)
+  expect(plan.operations.map((op) => op.type)).toEqual([
+    'drop_table', 'create_database', 'create_table',
+  ])
+  expect(plan.riskSummary).toEqual({ safe: 2, caution: 0, danger: 1 })
+})
+```
+
+**Drift comparison tests** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift.test.ts:8-24` verify the `compareSchemaObjects` and `compareTableShape` functions with concrete inputs and assert on structured output fields like `missing`, `extra`, `reasonCodes`, etc.
+
+**Codegen type mapping tests** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.test.ts:56-245` exercise the `mapColumnType` function with various ClickHouse types and assert on TypeScript type strings, Zod type strings, and nullable flags. These test the mapping behavior, not the internal parsing logic.
+
+#### Tests Approaching Implementation Details
+
+The only area that approaches testing internal details is the pull plugin's `__testUtils` exposure at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.test.ts:286-328`. Tests like `parseAsClause`, `parseToClause`, and `mapSystemTableRowToDefinition` exercise internal parser helpers that are explicitly exported under a `__testUtils` namespace:
+
+```typescript
+describe('@chkit/plugin-pull parser helpers', () => {
+  test('parseAsClause extracts trailing query and trims semicolon', () => {
+    const asClause = __testUtils.parseAsClause(`CREATE VIEW app.v AS\nSELECT id\nFROM app.users;`)
+    expect(asClause).toBe('SELECT id\nFROM app.users')
+  })
+```
+
+These are testing internal parser functions directly. However, they are factored as pure functions with well-defined inputs/outputs, so they test behavior of those units rather than testing "was method X called."
+
+---
+
+### 2. Mock Usage
+
+**There are zero mocks, zero spies, and zero `jest.fn()`/`vi.fn()` calls in the entire test suite.** A grep for `mock|vi\.fn|jest\.fn|spyOn` across all `.test.ts` files returns no matches.
+
+Instead of mocking, the codebase uses two alternative strategies:
+
+**Strategy A: Subprocess isolation.** CLI integration tests spawn the real CLI binary via `Bun.spawnSync` (defined in `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/testkit.test.ts:12-26`), creating complete process-level isolation:
+
+```typescript
+export function runCli(args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  const result = Bun.spawnSync({
+    cmd: ['bun', './packages/cli/src/bin/chkit.ts', ...args],
+    cwd: WORKSPACE_ROOT,
+    stdout: 'pipe', stderr: 'pipe',
+    env: process.env,
+  })
+  return { exitCode: result.exitCode, stdout: ..., stderr: ... }
+}
+```
+
+**Strategy B: Simulation flags.** For the backfill plugin, instead of mocking ClickHouse, tests use built-in simulation parameters. At `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/runtime.test.ts:94-109`, the `executeBackfillRun` function accepts `execution.simulation.failChunkId` and `execution.simulation.failCount` to deterministically simulate chunk failures without needing an external database:
+
+```typescript
+const firstRun = await executeBackfillRun({
+  planId: planned.plan.planId,
+  configPath, config, options,
+  execution: {
+    simulation: { failChunkId, failCount: 1 },
+  },
+})
+expect(firstRun.status.status).toBe('failed')
+```
+
+Similarly, at the CLI level (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:344-357`):
+```typescript
+const failedRun = runCli([
+  'plugin', 'backfill', 'run',
+  '--plan-id', planPayload.planId,
+  '--simulate-fail-chunk', failChunkId as string,
+  '--simulate-fail-count', '1',
+  '--config', fixture.configPath, '--json',
+])
+```
+
+**Strategy C: In-memory introspect callbacks.** The pull plugin tests avoid needing a real ClickHouse by injecting a mock `introspect` function at plugin creation time (`/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.test.ts:59-77`):
+
+```typescript
+const plugin = createPullPlugin({
+  databases: ['app'],
+  introspect: async () => [
+    { database: 'app', name: 'users', engine: 'MergeTree()', ... },
+  ],
+})
+```
+
+This is a form of dependency injection rather than runtime mocking -- the `introspect` parameter is part of the plugin's public API.
+
+---
+
+### 3. Integration Tests Testing Full Flows
+
+The suite has multiple categories of full-flow integration tests:
+
+#### Filesystem-Only Integration Tests (no external dependencies)
+
+These are the largest category. Each test creates a temporary directory with a config file and schema, then runs full CLI command sequences. Examples:
+
+- **Full generate-then-check cycle** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/check.e2e.test.ts:8-29`: generates a migration, then runs `check --json` and verifies the check fails with `pending_migrations`.
+
+- **Two-migration scenario** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/migration-scenario.test.ts:7-80`: generates an initial schema, then modifies the schema to add projections and unique keys, verifies the diff plan includes the expected operations and the destructive gate blocks execution.
+
+- **Table scoping end-to-end** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/table-scope.e2e.test.ts:22-125`: creates a two-table schema, generates init migration, modifies both tables, then uses `--table users` to generate a scoped migration. Verifies the migration SQL only contains user-table operations, the snapshot state is partially updated, and migrate with table scoping only lists the relevant migration.
+
+- **Plugin lifecycle** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:156-225`: creates a backfill plan, runs it, then checks status -- all through the CLI subprocess.
+
+- **Backfill fail-resume cycle** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:303-396`: plans a backfill, runs it with a simulated chunk failure, then resumes and verifies the already-done chunk is not replayed (checking `attempts: 1` in the run state file).
+
+#### Live ClickHouse Integration Tests
+
+Three test files require a live ClickHouse instance:
+
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/clickhouse-live.e2e.test.ts`: Runs init -> generate -> migrate --execute -> status against live ClickHouse, verifying the full lifecycle including a second additive migration and a check command.
+
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift.e2e.test.ts`: Migrates a table, then manually alters it via raw SQL (adding a rogue column, creating an extra view), and verifies the `drift` and `check` commands detect the drift with correct reason codes.
+
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/pull.e2e.test.ts`: Creates tables, views, and materialized views in a target database plus a noise database, then runs the pull plugin and verifies only the target database objects appear in the generated schema file.
+
+---
+
+### 4. Test Reliability Assessment
+
+#### Reliable Patterns
+
+**Temp directory isolation**: Every test that touches the filesystem creates its own `mkdtemp` directory and cleans up in a `finally` block. This is consistent across all files. For example, `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/testkit.test.ts:48-70`:
+
+```typescript
+export async function createFixture(initialSchema?: string): Promise<{...}> {
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-test-'))
+  // ...
+  return { dir, configPath, migrationsDir, metaDir, schemaPath }
+}
+```
+
+And every test using it follows:
+```typescript
+const fixture = await createFixture()
+try {
+  // test body
+} finally {
+  await rm(fixture.dir, { recursive: true, force: true })
+}
+```
+
+**Unique database names for live tests**: Live ClickHouse tests generate unique database names using `Date.now()` and `Math.random()` to avoid collisions between concurrent test runs. At `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/clickhouse-live.e2e.test.ts:114`:
+```typescript
+const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+const database = `chkit_e2e_${dbSuffix}`
+```
+
+**No shared mutable state**: There are no `beforeEach`/`afterEach` hooks, no shared variables mutated between tests, and no test ordering dependencies. Each test is completely self-contained.
+
+**Deterministic backfill plan IDs**: The backfill planner tests verify idempotency explicitly at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/planner.test.ts:42-46`:
+```typescript
+expect(first.plan.planId).toBe(second.plan.planId)
+expect(first.existed).toBe(false)
+expect(second.existed).toBe(true)
+```
+
+#### Potential Reliability Concerns
+
+**Live ClickHouse eventual consistency**: The drift e2e tests have explicit retry logic for ClickHouse Cloud's eventually consistent DDL. At `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift.e2e.test.ts:75-91`:
+```typescript
+async function runSqlWithUnknownTableRetry(url, username, password, sql, attempts = 5) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try { await runSql(...); return }
+    catch (error) {
+      if (!isUnknownTableError(error) || attempt === attempts) throw error
+      await sleep(attempt * 200)
+    }
+  }
+}
+```
+
+And `runCliWithRetry` at lines 93-105 retries `migrate --execute` up to 5 times with 2-second delays for the same reason. The pull e2e test also uses a `retry` helper at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/pull.e2e.test.ts:54-64`.
+
+**Long timeouts on live tests**: All live ClickHouse tests use 240-second timeouts (e.g., `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/clickhouse-live.e2e.test.ts:177`). The CLI package-level test script at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/package.json:24` runs with `--timeout 15000` (15 seconds) and `--concurrent`, which covers the filesystem-only tests.
+
+**Environment variable gating for live tests**: The live e2e test files call `getRequiredEnv()` at module scope (e.g., `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/clickhouse-live.e2e.test.ts:109`). When environment variables like `CLICKHOUSE_URL` and `CLICKHOUSE_PASSWORD` are missing, `getRequiredEnv()` throws at lines 21-27, which causes the test file to fail entirely rather than skip gracefully. The turbo config passes these through at `/Users/marc/conductor/workspaces/chkit/kabul/turbo.json:16-20` via `passThroughEnv`.
+
+---
+
+### 5. Assertion Quality
+
+#### Meaningful Assertions
+
+Tests consistently assert on **structured output** rather than just "something happened." Examples:
+
+**Full payload structure validation** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/generate.e2e.test.ts:382-401` verifies the exact set of JSON keys in the response:
+```typescript
+test('generate --json uses stable success payload keys', async () => {
+  expect(sortedKeys(payload)).toEqual([
+    'command', 'definitionCount', 'migrationFile', 'operationCount',
+    'riskSummary', 'schemaVersion', 'scope', 'snapshotFile',
+  ])
+})
+```
+
+This pattern repeats at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/migrate.e2e.test.ts:155-168` and `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/status.e2e.test.ts:28-38`.
+
+**Semantic diff assertions** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/index.test.ts:225-240`:
+```typescript
+expect(plan.operations.map((op) => op.type)).toEqual([
+  'alter_table_add_column', 'alter_table_add_column',
+  'alter_table_add_index', 'alter_table_modify_setting',
+])
+expect(plan.operations[0]?.risk).toBe('safe')
+expect(plan.operations[2]?.risk).toBe('caution')
+```
+
+**File content verification**: The table scope e2e test at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/table-scope.e2e.test.ts:85-97` reads the actual generated migration file and snapshot state to verify correctness:
+```typescript
+const migrationSql = await readFile(migrationPath, 'utf8')
+expect(migrationSql).toContain('ALTER TABLE app.users')
+expect(migrationSql).not.toContain('ALTER TABLE app.events')
+const snapshot = JSON.parse(await readFile(join(fixture.metaDir, 'snapshot.json'), 'utf8'))
+expect(users?.columns?.some((column) => column.name === 'country')).toBe(true)
+expect(events?.columns?.some((column) => column.name === 'ingested_at')).toBe(false)
+```
+
+**Generated code validation** at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.test.ts:305-339` actually imports the generated TypeScript+Zod code and runs a Zod parse against it:
+```typescript
+const mod = await import(filePath)
+expect(mod.AppUsersRowSchema).toBeDefined()
+const parsed = mod.AppUsersRowSchema.parse({ id: '1', name: 'Alice', age: 30 })
+expect(parsed).toEqual({ id: '1', name: 'Alice', age: 30 })
+```
+
+#### Exact String Matching (intentional for codegen)
+
+The codegen tests at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.test.ts:274-278` use exact string comparison for generated output:
+```typescript
+expect(result.content).toBe(
+  `// Generated by chkit codegen plugin\n// chkit-codegen-version: 0.1.0\n\nexport interface AppUsersRow {\n  id: string\n  email: string\n  created_at: string\n}\n`
+)
+```
+
+This is intentional for a code generation tool where exact output stability matters. The test at lines 281-303 explicitly verifies the output is time-independent (header stability across different `now` values).
+
+---
+
+### 6. Snapshot Tests
+
+There are **zero snapshot tests** in the codebase. The word "snapshot" appears in test files only in reference to the application's schema `snapshot.json` artifact, not test framework snapshots.
+
+---
+
+### 7. Test Fixtures and Helpers
+
+#### Shared Test Kit (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/testkit.test.ts`)
+
+This 71-line file is the primary fixture factory for CLI integration tests. It exports:
+
+- **Constants** (lines 5-10): `WORKSPACE_ROOT`, `CORE_ENTRY`, `CLI_ENTRY`, `CODEGEN_PLUGIN_ENTRY`, `BACKFILL_PLUGIN_ENTRY`, `PULL_PLUGIN_ENTRY` -- absolute paths to source entry points.
+- **`runCli(args)`** (lines 12-26): Spawns the CLI binary synchronously, returns `{ exitCode, stdout, stderr }`.
+- **`renderUsersSchema(input?)`** (lines 28-38): Generates a parametric schema string with optional `uniqueKey` and `projectionQuery`.
+- **`renderScopedSchema()`** (lines 44-46): Generates a two-table schema (users + events) for table scoping tests.
+- **`createFixture(initialSchema?)`** (lines 48-70): Creates a temp directory with `schema.ts` and `clickhouse.config.ts`, returns paths to all artifact directories.
+- **`sortedKeys(payload)`** (lines 40-42): Helper for asserting stable JSON payload key sets.
+
+The file is named `testkit.test.ts` (with `.test.ts` extension) but functions as a shared utility. Other test files import from it:
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/check.e2e.test.ts:5`: `import { createFixture, runCli, sortedKeys } from './testkit.test'`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:6-14`: imports all constants and helpers.
+
+#### Live E2E Fixture Factories
+
+The live ClickHouse test files (`clickhouse-live.e2e.test.ts` and `drift.e2e.test.ts`) each contain their own `createFixture`, `runCli`, `getRequiredEnv`, and `dropDatabase` functions (not shared). These are duplicated between the two files:
+
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/clickhouse-live.e2e.test.ts:10-30` defines `getRequiredEnv()`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift.e2e.test.ts:10-30` defines the same `getRequiredEnv()`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/pull.e2e.test.ts:10-30` defines the same `getRequiredEnv()`
+
+Each live test file also defines its own local `runCli` that takes `cwd` as a first argument (different from the testkit's version which uses `WORKSPACE_ROOT`).
+
+---
+
+### 8. Coverage Assessment by Critical Path
+
+#### Well-Tested Paths
+
+| Feature | Test Coverage |
+|---------|--------------|
+| **Flag parsing** | 12 tests covering string, boolean, string[], negation, error cases (`parse-flags.test.ts`) |
+| **Schema diff/plan** | 14 tests covering create, drop, additive changes, non-additive changes, rename suggestions, structural key changes, projections, views, materialized views, deterministic ordering, validation errors (`core/index.test.ts`) |
+| **Drift detection** | 8 unit tests for `compareSchemaObjects`, `compareTableShape`, `summarizeDriftReasons` covering missing/extra objects, kind mismatches, column/engine/key/setting/index/ttl/projection/partition mismatches, equivalent schemas, SharedMergeTree equivalence, quoted defaults (`drift.test.ts`) |
+| **Generate command** | 16 tests covering dry-run, rename suggestions, explicit rename flags, schema renamedFrom metadata, validation errors, comma-delimited orderBy, idempotent no-op, stable payload keys, migration ID, table scoping (`generate.e2e.test.ts`) |
+| **Migrate command** | 7 tests covering checksum mismatch, destructive gate, --allow-destructive bypass, stable payload keys, table scoping (`migrate.e2e.test.ts`) |
+| **Check command** | 5 tests covering pending detection, clean state, policy overrides, --strict override, checksum mismatch policy (`check.e2e.test.ts`) |
+| **Status command** | 3 tests covering pending count, corrupted journal, checksum mismatch reporting (`status.e2e.test.ts`) |
+| **Table scoping** | 5 unit tests + 2 e2e tests covering selector parsing, resolution, plan filtering, scoped generate, zero-match no-op (`table-scope.test.ts`, `table-scope.e2e.test.ts`) |
+| **Plugin system** | 29 tests covering plan hooks, custom commands, pull/codegen/backfill plugin integration, runOnGenerate hook, check hooks, inline registration, error paths (`plugin.test.ts`) |
+| **Backfill plugin** | 1 unit + 3 planner + 1 surface + 6 runtime tests covering plan determinism, run lifecycle, fail+resume, compatibility check, cancel, doctor, check integration (`options.test.ts`, `planner.test.ts`, `plugin.test.ts`, `runtime.test.ts`) |
+| **Codegen plugin** | 15 tests covering options, type mapping (primitives, nullable, bigint, parameterized, composite, LowCardinality, unsupported), TypeScript generation, Zod generation, ingest generation, check hook (`plugin-codegen/index.test.ts`) |
+| **Pull plugin** | 8 unit + 1 live e2e tests covering schema rendering, dryrun, view/MV support, write+force flow, parser helpers, skipped objects summary, live introspection (`plugin-pull/index.test.ts`, `pull.e2e.test.ts`) |
+| **ClickHouse client** | 5 tests covering executor creation, engine kind inference, SQL clause parsing (`clickhouse/index.test.ts`) |
+| **Codegen artifacts** | 4 tests covering migration file writing, ID sanitization, rename suggestion headers, rename operation rendering (`codegen/index.test.ts`) |
+| **Live full cycle** | 3 tests covering init+generate+migrate+status, additive second cycle, check after migrate (`clickhouse-live.e2e.test.ts`) |
+| **Live drift** | 4 tests covering manual drift detection, unique-key/projection drift, failOnDrift policy, --strict override (`drift.e2e.test.ts`) |
+
+#### Paths Without Direct Test Coverage
+
+- **`init` command**: Only tested as a side effect inside `clickhouse-live.e2e.test.ts:120` (`runCli(fixture.dir, ['init'])`). No dedicated init tests verify the scaffolding behavior or error cases.
+
+- **Human-readable (non-JSON) output**: All CLI integration tests use `--json` mode. The human-readable text output paths (formatting, color, tables) have no test coverage.
+
+- **Interactive mode / TTY prompts**: The destructive migration gate tests verify the non-interactive CLI path (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/migrate.e2e.test.ts:94-111`), but any interactive confirmation prompt flow is untested.
+
+- **Config loading edge cases**: Tests always create well-formed config files. There are no tests for malformed config, missing config, or config discovery logic (e.g., searching parent directories).
+
+- **ClickHouse client `execute`/`query` methods**: The clickhouse package test at `/Users/marc/conductor/workspaces/chkit/kabul/packages/clickhouse/src/index.test.ts:17-26` only verifies the executor has the right methods (`typeof executor.execute === 'function'`). It does not test actual query execution; that path is only exercised by the live e2e tests indirectly.
+
+- **Error recovery in migrate --execute**: The live tests verify successful migration execution, but there are no tests for what happens when a SQL statement fails mid-migration (partial application, journal state on failure).
+
+- **Plugin loading errors**: No tests for malformed plugin files, missing plugin modules, or plugin API version mismatches.
+
+---
+
+### 9. Key Patterns Observed
+
+**Pattern: CLI-as-Black-Box Testing.** The predominant pattern across 14 of the 24 test files is to spawn the CLI binary as a subprocess, pass `--json` flags, parse the stdout JSON, and assert on the structured payload. This tests the entire stack from argument parsing through to output serialization.
+
+**Pattern: Determinism Verification.** Multiple tests explicitly verify deterministic output:
+- Plan ordering is deterministic regardless of input order (`/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/index.test.ts:657-696`)
+- Backfill plan IDs are identical for identical inputs (`/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/planner.test.ts:42-46`)
+- Codegen header is stable across generation times (`/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.test.ts:281-303`)
+- Migration filename from custom ID (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/generate.e2e.test.ts:403-423`)
+
+**Pattern: Stable API Contract Testing.** Several tests assert on the exact set of JSON keys in output payloads using `sortedKeys()` (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/generate.e2e.test.ts:382-401`, `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/migrate.e2e.test.ts:155-168`, `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/status.e2e.test.ts:28-38`). This guards against accidental additions or removals of fields in the machine-readable API.
+
+**Pattern: Negative Path Testing.** Error cases are well-covered:
+- Unknown flags throw `UnknownFlagError` (`parse-flags.test.ts:56-58`)
+- Missing flag values throw `MissingFlagValueError` (`parse-flags.test.ts:60-66`)
+- Invalid wildcard selectors throw (`table-scope.test.ts:19-23`)
+- Invalid schema definitions produce typed `ChxValidationError` (`core/index.test.ts:620-633`)
+- Destructive migrations are blocked with exit code 3 (`migrate.e2e.test.ts:51-91`)
+- Conflicting rename mappings fail with specific error messages (`generate.e2e.test.ts:231-255`)
+- Missing plugins show actionable error messages (`plugin.test.ts:877-897`)
+- Invalid plugin options return exit code 2 (`plugin.test.ts:899-923`)
+- Corrupted journal JSON is detected (`status.e2e.test.ts:44-57`)
+
+**Pattern: Multi-Step Scenario Tests.** Several tests exercise full lifecycle sequences:
+- Generate -> migrate -> check (`check.e2e.test.ts`)
+- Generate -> migrate -> drift (via manual SQL) -> check (`drift.e2e.test.ts`)
+- Generate -> generate (no-op) (`generate.e2e.test.ts:357-380`)
+- Plan -> run -> status (`plugin.test.ts:227-301`)
+- Plan -> run(fail) -> resume -> verify no replay (`plugin.test.ts:303-396`)
+- Codegen -> check (passes) -> tamper output -> check (fails) (`plugin.test.ts:818-875`)</result>
+<usage>total_tokens: 111065
+tool_uses: 33
+duration_ms: 272152</usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-marc-conductor-workspaces-chkit-kabul/tasks/a98a574.output
+
+---
+
+<task-notification>
+<task-id>a6eb549</task-id>
+<status>completed</status>
+<summary>Agent "Type safety and casts review" completed</summary>
+<result>Now I have a comprehensive view of the entire codebase. Let me compile the full analysis.
+
+---
+
+## Analysis: Type Safety and Cast Usage Across the chkit Monorepo
+
+### Overview
+
+The chkit monorepo contains zero uses of `any`, zero `@ts-ignore`/`@ts-expect-error`/`@ts-nocheck` directives, and no instances of `as unknown as TargetType` double-cast escape hatches in production code. The type casts present fall into a small number of recurring patterns, all rooted in two fundamental structural causes: `JSON.parse()` returning `unknown` (in practice), and a flag-parsing system whose `ParsedFlags` type is a flat `Record<string, string | string[] | boolean | undefined>` rather than a shape-per-command mapping.
+
+---
+
+### 1. `as` Type Casts -- Complete Inventory
+
+#### Category A: `JSON.parse()` Return Type Annotations
+
+`JSON.parse()` returns `any` in TypeScript's standard lib. Every call in the codebase immediately annotates the result with `as <ConcreteType>`.
+
+**Production code:**
+
+| File:Line | Expression | Target Type |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/migration-store.ts:29` | `JSON.parse(raw) as T` | Generic `T` in `parseJSONOrThrow<T>()` |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/state.ts:92` | `JSON.parse(await readFile(filePath, 'utf8')) as T` | Generic `T` in `readJsonMaybe<T>()` |
+| `/Users/marc/conductor/workspaces/chkit/kabul/scripts/manual-release.ts:278` | `JSON.parse(raw) as { mode?: string; tag?: string }` | Pre-state object |
+| `/Users/marc/conductor/workspaces/chkit/kabul/scripts/manual-release.ts:304` | `JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson` | PackageJson |
+| `/Users/marc/conductor/workspaces/chkit/kabul/scripts/manual-release.ts:315` | `JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson` | PackageJson |
+
+**Test code (all are `JSON.parse(result.stdout) as {...}`):** Every e2e test parses CLI stdout with explicit shape annotations. Examples include:
+
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/check.e2e.test.ts:16,36,78,105`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/generate.e2e.test.ts:13,43,70,103,136,159,193,222,314,344,362,371,387,417,445,472`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/migrate.e2e.test.ts:36,63,125,163,182,222`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/status.e2e.test.ts:18,93`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift-command.e2e.test.ts:27`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift.e2e.test.ts:182,196,245,258,309,365`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/clickhouse-live.e2e.test.ts:125,133,143,152,204,213,226,268,275,287`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/table-scope.e2e.test.ts:53,78,89,108,120,143,159,175`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:35,72,107,146,187,216,258,271,291,334,338,359,379,387,432,490,506,560,561,614,650,651,681,695,725,754,837,867,917,943,984`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/migration-scenario.test.ts:31,49,71,107`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/runtime.test.ts:124`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/planner.test.ts:78`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.test.ts:111,192`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/pull.e2e.test.ts:187`
+
+These are all structurally identical: `JSON.parse(someString) as { field: type }`.
+
+#### Category B: `ParsedFlags` Narrowing Casts
+
+The `ParsedFlags` type is defined at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:19` as:
+
+```typescript
+export type ParsedFlags = Record<string, string | string[] | boolean | undefined>
+```
+
+Every command handler extracts flag values by indexing into this record and casting:
+
+| File:Line | Expression | Target Type |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/chkit.ts:202` | `flags['--table'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate.ts:53` | `flags['--name'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate.ts:54` | `flags['--migration-id'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate.ts:55` | `flags['--table'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate.ts:76` | `flags['--rename-table'] as string[] \| undefined` | string[] \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate.ts:77` | `flags['--rename-column'] as string[] \| undefined` | string[] \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/drift.ts:107` | `flags['--table'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/migrate.ts:100` | `flags['--table'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/plugin.ts:118` | `flags['--table'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/args.ts:44-47` | `flags['--target'] as string \| undefined`, `flags['--from'] as string \| undefined`, `flags['--to'] as string \| undefined`, `flags['--chunk-hours'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/args.ts:73` | `flags['--plan-id'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/args.ts:78` | `flags['--simulate-fail-chunk'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/args.ts:81` | `flags['--simulate-fail-count'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/args.ts:115` | `flags['--plan-id'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.ts:734` | `flags['--bigint-mode'] as string \| undefined` | string \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.ts:741-745` | `flags['--out-file'] as string \| undefined`, `flags['--emit-zod'] as boolean \| undefined`, `flags['--include-views'] as boolean \| undefined`, `flags['--emit-ingest'] as boolean \| undefined`, `flags['--ingest-out-file'] as string \| undefined` | various |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.ts:204` | `flags['--database'] as string[] \| undefined` | string[] \| undefined |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.ts:210` | `flags['--out-file'] as string \| undefined` | string \| undefined |
+
+These all narrow the union `string | string[] | boolean | undefined` to the specific branch that the flag's declared `type` field dictates. The flag definitions (e.g., `type: 'string'` at the FlagDef) guarantee the runtime value type matches the cast, but this is not enforced at the type level because `ParsedFlags` erases the per-flag type information.
+
+#### Category C: `as const` Literal Narrowing
+
+These casts narrow string/type literals so that TypeScript infers literal union types instead of widened `string`:
+
+| File:Line | Expression | Purpose |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/planner.ts:136` | `'planned' as const` | Ensures status literal type |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/plugin.ts:133` | `'run' as const` | Ensures command literal |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/plugin.ts:183` | `'resume' as const` | Ensures command literal |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.ts:138` | `'schema' as const` | Ensures command literal |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.ts:331` | `'table' as const` | Ensures kind literal in spread |
+| `/Users/marc/conductor/workspaces/chkit/kabul/scripts/manual-release.ts:369` | `['dependencies', 'devDependencies'] as const` | Literal tuple |
+
+All plugin flag definitions use `as const` on the `type` property to satisfy the `FlagDef.type` literal union `'boolean' | 'string' | 'string[]'`:
+
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/plugin.ts:17-43` (13 occurrences)
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.ts:875-881` (7 occurrences)
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.ts:113-117` (5 occurrences)
+
+#### Category D: Dynamic Import Module Shape Casts
+
+| File:Line | Expression | Target Type |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/schema-loader.ts:29` | `(await import(...)) as Record<string, unknown>` | Module shape |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:147` | `(await import(...)) as { default?: unknown; plugin?: unknown }` | Plugin module shape |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:148` | `(mod.default ?? mod.plugin) as ChxPlugin \| undefined` | Plugin candidate |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/config.ts:32` | `(mod.default ?? mod.config) as ChxConfigInput \| undefined` | Config candidate |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/config.ts:39` | `candidate as ChxConfig` | After `isConfigFunction` guard returns false |
+
+Dynamic `import()` returns `any` in TypeScript. Each call site immediately casts to a known shape and then validates at runtime (e.g., checking `typeof candidate === 'object'` at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:149-153`).
+
+#### Category E: Type Guard Intermediate Cast
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model.ts:86` | `(value as { kind?: string }).kind` | Inside `isSchemaDefinition()` type guard. The parameter is `unknown`; the cast is the standard way to probe a property in a user-defined type guard. |
+
+#### Category F: Legacy Plugin Registration Cast
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:103` | `entry as ChxLegacyPluginRegistration` | Inside `normalizePluginRegistration()`. At this point, the function has already eliminated `string` (line 83) and inline registration (line 92 via `isInlinePluginRegistration()` type guard), so the remaining type is `ChxLegacyPluginRegistration`. |
+
+#### Category G: Map `.get()` After `.has()` Guard
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/parse-flags.ts:41` | `negationMap.get(token) as string` | Immediately after `negationMap.has(token)` check at line 40. |
+
+#### Category H: Post-Validation Array Element Access
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate/rename-mappings.ts:55-57` | `parts[0] as string`, `parts[1] as string`, `parts[2] as string` | After validation at line 48 confirms `parts.length === 3` and none are empty. |
+
+#### Category I: Null-Filtered Array Cast
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-codegen/src/index.ts:452` | `elements as { tsType: string; zodType: string }[]` | Line 451 has `if (elements.some((e) => e === null)) return null`, so by line 452, all elements are non-null. TypeScript's control flow analysis does not narrow the element type through `.some()`. |
+
+#### Category J: `reduce` Accumulator Type Annotation
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/table-scope.ts:188` | `{ safe: 0, caution: 0, danger: 0 } as Record<MigrationOperation['risk'], number>` | Initializer for `reduce()`. The `MigrationOperation['risk']` resolves to `'safe' \| 'caution' \| 'danger'`. |
+
+#### Category K: Test-Only Utility Casts
+
+| File:Line | Expression | Context |
+|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/check.e2e.test.ts:44` | `payload as unknown as Record<string, unknown>` | Passing a typed payload to `sortedKeys()` utility |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/generate.e2e.test.ts:322` | `payload as unknown as Record<string, unknown>` | Same pattern |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/status.e2e.test.ts:28` | `statusPayload as unknown as Record<string, unknown>` | Same pattern |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:351` | `failChunkId as string` | After finding chunk via `.find()` |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:572` | `planState.chunks[1]?.id as string` | Array element access in test assertion |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugin.test.ts:662` | `planState.chunks[1]?.id as string` | Same pattern |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/table-scope.e2e.test.ts:82` | `scopedGeneratePayload.migrationFile as string` | After JSON parse in test |
+
+---
+
+### 2. `any` Type Usage
+
+**Zero occurrences.** The grep for `: any`, `as any`, `<any>`, and `any[]` returned no matches in any `.ts` file outside `node_modules` and `dist`.
+
+---
+
+### 3. `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`
+
+**Zero occurrences.** No TypeScript suppression directives exist anywhere in the codebase.
+
+---
+
+### 4. Non-Null Assertions (`!`)
+
+There are exactly 4 non-null assertions, all in `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/chkit.ts`:
+
+| Line | Expression | Context |
+|---|---|---|
+| 86 | `p.plugin.extendCommands!` | Inside `collectExtensions()`, called after `filter((p) => p.plugin.extendCommands && p.plugin.extendCommands.length > 0)` at line 83. The `.filter()` guard ensures the value is truthy. |
+| 95 | `p.plugin.commands!` | Inside `collectPluginCommands()`, called after `filter((p) => p.plugin.commands && p.plugin.commands.length > 0)` at line 92. Same pattern. |
+| 262 | `resolved.run!({...})` | After the `plugin` command special case. The code reaches here only for core built-in commands whose `run` is always defined (they are `CommandDef` objects with non-optional `run`), but the `RegisteredCommand.run` type at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/command-registry.ts:11` is `CommandDef['run'] | null` because plugin commands set it to `null`. |
+| 289 | `resolved.run!({...})` | Same situation as line 262 -- this is the fallback path for all non-plugin, non-`plugin` commands. |
+
+For lines 262 and 289, the reason `run` is typed as nullable is that `RegisteredCommand` is a unified type serving both core commands (where `run` is always present) and plugin commands (where `run` is always `null`). The `if (resolved.isPlugin && !resolved.run)` guard at line 170 and the explicit `commandName === 'plugin'` check at line 255 ensure that by lines 262 and 289, `run` is non-null.
+
+---
+
+### 5. Generic Type Parameters
+
+The codebase uses generics in the following locations:
+
+| File:Line | Declaration | Type Parameters | Usage |
+|---|---|---|---|
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/diff-primitives.ts:1` | `interface NamedDiffChange<T>` | `T` | Wraps old/new items of any named entity |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/diff-primitives.ts:7` | `interface NamedDiffResult<T>` | `T` | Contains arrays of `T` for added/removed and `NamedDiffChange<T>` for changed |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/diff-primitives.ts:13` | `function diffByName<T>()` | `T` | Generic diffing of any named item list; used for columns, indexes, projections |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/canonical.ts:14` | `function sortByName<T extends { name: string }>()` | `T` bounded by `{ name: string }` | Sort utility preserving input type |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model.ts:29-31` | `function defineConfig<T extends ChxUserConfig>()` | `T` bounded by `ChxUserConfig` | 3 overloads preserving input config shape |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:114` | `interface ChxInlinePluginRegistration<TPlugin, TOptions>` | `TPlugin = unknown`, `TOptions extends object = Record<string, unknown>` | Plugin registration with typed plugin and options |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:156` | `type ChxConfigFn<T extends ChxUserConfig>` | `T` | Config factory function generic |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:160` | `type ChxConfigInput<T extends ChxUserConfig>` | `T` | Union of config object or factory |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:165` | `function definePluginConfig<TOptions extends object>()` | `TOptions` defaulting to `Record<string, unknown>` | Helper to define inline plugin registrations with typed options |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/drift-diff.ts:1` | `function diffByName<T>()` | `T` | CLI-local copy of diff utility |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/migration-store.ts:27` | `function parseJSONOrThrow<T>()` | `T` | JSON parsing helper |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/json-output.ts:25` | `function jsonPayload<T extends object>()` | `T` bounded by `object` | Adds command/version fields to any payload |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/json-output.ts:36` | `function emitJson<T extends object>()` | `T` | Wraps `jsonPayload` with printing |
+| `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/state.ts:90` | `function readJsonMaybe<T>()` | `T` | JSON file reader |
+
+The generics are used with appropriate bounds where relevant (`T extends { name: string }` for sorting, `T extends ChxUserConfig` for config, `T extends object` for JSON payloads). The `ChxInlinePluginRegistration<TPlugin, TOptions>` generic at `model-types.ts:114` is the most structurally significant -- it enables typed plugin registrations like `BackfillPluginRegistration` (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/types.ts:231-234`) and `CodegenPluginRegistration`.
+
+---
+
+### 6. Discriminated Unions
+
+The codebase uses discriminated unions extensively:
+
+**`SchemaDefinition`** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:79`):
+```typescript
+export type SchemaDefinition = TableDefinition | ViewDefinition | MaterializedViewDefinition
+```
+Discriminated on the `kind` field: `'table'` (line 45), `'view'` (line 63), `'materialized_view'` (line 71).
+
+This union is consumed throughout the codebase:
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/canonical.ts:108-111` -- `canonicalizeDefinition()` switches on `def.kind`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/planner.ts:40-47,49-56,58-63,71-77,80-87,89-95` -- `pushDropOperation()` and `pushCreateOperation()` switch on `def.kind`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/planner.ts:378,385,394` -- `planDiff()` narrows with `kind` comparisons
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model.ts:84-88` -- `isSchemaDefinition()` type guard checks `kind`
+- `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/table-scope.ts:38` -- `filter((def): def is TableDefinition => def.kind === 'table')` uses type predicate
+
+**`SettingDiffResult.changes`** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/diff-primitives.ts:52-55`):
+```typescript
+Array<
+  | { kind: 'modify'; key: string; value: string | number | boolean }
+  | { kind: 'reset'; key: string }
+>
+```
+Discriminated on `kind`. Consumed at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/planner.ts:326` with `if (change.kind === 'reset')`.
+
+**`MigrationOperationType`** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:174-194`): A 19-member string literal union used as the `type` field on `MigrationOperation`. This is not a tagged union of distinct shapes, but rather a single flat interface at line 195 where `type` restricts the operation kind.
+
+**`ColumnRenameSuggestion.kind`** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:203`): Currently has only `'column'` as a literal value, but is structured to allow future discriminant expansion.
+
+**`ParsedTableSelector.mode`** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/table-scope.ts:9`): `'exact' | 'prefix'` -- used at line 118 for matching logic.
+
+**`ChxPluginRegistration`** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:124-127`):
+```typescript
+export type ChxPluginRegistration =
+  | string
+  | ChxLegacyPluginRegistration
+  | ChxInlinePluginRegistration
+```
+Discriminated structurally (typeof for string, then `'plugin' in registration` for inline at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:176`).
+
+**Plugin registration kind** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:76`): The internal `normalizePluginRegistration()` function returns `kind: 'legacy' | 'inline'`, which is used at line 173 to decide whether to import a module or use the inline plugin object.
+
+**IntrospectedObject** (at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-pull/src/index.ts:81-83`):
+```typescript
+| ({ kind: 'table' } & IntrospectedTable)
+| ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as'>)
+| ({ kind: 'materialized_view' } & Pick<MaterializedViewDefinition, 'database' | 'name' | 'to' | 'as'>)
+```
+Discriminated on `kind`.
+
+---
+
+### 7. Plugin System Type Safety
+
+The plugin system's type safety flows through several layers:
+
+**Plugin Definition** (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:154-159`):
+```typescript
+export interface ChxPlugin {
+  manifest: ChxPluginManifest
+  hooks?: ChxPluginHooks
+  commands?: ChxPluginCommand[]
+  extendCommands?: CommandExtension[]
+}
+```
+
+The `definePlugin()` function at line 161 is an identity function that enforces the `ChxPlugin` interface at the definition site.
+
+**Plugin Registration** (`/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:114-122`):
+`ChxInlinePluginRegistration<TPlugin, TOptions>` is generic over both the plugin type and options type. The backfill plugin instantiates this at `/Users/marc/conductor/workspaces/chkit/kabul/packages/plugin-backfill/src/types.ts:231-234`:
+```typescript
+export type BackfillPluginRegistration = ChxInlinePluginRegistration<
+  BackfillPlugin,
+  BackfillPluginOptions
+>
+```
+
+**Hook Context Types** (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:59-151`):
+Each lifecycle hook has a dedicated context interface. The `ChxPluginHookContextBase` at line 59 provides the shared shape. The `PluginRuntime` at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:39-63` defines the runtime API with `Omit` types to exclude fields that the runtime itself provides (like `options` and `tableScope`).
+
+**Type Safety Boundary -- the `options` field**: Plugin options are typed as `Record<string, unknown>` at the runtime boundary (`/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/plugin-runtime.ts:29`). Each plugin internally knows its options shape but the runtime passes them opaquely. The backfill plugin receives `runtimeOptions: Record<string, unknown>` and feeds it through `mergeOptions(base, runtimeOptions)` which applies its own normalization.
+
+**Command Registration**: Plugin commands are `ChxPluginCommand[]` at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:125-130`. The `run` method receives a fully typed `ChxPluginCommandContext`. The command registry at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/command-registry.ts` wraps these into `RegisteredCommand` objects, merging plugin-declared flags with core global flags.
+
+**Flag Type Erasure**: The `parseFlags()` function at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/parse-flags.ts:21` returns `ParsedFlags` (a flat record). This is where per-flag type information is lost. The `FlagDef.type` field (`'boolean' | 'string' | 'string[]'`) determines runtime behavior (line 51-74) but the return type does not encode this. This is the root cause of all Category B casts throughout the codebase.
+
+**Extension Points**: The `extendCommands` mechanism at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:37-40` allows plugins to inject flags into core commands. The command registry at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/command-registry.ts:43-53` merges these flags. The merged flags are then available via `registry.resolveFlags()` at line 100. The type safety is maintained because all flags flow through the same `FlagDef` interface and `parseFlags()` function.
+
+---
+
+### Summary Statistics
+
+| Category | Count (production) | Count (test) |
+|---|---|---|
+| `as` casts on `JSON.parse()` | 5 | ~70 |
+| `as` casts on `ParsedFlags` access | ~25 | 0 |
+| `as const` literal narrowing | ~30 | 0 |
+| `as` casts on dynamic `import()` | 5 | 0 |
+| Type guard intermediate casts | 2 | 0 |
+| Map `.get()` after `.has()` | 1 | 0 |
+| Post-validation array access | 3 | 0 |
+| Null-filtered array narrowing | 1 | 0 |
+| `reduce` accumulator annotation | 1 | 0 |
+| Test-only `as unknown as` | 0 | 3 |
+| Test-only non-null casts | 0 | 3 |
+| `!` non-null assertions | 4 | 0 |
+| `any` usage | 0 | 0 |
+| `@ts-ignore` / `@ts-expect-error` / `@ts-nocheck` | 0 | 0 |</result>
+<usage>total_tokens: 90074
+tool_uses: 41
+duration_ms: 281623</usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-marc-conductor-workspaces-chkit-kabul/tasks/a6eb549.output
+
+---
+
+<task-notification>
+<task-id>a4fbd4c</task-id>
+<status>completed</status>
+<summary>Agent "Architecture analysis" completed</summary>
+<result>I now have a thorough understanding of the entire codebase. Here is the complete architectural report.
+
+---
+
+## Architectural Analysis: chkit Monorepo
+
+### Overview
+
+chkit is a ClickHouse schema management and migration toolkit built as a TypeScript monorepo containing 7 packages. The CLI (`packages/cli`) is the user-facing entry point that orchestrates schema loading, diff computation, migration file generation, and execution against a live ClickHouse instance. The core library (`packages/core`) houses the schema DSL, diff engine, and validation logic. Plugins extend the system with additional commands and lifecycle hooks.
+
+---
+
+### 1. Package Dependency Graph
+
+The dependency graph flows strictly downward with no circular dependencies.
+
+```
+                  +-----------+
+                  |    cli    |
+                  | (chkit)   |
+                  +-----+-----+
+                  |     |     |
+          +-------+  +--+--+  +-------+
+          |          |     |          |
+   @chkit/core  @chkit/clickhouse  @chkit/codegen
+          |          |
+          |     @chkit/core
+          |
+          +---- (leaf, depends on fast-glob only)
+
+   @chkit/plugin-codegen  --> @chkit/core
+   @chkit/plugin-pull     --> @chkit/core, @chkit/clickhouse
+   @chkit/plugin-backfill --> @chkit/core
+```
+
+Concrete references from `package.json` files:
+
+- **`cli`** (`/packages/cli/package.json:28-31`): depends on `@chkit/core`, `@chkit/clickhouse`, `@chkit/codegen`, and `fast-glob`
+- **`@chkit/core`** (`/packages/core/package.json:31-33`): depends only on `fast-glob` (leaf package)
+- **`@chkit/clickhouse`** (`/packages/clickhouse/package.json:31-34`): depends on `@chkit/core` and `@clickhouse/client`
+- **`@chkit/codegen`** (`/packages/codegen/package.json:31-33`): depends on `@chkit/core`
+- **`@chkit/plugin-codegen`** (`/packages/plugin-codegen/package.json:32-34`): depends on `@chkit/core` and `fast-glob`
+- **`@chkit/plugin-pull`** (`/packages/plugin-pull/package.json:32-34`): depends on `@chkit/core` and `@chkit/clickhouse`
+- **`@chkit/plugin-backfill`** (`/packages/plugin-backfill/package.json:32-33`): depends on `@chkit/core`
+
+The build order is enforced via Turborepo's `dependsOn: ["^build"]` in `/turbo.json:5`.
+
+---
+
+### 2. Entry Points and Public API Surface Per Package
+
+#### `@chkit/core` (`/packages/core/src/index.ts`)
+
+Re-exports the entire schema DSL and diffing engine:
+
+- **Model DSL**: `table()`, `view()`, `materializedView()`, `schema()`, `defineConfig()`, `resolveConfig()`, `isSchemaDefinition()` (from `/packages/core/src/model.ts:29-88`)
+- **Model Types**: `SchemaDefinition`, `TableDefinition`, `ViewDefinition`, `MaterializedViewDefinition`, `ChxUserConfig`, `ChxResolvedConfig`, `MigrationPlan`, `MigrationOperation`, `Snapshot`, `ChxPluginRegistration`, `ChxInlinePluginRegistration`, etc. (from `/packages/core/src/model-types.ts`)
+- **Canonicalization**: `canonicalizeDefinition()`, `canonicalizeDefinitions()`, `collectDefinitionsFromModule()` (from `/packages/core/src/canonical.ts:108-151`)
+- **Diff/Planner**: `planDiff()` (from `/packages/core/src/planner.ts:358`)
+- **Snapshot**: `createSnapshot()` (from `/packages/core/src/snapshot.ts:4`)
+- **Schema Loading**: `loadSchemaDefinitions()` (from `/packages/core/src/schema-loader.ts:13`)
+- **SQL Generation**: `toCreateSQL()` (from `/packages/core/src/sql.ts:72`)
+- **SQL Normalization**: `normalizeSQLFragment()` (from `/packages/core/src/sql-normalizer.ts:1`)
+- **Validation**: `assertValidDefinitions()`, `validateDefinitions()` (from `/packages/core/src/validate.ts:94-121`)
+
+#### `@chkit/clickhouse` (`/packages/clickhouse/src/index.ts`)
+
+Exposes the ClickHouse client wrapper:
+
+- **`createClickHouseExecutor(config)`** (line 130): Factory function returning a `ClickHouseExecutor` with methods `execute()`, `query()`, `insert()`, `listSchemaObjects()`, `listTableDetails()`
+- **`ClickHouseExecutor` interface** (line 20-26): The primary abstraction for all ClickHouse I/O
+- **`IntrospectedTable` interface** (line 61-74): Describes a fully-introspected table
+- **`inferSchemaKindFromEngine()`** (line 87-92): Maps engine strings to schema kinds
+- **Create-table parsers**: Re-exported from `/packages/clickhouse/src/create-table-parser.ts` (line 76-85)
+
+#### `@chkit/codegen` (`/packages/codegen/src/index.ts`)
+
+Exposes migration artifact generation:
+
+- **`generateArtifacts(input)`** (line 68): Writes `.sql` migration files and `snapshot.json` to disk, returns paths and content
+
+#### `chkit` CLI (`/packages/cli/src/index.ts`)
+
+Re-exports only the plugin system:
+
+- **`definePlugin()`**, **`definePluginConfig()`**, **`isInlinePluginRegistration()`** (from `/packages/cli/src/plugins.ts:161-177`)
+- **All plugin hook/command interfaces**: `ChxPlugin`, `ChxPluginHooks`, `ChxPluginCommand`, `ChxPluginCommandContext`, `CommandExtension`, `FlagDef`, `ParsedFlags`, etc. (from `/packages/cli/src/plugins.ts:1-159`)
+
+#### `@chkit/plugin-codegen` (`/packages/plugin-codegen/src/index.ts`)
+
+Exports the codegen plugin factory and its internal generation functions:
+
+- **`codegen(options)`** (line 1054): Returns a `CodegenPluginRegistration` for use in config
+- **`createCodegenPlugin(options)`** (line 862): Creates the raw plugin object
+- **`generateTypeArtifacts(input)`** (line 578): Pure function that generates TypeScript type declarations
+- **`generateIngestArtifacts(input)`** (line 669): Pure function that generates ingest helper functions
+- **`mapColumnType()`** (line 494): Maps a ClickHouse column type to TypeScript/Zod
+
+#### `@chkit/plugin-pull` (`/packages/plugin-pull/src/index.ts`)
+
+Exports the pull plugin factory:
+
+- **`pull(options)`** (line 181): Returns a `PullPluginRegistration`
+- **`createPullPlugin(options)`** (line 99): Creates the raw plugin object
+- **`renderSchemaFile(definitions)`** (line 560): Renders schema definitions as a TypeScript source file
+
+#### `@chkit/plugin-backfill` (`/packages/plugin-backfill/src/index.ts`)
+
+Exports the backfill plugin factory:
+
+- **`backfill(options)`** (from `/packages/plugin-backfill/src/plugin.ts:360`): Returns a `BackfillPluginRegistration`
+- **`createBackfillPlugin(options)`** (from `/packages/plugin-backfill/src/plugin.ts:46`): Creates the raw plugin object
+
+---
+
+### 3. Plugin Architecture
+
+#### Plugin Registration
+
+Plugins are registered in `clickhouse.config.ts` via the `plugins` array in `ChxUserConfig`. There are three registration forms, defined in `/packages/core/src/model-types.ts:107-128`:
+
+1. **String**: A bare module path (`string`)
+2. **Legacy object**: `{ resolve: string, name?: string, enabled?: boolean, options?: Record<string, unknown> }` (`ChxLegacyPluginRegistration`, line 107)
+3. **Inline object**: `{ plugin: TPlugin, name?: string, enabled?: boolean, options?: TOptions }` (`ChxInlinePluginRegistration`, line 114)
+
+The inline form is the recommended approach. Each plugin package exports a convenience factory (e.g., `codegen()`, `pull()`, `backfill()`) that returns a `ChxInlinePluginRegistration`.
+
+#### Plugin Discovery and Loading
+
+Handled in `/packages/cli/src/bin/plugin-runtime.ts:158-199`:
+
+1. `loadPluginRuntime()` iterates over `config.plugins` (line 168)
+2. Each registration is normalized via `normalizePluginRegistration()` (line 73-111), which classifies it as `'inline'` or `'legacy'`
+3. Disabled plugins (`enabled: false`) are skipped (line 170)
+4. For legacy plugins, the module is dynamically imported via `importPluginModule()` (line 146-156), which expects a `default` or `plugin` export
+5. Each plugin is validated via `validatePlugin()` (line 118-144): checks `manifest.name` is non-empty, `apiVersion` equals 1, and CLI version compatibility constraints
+6. Duplicate plugin names are rejected (line 189-191)
+7. Loaded plugins are stored in an array and a `byName` map (line 193-198)
+
+#### Plugin Interface (`ChxPlugin`)
+
+Defined in `/packages/cli/src/plugins.ts:154-159`:
+
+```typescript
+interface ChxPlugin {
+  manifest: ChxPluginManifest        // name, apiVersion, version?, compatibility?
+  hooks?: ChxPluginHooks             // lifecycle hooks
+  commands?: ChxPluginCommand[]      // custom CLI commands
+  extendCommands?: CommandExtension[] // inject flags into existing commands
+}
+```
+
+#### Lifecycle Hooks
+
+Defined in `/packages/cli/src/plugins.ts:132-152`. The `PluginRuntime` object invokes hooks sequentially across all loaded plugins in registration order:
+
+| Hook | When | Chainable? | Location |
+|------|------|------------|----------|
+| `onConfigLoaded` | After config is loaded, before schema loading | No (side-effect only) | `plugin-runtime.ts:210-220` |
+| `onSchemaLoaded` | After schema definitions are loaded | Yes (returns replacement definitions) | `plugin-runtime.ts:222-237` |
+| `onPlanCreated` | After migration plan is computed | Yes (returns replacement plan) | `plugin-runtime.ts:238-252` |
+| `onBeforeApply` | Before each migration file is executed | Yes (returns replacement statements) | `plugin-runtime.ts:253-266` |
+| `onAfterApply` | After each migration file is executed | No (side-effect only) | `plugin-runtime.ts:267-276` |
+| `onCheck` | During `chkit check` | Aggregated (returns `ChxOnCheckResult`) | `plugin-runtime.ts:278-298` |
+| `onCheckReport` | After check results are collected | No (side-effect, printing) | `plugin-runtime.ts:300-312` |
+
+For chainable hooks (`onSchemaLoaded`, `onPlanCreated`, `onBeforeApply`), the output of one plugin becomes the input to the next.
+
+#### Plugin Command Execution
+
+`runPluginCommand()` at `/packages/cli/src/bin/plugin-runtime.ts:313-329`:
+1. Looks up the plugin by name in the `byName` map
+2. Finds the command by name within `plugin.commands`
+3. Calls `command.run()` with a `ChxPluginCommandContext` that includes `pluginName`, `options` (from the registration), `config`, `configPath`, `jsonMode`, `flags`, `tableScope`, and a `print()` function
+
+#### Command Registration
+
+In `/packages/cli/src/bin/command-registry.ts:55-92`, plugin commands are registered based on their structure:
+- If a plugin has exactly one command whose name matches `manifest.name`, it becomes a top-level CLI command (e.g., `chkit codegen`)
+- If a plugin has multiple commands, they become subcommands under a parent namespace (e.g., `chkit backfill plan`, `chkit backfill run`)
+
+---
+
+### 4. CLI Framework
+
+The CLI uses a custom framework (no third-party CLI library). The entry point is `/packages/cli/src/bin/chkit.ts`.
+
+#### Command Dispatch (`main()` at line 100)
+
+1. Parses `process.argv.slice(2)` (line 101)
+2. Handles `--help`, `--version`, and `init` as special cases (lines 104-136)
+3. Loads config via `loadConfig()` and then `loadPluginRuntime()` (lines 138-140)
+4. Builds a `CommandRegistry` with core commands + plugin extensions + plugin commands (lines 142-147)
+5. Resolves the command by name via `registry.get(commandName)` (line 149)
+6. For unknown commands, checks `WELL_KNOWN_PLUGIN_COMMANDS` for a friendly error message (line 152-157)
+
+**Plugin command routing** (lines 170-251):
+- If `resolved.isPlugin && !resolved.run`, the CLI delegates to the plugin runtime
+- Parses flags using `parseFlags()` with the union of global + command-specific flags
+- Calls `pluginRuntime.runOnConfigLoaded()`, then `pluginRuntime.runPluginCommand()`
+
+**Core command routing** (lines 274-296):
+- Parses flags using `registry.resolveFlags(commandName)`
+- Calls `resolved.run()` with a `CommandRunContext` containing `command`, `flags`, `config`, `configPath`, `dirs`, `pluginRuntime`
+
+#### Flag Parsing
+
+`parseFlags()` in `/packages/cli/src/bin/parse-flags.ts:21-79`:
+- Iterates tokens, matching against a `FlagDef[]` lookup map
+- Supports boolean flags, string flags, and `string[]` flags (comma-delimited)
+- Supports negation flags (`--no-<name>` for boolean flags with `negation: true`)
+- Throws `UnknownFlagError` or `MissingFlagValueError` for validation failures
+
+#### Core Commands
+
+| Command | File | Description |
+|---------|------|-------------|
+| `init` | `/packages/cli/src/bin/commands/init.ts:5` | Scaffolds `clickhouse.config.ts` and example schema file |
+| `generate` | `/packages/cli/src/bin/commands/generate.ts:38` | Diffs schema against snapshot, generates migration SQL + snapshot |
+| `migrate` | `/packages/cli/src/bin/commands/migrate.ts:28` | Lists/applies pending migration files against ClickHouse |
+| `status` | `/packages/cli/src/bin/commands/status.ts:7` | Shows migration counts and checksum info |
+| `drift` | `/packages/cli/src/bin/commands/drift.ts:30` | Compares snapshot against live ClickHouse schema |
+| `check` | `/packages/cli/src/bin/commands/check.ts:9` | CI/release gate checks (pending, checksum, drift, plugins) |
+| `plugin` | `/packages/cli/src/bin/commands/plugin.ts:7` | Lists plugins and routes to plugin subcommands |
+
+---
+
+### 5. Configuration System
+
+#### Config File
+
+Default: `clickhouse.config.ts` (constant at `/packages/cli/src/bin/config.ts:16`).
+
+#### Loading
+
+`loadConfig()` at `/packages/cli/src/bin/config.ts:22-45`:
+1. Resolves the path relative to `process.cwd()` (line 26)
+2. Dynamically imports the config file via `import(pathToFileURL(...).href)` (line 31)
+3. Reads the `default` or `config` named export (line 32)
+4. If the export is a function (`ChxConfigFn`), invokes it with a `ChxConfigEnv` to support dynamic config (line 39)
+5. Calls `resolveConfig()` to normalize defaults
+
+#### Config Types
+
+`ChxUserConfig` at `/packages/core/src/model-types.ts:129-138`:
+```typescript
+interface ChxUserConfig {
+  schema: string | string[]
+  outDir?: string
+  migrationsDir?: string
+  metaDir?: string
+  plugins?: ChxPluginRegistration[]
+  check?: ChxCheckConfig
+  safety?: ChxSafetyConfig
+  clickhouse?: ChxUserClickHouseConfig
+}
+```
+
+#### Resolution
+
+`resolveConfig()` at `/packages/core/src/model.ts:35-64`:
+- `schema` is normalized to an array (line 41)
+- `outDir` defaults to `'./chkit'` (line 36)
+- `migrationsDir` defaults to `join(outDir, 'migrations')` (line 37)
+- `metaDir` defaults to `join(outDir, 'meta')` (line 38)
+- `plugins` defaults to `[]` (line 45)
+- `check.failOnPending`, `check.failOnChecksumMismatch`, `check.failOnDrift` all default to `true` (lines 47-49)
+- `safety.allowDestructive` defaults to `false` (line 52)
+- `clickhouse` connection fields get defaults: `username: 'default'`, `password: ''`, `database: 'default'`, `secure: false` (lines 54-62)
+
+The result is a fully-resolved `ChxResolvedConfig` (`/packages/core/src/model-types.ts:140-149`) where all optional fields have default values.
+
+#### Directory Resolution
+
+`resolveDirs()` at `/packages/cli/src/bin/config.ts:53-58` resolves `outDir`, `migrationsDir`, `metaDir` relative to `process.cwd()`.
+
+---
+
+### 6. Diff/Migration Engine in Core
+
+This is the central algorithm in the system, orchestrated by the `generate` command.
+
+#### Schema Loading
+
+`loadSchemaDefinitions()` at `/packages/core/src/schema-loader.ts:13-34`:
+1. Resolves glob patterns via `fast-glob` (line 18)
+2. For each matched file, dynamically imports it (line 29)
+3. Calls `collectDefinitionsFromModule(mod)` which walks all exports looking for objects with `kind: 'table' | 'view' | 'materialized_view'` (from `/packages/core/src/canonical.ts:134-151`)
+4. Deduplicates and sorts via `canonicalizeDefinitions()` (line 33)
+
+#### Canonicalization
+
+`canonicalizeDefinitions()` at `/packages/core/src/canonical.ts:118-132`:
+1. Each definition is canonicalized: strings trimmed, SQL fragments normalized, key columns split at commas, settings sorted, indexes and projections sorted by name
+2. Deduplication by `definitionKey()` = `"${kind}:${database}.${name}"` (line 114)
+3. Sorted by: kind (table=0, view=1, materialized_view=2), then database, then name
+
+#### Snapshot
+
+The previous state is stored in `<metaDir>/snapshot.json`. Read by `readSnapshot()` at `/packages/cli/src/bin/migration-store.ts:35-49`. Contains `{ version: 1, generatedAt: string, definitions: SchemaDefinition[] }`.
+
+#### Diff Planning
+
+`planDiff(oldDefinitions, newDefinitions)` at `/packages/core/src/planner.ts:358-458`:
+
+1. Canonicalizes both sets, validates new definitions (lines 359-361)
+2. Builds maps keyed by `definitionKey()` (lines 362-363)
+3. **Drop pass** (lines 368-371): For each old definition not in new, emit a drop operation (`danger` risk)
+4. **Modify pass** (lines 373-413): For each new definition that exists in old:
+   - **Tables**: calls `diffTables()` (line 379)
+   - **Views**: if `as` or `comment` changed, drop + recreate (`caution` risk) (lines 385-389)
+   - **Materialized views**: if `as`, `comment`, or `to` changed, drop + recreate (`caution` risk) (lines 393-408)
+   - **Kind change**: drop old (`danger` risk) (lines 410-412)
+5. **Create pass** (lines 415-422): For each new definition not in old (or kind-changed), create it (`safe` risk), and record its database for `CREATE DATABASE` operations
+6. **Database creation** (lines 424-427): `CREATE DATABASE IF NOT EXISTS` for new databases
+7. **Sorting** (lines 428-440): Operations are sorted by rank: drops first, then alters, then create databases, then create tables, then create views, then materialized views; within same rank, alphabetical by key
+8. **Risk summary** (lines 442-445): Counts `safe`, `caution`, `danger` operations
+
+#### Table Diffing
+
+`diffTables(oldDef, newDef)` at `/packages/core/src/planner.ts:195-356`:
+
+1. **Recreate check** via `requiresTableRecreate()` (line 196, defined at line 114): If `engine`, `primaryKey`, `orderBy`, `partitionBy`, or `uniqueKey` differ, the table must be dropped and recreated
+2. **Column diff** via `diffByName()` from `/packages/core/src/diff-primitives.ts:13-49`: Compares columns by name, classifying as added/removed/changed using JSON serialization of normalized column shapes
+3. **Index diff**: Same `diffByName()` pattern; changed indexes are dropped then re-added
+4. **Projection diff**: Same `diffByName()` pattern; changed projections are dropped then re-added
+5. **Settings diff** via `diffSettings()` from `/packages/core/src/diff-primitives.ts:58-80`: Classifies settings as `modify` or `reset`
+6. **TTL diff**: Simple string comparison (line 343)
+7. **Rename suggestions** via `inferColumnRenameSuggestions()` (line 354, defined at line 147): If a dropped column and an added column have identical type/nullable/default/comment (differing only in name), it suggests a rename operation with `confidence: 'high'`
+
+#### SQL Generation
+
+`toCreateSQL()` at `/packages/core/src/sql.ts:72-77`: Dispatches to `renderTableSQL()`, `renderViewSQL()`, or `renderMaterializedViewSQL()`.
+
+`renderTableSQL()` at `/packages/core/src/sql.ts:33-62`: Renders a full `CREATE TABLE IF NOT EXISTS` statement with columns, indexes, projections, engine, partition, primary key, order by, unique key, TTL, settings, and comment.
+
+ALTER operations are rendered by individual functions at `/packages/core/src/sql.ts:79-124`: `renderAlterAddColumn()`, `renderAlterModifyColumn()`, `renderAlterDropColumn()`, `renderAlterAddIndex()`, `renderAlterDropIndex()`, `renderAlterAddProjection()`, `renderAlterDropProjection()`, `renderAlterModifySetting()`, `renderAlterResetSetting()`, `renderAlterModifyTTL()`.
+
+#### Migration Artifact Generation
+
+`generateArtifacts()` at `/packages/codegen/src/index.ts:68-103`:
+1. Generates a timestamped migration filename (or uses a user-supplied `migrationId`)
+2. Builds the migration `.sql` content via `buildMigrationContent()` (line 37-66): header comments with metadata, rename suggestions as comments, and operation SQL blocks
+3. Creates the snapshot via `createSnapshot()` (line 90)
+4. Writes the `.sql` file (if operations exist) and `snapshot.json` to disk
+
+#### Migration Application
+
+`cmdMigrate()` at `/packages/cli/src/bin/commands/migrate.ts:96-321`:
+1. Lists migration files from `migrationsDir` (line 116)
+2. Reads the journal to determine which are already applied (lines 117-119)
+3. Validates checksum integrity (lines 120-138)
+4. For each pending migration, extracts executable SQL statements, invokes `onBeforeApply` hook, executes each statement via `db.execute()`, records the journal entry with a SHA-256 checksum, then invokes `onAfterApply` hook (lines 272-308)
+
+#### Journal
+
+Stored in `<metaDir>/journal.json`. Schema: `{ version: 1, applied: Array<{ name, appliedAt, checksum }> }`. Managed by functions in `/packages/cli/src/bin/migration-store.ts:55-127`.
+
+---
+
+### 7. Separation of Concerns
+
+The layering follows a clear tiered architecture:
+
+**Tier 1: Core Domain (`@chkit/core`)**
+- Zero runtime dependencies beyond `fast-glob` for file globbing
+- Contains the entire schema DSL, type system, canonicalization, validation, diff algorithm, and SQL generation
+- Exports pure functions -- no I/O beyond schema file loading
+- All other packages depend on this; it depends on nothing internal
+
+**Tier 2: Infrastructure Adapters (`@chkit/clickhouse`, `@chkit/codegen`)**
+- `@chkit/clickhouse`: Wraps the `@clickhouse/client` SDK into a `ClickHouseExecutor` interface, handles ClickHouse system table introspection, and provides `create_table_query` parsing
+- `@chkit/codegen`: Handles file I/O for migration artifacts (writing `.sql` and `snapshot.json`)
+- Both depend only on `@chkit/core`
+
+**Tier 3: Plugins (`@chkit/plugin-codegen`, `@chkit/plugin-pull`, `@chkit/plugin-backfill`)**
+- Each plugin is a self-contained package that implements the `ChxPlugin` interface
+- Each exports a factory function returning a `ChxInlinePluginRegistration`
+- Plugins depend on `@chkit/core` and optionally `@chkit/clickhouse` -- never on each other or on the CLI
+- The codegen plugin contains its own type mapping logic, the pull plugin contains schema introspection and rendering logic, the backfill plugin contains time-windowed chunk planning and execution logic
+
+**Tier 4: CLI Orchestrator (`chkit`)**
+- Depends on all three internal packages: `@chkit/core`, `@chkit/clickhouse`, `@chkit/codegen`
+- Provides the custom CLI framework: command registry, flag parsing, help formatting
+- Provides the plugin runtime that loads, validates, and executes plugins
+- Provides the migration store (journal, snapshot, checksum verification)
+- Provides drift detection by comparing snapshot against live ClickHouse
+- Provides the `check` command as a CI gate that aggregates checks from core + plugins
+- Provides the `generate` pipeline that orchestrates schema loading -> diffing -> rename mapping -> plan filtering -> artifact generation -> optional codegen plugin trigger
+
+**Cross-Cutting Concerns:**
+- **JSON output**: All commands support `--json` for machine-readable output; this is consistently implemented via `emitJson()` at `/packages/cli/src/bin/json-output.ts` and the plugin `print()` callback
+- **Table scoping**: The `--table` flag enables filtering operations to specific tables, implemented in `/packages/cli/src/bin/table-scope.ts` and threaded through command handlers and the plugin `tableScope` context
+- **Error handling**: Structured error classes (`ChxValidationError`, `UnknownFlagError`, `MissingFlagValueError`, plugin-specific errors like `CodegenConfigError`, `PullConfigError`, `BackfillConfigError`) with distinct exit codes (1 for general errors, 2 for config errors, 3 for blocked destructive operations)</result>
+<usage>total_tokens: 114709
+tool_uses: 54
+duration_ms: 299225</usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-marc-conductor-workspaces-chkit-kabul/tasks/a4fbd4c.output
+
+---
+
+<task-notification>
+<task-id>ac97642</task-id>
+<status>completed</status>
+<summary>Agent "Code quality review" completed</summary>
+<result>Confirmed: `fast-glob` is imported directly in the CLI at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/migration-store.ts:6` (for `listMigrations`). The `plugin-codegen` package does not import `fast-glob` directly in its source code -- it appears only in its `package.json` as a dependency, likely because it imports `@chkit/core` which uses `fast-glob` at runtime for `loadSchemaDefinitions`.
+
+Now continuing the analysis:
+
+**`ChxPluginRegistrationMeta`**: Confirmed unreferenced. It is exported from `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/plugins.ts:54-57` and re-exported via `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/index.ts:1` but never used or imported anywhere in the codebase.
+
+**`ChxConfig` and `ResolvedChxConfig` type aliases**: At `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/model-types.ts:161-162`:
+```typescript
+export type ChxConfig = ChxUserConfig
+export type ResolvedChxConfig = ChxResolvedConfig
+```
+These are simple aliases. `ChxConfig` is used in `/Users/marc/conductor/workspaces/chkit/kabul/packages/clickhouse/src/index.ts:4` and `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/config.ts:9`. `ResolvedChxConfig` is used widely. Both work as convenience aliases.
+
+### 10. The Codegen System (Migration Generation)
+
+The migration generation pipeline has three layers:
+
+**Layer 1: Diff Planning (`@chkit/core`)**
+
+The `planDiff()` function at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/planner.ts:358-458` takes old and new `SchemaDefinition[]` arrays and produces a `MigrationPlan`. The flow:
+
+1. Both inputs are canonicalized via `canonicalizeDefinitions()` (sorts, trims, normalizes SQL fragments) at line 359-360.
+2. New definitions are validated via `assertValidDefinitions()` at line 361.
+3. Maps are built keyed by `definitionKey()` which returns `"${kind}:${database}.${name}"`.
+4. Three passes: (a) detect drops (old not in new), (b) detect modifications (both old and new exist -- delegates to `diffTables()` for tables, direct comparison for views), (c) detect creates (new not in old).
+5. Database `CREATE DATABASE IF NOT EXISTS` operations are added for any database referenced in create operations (lines 420-426).
+6. Operations are sorted by a rank function: drops first (0), alters (1), create_database (2), create_table (3), create_view (4), other (5), then alphabetically by key.
+7. Rename suggestions are inferred by `inferColumnRenameSuggestions()` at lines 147-193 which matches dropped and added columns by identical `JSON.stringify(normalizeColumn())` signatures.
+
+**Layer 2: SQL Rendering (`@chkit/core/sql.ts`)**
+
+Individual SQL render functions at `/Users/marc/conductor/workspaces/chkit/kabul/packages/core/src/sql.ts`:
+- `toCreateSQL()` (line 72-77) dispatches to `renderTableSQL`, `renderViewSQL`, or `renderMaterializedViewSQL`.
+- `renderTableSQL()` (line 33-62) builds `CREATE TABLE IF NOT EXISTS` with columns, indexes, projections, engine, partitionBy, primaryKey, orderBy, uniqueKey, TTL, settings, comment clauses.
+- `renderColumn()` (line 20-25) renders a single column with nullable wrapping, default value, and comment.
+- `renderDefault()` (line 12-18) handles the `fn:` prefix convention: `fn:now64(3)` renders as `now64(3)` (raw expression), while regular strings are single-quoted with escaping.
+- ALTER renderers (lines 79-124) produce individual `ALTER TABLE` statements.
+
+**Layer 3: Artifact Generation (`@chkit/codegen`)**
+
+The `generateArtifacts()` function at `/Users/marc/conductor/workspaces/chkit/kabul/packages/codegen/src/index.ts:68-103`:
+
+1. Generates a timestamp-based or custom migration ID for the filename.
+2. Creates directories (`migrationsDir`, `metaDir`) via `mkdir({ recursive: true })`.
+3. Builds migration file content via `buildMigrationContent()` (lines 37-66), which writes a structured comment header containing:
+   - Format version: `-- chkit-migration-format: v1`
+   - Generation timestamp
+   - CLI version
+   - Definition count, operation count, rename suggestion count
+   - Risk summary
+   - Per-operation comments: `-- operation: <type> key=<key> risk=<risk>` followed by the SQL
+4. Only writes the migration file if there are operations (line 86-88, null otherwise).
+5. Always writes the snapshot file as `snapshot.json` in `metaDir`.
+6. The snapshot is created via `createSnapshot()` from `@chkit/core` at line 90, which canonicalizes definitions and stores them with a timestamp.
+
+**The rename pipeline** (in `generate/plan-pipeline.ts` and `generate/rename-mappings.ts`):
+
+The `cmdGenerate` function at `/Users/marc/conductor/workspaces/chkit/kabul/packages/cli/src/bin/commands/generate.ts:76-140` orchestrates rename processing:
+1. Parse `--rename-table` and `--rename-column` CLI flags into mapping objects.
+2. Collect schema-declared renames from `renamedFrom` properties on `TableDefinition` and `ColumnDefinition`.
+3. Merge CLI and schema mappings (CLI overrides schema for conflicts).
+4. Validate: no conflicting or chained mappings, mappings reference existing definitions.
+5. For table renames: remap old definitions' names so the planner sees them as the same table (at line 113-116 via `remapOldDefinitionsForTableRenames()`), then post-process the plan to replace drop+create pairs with `RENAME TABLE` operations (at line 138 via `applyExplicitTableRenames()`).
+6. For column renames: match confirmed mappings against the plan's drop+add column operation pairs and replace them with `RENAME COLUMN` operations (at line 140 via `applySelectedRenameSuggestions()`).
+
+### Summary of Structural Patterns
+
+- **Plugin architecture**: Plugins implement a `ChxPlugin` interface with `manifest`, optional `hooks`, optional `commands`, and optional `extendCommands`. The runtime loads them via dynamic import or inline registration. Hooks run sequentially for all loaded plugins. The command registry merges core and plugin commands into a unified dispatch.
+
+- **Dual output mode**: Every command supports `--json` for machine-readable output. The `emitJson()` helper wraps payloads with `command` and `schemaVersion` fields. Text output is written directly to `console.log`.
+
+- **Snapshot-based diffing**: The generate command compares the previous snapshot (from `metaDir/snapshot.json`) against current schema definitions to produce a plan. The migrate command reads `.sql` files and a journal (`metaDir/journal.json`) to track applied migrations with checksums.
+
+- **Table scope filtering**: The `--table` flag enables selective operations. The `TableScope` type tracks enabled state, selector string, and matched table keys. Scope filtering is applied post-planning in both `generate` and `migrate` commands.</result>
+<usage>total_tokens: 149857
+tool_uses: 70
+duration_ms: 315661</usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+Show me the report
+
+---
+
+1. I am wondering for the e2e tests, would it make moreo sense to have a dedicated database for it. and just insert data + read the inserted data? or is there a benefit of a dedicated DB per run?
+
+2. what does it mean that clickhouse-live.e2e.test.ts has a guard but pull does not?
+
+Okay lets go deeper on the recommendations. Can you write them into the file system. SO we can have dedicated sessions for them. (into .context)
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. First, there was a system instruction to rename the branch using `git branch -m` with prefix "KeKs0r/".
+
+2. The user's main request was to review the architecture and structure of the repository, focusing on:
+   - Simplicity, extendability, and type safety (easily verifiable by agents)
+   - Flag any use of casts (they should be exceptions)
+   - Review test cases - they should test results, not meaningless implementation; prefer integration tests; should be reliable
+   - Make a full review report
+
+3. I renamed the branch to `KeKs0r/full-code-review` and launched 4 parallel subagents:
+   - Architecture analysis (a4fbd4c)
+   - Type safety and casts review (a6eb549)
+   - Test quality review (a98a574)
+   - Code quality review (ac97642)
+
+4. All four agents completed after several minutes of work. I compiled a comprehensive review report.
+
+5. The user then asked two questions:
+   - About e2e tests: dedicated database vs per-run database
+   - What does it mean that clickhouse-live.e2e.test.ts has a guard but pull does not?
+   - Asked to write recommendations into the filesystem (.context directory)
+
+6. I answered both questions and wrote 12 files into .context/:
+   - review-summary.md
+   - rec-01 through rec-11 (11 recommendation files)
+
+Let me catalog all the files created and their contents.
+
+Summary:
+1. Primary Request and Intent:
+   The user requested a comprehensive architecture and code review of the chkit monorepo (a ClickHouse schema management and migration toolkit). Specific review criteria:
+   - **Simplicity, extendability, and type safety** - especially that types are easily verifiable by agents
+   - **Flag all uses of casts** (`as` casts) since they should be exceptions
+   - **Review test cases** - should test results not implementation details; prefer integration tests that test overall behavior; must be reliable
+   - **Produce a full review report**
+   
+   After the report was delivered, the user asked two follow-up questions about test architecture and then requested all recommendations be written as individual files in `.context/` for dedicated implementation sessions.
+
+2. Key Technical Concepts:
+   - TypeScript monorepo with Bun workspaces and Turborepo
+   - 7 packages: `@chkit/core`, `@chkit/clickhouse`, `@chkit/codegen`, `chkit` (CLI), `@chkit/plugin-codegen`, `@chkit/plugin-pull`, `@chkit/plugin-backfill`
+   - Plugin architecture with 3 registration forms (string, legacy, inline) and typed `ChxInlinePluginRegistration<TPlugin, TOptions>` generic
+   - Custom CLI framework (no third-party CLI library) with flag parsing, command registry
+   - Schema diffing engine: snapshot-based comparison producing migration plans with risk classification
+   - `ParsedFlags = Record<string, string | string[] | boolean | undefined>` - root cause of ~25 casts
+   - Discriminated unions on `kind` field for `SchemaDefinition`, `IntrospectedObject`, etc.
+   - Zero `any`, zero `@ts-ignore`, zero mocks in the entire codebase
+   - CLI-as-black-box testing pattern (subprocess spawning with JSON output assertions)
+   - Per-run unique database names for ClickHouse e2e test isolation
+
+3. Files and Code Sections:
+   - `.context/review-summary.md` - Created. Index of all 11 recommendation files with priority/effort/impact table.
+   
+   - `.context/rec-01-typed-flag-parser.md` - Created. HIGH priority. Documents how `parseFlags()` returns untyped `ParsedFlags` causing ~25 casts. Lists all affected files. Proposes two approaches: (A) mapped type inference from flag definitions, (B) typed accessor helpers.
+   
+   - `.context/rec-02-fix-cli-version.md` - Created. HIGH priority. `CLI_VERSION = '0.1.0'` at `packages/cli/src/bin/version.ts:1` doesn't match `package.json` version `0.1.0-beta.7`.
+   
+   - `.context/rec-03-unify-split-comma.md` - Created. MEDIUM priority. `splitTopLevelComma` duplicated in 3 places: `core/src/key-clause.ts`, `clickhouse/src/create-table-parser.ts`, `plugin-pull/src/index.ts`.
+   
+   - `.context/rec-04-plugin-error-handler.md` - Created. MEDIUM priority. Try/catch boilerplate repeated 8 times across all plugins. Proposes shared `runPluginCommand` wrapper.
+   
+   - `.context/rec-05-delete-dead-code.md` - Created. MEDIUM priority. Three items: `ChxPluginRegistrationMeta` (unused interface), unused `Command` union members, `addOperation` trivial wrapper.
+   
+   - `.context/rec-06-split-codegen-plugin.md` - Created. MEDIUM priority. `plugin-codegen/src/index.ts` is 1,061 lines. Proposes splitting into `plugin.ts`, `type-mapping.ts`, `generate-types.ts`, `generate-ingest.ts`, `options.ts`, `types.ts`.
+   
+   - `.context/rec-07-remove-phantom-dep.md` - Created. MEDIUM priority. `fast-glob` in `plugin-codegen/package.json` is never directly imported.
+   
+   - `.context/rec-08-chkit-non-null-assertions.md` - Created. LOW priority. 4 `!` assertions in `chkit.ts` at lines 86, 95, 262, 289. Documents fix approaches including discriminated `RegisteredCommand` types.
+   
+   - `.context/rec-09-clickhouse-executor-close.md` - Created. LOW priority. `ClickHouseExecutor` interface lacks `close()` method.
+   
+   - `.context/rec-10-test-coverage-gaps.md` - Created. LOW priority. Lists gaps: init command, human-readable output, config loading edges, plugin loading errors, migrate error recovery, pull.e2e.test.ts env var guard.
+   
+   - `.context/rec-11-share-test-utils.md` - Created. LOW priority. `getRequiredEnv()`, `runSql()`, `dropDatabase()`, `retry()` duplicated across 3 live e2e test files.
+
+   Key files examined by agents (not modified):
+   - `packages/cli/src/bin/chkit.ts` - CLI entry point, command dispatch, 4 non-null assertions
+   - `packages/cli/src/bin/parse-flags.ts` - Flag parser returning untyped `ParsedFlags`
+   - `packages/cli/src/plugins.ts` - Plugin types, dead `ChxPluginRegistrationMeta`
+   - `packages/core/src/model-types.ts` - Core type definitions, discriminated unions
+   - `packages/core/src/planner.ts` - Diff/migration planning engine
+   - `packages/core/src/key-clause.ts` - `splitTopLevelComma` (one of 3 copies)
+   - `packages/plugin-codegen/src/index.ts` - 1,061-line single file
+   - `packages/plugin-backfill/src/plugin.ts` - 6 repeated try/catch blocks
+   - `packages/cli/src/bin/version.ts` - Hardcoded `CLI_VERSION = '0.1.0'`
+
+4. Errors and fixes:
+   - No code errors were encountered. This was a read-only review task.
+   - Initial `TaskOutput` calls timed out at 120s because agents were still running. Fixed by retrying with 300s timeout, after which all agents completed successfully.
+
+5. Problem Solving:
+   - Successfully parallelized 4 review agents to analyze different aspects simultaneously
+   - Compiled findings from all 4 agents into a unified report
+   - Answered user's architectural questions about per-run database isolation (correct for DDL-testing tool) and env var guard inconsistency between test files
+   - Wrote 12 recommendation files as self-contained task briefs for future sessions
+
+6. All user messages:
+   - "Review the architecture and structure of this repository. DO it in subagents and give feedback. Goals are simplicity, extendability and type safety, in a sense that its easily verifyable by agents. Also flag use of any casts, since we dont like them. they should be the exception. Also rview the test cases, they should test the results, not meaningless implementaiton. prefer integrationt ests that test overall behaviour. But they should also be reliable, Make a full review report"
+   - (Empty message while agents were running)
+   - "Show me the report"
+   - "1. I am wondering for the e2e tests, would it make moreo sense to have a dedicated database for it. and just insert data + read the inserted data? or is there a benefit of a dedicated DB per run? 2. what does it mean that clickhouse-live.e2e.test.ts has a guard but pull does not? Okay lets go deeper on the recommendations. Can you write them into the file system. SO we can have dedicated sessions for them. (into .context)"
+
+7. Pending Tasks:
+   - No explicitly pending tasks. The review and recommendation writing is complete. The 11 recommendation files in `.context/` are ready for dedicated implementation sessions.
+
+8. Current Work:
+   The most recently completed work was writing 12 files into `.context/`:
+   - `review-summary.md` (index)
+   - `rec-01-typed-flag-parser.md` through `rec-11-share-test-utils.md`
+   
+   This was in direct response to the user's request: "Okay lets go deeper on the recommendations. Can you write them into the file system. SO we can have dedicated sessions for them. (into .context)"
+   
+   All files were written successfully. The branch is `KeKs0r/full-code-review`. No code changes were made to the repository itself - this was a review-only session.
+
+9. Optional Next Step:
+   No next step required. The review is complete and all recommendations have been written to `.context/`. The user indicated these are for "dedicated sessions" - meaning separate future workspaces/sessions will pick up individual recommendations. Awaiting user direction on which recommendation to tackle first, if any.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/marc/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+ah no write all of them in a single file please.
+
+---
+
+make sure we have a table at the top and then a detailed description later. In the table,  besides priority also add an Effort column

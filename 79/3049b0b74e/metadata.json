@@ -3,9 +3,21 @@
   "checkpoint_id": "793049b0b74e",
   "strategy": "manual-commit",
   "branch": "KeKs0r/full-code-review",
-  "checkpoints_count": 5,
+  "checkpoints_count": 7,
   "files_touched": [
     ".context/code-review.md",
+    ".context/rec-01-typed-flag-parser.md",
+    ".context/rec-02-fix-cli-version.md",
+    ".context/rec-03-unify-split-comma.md",
+    ".context/rec-04-plugin-error-handler.md",
+    ".context/rec-05-delete-dead-code.md",
+    ".context/rec-06-split-codegen-plugin.md",
+    ".context/rec-07-remove-phantom-dep.md",
+    ".context/rec-08-chkit-non-null-assertions.md",
+    ".context/rec-09-clickhouse-executor-close.md",
+    ".context/rec-10-test-coverage-gaps.md",
+    ".context/rec-11-share-test-utils.md",
+    ".context/review-summary.md",
     "packages/cli/src/bin/chkit.ts",
     "packages/cli/src/bin/version.ts",
     "packages/clickhouse/src/create-table-parser.ts",
@@ -33,13 +45,20 @@
       "context": "/79/3049b0b74e/2/context.md",
       "content_hash": "/79/3049b0b74e/2/content_hash.txt",
       "prompt": "/79/3049b0b74e/2/prompt.txt"
+    },
+    {
+      "metadata": "/79/3049b0b74e/3/metadata.json",
+      "transcript": "/79/3049b0b74e/3/full.jsonl",
+      "context": "/79/3049b0b74e/3/context.md",
+      "content_hash": "/79/3049b0b74e/3/content_hash.txt",
+      "prompt": "/79/3049b0b74e/3/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 191,
-    "cache_creation_tokens": 127282,
-    "cache_read_tokens": 1948873,
-    "output_tokens": 484,
-    "api_call_count": 54
+    "input_tokens": 2121,
+    "cache_creation_tokens": 588602,
+    "cache_read_tokens": 3553304,
+    "output_tokens": 586,
+    "api_call_count": 81
   }
 }

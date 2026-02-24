@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "793049b0b74e",
+  "session_id": "3b838b9d-e1be-4128-a012-62f727c6d343",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T02:22:22.571989Z",
+  "branch": "KeKs0r/full-code-review",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".context/code-review.md",
+    ".context/rec-01-typed-flag-parser.md",
+    ".context/rec-02-fix-cli-version.md",
+    ".context/rec-03-unify-split-comma.md",
+    ".context/rec-04-plugin-error-handler.md",
+    ".context/rec-05-delete-dead-code.md",
+    ".context/rec-06-split-codegen-plugin.md",
+    ".context/rec-07-remove-phantom-dep.md",
+    ".context/rec-08-chkit-non-null-assertions.md",
+    ".context/rec-09-clickhouse-executor-close.md",
+    ".context/rec-10-test-coverage-gaps.md",
+    ".context/rec-11-share-test-utils.md",
+    ".context/review-summary.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "ed71b3b8-d9fb-4bc0-a8d0-53a5739ce0d1",
+  "token_usage": {
+    "input_tokens": 1930,
+    "cache_creation_tokens": 461320,
+    "cache_read_tokens": 1604431,
+    "output_tokens": 102,
+    "api_call_count": 27
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T02:22:17.981434Z",
+    "agent_lines": 0,
+    "human_added": 383,
+    "human_modified": 560,
+    "human_removed": 0,
+    "total_committed": 392,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-kabul/3b838b9d-e1be-4128-a012-62f727c6d343.jsonl"
+}
