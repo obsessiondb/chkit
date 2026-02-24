@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "e701ea0a0d66",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/add-plugin-obsessiondb.md",
+    ".changeset/custom-cli-framework.md",
+    ".changeset/fix-migration-ordering.md",
+    ".changeset/internal-refactors.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e7/01ea0a0d66/0/metadata.json",
+      "transcript": "/e7/01ea0a0d66/0/full.jsonl",
+      "context": "/e7/01ea0a0d66/0/context.md",
+      "content_hash": "/e7/01ea0a0d66/0/content_hash.txt",
+      "prompt": "/e7/01ea0a0d66/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 15926,
+    "cache_read_tokens": 212738,
+    "output_tokens": 1697,
+    "api_call_count": 8
+  }
+}

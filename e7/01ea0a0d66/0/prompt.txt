@@ -1,0 +1,5 @@
+I want to do a new release, what do I need to do?
+
+---
+
+i think I did not create changesets, can you check github which pull requests have been merged since the last release and generate a changset

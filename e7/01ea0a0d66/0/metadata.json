@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "e701ea0a0d66",
+  "session_id": "096a7750-5cd7-4da8-8ce7-784a8138f36f",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T04:43:55.604156Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/add-plugin-obsessiondb.md",
+    ".changeset/custom-cli-framework.md",
+    ".changeset/fix-migration-ordering.md",
+    ".changeset/internal-refactors.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "72252d9e-191e-4100-b79d-69e1c82e490a",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 15926,
+    "cache_read_tokens": 212738,
+    "output_tokens": 1697,
+    "api_call_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T04:43:55.558497Z",
+    "agent_lines": 27,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 27,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chkit/096a7750-5cd7-4da8-8ce7-784a8138f36f.jsonl"
+}
