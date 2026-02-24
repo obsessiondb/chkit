@@ -13,8 +13,10 @@ import {
   type MaterializedViewDefinition,
   type ResolvedChxConfig,
   type SchemaDefinition,
+  splitTopLevelComma,
   type TableDefinition,
   type ViewDefinition,
+  wrapPluginRun,
 } from '@chkit/core'
 
 export interface PullPluginOptions {
@@ -117,61 +119,58 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
           { name: '--database', type: 'string[]' as const, description: 'Database names to pull', placeholder: '<name>' },
         ],
         async run({ flags, jsonMode, print, options: runtimeOptions, config }) {
-          try {
-            const overrides = flagsToOverrides(flags)
-            const mergedOptions = mergeOptions(base, runtimeOptions, overrides)
-            const pulled = await pullSchema({
-              config,
-              options: { ...mergedOptions, introspect: introspector },
-            })
-
-            if (!overrides.dryrun) {
-              await writeSchemaFile({
-                outFile: pulled.outFile,
-                content: pulled.content,
-                overwrite: mergedOptions.overwrite,
+          return wrapPluginRun({
+            command: 'schema',
+            label: 'Pull schema',
+            jsonMode,
+            print,
+            configErrorClass: PullConfigError,
+            fn: async () => {
+              const overrides = flagsToOverrides(flags)
+              const mergedOptions = mergeOptions(base, runtimeOptions, overrides)
+              const pulled = await pullSchema({
+                config,
+                options: { ...mergedOptions, introspect: introspector },
               })
-            }
 
-            const payload = {
-              ok: true,
-              command: 'schema' as const,
-              outFile: pulled.outFile,
-              definitionCount: pulled.definitionCount,
-              tableCount: pulled.tableCount,
-              databases: pulled.databases,
-              skippedObjects: pulled.skippedObjects,
-              dryrun: overrides.dryrun,
-              ...(overrides.dryrun ? { content: pulled.content } : {}),
-            }
+              if (!overrides.dryrun) {
+                await writeSchemaFile({
+                  outFile: pulled.outFile,
+                  content: pulled.content,
+                  overwrite: mergedOptions.overwrite,
+                })
+              }
 
-            if (jsonMode) {
-              print(payload)
+              const payload = {
+                ok: true,
+                command: 'schema' as const,
+                outFile: pulled.outFile,
+                definitionCount: pulled.definitionCount,
+                tableCount: pulled.tableCount,
+                databases: pulled.databases,
+                skippedObjects: pulled.skippedObjects,
+                dryrun: overrides.dryrun,
+                ...(overrides.dryrun ? { content: pulled.content } : {}),
+              }
+
+              if (jsonMode) {
+                print(payload)
+                return 0
+              }
+
+              if (overrides.dryrun) {
+                print(
+                  `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
+                )
+                print(pulled.content)
+              } else {
+                print(
+                  `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
+                )
+              }
               return 0
-            }
-
-            if (overrides.dryrun) {
-              print(
-                `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
-              )
-              print(pulled.content)
-            } else {
-              print(
-                `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
-              )
-            }
-            return 0
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            if (jsonMode) {
-              print({ ok: false, command: 'schema', error: message })
-            } else {
-              print(`Pull schema failed: ${message}`)
-            }
-
-            if (error instanceof PullConfigError) return 2
-            return 1
-          }
+            },
+          })
         },
       },
     ],
@@ -406,57 +405,7 @@ function summarizeSkippedObjects(
 
 function splitTopLevelCommaSeparated(input: string | undefined): string[] {
   if (!input) return []
-
-  const values: string[] = []
-  let current = ''
-  let depth = 0
-  let inString = false
-  let quote = "'"
-
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i]
-    if (!char) continue
-
-    if (inString) {
-      current += char
-      if (char === quote && input[i - 1] !== '\\') {
-        inString = false
-      }
-      continue
-    }
-
-    if (char === "'" || char === '"') {
-      current += char
-      inString = true
-      quote = char
-      continue
-    }
-
-    if (char === '(') {
-      depth += 1
-      current += char
-      continue
-    }
-
-    if (char === ')') {
-      depth = Math.max(0, depth - 1)
-      current += char
-      continue
-    }
-
-    if (char === ',' && depth === 0) {
-      const chunk = normalizeWrappedTuple(current)
-      if (chunk.length > 0) values.push(chunk)
-      current = ''
-      continue
-    }
-
-    current += char
-  }
-
-  const last = normalizeWrappedTuple(current)
-  if (last.length > 0) values.push(last)
-  return values
+  return splitTopLevelComma(input).map(normalizeWrappedTuple)
 }
 
 function normalizeWrappedTuple(input: string): string {

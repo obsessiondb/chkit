@@ -51,11 +51,6 @@ export interface ChxPluginManifest {
   }
 }
 
-export interface ChxPluginRegistrationMeta {
-  resolve: string
-  options: Record<string, unknown>
-}
-
 export interface ChxPluginHookContextBase {
   command: string
   config: ResolvedChxConfig

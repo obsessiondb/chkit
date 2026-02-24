@@ -7,6 +7,8 @@ export {
 export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'
 export { loadSchemaDefinitions, type SchemaLoaderOptions } from './schema-loader.js'
+export { splitTopLevelComma } from './key-clause.js'
 export { normalizeSQLFragment } from './sql-normalizer.js'
 export { toCreateSQL } from './sql.js'
 export { assertValidDefinitions, validateDefinitions } from './validate.js'
+export { wrapPluginRun } from './plugin-error.js'
