@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "793049b0b74e",
+  "session_id": "d0b80c5e-0654-4bc7-bc21-2a5c2a1a95d7",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T02:22:23.19534Z",
+  "branch": "KeKs0r/full-code-review",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".context/code-review.md",
+    "packages/core/src/index.ts",
+    "packages/core/src/plugin-error.ts",
+    "packages/plugin-backfill/src/plugin.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-pull/src/index.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 35,
+    "cache_creation_tokens": 93654,
+    "cache_read_tokens": 2220456,
+    "output_tokens": 238,
+    "api_call_count": 32
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T02:22:22.946053Z",
+    "agent_lines": 343,
+    "human_added": 0,
+    "human_modified": 49,
+    "human_removed": 511,
+    "total_committed": 392,
+    "agent_percentage": 87.5
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-kabul/d0b80c5e-0654-4bc7-bc21-2a5c2a1a95d7.jsonl"
+}
