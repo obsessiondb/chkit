@@ -4,7 +4,7 @@ import type {
   SchemaDefinition,
 } from '@chkit/core'
 
-export interface ObsessionDBPluginOptions {}
+export type ObsessionDBPluginOptions = Record<string, never>
 
 interface ObsessionDBPlugin {
   manifest: { name: 'obsessiondb'; apiVersion: 1 }
@@ -21,7 +21,7 @@ interface ObsessionDBPlugin {
       config: ResolvedChxConfig
       flags: Record<string, string | string[] | boolean | undefined>
       definitions: SchemaDefinition[]
-    }): SchemaDefinition[] | void
+    }): SchemaDefinition[] | undefined
   }
 }
 

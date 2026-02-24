@@ -219,9 +219,9 @@ describe('obsessiondb plugin', () => {
 
     expect(result).toBeDefined()
     expect(result).toHaveLength(3)
-    expect((result![0] as { engine: string }).engine).toBe('ReplacingMergeTree(ts)')
-    expect((result![1] as { engine: string }).engine).toBe('MergeTree')
-    expect(result![2]).toEqual(makeView('events_view'))
+    expect((result?.[0] as { engine: string }).engine).toBe('ReplacingMergeTree(ts)')
+    expect((result?.[1] as { engine: string }).engine).toBe('MergeTree')
+    expect(result?.[2]).toEqual(makeView('events_view'))
   })
 
   test('onSchemaLoaded is a no-op for ObsessionDB hosts', () => {
