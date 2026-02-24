@@ -3,7 +3,7 @@
   "checkpoint_id": "793049b0b74e",
   "strategy": "manual-commit",
   "branch": "KeKs0r/full-code-review",
-  "checkpoints_count": 8,
+  "checkpoints_count": 10,
   "files_touched": [
     ".context/code-review.md",
     ".context/rec-01-typed-flag-parser.md",
@@ -19,10 +19,13 @@
     ".context/rec-11-share-test-utils.md",
     ".context/review-summary.md",
     "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/json-output.ts",
     "packages/cli/src/bin/version.ts",
+    "packages/cli/src/plugins.ts",
     "packages/clickhouse/src/create-table-parser.ts",
     "packages/clickhouse/src/index.ts",
     "packages/core/src/index.ts",
+    "packages/core/src/planner.ts",
     "packages/plugin-pull/src/index.ts"
   ],
   "sessions": [
@@ -60,13 +63,20 @@
       "context": "/79/3049b0b74e/4/context.md",
       "content_hash": "/79/3049b0b74e/4/content_hash.txt",
       "prompt": "/79/3049b0b74e/4/prompt.txt"
+    },
+    {
+      "metadata": "/79/3049b0b74e/5/metadata.json",
+      "transcript": "/79/3049b0b74e/5/full.jsonl",
+      "context": "/79/3049b0b74e/5/context.md",
+      "content_hash": "/79/3049b0b74e/5/content_hash.txt",
+      "prompt": "/79/3049b0b74e/5/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 2130,
-    "cache_creation_tokens": 607411,
-    "cache_read_tokens": 3775796,
-    "output_tokens": 618,
-    "api_call_count": 89
+    "input_tokens": 8906,
+    "cache_creation_tokens": 670747,
+    "cache_read_tokens": 4140005,
+    "output_tokens": 719,
+    "api_call_count": 100
   }
 }
