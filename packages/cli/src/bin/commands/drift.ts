@@ -3,7 +3,8 @@ import { join } from 'node:path'
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
 
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { GLOBAL_FLAGS } from '../global-flags.js'
 import {
   compareSchemaObjects,
   compareTableShape,
@@ -104,8 +105,9 @@ export async function buildDriftPayload(
 
 async function cmdDrift(ctx: CommandRunContext): Promise<void> {
   const { flags, config, dirs } = ctx
-  const tableSelector = flags['--table'] as string | undefined
-  const jsonMode = flags['--json'] === true
+  const f = typedFlags(flags, GLOBAL_FLAGS)
+  const tableSelector = f['--table']
+  const jsonMode = f['--json'] === true
   const { metaDir } = dirs
   const snapshot = await readSnapshot(metaDir)
   if (!snapshot) {

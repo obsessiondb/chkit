@@ -2,7 +2,8 @@ import { generateArtifacts } from '@chkit/codegen'
 import process from 'node:process'
 import { ChxValidationError, planDiff } from '@chkit/core'
 
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { GLOBAL_FLAGS } from '../global-flags.js'
 import {
   CLI_VERSION,
   emitJson,
@@ -35,26 +36,29 @@ import {
 } from './generate/rename-mappings.js'
 import { emitGenerateApplyOutput, emitGeneratePlanOutput } from './generate/output.js'
 
+const GENERATE_FLAGS = defineFlags([
+  { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },
+  { name: '--migration-id', type: 'string', description: 'Deterministic migration file prefix', placeholder: '<id>' },
+  { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },
+  { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },
+  { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
+] as const)
+
 export const generateCommand: CommandDef = {
   name: 'generate',
   description: 'Generate migration artifacts from schema definitions',
-  flags: [
-    { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },
-    { name: '--migration-id', type: 'string', description: 'Deterministic migration file prefix', placeholder: '<id>' },
-    { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },
-    { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },
-    { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
-  ],
+  flags: GENERATE_FLAGS,
   run: cmdGenerate,
 }
 
 async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
   const { flags, config, configPath, dirs, pluginRuntime } = ctx
-  const migrationName = flags['--name'] as string | undefined
-  const migrationId = flags['--migration-id'] as string | undefined
-  const tableSelector = flags['--table'] as string | undefined
-  const planMode = flags['--dryrun'] === true
-  const jsonMode = flags['--json'] === true
+  const f = typedFlags(flags, [...GLOBAL_FLAGS, ...GENERATE_FLAGS] as const)
+  const migrationName = f['--name']
+  const migrationId = f['--migration-id']
+  const tableSelector = f['--table']
+  const planMode = f['--dryrun'] === true
+  const jsonMode = f['--json'] === true
 
   await pluginRuntime.runOnConfigLoaded({
     command: 'generate',
@@ -73,8 +77,8 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
     definitions,
   })
 
-  const renameTableValues = (flags['--rename-table'] as string[] | undefined) ?? []
-  const renameColumnValues = (flags['--rename-column'] as string[] | undefined) ?? []
+  const renameTableValues = f['--rename-table'] ?? []
+  const renameColumnValues = f['--rename-column'] ?? []
   const cliTableMappings = parseRenameTableMappings(renameTableValues)
   const cliColumnMappings = parseRenameColumnMappings(renameColumnValues)
   const schemaMappings = collectSchemaRenameMappings(definitions)

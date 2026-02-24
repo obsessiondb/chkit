@@ -11,7 +11,7 @@ import type {
   GenerateIngestArtifactsOutput,
 } from './types.js'
 import { CodegenConfigError } from './errors.js'
-import { flagsToOverrides, mergeOptions, normalizeCodegenOptions, normalizeRuntimeOptions } from './options.js'
+import { CODEGEN_FLAGS, flagsToOverrides, mergeOptions, normalizeCodegenOptions, normalizeRuntimeOptions } from './options.js'
 import { generateIngestArtifacts, generateTypeArtifacts } from './generators.js'
 
 async function writeAtomic(targetPath: string, content: string): Promise<void> {
@@ -110,15 +110,7 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
       {
         name: 'codegen',
         description: 'Generate TypeScript artifacts from chkit schema definitions',
-        flags: [
-          { name: '--check', type: 'boolean' as const, description: 'Check if generated output is up-to-date' },
-          { name: '--out-file', type: 'string' as const, description: 'Output file path', placeholder: '<path>' },
-          { name: '--emit-zod', type: 'boolean' as const, description: 'Emit Zod schemas alongside TypeScript types', negation: true },
-          { name: '--emit-ingest', type: 'boolean' as const, description: 'Emit ingest helper functions', negation: true },
-          { name: '--ingest-out-file', type: 'string' as const, description: 'Ingest output file path', placeholder: '<path>' },
-          { name: '--bigint-mode', type: 'string' as const, description: 'How to represent large integers (string or bigint)', placeholder: '<mode>' },
-          { name: '--include-views', type: 'boolean' as const, description: 'Include views in generated output' },
-        ],
+        flags: CODEGEN_FLAGS,
         async run({
           flags,
           jsonMode,

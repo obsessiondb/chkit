@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import process from 'node:process'
 
-import type { FlagDef, ParsedFlags } from '../plugins.js'
+import type { ParsedFlags } from '../plugins.js'
+import { typedFlags } from '../plugins.js'
 import { createCommandRegistry } from './command-registry.js'
 import { generateCommand } from './commands/generate.js'
 import { migrateCommand } from './commands/migrate.js'
@@ -11,18 +12,13 @@ import { checkCommand } from './commands/check.js'
 import { pluginCommand } from './commands/plugin.js'
 import { cmdInit } from './commands/init.js'
 import { loadConfig, resolveDirs } from './config.js'
+import { GLOBAL_FLAGS } from './global-flags.js'
 import { formatGlobalHelp, formatCommandHelp } from './help.js'
-import { parseFlags, UnknownFlagError, MissingFlagValueError } from './parse-flags.js'
+import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { loadPluginRuntime } from './plugin-runtime.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { CLI_VERSION } from './version.js'
-
-const GLOBAL_FLAGS: FlagDef[] = [
-  { name: '--config', type: 'string', description: 'Path to config file', placeholder: '<path>' },
-  { name: '--json', type: 'boolean', description: 'Emit machine-readable JSON output' },
-  { name: '--table', type: 'string', description: 'Limit command scope to tables by exact name or trailing wildcard prefix', placeholder: '<selector>' },
-]
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
@@ -195,8 +191,9 @@ async function main(): Promise<void> {
       throw error
     }
 
-    const jsonMode = flags['--json'] === true
-    const tableSelector = flags['--table'] as string | undefined
+    const gf = typedFlags(flags, GLOBAL_FLAGS)
+    const jsonMode = gf['--json'] === true
+    const tableSelector = gf['--table']
 
     let tableScope: ReturnType<typeof resolveTableScope>
     try {

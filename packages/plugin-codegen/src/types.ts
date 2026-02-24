@@ -1,6 +1,8 @@
 import type {
   ChxInlinePluginRegistration,
+  FlagDef,
   MaterializedViewDefinition,
+  ParsedFlags,
   ResolvedChxConfig,
   TableDefinition,
   ViewDefinition,
@@ -20,7 +22,7 @@ export interface CodegenPluginOptions {
 
 export interface CodegenPluginCommandContext {
   args: string[]
-  flags: Record<string, string | string[] | boolean | undefined>
+  flags: ParsedFlags
   jsonMode: boolean
   options: Record<string, unknown>
   config: ResolvedChxConfig
@@ -37,13 +39,7 @@ export interface CodegenPlugin {
   commands: Array<{
     name: 'codegen'
     description: string
-    flags?: Array<{
-      name: string
-      type: 'boolean' | 'string' | 'string[]'
-      description: string
-      placeholder?: string
-      negation?: boolean
-    }>
+    flags?: readonly FlagDef[]
     run: (context: CodegenPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
   hooks?: {

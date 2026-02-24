@@ -1,3 +1,5 @@
+import { defineFlags, typedFlags, type ParsedFlags } from '@chkit/core'
+
 import type { CodegenPluginOptions, FlagOverrides } from './types.js'
 import { CodegenConfigError } from './errors.js'
 
@@ -82,19 +84,30 @@ export function normalizeCodegenOptions(options: CodegenPluginOptions = {}): Req
   }
 }
 
-export function flagsToOverrides(flags: Record<string, string | string[] | boolean | undefined>): FlagOverrides {
-  const rawBigintMode = flags['--bigint-mode'] as string | undefined
+export const CODEGEN_FLAGS = defineFlags([
+  { name: '--check', type: 'boolean', description: 'Check if generated output is up-to-date' },
+  { name: '--out-file', type: 'string', description: 'Output file path', placeholder: '<path>' },
+  { name: '--emit-zod', type: 'boolean', description: 'Emit Zod schemas alongside TypeScript types', negation: true },
+  { name: '--emit-ingest', type: 'boolean', description: 'Emit ingest helper functions', negation: true },
+  { name: '--ingest-out-file', type: 'string', description: 'Ingest output file path', placeholder: '<path>' },
+  { name: '--bigint-mode', type: 'string', description: 'How to represent large integers (string or bigint)', placeholder: '<mode>' },
+  { name: '--include-views', type: 'boolean', description: 'Include views in generated output' },
+] as const)
+
+export function flagsToOverrides(flags: ParsedFlags): FlagOverrides {
+  const f = typedFlags(flags, CODEGEN_FLAGS)
+  const rawBigintMode = f['--bigint-mode']
   if (rawBigintMode !== undefined && rawBigintMode !== 'string' && rawBigintMode !== 'bigint') {
     throw new CodegenConfigError('Invalid value for --bigint-mode. Expected string or bigint.')
   }
 
   return {
-    check: flags['--check'] === true,
-    outFile: flags['--out-file'] as string | undefined,
-    emitZod: flags['--emit-zod'] as boolean | undefined,
-    includeViews: flags['--include-views'] as boolean | undefined,
-    emitIngest: flags['--emit-ingest'] as boolean | undefined,
-    ingestOutFile: flags['--ingest-out-file'] as string | undefined,
+    check: f['--check'] === true,
+    outFile: f['--out-file'],
+    emitZod: f['--emit-zod'],
+    includeViews: f['--include-views'],
+    emitIngest: f['--emit-ingest'],
+    ingestOutFile: f['--ingest-out-file'],
     bigintMode: rawBigintMode,
   }
 }

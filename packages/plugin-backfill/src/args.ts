@@ -1,3 +1,5 @@
+import { defineFlags, typedFlags, type ParsedFlags } from '@chkit/core'
+
 import { BackfillConfigError } from './errors.js'
 import type {
   ParsedCancelArgs,
@@ -8,7 +10,35 @@ import type {
   ParsedStatusArgs,
 } from './types.js'
 
-type ParsedFlags = Record<string, string | string[] | boolean | undefined>
+export const PLAN_FLAGS = defineFlags([
+  { name: '--target', type: 'string', description: 'Target table (database.table)', placeholder: '<database.table>' },
+  { name: '--from', type: 'string', description: 'Start timestamp', placeholder: '<timestamp>' },
+  { name: '--to', type: 'string', description: 'End timestamp', placeholder: '<timestamp>' },
+  { name: '--chunk-hours', type: 'string', description: 'Hours per chunk', placeholder: '<hours>' },
+  { name: '--force-large-window', type: 'boolean', description: 'Allow large time windows without confirmation' },
+] as const)
+
+export const RUN_FLAGS = defineFlags([
+  { name: '--plan-id', type: 'string', description: 'Plan ID to execute', placeholder: '<id>' },
+  { name: '--replay-done', type: 'boolean', description: 'Re-execute already completed chunks' },
+  { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
+  { name: '--force-overlap', type: 'boolean', description: 'Allow overlapping runs' },
+  { name: '--force-compatibility', type: 'boolean', description: 'Skip compatibility checks' },
+  { name: '--simulate-fail-chunk', type: 'string', description: 'Simulate failure on chunk', placeholder: '<chunk-id>' },
+  { name: '--simulate-fail-count', type: 'string', description: 'Number of simulated failures', placeholder: '<count>' },
+] as const)
+
+export const RESUME_FLAGS = defineFlags([
+  { name: '--plan-id', type: 'string', description: 'Plan ID to resume', placeholder: '<id>' },
+  { name: '--replay-done', type: 'boolean', description: 'Re-execute already completed chunks' },
+  { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
+  { name: '--force-overlap', type: 'boolean', description: 'Allow overlapping runs' },
+  { name: '--force-compatibility', type: 'boolean', description: 'Skip compatibility checks' },
+] as const)
+
+export const PLAN_ID_FLAGS = defineFlags([
+  { name: '--plan-id', type: 'string', description: 'Plan ID', placeholder: '<id>' },
+] as const)
 
 function normalizeTimestamp(raw: string, flagName: string): string {
   const value = raw.trim()
@@ -41,11 +71,12 @@ function normalizePlanId(raw: string): string {
 }
 
 export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
-  const target = flags['--target'] as string | undefined
-  const from = flags['--from'] as string | undefined
-  const to = flags['--to'] as string | undefined
-  const rawChunkHours = flags['--chunk-hours'] as string | undefined
-  const forceLargeWindow = flags['--force-large-window'] === true
+  const f = typedFlags(flags, PLAN_FLAGS)
+  const target = f['--target']
+  const from = f['--from']
+  const to = f['--to']
+  const rawChunkHours = f['--chunk-hours']
+  const forceLargeWindow = f['--force-large-window'] === true
 
   let chunkHours: number | undefined
   if (rawChunkHours !== undefined) {
@@ -70,15 +101,16 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
 }
 
 export function parseRunArgs(flags: ParsedFlags): ParsedRunArgs {
-  const planId = flags['--plan-id'] as string | undefined
-  const replayDone = flags['--replay-done'] === true
-  const replayFailed = flags['--replay-failed'] === true
-  const forceOverlap = flags['--force-overlap'] === true
-  const forceCompatibility = flags['--force-compatibility'] === true
-  const simulateFailChunk = flags['--simulate-fail-chunk'] as string | undefined
+  const f = typedFlags(flags, RUN_FLAGS)
+  const planId = f['--plan-id']
+  const replayDone = f['--replay-done'] === true
+  const replayFailed = f['--replay-failed'] === true
+  const forceOverlap = f['--force-overlap'] === true
+  const forceCompatibility = f['--force-compatibility'] === true
+  const simulateFailChunk = f['--simulate-fail-chunk']
 
   let simulateFailCount = 1
-  const rawSimulateFailCount = flags['--simulate-fail-count'] as string | undefined
+  const rawSimulateFailCount = f['--simulate-fail-count']
   if (rawSimulateFailCount !== undefined) {
     const parsed = Number(rawSimulateFailCount)
     if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
@@ -112,7 +144,8 @@ export function parseResumeArgs(flags: ParsedFlags): ParsedResumeArgs {
 }
 
 export function parseStatusArgs(flags: ParsedFlags): ParsedStatusArgs {
-  const planId = flags['--plan-id'] as string | undefined
+  const f = typedFlags(flags, PLAN_ID_FLAGS)
+  const planId = f['--plan-id']
   if (!planId) throw new BackfillConfigError('Missing required --plan-id <id>')
   return { planId: normalizePlanId(planId) }
 }

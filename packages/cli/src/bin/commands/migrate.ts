@@ -5,7 +5,8 @@ import { createInterface } from 'node:readline/promises'
 
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
 import {
   checksumSQL,
@@ -25,14 +26,16 @@ import {
 } from '../safety-markers.js'
 import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../table-scope.js'
 
+const MIGRATE_FLAGS = defineFlags([
+  { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
+  { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
+  { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
+] as const)
+
 export const migrateCommand: CommandDef = {
   name: 'migrate',
   description: 'Review or execute pending migrations',
-  flags: [
-    { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
-    { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
-    { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
-  ],
+  flags: MIGRATE_FLAGS,
   run: cmdMigrate,
 }
 
@@ -95,10 +98,11 @@ async function filterPendingByScope(
 
 async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
   const { flags, config, configPath, dirs, pluginRuntime } = ctx
-  const executeRequested = flags['--apply'] === true || flags['--execute'] === true
-  const allowDestructive = flags['--allow-destructive'] === true
-  const tableSelector = flags['--table'] as string | undefined
-  const jsonMode = flags['--json'] === true
+  const f = typedFlags(flags, [...GLOBAL_FLAGS, ...MIGRATE_FLAGS] as const)
+  const executeRequested = f['--apply'] === true || f['--execute'] === true
+  const allowDestructive = f['--allow-destructive'] === true
+  const tableSelector = f['--table']
+  const jsonMode = f['--json'] === true
 
   const { migrationsDir, metaDir } = dirs
   const snapshot = await readSnapshot(metaDir)
