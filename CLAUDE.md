@@ -52,7 +52,10 @@ bun run lint         # lint all packages
 
 ## Pull Requests
 
-Before creating a PR, you MUST run `bun verify` and ensure it passes. Do not create a PR if verification fails — fix the issues first.
+Before creating a PR, you MUST:
+
+1. Run `bun verify` and ensure it passes. Do not create a PR if verification fails — fix the issues first.
+2. If the PR introduces a new feature, bug fix, or any user-facing change, generate a changeset with `bun run changeset`. Select the affected packages and describe the change.
 
 ## Release
 
