@@ -4,7 +4,7 @@ export async function wrapPluginRun(options: {
   jsonMode: boolean
   print: (value: unknown) => void
   configErrorClass?: new (message: string) => Error
-  fn: () => Promise<void | number> | void | number
+  fn: () => Promise<undefined | number> | undefined | number
 }): Promise<number | undefined> {
   try {
     return (await options.fn()) ?? undefined
