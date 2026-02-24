@@ -1,9 +1,9 @@
-import {
-  type ColumnRenameSuggestion,
-  type MigrationOperation,
-  type MigrationPlan,
-  type RiskLevel,
-  type SchemaDefinition,
+import type {
+  ColumnRenameSuggestion,
+  MigrationOperation,
+  MigrationPlan,
+  RiskLevel,
+  SchemaDefinition,
 } from '@chkit/core'
 
 import type { ColumnRenameMapping, TableRenameMapping } from './rename-mappings.js'

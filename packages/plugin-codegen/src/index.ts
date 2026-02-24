@@ -856,7 +856,7 @@ function mergeCheckResults(results: CodegenPluginCheckResult[]): CodegenPluginCh
     evaluated: true,
     ok: allOk,
     findings: allFindings,
-    metadata: results.reduce((acc, r) => ({ ...acc, ...r.metadata }), {}),
+    metadata: Object.assign({}, ...results.map((r) => r.metadata)),
   }
 }
 
