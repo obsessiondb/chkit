@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "5cf1a2ae0760",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/plugin-system-update",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/chkit.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-pull/src/index.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5c/f1a2ae0760/0/metadata.json",
+      "transcript": "/5c/f1a2ae0760/0/full.jsonl",
+      "context": "/5c/f1a2ae0760/0/context.md",
+      "content_hash": "/5c/f1a2ae0760/0/content_hash.txt",
+      "prompt": "/5c/f1a2ae0760/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 27,
+    "cache_creation_tokens": 46363,
+    "cache_read_tokens": 1429177,
+    "output_tokens": 278,
+    "api_call_count": 25
+  }
+}
