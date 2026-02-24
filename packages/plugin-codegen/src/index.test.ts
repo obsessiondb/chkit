@@ -495,8 +495,6 @@ describe('@chkit/plugin-codegen check hook', () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-codegen-plugin-'))
     const schemaPath = join(dir, 'schema.ts')
     const configPath = join(dir, 'clickhouse.config.ts')
-    const outFile = join(dir, 'generated/chkit-types.ts')
-
     try {
       await writeFile(
         schemaPath,

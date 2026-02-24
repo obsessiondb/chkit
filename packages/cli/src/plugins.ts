@@ -124,25 +124,25 @@ export interface ChxPluginCommand {
   name: string
   description?: string
   flags?: readonly FlagDef[]
-  run: (context: ChxPluginCommandContext) => void | number | Promise<void | number>
+  run: (context: ChxPluginCommandContext) => undefined | number | Promise<undefined | number>
 }
 
 export interface ChxPluginHooks {
   onConfigLoaded?: (context: ChxOnConfigLoadedContext) => void | Promise<void>
   onSchemaLoaded?: (
     context: ChxOnSchemaLoadedContext
-  ) => SchemaDefinition[] | void | Promise<SchemaDefinition[] | void>
+  ) => SchemaDefinition[] | undefined | Promise<SchemaDefinition[] | undefined>
   onPlanCreated?: (
     context: ChxOnPlanCreatedContext
-  ) => MigrationPlan | void | Promise<MigrationPlan | void>
+  ) => MigrationPlan | undefined | Promise<MigrationPlan | undefined>
   onBeforeApply?: (
     context: ChxOnBeforeApplyContext
   ) =>
-    | void
+    | undefined
     | { statements?: string[] }
-    | Promise<void | { statements?: string[] }>
+    | Promise<undefined | { statements?: string[] }>
   onAfterApply?: (context: ChxOnAfterApplyContext) => void | Promise<void>
-  onCheck?: (context: ChxOnCheckContext) => ChxOnCheckResult | void | Promise<ChxOnCheckResult | void>
+  onCheck?: (context: ChxOnCheckContext) => ChxOnCheckResult | undefined | Promise<ChxOnCheckResult | undefined>
   onCheckReport?: (context: {
     result: ChxOnCheckResult
     print: (line: string) => void
