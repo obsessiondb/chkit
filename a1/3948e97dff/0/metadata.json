@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "a13948e97dff",
+  "session_id": "4fbcf1d3-ac65-439f-9852-fb9dd27f9525",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T03:22:43.808727Z",
+  "branch": "marc/split-codegen-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/plugin-codegen/src/errors.ts",
+    "packages/plugin-codegen/src/generators.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-codegen/src/naming.ts",
+    "packages/plugin-codegen/src/options.ts",
+    "packages/plugin-codegen/src/plugin.ts",
+    "packages/plugin-codegen/src/types.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 46,
+    "cache_creation_tokens": 160428,
+    "cache_read_tokens": 2899589,
+    "output_tokens": 662,
+    "api_call_count": 42
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T03:22:43.45457Z",
+    "agent_lines": 1104,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1104,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-vienna/4fbcf1d3-ac65-439f-9852-fb9dd27f9525.jsonl"
+}

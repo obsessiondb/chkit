@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "a13948e97dff",
+  "strategy": "manual-commit",
+  "branch": "marc/split-codegen-plugin",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/plugin-codegen/src/errors.ts",
+    "packages/plugin-codegen/src/generators.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-codegen/src/naming.ts",
+    "packages/plugin-codegen/src/options.ts",
+    "packages/plugin-codegen/src/plugin.ts",
+    "packages/plugin-codegen/src/types.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a1/3948e97dff/0/metadata.json",
+      "transcript": "/a1/3948e97dff/0/full.jsonl",
+      "context": "/a1/3948e97dff/0/context.md",
+      "content_hash": "/a1/3948e97dff/0/content_hash.txt",
+      "prompt": "/a1/3948e97dff/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 46,
+    "cache_creation_tokens": 160428,
+    "cache_read_tokens": 2899589,
+    "output_tokens": 662,
+    "api_call_count": 42
+  }
+}
