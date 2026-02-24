@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import fg from 'fast-glob'
@@ -50,45 +50,6 @@ export async function readSnapshot(metaDir: string): Promise<Snapshot | null> {
 
 export function summarizePlan(operations: MigrationOperation[]): string[] {
   return operations.map((op) => `${op.type} [${op.risk}] ${op.key}`)
-}
-
-export async function readJournal(metaDir: string): Promise<MigrationJournal> {
-  const file = join(metaDir, 'journal.json')
-  if (!existsSync(file)) return { version: 1, applied: [] }
-  const raw = await readFile(file, 'utf8')
-  const parsed = parseJSONOrThrow<
-    Partial<MigrationJournal> & { applied?: MigrationJournalEntry[] | string[] }
-  >(raw, file, 'journal')
-
-  const normalizedApplied: MigrationJournalEntry[] = []
-  for (const item of parsed.applied ?? []) {
-    if (typeof item === 'string') {
-      normalizedApplied.push({
-        name: item,
-        appliedAt: '',
-        checksum: '',
-      })
-      continue
-    }
-    if (!item || typeof item !== 'object') continue
-    if (typeof item.name !== 'string') continue
-    normalizedApplied.push({
-      name: item.name,
-      appliedAt: typeof item.appliedAt === 'string' ? item.appliedAt : '',
-      checksum: typeof item.checksum === 'string' ? item.checksum : '',
-    })
-  }
-
-  return {
-    version: 1,
-    applied: normalizedApplied,
-  }
-}
-
-export async function writeJournal(metaDir: string, journal: MigrationJournal): Promise<void> {
-  await mkdir(metaDir, { recursive: true })
-  const file = join(metaDir, 'journal.json')
-  await writeFile(file, `${JSON.stringify(journal, null, 2)}\n`, 'utf8')
 }
 
 export async function listMigrations(migrationsDir: string): Promise<string[]> {

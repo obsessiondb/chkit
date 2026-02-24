@@ -3,19 +3,16 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
-import { createClickHouseExecutor } from '@chkit/clickhouse'
-
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
+import { createJournalStoreFromConfig } from '../journal-store.js'
 import {
   checksumSQL,
   findChecksumMismatches,
   listMigrations,
-  readJournal,
   readSnapshot,
   type MigrationJournalEntry,
-  writeJournal,
 } from '../migration-store.js'
 import {
   collectDestructiveOperationMarkers,
@@ -105,6 +102,12 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
   const jsonMode = f['--json'] === true
 
   const { migrationsDir, metaDir } = dirs
+
+  if (!config.clickhouse) {
+    throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
+  }
+
+  const { journalStore, db } = createJournalStoreFromConfig(config.clickhouse)
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
 
@@ -118,7 +121,7 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
 
   await mkdir(migrationsDir, { recursive: true })
   const files = await listMigrations(migrationsDir)
-  const journal = await readJournal(metaDir)
+  const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pendingAll = files.filter((f) => !appliedNames.has(f))
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
@@ -266,11 +269,6 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
     throw new Error('Blocked destructive migration execution.')
   }
 
-  if (!config.clickhouse) {
-    throw new Error('clickhouse config is required for --apply')
-  }
-
-  const db = createClickHouseExecutor(config.clickhouse)
   const appliedNow: MigrationJournalEntry[] = []
 
   for (const file of pending) {
@@ -295,9 +293,8 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
       appliedAt: new Date().toISOString(),
       checksum: checksumSQL(sql),
     }
-    journal.applied.push(entry)
     appliedNow.push(entry)
-    await writeJournal(metaDir, journal)
+    await journalStore.appendEntry(entry)
     await pluginRuntime.runOnAfterApply({
       command: 'migrate',
       config,
@@ -316,10 +313,9 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
       mode: 'execute',
       scope: tableScope,
       applied: appliedNow,
-      journalFile: join(metaDir, 'journal.json'),
     })
     return
   }
 
-  console.log(`\nJournal updated: ${join(metaDir, 'journal.json')}`)
+  console.log(`\nMigrations recorded in ClickHouse _chkit_migrations table.`)
 }
