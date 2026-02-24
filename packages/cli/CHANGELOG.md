@@ -1,5 +1,29 @@
 # chkit
 
+## 0.1.0-beta.9
+
+### Patch Changes
+
+- ba60638: Add homepage and repository metadata to all packages, and link READMEs to the chkit CLI package and documentation site.
+- a94a2a1: Replace @stricli/core with a custom CLI framework, migrate plugins to declared flags, and refine the plugin API and error handling.
+- a94a2a1: Fix migration ordering so tables are created before views and materialized views that depend on them.
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
+- 3ab6919: Store migration journal in ClickHouse instead of a local file. Migration state is now tracked per-environment via a `_chkit_migrations` table, enabling multi-environment deployments where staging and production independently track applied migrations.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
+- Updated dependencies [ba60638]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [f719c50]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [3ab6919]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+  - @chkit/clickhouse@0.1.0-beta.9
+  - @chkit/codegen@0.1.0-beta.9
+  - @chkit/core@0.1.0-beta.9
+
 ## 0.1.0-beta.8
 
 ### Patch Changes

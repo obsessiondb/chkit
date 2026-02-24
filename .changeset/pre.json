@@ -19,6 +19,7 @@
     "fix-migration-ordering",
     "fix-workspace-deps",
     "internal-refactors",
+    "journal-in-clickhouse",
     "rename-plugin-codegen",
     "rename-to-chkit"
   ]
