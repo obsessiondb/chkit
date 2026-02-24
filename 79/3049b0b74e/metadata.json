@@ -3,11 +3,14 @@
   "checkpoint_id": "793049b0b74e",
   "strategy": "manual-commit",
   "branch": "KeKs0r/full-code-review",
-  "checkpoints_count": 3,
+  "checkpoints_count": 5,
   "files_touched": [
     ".context/code-review.md",
     "packages/cli/src/bin/chkit.ts",
-    "packages/cli/src/bin/version.ts"
+    "packages/cli/src/bin/version.ts",
+    "packages/clickhouse/src/create-table-parser.ts",
+    "packages/core/src/index.ts",
+    "packages/plugin-pull/src/index.ts"
   ],
   "sessions": [
     {
@@ -23,13 +26,20 @@
       "context": "/79/3049b0b74e/1/context.md",
       "content_hash": "/79/3049b0b74e/1/content_hash.txt",
       "prompt": "/79/3049b0b74e/1/prompt.txt"
+    },
+    {
+      "metadata": "/79/3049b0b74e/2/metadata.json",
+      "transcript": "/79/3049b0b74e/2/full.jsonl",
+      "context": "/79/3049b0b74e/2/context.md",
+      "content_hash": "/79/3049b0b74e/2/content_hash.txt",
+      "prompt": "/79/3049b0b74e/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 170,
-    "cache_creation_tokens": 57333,
-    "cache_read_tokens": 1207762,
-    "output_tokens": 356,
-    "api_call_count": 36
+    "input_tokens": 191,
+    "cache_creation_tokens": 127282,
+    "cache_read_tokens": 1948873,
+    "output_tokens": 484,
+    "api_call_count": 54
   }
 }
