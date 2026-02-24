@@ -290,7 +290,7 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
 
     const entry: MigrationJournalEntry = {
       name: file,
-      appliedAt: new Date().toISOString(),
+      appliedAt: new Date().toISOString().replace('Z', ''),
       checksum: checksumSQL(sql),
     }
     appliedNow.push(entry)

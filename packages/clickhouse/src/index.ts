@@ -136,6 +136,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     database: config.database,
     clickhouse_settings: {
       wait_end_of_query: 1,
+      async_insert: 0,
     },
   })
 
