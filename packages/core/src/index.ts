@@ -1,3 +1,4 @@
+export * from './flags.js'
 export * from './model.js'
 export {
   canonicalizeDefinition,

@@ -207,7 +207,7 @@ export interface BackfillPlugin {
   commands: Array<{
     name: 'plan' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
     description: string
-    flags?: Array<{
+    flags?: ReadonlyArray<{
       name: string
       type: 'boolean' | 'string' | 'string[]'
       description: string

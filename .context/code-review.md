@@ -13,12 +13,12 @@ below are improvements, not fixes for broken things.
 
 | # | Title | Priority | Effort | Impact |
 |---|-------|----------|--------|--------|
-| 01 | Typed Flag Parser | High | Medium | Eliminates ~25 casts |
+| 01 | ~~Typed Flag Parser~~ | ~~High~~ | ~~Medium~~ | Done |
 | 02 | ~~Fix CLI Version Drift~~ | ~~High~~ | ~~Small~~ | Done |
 | 03 | ~~Unify splitTopLevelComma~~ | ~~Medium~~ | ~~Small~~ | Done |
 | 04 | ~~Extract Plugin Error Handler~~ | ~~Medium~~ | ~~Small~~ | Done |
 | 05 | ~~Delete Dead Code~~ | ~~Medium~~ | ~~Trivial~~ | Done |
-| 06 | Split plugin-codegen index.ts | Medium | Medium | Navigability (1061-line file) |
+| 06 | ~~Split plugin-codegen index.ts~~ | ~~Medium~~ | ~~Medium~~ | Done |
 | 07 | ~~Remove Phantom fast-glob Dep~~ | ~~Medium~~ | ~~Trivial~~ | Done |
 | 08 | ~~Replace Non-Null Assertions~~ | ~~Low~~ | ~~Small~~ | Done |
 | 09 | ~~Add close() to Executor~~ | ~~Low~~ | ~~Small~~ | Done |

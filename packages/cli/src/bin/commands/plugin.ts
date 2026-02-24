@@ -1,6 +1,7 @@
-import type { CommandDef, CommandRunContext, ParsedFlags } from '../../plugins.js'
+import { typedFlags, type CommandDef, type CommandRunContext, type ParsedFlags } from '../../plugins.js'
+import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson, printOutput } from '../json-output.js'
-import { parseFlags, UnknownFlagError, MissingFlagValueError } from '../parse-flags.js'
+import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../table-scope.js'
 import { loadSchemaDefinitions } from '../schema-loader.js'
 
@@ -115,7 +116,8 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
     return
   }
 
-  const tableSelector = flags['--table'] as string | undefined
+  const gf = typedFlags(flags, GLOBAL_FLAGS)
+  const tableSelector = gf['--table']
   let tableScope: ReturnType<typeof resolveTableScope>
   try {
     const definitions = await loadSchemaDefinitions(ctx.config.schema)

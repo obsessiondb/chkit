@@ -10,11 +10,14 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  defineFlags,
   type MaterializedViewDefinition,
+  type ParsedFlags,
   type ResolvedChxConfig,
   type SchemaDefinition,
   splitTopLevelComma,
   type TableDefinition,
+  typedFlags,
   type ViewDefinition,
   wrapPluginRun,
 } from '@chkit/core'
@@ -28,7 +31,7 @@ export interface PullPluginOptions {
 
 export interface PullPluginCommandContext {
   args: string[]
-  flags: Record<string, string | string[] | boolean | undefined>
+  flags: ParsedFlags
   jsonMode: boolean
   options: Record<string, unknown>
   config: ResolvedChxConfig
@@ -45,7 +48,7 @@ export interface PullPlugin {
   commands: Array<{
     name: 'schema'
     description: string
-    flags?: Array<{
+    flags?: ReadonlyArray<{
       name: string
       type: 'boolean' | 'string' | 'string[]'
       description: string
@@ -62,6 +65,14 @@ export type PullIntrospector = (input: {
 }) => Promise<IntrospectedObject[]>
 
 export type PullPluginRegistration = ChxInlinePluginRegistration<PullPlugin, PullPluginOptions>
+
+const PULL_SCHEMA_FLAGS = defineFlags([
+  { name: '--dryrun', type: 'boolean', description: 'Preview without writing files' },
+  { name: '--force', type: 'boolean', description: 'Overwrite existing output file' },
+  { name: '--overwrite', type: 'boolean', description: 'Overwrite existing output file (alias for --force)' },
+  { name: '--out-file', type: 'string', description: 'Output file path', placeholder: '<path>' },
+  { name: '--database', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
+] as const)
 
 interface FlagOverrides {
   outFile?: string
@@ -111,13 +122,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
-        flags: [
-          { name: '--dryrun', type: 'boolean' as const, description: 'Preview without writing files' },
-          { name: '--force', type: 'boolean' as const, description: 'Overwrite existing output file' },
-          { name: '--overwrite', type: 'boolean' as const, description: 'Overwrite existing output file (alias for --force)' },
-          { name: '--out-file', type: 'string' as const, description: 'Output file path', placeholder: '<path>' },
-          { name: '--database', type: 'string[]' as const, description: 'Database names to pull', placeholder: '<name>' },
-        ],
+        flags: PULL_SCHEMA_FLAGS,
         async run({ flags, jsonMode, print, options: runtimeOptions, config }) {
           return wrapPluginRun({
             command: 'schema',
@@ -199,14 +204,14 @@ function normalizePullOptions(options: PullPluginOptions = {}): Required<Omit<Pu
   }
 }
 
-function flagsToOverrides(flags: Record<string, string | string[] | boolean | undefined>): FlagOverrides {
-  const rawDatabases = flags['--database'] as string[] | undefined
-  const databases = normalizeDatabasesOption(rawDatabases ?? [], 'database flag') ?? []
+function flagsToOverrides(flags: ParsedFlags): FlagOverrides {
+  const f = typedFlags(flags, PULL_SCHEMA_FLAGS)
+  const databases = normalizeDatabasesOption(f['--database'] ?? [], 'database flag') ?? []
 
   return {
-    dryrun: flags['--dryrun'] === true,
-    overwrite: flags['--force'] === true || flags['--overwrite'] === true || undefined,
-    outFile: flags['--out-file'] as string | undefined,
+    dryrun: f['--dryrun'] === true,
+    overwrite: f['--force'] === true || f['--overwrite'] === true || undefined,
+    outFile: f['--out-file'],
     databases,
   }
 }

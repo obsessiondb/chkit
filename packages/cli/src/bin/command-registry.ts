@@ -3,8 +3,8 @@ import type { ChxPluginCommand, CommandDef, CommandExtension, FlagDef } from '..
 export interface RegisteredCommand {
   name: string
   description: string
-  flags: FlagDef[]
-  pluginFlags: Array<{ pluginName: string; flags: FlagDef[] }>
+  flags: readonly FlagDef[]
+  pluginFlags: Array<{ pluginName: string; flags: readonly FlagDef[] }>
   isPlugin: boolean
   pluginName?: string
   subcommands?: RegisteredCommand[]
@@ -13,14 +13,14 @@ export interface RegisteredCommand {
 
 export interface CommandRegistry {
   commands: RegisteredCommand[]
-  globalFlags: FlagDef[]
+  globalFlags: readonly FlagDef[]
   get(name: string): RegisteredCommand | undefined
   resolveFlags(name: string, subcommand?: string): FlagDef[]
 }
 
 export function createCommandRegistry(input: {
   coreCommands: CommandDef[]
-  globalFlags: FlagDef[]
+  globalFlags: readonly FlagDef[]
   pluginExtensions: Array<{ pluginName: string; extensions: CommandExtension[] }>
   pluginCommands: Array<{ pluginName: string; commands: ChxPluginCommand[]; manifestName: string }>
 }): CommandRegistry {

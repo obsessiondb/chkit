@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import type { FlagDef } from '../plugins.js'
-import { MissingFlagValueError, UnknownFlagError, parseFlags } from './parse-flags.js'
+import { defineFlags, MissingFlagValueError, UnknownFlagError, parseFlags, type FlagDef } from './flags.js'
 
 describe('parseFlags', () => {
   const defs: FlagDef[] = [
@@ -75,5 +74,28 @@ describe('parseFlags', () => {
   it('last string flag wins', () => {
     const result = parseFlags(['--name', 'first', '--name', 'second'], defs)
     expect(result['--name']).toBe('second')
+  })
+
+  it('infers typed record from defineFlags', () => {
+    const typedDefs = defineFlags([
+      { name: '--out', type: 'string', description: 'Output' },
+      { name: '--verbose', type: 'boolean', description: 'Verbose' },
+      { name: '--tags', type: 'string[]', description: 'Tags' },
+    ] as const)
+
+    const result = parseFlags(['--out', 'file.ts', '--verbose', '--tags', 'a,b'], typedDefs)
+
+    // Runtime assertions
+    expect(result['--out']).toBe('file.ts')
+    expect(result['--verbose']).toBe(true)
+    expect(result['--tags']).toEqual(['a', 'b'])
+
+    // Type-level assertions: these assignments would fail to compile if inference is broken
+    const _out: string | undefined = result['--out']
+    const _verbose: boolean | undefined = result['--verbose']
+    const _tags: string[] | undefined = result['--tags']
+    void _out
+    void _verbose
+    void _tags
   })
 })
