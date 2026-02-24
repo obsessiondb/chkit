@@ -3,29 +3,34 @@
   "checkpoint_id": "02f5b5e9ccfa",
   "session_id": "bab732db-a82e-410a-b87a-ee2f20b237b8",
   "strategy": "manual-commit",
-  "created_at": "2026-02-24T07:13:32.312019Z",
+  "created_at": "2026-02-24T07:33:49.872761Z",
   "branch": "marc/num-6552-chkit-migrations-in-ch",
   "checkpoints_count": 1,
   "files_touched": [
-    "packages/cli/src/bin/journal-store.ts"
+    "packages/cli/src/bin/commands/migrate.ts",
+    "packages/cli/src/clickhouse-live.e2e.test.ts",
+    "packages/cli/src/drift.e2e.test.ts",
+    "packages/clickhouse/src/index.ts"
   ],
   "agent": "Claude Code",
-  "transcript_identifier_at_start": "be5ed1c2-faa0-472e-b0a2-1bf35c3fb773",
+  "transcript_identifier_at_start": "b89cd7d3-35ac-4243-9855-9bcca555fa8a",
+  "checkpoint_transcript_start": 138,
+  "transcript_lines_at_start": 138,
   "token_usage": {
-    "input_tokens": 526,
-    "cache_creation_tokens": 250303,
-    "cache_read_tokens": 1930124,
-    "output_tokens": 243,
-    "api_call_count": 31
+    "input_tokens": 50,
+    "cache_creation_tokens": 65338,
+    "cache_read_tokens": 2838754,
+    "output_tokens": 346,
+    "api_call_count": 42
   },
   "initial_attribution": {
-    "calculated_at": "2026-02-24T07:13:32.059377Z",
-    "agent_lines": 1,
-    "human_added": 0,
-    "human_modified": 0,
+    "calculated_at": "2026-02-24T07:33:49.434768Z",
+    "agent_lines": 0,
+    "human_added": 3,
+    "human_modified": 5,
     "human_removed": 0,
-    "total_committed": 1,
-    "agent_percentage": 100
+    "total_committed": 3,
+    "agent_percentage": 0
   },
   "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-tianjin-v1/bab732db-a82e-410a-b87a-ee2f20b237b8.jsonl"
 }

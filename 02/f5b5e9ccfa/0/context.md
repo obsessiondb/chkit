@@ -36,3 +36,28 @@ The user has attached these files. Read them before proceeding.
 
 Fix the failing CI actions. I've attached the failure logs.
 
+### Prompt 5
+
+did we also apply this setting not only for the e2e tests, but also the real journal reads and writes?
+
+### Prompt 6
+
+run `bun verify`
+
+### Prompt 7
+
+bun `verify` should use doppler to use real credentials to test everything. Is it not?
+
+### Prompt 8
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Initial Request**: User wants to move migration state from local `journal.json` to ClickHouse itself to support multi-environment deployments (staging/production).
+
+2. **Branch Rename**: System instruction required renaming the branch. Renamed to `marc/migration-state-in-ch`.
+
+3. *...
+
