@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "f6efe2e6b63d",
+  "strategy": "manual-commit",
+  "branch": "marc/update-pr-docs",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f6/efe2e6b63d/0/metadata.json",
+      "transcript": "/f6/efe2e6b63d/0/full.jsonl",
+      "context": "/f6/efe2e6b63d/0/context.md",
+      "content_hash": "/f6/efe2e6b63d/0/content_hash.txt",
+      "prompt": "/f6/efe2e6b63d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 65,
+    "cache_creation_tokens": 17285,
+    "cache_read_tokens": 237282,
+    "output_tokens": 36,
+    "api_call_count": 10
+  }
+}
