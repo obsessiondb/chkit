@@ -26,6 +26,7 @@ export interface PullPluginOptions {
 
 export interface PullPluginCommandContext {
   args: string[]
+  flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
   options: Record<string, unknown>
   config: ResolvedChxConfig
@@ -42,6 +43,13 @@ export interface PullPlugin {
   commands: Array<{
     name: 'schema'
     description: string
+    flags?: Array<{
+      name: string
+      type: 'boolean' | 'string' | 'string[]'
+      description: string
+      placeholder?: string
+      negation?: boolean
+    }>
     run: (context: PullPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
 }
@@ -53,7 +61,7 @@ export type PullIntrospector = (input: {
 
 export type PullPluginRegistration = ChxInlinePluginRegistration<PullPlugin, PullPluginOptions>
 
-interface ParsedCommandArgs {
+interface FlagOverrides {
   outFile?: string
   databases: string[]
   overwrite?: boolean
@@ -101,16 +109,23 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
-        async run({ args, jsonMode, print, options: runtimeOptions, config }) {
+        flags: [
+          { name: '--dryrun', type: 'boolean' as const, description: 'Preview without writing files' },
+          { name: '--force', type: 'boolean' as const, description: 'Overwrite existing output file' },
+          { name: '--overwrite', type: 'boolean' as const, description: 'Overwrite existing output file (alias for --force)' },
+          { name: '--out-file', type: 'string' as const, description: 'Output file path', placeholder: '<path>' },
+          { name: '--database', type: 'string[]' as const, description: 'Database names to pull', placeholder: '<name>' },
+        ],
+        async run({ flags, jsonMode, print, options: runtimeOptions, config }) {
           try {
-            const parsedArgs = parseArgs(args)
-            const mergedOptions = mergeOptions(base, runtimeOptions, parsedArgs)
+            const overrides = flagsToOverrides(flags)
+            const mergedOptions = mergeOptions(base, runtimeOptions, overrides)
             const pulled = await pullSchema({
               config,
               options: { ...mergedOptions, introspect: introspector },
             })
 
-            if (!parsedArgs.dryrun) {
+            if (!overrides.dryrun) {
               await writeSchemaFile({
                 outFile: pulled.outFile,
                 content: pulled.content,
@@ -126,8 +141,8 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               tableCount: pulled.tableCount,
               databases: pulled.databases,
               skippedObjects: pulled.skippedObjects,
-              dryrun: parsedArgs.dryrun,
-              ...(parsedArgs.dryrun ? { content: pulled.content } : {}),
+              dryrun: overrides.dryrun,
+              ...(overrides.dryrun ? { content: pulled.content } : {}),
             }
 
             if (jsonMode) {
@@ -135,7 +150,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               return 0
             }
 
-            if (parsedArgs.dryrun) {
+            if (overrides.dryrun) {
               print(
                 `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
               )
@@ -185,63 +200,31 @@ function normalizePullOptions(options: PullPluginOptions = {}): Required<Omit<Pu
   }
 }
 
-function parseArgs(args: string[]): ParsedCommandArgs {
-  const parsed: ParsedCommandArgs = {
-    dryrun: false,
-    databases: [],
+function flagsToOverrides(flags: Record<string, string | string[] | boolean | undefined>): FlagOverrides {
+  const rawDatabases = flags['--database'] as string[] | undefined
+  const databases = normalizeDatabasesOption(rawDatabases ?? [], 'database flag') ?? []
+
+  return {
+    dryrun: flags['--dryrun'] === true,
+    overwrite: flags['--force'] === true || flags['--overwrite'] === true || undefined,
+    outFile: flags['--out-file'] as string | undefined,
+    databases,
   }
-
-  for (let i = 0; i < args.length; i += 1) {
-    const token = args[i]
-    if (!token) continue
-
-    if (token === '--dryrun') {
-      parsed.dryrun = true
-      continue
-    }
-
-    if (token === '--force' || token === '--overwrite') {
-      parsed.overwrite = true
-      continue
-    }
-
-    if (token === '--out-file') {
-      const value = args[i + 1]
-      if (!value || value.startsWith('--')) {
-        throw new PullConfigError('Missing value for --out-file')
-      }
-      parsed.outFile = value
-      i += 1
-      continue
-    }
-
-    if (token === '--database') {
-      const value = args[i + 1]
-      if (!value || value.startsWith('--')) {
-        throw new PullConfigError('Missing value for --database')
-      }
-      parsed.databases.push(...splitCommaValues(value))
-      i += 1
-    }
-  }
-
-  parsed.databases = normalizeDatabasesOption(parsed.databases, 'database flag') ?? []
-  return parsed
 }
 
 function mergeOptions(
   baseOptions: Required<Omit<PullPluginOptions, 'introspect'>>,
   runtimeOptions: Record<string, unknown>,
-  argOptions: ParsedCommandArgs
+  overrides: FlagOverrides
 ): Required<Omit<PullPluginOptions, 'introspect'>> {
   const runtime = normalizeRuntimeOptions(runtimeOptions)
 
   return {
     ...baseOptions,
     ...runtime,
-    ...(argOptions.outFile ? { outFile: argOptions.outFile } : {}),
-    ...(argOptions.databases.length > 0 ? { databases: argOptions.databases } : {}),
-    ...(argOptions.overwrite !== undefined ? { overwrite: argOptions.overwrite } : {}),
+    ...(overrides.outFile ? { outFile: overrides.outFile } : {}),
+    ...(overrides.databases.length > 0 ? { databases: overrides.databases } : {}),
+    ...(overrides.overwrite !== undefined ? { overwrite: overrides.overwrite } : {}),
   }
 }
 

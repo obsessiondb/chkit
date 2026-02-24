@@ -527,6 +527,7 @@ describe('@chkit/plugin-codegen check hook', () => {
       expect(run).toBeTruthy()
       const exitCode = await run?.run({
         args: [],
+        flags: {},
         jsonMode: true,
         options: {},
         config: resolveConfig({ schema: schemaPath }),

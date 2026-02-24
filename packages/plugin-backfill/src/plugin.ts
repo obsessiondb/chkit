@@ -13,6 +13,36 @@ import {
 } from './runtime.js'
 import type { BackfillPlugin, BackfillPluginOptions, BackfillPluginRegistration } from './types.js'
 
+const PLAN_FLAGS = [
+  { name: '--target', type: 'string' as const, description: 'Target table (database.table)', placeholder: '<database.table>' },
+  { name: '--from', type: 'string' as const, description: 'Start timestamp', placeholder: '<timestamp>' },
+  { name: '--to', type: 'string' as const, description: 'End timestamp', placeholder: '<timestamp>' },
+  { name: '--chunk-hours', type: 'string' as const, description: 'Hours per chunk', placeholder: '<hours>' },
+  { name: '--force-large-window', type: 'boolean' as const, description: 'Allow large time windows without confirmation' },
+]
+
+const RUN_FLAGS = [
+  { name: '--plan-id', type: 'string' as const, description: 'Plan ID to execute', placeholder: '<id>' },
+  { name: '--replay-done', type: 'boolean' as const, description: 'Re-execute already completed chunks' },
+  { name: '--replay-failed', type: 'boolean' as const, description: 'Re-execute failed chunks' },
+  { name: '--force-overlap', type: 'boolean' as const, description: 'Allow overlapping runs' },
+  { name: '--force-compatibility', type: 'boolean' as const, description: 'Skip compatibility checks' },
+  { name: '--simulate-fail-chunk', type: 'string' as const, description: 'Simulate failure on chunk', placeholder: '<chunk-id>' },
+  { name: '--simulate-fail-count', type: 'string' as const, description: 'Number of simulated failures', placeholder: '<count>' },
+]
+
+const RESUME_FLAGS = [
+  { name: '--plan-id', type: 'string' as const, description: 'Plan ID to resume', placeholder: '<id>' },
+  { name: '--replay-done', type: 'boolean' as const, description: 'Re-execute already completed chunks' },
+  { name: '--replay-failed', type: 'boolean' as const, description: 'Re-execute failed chunks' },
+  { name: '--force-overlap', type: 'boolean' as const, description: 'Allow overlapping runs' },
+  { name: '--force-compatibility', type: 'boolean' as const, description: 'Skip compatibility checks' },
+]
+
+const PLAN_ID_FLAGS = [
+  { name: '--plan-id', type: 'string' as const, description: 'Plan ID', placeholder: '<id>' },
+]
+
 export function createBackfillPlugin(options: BackfillPluginOptions = {}): BackfillPlugin {
   const base = normalizeBackfillOptions(options)
   validateBaseOptions(base)
@@ -26,9 +56,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       {
         name: 'plan',
         description: 'Build a deterministic backfill plan and persist immutable plan state',
-        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+        flags: PLAN_FLAGS,
+        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
           try {
-            const parsed = parsePlanArgs(args)
+            const parsed = parsePlanArgs(flags)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
 
@@ -73,9 +104,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       {
         name: 'run',
         description: 'Execute a planned backfill with checkpointed chunk progress',
-        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+        flags: RUN_FLAGS,
+        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
           try {
-            const parsed = parseRunArgs(args)
+            const parsed = parseRunArgs(flags)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
 
@@ -126,9 +158,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       {
         name: 'resume',
         description: 'Resume a backfill run from last checkpoint',
-        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+        flags: RESUME_FLAGS,
+        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
           try {
-            const parsed = parseResumeArgs(args)
+            const parsed = parseResumeArgs(flags)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
 
@@ -175,9 +208,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       {
         name: 'status',
         description: 'Show checkpoint and chunk progress for a backfill run',
-        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+        flags: PLAN_ID_FLAGS,
+        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
           try {
-            const parsed = parseStatusArgs(args)
+            const parsed = parseStatusArgs(flags)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
 
@@ -214,9 +248,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       {
         name: 'cancel',
         description: 'Cancel an in-progress backfill run and prevent further chunk execution',
-        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+        flags: PLAN_ID_FLAGS,
+        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
           try {
-            const parsed = parseCancelArgs(args)
+            const parsed = parseCancelArgs(flags)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
 
@@ -253,9 +288,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
       {
         name: 'doctor',
         description: 'Provide actionable remediation steps for failed or pending backfill runs',
-        async run({ args, jsonMode, print, options: runtimeOptions, config, configPath }) {
+        flags: PLAN_ID_FLAGS,
+        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
           try {
-            const parsed = parseDoctorArgs(args)
+            const parsed = parseDoctorArgs(flags)
             const effectiveOptions = mergeOptions(base, runtimeOptions)
             validateBaseOptions(effectiveOptions)
 

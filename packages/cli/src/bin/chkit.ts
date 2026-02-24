@@ -168,33 +168,38 @@ async function main(): Promise<void> {
   }
 
   if (resolved.isPlugin && !resolved.run) {
-    const { jsonMode, tableSelector, rest } = stripGlobalFlags(argv.slice(1))
+    const argsAfterCommand = argv.slice(1)
     let subcommandName: string | undefined
-    let pluginArgs: string[]
 
     if (resolved.subcommands) {
-      const candidate = rest[0]
-      if (candidate && !candidate.startsWith('--')) {
-        const sub = resolved.subcommands.find((s) => s.name === candidate)
-        if (sub) {
-          subcommandName = candidate
-          pluginArgs = rest.slice(1)
-        } else {
-          console.error(`Unknown subcommand: ${commandName} ${candidate}`)
-          console.log(formatCommandHelp(resolved, registry.globalFlags))
-          process.exitCode = 1
-          return
-        }
+      // Match against known subcommand names to avoid confusing flag values
+      // (e.g., config paths) with subcommand candidates
+      const matchedSub = resolved.subcommands.find((s) => argsAfterCommand.includes(s.name))
+      if (matchedSub) {
+        subcommandName = matchedSub.name
       } else if (resolved.subcommands.length === 1) {
         subcommandName = resolved.subcommands[0]!.name
-        pluginArgs = rest
       } else {
         console.log(formatCommandHelp(resolved, registry.globalFlags))
         return
       }
-    } else {
-      pluginArgs = rest
     }
+
+    const allPluginFlags = registry.resolveFlags(commandName, subcommandName)
+    let flags: ParsedFlags
+    try {
+      flags = parseFlags(argsAfterCommand, allPluginFlags)
+    } catch (error) {
+      if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
+        console.error(error.message)
+        process.exitCode = 1
+        return
+      }
+      throw error
+    }
+
+    const jsonMode = flags['--json'] === true
+    const tableSelector = flags['--table'] as string | undefined
 
     let tableScope: ReturnType<typeof resolveTableScope>
     try {
@@ -203,10 +208,6 @@ async function main(): Promise<void> {
     } catch {
       tableScope = resolveTableScope(tableSelector, [])
     }
-
-    const flags: ParsedFlags = {}
-    if (jsonMode) flags['--json'] = true
-    if (tableSelector) flags['--table'] = tableSelector
 
     try {
       await pluginRuntime.runOnConfigLoaded({
@@ -237,7 +238,7 @@ async function main(): Promise<void> {
       configPath,
       jsonMode,
       tableScope,
-      args: pluginArgs,
+      args: [],
       flags,
       print(value) {
         printOutput(value, jsonMode)

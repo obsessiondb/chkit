@@ -21,7 +21,7 @@ This document is for contributors. The root `README.md` is user-facing.
 
 ## CLI Module Layout
 
-- `packages/cli/src/bin/chkit.ts`: stricli app wiring and route/flag mapping.
+- `packages/cli/src/bin/chkit.ts`: CLI entry point with command registry and flag parsing.
 - `packages/cli/src/bin/lib.ts`: shared CLI runtime helpers (config, dirs, json envelope, journal/snapshot helpers).
 - `packages/cli/src/bin/commands/init.ts`: `chkit init`.
 - `packages/cli/src/bin/commands/generate.ts`: `chkit generate`.
