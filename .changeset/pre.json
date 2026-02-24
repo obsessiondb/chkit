@@ -9,11 +9,16 @@
     "@chkit/core": "0.0.0",
     "@chkit/plugin-backfill": "0.0.0",
     "@chkit/plugin-pull": "0.0.0",
-    "@chkit/plugin-codegen": "0.0.0"
+    "@chkit/plugin-codegen": "0.0.0",
+    "@chkit/plugin-obsessiondb": "0.1.0-beta.7"
   },
   "changesets": [
     "add-pkg-links",
+    "add-plugin-obsessiondb",
+    "custom-cli-framework",
+    "fix-migration-ordering",
     "fix-workspace-deps",
+    "internal-refactors",
     "rename-plugin-codegen",
     "rename-to-chkit"
   ]
