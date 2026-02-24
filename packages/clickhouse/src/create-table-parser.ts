@@ -1,53 +1,8 @@
-import { normalizeSQLFragment } from '@chkit/core'
+import { normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
 
 interface ProjectionDefinitionShape {
   name: string
   query: string
-}
-
-function splitTopLevelCommaSeparated(input: string): string[] {
-  const out: string[] = []
-  let current = ''
-  let depth = 0
-  let inString = false
-  let stringQuote = "'"
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i]
-    if (!char) continue
-    if (inString) {
-      current += char
-      if (char === stringQuote && input[i - 1] !== '\\') {
-        inString = false
-      }
-      continue
-    }
-    if (char === "'" || char === '"') {
-      inString = true
-      stringQuote = char
-      current += char
-      continue
-    }
-    if (char === '(') {
-      depth += 1
-      current += char
-      continue
-    }
-    if (char === ')') {
-      depth = Math.max(0, depth - 1)
-      current += char
-      continue
-    }
-    if (char === ',' && depth === 0) {
-      const chunk = current.trim()
-      if (chunk.length > 0) out.push(chunk)
-      current = ''
-      continue
-    }
-    current += char
-  }
-  const last = current.trim()
-  if (last.length > 0) out.push(last)
-  return out
 }
 
 function parseClauseFromCreateTableQuery(
@@ -112,7 +67,7 @@ export function parseSettingsFromCreateTableQuery(createTableQuery: string | und
   if (!settingsMatch?.[1]) return {}
   const rawSettings = settingsMatch[1].trim()
   if (!rawSettings) return {}
-  const items = splitTopLevelCommaSeparated(rawSettings)
+  const items = splitTopLevelComma(rawSettings)
   const out: Record<string, string> = {}
   for (const item of items) {
     const eq = item.indexOf('=')
@@ -184,7 +139,7 @@ export function parseProjectionsFromCreateTableQuery(
 ): ProjectionDefinitionShape[] {
   const body = extractCreateTableBody(createTableQuery)
   if (!body) return []
-  const parts = splitTopLevelCommaSeparated(body)
+  const parts = splitTopLevelComma(body)
   const projections: ProjectionDefinitionShape[] = []
   for (const part of parts) {
     const match = part.match(

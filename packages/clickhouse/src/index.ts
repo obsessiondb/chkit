@@ -23,6 +23,7 @@ export interface ClickHouseExecutor {
   insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
   listTableDetails(databases: string[]): Promise<IntrospectedTable[]>
+  close(): Promise<void>
 }
 
 export interface SchemaObjectRef {
@@ -152,6 +153,9 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         values: params.values,
         format: 'JSONEachRow',
       })
+    },
+    async close(): Promise<void> {
+      await client.close()
     },
     async listSchemaObjects(): Promise<SchemaObjectRef[]> {
       const rows = await this.query<SystemTableRow>(

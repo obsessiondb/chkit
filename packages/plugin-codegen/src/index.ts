@@ -11,6 +11,7 @@ import {
   type SchemaDefinition,
   type TableDefinition,
   type ViewDefinition,
+  wrapPluginRun,
 } from '@chkit/core'
 
 export interface CodegenPluginOptions {
@@ -888,110 +889,102 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
           config,
           configPath,
         }): Promise<undefined | number> {
-          try {
-            const overrides = flagsToOverrides(flags)
-            const effectiveOptions = mergeOptions(base, runtimeOptions, overrides)
-            const configDir = resolve(configPath, '..')
-            const outFile = resolve(configDir, effectiveOptions.outFile)
-            const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
-            const generated = generateTypeArtifacts({
-              definitions,
-              options: effectiveOptions,
-            })
-
-            let ingestGenerated: GenerateIngestArtifactsOutput | null = null
-            let ingestOutFile: string | null = null
-            if (effectiveOptions.emitIngest) {
-              ingestGenerated = generateIngestArtifacts({
+          return wrapPluginRun({
+            command: 'codegen',
+            label: 'Codegen',
+            jsonMode,
+            print,
+            configErrorClass: CodegenConfigError,
+            fn: async () => {
+              const overrides = flagsToOverrides(flags)
+              const effectiveOptions = mergeOptions(base, runtimeOptions, overrides)
+              const configDir = resolve(configPath, '..')
+              const outFile = resolve(configDir, effectiveOptions.outFile)
+              const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
+              const generated = generateTypeArtifacts({
                 definitions,
                 options: effectiveOptions,
               })
-              ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
-            }
 
-            if (overrides.check) {
-              const current = await readMaybe(outFile)
-              const typeCheckResult = checkGeneratedOutput({
-                label: 'Codegen',
-                outFile,
-                expected: generated.content,
-                current,
-                missingCode: 'codegen_missing_output',
-                staleCode: 'codegen_stale_output',
-              })
-
-              const results = [typeCheckResult]
-
-              if (ingestGenerated && ingestOutFile) {
-                const ingestCurrent = await readMaybe(ingestOutFile)
-                results.push(checkGeneratedOutput({
-                  label: 'Codegen ingest',
-                  outFile: ingestOutFile,
-                  expected: ingestGenerated.content,
-                  current: ingestCurrent,
-                  missingCode: 'codegen_missing_ingest_output',
-                  staleCode: 'codegen_stale_ingest_output',
-                }))
+              let ingestGenerated: GenerateIngestArtifactsOutput | null = null
+              let ingestOutFile: string | null = null
+              if (effectiveOptions.emitIngest) {
+                ingestGenerated = generateIngestArtifacts({
+                  definitions,
+                  options: effectiveOptions,
+                })
+                ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
               }
 
-              const checkResult = mergeCheckResults(results)
+              if (overrides.check) {
+                const current = await readMaybe(outFile)
+                const typeCheckResult = checkGeneratedOutput({
+                  label: 'Codegen',
+                  outFile,
+                  expected: generated.content,
+                  current,
+                  missingCode: 'codegen_missing_output',
+                  staleCode: 'codegen_stale_output',
+                })
+
+                const results = [typeCheckResult]
+
+                if (ingestGenerated && ingestOutFile) {
+                  const ingestCurrent = await readMaybe(ingestOutFile)
+                  results.push(checkGeneratedOutput({
+                    label: 'Codegen ingest',
+                    outFile: ingestOutFile,
+                    expected: ingestGenerated.content,
+                    current: ingestCurrent,
+                    missingCode: 'codegen_missing_ingest_output',
+                    staleCode: 'codegen_stale_ingest_output',
+                  }))
+                }
+
+                const checkResult = mergeCheckResults(results)
+                const payload = {
+                  ok: checkResult.ok,
+                  findingCodes: checkResult.findings.map((finding) => finding.code),
+                  outFile,
+                  mode: 'check',
+                }
+
+                if (jsonMode) {
+                  print(payload)
+                } else {
+                  if (checkResult.ok) {
+                    print(`Codegen up-to-date: ${outFile}`)
+                  } else {
+                    const firstCode = checkResult.findings[0]?.code ?? 'codegen_stale_output'
+                    print(`Codegen check failed (${firstCode}): ${outFile}`)
+                  }
+                }
+                return checkResult.ok ? 0 : 1
+              }
+
+              await writeAtomic(outFile, generated.content)
+
+              if (ingestGenerated && ingestOutFile) {
+                await writeAtomic(ingestOutFile, ingestGenerated.content)
+              }
+
               const payload = {
-                ok: checkResult.ok,
-                findingCodes: checkResult.findings.map((finding) => finding.code),
+                ok: true,
                 outFile,
-                mode: 'check',
+                declarationCount: generated.declarationCount,
+                findingCodes: generated.findings.map((finding) => finding.code),
+                mode: 'write',
               }
 
               if (jsonMode) {
                 print(payload)
               } else {
-                if (checkResult.ok) {
-                  print(`Codegen up-to-date: ${outFile}`)
-                } else {
-                  const firstCode = checkResult.findings[0]?.code ?? 'codegen_stale_output'
-                  print(`Codegen check failed (${firstCode}): ${outFile}`)
-                }
+                print(`Codegen wrote ${outFile} (${generated.declarationCount} declarations)`)
               }
-              return checkResult.ok ? 0 : 1
-            }
 
-            await writeAtomic(outFile, generated.content)
-
-            if (ingestGenerated && ingestOutFile) {
-              await writeAtomic(ingestOutFile, ingestGenerated.content)
-            }
-
-            const payload = {
-              ok: true,
-              outFile,
-              declarationCount: generated.declarationCount,
-              findingCodes: generated.findings.map((finding) => finding.code),
-              mode: 'write',
-            }
-
-            if (jsonMode) {
-              print(payload)
-            } else {
-              print(`Codegen wrote ${outFile} (${generated.declarationCount} declarations)`)
-            }
-
-            return 0
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            if (jsonMode) {
-              print({
-                ok: false,
-                error: message,
-              })
-            } else {
-              print(`Codegen failed: ${message}`)
-            }
-
-            if (error instanceof CodegenConfigError) {
-              return 2
-            }
-            return 1
-          }
+              return 0
+            },
+          })
         },
       },
     ],

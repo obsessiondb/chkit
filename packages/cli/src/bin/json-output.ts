@@ -1,14 +1,10 @@
 export type Command =
-  | 'init'
   | 'generate'
-  | 'codegen'
   | 'migrate'
   | 'status'
   | 'drift'
   | 'check'
   | 'plugin'
-  | 'help'
-  | 'version'
 
 const JSON_CONTRACT_VERSION = 1
 

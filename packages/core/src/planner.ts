@@ -28,17 +28,13 @@ function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinitio
   return new Map(definitions.map((def) => [definitionKey(def), def]))
 }
 
-function addOperation(operations: MigrationOperation[], operation: MigrationOperation): void {
-  operations.push(operation)
-}
-
 function pushDropOperation(
   operations: MigrationOperation[],
   def: SchemaDefinition,
   risk: RiskLevel = 'danger'
 ): void {
   if (def.kind === 'table') {
-    addOperation(operations, {
+    operations.push( {
       type: 'drop_table',
       key: definitionKey(def),
       risk,
@@ -47,7 +43,7 @@ function pushDropOperation(
     return
   }
   if (def.kind === 'view') {
-    addOperation(operations, {
+    operations.push( {
       type: 'drop_view',
       key: definitionKey(def),
       risk,
@@ -55,7 +51,7 @@ function pushDropOperation(
     })
     return
   }
-  addOperation(operations, {
+  operations.push( {
     type: 'drop_materialized_view',
     key: definitionKey(def),
     risk,
@@ -69,7 +65,7 @@ function pushCreateOperation(
   risk: RiskLevel = 'safe'
 ): void {
   if (def.kind === 'table') {
-    addOperation(operations, {
+    operations.push( {
       type: 'create_table',
       key: definitionKey(def),
       risk,
@@ -78,7 +74,7 @@ function pushCreateOperation(
     return
   }
   if (def.kind === 'view') {
-    addOperation(operations, {
+    operations.push( {
       type: 'create_view',
       key: definitionKey(def),
       risk,
@@ -86,7 +82,7 @@ function pushCreateOperation(
     })
     return
   }
-  addOperation(operations, {
+  operations.push( {
     type: 'create_materialized_view',
     key: definitionKey(def),
     risk,
@@ -99,7 +95,7 @@ function pushCreateDatabaseOperation(
   database: string,
   risk: RiskLevel = 'safe'
 ): void {
-  addOperation(operations, {
+  operations.push( {
     type: 'create_database',
     key: `database:${database}`,
     risk,
@@ -223,7 +219,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   const addedColumns = columnDiff.added
   const droppedColumns = columnDiff.removed
   for (const column of columnDiff.added) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_add_column',
       key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
       risk: 'safe',
@@ -231,7 +227,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const { name, newItem } of columnDiff.changed) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_modify_column',
       key: `table:${newDef.database}.${newDef.name}:column:${name}`,
       risk: 'caution',
@@ -239,7 +235,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const column of columnDiff.removed) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_drop_column',
       key: `table:${newDef.database}.${newDef.name}:column:${column.name}`,
       risk: 'danger',
@@ -254,7 +250,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     (left, right) => JSON.stringify(left) === JSON.stringify(right)
   )
   for (const index of indexDiff.added) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_add_index',
       key: `table:${newDef.database}.${newDef.name}:index:${index.name}`,
       risk: 'caution',
@@ -262,13 +258,13 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const { name, newItem } of indexDiff.changed) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_drop_index',
       key: `table:${newDef.database}.${newDef.name}:index:${name}`,
       risk: 'caution',
       sql: renderAlterDropIndex(newDef, name),
     })
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_add_index',
       key: `table:${newDef.database}.${newDef.name}:index:${name}`,
       risk: 'caution',
@@ -276,7 +272,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const index of indexDiff.removed) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_drop_index',
       key: `table:${newDef.database}.${newDef.name}:index:${index.name}`,
       risk: 'caution',
@@ -291,7 +287,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     (left, right) => JSON.stringify(left) === JSON.stringify(right)
   )
   for (const projection of projectionDiff.added) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_add_projection',
       key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
       risk: 'caution',
@@ -299,13 +295,13 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const { name, newItem } of projectionDiff.changed) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_drop_projection',
       key: `table:${newDef.database}.${newDef.name}:projection:${name}`,
       risk: 'caution',
       sql: renderAlterDropProjection(newDef, name),
     })
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_add_projection',
       key: `table:${newDef.database}.${newDef.name}:projection:${name}`,
       risk: 'caution',
@@ -313,7 +309,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const projection of projectionDiff.removed) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_drop_projection',
       key: `table:${newDef.database}.${newDef.name}:projection:${projection.name}`,
       risk: 'caution',
@@ -324,7 +320,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   const settingDiff = diffSettings(oldDef.settings ?? {}, newDef.settings ?? {})
   for (const change of settingDiff.changes) {
     if (change.kind === 'reset') {
-      addOperation(ops, {
+      ops.push( {
         type: 'alter_table_reset_setting',
         key: `table:${newDef.database}.${newDef.name}:setting:${change.key}`,
         risk: 'caution',
@@ -332,7 +328,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       })
       continue
     }
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_modify_setting',
       key: `table:${newDef.database}.${newDef.name}:setting:${change.key}`,
       risk: 'caution',
@@ -341,7 +337,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   }
 
   if ((oldDef.ttl ?? '') !== (newDef.ttl ?? '')) {
-    addOperation(ops, {
+    ops.push( {
       type: 'alter_table_modify_ttl',
       key: `table:${newDef.database}.${newDef.name}:ttl`,
       risk: 'caution',
