@@ -37,6 +37,11 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
   return {
     async readJournal(): Promise<MigrationJournal> {
       await ensureTable()
+      try {
+        await db.execute(`SYSTEM SYNC REPLICA _chkit_migrations`)
+      } catch {
+        // Non-replicated or single-node setups don't support SYSTEM SYNC REPLICA.
+      }
       const rows = await db.query<MigrationRow>(
         `SELECT name, applied_at, checksum, chkit_version FROM _chkit_migrations ORDER BY name SETTINGS select_sequential_consistency = 1`
       )
@@ -52,17 +57,15 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
 
     async appendEntry(entry: MigrationJournalEntry): Promise<void> {
       await ensureTable()
-      await db.insert<MigrationRow>({
-        table: '_chkit_migrations',
-        values: [
-          {
-            name: entry.name,
-            applied_at: entry.appliedAt,
-            checksum: entry.checksum,
-            chkit_version: CLI_VERSION,
-          },
-        ],
-      })
+      const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+      await db.execute(
+        `INSERT INTO _chkit_migrations (name, applied_at, checksum, chkit_version) VALUES ('${esc(entry.name)}', '${esc(entry.appliedAt)}', '${esc(entry.checksum)}', '${esc(CLI_VERSION)}')`
+      )
+      try {
+        await db.execute(`SYSTEM SYNC REPLICA _chkit_migrations`)
+      } catch {
+        // Non-replicated or single-node setups don't support SYSTEM SYNC REPLICA.
+      }
     },
   }
 }
