@@ -79,22 +79,19 @@ function exitIfNeeded(): void {
 }
 
 function collectExtensions(runtime: Awaited<ReturnType<typeof loadPluginRuntime>>) {
-  return runtime.plugins
-    .filter((p) => p.plugin.extendCommands && p.plugin.extendCommands.length > 0)
-    .map((p) => ({
-      pluginName: p.plugin.manifest.name,
-      extensions: p.plugin.extendCommands!,
-    }))
+  return runtime.plugins.flatMap((p) => {
+    const extensions = p.plugin.extendCommands
+    if (!extensions || extensions.length === 0) return []
+    return [{ pluginName: p.plugin.manifest.name, extensions }]
+  })
 }
 
 function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRuntime>>) {
-  return runtime.plugins
-    .filter((p) => p.plugin.commands && p.plugin.commands.length > 0)
-    .map((p) => ({
-      pluginName: p.plugin.manifest.name,
-      commands: p.plugin.commands!,
-      manifestName: p.plugin.manifest.name,
-    }))
+  return runtime.plugins.flatMap((p) => {
+    const commands = p.plugin.commands
+    if (!commands || commands.length === 0) return []
+    return [{ pluginName: p.plugin.manifest.name, commands, manifestName: p.plugin.manifest.name }]
+  })
 }
 
 async function main(): Promise<void> {
@@ -259,7 +256,8 @@ async function main(): Promise<void> {
     if (tableSelector) flags['--table'] = tableSelector
 
     const dirs = resolveDirs(config)
-    await resolved.run!({
+    if (!resolved.run) throw new Error(`Command '${commandName}' has no run handler`)
+    await resolved.run({
       command: commandName,
       flags,
       config,
@@ -286,7 +284,8 @@ async function main(): Promise<void> {
 
   const dirs = resolveDirs(config)
 
-  await resolved.run!({
+  if (!resolved.run) throw new Error(`Command '${commandName}' has no run handler`)
+  await resolved.run({
     command: commandName,
     flags,
     config,
