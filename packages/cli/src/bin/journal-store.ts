@@ -31,6 +31,16 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
   async function ensureTable(): Promise<void> {
     if (bootstrapped) return
     await db.execute(CREATE_TABLE_SQL)
+    // On ClickHouse Cloud, DDL propagation across nodes may lag behind the
+    // CREATE TABLE acknowledgment. Wait until the table is queryable.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        await db.query(`SELECT name FROM _chkit_migrations LIMIT 0`)
+        break
+      } catch {
+        await new Promise((r) => setTimeout(r, 250))
+      }
+    }
     bootstrapped = true
   }
 

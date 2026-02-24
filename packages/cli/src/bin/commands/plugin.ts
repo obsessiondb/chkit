@@ -24,7 +24,7 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
   const afterPlugin = pluginIdx >= 0 ? argv.slice(pluginIdx + 1) : []
   const filtered: string[] = []
   for (let i = 0; i < afterPlugin.length; i++) {
-    const token = afterPlugin[i]!
+    const token = afterPlugin[i] as string
     if (GLOBAL_BOOLEAN_FLAGS.has(token)) continue
     if (GLOBAL_STRING_FLAGS.has(token)) {
       i++
