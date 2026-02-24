@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "fff58598b3a6",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6552-chkit-migrations-in-ch",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/commands/plugin.ts",
+    "packages/cli/src/bin/journal-store.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ff/f58598b3a6/0/metadata.json",
+      "transcript": "/ff/f58598b3a6/0/full.jsonl",
+      "context": "/ff/f58598b3a6/0/context.md",
+      "content_hash": "/ff/f58598b3a6/0/content_hash.txt",
+      "prompt": "/ff/f58598b3a6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 18,
+    "cache_creation_tokens": 145214,
+    "cache_read_tokens": 836384,
+    "output_tokens": 127,
+    "api_call_count": 14
+  }
+}
