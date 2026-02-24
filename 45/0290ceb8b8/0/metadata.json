@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "450290ceb8b8",
+  "session_id": "e1731008-549e-4aef-b905-b1379a55ff4a",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T10:13:45.644047Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".changeset/journal-in-clickhouse.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "1a10a356-1e43-4c79-b3ca-e80966af622b",
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 25872,
+    "cache_read_tokens": 174705,
+    "output_tokens": 683,
+    "api_call_count": 8
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T10:13:45.603165Z",
+    "agent_lines": 6,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 6,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-Workspace-chkit/e1731008-549e-4aef-b905-b1379a55ff4a.jsonl"
+}

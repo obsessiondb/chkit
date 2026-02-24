@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "450290ceb8b8",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".changeset/journal-in-clickhouse.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/45/0290ceb8b8/0/metadata.json",
+      "transcript": "/45/0290ceb8b8/0/full.jsonl",
+      "context": "/45/0290ceb8b8/0/context.md",
+      "content_hash": "/45/0290ceb8b8/0/content_hash.txt",
+      "prompt": "/45/0290ceb8b8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 12,
+    "cache_creation_tokens": 25872,
+    "cache_read_tokens": 174705,
+    "output_tokens": 683,
+    "api_call_count": 8
+  }
+}
