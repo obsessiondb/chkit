@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "a88cb0143102",
+  "session_id": "bb4f4bed-1bd6-4e7c-94f5-eed775720d74",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-24T00:51:32.818568Z",
+  "branch": "KeKs0r/plugin-system-update",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".context/plan.md",
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/commands/plugin.ts",
+    "packages/plugin-backfill/src/args.ts",
+    "packages/plugin-backfill/src/plugin.ts",
+    "packages/plugin-backfill/src/types.ts",
+    "packages/plugin-codegen/src/index.test.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-pull/src/index.test.ts",
+    "packages/plugin-pull/src/index.ts",
+    "planning/08-internal-structure.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 155,
+    "cache_creation_tokens": 415957,
+    "cache_read_tokens": 8776864,
+    "output_tokens": 9467,
+    "api_call_count": 91
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-24T00:51:32.084994Z",
+    "agent_lines": 236,
+    "human_added": 661,
+    "human_modified": 89,
+    "human_removed": 0,
+    "total_committed": 986,
+    "agent_percentage": 23.935091277890468
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-kingston/bb4f4bed-1bd6-4e7c-94f5-eed775720d74.jsonl"
+}
