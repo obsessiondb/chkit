@@ -209,6 +209,11 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(secondGeneratePayload.migrationFile).toBeTruthy()
 
         const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
+        if (secondPlan.exitCode !== 0) {
+          throw new Error(
+            `second migrate --json plan failed (exit=${secondPlan.exitCode})\nstdout:\n${secondPlan.stdout}\nstderr:\n${secondPlan.stderr}`
+          )
+        }
         expect(secondPlan.exitCode).toBe(0)
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
         expect(secondPlanPayload.pending.length).toBe(1)
