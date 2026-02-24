@@ -38,7 +38,7 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
     async readJournal(): Promise<MigrationJournal> {
       await ensureTable()
       const rows = await db.query<MigrationRow>(
-        `SELECT name, applied_at, checksum, chkit_version FROM _chkit_migrations ORDER BY name`
+        `SELECT name, applied_at, checksum, chkit_version FROM _chkit_migrations ORDER BY name SETTINGS select_sequential_consistency = 1`
       )
       return {
         version: 1,
