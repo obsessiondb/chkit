@@ -190,6 +190,7 @@ export interface ExecuteBackfillRunOutput {
 
 export interface BackfillPluginCommandContext {
   args: string[]
+  flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
   options: Record<string, unknown>
   config: ResolvedChxConfig
@@ -206,6 +207,13 @@ export interface BackfillPlugin {
   commands: Array<{
     name: 'plan' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
     description: string
+    flags?: Array<{
+      name: string
+      type: 'boolean' | 'string' | 'string[]'
+      description: string
+      placeholder?: string
+      negation?: boolean
+    }>
     run: (context: BackfillPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
   hooks?: {

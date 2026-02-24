@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 
 import {
   type ChxInlinePluginRegistration,
@@ -27,6 +27,7 @@ export interface CodegenPluginOptions {
 
 export interface CodegenPluginCommandContext {
   args: string[]
+  flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
   options: Record<string, unknown>
   config: ResolvedChxConfig
@@ -43,6 +44,13 @@ export interface CodegenPlugin {
   commands: Array<{
     name: 'codegen'
     description: string
+    flags?: Array<{
+      name: string
+      type: 'boolean' | 'string' | 'string[]'
+      description: string
+      placeholder?: string
+      negation?: boolean
+    }>
     run: (context: CodegenPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
   hooks?: {
@@ -120,16 +128,6 @@ export interface CodegenPluginCheckResult {
     metadata?: Record<string, unknown>
   }>
   metadata?: Record<string, unknown>
-}
-
-interface ParsedCommandArgs {
-  check: boolean
-  outFile?: string
-  emitZod?: boolean
-  bigintMode?: 'string' | 'bigint'
-  includeViews?: boolean
-  emitIngest?: boolean
-  ingestOutFile?: string
 }
 
 interface ResolvedTableName {
@@ -722,94 +720,49 @@ export function generateIngestArtifacts(
   }
 }
 
-function parseArgs(args: string[]): ParsedCommandArgs {
-  const parsed: ParsedCommandArgs = {
-    check: false,
+interface FlagOverrides {
+  check: boolean
+  outFile?: string
+  emitZod?: boolean
+  bigintMode?: 'string' | 'bigint'
+  includeViews?: boolean
+  emitIngest?: boolean
+  ingestOutFile?: string
+}
+
+function flagsToOverrides(flags: Record<string, string | string[] | boolean | undefined>): FlagOverrides {
+  const rawBigintMode = flags['--bigint-mode'] as string | undefined
+  if (rawBigintMode !== undefined && rawBigintMode !== 'string' && rawBigintMode !== 'bigint') {
+    throw new CodegenConfigError('Invalid value for --bigint-mode. Expected string or bigint.')
   }
 
-  for (let i = 0; i < args.length; i += 1) {
-    const token = args[i]
-    if (!token) continue
-
-    if (token === '--check') {
-      parsed.check = true
-      continue
-    }
-
-    if (token === '--include-views') {
-      parsed.includeViews = true
-      continue
-    }
-
-    if (token === '--emit-zod') {
-      parsed.emitZod = true
-      continue
-    }
-
-    if (token === '--no-emit-zod') {
-      parsed.emitZod = false
-      continue
-    }
-
-    if (token === '--emit-ingest') {
-      parsed.emitIngest = true
-      continue
-    }
-
-    if (token === '--no-emit-ingest') {
-      parsed.emitIngest = false
-      continue
-    }
-
-    if (token === '--out-file') {
-      const value = args[i + 1]
-      if (!value || value.startsWith('--')) {
-        throw new CodegenConfigError('Missing value for --out-file')
-      }
-      parsed.outFile = value
-      i += 1
-      continue
-    }
-
-    if (token === '--ingest-out-file') {
-      const value = args[i + 1]
-      if (!value || value.startsWith('--')) {
-        throw new CodegenConfigError('Missing value for --ingest-out-file')
-      }
-      parsed.ingestOutFile = value
-      i += 1
-      continue
-    }
-
-    if (token === '--bigint-mode') {
-      const value = args[i + 1]
-      if (value !== 'string' && value !== 'bigint') {
-        throw new CodegenConfigError('Invalid value for --bigint-mode. Expected string or bigint.')
-      }
-      parsed.bigintMode = value
-      i += 1
-    }
+  return {
+    check: flags['--check'] === true,
+    outFile: flags['--out-file'] as string | undefined,
+    emitZod: flags['--emit-zod'] as boolean | undefined,
+    includeViews: flags['--include-views'] as boolean | undefined,
+    emitIngest: flags['--emit-ingest'] as boolean | undefined,
+    ingestOutFile: flags['--ingest-out-file'] as string | undefined,
+    bigintMode: rawBigintMode,
   }
-
-  return parsed
 }
 
 function mergeOptions(
   baseOptions: Required<CodegenPluginOptions>,
   runtimeOptions: Record<string, unknown>,
-  argOptions: ParsedCommandArgs
+  overrides: FlagOverrides
 ): Required<CodegenPluginOptions> {
   const fromRuntime = normalizeRuntimeOptions(runtimeOptions)
   const withRuntime = normalizeCodegenOptions({ ...baseOptions, ...fromRuntime })
 
   return normalizeCodegenOptions({
     ...withRuntime,
-    outFile: argOptions.outFile ?? withRuntime.outFile,
-    emitZod: argOptions.emitZod ?? withRuntime.emitZod,
-    bigintMode: argOptions.bigintMode ?? withRuntime.bigintMode,
-    includeViews: argOptions.includeViews ?? withRuntime.includeViews,
-    emitIngest: argOptions.emitIngest ?? withRuntime.emitIngest,
-    ingestOutFile: argOptions.ingestOutFile ?? withRuntime.ingestOutFile,
+    outFile: overrides.outFile ?? withRuntime.outFile,
+    emitZod: overrides.emitZod ?? withRuntime.emitZod,
+    bigintMode: overrides.bigintMode ?? withRuntime.bigintMode,
+    includeViews: overrides.includeViews ?? withRuntime.includeViews,
+    emitIngest: overrides.emitIngest ?? withRuntime.emitIngest,
+    ingestOutFile: overrides.ingestOutFile ?? withRuntime.ingestOutFile,
   })
 }
 
@@ -918,8 +871,17 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
       {
         name: 'codegen',
         description: 'Generate TypeScript artifacts from chkit schema definitions',
+        flags: [
+          { name: '--check', type: 'boolean' as const, description: 'Check if generated output is up-to-date' },
+          { name: '--out-file', type: 'string' as const, description: 'Output file path', placeholder: '<path>' },
+          { name: '--emit-zod', type: 'boolean' as const, description: 'Emit Zod schemas alongside TypeScript types', negation: true },
+          { name: '--emit-ingest', type: 'boolean' as const, description: 'Emit ingest helper functions', negation: true },
+          { name: '--ingest-out-file', type: 'string' as const, description: 'Ingest output file path', placeholder: '<path>' },
+          { name: '--bigint-mode', type: 'string' as const, description: 'How to represent large integers (string or bigint)', placeholder: '<mode>' },
+          { name: '--include-views', type: 'boolean' as const, description: 'Include views in generated output' },
+        ],
         async run({
-          args,
+          flags,
           jsonMode,
           print,
           options: runtimeOptions,
@@ -927,8 +889,8 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
           configPath,
         }): Promise<undefined | number> {
           try {
-            const parsedArgs = parseArgs(args)
-            const effectiveOptions = mergeOptions(base, runtimeOptions, parsedArgs)
+            const overrides = flagsToOverrides(flags)
+            const effectiveOptions = mergeOptions(base, runtimeOptions, overrides)
             const configDir = resolve(configPath, '..')
             const outFile = resolve(configDir, effectiveOptions.outFile)
             const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
@@ -947,7 +909,7 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
               ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
             }
 
-            if (parsedArgs.check) {
+            if (overrides.check) {
               const current = await readMaybe(outFile)
               const typeCheckResult = checkGeneratedOutput({
                 label: 'Codegen',

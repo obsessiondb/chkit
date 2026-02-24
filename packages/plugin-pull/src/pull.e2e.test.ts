@@ -165,7 +165,8 @@ describe('@chkit/plugin-pull live env e2e', () => {
 
         const output: unknown[] = []
         const exitCode = await command.run({
-          args: ['--database', targetDatabase],
+          args: [],
+          flags: { '--database': [targetDatabase] },
           jsonMode: true,
           options: {},
           configPath: join(dir, 'clickhouse.config.ts'),

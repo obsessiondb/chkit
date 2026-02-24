@@ -8,6 +8,8 @@ import type {
   ParsedStatusArgs,
 } from './types.js'
 
+type ParsedFlags = Record<string, string | string[] | boolean | undefined>
+
 function normalizeTimestamp(raw: string, flagName: string): string {
   const value = raw.trim()
   if (value.length === 0) {
@@ -38,41 +40,20 @@ function normalizePlanId(raw: string): string {
   return value
 }
 
-export function parsePlanArgs(args: string[]): ParsedPlanArgs {
-  let target: string | undefined
-  let from: string | undefined
-  let to: string | undefined
+export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
+  const target = flags['--target'] as string | undefined
+  const from = flags['--from'] as string | undefined
+  const to = flags['--to'] as string | undefined
+  const rawChunkHours = flags['--chunk-hours'] as string | undefined
+  const forceLargeWindow = flags['--force-large-window'] === true
+
   let chunkHours: number | undefined
-  let forceLargeWindow = false
-
-  for (let i = 0; i < args.length; i += 1) {
-    const token = args[i]
-    if (!token) continue
-
-    if (token === '--force-large-window') {
-      forceLargeWindow = true
-      continue
+  if (rawChunkHours !== undefined) {
+    const parsed = Number(rawChunkHours)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new BackfillConfigError('Invalid value for --chunk-hours. Expected a positive number.')
     }
-
-    if (token === '--target' || token === '--from' || token === '--to' || token === '--chunk-hours') {
-      const nextValue = args[i + 1]
-      if (!nextValue || nextValue.startsWith('--')) {
-        throw new BackfillConfigError(`Missing value for ${token}`)
-      }
-
-      if (token === '--target') target = nextValue
-      if (token === '--from') from = nextValue
-      if (token === '--to') to = nextValue
-      if (token === '--chunk-hours') {
-        const parsed = Number(nextValue)
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-          throw new BackfillConfigError('Invalid value for --chunk-hours. Expected a positive number.')
-        }
-        chunkHours = parsed
-      }
-
-      i += 1
-    }
+    chunkHours = parsed
   }
 
   if (!target) throw new BackfillConfigError('Missing required --target <database.table>')
@@ -88,61 +69,22 @@ export function parsePlanArgs(args: string[]): ParsedPlanArgs {
   }
 }
 
-export function parseRunArgs(args: string[]): ParsedRunArgs {
-  let planId: string | undefined
-  let replayDone = false
-  let replayFailed = false
-  let forceOverlap = false
-  let forceCompatibility = false
-  let simulateFailChunk: string | undefined
+export function parseRunArgs(flags: ParsedFlags): ParsedRunArgs {
+  const planId = flags['--plan-id'] as string | undefined
+  const replayDone = flags['--replay-done'] === true
+  const replayFailed = flags['--replay-failed'] === true
+  const forceOverlap = flags['--force-overlap'] === true
+  const forceCompatibility = flags['--force-compatibility'] === true
+  const simulateFailChunk = flags['--simulate-fail-chunk'] as string | undefined
+
   let simulateFailCount = 1
-
-  for (let i = 0; i < args.length; i += 1) {
-    const token = args[i]
-    if (!token) continue
-
-    if (token === '--replay-done') {
-      replayDone = true
-      continue
+  const rawSimulateFailCount = flags['--simulate-fail-count'] as string | undefined
+  if (rawSimulateFailCount !== undefined) {
+    const parsed = Number(rawSimulateFailCount)
+    if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+      throw new BackfillConfigError('Invalid value for --simulate-fail-count. Expected integer > 0.')
     }
-
-    if (token === '--replay-failed') {
-      replayFailed = true
-      continue
-    }
-
-    if (token === '--force-overlap') {
-      forceOverlap = true
-      continue
-    }
-
-    if (token === '--force-compatibility') {
-      forceCompatibility = true
-      continue
-    }
-
-    if (
-      token === '--plan-id' ||
-      token === '--simulate-fail-chunk' ||
-      token === '--simulate-fail-count'
-    ) {
-      const nextValue = args[i + 1]
-      if (!nextValue || nextValue.startsWith('--')) {
-        throw new BackfillConfigError(`Missing value for ${token}`)
-      }
-
-      if (token === '--plan-id') planId = nextValue
-      if (token === '--simulate-fail-chunk') simulateFailChunk = nextValue
-      if (token === '--simulate-fail-count') {
-        const parsed = Number(nextValue)
-        if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
-          throw new BackfillConfigError('Invalid value for --simulate-fail-count. Expected integer > 0.')
-        }
-        simulateFailCount = parsed
-      }
-
-      i += 1
-    }
+    simulateFailCount = parsed
   }
 
   if (!planId) throw new BackfillConfigError('Missing required --plan-id <id>')
@@ -158,8 +100,8 @@ export function parseRunArgs(args: string[]): ParsedRunArgs {
   }
 }
 
-export function parseResumeArgs(args: string[]): ParsedResumeArgs {
-  const parsed = parseRunArgs(args)
+export function parseResumeArgs(flags: ParsedFlags): ParsedResumeArgs {
+  const parsed = parseRunArgs(flags)
   return {
     planId: parsed.planId,
     replayDone: parsed.replayDone,
@@ -169,30 +111,16 @@ export function parseResumeArgs(args: string[]): ParsedResumeArgs {
   }
 }
 
-export function parseStatusArgs(args: string[]): ParsedStatusArgs {
-  let planId: string | undefined
-
-  for (let i = 0; i < args.length; i += 1) {
-    const token = args[i]
-    if (token !== '--plan-id') continue
-
-    const nextValue = args[i + 1]
-    if (!nextValue || nextValue.startsWith('--')) {
-      throw new BackfillConfigError('Missing value for --plan-id')
-    }
-    planId = nextValue
-    i += 1
-  }
-
+export function parseStatusArgs(flags: ParsedFlags): ParsedStatusArgs {
+  const planId = flags['--plan-id'] as string | undefined
   if (!planId) throw new BackfillConfigError('Missing required --plan-id <id>')
-
   return { planId: normalizePlanId(planId) }
 }
 
-export function parseCancelArgs(args: string[]): ParsedCancelArgs {
-  return parseStatusArgs(args)
+export function parseCancelArgs(flags: ParsedFlags): ParsedCancelArgs {
+  return parseStatusArgs(flags)
 }
 
-export function parseDoctorArgs(args: string[]): ParsedDoctorArgs {
-  return parseStatusArgs(args)
+export function parseDoctorArgs(flags: ParsedFlags): ParsedDoctorArgs {
+  return parseStatusArgs(flags)
 }
