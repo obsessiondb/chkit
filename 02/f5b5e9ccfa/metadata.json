@@ -6,6 +6,7 @@
   "checkpoints_count": 1,
   "files_touched": [
     "packages/cli/src/bin/commands/migrate.ts",
+    "packages/cli/src/bin/journal-store.ts",
     "packages/cli/src/clickhouse-live.e2e.test.ts",
     "packages/cli/src/drift.e2e.test.ts",
     "packages/clickhouse/src/index.ts"
@@ -20,10 +21,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 50,
-    "cache_creation_tokens": 65338,
-    "cache_read_tokens": 2838754,
-    "output_tokens": 346,
+    "input_tokens": 44,
+    "cache_creation_tokens": 120060,
+    "cache_read_tokens": 4854128,
+    "output_tokens": 436,
     "api_call_count": 42
   }
 }

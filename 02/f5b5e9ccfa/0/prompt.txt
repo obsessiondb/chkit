@@ -316,3 +316,14 @@ Summary:
 
 If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/marc/.REDACTED.jsonl
 Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /tmp/attachments/verify_64644370974.log
+</system_instruction>
+
+
+
+Fix the failing CI actions. I've attached the failure logs.

@@ -61,3 +61,14 @@ Let me chronologically analyze the conversation:
 
 3. *...
 
+### Prompt 9
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /tmp/attachments/verify_64644370974.log
+</system_instruction>
+
+
+
+Fix the failing CI actions. I've attached the failure logs.
+
