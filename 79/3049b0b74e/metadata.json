@@ -3,10 +3,11 @@
   "checkpoint_id": "793049b0b74e",
   "strategy": "manual-commit",
   "branch": "KeKs0r/full-code-review",
-  "checkpoints_count": 1,
+  "checkpoints_count": 3,
   "files_touched": [
     ".context/code-review.md",
-    "packages/cli/src/bin/chkit.ts"
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/version.ts"
   ],
   "sessions": [
     {
@@ -15,13 +16,20 @@
       "context": "/79/3049b0b74e/0/context.md",
       "content_hash": "/79/3049b0b74e/0/content_hash.txt",
       "prompt": "/79/3049b0b74e/0/prompt.txt"
+    },
+    {
+      "metadata": "/79/3049b0b74e/1/metadata.json",
+      "transcript": "/79/3049b0b74e/1/full.jsonl",
+      "context": "/79/3049b0b74e/1/context.md",
+      "content_hash": "/79/3049b0b74e/1/content_hash.txt",
+      "prompt": "/79/3049b0b74e/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 11,
-    "cache_creation_tokens": 23701,
-    "cache_read_tokens": 302638,
-    "output_tokens": 117,
-    "api_call_count": 10
+    "input_tokens": 170,
+    "cache_creation_tokens": 57333,
+    "cache_read_tokens": 1207762,
+    "output_tokens": 356,
+    "api_call_count": 36
   }
 }
