@@ -178,7 +178,7 @@ async function main(): Promise<void> {
       if (matchedSub) {
         subcommandName = matchedSub.name
       } else if (resolved.subcommands.length === 1) {
-        subcommandName = resolved.subcommands[0]!.name
+        subcommandName = resolved.subcommands[0]?.name
       } else {
         console.log(formatCommandHelp(resolved, registry.globalFlags))
         return

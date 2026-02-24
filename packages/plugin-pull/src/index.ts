@@ -276,13 +276,6 @@ function normalizeDatabasesOption(value: unknown, label: string): string[] | und
   return [...new Set(normalized)].sort()
 }
 
-function splitCommaValues(input: string): string[] {
-  return input
-    .split(',')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
-}
-
 async function pullSchema(input: {
   config: ResolvedChxConfig
   options: Required<Omit<PullPluginOptions, 'introspect'>> & { introspect?: PullIntrospector }
