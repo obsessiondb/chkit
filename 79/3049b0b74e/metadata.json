@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "793049b0b74e",
+  "strategy": "manual-commit",
+  "branch": "KeKs0r/full-code-review",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".context/code-review.md",
+    "packages/cli/src/bin/chkit.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/79/3049b0b74e/0/metadata.json",
+      "transcript": "/79/3049b0b74e/0/full.jsonl",
+      "context": "/79/3049b0b74e/0/context.md",
+      "content_hash": "/79/3049b0b74e/0/content_hash.txt",
+      "prompt": "/79/3049b0b74e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 11,
+    "cache_creation_tokens": 23701,
+    "cache_read_tokens": 302638,
+    "output_tokens": 117,
+    "api_call_count": 10
+  }
+}
