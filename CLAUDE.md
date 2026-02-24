@@ -50,6 +50,10 @@ bun run typecheck    # type-check all packages
 bun run lint         # lint all packages
 ```
 
+## Pull Requests
+
+Before creating a PR, you MUST run `bun verify` and ensure it passes. Do not create a PR if verification fails — fix the issues first.
+
 ## Release
 
 Uses changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump versions.
