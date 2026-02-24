@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "82c569e9dc56",
+  "strategy": "manual-commit",
+  "branch": "marc/typed-flag-parser",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/plugins.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-codegen/src/options.ts",
+    "packages/plugin-codegen/src/plugin.ts",
+    "packages/plugin-codegen/src/types.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/82/c569e9dc56/0/metadata.json",
+      "transcript": "/82/c569e9dc56/0/full.jsonl",
+      "context": "/82/c569e9dc56/0/context.md",
+      "content_hash": "/82/c569e9dc56/0/content_hash.txt",
+      "prompt": "/82/c569e9dc56/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 38,
+    "cache_creation_tokens": 112094,
+    "cache_read_tokens": 4112287,
+    "output_tokens": 484,
+    "api_call_count": 36
+  }
+}
