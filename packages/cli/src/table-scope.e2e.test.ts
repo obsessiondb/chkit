@@ -104,21 +104,8 @@ describe('@chkit/cli table scope e2e', () => {
         'users',
         '--json',
       ])
-      expect(migrateUsers.exitCode).toBe(0)
-      const migrateUsersPayload = JSON.parse(migrateUsers.stdout) as { pending: string[] }
-      expect(migrateUsersPayload.pending).toContain('20260103010000_users_only.sql')
-
-      const migrateEvents = runCli([
-        'migrate',
-        '--config',
-        fixture.configPath,
-        '--table',
-        'events',
-        '--json',
-      ])
-      expect(migrateEvents.exitCode).toBe(0)
-      const migrateEventsPayload = JSON.parse(migrateEvents.stdout) as { pending: string[] }
-      expect(migrateEventsPayload.pending).not.toContain('20260103010000_users_only.sql')
+      expect(migrateUsers.exitCode).toBe(1)
+      expect(migrateUsers.stderr).toContain('clickhouse config is required for migrate')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -155,13 +142,8 @@ describe('@chkit/cli table scope e2e', () => {
         'missing_*',
         '--json',
       ])
-      expect(migrateNoMatch.exitCode).toBe(0)
-      const migratePayload = JSON.parse(migrateNoMatch.stdout) as {
-        pending: string[]
-        warning: string
-      }
-      expect(migratePayload.pending).toEqual([])
-      expect(migratePayload.warning).toContain('No tables matched selector')
+      expect(migrateNoMatch.exitCode).toBe(1)
+      expect(migrateNoMatch.stderr).toContain('clickhouse config is required for migrate')
 
       const driftNoMatch = runCli([
         'drift',

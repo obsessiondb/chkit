@@ -3,7 +3,8 @@ import { mkdir } from 'node:fs/promises'
 import { summarizeDriftReasons } from '../../drift.js'
 import type { CommandDef, CommandRunContext } from '../../plugins.js'
 import { emitJson } from '../json-output.js'
-import { findChecksumMismatches, listMigrations, readJournal, readSnapshot } from '../migration-store.js'
+import { createJournalStoreFromConfig } from '../journal-store.js'
+import { findChecksumMismatches, listMigrations, readSnapshot } from '../migration-store.js'
 import { buildDriftPayload } from './drift.js'
 
 export const checkCommand: CommandDef = {
@@ -22,8 +23,14 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
   const { migrationsDir, metaDir } = dirs
   await mkdir(migrationsDir, { recursive: true })
 
+  if (!config.clickhouse) {
+    throw new Error('clickhouse config is required for check (journal is stored in ClickHouse)')
+  }
+
+  const { journalStore } = createJournalStoreFromConfig(config.clickhouse)
+
   const files = await listMigrations(migrationsDir)
-  const journal = await readJournal(metaDir)
+  const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pending = files.filter((f) => !appliedNames.has(f))
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)

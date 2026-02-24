@@ -42,7 +42,7 @@ function stripGlobalFlags(argv: string[]): {
   let tableSelector: string | undefined
 
   for (let i = 0; i < argv.length; i++) {
-    const token = argv[i]!
+    const token = argv[i] as string
     if (token === '--json') {
       jsonMode = true
       continue

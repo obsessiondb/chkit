@@ -7,14 +7,17 @@ export {
   writeIfMissing,
 } from './config.js'
 export {
+  createJournalStore,
+  createJournalStoreFromConfig,
+  type JournalStore,
+} from './journal-store.js'
+export {
   checksumSQL,
   findChecksumMismatches,
   listMigrations,
   parseJSONOrThrow,
-  readJournal,
   readSnapshot,
   summarizePlan,
-  writeJournal,
   type ChecksumMismatch,
   type MigrationJournal,
   type MigrationJournalEntry,

@@ -135,9 +135,11 @@ async function createFixture(database: string): Promise<E2EFixture> {
   await writeFile(schemaPath, renderBaseSchema(database), 'utf8')
   await writeFile(
     configPath,
-    `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n}\n`,
+    `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${database}',\n  },\n}\n`,
     'utf8'
   )
+
+  await runSql(clickhouseUrl, clickhouseUser, clickhousePassword, `CREATE DATABASE IF NOT EXISTS ${database}`)
 
   return { dir, configPath, schemaPath }
 }
@@ -300,7 +302,7 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${database}',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
           'utf8'
         )
 
@@ -356,7 +358,7 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: 'default',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${database}',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
           'utf8'
         )
 
