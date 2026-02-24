@@ -1,5 +1,6 @@
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import type { CommandDef, CommandRunContext, ParsedFlags } from '../../plugins.js'
 import { emitJson, printOutput } from '../json-output.js'
+import { parseFlags, UnknownFlagError, MissingFlagValueError } from '../parse-flags.js'
 import { resolveTableScope, tableKeysFromDefinitions } from '../table-scope.js'
 import { loadSchemaDefinitions } from '../schema-loader.js'
 
@@ -123,13 +124,34 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
     tableScope = resolveTableScope(tableSelector, [])
   }
 
+  // Parse plugin-specific flags when the command declares them
+  const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
+  let mergedFlags: ParsedFlags = { ...flags }
+  if (targetCommand?.flags && targetCommand.flags.length > 0) {
+    try {
+      const parsed = parseFlags(commandArgs, targetCommand.flags)
+      mergedFlags = { ...flags, ...parsed }
+    } catch (error) {
+      if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
+        if (jsonMode) {
+          emitJson('plugin', { ok: false, error: error.message })
+        } else {
+          console.error(error.message)
+        }
+        process.exitCode = 1
+        return
+      }
+      throw error
+    }
+  }
+
   const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {
     config,
     configPath,
     jsonMode,
     tableScope,
     args: commandArgs,
-    flags,
+    flags: mergedFlags,
     print(value) {
       printOutput(value, jsonMode)
     },

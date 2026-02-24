@@ -81,7 +81,8 @@ describe('@chkit/plugin-pull schema command', () => {
 
     const logs: unknown[] = []
     const code = await command.run({
-      args: ['--dryrun'],
+      args: [],
+      flags: { '--dryrun': true },
       jsonMode: true,
       options: {},
       configPath: '/tmp/clickhouse.config.ts',
@@ -161,7 +162,8 @@ describe('@chkit/plugin-pull schema command', () => {
 
     const logs: unknown[] = []
     const code = await command.run({
-      args: ['--dryrun'],
+      args: [],
+      flags: { '--dryrun': true },
       jsonMode: true,
       options: {},
       configPath: '/tmp/clickhouse.config.ts',
@@ -224,10 +226,11 @@ describe('@chkit/plugin-pull schema command', () => {
     const command = plugin.commands[0]
     if (!command) throw new Error('missing command')
 
-    const run = async (args: string[]): Promise<{ code: undefined | number; output: unknown[] }> => {
+    const run = async (flags: Record<string, string | string[] | boolean | undefined> = {}): Promise<{ code: undefined | number; output: unknown[] }> => {
       const output: unknown[] = []
       const code = await command.run({
-        args,
+        args: [],
+        flags,
         jsonMode: true,
         options: {},
         configPath: '/tmp/clickhouse.config.ts',
@@ -255,13 +258,13 @@ describe('@chkit/plugin-pull schema command', () => {
     }
 
     try {
-      const first = await run([])
+      const first = await run()
       expect(first.code).toBe(0)
       const written = await readFile(outFile, 'utf8')
       expect(written).toContain('const app_users = table({')
 
       await writeFile(outFile, '// existing\n', 'utf8')
-      const second = await run([])
+      const second = await run()
       expect(second.code).toBe(2)
       expect(second.output[0]).toEqual({
         ok: false,
@@ -269,7 +272,7 @@ describe('@chkit/plugin-pull schema command', () => {
         error: `Output file already exists at ${outFile}. Re-run with --force or set plugin option overwrite=true.`,
       })
 
-      const third = await run(['--force'])
+      const third = await run({ '--force': true })
       expect(third.code).toBe(0)
       const forced = await readFile(outFile, 'utf8')
       expect(forced).toContain('export default schema(app_users)')
