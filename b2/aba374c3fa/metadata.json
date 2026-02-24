@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "b2aba374c3fa",
+  "strategy": "manual-commit",
+  "branch": "marc/typed-flag-parser",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/command-registry.ts",
+    "packages/cli/src/bin/commands/drift.ts",
+    "packages/cli/src/bin/commands/generate.ts",
+    "packages/cli/src/bin/commands/migrate.ts",
+    "packages/cli/src/bin/commands/plugin.ts",
+    "packages/cli/src/bin/global-flags.ts",
+    "packages/cli/src/bin/help.ts",
+    "packages/cli/src/bin/parse-flags.test.ts",
+    "packages/cli/src/bin/parse-flags.ts",
+    "packages/cli/src/plugins.ts",
+    "packages/plugin-backfill/src/args.ts",
+    "packages/plugin-backfill/src/plugin.ts",
+    "packages/plugin-backfill/src/types.ts",
+    "packages/plugin-codegen/src/index.ts",
+    "packages/plugin-pull/src/index.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b2/aba374c3fa/0/metadata.json",
+      "transcript": "/b2/aba374c3fa/0/full.jsonl",
+      "context": "/b2/aba374c3fa/0/context.md",
+      "content_hash": "/b2/aba374c3fa/0/content_hash.txt",
+      "prompt": "/b2/aba374c3fa/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 8100,
+    "cache_creation_tokens": 107949,
+    "cache_read_tokens": 8640902,
+    "output_tokens": 1117,
+    "api_call_count": 95
+  }
+}
