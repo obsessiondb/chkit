@@ -1,0 +1,42 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "fff58598b3a6",
+  "session_id": "74e8f6e6-6d76-486e-a831-70dd772ac11e",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-25T10:53:48.828828Z",
+  "branch": "marc/num-6552-chkit-migrations-in-ch",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/commands/check.ts",
+    "packages/cli/src/bin/commands/migrate.ts",
+    "packages/cli/src/bin/commands/status.ts",
+    "packages/cli/src/bin/journal-store.ts",
+    "packages/cli/src/bin/lib.ts",
+    "packages/cli/src/bin/migration-store.ts",
+    "packages/cli/src/check.e2e.test.ts",
+    "packages/cli/src/migrate.e2e.test.ts",
+    "packages/cli/src/migration-scenario.test.ts",
+    "packages/cli/src/plugin.test.ts",
+    "packages/cli/src/status.e2e.test.ts",
+    "packages/cli/src/table-scope.e2e.test.ts",
+    "packages/clickhouse/src/index.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 60,
+    "cache_creation_tokens": 122736,
+    "cache_read_tokens": 4807566,
+    "output_tokens": 496,
+    "api_call_count": 60
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-25T10:53:44.435069Z",
+    "agent_lines": 160,
+    "human_added": 9,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 169,
+    "agent_percentage": 94.67455621301775
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-tianjin-v1/74e8f6e6-6d76-486e-a831-70dd772ac11e.jsonl"
+}

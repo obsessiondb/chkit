@@ -3,11 +3,23 @@
   "checkpoint_id": "fff58598b3a6",
   "strategy": "manual-commit",
   "branch": "marc/num-6552-chkit-migrations-in-ch",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/commands/check.ts",
+    "packages/cli/src/bin/commands/migrate.ts",
     "packages/cli/src/bin/commands/plugin.ts",
-    "packages/cli/src/bin/journal-store.ts"
+    "packages/cli/src/bin/commands/status.ts",
+    "packages/cli/src/bin/journal-store.ts",
+    "packages/cli/src/bin/lib.ts",
+    "packages/cli/src/bin/migration-store.ts",
+    "packages/cli/src/check.e2e.test.ts",
+    "packages/cli/src/migrate.e2e.test.ts",
+    "packages/cli/src/migration-scenario.test.ts",
+    "packages/cli/src/plugin.test.ts",
+    "packages/cli/src/status.e2e.test.ts",
+    "packages/cli/src/table-scope.e2e.test.ts",
+    "packages/clickhouse/src/index.ts"
   ],
   "sessions": [
     {
@@ -16,13 +28,20 @@
       "context": "/ff/f58598b3a6/0/context.md",
       "content_hash": "/ff/f58598b3a6/0/content_hash.txt",
       "prompt": "/ff/f58598b3a6/0/prompt.txt"
+    },
+    {
+      "metadata": "/ff/f58598b3a6/1/metadata.json",
+      "transcript": "/ff/f58598b3a6/1/full.jsonl",
+      "context": "/ff/f58598b3a6/1/context.md",
+      "content_hash": "/ff/f58598b3a6/1/content_hash.txt",
+      "prompt": "/ff/f58598b3a6/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 18,
-    "cache_creation_tokens": 145214,
-    "cache_read_tokens": 836384,
-    "output_tokens": 127,
-    "api_call_count": 14
+    "input_tokens": 78,
+    "cache_creation_tokens": 267950,
+    "cache_read_tokens": 5643950,
+    "output_tokens": 623,
+    "api_call_count": 74
   }
 }
