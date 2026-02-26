@@ -21,6 +21,7 @@
     "internal-refactors",
     "journal-in-clickhouse",
     "rename-plugin-codegen",
-    "rename-to-chkit"
+    "rename-to-chkit",
+    "skill-hint-plugin"
   ]
 }
