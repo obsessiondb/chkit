@@ -36,7 +36,7 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx())
+    await plugin.hooks?.onInit?.(initCtx())
     expect(installed).toBe(true)
   })
 
@@ -49,13 +49,13 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx())
+    await plugin.hooks?.onInit?.(initCtx())
 
     expect(written).toHaveLength(1)
-    expect(written[0]!.lastDismissed).toBeDefined()
+    expect(written[0]?.lastDismissed).toBeDefined()
 
     const spy = spyOn(console, 'error').mockImplementation(() => {})
-    await plugin.hooks!.onComplete!(completeCtx())
+    await plugin.hooks?.onComplete?.(completeCtx())
     const output = spy.mock.calls.flat().join(' ')
     expect(output).toContain(SKILL_INSTALL_COMMAND)
     spy.mockRestore()
@@ -81,12 +81,12 @@ describe('skill-hint plugin', () => {
 
     // First run — user is prompted and declines
     const plugin1 = createSkillHintPlugin(makeDeps())
-    await plugin1.hooks!.onInit!(initCtx())
+    await plugin1.hooks?.onInit?.(initCtx())
     expect(promptCount).toBe(1)
 
     // Second run — state was stored, should not prompt
     const plugin2 = createSkillHintPlugin(makeDeps())
-    await plugin2.hooks!.onInit!(initCtx())
+    await plugin2.hooks?.onInit?.(initCtx())
     expect(promptCount).toBe(1)
   })
 
@@ -106,7 +106,7 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx())
+    await plugin.hooks?.onInit?.(initCtx())
     expect(promptCount).toBe(1)
   })
 
@@ -122,7 +122,7 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx())
+    await plugin.hooks?.onInit?.(initCtx())
     expect(prompted).toBe(false)
   })
 
@@ -137,7 +137,7 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx({ isInteractive: false }))
+    await plugin.hooks?.onInit?.(initCtx({ isInteractive: false }))
     expect(prompted).toBe(false)
   })
 
@@ -152,7 +152,7 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx({ jsonMode: true }))
+    await plugin.hooks?.onInit?.(initCtx({ jsonMode: true }))
     expect(prompted).toBe(false)
   })
 
@@ -163,10 +163,10 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx())
+    await plugin.hooks?.onInit?.(initCtx())
 
     const spy = spyOn(console, 'error').mockImplementation(() => {})
-    await plugin.hooks!.onComplete!(completeCtx({ jsonMode: true }))
+    await plugin.hooks?.onComplete?.(completeCtx({ jsonMode: true }))
     expect(spy.mock.calls).toHaveLength(0)
     spy.mockRestore()
   })
@@ -178,10 +178,10 @@ describe('skill-hint plugin', () => {
       })
     )
 
-    await plugin.hooks!.onInit!(initCtx())
+    await plugin.hooks?.onInit?.(initCtx())
 
     const spy = spyOn(console, 'error').mockImplementation(() => {})
-    await plugin.hooks!.onComplete!(completeCtx({ exitCode: 1 }))
+    await plugin.hooks?.onComplete?.(completeCtx({ exitCode: 1 }))
     expect(spy.mock.calls).toHaveLength(0)
     spy.mockRestore()
   })
