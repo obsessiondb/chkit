@@ -1,9 +1,42 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import process from 'node:process'
 
 import { definePlugin, type ChxPlugin } from '../../plugins.js'
+
+const AGENTIC_MARKERS = ['.claude', '.cursor', 'CLAUDE.md', '.cursorrules', '.github/copilot-instructions.md']
+
+/**
+ * Walk up from `cwd` to find the best directory for installing agent skills.
+ *
+ * 1. Look for agentic markers (.claude/, .cursor/, CLAUDE.md, etc.)
+ * 2. Fall back to the git root (.git)
+ * 3. Fall back to `cwd`
+ */
+export function findAgentRoot(cwd: string): string {
+  // Pass 1: look for agentic markers
+  let dir = cwd
+  while (true) {
+    for (const marker of AGENTIC_MARKERS) {
+      if (existsSync(join(dir, marker))) return dir
+    }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+
+  // Pass 2: look for .git
+  dir = cwd
+  while (true) {
+    if (existsSync(join(dir, '.git'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+
+  return cwd
+}
 
 export const SKILL_INSTALL_COMMAND = 'npx skills add obsessiondb/chkit'
 export const HINT_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
@@ -31,8 +64,8 @@ function getStateFilePath(): string {
 
 const defaultDeps: SkillHintDeps = {
   isSkillInstalled() {
-    const cwd = process.cwd()
-    const projectSkill = join(cwd, '.claude', 'skills', 'chkit', 'SKILL.md')
+    const root = findAgentRoot(process.cwd())
+    const projectSkill = join(root, '.claude', 'skills', 'chkit', 'SKILL.md')
     const globalSkill = join(homedir(), '.claude', 'skills', 'chkit', 'SKILL.md')
     return existsSync(projectSkill) || existsSync(globalSkill)
   },
@@ -70,7 +103,7 @@ const defaultDeps: SkillHintDeps = {
     const { execSync } = await import('node:child_process')
     try {
       console.error('')
-      execSync(SKILL_INSTALL_COMMAND, { stdio: 'inherit' })
+      execSync(SKILL_INSTALL_COMMAND, { cwd: findAgentRoot(process.cwd()), stdio: 'inherit' })
       return true
     } catch {
       console.error(`Failed to install. Run manually: ${SKILL_INSTALL_COMMAND}`)
