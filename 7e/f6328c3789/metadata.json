@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "7ef6328c3789",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6597-chkit-hint-at-installing-skills",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/internal-plugins/skill-hint.test.ts",
+    "packages/cli/src/clickhouse-live.e2e.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7e/f6328c3789/0/metadata.json",
+      "transcript": "/7e/f6328c3789/0/full.jsonl",
+      "context": "/7e/f6328c3789/0/context.md",
+      "content_hash": "/7e/f6328c3789/0/content_hash.txt",
+      "prompt": "/7e/f6328c3789/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 41,
+    "cache_creation_tokens": 59708,
+    "cache_read_tokens": 2218111,
+    "output_tokens": 467,
+    "api_call_count": 37
+  }
+}

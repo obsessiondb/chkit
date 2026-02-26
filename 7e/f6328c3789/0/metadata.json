@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "7ef6328c3789",
+  "session_id": "366bc4b1-8789-4be2-bcc0-31861da6e9b7",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T10:07:07.754312Z",
+  "branch": "marc/num-6597-chkit-hint-at-installing-skills",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/internal-plugins/skill-hint.test.ts",
+    "packages/cli/src/clickhouse-live.e2e.test.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 41,
+    "cache_creation_tokens": 59708,
+    "cache_read_tokens": 2218111,
+    "output_tokens": 467,
+    "api_call_count": 37
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T10:07:07.617272Z",
+    "agent_lines": 18,
+    "human_added": 1035,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1053,
+    "agent_percentage": 1.7094017094017095
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-prague/366bc4b1-8789-4be2-bcc0-31861da6e9b7.jsonl"
+}
