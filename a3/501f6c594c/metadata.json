@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "a3501f6c594c",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6597-chkit-hint-at-installing-skills",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/internal-plugins/index.ts",
+    "packages/cli/src/bin/internal-plugins/skill-hint.test.ts",
+    "packages/cli/src/bin/internal-plugins/skill-hint.ts",
+    "packages/cli/src/bin/plugin-runtime.ts",
+    "packages/cli/src/bin/skill-hint.test.ts",
+    "packages/cli/src/bin/skill-hint.ts",
+    "packages/cli/src/plugins.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a3/501f6c594c/0/metadata.json",
+      "transcript": "/a3/501f6c594c/0/full.jsonl",
+      "context": "/a3/501f6c594c/0/context.md",
+      "content_hash": "/a3/501f6c594c/0/content_hash.txt",
+      "prompt": "/a3/501f6c594c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2659,
+    "cache_creation_tokens": 277402,
+    "cache_read_tokens": 8646989,
+    "output_tokens": 970,
+    "api_call_count": 100
+  }
+}
