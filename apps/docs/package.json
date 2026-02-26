@@ -8,7 +8,7 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "deploy": "wrangler pages deploy dist --project-name=chkit-docs",
+    "deploy": "wrangler deploy",
     "astro": "astro"
   },
   "dependencies": {
