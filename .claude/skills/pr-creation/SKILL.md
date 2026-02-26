@@ -48,6 +48,24 @@ Short description of the change.
 
 If the PR is purely internal (CI, docs, refactoring with no user-facing effect), a changeset is not required.
 
+### How to decide: user-facing or internal?
+
+**When in doubt, create a changeset.** The cost of an unnecessary changeset is near zero; a missing one delays the release.
+
+A change is **user-facing** if it affects what users experience when they install or run chkit. Ask yourself: "If a user upgrades chkit, could they notice this change?" If yes, it needs a changeset.
+
+Examples that **require** a changeset:
+- Bug fixes — even if the fix is in internal/plugin code, if it corrects wrong behavior users can hit, it's user-facing
+- New CLI flags, commands, or options
+- Changed output format, error messages, or default behavior
+- Performance improvements users would notice
+
+Examples that **do NOT require** a changeset:
+- CI/CD pipeline changes
+- Documentation-only changes (docs site, README)
+- Dev tooling (linter config, test infra)
+- Pure refactors where behavior is identical before and after
+
 ## 4. Commit All Changes
 
 Stage and commit all changes including changeset files. Follow any user instructions about commit message style.
@@ -75,5 +93,6 @@ EOF
 
 ## Common Mistakes to Avoid
 
-- **Forgetting changesets**: This is the #1 mistake. Always check if changes are user-facing.
+- **Forgetting changesets**: This is the #1 mistake. Always check if changes are user-facing. A bug fix in internal code is still user-facing if it changes behavior users can observe.
+- **Calling bug fixes "internal"**: If the code change fixes something that was broken for users (e.g., wrong file paths, incorrect defaults, broken commands), it needs a changeset — even if only internal files were modified.
 - **Describing only the latest commit**: The PR description should cover the entire branch diff.
