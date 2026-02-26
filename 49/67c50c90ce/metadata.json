@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "4967c50c90ce",
+  "strategy": "manual-commit",
+  "branch": "marc/move-skills-to-claude",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/journal-store.ts",
+    "packages/cli/src/clickhouse-live.e2e.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/49/67c50c90ce/0/metadata.json",
+      "transcript": "/49/67c50c90ce/0/full.jsonl",
+      "context": "/49/67c50c90ce/0/context.md",
+      "content_hash": "/49/67c50c90ce/0/content_hash.txt",
+      "prompt": "/49/67c50c90ce/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 17,
+    "cache_creation_tokens": 46208,
+    "cache_read_tokens": 841293,
+    "output_tokens": 134,
+    "api_call_count": 15
+  }
+}
