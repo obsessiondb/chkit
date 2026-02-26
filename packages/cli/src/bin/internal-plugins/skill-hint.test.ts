@@ -1,7 +1,10 @@
-import { describe, expect, spyOn, test } from 'bun:test'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 
 import type { ChxOnCompleteContext, ChxOnInitContext } from '../../plugins.js'
-import { createSkillHintPlugin, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type SkillHintDeps, type SkillHintState } from './skill-hint.js'
+import { createSkillHintPlugin, findAgentRoot, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type SkillHintDeps, type SkillHintState } from './skill-hint.js'
 
 function initCtx(overrides?: Partial<ChxOnInitContext>): ChxOnInitContext {
   return { command: 'status', isInteractive: true, jsonMode: false, options: {}, ...overrides }
@@ -184,5 +187,75 @@ describe('skill-hint plugin', () => {
     await plugin.hooks?.onComplete?.(completeCtx({ exitCode: 1 }))
     expect(spy.mock.calls).toHaveLength(0)
     spy.mockRestore()
+  })
+})
+
+describe('findAgentRoot', () => {
+  const base = join(tmpdir(), `chkit-test-${Date.now()}`)
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  function makeDir(...segments: string[]): string {
+    const dir = join(base, ...segments)
+    mkdirSync(dir, { recursive: true })
+    return dir
+  }
+
+  test('returns cwd when .claude/ exists in cwd', () => {
+    const root = makeDir('project')
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    expect(findAgentRoot(root)).toBe(root)
+  })
+
+  test('returns parent when .claude/ exists in parent but not cwd', () => {
+    const root = makeDir('monorepo')
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    const sub = makeDir('monorepo', 'packages', 'backend')
+    expect(findAgentRoot(sub)).toBe(root)
+  })
+
+  test('finds CLAUDE.md as agentic marker', () => {
+    const root = makeDir('project')
+    writeFileSync(join(root, 'CLAUDE.md'), '')
+    const sub = makeDir('project', 'src')
+    expect(findAgentRoot(sub)).toBe(root)
+  })
+
+  test('finds .cursorrules as agentic marker', () => {
+    const root = makeDir('project')
+    writeFileSync(join(root, '.cursorrules'), '')
+    const sub = makeDir('project', 'src')
+    expect(findAgentRoot(sub)).toBe(root)
+  })
+
+  test('finds .github/copilot-instructions.md as agentic marker', () => {
+    const root = makeDir('project')
+    mkdirSync(join(root, '.github'), { recursive: true })
+    writeFileSync(join(root, '.github', 'copilot-instructions.md'), '')
+    const sub = makeDir('project', 'src')
+    expect(findAgentRoot(sub)).toBe(root)
+  })
+
+  test('falls back to git root when no agentic markers found', () => {
+    const root = makeDir('repo')
+    mkdirSync(join(root, '.git'), { recursive: true })
+    const sub = makeDir('repo', 'packages', 'backend')
+    expect(findAgentRoot(sub)).toBe(root)
+  })
+
+  test('prefers agentic marker over git root', () => {
+    const gitRoot = makeDir('repo')
+    mkdirSync(join(gitRoot, '.git'), { recursive: true })
+    const agentRoot = makeDir('repo', 'packages', 'app')
+    mkdirSync(join(agentRoot, '.claude'), { recursive: true })
+    const sub = makeDir('repo', 'packages', 'app', 'src')
+    expect(findAgentRoot(sub)).toBe(agentRoot)
+  })
+
+  test('returns cwd when no markers found at all', () => {
+    const dir = makeDir('bare', 'nested')
+    expect(findAgentRoot(dir)).toBe(dir)
   })
 })
