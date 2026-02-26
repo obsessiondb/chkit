@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "4787f1af6120",
+  "strategy": "manual-commit",
+  "branch": "marc/num-6596-chkit-produce-chkit-skill-so-agents-are-better-at-using-it",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/commands/skill.ts",
+    "packages/cli/src/bin/help.ts",
+    "skills/chkit/SKILL.md",
+    "skills/chkit/references/cli-reference.md",
+    "skills/chkit/references/dsl-reference.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/47/87f1af6120/0/metadata.json",
+      "transcript": "/47/87f1af6120/0/full.jsonl",
+      "context": "/47/87f1af6120/0/context.md",
+      "content_hash": "/47/87f1af6120/0/content_hash.txt",
+      "prompt": "/47/87f1af6120/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4220,
+    "cache_creation_tokens": 127198,
+    "cache_read_tokens": 6535268,
+    "output_tokens": 888,
+    "api_call_count": 72
+  }
+}
