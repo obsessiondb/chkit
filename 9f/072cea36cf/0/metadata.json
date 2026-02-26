@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "9f072cea36cf",
+  "session_id": "08c55e70-2741-4b0b-a8be-049373e69970",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T09:49:37.577435Z",
+  "branch": "marc/num-6597-chkit-hint-at-installing-skills",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/skill-hint-plugin.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "9536a619-0856-45eb-b197-3c795f4a1227",
+  "checkpoint_transcript_start": 740,
+  "transcript_lines_at_start": 740,
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 130557,
+    "cache_read_tokens": 771426,
+    "output_tokens": 82,
+    "api_call_count": 6
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T09:49:36.997278Z",
+    "agent_lines": 5,
+    "human_added": 32,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 37,
+    "agent_percentage": 13.513513513513514
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-prague/08c55e70-2741-4b0b-a8be-049373e69970.jsonl"
+}

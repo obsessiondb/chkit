@@ -1,0 +1,151 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/prague directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/prague/.context/attachments/[LINEAR]-NUM-6597.md
+</system_instruction>
+
+---
+
+Base directory for this skill: /Users/marc/conductor/workspaces/chkit/prague/.claude/skills/testing-bun
+
+# Testing Standards (Bun)
+
+## Framework
+- Use `bun:test` imports (`describe`, `test`, `expect`, etc.)
+- Use Bun test runner (`bun test`), typically via workspace scripts (`bun run test`)
+- Do not introduce Vitest/Jest in this repo
+- For local e2e/integration runs that need env vars, use Doppler (`bun run test:env`)
+
+## Critical Rules
+
+### 1. No Try/Catch in Positive Tests
+
+```ts
+// Bad
+test('creates user', async () => {
+  try {
+    const user = await createUser(input)
+    expect(user.id).toBeDefined()
+  } catch (error) {
+    console.error(error)
+  }
+})
+
+// Good
+test('creates user', async () => {
+  const user = await createUser(input)
+  expect(user.id).toBeDefined()
+})
+
+// Good for expected failures
+test('rejects invalid input', async () => {
+  await expect(createUser(invalid)).rejects.toThrow('Invalid email')
+})
+```
+
+### 2. No Early Returns in Tests
+
+```ts
+// Bad
+test('calls API', async () => {
+  if (!hasCredentials) return
+  await callApi()
+})
+
+// Good
+test('calls API', async () => {
+  expect(hasCredentials).toBe(true)
+  await callApi()
+})
+```
+
+### 3. No Hidden Skips for Missing Env Vars
+
+```ts
+// Bad
+describe.skipIf(!process.env.CLICKHOUSE_URL)('integration', () => {})
+
+// Bad
+if (!process.env.CLICKHOUSE_URL) {
+  test.skip('requires CLICKHOUSE_URL', () => {})
+}
+
+// Good
+describe('integration', () => {
+  const url = process.env.CLICKHOUSE_URL
+  expect(url).toBeTruthy()
+})
+```
+
+### 4. E2E Policy (Mandatory)
+
+- E2E tests must never be conditional on env availability.
+- Never use `skip`, `skipIf`, guard `return`, or branching that bypasses e2e execution when env vars are absent.
+- Missing required env vars must cause test failure immediately.
+- Local e2e execution must use Doppler so required vars are injected.
+
+```bash
+# Required local command for env-dependent suites
+bun run test:env
+```
+
+### 5. Prefer Inline Setup Over `beforeEach`
+
+Use inline setup unless lifecycle hooks are required for async cleanup/reset.
+
+## Bun-Specific Practices
+
+- Keep tests deterministic and isolated
+- Prefer plain `test(...)` blocks with explicit setup
+- Use package-level scripts (`bun test src`) for focused runs when needed
+
+## Env-Dependent Tests
+
+If tests require Doppler-provided vars:
+1. Ensure var is in package `turbo.json` `passThroughEnv`
+2. Ensure CI mapping in `.github/workflows/ci.yml`
+3. Run local e2e/integration suites with `bun run test:env`
+4. Treat missing vars as a hard failure, not a skip path
+
+---
+
+can we actuallI think I want this rather implemented as plugin. lets create a folder of plugins in the CLI package, those will be the internal plugins. and lets think about a plugin hook where this can be implemented. Maybe on some type of startup, to ask on cli initialization. and if the user says no, keep that for the run, and print at the end, the command they can manually run to add the skill. 
+then we want test cases:
+1. user says yes
+2. user says no -> we print something a the end when the command ran
+3. user says no, runs command again and is not prompted again (since we stored it somewhere)
+4. user ran it > 1 month ago, and then runs again, is asked again.
+
+---
+
+are you still running? what is the status? And i find the internal plugin registration a little bit weird. I would have expected. the plugin to be defined the same way the other plugins are configured, just that its automatically added to the list of plugins, independant on the user space.
+
+---
+
+i think we want to run `runOnComplete` always not only in success case, and potentially provide the result of the call. so the plugin can decide whether it wants to do something or at all in success/failure case
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/prague/.context/attachments/PR instructions.md
+</system_instruction>
+
+
+
+Create a PR
+
+---
+
+doesnt your CLAUDE.md suggest you create changesets when we are adding user facing features? why didnt you?
