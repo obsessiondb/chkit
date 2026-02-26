@@ -265,8 +265,29 @@ When a property changes, chkit determines whether ALTER or DROP+CREATE is needed
 
 Views and materialized views always use drop+recreate.
 
-## References
+## Documentation
 
-For detailed specifications, see:
-- `references/dsl-reference.md` — full DSL field reference, column types, validation rules
-- `references/cli-reference.md` — per-command flags, JSON output schemas, exit codes
+Full documentation is at https://chkit.obsessiondb.com. The site supports content negotiation — request any page with `Accept: text/markdown` to receive raw source markdown instead of HTML. Fetch docs for details not covered in this skill file.
+
+```sh
+curl -s -H "Accept: text/markdown" <url>
+```
+
+### Key pages
+
+| Page | URL | Use when |
+|------|-----|----------|
+| Schema DSL Reference | `https://chkit.obsessiondb.com/schema/dsl-reference/` | Full field specs, column types, validation rules |
+| Configuration | `https://chkit.obsessiondb.com/configuration/overview/` | All config options and defaults |
+| Codegen Plugin | `https://chkit.obsessiondb.com/plugins/codegen/` | TypeScript types, Zod schemas, ingest functions |
+| Pull Plugin | `https://chkit.obsessiondb.com/plugins/pull/` | Introspecting live ClickHouse into schema files |
+| Backfill Plugin | `https://chkit.obsessiondb.com/plugins/backfill/` | Time-windowed data backfill with checkpoints |
+| CI/CD Integration | `https://chkit.obsessiondb.com/guides/ci-cd/` | Pipeline setup, check commands, deployment |
+
+### Discover all pages
+
+Fetch the index to find CLI command pages and any other documentation:
+
+```sh
+curl -s -H "Accept: text/markdown" https://chkit.obsessiondb.com/
+```
