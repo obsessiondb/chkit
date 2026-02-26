@@ -1,0 +1,10 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "chkit-docs-test",
+	"main": "./test/worker-entry.ts",
+	"compatibility_date": "2025-01-01",
+	"assets": {
+		"directory": "./test/fixtures/assets",
+		"binding": "ASSETS"
+	}
+}

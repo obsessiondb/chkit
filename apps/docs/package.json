@@ -8,6 +8,7 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
+    "test": "vitest run",
     "deploy": "wrangler deploy",
     "astro": "astro"
   },
@@ -15,5 +16,10 @@
     "@astrojs/starlight": "^0.37.6",
     "astro": "^5.6.1",
     "sharp": "^0.34.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.17",
+    "@cloudflare/workers-types": "^4.20260305.0",
+    "vitest": "3.2"
   }
 }
