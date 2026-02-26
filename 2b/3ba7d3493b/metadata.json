@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "2b3ba7d3493b",
+  "strategy": "manual-commit",
+  "branch": "marc/codegen-generated-header",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/plugin-codegen/src/generators.ts",
+    "packages/plugin-codegen/src/index.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2b/3ba7d3493b/0/metadata.json",
+      "transcript": "/2b/3ba7d3493b/0/full.jsonl",
+      "context": "/2b/3ba7d3493b/0/context.md",
+      "content_hash": "/2b/3ba7d3493b/0/content_hash.txt",
+      "prompt": "/2b/3ba7d3493b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 74,
+    "cache_creation_tokens": 52963,
+    "cache_read_tokens": 587582,
+    "output_tokens": 229,
+    "api_call_count": 21
+  }
+}
