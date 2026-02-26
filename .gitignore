@@ -5,6 +5,11 @@ dist
 coverage
 .DS_Store
 .env
+.env.*
+!.env.example
 *.tsbuildinfo
+*.log
 .tmp
+.vscode
+.idea
 .claude/settings.local.json

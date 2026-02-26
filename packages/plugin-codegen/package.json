@@ -1,7 +1,14 @@
 {
   "name": "@chkit/plugin-codegen",
   "version": "0.1.0-beta.10",
+  "description": "TypeScript type and Zod schema generation plugin for chkit",
+  "license": "MIT",
+  "author": "ObsessionDB",
+  "keywords": ["clickhouse", "typescript", "codegen", "zod", "chkit-plugin"],
   "homepage": "https://chkit.obsessiondb.com",
+  "bugs": {
+    "url": "https://github.com/obsessiondb/chkit/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/obsessiondb/chkit.git",
