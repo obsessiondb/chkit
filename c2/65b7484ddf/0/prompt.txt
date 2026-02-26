@@ -1,0 +1,603 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/macau-v1 directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+To do immediately, before using any skills or any other tools (one time only):
+
+Rename the branch using `git branch -m`. Do not check the current branch name.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "marc/" before the name.
+
+</system-instruction>
+
+I want to set this repository to public on GitHub because we want to open source it. Before I do that, maybe check all the commit history and everything for sensitive information, security credentials, yada yada, to make sure if we set it to public that we didn't expose anything.
+
+---
+
+<task-notification>
+<task-id>a8bcff83b23412a03</task-id>
+<tool-use-id>toolu_01W3Ztqu8CWCJPkqGQHLbPrT</tool-use-id>
+<status>completed</status>
+<summary>Agent "Scan current files for secrets" completed</summary>
+<result>Good -- those are all proper GitHub Actions secret references (using `${{ secrets.* }}`), not hardcoded values.
+
+Here is the full report of all 17 checks:
+
+---
+
+## Sensitive Information Scan Report
+
+### Check 1: .env files
+**No findings.** No `.env` files exist in the working tree.
+
+### Check 2: .gitignore for env/secret patterns
+**Good.** The `.gitignore` properly includes `.env`:
+```
+node_modules
+.bun
+.turbo
+dist
+coverage
+.DS_Store
+.env
+*.tsbuildinfo
+.tmp
+```
+
+### Check 3: Hardcoded secrets in source files
+**No findings.** No pattern matches for hardcoded password/secret/token/apikey assignments with string values.
+
+### Check 4: AWS keys (AKIA...)
+**No findings.** No AWS access key IDs found.
+
+### Check 5: Private keys (BEGIN PRIVATE KEY)
+**No findings.** No private key material found.
+
+### Check 6: GitHub tokens (ghp_, gho_, ghs_, ghu_, github_pat_)
+**No findings.** No GitHub personal access tokens found.
+
+### Check 7: npm tokens (npm_...)
+**No findings.** No npm tokens found.
+
+### Check 8: Connection strings with embedded credentials
+**No findings.** No database connection strings with inline passwords found.
+
+### Check 9: Bearer tokens
+**No findings.** No bearer tokens found.
+
+### Check 10: .npmrc files with auth tokens
+**No findings.** No `.npmrc` files exist in the repository (outside `node_modules`).
+
+### Check 11: SSH keys / PEM files / key files
+**No findings.** No `.pem`, `.key`, `id_rsa*`, `id_ed25519*`, `.p12`, or `.pfx` files found.
+
+### Check 12: Docker files with secrets
+**No findings.** No Dockerfiles or docker-compose files matched.
+
+### Check 13: Internal/private URLs and IPs
+**No findings.** No internal hostnames (`.corp.`, `.local.`, `.internal.`) or private IP ranges (10.x, 172.16-31.x, 192.168.x) found.
+
+### Check 14: CI/CD configs referencing secrets
+**Findings (safe).** One file found: `/Users/marc/conductor/workspaces/chkit/macau-v1/.github/workflows/ci.yml`
+
+It references secrets properly via GitHub Actions secret injection syntax:
+```yaml
+CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+```
+These are **not** hardcoded values -- they are references to GitHub Actions encrypted secrets, which is the correct and expected pattern.
+
+### Check 15: CI/CD YAML files
+One file found: `/Users/marc/conductor/workspaces/chkit/macau-v1/.github/workflows/ci.yml` (already reviewed above).
+
+### Check 16: Hardcoded ClickHouse credentials
+**Findings (safe / expected).** All matches fall into two categories:
+
+1. **Documentation files** (`apps/docs/src/content/docs/guides/ci-cd.md`, `README.md`, `skills/chkit/SKILL.md`) -- These show example configuration patterns like:
+   ```ts
+   password: process.env.CLICKHOUSE_PASSWORD ?? '',
+   ```
+   These are documentation examples reading from environment variables, not hardcoded credentials.
+
+2. **E2E test files** (`packages/cli/src/clickhouse-live.e2e.test.ts`, `packages/cli/src/drift.e2e.test.ts`, `packages/plugin-pull/src/pull.e2e.test.ts`) -- These read passwords from environment variables at runtime:
+   ```ts
+   const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
+   ```
+   No hardcoded password values are present. The tests require the `CLICKHOUSE_PASSWORD` env var to be set at runtime and throw an error if it is missing.
+
+3. **Unit test files** (`packages/cli/src/plugin.test.ts`) -- These use empty string passwords for local/mock ClickHouse:
+   ```ts
+   password: '',
+   ```
+   This is a default/empty password for local testing, not a leaked credential.
+
+### Check 17: TODO/FIXME comments about secrets
+**No findings.** No TODO/FIXME/HACK/XXX comments referencing secrets, passwords, credentials, tokens, or keys.
+
+---
+
+## Summary
+
+**No sensitive information was found in the working tree.** The repository is clean:
+
+- No `.env` files committed
+- `.gitignore` properly excludes `.env`
+- No hardcoded secrets, API keys, private keys, tokens, or credentials anywhere
+- CI/CD workflows use GitHub Actions `${{ secrets.* }}` syntax correctly
+- All ClickHouse password references in source code read from environment variables at runtime
+- Test files use either env vars (e2e tests) or empty strings (unit tests) for passwords
+- No `.npmrc` auth tokens, SSH keys, PEM files, or Docker secrets present
+- No internal/private network addresses exposed</result>
+<usage><total_tokens>16891</total_tokens><tool_uses>31</tool_uses><duration_ms>73059</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>a44e0fbd12aa50bf6</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<status>completed</status>
+<summary>Agent "Scan git history for secrets" completed</summary>
+<result>I have enough data to provide a comprehensive report. Here is the full findings summary.
+
+---
+
+## Secret Scan Report for `/Users/marc/conductor/workspaces/chkit/macau-v1`
+
+### 1. Passwords, Tokens, API Keys, Secrets (general pattern)
+
+**Result: NO REAL SECRETS FOUND** -- all matches were false positives.
+
+The matches included:
+- `computeCompatibilityToken(...)` -- code logic, not a secret
+- `requireIdempotencyToken` -- ClickHouse configuration parsing
+- `const token = afterPlugin[i] as string` -- plugin parsing code
+- `compatibilityToken` -- computed hash values in the migration engine
+
+All of these are code-level references to tokens/keys as concepts in the ClickHouse migration system, not hardcoded secret values.
+
+### 2. AWS Access Keys (AKIA...)
+
+**Result: NONE FOUND.** No AWS access keys anywhere in the git history.
+
+### 3. Private Keys (BEGIN ... PRIVATE KEY)
+
+**Result: NONE FOUND.** No private key material anywhere in the git history.
+
+### 4. GitHub Tokens (ghp_, gho_, ghs_, ghu_, github_pat_)
+
+**Result: ONE MATCH -- PLACEHOLDER ONLY.**
+
+The only match is `ghp_xxxxxxxxxxxxxxxxxxxx`, which is clearly a placeholder/example token (all x's). It appears inside Conductor session log JSONL files that were committed to `entire/*` branches. This was part of documentation being fetched about Claude Code plugin marketplaces, where the placeholder token appeared as an example.
+
+**Not a real secret.**
+
+### 5. High-Entropy Strings Assigned to Secret-Like Variables
+
+**Result: NONE FOUND** after filtering out false positives. All matches in the raw output were from Conductor session log metadata (sessionId UUIDs, tool_use_id values, etc.) -- none were actual secrets.
+
+### 6. npm Tokens (npm_...)
+
+**Result: NONE FOUND.** No npm tokens anywhere in the git history.
+
+### 7. Connection Strings with Credentials (mysql://, postgres://, clickhouse://, etc.)
+
+**Result: NONE FOUND.** No connection strings with embedded credentials.
+
+### 8. Bearer Tokens
+
+**Result: NONE FOUND.** No bearer tokens in the git history.
+
+### 9. .env Files
+
+**Result: NONE FOUND.** No `.env` files were ever committed to any branch.
+
+### 10. ClickHouse Credentials
+
+**Result: NO HARDCODED CREDENTIALS.** All ClickHouse credential references are properly handled:
+- CI/CD files use `${{ secrets.CLICKHOUSE_URL }}`, `${{ secrets.CLICKHOUSE_PASSWORD }}`, etc. (GitHub Actions secrets)
+- Code reads from environment variables (`process.env.CLICKHOUSE_URL`, etc.)
+- Documentation mentions the variable names but never includes actual values
+- No hardcoded ClickHouse connection strings with passwords
+
+### 11. AI Platform API Keys (Anthropic, OpenAI)
+
+**Result: NONE FOUND.** No `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `sk-ant-`, or `sk-proj-` patterns.
+
+### 12. Slack Webhooks/Tokens
+
+**Result: NONE FOUND.** No Slack webhook URLs or `xox[bpas]-` tokens.
+
+### 13. JWT Tokens
+
+**Result: NONE FOUND.** No JWT tokens (`eyJ...`) in the history.
+
+### 14. Third-Party Service Keys (Stripe, SendGrid, etc.)
+
+**Result: NONE FOUND.**
+
+### 15. Private Key Files (.pem, .key, .p12, .pfx)
+
+The final check for private key files was blocked by a permission denial, but the earlier `BEGIN PRIVATE KEY` content search already confirmed no private key material exists in any commit diff.
+
+---
+
+## Notable Observation: Conductor Session Logs in Git
+
+While no secrets were found, there is one item worth flagging:
+
+**137 commits contain `.jsonl` session log files** from Conductor (the agent orchestration tool). These are spread across branches like `entire/*` and some `marc/*` branches. The JSONL files contain full agent conversation transcripts including:
+- System instructions
+- User prompts
+- Tool call inputs/outputs
+- Session IDs, UUIDs, and branch names
+- Fetched web content
+
+While none of these contained actual secrets (tool_use_ids are labeled REDACTED, and no real credentials were found), committing full agent session logs to a repository is a **potential information disclosure risk** if the repo is public or shared. These logs reveal internal tooling details, workspace paths, branch naming conventions, and the full content of agent interactions.
+
+---
+
+## Summary
+
+| Check | Result |
+|-------|--------|
+| Passwords/tokens/API keys | CLEAN -- no real secrets |
+| AWS access keys | CLEAN |
+| Private keys | CLEAN |
+| GitHub tokens | CLEAN (only `ghp_xxxxxxxxxxxxxxxxxxxx` placeholder) |
+| High-entropy secret strings | CLEAN |
+| npm tokens | CLEAN |
+| Connection strings with creds | CLEAN |
+| Bearer tokens | CLEAN |
+| .env files | CLEAN -- never committed |
+| ClickHouse credentials | CLEAN -- all via env vars/GH secrets |
+| AI API keys | CLEAN |
+| Slack tokens/webhooks | CLEAN |
+| JWT tokens | CLEAN |
+| Third-party service keys | CLEAN |
+| Private key files | CLEAN |
+
+**Overall: No sensitive secrets or credentials were found in the git history.** The repository properly uses GitHub Actions secrets and environment variables for all credential handling. The only advisory finding is the presence of Conductor session log JSONL files in some branches, which contain agent conversation transcripts but no actual secrets.</result>
+<usage><total_tokens>31527</total_tokens><tool_uses>44</tool_uses><duration_ms>314752</duration_ms></usage>
+</task-notification>
+Full transcript available at: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>aaf2e5e0ab29e1cb9</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<status>completed</status>
+<summary>Agent "Check git metadata for PII" completed</summary>
+<result>Now I have all the findings. Here is the complete report.
+
+---
+
+## Full Audit Report: Git Metadata and Sensitive Information
+
+### 1. COMMIT AUTHORS (PII in Git History)
+
+**Finding: PERSONAL EMAIL EXPOSED**
+
+Three unique author identities appear across 752+ commits:
+
+| Author Name | Email |
+|---|---|
+| `KeKs0r` | `marc.hoeffl@laserfocus.io` |
+| `Marc Hoeffl` | `marc.hoeffl@laserfocus.io` |
+| `Checkpointer` | `checkpointer@noreply` |
+
+**Committers** (slightly different set):
+
+| Committer Name | Email |
+|---|---|
+| `KeKs0r` | `marc.hoeffl@laserfocus.io` |
+| `GitHub` | `noreply@github.com` |
+| `Checkpointer` | `checkpointer@noreply` |
+
+**Issue:** The personal email `marc.hoeffl@laserfocus.io` is baked into the git history across presumably most of the 752 commits. The username `KeKs0r` (a GitHub handle) is also present. This PII is **permanently embedded** in every commit object and cannot be removed without rewriting history (e.g., `git filter-repo`).
+
+---
+
+### 2. EMAILS IN FILE CONTENTS
+
+**Finding: CLEAN** -- No personal email addresses found in any tracked files. Searched for `hoeffl`, `laserfocus`, `keks0r`, and `noreply` patterns in file content. All returned zero matches.
+
+---
+
+### 3. SLACK WEBHOOKS
+
+**Finding: CLEAN** -- No Slack webhook URLs found.
+
+---
+
+### 4. IP ADDRESSES
+
+**Finding: CLEAN** -- No specific/internal IP addresses found in file content (only `localhost` references in ClickHouse config examples).
+
+---
+
+### 5. GPG KEYS
+
+**Finding: N/A** -- GPG is not installed in this environment, so commit signatures could not be verified. No signed commits detected based on the absence of GPG infrastructure.
+
+---
+
+### 6. LICENSE FILE
+
+**Finding: CLEAN**
+
+File: `/Users/marc/conductor/workspaces/chkit/macau-v1/LICENSE`
+
+MIT License, copyright attributed to **"ObsessionDB"** (the organization), not a personal name. This is appropriate for open source.
+
+---
+
+### 7. PACKAGE.JSON FILES
+
+**Finding: CLEAN** -- No `author`, `contributors`, or `bugs` fields with personal info in any package.json. The root `package.json` has `"private": true` (appropriate for the monorepo root). All published packages point to:
+- Homepage: `https://chkit.obsessiondb.com`
+- Repository: `https://github.com/obsessiondb/chkit.git`
+
+The `apps/docs/package.json` is also marked `"private": true`.
+
+---
+
+### 8. GIT TAGS
+
+**Finding: LOW RISK** -- 15 tags exist, all are standard package release tags:
+
+```
+@chkit/cli@0.1.0-beta.0
+@chkit/cli@0.1.0-beta.1
+@chkit/clickhouse@0.1.0-beta.0
+@chkit/clickhouse@0.1.0-beta.1
+@chkit/codegen@0.1.0-beta.0
+@chkit/codegen@0.1.0-beta.1
+@chkit/core@0.1.0-beta.0
+@chkit/core@0.1.0-beta.1
+@chkit/plugin-backfill@0.1.0-beta.0
+@chkit/plugin-backfill@0.1.0-beta.1
+@chkit/plugin-pull@0.1.0-beta.0
+@chkit/plugin-pull@0.1.0-beta.1
+@chkit/plugin-typegen@0.1.0-beta.0
+@chkit/plugin-typegen@0.1.0-beta.1
+chkit@0.1.0-beta.5
+```
+
+These are fine for open source. Note `@chkit/plugin-typegen` tags reference an old package name (now `@chkit/plugin-codegen`).
+
+---
+
+### 9. HISTORICALLY COMMITTED SENSITIVE FILES
+
+**Finding: CLEAN** -- No `.env`, `.pem`, `.key`, `.npmrc`, credentials, or other sensitive files were ever committed (even if later deleted).
+
+The `.gitignore` correctly excludes `.env` files.
+
+---
+
+### 10. LOCAL FILESYSTEM PATHS IN FILES
+
+**Finding: PERSONAL LOCAL PATHS EXPOSED**
+
+The file `AGENTS.md` contains 5 hardcoded local filesystem paths:
+
+```
+/Users/marc/Workspace/chkit/skills/code-architecture/SKILL.md
+/Users/marc/Workspace/chkit/skills/environment-variables/SKILL.md
+/Users/marc/Workspace/chkit/skills/library-docs/SKILL.md
+/Users/marc/Workspace/chkit/skills/testing-bun/SKILL.md
+/Users/marc/Workspace/chkit/skills/typescript-standards/SKILL.md
+```
+
+These reveal the local username (`marc`) and directory structure.
+
+---
+
+### 11. INTERNAL/PROPRIETARY DOMAIN REFERENCES
+
+**Finding: REVIEW RECOMMENDED**
+
+| Domain | Context | Risk |
+|---|---|---|
+| `obsessiondb.com` / `chkit.obsessiondb.com` | Product/docs domain | Fine -- this is the public product |
+| `obsession.numia-dev.com` | Referenced in `packages/plugin-obsessiondb/` | **MEDIUM** -- `numia-dev.com` appears to be an internal/staging domain. It is referenced in source code (`src/index.ts`) and tests (`src/index.test.ts`) and the README. |
+| `laserfocus.io` | Only in git commit metadata | **HIGH** in git history -- reveals a connection to another company/product |
+
+---
+
+### 12. BRANCH NAMES
+
+**Finding: PERSONAL IDENTIFIERS IN BRANCHES**
+
+Branch names expose personal identifiers and internal ticket numbers:
+
+- `KeKs0r/*` branches (6 branches) -- personal GitHub handle
+- `marc/*` branches (14+ branches) -- personal name
+- `marc/num-5702-*`, `marc/num-6439-*`, etc. -- internal issue tracker IDs
+- `entire/*` branches -- references to "Entire" tooling (internal workflow tool)
+
+These branches exist both locally and some on remote.
+
+---
+
+### 13. INTERNAL TOOLING REFERENCES
+
+**Finding: REVIEW RECOMMENDED**
+
+The file `.claude/settings.json` contains references to an internal tool called `entire`:
+
+```json
+"command": "entire hooks claude-code session-end"
+"command": "entire hooks claude-code session-start"
+"command": "entire hooks claude-code pre-task"
+"command": "entire hooks claude-code post-task"
+"command": "entire hooks claude-code post-todo"
+"command": "entire hooks claude-code stop"
+"command": "entire hooks claude-code user-prompt-submit"
+```
+
+This also references a path: `Read(./.entire/metadata/**)`.
+
+---
+
+### 14. REMOTE URL MISMATCH
+
+**Finding: INFORMATIONAL**
+
+The git remote origin is `git@github.com:obsessiondb/chx.git` but all package.json files reference `https://github.com/obsessiondb/chkit.git`. The repo may have been renamed from `chx` to `chkit` on GitHub, but the local remote URL was never updated.
+
+---
+
+### 15. SECRETS MANAGEMENT REFERENCES
+
+**Finding: CLEAN** -- No actual secret values found. References to secrets are all via:
+- GitHub Actions `${{ secrets.* }}` syntax (safe)
+- `process.env.*` references (safe)
+- Doppler CLI wrapper for local development (safe -- no secrets stored in repo)
+
+Referenced secret names: `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DB`, `CLICKHOUSE_URL`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`.
+
+---
+
+## Summary of Actions Needed Before Open-Sourcing
+
+### Critical (must fix)
+
+1. **Rewrite git history** to replace `marc.hoeffl@laserfocus.io` with a generic or `noreply` email (use `git filter-repo` or similar). This also affects the `KeKs0r` and `Marc Hoeffl` author names. Alternatively, if you plan to push a fresh squashed history, this is moot.
+
+2. **Fix `AGENTS.md`** -- remove or convert the 5 hardcoded `/Users/marc/Workspace/chkit/...` paths to relative paths.
+
+### Recommended (should fix)
+
+3. **Remove or clean `.claude/settings.json`** -- the `entire hooks` commands reference internal tooling that won't exist for external contributors and leaks internal workflow details.
+
+4. **Review `numia-dev.com` references** in `packages/plugin-obsessiondb/` -- decide if this internal/staging domain should be visible in the open-source codebase. It appears in `src/index.ts`, `src/index.test.ts`, and the README.
+
+5. **Clean up branches** before making the remote public -- the `KeKs0r/*` and `marc/*` branch names contain personal identifiers and internal ticket numbers.
+
+6. **Update the git remote URL** from `obsessiondb/chx.git` to `obsessiondb/chkit.git` if the repo has been renamed.
+
+### Low Risk (nice to have)
+
+7. **Remove stale tags** for `@chkit/plugin-typegen` (package was renamed to `@chkit/plugin-codegen`).
+
+8. **Review the Doppler project reference** in `package.json` scripts (`--project chkit --config ci`) -- this is not sensitive but does reveal internal CI tooling choices.</result>
+<usage><total_tokens>37339</total_tokens><tool_uses>80</tool_uses><duration_ms>317991</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-marc-conductor-workspaces-chkit-macau-v1/tasks/aaf2e5e0ab29e1cb9.output
+
+---
+
+i dont care about the git author email, but where does it come from? 
+
+2. remove agents.md, i am using CLAUDE, which is configured through CLAUDE.md
+3. yes move entire and rudel (if they are in there) into .claude/settings.local.json and gitignore it (I think this is how you can have local hooks)
+4. its fine
+5 yes clean up
+6. change the remote to chkit.git
+
+---
+
+you can keep origin/entire, but all the others can go
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/macau-v1/.context/attachments/PR instructions.md
+</system_instruction>
+
+
+
+Create a PR
+
+---
+
+Base directory for this skill: /Users/marc/conductor/workspaces/chkit/macau-v1/.claude/skills/pr-creation
+
+# PR Creation Checklist
+
+Follow these steps in order when creating a pull request. Do not skip any step.
+
+## 1. Run Verification
+
+```bash
+bun verify
+```
+
+Do NOT proceed if verification fails. Fix issues first.
+
+## 2. Review the Workspace Diff
+
+Use `mcp__conductor__GetWorkspaceDiff` with `stat: true` to see all changed files, then review the full diff to understand the scope of changes.
+
+## 3. Create Changesets (if needed)
+
+If the PR introduces **any user-facing change** (new feature, bug fix, API change, behavior change):
+
+1. Create a changeset file manually at `.changeset/<descriptive-name>.md`
+2. The interactive `bun run changeset` CLI does not work in this environment — create the file directly
+3. Use this format:
+
+```markdown
+---
+"package-name": patch|minor|major
+---
+
+Short description of the change.
+```
+
+4. Look at existing `.changeset/*.md` files for reference on package names and format
+5. Choose the bump type:
+   - `patch` — bug fixes, internal changes
+   - `minor` — new features, non-breaking additions
+   - `major` — breaking changes
+
+   **BETA NOTICE:** While chkit is in BETA, **always use `patch`** for all releases regardless of change type.
+
+If the PR is purely internal (CI, docs, refactoring with no user-facing effect), a changeset is not required.
+
+## 4. Commit All Changes
+
+Stage and commit all changes including changeset files. Follow any user instructions about commit message style.
+
+## 5. Push and Create PR
+
+1. Push to origin with `-u` flag if the branch has no upstream
+2. Use `gh pr create --base main` with:
+   - Title under 80 characters
+   - Description covering ALL changes in the workspace diff (not just the latest commit)
+   - Keep description under five sentences unless instructed otherwise
+
+```bash
+gh pr create --base main --title "title here" --body "$(cat <<'EOF'
+## Summary
+- bullet points describing changes
+
+## Test plan
+- [ ] testing steps
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+## Common Mistakes to Avoid
+
+- **Forgetting changesets**: This is the #1 mistake. Always check if changes are user-facing.
+- **Describing only the latest commit**: The PR description should cover the entire branch diff.
