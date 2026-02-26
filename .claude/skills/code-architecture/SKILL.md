@@ -2,6 +2,8 @@
 name: code-architecture
 description: Code architecture patterns for this monorepo. Use when organizing code, refactoring modules, designing service structure, or extracting/moving code to new files. Enforces clean function ordering, service functions over classes, and explicit dependency injection.
 allowed-tools: [Read, Edit, Grep, Glob]
+metadata:
+  internal: true
 ---
 
 # Code Architecture Standards
