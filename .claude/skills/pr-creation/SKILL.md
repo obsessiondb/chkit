@@ -42,6 +42,8 @@ Short description of the change.
    - `minor` — new features, non-breaking additions
    - `major` — breaking changes
 
+   **BETA NOTICE:** While chkit is in BETA, **always use `patch`** for all releases regardless of change type.
+
 If the PR is purely internal (CI, docs, refactoring with no user-facing effect), a changeset is not required.
 
 ## 4. Commit All Changes
