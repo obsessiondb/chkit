@@ -1,4 +1,5 @@
 import {
+  normalizeEngine as coreNormalizeEngine,
   normalizeSQLFragment,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -221,11 +222,7 @@ function normalizeClause(value: string | undefined): string {
 
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
-  const normalized = normalizeSQLFragment(value)
-    .replace(/\(\)\s*$/, '')
-    .toLowerCase()
-  if (normalized === 'sharedmergetree') return 'mergetree'
-  return normalized
+  return coreNormalizeEngine(normalizeSQLFragment(value)).toLowerCase()
 }
 
 export function compareTableShape(expected: TableDefinition, actual: ActualTableShape): TableDriftDetail | null {

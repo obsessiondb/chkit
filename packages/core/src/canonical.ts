@@ -9,7 +9,7 @@ import type {
 } from './model.js'
 import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
-import { normalizeSQLFragment } from './sql-normalizer.js'
+import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => a.name.localeCompare(b.name))
@@ -67,7 +67,7 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
           name: def.renamedFrom.name.trim(),
         }
       : undefined,
-    engine: def.engine.trim(),
+    engine: normalizeEngine(def.engine),
     columns: def.columns.map(canonicalizeColumn),
     primaryKey: normalizeKeyColumns(def.primaryKey),
     orderBy: normalizeKeyColumns(def.orderBy),
