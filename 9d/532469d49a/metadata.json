@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "9d532469d49a",
+  "strategy": "manual-commit",
+  "branch": "marc/docs-markdown-tests",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "apps/docs/package.json",
+    "apps/docs/test/fixtures/assets/_raw/cli/overview.md",
+    "apps/docs/test/fixtures/assets/_raw/getting-started.md",
+    "apps/docs/test/fixtures/assets/_raw/index.md",
+    "apps/docs/test/fixtures/assets/_raw/index.mdx",
+    "apps/docs/test/middleware.test.ts",
+    "apps/docs/test/worker-entry.ts",
+    "apps/docs/vitest.config.ts",
+    "apps/docs/wrangler.test.jsonc"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9d/532469d49a/0/metadata.json",
+      "transcript": "/9d/532469d49a/0/full.jsonl",
+      "context": "/9d/532469d49a/0/context.md",
+      "content_hash": "/9d/532469d49a/0/content_hash.txt",
+      "prompt": "/9d/532469d49a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 90,
+    "cache_creation_tokens": 71347,
+    "cache_read_tokens": 1225697,
+    "output_tokens": 257,
+    "api_call_count": 30
+  }
+}
