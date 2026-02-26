@@ -2,6 +2,8 @@
 name: typescript-standards
 description: TypeScript coding standards for this monorepo. Use when writing/refactoring/reviewing TypeScript.
 allowed-tools: [Read, Edit, Grep, Glob]
+metadata:
+  internal: true
 ---
 
 # TypeScript Standards

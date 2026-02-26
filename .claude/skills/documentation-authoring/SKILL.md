@@ -7,6 +7,8 @@ description: >
   writing guides, updating CLI references, or any work involving files in apps/docs/. Also trigger
   when the user asks about the docs site structure, how pages are organized, or how to add content
   to the chkit website.
+metadata:
+  internal: true
 ---
 
 ## Overview

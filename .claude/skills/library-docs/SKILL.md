@@ -2,6 +2,8 @@
 name: library-docs
 description: Fetch real-time, official library docs instead of relying on stale memory. Use whenever implementing against external libraries/frameworks/packages.
 allowed-tools: mcp__context7__resolve-library-id, mcp__context7__get-library-docs
+metadata:
+  internal: true
 ---
 
 # Library Documentation Research

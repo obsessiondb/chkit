@@ -2,6 +2,8 @@
 name: testing-bun
 description: CRITICAL - Invoke before writing or modifying tests in this repo. Use for `bun:test` test files, new test cases, and test refactors. Enforces no try/catch in positive tests, no early returns, and no hidden skips.
 allowed-tools: [Read, Edit, Grep, Glob, Bash]
+metadata:
+  internal: true
 ---
 
 # Testing Standards (Bun)

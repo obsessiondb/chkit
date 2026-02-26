@@ -2,6 +2,8 @@
 name: pr-creation
 description: Use when creating a pull request. Ensures changesets are created for user-facing changes, verification passes, and PR metadata is correct. Invoke this skill BEFORE committing or pushing PR code.
 allowed-tools: [Read, Edit, Write, Bash, Glob, Grep, mcp__conductor__GetWorkspaceDiff]
+metadata:
+  internal: true
 ---
 
 # PR Creation Checklist
