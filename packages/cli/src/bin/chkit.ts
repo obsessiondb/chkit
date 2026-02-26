@@ -18,6 +18,7 @@ import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core
 import { loadPluginRuntime } from './plugin-runtime.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
+import { getInternalPlugins } from './internal-plugins/index.js'
 import { CLI_VERSION } from './version.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
@@ -130,7 +131,20 @@ async function main(): Promise<void> {
 
   const configPathArg = extractConfigPath(argv)
   const { config, path: configPath } = await loadConfig(configPathArg)
-  const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
+  const pluginRuntime = await loadPluginRuntime({
+    config,
+    configPath,
+    cliVersion: CLI_VERSION,
+    internalPlugins: getInternalPlugins(),
+  })
+
+  const initCtx = {
+    command: commandName,
+    isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
+    jsonMode: argv.includes('--json'),
+  }
+  await pluginRuntime.runOnInit(initCtx)
+  _onComplete = (exitCode: number) => pluginRuntime.runOnComplete({ ...initCtx, exitCode })
 
   const registry = createCommandRegistry({
     coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
@@ -219,7 +233,6 @@ async function main(): Promise<void> {
         console.error(message)
       }
       process.exitCode = 2
-      exitIfNeeded()
       return
     }
 
@@ -240,7 +253,6 @@ async function main(): Promise<void> {
     })
 
     if (exitCode !== 0) process.exitCode = exitCode
-    exitIfNeeded()
     return
   }
 
@@ -262,7 +274,6 @@ async function main(): Promise<void> {
       dirs,
       pluginRuntime,
     })
-    exitIfNeeded()
     return
   }
 
@@ -290,11 +301,27 @@ async function main(): Promise<void> {
     dirs,
     pluginRuntime,
   })
-
-  exitIfNeeded()
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+let _onComplete: ((exitCode: number) => Promise<void>) | undefined
+
+function resolveExitCode(): number {
+  if (typeof process.exitCode === 'number') return process.exitCode
+  return process.exitCode ? Number(process.exitCode) : 0
+}
+
+main()
+  .then(async () => {
+    const code = resolveExitCode()
+    await _onComplete?.(code)
+    exitIfNeeded()
+  })
+  .catch(async (error) => {
+    try {
+      await _onComplete?.(1)
+    } catch {
+      // onComplete errors must not mask the original error
+    }
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
