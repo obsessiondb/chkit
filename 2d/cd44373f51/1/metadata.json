@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "2dcd44373f51",
+  "session_id": "1fb656a4-98da-4d9f-8ce9-f707d6f818cd",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T05:55:24.933159Z",
+  "branch": "marc/move-skills-to-claude",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/cli/src/drift.ts",
+    "packages/core/src/canonical.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/sql-normalizer.ts",
+    "packages/plugin-pull/src/index.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 27,
+    "cache_creation_tokens": 40971,
+    "cache_read_tokens": 966139,
+    "output_tokens": 343,
+    "api_call_count": 22
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T05:55:24.725444Z",
+    "agent_lines": 15,
+    "human_added": 955,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 970,
+    "agent_percentage": 1.5463917525773196
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-apia/1fb656a4-98da-4d9f-8ce9-f707d6f818cd.jsonl"
+}
