@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "5fc5bd6e9759",
+  "strategy": "manual-commit",
+  "branch": "marc/skill-docs-integration",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "skills/chkit/SKILL.md",
+    "skills/chkit/references/cli-reference.md",
+    "skills/chkit/references/dsl-reference.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/5f/c5bd6e9759/0/metadata.json",
+      "transcript": "/5f/c5bd6e9759/0/full.jsonl",
+      "context": "/5f/c5bd6e9759/0/context.md",
+      "content_hash": "/5f/c5bd6e9759/0/content_hash.txt",
+      "prompt": "/5f/c5bd6e9759/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4092,
+    "cache_creation_tokens": 78574,
+    "cache_read_tokens": 1092078,
+    "output_tokens": 214,
+    "api_call_count": 25
+  }
+}

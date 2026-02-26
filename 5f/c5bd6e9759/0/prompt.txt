@@ -1,0 +1,40 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/san-jose-v1 directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+To do immediately, before using any skills or any other tools (one time only):
+
+Rename the branch using `git branch -m`. Do not check the current branch name.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "marc/" before the name.
+
+</system-instruction>
+
+We just have a added markdown serving for the documentation page. In this repository, we have a skill for the CH book, and I want to extend the skill definition to make the agent know where to find the full documentation and how to get extra information. Evaluate how to best extend the skill or refactor the skill description to do this. Potentially, we can also remove the references and maybe serve them from the documentation page to always ensure that they are up-to-date.
+
+The docs page is deployed under chkit.obsessiondb.com request it with accept:text/markdown to research its structure
+
+---
+
+should we directly reference a few core files ot fetch and the index to discover ALL documentation? 
+e.g. direct links to plugin documentation?
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/san-jose-v1/.context/attachments/PR instructions.md
+</system_instruction>
+
+
+
+Create a PR

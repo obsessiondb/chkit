@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "5fc5bd6e9759",
+  "session_id": "dc89aaf1-012a-4c2f-b6f1-1d56b0add5f1",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T09:07:07.308887Z",
+  "branch": "marc/skill-docs-integration",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "skills/chkit/SKILL.md",
+    "skills/chkit/references/cli-reference.md",
+    "skills/chkit/references/dsl-reference.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 4092,
+    "cache_creation_tokens": 78574,
+    "cache_read_tokens": 1092078,
+    "output_tokens": 214,
+    "api_call_count": 25
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T09:07:07.023Z",
+    "agent_lines": 25,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 25,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-san-jose-v1/dc89aaf1-012a-4c2f-b6f1-1d56b0add5f1.jsonl"
+}
