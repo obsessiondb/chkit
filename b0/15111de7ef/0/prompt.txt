@@ -1,0 +1,37 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/washington-v1 directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system-instruction>
+To do immediately, before using any skills or any other tools (one time only):
+
+Rename the branch using `git branch -m`. Do not check the current branch name.
+
+Choosing a branch name: use concrete, specific language, avoid abstract nouns, and be concise (<30 characters). Use the prefix "marc/" before the name.
+
+</system-instruction>
+
+Check the code gen plugin, I think we're generating ingestion scripts or subtypes etc. files especially and when in code bases where the generated files live an agent sees them, the agent is tempted to change those files so I think on top of these files we should probably add a comment like automatically generated do not change so whenever agents see that file they're not tempted to change it
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /tmp/attachments/PR instructions.md
+</system_instruction>
+
+
+
+Create a PR
+
+---
+
+didnt we have a hint in CLAUDE.md to generate a changeset, when we create a PR?

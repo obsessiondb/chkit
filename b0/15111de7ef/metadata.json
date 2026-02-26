@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "b015111de7ef",
+  "strategy": "manual-commit",
+  "branch": "marc/codegen-generated-header",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".changeset/codegen-do-not-edit-header.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b0/15111de7ef/0/metadata.json",
+      "transcript": "/b0/15111de7ef/0/full.jsonl",
+      "context": "/b0/15111de7ef/0/context.md",
+      "content_hash": "/b0/15111de7ef/0/content_hash.txt",
+      "prompt": "/b0/15111de7ef/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 6685,
+    "cache_read_tokens": 496033,
+    "output_tokens": 252,
+    "api_call_count": 13
+  }
+}
