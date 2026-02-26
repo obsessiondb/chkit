@@ -1,7 +1,14 @@
 {
   "name": "chkit",
   "version": "0.1.0-beta.10",
+  "description": "ClickHouse schema and migration CLI for TypeScript projects",
+  "license": "MIT",
+  "author": "ObsessionDB",
+  "keywords": ["clickhouse", "schema", "migrations", "typescript", "database", "cli"],
   "homepage": "https://chkit.obsessiondb.com",
+  "bugs": {
+    "url": "https://github.com/obsessiondb/chkit/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/obsessiondb/chkit.git",
