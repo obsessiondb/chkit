@@ -3,7 +3,7 @@
   "checkpoint_id": "629489e96930",
   "strategy": "manual-commit",
   "branch": "marc/serve-markdown-docs",
-  "checkpoints_count": 8,
+  "checkpoints_count": 9,
   "files_touched": [
     ".claude/commands/documentation-authoring.md",
     ".claude/skills/documentation-authoring/SKILL.md",
@@ -1204,13 +1204,20 @@
       "context": "/62/9489e96930/1/context.md",
       "content_hash": "/62/9489e96930/1/content_hash.txt",
       "prompt": "/62/9489e96930/1/prompt.txt"
+    },
+    {
+      "metadata": "/62/9489e96930/2/metadata.json",
+      "transcript": "/62/9489e96930/2/full.jsonl",
+      "context": "/62/9489e96930/2/context.md",
+      "content_hash": "/62/9489e96930/2/content_hash.txt",
+      "prompt": "/62/9489e96930/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 191,
-    "cache_creation_tokens": 274170,
-    "cache_read_tokens": 9097716,
-    "output_tokens": 3383,
-    "api_call_count": 126
+    "input_tokens": 234,
+    "cache_creation_tokens": 332311,
+    "cache_read_tokens": 11147468,
+    "output_tokens": 3837,
+    "api_call_count": 165
   }
 }
