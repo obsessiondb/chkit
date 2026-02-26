@@ -15,7 +15,9 @@ import type {
   ChxOnCheckResult,
   ChxOnAfterApplyContext,
   ChxOnBeforeApplyContext,
+  ChxOnCompleteContext,
   ChxOnConfigLoadedContext,
+  ChxOnInitContext,
   ChxOnPlanCreatedContext,
   ChxOnSchemaLoadedContext,
   ChxPlugin,
@@ -39,6 +41,8 @@ const UNFILTERED_TABLE_SCOPE: TableScope = {
 export interface PluginRuntime {
   plugins: ReadonlyArray<LoadedPlugin>
   getCommand(pluginName: string, commandName: string): { command: ChxPluginCommand; plugin: LoadedPlugin } | null
+  runOnInit(context: Omit<ChxOnInitContext, 'options'>): Promise<void>
+  runOnComplete(context: Omit<ChxOnCompleteContext, 'options' | 'exitCode'> & { exitCode?: number }): Promise<void>
   runOnConfigLoaded(
     context: Omit<ChxOnConfigLoadedContext, 'options' | 'tableScope'> & { tableScope?: TableScope }
   ): Promise<void>
@@ -159,6 +163,7 @@ export async function loadPluginRuntime(input: {
   config: ResolvedChxConfig
   configPath: string
   cliVersion: string
+  internalPlugins?: ChxPlugin[]
 }): Promise<PluginRuntime> {
   const registrations = input.config.plugins ?? []
   const loaded: LoadedPlugin[] = []
@@ -198,6 +203,13 @@ export async function loadPluginRuntime(input: {
     byName.set(plugin.manifest.name, item)
   }
 
+  for (const plugin of input.internalPlugins ?? []) {
+    if (byName.has(plugin.manifest.name)) continue
+    const item: LoadedPlugin = { plugin, options: {} }
+    loaded.push(item)
+    byName.set(plugin.manifest.name, item)
+  }
+
   return {
     plugins: loaded,
     getCommand(pluginName, commandName) {
@@ -206,6 +218,29 @@ export async function loadPluginRuntime(input: {
       const command = (item.plugin.commands ?? []).find((entry) => entry.name === commandName)
       if (!command) return null
       return { plugin: item, command }
+    },
+    async runOnInit(context) {
+      for (const item of loaded) {
+        const hook = item.plugin.hooks?.onInit
+        if (!hook) continue
+        try {
+          await hook({ ...context, options: item.options })
+        } catch (error) {
+          throw formatPluginError(item.plugin.manifest.name, 'onInit', error)
+        }
+      }
+    },
+    async runOnComplete(context) {
+      const exitCode = context.exitCode ?? 0
+      for (const item of loaded) {
+        const hook = item.plugin.hooks?.onComplete
+        if (!hook) continue
+        try {
+          await hook({ ...context, exitCode, options: item.options })
+        } catch (error) {
+          throw formatPluginError(item.plugin.manifest.name, 'onComplete', error)
+        }
+      }
     },
     async runOnConfigLoaded(context) {
       const tableScope = context.tableScope ?? UNFILTERED_TABLE_SCOPE
