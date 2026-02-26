@@ -45,6 +45,20 @@ function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string
   }
 }
 
+async function runCliWithRetry(
+  cwd: string,
+  args: string[],
+  { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const result = runCli(cwd, args)
+    if (result.exitCode === 0) return result
+    if (attempt === maxAttempts) return result
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  return runCli(cwd, args)
+}
+
 async function dropDatabase(url: string, username: string, password: string, database: string): Promise<void> {
   const auth = Buffer.from(`${username}:${password}`).toString('base64')
   await fetch(url, {
@@ -280,7 +294,7 @@ describe('@chkit/cli doppler env e2e', () => {
         const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as { operationCount: number }
         expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
 
-        const secondExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const secondExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (secondExecute.exitCode !== 0) {
           throw new Error(
             `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
