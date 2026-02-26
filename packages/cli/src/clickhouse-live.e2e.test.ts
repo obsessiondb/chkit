@@ -147,7 +147,7 @@ describe('@chkit/cli doppler env e2e', () => {
       const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
       expect(planPayload.pending.length).toBe(1)
 
-      const executeResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+      const executeResult = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
       if (executeResult.exitCode !== 0) {
         throw new Error(
           `migrate --execute failed (exit=${executeResult.exitCode})\nstdout:\n${executeResult.stdout}\nstderr:\n${executeResult.stderr}`
@@ -203,7 +203,7 @@ describe('@chkit/cli doppler env e2e', () => {
         const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(firstGenerate.exitCode).toBe(0)
 
-        const firstExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const firstExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (firstExecute.exitCode !== 0) {
           throw new Error(
             `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
@@ -232,7 +232,7 @@ describe('@chkit/cli doppler env e2e', () => {
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
         expect(secondPlanPayload.pending.length).toBe(1)
 
-        const secondExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const secondExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (secondExecute.exitCode !== 0) {
           throw new Error(
             `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
@@ -273,7 +273,7 @@ describe('@chkit/cli doppler env e2e', () => {
       try {
         const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(firstGenerate.exitCode).toBe(0)
-        const firstExecute = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const firstExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
         if (firstExecute.exitCode !== 0) {
           throw new Error(
             `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`

@@ -86,6 +86,21 @@ export interface ChxOnAfterApplyContext extends ChxPluginHookContextBase {
   appliedAt: string
 }
 
+export interface ChxOnInitContext {
+  command: string
+  isInteractive: boolean
+  jsonMode: boolean
+  options: Record<string, unknown>
+}
+
+export interface ChxOnCompleteContext {
+  command: string
+  isInteractive: boolean
+  jsonMode: boolean
+  exitCode: number
+  options: Record<string, unknown>
+}
+
 export interface ChxCheckFinding {
   code: string
   message: string
@@ -128,6 +143,8 @@ export interface ChxPluginCommand {
 }
 
 export interface ChxPluginHooks {
+  onInit?: (context: ChxOnInitContext) => void | Promise<void>
+  onComplete?: (context: ChxOnCompleteContext) => void | Promise<void>
   onConfigLoaded?: (context: ChxOnConfigLoadedContext) => void | Promise<void>
   onSchemaLoaded?: (
     context: ChxOnSchemaLoadedContext
