@@ -2,6 +2,8 @@
 name: environment-variables
 description: Environment variable management for this monorepo. Use when adding new env vars/secrets, debugging missing env errors, CI mismatches, or Turborepo env passthrough issues.
 allowed-tools: [Read, Edit, Grep, Glob, Bash]
+metadata:
+  internal: true
 ---
 
 # Environment Variables Management
