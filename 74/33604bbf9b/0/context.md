@@ -1,0 +1,9 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+make @.changeset/skill-hint-plugin.md a patch\
+And also make sure, that in the pr-creations kill @.claude/skills/pr-creation/SKILL.md we mention while we are in BETA we ONLY do patch releases.
+
