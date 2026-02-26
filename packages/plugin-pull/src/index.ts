@@ -12,6 +12,7 @@ import {
   type ChxInlinePluginRegistration,
   defineFlags,
   type MaterializedViewDefinition,
+  normalizeEngine,
   type ParsedFlags,
   type ResolvedChxConfig,
   type SchemaDefinition,
@@ -340,7 +341,7 @@ function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefini
     kind: 'table',
     database: table.database,
     name: table.name,
-    engine: table.engine ?? 'MergeTree()',
+    engine: normalizeEngine(table.engine ?? 'MergeTree()'),
     columns: table.columns.map((column) => ({
       ...column,
       default: normalizeDefault(column.default),

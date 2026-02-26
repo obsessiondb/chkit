@@ -30,6 +30,18 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
 
   async function ensureTable(): Promise<void> {
     if (bootstrapped) return
+    // Probe whether the table already exists before issuing CREATE TABLE.
+    // On ClickHouse Cloud, repeated CREATE TABLE IF NOT EXISTS can fail with
+    // "already exists in metadata backend with different schema" because the
+    // engine normalisation (SharedMergeTree vs SharedMergeTree()) differs
+    // between the stored metadata and the new DDL statement.
+    try {
+      await db.query(`SELECT name FROM _chkit_migrations LIMIT 0`)
+      bootstrapped = true
+      return
+    } catch {
+      // Table does not exist yet – create it below.
+    }
     await db.execute(CREATE_TABLE_SQL)
     // On ClickHouse Cloud, DDL propagation across nodes may lag behind the
     // CREATE TABLE acknowledgment. Wait until the table is queryable.
