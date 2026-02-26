@@ -55,6 +55,14 @@ All commands support `--json` for machine-readable output and `--config <path>` 
 | [`@chkit/plugin-backfill`](https://www.npmjs.com/package/@chkit/plugin-backfill) | Time-windowed data backfill with checkpoints |
 | [`@chkit/plugin-obsessiondb`](https://www.npmjs.com/package/@chkit/plugin-obsessiondb) | Auto-rewrite Shared engines for ObsessionDB compatibility |
 
+## AI Agent Skill
+
+Install the chkit agent skill so AI coding assistants understand chkit:
+
+```bash
+npx skills add obsessiondb/chkit
+```
+
 ## Documentation
 
 See the [chkit documentation](https://chkit.obsessiondb.com).

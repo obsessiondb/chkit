@@ -10,6 +10,8 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
   lines.push('')
   lines.push('Commands:')
 
+  lines.push(`  ${'init'.padEnd(14)} Scaffold a new project with config and example schema`)
+
   const coreCommands = registry.commands.filter((c) => !c.isPlugin)
   const pluginCommands = registry.commands.filter((c) => c.isPlugin)
 
