@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "b6271ea0c0a7",
+  "strategy": "manual-commit",
+  "branch": "marc/move-skills-to-claude",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/skills/code-architecture/SKILL.md",
+    ".claude/skills/environment-variables/SKILL.md",
+    ".claude/skills/library-docs/SKILL.md",
+    ".claude/skills/testing-bun/SKILL.md",
+    ".claude/skills/typescript-standards/SKILL.md",
+    ".context/code-review.md",
+    "planning/07-json-output-contract.md",
+    "planning/08-internal-structure.md",
+    "planning/README.md",
+    "planning/optional-feature-clickhouse-compatibility-matrix.md",
+    "planning/optional-feature-dependency-intelligence-plugin.md",
+    "planning/optional-feature-distributed.md",
+    "planning/optional-feature-engine-specific-validation.md",
+    "skills/code-architecture/SKILL.md",
+    "skills/environment-variables/SKILL.md",
+    "skills/library-docs/SKILL.md",
+    "skills/testing-bun/SKILL.md",
+    "skills/typescript-standards/SKILL.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b6/271ea0c0a7/0/metadata.json",
+      "transcript": "/b6/271ea0c0a7/0/full.jsonl",
+      "context": "/b6/271ea0c0a7/0/context.md",
+      "content_hash": "/b6/271ea0c0a7/0/content_hash.txt",
+      "prompt": "/b6/271ea0c0a7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 69,
+    "cache_creation_tokens": 38651,
+    "cache_read_tokens": 331275,
+    "output_tokens": 67,
+    "api_call_count": 14
+  }
+}

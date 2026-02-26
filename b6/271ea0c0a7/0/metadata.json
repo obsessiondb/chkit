@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "b6271ea0c0a7",
+  "session_id": "0e24ba4d-f155-4e0b-8b71-e93420b9a2d6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T05:08:24.275688Z",
+  "branch": "marc/move-skills-to-claude",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/skills/code-architecture/SKILL.md",
+    ".claude/skills/environment-variables/SKILL.md",
+    ".claude/skills/library-docs/SKILL.md",
+    ".claude/skills/testing-bun/SKILL.md",
+    ".claude/skills/typescript-standards/SKILL.md",
+    ".context/code-review.md",
+    "planning/07-json-output-contract.md",
+    "planning/08-internal-structure.md",
+    "planning/README.md",
+    "planning/optional-feature-clickhouse-compatibility-matrix.md",
+    "planning/optional-feature-dependency-intelligence-plugin.md",
+    "planning/optional-feature-distributed.md",
+    "planning/optional-feature-engine-specific-validation.md",
+    "skills/code-architecture/SKILL.md",
+    "skills/environment-variables/SKILL.md",
+    "skills/library-docs/SKILL.md",
+    "skills/testing-bun/SKILL.md",
+    "skills/typescript-standards/SKILL.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 69,
+    "cache_creation_tokens": 38651,
+    "cache_read_tokens": 331275,
+    "output_tokens": 67,
+    "api_call_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T05:08:24.19167Z",
+    "agent_lines": 385,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 385,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-apia/0e24ba4d-f155-4e0b-8b71-e93420b9a2d6.jsonl"
+}
