@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "6d60d4ada49c",
+  "session_id": "06f63e9a-6538-482c-b4ac-7d7bf20d9f12",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T14:36:15.725328Z",
+  "branch": "marc/fix-main-deploy",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".changeset/fix-docs-deploy.md",
+    "apps/docs/package.json"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 218,
+    "cache_creation_tokens": 51973,
+    "cache_read_tokens": 685835,
+    "output_tokens": 101,
+    "api_call_count": 23
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T14:36:15.664863Z",
+    "agent_lines": 6,
+    "human_added": 19,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 25,
+    "agent_percentage": 24
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-seoul-v1/06f63e9a-6538-482c-b4ac-7d7bf20d9f12.jsonl"
+}

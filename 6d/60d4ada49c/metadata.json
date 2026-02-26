@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "6d60d4ada49c",
+  "strategy": "manual-commit",
+  "branch": "marc/fix-main-deploy",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".changeset/fix-docs-deploy.md",
+    "apps/docs/package.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6d/60d4ada49c/0/metadata.json",
+      "transcript": "/6d/60d4ada49c/0/full.jsonl",
+      "context": "/6d/60d4ada49c/0/context.md",
+      "content_hash": "/6d/60d4ada49c/0/content_hash.txt",
+      "prompt": "/6d/60d4ada49c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 218,
+    "cache_creation_tokens": 51973,
+    "cache_read_tokens": 685835,
+    "output_tokens": 101,
+    "api_call_count": 23
+  }
+}
