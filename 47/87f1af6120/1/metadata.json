@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "4787f1af6120",
+  "session_id": "17a79690-fe62-4a09-a41b-86530367ff8e",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T08:19:05.031912Z",
+  "branch": "marc/num-6596-chkit-produce-chkit-skill-so-agents-are-better-at-using-it",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "apps/docs/src/content/docs/getting-started.md",
+    "packages/cli/README.md",
+    "packages/cli/src/bin/chkit.ts",
+    "packages/cli/src/bin/help.ts"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 60,
+    "cache_creation_tokens": 108192,
+    "cache_read_tokens": 765086,
+    "output_tokens": 144,
+    "api_call_count": 18
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T08:19:04.854782Z",
+    "agent_lines": 20,
+    "human_added": 542,
+    "human_modified": 6,
+    "human_removed": 0,
+    "total_committed": 568,
+    "agent_percentage": 3.5211267605633805
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-dallas/17a79690-fe62-4a09-a41b-86530367ff8e.jsonl"
+}
