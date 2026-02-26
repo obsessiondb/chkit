@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.4",
+  "checkpoint_id": "513659b0a2c2",
+  "session_id": "08c55e70-2741-4b0b-a8be-049373e69970",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-26T09:58:54.181498Z",
+  "branch": "marc/num-6597-chkit-hint-at-installing-skills",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".claude/skills/pr-creation/SKILL.md",
+    "CLAUDE.md"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "6a02f248-50e8-423b-8ef1-8e6110629e2c",
+  "token_usage": {
+    "input_tokens": 2700,
+    "cache_creation_tokens": 452277,
+    "cache_read_tokens": 11070910,
+    "output_tokens": 1277,
+    "api_call_count": 129
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-26T09:58:53.584299Z",
+    "agent_lines": 75,
+    "human_added": 64,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 139,
+    "agent_percentage": 53.956834532374096
+  },
+  "transcript_path": ".claude/projects/-Users-marc-conductor-workspaces-chkit-prague/08c55e70-2741-4b0b-a8be-049373e69970.jsonl"
+}

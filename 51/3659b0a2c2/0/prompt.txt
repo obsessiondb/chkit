@@ -1,0 +1,461 @@
+<system_instruction>
+You are working inside Conductor, a Mac app that lets the user run many coding agents in parallel.
+Your work should take place in the /Users/marc/conductor/workspaces/chkit/prague directory (unless otherwise directed), which has been set up for you to work in.
+Each workspace has a .context directory (gitignored) where you can save files to collaborate with other agents.
+The target branch for this workspace is main. Use this for actions like creating new PRs, bisecting, etc., unless you're told otherwise.
+
+If the user asks you to work on several unrelated tasks in parallel, you can suggest they start new workspaces.
+If the user asks for help with Conductor, ask them to email [humans@conductor.build](mailto:humans@conductor.build) or
+click on the comment icon in the bottom left to send feedback.
+</system_instruction>
+
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/prague/.context/attachments/[LINEAR]-NUM-6597.md
+</system_instruction>
+
+---
+
+Base directory for this skill: /Users/marc/conductor/workspaces/chkit/prague/.claude/skills/testing-bun
+
+# Testing Standards (Bun)
+
+## Framework
+- Use `bun:test` imports (`describe`, `test`, `expect`, etc.)
+- Use Bun test runner (`bun test`), typically via workspace scripts (`bun run test`)
+- Do not introduce Vitest/Jest in this repo
+- For local e2e/integration runs that need env vars, use Doppler (`bun run test:env`)
+
+## Critical Rules
+
+### 1. No Try/Catch in Positive Tests
+
+```ts
+// Bad
+test('creates user', async () => {
+  try {
+    const user = await createUser(input)
+    expect(user.id).toBeDefined()
+  } catch (error) {
+    console.error(error)
+  }
+})
+
+// Good
+test('creates user', async () => {
+  const user = await createUser(input)
+  expect(user.id).toBeDefined()
+})
+
+// Good for expected failures
+test('rejects invalid input', async () => {
+  await expect(createUser(invalid)).rejects.toThrow('Invalid email')
+})
+```
+
+### 2. No Early Returns in Tests
+
+```ts
+// Bad
+test('calls API', async () => {
+  if (!hasCredentials) return
+  await callApi()
+})
+
+// Good
+test('calls API', async () => {
+  expect(hasCredentials).toBe(true)
+  await callApi()
+})
+```
+
+### 3. No Hidden Skips for Missing Env Vars
+
+```ts
+// Bad
+describe.skipIf(!process.env.CLICKHOUSE_URL)('integration', () => {})
+
+// Bad
+if (!process.env.CLICKHOUSE_URL) {
+  test.skip('requires CLICKHOUSE_URL', () => {})
+}
+
+// Good
+describe('integration', () => {
+  const url = process.env.CLICKHOUSE_URL
+  expect(url).toBeTruthy()
+})
+```
+
+### 4. E2E Policy (Mandatory)
+
+- E2E tests must never be conditional on env availability.
+- Never use `skip`, `skipIf`, guard `return`, or branching that bypasses e2e execution when env vars are absent.
+- Missing required env vars must cause test failure immediately.
+- Local e2e execution must use Doppler so required vars are injected.
+
+```bash
+# Required local command for env-dependent suites
+bun run test:env
+```
+
+### 5. Prefer Inline Setup Over `beforeEach`
+
+Use inline setup unless lifecycle hooks are required for async cleanup/reset.
+
+## Bun-Specific Practices
+
+- Keep tests deterministic and isolated
+- Prefer plain `test(...)` blocks with explicit setup
+- Use package-level scripts (`bun test src`) for focused runs when needed
+
+## Env-Dependent Tests
+
+If tests require Doppler-provided vars:
+1. Ensure var is in package `turbo.json` `passThroughEnv`
+2. Ensure CI mapping in `.github/workflows/ci.yml`
+3. Run local e2e/integration suites with `bun run test:env`
+4. Treat missing vars as a hard failure, not a skip path
+
+---
+
+can we actuallI think I want this rather implemented as plugin. lets create a folder of plugins in the CLI package, those will be the internal plugins. and lets think about a plugin hook where this can be implemented. Maybe on some type of startup, to ask on cli initialization. and if the user says no, keep that for the run, and print at the end, the command they can manually run to add the skill. 
+then we want test cases:
+1. user says yes
+2. user says no -> we print something a the end when the command ran
+3. user says no, runs command again and is not prompted again (since we stored it somewhere)
+4. user ran it > 1 month ago, and then runs again, is asked again.
+
+---
+
+are you still running? what is the status? And i find the internal plugin registration a little bit weird. I would have expected. the plugin to be defined the same way the other plugins are configured, just that its automatically added to the list of plugins, independant on the user space.
+
+---
+
+i think we want to run `runOnComplete` always not only in success case, and potentially provide the result of the call. so the plugin can decide whether it wants to do something or at all in success/failure case
+
+---
+
+<system_instruction>
+The user has attached these files. Read them before proceeding.
+- /Users/marc/conductor/workspaces/chkit/prague/.context/attachments/PR instructions.md
+</system_instruction>
+
+
+
+Create a PR
+
+---
+
+doesnt your CLAUDE.md suggest you create changesets when we are adding user facing features? why didnt you?
+
+---
+
+I also ask you why you didnt, because we want you in the future to adhere to it. So i need to change something to make you remember. reflect why you didnt and how we can make you in the future
+
+---
+
+yes but you still DID not, so WHY?
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me trace through the entire conversation chronologically:
+
+1. **Initial task**: User attached a Linear issue (NUM-6597) about hinting users to install chkit Claude agent skills. The issue describes: check if skill is installed, prompt once a month, store dismissal in user folder.
+
+2. **First implementation**: I created `packages/cli/src/bin/skill-hint.ts` and `skill-hint.test.ts` as standalone modules, integrated directly into `chkit.ts` via a `.then()` after `main()`. This passed all tests.
+
+3. **User feedback #1**: User wanted this implemented as an internal plugin instead, using a plugin folder in the CLI package. They wanted plugin hooks (startup/shutdown), and specific test cases: (1) user says yes, (2) user says no → print at end, (3) user says no, runs again → not prompted, (4) user ran >1 month ago → asked again.
+
+4. **Second implementation**: I created a custom `InternalPlugin` interface with `onStartup`/`onShutdown` hooks in `packages/cli/src/bin/internal-plugins/`. This worked but...
+
+5. **User feedback #2**: User said the internal plugin registration was "weird" - they expected it to use the same `ChxPlugin` interface as other plugins, just auto-added to the plugin list.
+
+6. **Third implementation (current)**: I refactored to:
+   - Add `onInit`/`onComplete` hooks to the existing `ChxPluginHooks` interface in `plugins.ts`
+   - Add `internalPlugins?: ChxPlugin[]` parameter to `loadPluginRuntime`
+   - Implement `runOnInit`/`runOnComplete` in the plugin runtime
+   - Rewrite skill-hint as a proper `ChxPlugin` using `definePlugin()`
+   - Wire it up in `chkit.ts` through the existing plugin runtime
+
+7. **User feedback #3**: User wanted `runOnComplete` to always run (not just on success) and receive the exit code so the plugin can decide.
+
+8. **Fourth iteration**: Added `exitCode` to `ChxOnCompleteContext`, made `.then()` and `.catch()` both call `_onComplete`, removed `exitIfNeeded()` from inside `main()` and moved it to after `onComplete` in `.then()`.
+
+9. **PR creation**: User asked to create a PR. I committed, pushed, created the PR at https://github.com/obsessiondb/chkit/pull/54.
+
+10. **User feedback #4**: User pointed out I missed creating a changeset (required by CLAUDE.md). I created it and pushed.
+
+11. **User feedback #5**: User pushed deeper - asked WHY I missed it. I reflected that I followed the attached PR instructions file mechanically without cross-referencing CLAUDE.md. Created a memory file.
+
+12. **User feedback #6**: User said the memory should be for PR creation, not per-commit (commits can be intermediate). Also suggested creating a dedicated skill for PR creation since the PR instructions say "If you have any skills related to creating PRs, invoke them now."
+
+13. **Current request**: User asked for a detailed summary of the conversation, noting they want to create a dedicated PR skill and fix the memory file.
+
+Key files:
+- `packages/cli/src/plugins.ts` - Added `ChxOnInitContext`, `ChxOnCompleteContext`, and hooks
+- `packages/cli/src/bin/plugin-runtime.ts` - Added `internalPlugins` param, `runOnInit`/`runOnComplete`
+- `packages/cli/src/bin/chkit.ts` - Wired up internal plugins and lifecycle hooks
+- `packages/cli/src/bin/internal-plugins/index.ts` - Exports `getInternalPlugins()`
+- `packages/cli/src/bin/internal-plugins/skill-hint.ts` - The skill hint plugin
+- `packages/cli/src/bin/internal-plugins/skill-hint.test.ts` - 9 tests
+- `.changeset/skill-hint-plugin.md` - Changeset for the feature
+- `~/.claude/projects/.../memory/MEMORY.md` - Memory file (needs updating)
+
+The PR is created and pushed. The pending work is:
+1. Fix the memory file to be about PR creation, not per-commit
+2. Create a dedicated PR creation skill
+
+Summary:
+1. Primary Request and Intent:
+   The user's primary request was to implement a feature from Linear issue NUM-6597: hint chkit CLI users to install the chkit Claude agent skill for Claude Code. Specifically:
+   - Check if the skill is installed (`.claude/skills/chkit/SKILL.md`)
+   - Prompt the user once per month if not installed
+   - If user says no, store dismissal in a user-level location (`~/.chkit/skill-hint.json`), not repo-level
+   - If user says yes, install via `npx skills add obsessiondb/chkit`
+   - Show the manual install command at the end of a successful command run if user declined
+   
+   The user had strong opinions on architecture:
+   - Internal plugins must use the **same `ChxPlugin` interface** as user plugins, just auto-injected
+   - New plugin lifecycle hooks (`onInit`/`onComplete`) should be added to the plugin system
+   - `onComplete` must always run (success and failure) and receive `exitCode` so the plugin can decide behavior
+   - The implementation should be in an `internal-plugins/` folder within the CLI package
+   
+   The user also identified a process failure: changesets were not created before the PR, and asked for reflection on why and a durable fix (memory file + potentially a dedicated PR creation skill).
+
+2. Key Technical Concepts:
+   - chkit monorepo with Bun workspaces and Turborepo
+   - `ChxPlugin` interface with `manifest`, `hooks`, `commands`, `extendCommands`
+   - Plugin runtime (`loadPluginRuntime`) with lifecycle hooks chain
+   - `definePlugin()` helper for creating plugins
+   - Internal plugins auto-injected via `internalPlugins` parameter
+   - Dependency injection pattern for testability (`SkillHintDeps`)
+   - `process.exitCode` vs `process.exit()` for exit handling
+   - `exitIfNeeded()` moved from inside `main()` to after `onComplete` in `.then()`
+   - Module-level `_onComplete` variable to bridge `main()` scope to `.then()` handler
+   - Changeset workflow with `bun run changeset` (interactive CLI doesn't work, manual file creation needed)
+   - Memory system at `~/.claude/projects/.../memory/MEMORY.md`
+
+3. Files and Code Sections:
+   - **`packages/cli/src/plugins.ts`** — Core plugin type definitions. Added two new hook context types and hooks:
+     ```typescript
+     export interface ChxOnInitContext {
+       command: string
+       isInteractive: boolean
+       jsonMode: boolean
+       options: Record<string, unknown>
+     }
+
+     export interface ChxOnCompleteContext {
+       command: string
+       isInteractive: boolean
+       jsonMode: boolean
+       exitCode: number
+       options: Record<string, unknown>
+     }
+
+     // Added to ChxPluginHooks:
+     onInit?: (context: ChxOnInitContext) => void | Promise<void>
+     onComplete?: (context: ChxOnCompleteContext) => void | Promise<void>
+     ```
+
+   - **`packages/cli/src/bin/plugin-runtime.ts`** — Plugin loading and lifecycle execution. Key changes:
+     - Added `internalPlugins?: ChxPlugin[]` to `loadPluginRuntime` input
+     - Internal plugins are appended after user plugins, skipped if name collision
+     - Added `runOnInit` and `runOnComplete` to `PluginRuntime` interface and implementation
+     ```typescript
+     export interface PluginRuntime {
+       // ...existing...
+       runOnInit(context: Omit<ChxOnInitContext, 'options'>): Promise<void>
+       runOnComplete(context: Omit<ChxOnCompleteContext, 'options' | 'exitCode'> & { exitCode?: number }): Promise<void>
+     }
+     
+     // Internal plugin loading:
+     for (const plugin of input.internalPlugins ?? []) {
+       if (byName.has(plugin.manifest.name)) continue
+       const item: LoadedPlugin = { plugin, options: {} }
+       loaded.push(item)
+       byName.set(plugin.manifest.name, item)
+     }
+     
+     // runOnComplete defaults exitCode to 0:
+     async runOnComplete(context) {
+       const exitCode = context.exitCode ?? 0
+       for (const item of loaded) {
+         const hook = item.plugin.hooks?.onComplete
+         if (!hook) continue
+         try {
+           await hook({ ...context, exitCode, options: item.options })
+         } catch (error) {
+           throw formatPluginError(item.plugin.manifest.name, 'onComplete', error)
+         }
+       }
+     }
+     ```
+
+   - **`packages/cli/src/bin/chkit.ts`** — CLI entry point. Key changes:
+     - Imports `getInternalPlugins` from `./internal-plugins/index.js`
+     - Passes internal plugins to `loadPluginRuntime`
+     - Calls `runOnInit` after plugin loading
+     - Stores `_onComplete` closure at module level
+     - Removed all `exitIfNeeded()` calls from inside `main()`
+     - `.then()` always calls `_onComplete` then `exitIfNeeded()`
+     - `.catch()` calls `_onComplete(1)` with error swallowing, then original error handling
+     ```typescript
+     const pluginRuntime = await loadPluginRuntime({
+       config, configPath, cliVersion: CLI_VERSION,
+       internalPlugins: getInternalPlugins(),
+     })
+     const initCtx = {
+       command: commandName,
+       isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
+       jsonMode: argv.includes('--json'),
+     }
+     await pluginRuntime.runOnInit(initCtx)
+     _onComplete = (exitCode: number) => pluginRuntime.runOnComplete({ ...initCtx, exitCode })
+     
+     // Bottom of file:
+     let _onComplete: ((exitCode: number) => Promise<void>) | undefined
+     function resolveExitCode(): number {
+       if (typeof process.exitCode === 'number') return process.exitCode
+       return process.exitCode ? Number(process.exitCode) : 0
+     }
+     main()
+       .then(async () => {
+         const code = resolveExitCode()
+         await _onComplete?.(code)
+         exitIfNeeded()
+       })
+       .catch(async (error) => {
+         try { await _onComplete?.(1) } catch {}
+         console.error(error instanceof Error ? error.message : String(error))
+         process.exit(1)
+       })
+     ```
+
+   - **`packages/cli/src/bin/internal-plugins/index.ts`** — Simple aggregator:
+     ```typescript
+     import type { ChxPlugin } from '../../plugins.js'
+     import { createSkillHintPlugin } from './skill-hint.js'
+     export function getInternalPlugins(): ChxPlugin[] {
+       return [createSkillHintPlugin()]
+     }
+     ```
+
+   - **`packages/cli/src/bin/internal-plugins/skill-hint.ts`** — The skill hint plugin with dependency injection:
+     ```typescript
+     export const SKILL_INSTALL_COMMAND = 'npx skills add obsessiondb/chkit'
+     export const HINT_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000
+
+     export interface SkillHintDeps {
+       isSkillInstalled(): boolean
+       readState(): SkillHintState
+       writeState(state: SkillHintState): void
+       promptUser(): Promise<boolean>
+       installSkill(): Promise<boolean>
+       now(): number
+     }
+
+     export function createSkillHintPlugin(overrides?: Partial<SkillHintDeps>): ChxPlugin {
+       const deps: SkillHintDeps = { ...defaultDeps, ...overrides }
+       let pendingMessage: string | undefined
+       return definePlugin({
+         manifest: { name: '@chkit/internal-skill-hint', apiVersion: 1 },
+         hooks: {
+           async onInit(ctx) {
+             if (!ctx.isInteractive || ctx.jsonMode) return
+             if (deps.isSkillInstalled()) return
+             const state = deps.readState()
+             if (state.lastDismissed) {
+               const elapsed = deps.now() - new Date(state.lastDismissed).getTime()
+               if (elapsed < HINT_INTERVAL_MS) return
+             }
+             const accepted = await deps.promptUser()
+             if (accepted) { await deps.installSkill() }
+             else {
+               deps.writeState({ lastDismissed: new Date(deps.now()).toISOString() })
+               pendingMessage = `You can install it later with: ${SKILL_INSTALL_COMMAND}`
+             }
+           },
+           onComplete(ctx) {
+             if (pendingMessage && !ctx.jsonMode && ctx.exitCode === 0) {
+               console.error('')
+               console.error(pendingMessage)
+             }
+           },
+         },
+       })
+     }
+     ```
+
+   - **`packages/cli/src/bin/internal-plugins/skill-hint.test.ts`** — 9 tests using `bun:test` with dependency injection, covering all user-requested scenarios plus edge cases.
+
+   - **`.changeset/skill-hint-plugin.md`** — Changeset for the feature:
+     ```markdown
+     ---
+     "chkit": minor
+     ---
+     Add onInit/onComplete plugin lifecycle hooks and hint users to install the chkit Claude agent skill.
+     ```
+
+   - **`~/.claude/projects/-Users-marc-conductor-workspaces-chkit-prague/memory/MEMORY.md`** — Current (needs updating per user's latest feedback):
+     ```markdown
+     # chkit Project Memory
+     ## Pre-commit Checklist (CRITICAL — read before every commit)
+     After `bun verify` passes and BEFORE committing code:
+     1. If the change is user-facing, create a changeset file manually in `.changeset/`
+     2. Stage the changeset file together with the code changes in the same commit.
+     This applies regardless of what any attached PR instruction files say.
+     ```
+
+4. Errors and fixes:
+   - **First architecture (standalone module)**: User rejected it — wanted a proper internal plugin system, not a standalone function wired into `chkit.ts`.
+   - **Second architecture (custom InternalPlugin interface)**: User rejected it — wanted internal plugins to use the same `ChxPlugin` interface as user plugins, just auto-injected.
+   - **onComplete only on success**: User pointed out `runOnComplete` should always run and receive `exitCode`, not be gated on success. Fixed by removing the `exitCode === 0` check from `.then()`, adding `exitCode` to context, calling `_onComplete` in both `.then()` and `.catch()`, and moving `exitIfNeeded()` to after `onComplete`.
+   - **Missing changeset**: Forgot to create a changeset before the PR. User called this out. Fixed by creating `.changeset/skill-hint-plugin.md` and pushing it. Root cause: followed attached PR instruction file mechanically without cross-referencing CLAUDE.md's PR requirements.
+   - **Memory file scope wrong**: User said the memory should be about PR creation (not per-commit, since commits can be intermediate). This still needs fixing.
+
+5. Problem Solving:
+   - Solved the challenge of calling `runOnComplete` from both success and error paths by using a module-level `_onComplete` closure set inside `main()` and invoked in `.then()`/`.catch()`.
+   - Solved testability by using dependency injection (`SkillHintDeps`) so tests can fake filesystem, prompts, time, and installation.
+   - Solved the exit handling by removing `exitIfNeeded()` from inside `main()` branches and moving it to after `onComplete` runs in `.then()`.
+
+6. All user messages:
+   - (Initial empty message with attached Linear issue NUM-6597)
+   - "can we actuallI think I want this rather implemented as plugin. lets create a folder of plugins in the CLI package, those will be the internal plugins. and lets think about a plugin hook where this can be implemented. Maybe on some type of startup, to ask on cli initialization. and if the user says no, keep that for the run, and print at the end, the command they can manually run to add the skill. then we want test cases: 1. user says yes 2. user says no -> we print something a the end when the command ran 3. user says no, runs command again and is not prompted again (since we stored it somewhere) 4. user ran it > 1 month ago, and then runs again, is asked again."
+   - "are you still running? what is the status? And i find the internal plugin registration a little bit weird. I would have expected. the plugin to be defined the same way the other plugins are configured, just that its automatically added to the list of plugins, independant on the user space."
+   - "i think we want to run `runOnComplete` always not only in success case, and potentially provide the result of the call. so the plugin can decide whether it wants to do something or at all in success/failure case"
+   - (Attached PR instructions file, asked to create a PR)
+   - "doesnt your CLAUDE.md suggest you create changesets when we are adding user facing features? why didnt you?"
+   - "i rather want it for each PR, because commits might be intermediate. also the PR creation text contains this `If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.` So maybe we need a dedicated skill, that you know to invoke when it comes to it?"
+   - "yes but you still DID not, so WHY?"
+   - "i rather want it for each PR, because commits might be intermediate. also the PR creation text contains this `If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.` So maybe we need a dedicated skill, that you know to invoke when it comes to it?" (repeated with summary request)
+
+7. Pending Tasks:
+   - **Fix the memory file**: Change from "pre-commit" to "pre-PR" scope, since commits can be intermediate.
+   - **Create a dedicated PR creation skill**: The attached PR instructions say "If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence." The user suggests creating a skill that includes the changeset step, so it's automatically invoked at PR creation time.
+
+8. Current Work:
+   The PR (https://github.com/obsessiondb/chkit/pull/54) is created and pushed with all code changes and the changeset. The implementation is complete and verified (33 build tasks, 78 tests, 0 failures).
+   
+   The user's most recent substantive request is about fixing the process so changesets aren't missed again. They said: "i rather want it for each PR, because commits might be intermediate. also the PR creation text contains this `If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.` So maybe we need a dedicated skill, that you know to invoke when it comes to it?"
+
+9. Optional Next Step:
+   Two tasks from the user's most recent message:
+   1. Update the memory file (`~/.claude/projects/-Users-marc-conductor-workspaces-chkit-prague/memory/MEMORY.md`) to scope the changeset requirement to PR creation (not per-commit).
+   2. Create a dedicated PR creation skill (in `.claude/skills/`) that includes the changeset step, so it gets invoked automatically when the PR instructions file says "If you have any skills related to creating PRs, invoke them now."
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/marc/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+we dont need to rereference the CLAUDE.md, we can actually remove the creating PR part of the CLAUDE.md now. we hope the skill is inoked when needed
+
+---
+
+Commit and push all changes
