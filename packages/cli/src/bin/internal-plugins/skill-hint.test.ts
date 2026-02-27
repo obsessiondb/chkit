@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 
 import type { ChxOnCompleteContext, ChxOnInitContext } from '../../plugins.js'
-import { createSkillHintPlugin, findAgentRoot, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type SkillHintDeps, type SkillHintState } from './skill-hint.js'
+import { createSkillHintPlugin, findAgentRoot, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type AgentKind, type SkillHintDeps, type SkillHintState } from './skill-hint.js'
 
 function initCtx(overrides?: Partial<ChxOnInitContext>): ChxOnInitContext {
   return { command: 'status', isInteractive: true, jsonMode: false, options: {}, ...overrides }
@@ -16,10 +16,11 @@ function completeCtx(overrides?: Partial<ChxOnCompleteContext>): ChxOnCompleteCo
 
 function fakeDeps(overrides?: Partial<SkillHintDeps>): Partial<SkillHintDeps> {
   return {
+    detectAgent: () => ({ root: '/fake', agent: 'claude' }),
     isSkillInstalled: () => false,
     readState: () => ({}),
     writeState: () => {},
-    promptUser: async () => false,
+    promptUser: async (_agent: AgentKind) => false,
     installSkill: async () => true,
     now: () => Date.now(),
     ...overrides,
@@ -70,12 +71,13 @@ describe('skill-hint plugin', () => {
     const now = Date.now()
 
     const makeDeps = (): Partial<SkillHintDeps> => ({
+      detectAgent: () => ({ root: '/fake', agent: 'claude' }),
       isSkillInstalled: () => false,
       readState: () => stateStore,
       writeState: (s) => {
         stateStore = s
       },
-      promptUser: async () => {
+      promptUser: async (_agent: AgentKind) => {
         promptCount++
         return false
       },
@@ -206,28 +208,28 @@ describe('findAgentRoot', () => {
   test('returns cwd when .claude/ exists in cwd', () => {
     const root = makeDir('project')
     mkdirSync(join(root, '.claude'), { recursive: true })
-    expect(findAgentRoot(root)).toBe(root)
+    expect(findAgentRoot(root)).toEqual({ root, agent: 'claude' })
   })
 
   test('returns parent when .claude/ exists in parent but not cwd', () => {
     const root = makeDir('monorepo')
     mkdirSync(join(root, '.claude'), { recursive: true })
     const sub = makeDir('monorepo', 'packages', 'backend')
-    expect(findAgentRoot(sub)).toBe(root)
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'claude' })
   })
 
   test('finds CLAUDE.md as agentic marker', () => {
     const root = makeDir('project')
     writeFileSync(join(root, 'CLAUDE.md'), '')
     const sub = makeDir('project', 'src')
-    expect(findAgentRoot(sub)).toBe(root)
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'claude' })
   })
 
   test('finds .cursorrules as agentic marker', () => {
     const root = makeDir('project')
     writeFileSync(join(root, '.cursorrules'), '')
     const sub = makeDir('project', 'src')
-    expect(findAgentRoot(sub)).toBe(root)
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'cursor' })
   })
 
   test('finds .github/copilot-instructions.md as agentic marker', () => {
@@ -235,14 +237,35 @@ describe('findAgentRoot', () => {
     mkdirSync(join(root, '.github'), { recursive: true })
     writeFileSync(join(root, '.github', 'copilot-instructions.md'), '')
     const sub = makeDir('project', 'src')
-    expect(findAgentRoot(sub)).toBe(root)
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'copilot' })
+  })
+
+  test('finds .cursor/ as agentic marker', () => {
+    const root = makeDir('project-cursor')
+    mkdirSync(join(root, '.cursor'), { recursive: true })
+    const sub = makeDir('project-cursor', 'src')
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'cursor' })
+  })
+
+  test('finds .windsurf/ as agentic marker', () => {
+    const root = makeDir('project-windsurf')
+    mkdirSync(join(root, '.windsurf'), { recursive: true })
+    const sub = makeDir('project-windsurf', 'src')
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'windsurf' })
+  })
+
+  test('finds .roo/ as agentic marker', () => {
+    const root = makeDir('project-roo')
+    mkdirSync(join(root, '.roo'), { recursive: true })
+    const sub = makeDir('project-roo', 'src')
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'roo' })
   })
 
   test('falls back to git root when no agentic markers found', () => {
     const root = makeDir('repo')
     mkdirSync(join(root, '.git'), { recursive: true })
     const sub = makeDir('repo', 'packages', 'backend')
-    expect(findAgentRoot(sub)).toBe(root)
+    expect(findAgentRoot(sub)).toEqual({ root, agent: 'unknown' })
   })
 
   test('prefers agentic marker over git root', () => {
@@ -251,11 +274,64 @@ describe('findAgentRoot', () => {
     const agentRoot = makeDir('repo', 'packages', 'app')
     mkdirSync(join(agentRoot, '.claude'), { recursive: true })
     const sub = makeDir('repo', 'packages', 'app', 'src')
-    expect(findAgentRoot(sub)).toBe(agentRoot)
+    expect(findAgentRoot(sub)).toEqual({ root: agentRoot, agent: 'claude' })
   })
 
   test('returns cwd when no markers found at all', () => {
     const dir = makeDir('bare', 'nested')
-    expect(findAgentRoot(dir)).toBe(dir)
+    expect(findAgentRoot(dir)).toEqual({ root: dir, agent: 'unknown' })
+  })
+})
+
+describe('agent-aware prompting', () => {
+  test('passes detected agent to promptUser', async () => {
+    let receivedAgent: AgentKind | undefined
+    const plugin = createSkillHintPlugin(
+      fakeDeps({
+        detectAgent: () => ({ root: '/fake', agent: 'windsurf' }),
+        promptUser: async (agent: AgentKind) => {
+          receivedAgent = agent
+          return false
+        },
+      })
+    )
+
+    await plugin.hooks?.onInit?.(initCtx())
+    expect(receivedAgent).toBe('windsurf')
+  })
+
+  test('passes unknown agent when no markers found', async () => {
+    let receivedAgent: AgentKind | undefined
+    const plugin = createSkillHintPlugin(
+      fakeDeps({
+        detectAgent: () => ({ root: '/fake', agent: 'unknown' }),
+        promptUser: async (agent: AgentKind) => {
+          receivedAgent = agent
+          return false
+        },
+      })
+    )
+
+    await plugin.hooks?.onInit?.(initCtx())
+    expect(receivedAgent).toBe('unknown')
+  })
+
+  test('passes different agent kinds correctly', async () => {
+    const agents: AgentKind[] = ['claude', 'cursor', 'copilot', 'roo', 'trae']
+    for (const expected of agents) {
+      let receivedAgent: AgentKind | undefined
+      const plugin = createSkillHintPlugin(
+        fakeDeps({
+          detectAgent: () => ({ root: '/fake', agent: expected }),
+          promptUser: async (agent: AgentKind) => {
+            receivedAgent = agent
+            return false
+          },
+        })
+      )
+
+      await plugin.hooks?.onInit?.(initCtx())
+      expect(receivedAgent).toBe(expected)
+    }
   })
 })
