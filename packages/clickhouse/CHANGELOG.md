@@ -1,5 +1,26 @@
 # @chkit/clickhouse
 
+## 0.1.0-beta.13
+
+### Patch Changes
+
+- ba60638: Add homepage and repository metadata to all packages, and link READMEs to the chkit CLI package and documentation site.
+- 1f8ad1b: Fix silent exit with no error output when ClickHouse is unreachable. The CLI now displays clear error messages for connection failures (connection refused, host not found, timeout, etc.) including the configured ClickHouse URL. Added fallback error formatting for any errors with empty messages.
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- 3ab6919: Store migration journal in ClickHouse instead of a local file. Migration state is now tracked per-environment via a `_chkit_migrations` table, enabling multi-environment deployments where staging and production independently track applied migrations.
+- 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
+- Updated dependencies [ba60638]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [f719c50]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [9a54433]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+  - @chkit/core@0.1.0-beta.13
+
 ## 0.1.0-beta.12
 
 ### Patch Changes
