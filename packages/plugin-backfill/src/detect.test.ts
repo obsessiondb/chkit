@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { table, materializedView } from '@chkit/core'
 import type { SchemaDefinition } from '@chkit/core'
 
-import { detectCandidatesFromTable, findTableForTarget } from './detect.js'
+import { detectCandidatesFromTable, extractSchemaTimeColumn, findTableForTarget } from './detect.js'
 
 describe('@chkit/plugin-backfill detect', () => {
   test('finds DateTime column in ORDER BY as top candidate', () => {
@@ -188,5 +188,49 @@ describe('@chkit/plugin-backfill detect', () => {
     const found = findTableForTarget(definitions, 'app', 'events')
 
     expect(found).toBeUndefined()
+  })
+
+  test('extractSchemaTimeColumn reads plugins.backfill.timeColumn', () => {
+    const def = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'event_time', type: 'DateTime' },
+      ],
+      engine: 'MergeTree',
+      primaryKey: ['event_time'],
+      orderBy: ['event_time', 'id'],
+      plugins: { backfill: { timeColumn: 'event_time' } },
+    })
+
+    expect(extractSchemaTimeColumn(def)).toBe('event_time')
+  })
+
+  test('extractSchemaTimeColumn returns undefined when no plugins config', () => {
+    const def = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    expect(extractSchemaTimeColumn(def)).toBeUndefined()
+  })
+
+  test('extractSchemaTimeColumn returns undefined when backfill config has no timeColumn', () => {
+    const def = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      plugins: { backfill: {} },
+    })
+
+    expect(extractSchemaTimeColumn(def)).toBeUndefined()
   })
 })

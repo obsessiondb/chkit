@@ -41,6 +41,9 @@ export interface ProjectionDefinition {
   query: string
 }
 
+// biome-ignore lint/suspicious/noEmptyInterface: must be an interface for declaration merging by plugins
+export interface TablePlugins {}
+
 export interface TableDefinition {
   kind: 'table'
   database: string
@@ -57,6 +60,7 @@ export interface TableDefinition {
   indexes?: SkipIndexDefinition[]
   projections?: ProjectionDefinition[]
   comment?: string
+  plugins?: TablePlugins
 }
 
 export interface ViewDefinition {
