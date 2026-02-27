@@ -60,6 +60,38 @@ export default defineConfig({
 })
 ```
 
+## Time column resolution
+
+The backfill plugin needs a time column to build WHERE clauses for each chunk. It resolves the column through a layered fallback chain:
+
+1. **CLI flag** — `--time-column <column>` on the `plan` command.
+2. **Schema-level config** — `plugins.backfill.timeColumn` on the table definition.
+3. **Global default** — `defaults.timeColumn` in the plugin options.
+4. **Auto-detection** — Scans ORDER BY columns and common time column names (`created_at`, `timestamp`, `event_time`, etc.) for DateTime/DateTime64 types.
+
+Schema-level configuration is the recommended approach when different tables use different time columns. Define it directly in the `table()` call:
+
+```ts
+import { table } from '@chkit/core'
+
+export const events = table({
+  database: 'app',
+  name: 'events',
+  columns: [
+    { name: 'event_time', type: 'DateTime' },
+    { name: 'id', type: 'UInt64' },
+  ],
+  engine: 'MergeTree',
+  orderBy: ['event_time', 'id'],
+  primaryKey: ['event_time', 'id'],
+  plugins: {
+    backfill: { timeColumn: 'event_time' },
+  },
+})
+```
+
+This requires importing `@chkit/plugin-backfill` somewhere in the project (typically in `clickhouse.config.ts`) to activate the type augmentation. The `plugins.backfill` object is fully typed — autocomplete and type errors work as expected.
+
 ## Options
 
 Configuration is organized into three groups plus a top-level `stateDir`.
@@ -76,7 +108,7 @@ Configuration is organized into three groups plus a top-level `stateDir`.
 | `maxParallelChunks` | `number` | `1` | Max concurrent chunks |
 | `maxRetriesPerChunk` | `number` | `3` | Retry budget per chunk |
 | `requireIdempotencyToken` | `boolean` | `true` | Generate deterministic tokens |
-| `timeColumn` | `string` | auto-detect | Column name for time-based WHERE clause |
+| `timeColumn` | `string` | auto-detect | Fallback column name for time-based WHERE clause (overridden by schema-level config) |
 
 **`policy` group:**
 
