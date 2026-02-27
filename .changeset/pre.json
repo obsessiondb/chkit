@@ -15,9 +15,11 @@
   "changesets": [
     "add-pkg-links",
     "add-plugin-obsessiondb",
+    "backfill-time-column",
     "custom-cli-framework",
     "fix-docs-deploy",
     "fix-migration-ordering",
+    "fix-silent-error-output",
     "fix-skill-install-path",
     "fix-workspace-deps",
     "internal-refactors",
@@ -25,6 +27,7 @@
     "open-source-audit",
     "rename-plugin-codegen",
     "rename-to-chkit",
+    "skill-hint-agent-aware",
     "skill-hint-plugin"
   ]
 }
