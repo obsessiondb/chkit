@@ -121,11 +121,16 @@ describe('@chkit/plugin-pull live env e2e', () => {
           `CREATE DATABASE IF NOT EXISTS ${noiseDatabase}`
         )
 
-        await runSql(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
-          `CREATE TABLE ${targetDatabase}.events (id UInt64, source String, received_at DateTime64(3) DEFAULT now64(3)) ENGINE = MergeTree() PARTITION BY toYYYYMM(received_at) PRIMARY KEY (id) ORDER BY (id) SETTINGS index_granularity = 8192`
+        // ClickHouse Cloud DDL is eventually consistent — the database
+        // may not be visible immediately after CREATE DATABASE, so we
+        // retry the first table creation.
+        await retry(3, 2000, () =>
+          runSql(
+            liveEnv.clickhouseUrl,
+            liveEnv.clickhouseUser,
+            liveEnv.clickhousePassword,
+            `CREATE TABLE ${targetDatabase}.events (id UInt64, source String, received_at DateTime64(3) DEFAULT now64(3)) ENGINE = MergeTree() PARTITION BY toYYYYMM(received_at) PRIMARY KEY (id) ORDER BY (id) SETTINGS index_granularity = 8192`
+          )
         )
         await runSql(
           liveEnv.clickhouseUrl,
@@ -156,11 +161,13 @@ describe('@chkit/plugin-pull live env e2e', () => {
             `CREATE MATERIALIZED VIEW ${targetDatabase}.events_mv TO ${targetDatabase}.events_rollup AS SELECT id, count() AS c FROM ${targetDatabase}.events GROUP BY id`
           )
         )
-        await runSql(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
-          `CREATE TABLE ${noiseDatabase}.noise_table (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
+        await retry(3, 2000, () =>
+          runSql(
+            liveEnv.clickhouseUrl,
+            liveEnv.clickhouseUser,
+            liveEnv.clickhousePassword,
+            `CREATE TABLE ${noiseDatabase}.noise_table (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
+          )
         )
 
         const output: unknown[] = []
