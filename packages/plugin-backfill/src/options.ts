@@ -1,5 +1,5 @@
 import { BackfillConfigError } from './errors.js'
-import type { BackfillPluginOptions, NormalizedBackfillPluginOptions } from './types.js'
+import type { BackfillPluginOptions, NormalizedBackfillDefaults, NormalizedBackfillPluginOptions } from './types.js'
 
 const DEFAULT_OPTIONS: NormalizedBackfillPluginOptions = {
   defaults: {
@@ -72,6 +72,7 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
         options.defaults.requireIdempotencyToken,
         'defaults.requireIdempotencyToken'
       ),
+      timeColumn: parseString(options.defaults.timeColumn, 'defaults.timeColumn'),
     }
   }
 
@@ -115,12 +116,16 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
 export function normalizeBackfillOptions(
   options: BackfillPluginOptions = {}
 ): NormalizedBackfillPluginOptions {
+  const mergedDefaults: NormalizedBackfillDefaults = {
+    ...DEFAULT_OPTIONS.defaults,
+    ...(options.defaults ?? {}),
+  }
+  if (mergedDefaults.timeColumn === undefined) {
+    delete mergedDefaults.timeColumn
+  }
   return {
     stateDir: options.stateDir,
-    defaults: {
-      ...DEFAULT_OPTIONS.defaults,
-      ...(options.defaults ?? {}),
-    },
+    defaults: mergedDefaults,
     policy: {
       ...DEFAULT_OPTIONS.policy,
       ...(options.policy ?? {}),

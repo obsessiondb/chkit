@@ -57,8 +57,8 @@ export function computeCompatibilityToken(input: {
   )
 }
 
-export function planIdentity(target: string, from: string, to: string, chunkHours: number): string {
-  return `${target}|${from}|${to}|${chunkHours}`
+export function planIdentity(target: string, from: string, to: string, chunkHours: number, timeColumn: string): string {
+  return `${target}|${from}|${to}|${chunkHours}|${timeColumn}`
 }
 
 export function computeBackfillStateDir(

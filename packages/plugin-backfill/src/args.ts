@@ -15,6 +15,7 @@ export const PLAN_FLAGS = defineFlags([
   { name: '--from', type: 'string', description: 'Start timestamp', placeholder: '<timestamp>' },
   { name: '--to', type: 'string', description: 'End timestamp', placeholder: '<timestamp>' },
   { name: '--chunk-hours', type: 'string', description: 'Hours per chunk', placeholder: '<hours>' },
+  { name: '--time-column', type: 'string', description: 'Time column for WHERE clause', placeholder: '<column>' },
   { name: '--force-large-window', type: 'boolean', description: 'Allow large time windows without confirmation' },
 ] as const)
 
@@ -76,6 +77,7 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
   const from = f['--from']
   const to = f['--to']
   const rawChunkHours = f['--chunk-hours']
+  const timeColumn = f['--time-column']
   const forceLargeWindow = f['--force-large-window'] === true
 
   let chunkHours: number | undefined
@@ -96,6 +98,7 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
     from: normalizeTimestamp(from, '--from'),
     to: normalizeTimestamp(to, '--to'),
     chunkHours,
+    timeColumn: timeColumn?.trim() || undefined,
     forceLargeWindow,
   }
 }

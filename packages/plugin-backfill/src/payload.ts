@@ -15,6 +15,7 @@ export function planPayload(output: BuildBackfillPlanOutput): {
   to: string
   chunkCount: number
   chunkHours: number
+  timeColumn: string
   planPath: string
   existed: boolean
 } {
@@ -27,6 +28,7 @@ export function planPayload(output: BuildBackfillPlanOutput): {
     to: output.plan.to,
     chunkCount: output.plan.chunks.length,
     chunkHours: output.plan.options.chunkHours,
+    timeColumn: output.plan.options.timeColumn,
     planPath: output.planPath,
     existed: output.existed,
   }

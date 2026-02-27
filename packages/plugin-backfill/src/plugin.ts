@@ -1,3 +1,6 @@
+import process from 'node:process'
+import { createInterface } from 'node:readline/promises'
+
 import { wrapPluginRun } from '@chkit/core'
 
 import {
@@ -12,6 +15,7 @@ import {
   parseRunArgs,
   parseStatusArgs,
 } from './args.js'
+import { detectTimeColumnCandidates } from './detect.js'
 import { BackfillConfigError } from './errors.js'
 import { normalizeBackfillOptions, mergeOptions, validateBaseOptions } from './options.js'
 import { planPayload, runPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
@@ -24,7 +28,92 @@ import {
   getBackfillStatus,
   resumeBackfillRun,
 } from './runtime.js'
-import type { BackfillPlugin, BackfillPluginOptions, BackfillPluginRegistration } from './types.js'
+import type {
+  BackfillPlugin,
+  BackfillPluginOptions,
+  BackfillPluginRegistration,
+  NormalizedBackfillPluginOptions,
+  TimeColumnCandidate,
+} from './types.js'
+
+async function resolveTimeColumn(input: {
+  flagValue?: string
+  defaults: NormalizedBackfillPluginOptions['defaults']
+  target: string
+  schemaGlobs: string | string[]
+  configPath: string
+  jsonMode: boolean
+}): Promise<string> {
+  if (input.flagValue) return input.flagValue
+  if (input.defaults.timeColumn) return input.defaults.timeColumn
+
+  const candidates = await detectTimeColumnCandidates(
+    input.target,
+    input.schemaGlobs,
+    input.configPath
+  )
+
+  if (candidates.length === 0) {
+    throw new BackfillConfigError(
+      `Cannot determine time column for ${input.target}. Specify --time-column <column> or set defaults.timeColumn in plugin config.`
+    )
+  }
+
+  if (input.jsonMode) {
+    return candidates[0]!.name
+  }
+
+  if (candidates.length === 1) {
+    return confirmSingleCandidate(candidates[0]!, input.target)
+  }
+
+  return selectFromCandidates(candidates, input.target)
+}
+
+async function confirmSingleCandidate(
+  candidate: TimeColumnCandidate,
+  target: string
+): Promise<string> {
+  const label = `${candidate.name} (${candidate.type}${candidate.source === 'order_by' ? ', in ORDER BY' : ''})`
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const response = await rl.question(`Detected time column for ${target}: ${label}\nUse ${candidate.name}? [Y/n]: `)
+    const trimmed = response.trim().toLowerCase()
+    if (trimmed === '' || trimmed === 'y' || trimmed === 'yes') {
+      return candidate.name
+    }
+    throw new BackfillConfigError(
+      `Time column not confirmed. Specify --time-column <column> explicitly.`
+    )
+  } finally {
+    rl.close()
+  }
+}
+
+async function selectFromCandidates(
+  candidates: TimeColumnCandidate[],
+  target: string
+): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    console.log(`Detected time column candidates for ${target}:`)
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!
+      const suffix = c.source === 'order_by' ? ', in ORDER BY' : ''
+      console.log(`  ${i + 1}. ${c.name} (${c.type}${suffix})`)
+    }
+    const response = await rl.question(`Select time column [1-${candidates.length}]: `)
+    const index = Number(response.trim()) - 1
+    if (!Number.isInteger(index) || index < 0 || index >= candidates.length) {
+      throw new BackfillConfigError(
+        `Invalid selection. Specify --time-column <column> explicitly.`
+      )
+    }
+    return candidates[index]!.name
+  } finally {
+    rl.close()
+  }
+}
 
 export function createBackfillPlugin(options: BackfillPluginOptions = {}): BackfillPlugin {
   const base = normalizeBackfillOptions(options)
@@ -52,10 +141,20 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               const effectiveOptions = mergeOptions(base, runtimeOptions)
               validateBaseOptions(effectiveOptions)
 
+              const timeColumn = await resolveTimeColumn({
+                flagValue: parsed.timeColumn,
+                defaults: effectiveOptions.defaults,
+                target: parsed.target,
+                schemaGlobs: config.schema,
+                configPath,
+                jsonMode,
+              })
+
               const output = await buildBackfillPlan({
                 target: parsed.target,
                 from: parsed.from,
                 to: parsed.to,
+                timeColumn,
                 config,
                 configPath,
                 options: effectiveOptions,
@@ -68,7 +167,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 print(payload)
               } else {
                 print(
-                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks at ${payload.chunkHours}h) -> ${payload.planPath}${payload.existed ? ' [existing]' : ''}`
+                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks at ${payload.chunkHours}h, time column: ${payload.timeColumn}) -> ${payload.planPath}${payload.existed ? ' [existing]' : ''}`
                 )
               }
 
