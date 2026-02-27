@@ -1,10 +1,14 @@
 {
   "name": "@chkit/clickhouse",
-  "version": "0.1.0-beta.10",
+  "version": "0.1.0-beta.11",
   "description": "ClickHouse client wrapper for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
-  "keywords": ["clickhouse", "database", "client"],
+  "keywords": [
+    "clickhouse",
+    "database",
+    "client"
+  ],
   "homepage": "https://chkit.obsessiondb.com",
   "bugs": {
     "url": "https://github.com/obsessiondb/chkit/issues"
