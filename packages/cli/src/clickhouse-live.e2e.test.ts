@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -7,16 +7,20 @@ const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
 const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
-function getRequiredEnv(): {
+interface LiveEnv {
   clickhouseUrl: string
   clickhouseUser: string
   clickhousePassword: string
-} {
+  clickhouseDatabase: string
+}
+
+function getRequiredEnv(): LiveEnv {
   const clickhouseHost = process.env.CLICKHOUSE_HOST?.trim()
   const clickhouseUrl =
     process.env.CLICKHOUSE_URL?.trim() || (clickhouseHost ? `https://${clickhouseHost}` : '')
   const clickhouseUser = process.env.CLICKHOUSE_USER?.trim() || 'default'
   const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
+  const clickhouseDatabase = process.env.CLICKHOUSE_DB?.trim() || 'default'
 
   if (!clickhouseUrl) {
     throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
@@ -26,7 +30,92 @@ function getRequiredEnv(): {
     throw new Error('Missing CLICKHOUSE_PASSWORD')
   }
 
-  return { clickhouseUrl, clickhouseUser, clickhousePassword }
+  return { clickhouseUrl, clickhouseUser, clickhousePassword, clickhouseDatabase }
+}
+
+function quoteIdent(value: string): string {
+  return '`' + value.replace(/`/g, '``') + '`'
+}
+
+async function runSql(url: string, username: string, password: string, sql: string): Promise<void> {
+  const auth = Buffer.from(`${username}:${password}`).toString('base64')
+  const response = await fetch(url, {
+    method: 'POST',
+    signal: AbortSignal.timeout(10_000),
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'text/plain',
+    },
+    body: sql,
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`ClickHouse SQL failed (${response.status}): ${body}`)
+  }
+}
+
+async function querySql<T>(url: string, username: string, password: string, sql: string): Promise<T[]> {
+  const auth = Buffer.from(`${username}:${password}`).toString('base64')
+  const response = await fetch(url, {
+    method: 'POST',
+    signal: AbortSignal.timeout(10_000),
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'text/plain',
+    },
+    body: `${sql}\nFORMAT JSONEachRow`,
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`ClickHouse query failed (${response.status}): ${body}`)
+  }
+
+  const body = await response.text()
+  const trimmed = body.trim()
+  if (trimmed.length === 0) return []
+  return trimmed
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as T)
+}
+
+async function cleanupPrefixedObjects(
+  env: LiveEnv,
+  prefixes: Set<string>
+): Promise<void> {
+  if (prefixes.size === 0) return
+
+  const dbLiteral = env.clickhouseDatabase.replace(/'/g, "''")
+  const conditions = [...prefixes]
+    .map((prefix) => `name LIKE '${prefix.replace(/'/g, "''")}%'`)
+    .join(' OR ')
+
+  if (conditions.length === 0) return
+
+  const rows = await querySql<{ name: string; engine: string }>(
+    env.clickhouseUrl,
+    env.clickhouseUser,
+    env.clickhousePassword,
+    `SELECT name, engine FROM system.tables WHERE database = '${dbLiteral}' AND (${conditions})`
+  )
+
+  rows.sort((a, b) => {
+    const rank = (engine: string): number => {
+      if (engine === 'MaterializedView') return 0
+      if (engine === 'View') return 1
+      return 2
+    }
+    return rank(a.engine) - rank(b.engine)
+  })
+
+  for (const row of rows) {
+    const db = quoteIdent(env.clickhouseDatabase)
+    const table = quoteIdent(row.name)
+    const stmt = row.engine === 'View' ? `DROP VIEW IF EXISTS ${db}.${table}` : `DROP TABLE IF EXISTS ${db}.${table}`
+    await runSql(env.clickhouseUrl, env.clickhouseUser, env.clickhousePassword, stmt)
+  }
 }
 
 function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
@@ -57,7 +146,7 @@ function isValidJson(str: string): boolean {
 async function runCliWithRetry(
   cwd: string,
   args: string[],
-  { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {},
+  { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const expectJson = args.includes('--json')
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -69,25 +158,16 @@ async function runCliWithRetry(
   return runCli(cwd, args)
 }
 
-async function dropDatabase(url: string, username: string, password: string, database: string): Promise<void> {
-  const auth = Buffer.from(`${username}:${password}`).toString('base64')
-  await fetch(url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(10_000),
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'text/plain',
-    },
-    body: `DROP DATABASE IF EXISTS ${database}`,
-  })
+function createPrefix(label: string): string {
+  return `chkit_e2e_${label}_${Date.now()}_${Math.floor(Math.random() * 100000)}_`
 }
 
-function renderBaseSchema(database: string): string {
-  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
+function renderBaseSchema(database: string, usersTableName: string): string {
+  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
 }
 
-function renderEvolvedSchema(database: string): string {
-  return `import { schema, table, view } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n    { name: 'source', type: 'String', default: 'web' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersView = view({\n  database: '${database}',\n  name: 'users_view',\n  as: 'SELECT id, email, source FROM ${database}.users',\n})\n\nexport default schema(users, usersView)\n`
+function renderEvolvedSchema(database: string, usersTableName: string, usersViewName: string): string {
+  return `import { schema, table, view } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n    { name: 'source', type: 'String', default: 'web' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersView = view({\n  database: '${database}',\n  name: '${usersViewName}',\n  as: 'SELECT id, email, source FROM ${database}.${usersTableName}',\n})\n\nexport default schema(users, usersView)\n`
 }
 
 interface E2EFixture {
@@ -97,7 +177,11 @@ interface E2EFixture {
   schemaPath: string
 }
 
-async function createFixture(database: string): Promise<E2EFixture> {
+async function createFixture(input: {
+  database: string
+  usersTableName: string
+  usersViewName: string
+}): Promise<E2EFixture> {
   const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-e2e-'))
   const schemaPath = join(dir, 'schema.ts')
   const configPath = join(dir, 'clickhouse.config.ts')
@@ -107,96 +191,105 @@ async function createFixture(database: string): Promise<E2EFixture> {
 
   const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
 
-  await writeFile(schemaPath, renderBaseSchema(database), 'utf8')
+  await writeFile(schemaPath, renderBaseSchema(input.database, input.usersTableName), 'utf8')
 
   await writeFile(
     configPath,
-    `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${database}',\n  },\n}\n`,
+    `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${input.database}',\n  },\n}\n`,
     'utf8'
   )
-
-  const auth = Buffer.from(`${clickhouseUser}:${clickhousePassword}`).toString('base64')
-  await fetch(clickhouseUrl, {
-    method: 'POST',
-    signal: AbortSignal.timeout(10_000),
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'text/plain',
-    },
-    body: `CREATE DATABASE IF NOT EXISTS ${database}`,
-  })
 
   return { dir, configPath, migrationsDir, schemaPath }
 }
 
 describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
+  const prefixes = new Set<string>()
+
+  beforeAll(async () => {
+    await runSql(
+      liveEnv.clickhouseUrl,
+      liveEnv.clickhouseUser,
+      liveEnv.clickhousePassword,
+      `CREATE DATABASE IF NOT EXISTS ${quoteIdent(liveEnv.clickhouseDatabase)}`
+    )
+  })
+
+  afterAll(async () => {
+    await cleanupPrefixedObjects(liveEnv, prefixes)
+  })
 
   test(
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
-    const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-    const database = `chkit_e2e_${dbSuffix}`
-    const fixture = await createFixture(database)
-    const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
+      const prefix = createPrefix('flow')
+      prefixes.add(prefix)
+      const usersTable = `${prefix}users`
+      const usersView = `${prefix}users_view`
+      const fixture = await createFixture({
+        database: liveEnv.clickhouseDatabase,
+        usersTableName: usersTable,
+        usersViewName: usersView,
+      })
 
-    try {
-      const initResult = runCli(fixture.dir, ['init'])
-      expect(initResult.exitCode).toBe(0)
-
-      const generateResult = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
-      expect(generateResult.exitCode).toBe(0)
-      const generatePayload = JSON.parse(generateResult.stdout) as { migrationFile: string | null }
-      expect(generatePayload.migrationFile).toBeTruthy()
-      if (!generatePayload.migrationFile) {
-        throw new Error('expected generated migration file')
-      }
-
-      const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
-      expect(planResult.exitCode).toBe(0)
-      const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
-      expect(planPayload.pending.length).toBe(1)
-
-      const executeResult = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
-      if (executeResult.exitCode !== 0) {
-        throw new Error(
-          `migrate --execute failed (exit=${executeResult.exitCode})\nstdout:\n${executeResult.stdout}\nstderr:\n${executeResult.stderr}`
-        )
-      }
-      expect(executeResult.exitCode).toBe(0)
-      const executePayload = JSON.parse(executeResult.stdout) as {
-        mode: string
-        applied: Array<{ name: string }>
-      }
-      expect(executePayload.mode).toBe('execute')
-      expect(executePayload.applied.length).toBe(1)
-
-      const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'])
-      expect(statusResult.exitCode).toBe(0)
-      const statusPayload = JSON.parse(statusResult.stdout) as {
-        total: number
-        applied: number
-        pending: number
-        checksumMismatchCount: number
-      }
-      expect(statusPayload.total).toBe(1)
-      expect(statusPayload.applied).toBe(1)
-      expect(statusPayload.pending).toBe(0)
-      expect(statusPayload.checksumMismatchCount).toBe(0)
-
-      const generatedSqlPath = generatePayload.migrationFile.startsWith('/')
-        ? generatePayload.migrationFile
-        : join(fixture.migrationsDir, generatePayload.migrationFile)
-      const generatedSql = await readFile(generatedSqlPath, 'utf8')
-      expect(generatedSql.length).toBeGreaterThan(0)
-    } finally {
       try {
-        await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
-      } catch {
-        // Best-effort cleanup for shared e2e environment.
+        const initResult = runCli(fixture.dir, ['init'])
+        expect(initResult.exitCode).toBe(0)
+
+        const generateResult = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        expect(generateResult.exitCode).toBe(0)
+        const generatePayload = JSON.parse(generateResult.stdout) as { migrationFile: string | null }
+        expect(generatePayload.migrationFile).toBeTruthy()
+        if (!generatePayload.migrationFile) {
+          throw new Error('expected generated migration file')
+        }
+
+        const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
+        expect(planResult.exitCode).toBe(0)
+        const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
+        expect(planPayload.pending.length).toBe(1)
+
+        const executeResult = await runCliWithRetry(fixture.dir, [
+          'migrate',
+          '--config',
+          fixture.configPath,
+          '--execute',
+          '--json',
+        ])
+        if (executeResult.exitCode !== 0) {
+          throw new Error(
+            `migrate --execute failed (exit=${executeResult.exitCode})\nstdout:\n${executeResult.stdout}\nstderr:\n${executeResult.stderr}`
+          )
+        }
+        expect(executeResult.exitCode).toBe(0)
+        const executePayload = JSON.parse(executeResult.stdout) as {
+          mode: string
+          applied: Array<{ name: string }>
+        }
+        expect(executePayload.mode).toBe('execute')
+        expect(executePayload.applied.length).toBe(1)
+
+        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'])
+        expect(statusResult.exitCode).toBe(0)
+        const statusPayload = JSON.parse(statusResult.stdout) as {
+          total: number
+          applied: number
+          pending: number
+          checksumMismatchCount: number
+        }
+        expect(statusPayload.total).toBe(1)
+        expect(statusPayload.applied).toBe(1)
+        expect(statusPayload.pending).toBe(0)
+        expect(statusPayload.checksumMismatchCount).toBe(0)
+
+        const generatedSqlPath = generatePayload.migrationFile.startsWith('/')
+          ? generatePayload.migrationFile
+          : join(fixture.migrationsDir, generatePayload.migrationFile)
+        const generatedSql = await readFile(generatedSqlPath, 'utf8')
+        expect(generatedSql.length).toBeGreaterThan(0)
+      } finally {
+        await rm(fixture.dir, { recursive: true, force: true })
       }
-      await rm(fixture.dir, { recursive: true, force: true })
-    }
     },
     240_000
   )
@@ -204,16 +297,27 @@ describe('@chkit/cli doppler env e2e', () => {
   test(
     'runs additive second migration cycle in a separate project flow',
     async () => {
-      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chkit_e2e_additive_${dbSuffix}`
-      const fixture = await createFixture(database)
-      const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
+      const prefix = createPrefix('additive')
+      prefixes.add(prefix)
+      const usersTable = `${prefix}users`
+      const usersView = `${prefix}users_view`
+      const fixture = await createFixture({
+        database: liveEnv.clickhouseDatabase,
+        usersTableName: usersTable,
+        usersViewName: usersView,
+      })
 
       try {
         const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(firstGenerate.exitCode).toBe(0)
 
-        const firstExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const firstExecute = await runCliWithRetry(fixture.dir, [
+          'migrate',
+          '--config',
+          fixture.configPath,
+          '--execute',
+          '--json',
+        ])
         if (firstExecute.exitCode !== 0) {
           throw new Error(
             `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
@@ -221,7 +325,11 @@ describe('@chkit/cli doppler env e2e', () => {
         }
         expect(firstExecute.exitCode).toBe(0)
 
-        await writeFile(fixture.schemaPath, renderEvolvedSchema(database), 'utf8')
+        await writeFile(
+          fixture.schemaPath,
+          renderEvolvedSchema(liveEnv.clickhouseDatabase, usersTable, usersView),
+          'utf8'
+        )
 
         const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(secondGenerate.exitCode).toBe(0)
@@ -242,7 +350,13 @@ describe('@chkit/cli doppler env e2e', () => {
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
         expect(secondPlanPayload.pending.length).toBe(1)
 
-        const secondExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const secondExecute = await runCliWithRetry(fixture.dir, [
+          'migrate',
+          '--config',
+          fixture.configPath,
+          '--execute',
+          '--json',
+        ])
         if (secondExecute.exitCode !== 0) {
           throw new Error(
             `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
@@ -261,11 +375,6 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(statusPayload.applied).toBe(2)
         expect(statusPayload.pending).toBe(0)
       } finally {
-        try {
-          await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
-        } catch {
-          // Best-effort cleanup for shared e2e environment.
-        }
         await rm(fixture.dir, { recursive: true, force: true })
       }
     },
@@ -275,22 +384,37 @@ describe('@chkit/cli doppler env e2e', () => {
   test(
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
-      const dbSuffix = `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-      const database = `chkit_e2e_check_${dbSuffix}`
-      const fixture = await createFixture(database)
-      const { clickhouseUrl, clickhouseUser, clickhousePassword } = liveEnv
+      const prefix = createPrefix('check')
+      prefixes.add(prefix)
+      const usersTable = `${prefix}users`
+      const usersView = `${prefix}users_view`
+      const fixture = await createFixture({
+        database: liveEnv.clickhouseDatabase,
+        usersTableName: usersTable,
+        usersViewName: usersView,
+      })
 
       try {
         const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
         expect(firstGenerate.exitCode).toBe(0)
-        const firstExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const firstExecute = await runCliWithRetry(fixture.dir, [
+          'migrate',
+          '--config',
+          fixture.configPath,
+          '--execute',
+          '--json',
+        ])
         if (firstExecute.exitCode !== 0) {
           throw new Error(
             `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
           )
         }
 
-        await writeFile(fixture.schemaPath, renderEvolvedSchema(database), 'utf8')
+        await writeFile(
+          fixture.schemaPath,
+          renderEvolvedSchema(liveEnv.clickhouseDatabase, usersTable, usersView),
+          'utf8'
+        )
 
         const secondPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--dryrun', '--json'])
         expect(secondPlan.exitCode).toBe(0)
@@ -304,7 +428,13 @@ describe('@chkit/cli doppler env e2e', () => {
         const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as { operationCount: number }
         expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
 
-        const secondExecute = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const secondExecute = await runCliWithRetry(fixture.dir, [
+          'migrate',
+          '--config',
+          fixture.configPath,
+          '--execute',
+          '--json',
+        ])
         if (secondExecute.exitCode !== 0) {
           throw new Error(
             `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
@@ -328,15 +458,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(checkPayload.driftEvaluated).toBe(true)
         expect(checkPayload.drifted).toBe(false)
       } finally {
-        try {
-          await dropDatabase(clickhouseUrl, clickhouseUser, clickhousePassword, database)
-        } catch {
-          // Best-effort cleanup for shared e2e environment.
-        }
         await rm(fixture.dir, { recursive: true, force: true })
       }
     },
     240_000
   )
-
 })
