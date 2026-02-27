@@ -5,6 +5,7 @@ export interface BackfillPluginDefaults {
   maxParallelChunks?: number
   maxRetriesPerChunk?: number
   requireIdempotencyToken?: boolean
+  timeColumn?: string
 }
 
 export interface BackfillPluginPolicy {
@@ -26,9 +27,17 @@ export interface BackfillPluginOptions {
   limits?: BackfillPluginLimits
 }
 
+export interface NormalizedBackfillDefaults {
+  chunkHours: number
+  maxParallelChunks: number
+  maxRetriesPerChunk: number
+  requireIdempotencyToken: boolean
+  timeColumn?: string
+}
+
 export interface NormalizedBackfillPluginOptions {
   stateDir?: string
-  defaults: Required<BackfillPluginDefaults>
+  defaults: NormalizedBackfillDefaults
   policy: Required<BackfillPluginPolicy>
   limits: Required<BackfillPluginLimits>
 }
@@ -59,6 +68,7 @@ export interface BackfillPlanState {
     maxParallelChunks: number
     maxRetriesPerChunk: number
     requireIdempotencyToken: boolean
+    timeColumn: string
   }
   policy: Required<BackfillPluginPolicy>
   limits: Required<BackfillPluginLimits>
@@ -233,11 +243,18 @@ export type BackfillPluginRegistration = ChxInlinePluginRegistration<
   BackfillPluginOptions
 >
 
+export interface TimeColumnCandidate {
+  name: string
+  type: string
+  source: 'order_by' | 'column_scan'
+}
+
 export interface ParsedPlanArgs {
   target: string
   from: string
   to: string
   chunkHours?: number
+  timeColumn?: string
   forceLargeWindow: boolean
 }
 

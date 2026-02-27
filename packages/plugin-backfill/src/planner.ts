@@ -44,14 +44,15 @@ function buildChunkSqlTemplate(chunk: {
   target: string
   from: string
   to: string
+  timeColumn: string
 }): string {
   return [
     `/* chkit backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`,
     `INSERT INTO ${chunk.target}`,
     `SELECT *`,
     `FROM ${chunk.target}`,
-    `WHERE event_time >= toDateTime('${chunk.from}')`,
-    `  AND event_time < toDateTime('${chunk.to}');`,
+    `WHERE ${chunk.timeColumn} >= toDateTime('${chunk.from}')`,
+    `  AND ${chunk.timeColumn} < toDateTime('${chunk.to}');`,
   ].join('\n')
 }
 
@@ -62,6 +63,7 @@ function buildChunks(input: {
   to: string
   chunkHours: number
   requireIdempotencyToken: boolean
+  timeColumn: string
 }): BackfillChunk[] {
   const fromMillis = new Date(input.from).getTime()
   const toMillis = new Date(input.to).getTime()
@@ -92,6 +94,7 @@ function buildChunks(input: {
         target: input.target,
         from: chunkFrom,
         to: chunkTo,
+        timeColumn: input.timeColumn,
       }),
     })
 
@@ -105,6 +108,7 @@ export async function buildBackfillPlan(input: {
   target: string
   from: string
   to: string
+  timeColumn: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
@@ -125,7 +129,7 @@ export async function buildBackfillPlan(input: {
     forceLargeWindow: input.forceLargeWindow ?? false,
   })
 
-  const planId = hashId(planIdentity(input.target, input.from, input.to, chunkHours)).slice(0, 16)
+  const planId = hashId(planIdentity(input.target, input.from, input.to, chunkHours, input.timeColumn)).slice(0, 16)
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
   const paths = backfillPaths(stateDir, planId)
 
@@ -143,12 +147,14 @@ export async function buildBackfillPlan(input: {
       to: input.to,
       chunkHours,
       requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
+      timeColumn: input.timeColumn,
     }),
     options: {
       chunkHours,
       maxParallelChunks: input.options.defaults.maxParallelChunks,
       maxRetriesPerChunk: input.options.defaults.maxRetriesPerChunk,
       requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
+      timeColumn: input.timeColumn,
     },
     policy: input.options.policy,
     limits: input.options.limits,
