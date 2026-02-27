@@ -73,7 +73,7 @@ function formatFatalError(error: unknown): string {
     if (first instanceof Error && first.message) return first.message
   }
   if ('code' in error && typeof (error as NodeJS.ErrnoException).code === 'string') {
-    return (error as NodeJS.ErrnoException).code!
+    return (error as NodeJS.ErrnoException).code as string
   }
   return String(error) || 'Unknown error'
 }
