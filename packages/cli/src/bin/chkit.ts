@@ -63,6 +63,21 @@ function stripGlobalFlags(argv: string[]): {
   return { jsonMode, tableSelector, rest }
 }
 
+function formatFatalError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  if (error.message) return error.message
+  // AggregateError (e.g. ECONNREFUSED) has an empty message but useful sub-errors
+  if ('errors' in error && Array.isArray((error as AggregateError).errors)) {
+    const sub = (error as AggregateError).errors
+    const first = sub[0]
+    if (first instanceof Error && first.message) return first.message
+  }
+  if ('code' in error && typeof (error as NodeJS.ErrnoException).code === 'string') {
+    return (error as NodeJS.ErrnoException).code as string
+  }
+  return String(error) || 'Unknown error'
+}
+
 function exitIfNeeded(): void {
   const code =
     typeof process.exitCode === 'number'
@@ -322,6 +337,6 @@ main()
     } catch {
       // onComplete errors must not mask the original error
     }
-    console.error(error instanceof Error ? error.message : String(error))
+    console.error(formatFatalError(error))
     process.exit(1)
   })

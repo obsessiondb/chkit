@@ -128,6 +128,25 @@ function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefi
   }
 }
 
+const NETWORK_ERROR_LABELS: Record<string, string> = {
+  ECONNREFUSED: 'connection refused',
+  ENOTFOUND: 'host not found',
+  ETIMEDOUT: 'connection timed out',
+  ECONNRESET: 'connection reset',
+  EHOSTUNREACH: 'host unreachable',
+}
+
+function wrapConnectionError(error: unknown, url: string): never {
+  if (error instanceof Error && 'code' in error) {
+    const code = (error as NodeJS.ErrnoException).code ?? ''
+    const label = NETWORK_ERROR_LABELS[code]
+    if (label) {
+      throw new Error(`Could not connect to ClickHouse at ${url} (${label})`)
+    }
+  }
+  throw error
+}
+
 export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhouse']>): ClickHouseExecutor {
   const client = createClient({
     url: config.url,
@@ -143,18 +162,30 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
 
   return {
     async execute(sql: string): Promise<void> {
-      await client.command({ query: sql })
+      try {
+        await client.command({ query: sql })
+      } catch (error) {
+        wrapConnectionError(error, config.url)
+      }
     },
     async query<T>(sql: string): Promise<T[]> {
-      const result = await client.query({ query: sql, format: 'JSONEachRow' })
-      return result.json<T>()
+      try {
+        const result = await client.query({ query: sql, format: 'JSONEachRow' })
+        return result.json<T>()
+      } catch (error) {
+        wrapConnectionError(error, config.url)
+      }
     },
     async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void> {
-      await client.insert({
-        table: params.table,
-        values: params.values,
-        format: 'JSONEachRow',
-      })
+      try {
+        await client.insert({
+          table: params.table,
+          values: params.values,
+          format: 'JSONEachRow',
+        })
+      } catch (error) {
+        wrapConnectionError(error, config.url)
+      }
     },
     async close(): Promise<void> {
       await client.close()
