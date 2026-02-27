@@ -246,7 +246,7 @@ export type BackfillPluginRegistration = ChxInlinePluginRegistration<
 export interface TimeColumnCandidate {
   name: string
   type: string
-  source: 'order_by' | 'column_scan'
+  source: 'order_by' | 'column_scan' | 'schema'
 }
 
 export interface ParsedPlanArgs {

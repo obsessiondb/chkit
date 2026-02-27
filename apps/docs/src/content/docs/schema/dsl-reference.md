@@ -104,6 +104,7 @@ const events = table({
 | `projections` | `ProjectionDefinition[]` | Projections (see [Projections](#projections)) |
 | `comment` | `string` | Table comment |
 | `renamedFrom` | `{ database?: string; name: string }` | Previous identity for rename tracking (see [Rename support](#rename-support)) |
+| `plugins` | `TablePlugins` | Per-table plugin configuration (see [Plugin configuration](#plugin-configuration)) |
 
 :::note
 The `engine` field accepts any string. Common engines include `MergeTree()`, `ReplacingMergeTree()`, `SummingMergeTree()`, `AggregatingMergeTree()`, and `CollapsingMergeTree(sign)`.
@@ -292,6 +293,37 @@ columns: [
 ```
 
 Both table and column renames can be overridden by CLI flags `--rename-table` and `--rename-column`.
+
+## Plugin configuration
+
+The `plugins` field on a table definition provides per-table configuration for plugins. Each plugin that supports table-level config augments the `TablePlugins` interface via TypeScript declaration merging, so the available keys and their types depend on which plugin packages are imported.
+
+```ts
+import { table } from '@chkit/core'
+
+const events = table({
+  database: 'app',
+  name: 'events',
+  columns: [
+    { name: 'event_time', type: 'DateTime' },
+    { name: 'id', type: 'UInt64' },
+  ],
+  engine: 'MergeTree',
+  orderBy: ['event_time', 'id'],
+  primaryKey: ['event_time', 'id'],
+  plugins: {
+    backfill: { timeColumn: 'event_time' },
+  },
+})
+```
+
+Currently supported plugin keys:
+
+| Key | Plugin | Fields | Description |
+|-----|--------|--------|-------------|
+| `backfill` | [`@chkit/plugin-backfill`](/plugins/backfill/) | `timeColumn?: string` | Time column for backfill WHERE clauses |
+
+The `plugins` field is ignored by the diff engine — it does not affect migration planning or SQL generation.
 
 ## Validation rules
 

@@ -15,7 +15,7 @@ import {
   parseRunArgs,
   parseStatusArgs,
 } from './args.js'
-import { detectTimeColumnCandidates } from './detect.js'
+import { loadTimeColumnInfo } from './detect.js'
 import { BackfillConfigError } from './errors.js'
 import { normalizeBackfillOptions, mergeOptions, validateBaseOptions } from './options.js'
 import { planPayload, runPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
@@ -45,17 +45,19 @@ async function resolveTimeColumn(input: {
   jsonMode: boolean
 }): Promise<string> {
   if (input.flagValue) return input.flagValue
-  if (input.defaults.timeColumn) return input.defaults.timeColumn
 
-  const candidates = await detectTimeColumnCandidates(
+  const { schemaTimeColumn, candidates } = await loadTimeColumnInfo(
     input.target,
     input.schemaGlobs,
     input.configPath
   )
 
+  if (schemaTimeColumn) return schemaTimeColumn
+  if (input.defaults.timeColumn) return input.defaults.timeColumn
+
   if (candidates.length === 0) {
     throw new BackfillConfigError(
-      `Cannot determine time column for ${input.target}. Specify --time-column <column> or set defaults.timeColumn in plugin config.`
+      `Cannot determine time column for ${input.target}. Specify --time-column <column>, set plugins.backfill.timeColumn in table schema, or set defaults.timeColumn in plugin config.`
     )
   }
 
