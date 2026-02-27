@@ -22,7 +22,39 @@ Do NOT proceed if verification fails. Fix issues first.
 
 Use `mcp__conductor__GetWorkspaceDiff` with `stat: true` to see all changed files, then review the full diff to understand the scope of changes.
 
-## 3. Create Changesets (if needed)
+## 3. Check Documentation (if needed)
+
+After reviewing the diff, check whether the changes require documentation updates. Ask: "After this change, would the docs be inaccurate or incomplete?"
+
+### Package-to-docs mapping
+
+| Changed package | Docs to check |
+|----------------|--------------|
+| `packages/cli` | `apps/docs/src/content/docs/cli/<command>.md` for affected commands |
+| `packages/core` (config) | `apps/docs/src/content/docs/configuration/overview.md` |
+| `packages/core` (schema DSL) | `apps/docs/src/content/docs/schema/dsl-reference.md` |
+| `packages/plugin-codegen` | `apps/docs/src/content/docs/plugins/codegen.md`, `cli/codegen.md` |
+| `packages/plugin-pull` | `apps/docs/src/content/docs/plugins/pull.md`, `cli/pull.md` |
+| `packages/plugin-backfill` | `apps/docs/src/content/docs/plugins/backfill.md` |
+
+### What to update
+
+| Type of change | Update needed |
+|---------------|--------------|
+| New or changed CLI flag | Flags table in `cli/<command>.md` |
+| New CLI command | New `cli/<command>.md` page (use existing command pages as template) |
+| Changed command behavior | Behavior section in `cli/<command>.md` |
+| Changed exit codes or JSON output | Corresponding sections in `cli/<command>.md` |
+| New or changed plugin option | Options section in `plugins/<name>.md` |
+| New plugin subcommand | Commands section in `plugins/<name>.md` |
+| New config field | `configuration/overview.md` |
+| New schema DSL feature | `schema/dsl-reference.md` |
+
+If docs updates are needed, make them in this PR — do not defer to a follow-up. Use the `documentation-authoring` skill for guidance on page templates and formatting conventions.
+
+If the diff already includes appropriate docs changes, or the changes are purely internal with no docs impact, continue to the next step.
+
+## 4. Create Changesets (if needed)
 
 If the PR introduces **any user-facing change** (new feature, bug fix, API change, behavior change):
 
@@ -66,11 +98,11 @@ Examples that **do NOT require** a changeset:
 - Dev tooling (linter config, test infra)
 - Pure refactors where behavior is identical before and after
 
-## 4. Commit All Changes
+## 5. Commit All Changes
 
 Stage and commit all changes including changeset files. Follow any user instructions about commit message style.
 
-## 5. Push and Create PR
+## 6. Push and Create PR
 
 1. Push to origin with `-u` flag if the branch has no upstream
 2. Use `gh pr create --base main` with:
@@ -96,3 +128,4 @@ EOF
 - **Forgetting changesets**: This is the #1 mistake. Always check if changes are user-facing. A bug fix in internal code is still user-facing if it changes behavior users can observe.
 - **Calling bug fixes "internal"**: If the code change fixes something that was broken for users (e.g., wrong file paths, incorrect defaults, broken commands), it needs a changeset — even if only internal files were modified.
 - **Describing only the latest commit**: The PR description should cover the entire branch diff.
+- **Skipping docs updates**: If a change is user-facing enough to need a changeset, it almost certainly needs a docs update too. New flags, options, commands, and plugin features must be reflected in the corresponding docs page.
