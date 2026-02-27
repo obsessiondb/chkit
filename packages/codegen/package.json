@@ -1,10 +1,14 @@
 {
   "name": "@chkit/codegen",
-  "version": "0.1.0-beta.10",
+  "version": "0.1.0-beta.11",
   "description": "Migration artifact generator for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
-  "keywords": ["clickhouse", "codegen", "migrations"],
+  "keywords": [
+    "clickhouse",
+    "codegen",
+    "migrations"
+  ],
   "homepage": "https://chkit.obsessiondb.com",
   "bugs": {
     "url": "https://github.com/obsessiondb/chkit/issues"

@@ -1,10 +1,15 @@
 {
   "name": "@chkit/plugin-backfill",
-  "version": "0.1.0-beta.10",
+  "version": "0.1.0-beta.11",
   "description": "Time-windowed data backfill with checkpoints for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
-  "keywords": ["clickhouse", "backfill", "data-migration", "chkit-plugin"],
+  "keywords": [
+    "clickhouse",
+    "backfill",
+    "data-migration",
+    "chkit-plugin"
+  ],
   "homepage": "https://chkit.obsessiondb.com",
   "bugs": {
     "url": "https://github.com/obsessiondb/chkit/issues"

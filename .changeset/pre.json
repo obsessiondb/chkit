@@ -16,10 +16,13 @@
     "add-pkg-links",
     "add-plugin-obsessiondb",
     "custom-cli-framework",
+    "fix-docs-deploy",
     "fix-migration-ordering",
+    "fix-skill-install-path",
     "fix-workspace-deps",
     "internal-refactors",
     "journal-in-clickhouse",
+    "open-source-audit",
     "rename-plugin-codegen",
     "rename-to-chkit",
     "skill-hint-plugin"
