@@ -43,6 +43,7 @@ export default defineConfig({
         maxParallelChunks: 1,
         maxRetriesPerChunk: 3,
         requireIdempotencyToken: true,
+        timeColumn: 'created_at',
       },
       policy: {
         requireDryRunBeforeRun: true,
@@ -75,6 +76,7 @@ Configuration is organized into three groups plus a top-level `stateDir`.
 | `maxParallelChunks` | `number` | `1` | Max concurrent chunks |
 | `maxRetriesPerChunk` | `number` | `3` | Retry budget per chunk |
 | `requireIdempotencyToken` | `boolean` | `true` | Generate deterministic tokens |
+| `timeColumn` | `string` | auto-detect | Column name for time-based WHERE clause |
 
 **`policy` group:**
 
@@ -108,6 +110,7 @@ Build a deterministic backfill plan and persist immutable plan state.
 | `--from <timestamp>` | Yes | Window start (ISO timestamp) |
 | `--to <timestamp>` | Yes | Window end (ISO timestamp) |
 | `--chunk-hours <n>` | No | Override chunk size (defaults to `defaults.chunkHours`) |
+| `--time-column <column>` | No | Time column for WHERE clause (auto-detected if omitted) |
 | `--force-large-window` | No | Allow windows exceeding `limits.maxWindowHours` |
 
 ### `chkit plugin backfill run`
@@ -173,7 +176,7 @@ All state is persisted to the configured `stateDir`:
   events/<planId>.ndjson    # Append-only event log
 ```
 
-Plan IDs are deterministic: `sha256("<target>|<from>|<to>|<chunkHours>")` truncated to 16 hex characters. Re-planning with the same parameters produces the same plan ID.
+Plan IDs are deterministic: `sha256("<target>|<from>|<to>|<chunkHours>|<timeColumn>")` truncated to 16 hex characters. Re-planning with the same parameters produces the same plan ID.
 
 ## Common workflows
 
@@ -202,4 +205,3 @@ chkit check   # fails if pending backfills exist
 ## Current limits
 
 - `maxParallelChunks` is declared but execution is currently sequential.
-- SQL templates use a fixed `event_time` column convention.

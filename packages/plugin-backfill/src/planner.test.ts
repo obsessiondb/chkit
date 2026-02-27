@@ -25,6 +25,7 @@ describe('@chkit/plugin-backfill planning', () => {
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T18:00:00.000Z',
+        timeColumn: 'event_time',
         configPath,
         config,
         options,
@@ -34,6 +35,7 @@ describe('@chkit/plugin-backfill planning', () => {
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T18:00:00.000Z',
+        timeColumn: 'event_time',
         configPath,
         config,
         options,
@@ -68,6 +70,7 @@ describe('@chkit/plugin-backfill planning', () => {
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T07:00:00.000Z',
+        timeColumn: 'event_time',
         configPath,
         config,
         options,
@@ -79,6 +82,74 @@ describe('@chkit/plugin-backfill planning', () => {
       expect(persisted.planId).toBe(output.plan.planId)
       expect(persisted.chunks.length).toBe(4)
       expect(output.planPath).toContain('/plans/')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('uses provided time column name in SQL template', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({})
+
+      const output = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'session_date',
+        configPath,
+        config,
+        options,
+      })
+
+      const chunk = output.plan.chunks[0]
+      expect(chunk?.sqlTemplate).toContain('WHERE session_date >=')
+      expect(chunk?.sqlTemplate).toContain('AND session_date <')
+      expect(chunk?.sqlTemplate).not.toContain('event_time')
+      expect(output.plan.options.timeColumn).toBe('session_date')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('different time columns produce different plan IDs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({})
+
+      const planA = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'event_time',
+        configPath,
+        config,
+        options,
+      })
+
+      const planB = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'created_at',
+        configPath,
+        config,
+        options,
+      })
+
+      expect(planA.plan.planId).not.toBe(planB.plan.planId)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
