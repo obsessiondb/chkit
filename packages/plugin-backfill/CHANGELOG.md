@@ -1,5 +1,27 @@
 # @chkit/plugin-backfill
 
+## 0.1.0-beta.14
+
+### Patch Changes
+
+- ba60638: Add homepage and repository metadata to all packages, and link READMEs to the chkit CLI package and documentation site.
+- fe34638: Make backfill time column configurable with smart auto-detection. Replace hardcoded `event_time` column with support for `--time-column` CLI flag, `defaults.timeColumn` config option, and interactive detection that scans schema definitions for DateTime columns in ORDER BY or by common naming conventions.
+- a94a2a1: Replace @stricli/core with a custom CLI framework, migrate plugins to declared flags, and refine the plugin API and error handling.
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
+- Updated dependencies [ba60638]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [f719c50]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [bc0c6b1]
+- Updated dependencies [9a54433]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+  - @chkit/core@0.1.0-beta.14
+
 ## 0.1.0-beta.13
 
 ### Patch Changes
