@@ -55,7 +55,7 @@ function pushDropOperation(
     type: 'drop_materialized_view',
     key: definitionKey(def),
     risk,
-    sql: `DROP VIEW IF EXISTS ${def.database}.${def.name};`,
+    sql: `DROP TABLE IF EXISTS ${def.database}.${def.name} SYNC;`,
   })
 }
 
