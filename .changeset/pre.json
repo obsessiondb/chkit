@@ -24,6 +24,7 @@
     "fix-workspace-deps",
     "internal-refactors",
     "journal-in-clickhouse",
+    "mv-drop-sync",
     "open-source-audit",
     "rename-plugin-codegen",
     "rename-to-chkit",
