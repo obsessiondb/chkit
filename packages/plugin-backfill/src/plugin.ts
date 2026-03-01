@@ -184,6 +184,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               options: effectiveOptions,
               chunkHours: parsed.chunkHours,
               forceLargeWindow: parsed.forceLargeWindow,
+              force: parsed.force,
             })
 
             const payload = planPayload(output)
@@ -236,12 +237,27 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 ...runPayload(output),
                 command: 'run' as const,
               }
+              if (payload.noop) {
+                if (!context.jsonMode) {
+                  context.print(
+                    `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
+                  )
+                } else {
+                  context.print(payload)
+                }
+                return 0
+              }
               if (context.jsonMode) {
                 context.print(payload)
               } else {
-                context.print(
-                  `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
-                )
+                let line = `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
+                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
+                context.print(line)
+                if (payload.status === 'completed' && payload.rowsWritten === 0) {
+                  context.print(
+                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+                  )
+                }
               }
               return payload.ok ? 0 : 1
             } finally {
@@ -283,12 +299,27 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 ...runPayload(output),
                 command: 'resume' as const,
               }
+              if (payload.noop) {
+                if (!context.jsonMode) {
+                  context.print(
+                    `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
+                  )
+                } else {
+                  context.print(payload)
+                }
+                return 0
+              }
               if (context.jsonMode) {
                 context.print(payload)
               } else {
-                context.print(
-                  `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
-                )
+                let line = `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
+                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
+                context.print(line)
+                if (payload.status === 'completed' && payload.rowsWritten === 0) {
+                  context.print(
+                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+                  )
+                }
               }
               return payload.ok ? 0 : 1
             } finally {
@@ -316,9 +347,14 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
             if (context.jsonMode) {
               context.print(payload)
             } else {
-              context.print(
-                `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed})`
-              )
+              let line = `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed}, ${payload.rowsWritten} rows written)`
+              if (payload.lastError) line += ` \u2014 ${payload.lastError}`
+              context.print(line)
+              if (payload.status === 'completed' && payload.rowsWritten === 0) {
+                context.print(
+                  'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+                )
+              }
             }
             return payload.ok ? 0 : 1
           },

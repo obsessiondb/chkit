@@ -202,8 +202,10 @@ export function summarizeRunStatus(
   }
 
   let attempts = 0
+  let rowsWritten = 0
   for (const chunk of run.chunks) {
     attempts += chunk.attempts
+    rowsWritten += chunk.rowsWritten ?? 0
     if (chunk.status === 'pending') summary.pending += 1
     if (chunk.status === 'running') summary.running += 1
     if (chunk.status === 'done') summary.done += 1
@@ -217,6 +219,7 @@ export function summarizeRunStatus(
     status: run.status,
     totals: summary,
     attempts,
+    rowsWritten,
     updatedAt: run.updatedAt,
     runPath,
     eventPath,

@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import process from 'node:process'
 
 import type { ResolvedChxConfig } from '@chkit/core'
 
@@ -120,7 +121,7 @@ async function executeChunk(input: {
   maxRetries: number
   runPath: string
   eventPath: string
-  execute?: (sql: string) => Promise<void>
+  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
   simulation?: {
     failChunkId?: string
     failCount?: number
@@ -150,9 +151,10 @@ async function executeChunk(input: {
 
     if (!shouldSimulateFailure) {
       let executionError: string | undefined
+      let executionResult: void | { rowsWritten?: number } | undefined
       if (input.execute) {
         try {
-          await input.execute(input.chunk.sqlTemplate)
+          executionResult = await input.execute(input.chunk.sqlTemplate)
         } catch (error) {
           executionError = error instanceof Error ? error.message : String(error)
         }
@@ -162,6 +164,9 @@ async function executeChunk(input: {
         input.chunk.status = 'done'
         input.chunk.completedAt = nowIso()
         input.chunk.lastError = undefined
+        if (executionResult && typeof executionResult === 'object' && typeof executionResult.rowsWritten === 'number') {
+          input.chunk.rowsWritten = executionResult.rowsWritten
+        }
 
         await persistRunAndEvent({
           run: input.run,
@@ -273,48 +278,87 @@ async function executeRunLoop(input: {
     eventPath: string
   }
   execution: BackfillExecutionOptions
-  execute?: (sql: string) => Promise<void>
+  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
   const maxRetries = input.plan.options.maxRetriesPerChunk
+  let aborted = false
 
-  input.run.status = 'running'
-  input.run.replayDone = input.execution.replayDone ?? false
-  input.run.replayFailed = input.execution.replayFailed ?? false
+  const onSignal = () => { aborted = true }
+  process.on('SIGINT', onSignal)
+  process.on('SIGTERM', onSignal)
 
-  await persistRunAndEvent({
-    run: input.run,
-    runPath: input.paths.runPath,
-    eventPath: input.paths.eventPath,
-    event: {
-      type: 'run_started',
-      planId: input.plan.planId,
-      replayDone: input.run.replayDone,
-      replayFailed: input.run.replayFailed,
-    },
-  })
+  try {
+    input.run.status = 'running'
+    input.run.replayDone = input.execution.replayDone ?? false
+    input.run.replayFailed = input.execution.replayFailed ?? false
 
-  for (const chunk of input.run.chunks) {
-    if (chunk.status === 'done' && !input.run.replayDone) continue
+    await persistRunAndEvent({
+      run: input.run,
+      runPath: input.paths.runPath,
+      eventPath: input.paths.eventPath,
+      event: {
+        type: 'run_started',
+        planId: input.plan.planId,
+        replayDone: input.run.replayDone,
+        replayFailed: input.run.replayFailed,
+      },
+    })
 
-    if (chunk.status === 'failed') {
-      if (!input.run.replayFailed) {
-        input.run.status = 'failed'
-        input.run.lastError =
-          chunk.lastError ??
-          `Chunk ${chunk.id} is failed and resume requires --replay-failed to re-run failed chunks.`
+    for (const chunk of input.run.chunks) {
+      if (aborted) break
 
-        await persistRunAndEvent({
-          run: input.run,
-          runPath: input.paths.runPath,
-          eventPath: input.paths.eventPath,
-          event: {
-            type: 'run_blocked_failed_chunk',
-            planId: input.plan.planId,
-            chunkId: chunk.id,
-            message: input.run.lastError,
-          },
-        })
+      if (chunk.status === 'done' && !input.run.replayDone) continue
 
+      if (chunk.status === 'failed') {
+        if (!input.run.replayFailed) {
+          input.run.status = 'failed'
+          input.run.lastError =
+            chunk.lastError ??
+            `Chunk ${chunk.id} is failed and resume requires --replay-failed to re-run failed chunks.`
+
+          await persistRunAndEvent({
+            run: input.run,
+            runPath: input.paths.runPath,
+            eventPath: input.paths.eventPath,
+            event: {
+              type: 'run_blocked_failed_chunk',
+              planId: input.plan.planId,
+              chunkId: chunk.id,
+              message: input.run.lastError,
+            },
+          })
+
+          return {
+            run: input.run,
+            status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
+            runPath: input.paths.runPath,
+            eventPath: input.paths.eventPath,
+          }
+        }
+
+        chunk.status = 'pending'
+        chunk.attempts = 0
+        chunk.lastError = undefined
+        chunk.startedAt = undefined
+        chunk.completedAt = undefined
+      }
+
+      if (chunk.status === 'running') {
+        chunk.status = 'pending'
+      }
+
+      const executed = await executeChunk({
+        run: input.run,
+        chunk,
+        maxRetries,
+        runPath: input.paths.runPath,
+        eventPath: input.paths.eventPath,
+        execute: input.execute,
+        simulation: input.execution.simulation,
+      })
+
+      if (!executed.ok) {
+        input.run.completedAt = nowIso()
         return {
           run: input.run,
           status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
@@ -322,58 +366,53 @@ async function executeRunLoop(input: {
           eventPath: input.paths.eventPath,
         }
       }
-
-      chunk.status = 'pending'
-      chunk.attempts = 0
-      chunk.lastError = undefined
-      chunk.startedAt = undefined
-      chunk.completedAt = undefined
     }
 
-    if (chunk.status === 'running') {
-      chunk.status = 'pending'
-    }
-
-    const executed = await executeChunk({
-      run: input.run,
-      chunk,
-      maxRetries,
-      runPath: input.paths.runPath,
-      eventPath: input.paths.eventPath,
-      execute: input.execute,
-      simulation: input.execution.simulation,
-    })
-
-    if (!executed.ok) {
+    if (!aborted) {
+      input.run.status = 'completed'
       input.run.completedAt = nowIso()
-      return {
+      input.run.lastError = undefined
+
+      await persistRunAndEvent({
         run: input.run,
-        status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
         runPath: input.paths.runPath,
         eventPath: input.paths.eventPath,
+        event: {
+          type: 'run_completed',
+          planId: input.plan.planId,
+        },
+      })
+    }
+
+    return {
+      run: input.run,
+      status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
+      runPath: input.paths.runPath,
+      eventPath: input.paths.eventPath,
+    }
+  } finally {
+    process.removeListener('SIGINT', onSignal)
+    process.removeListener('SIGTERM', onSignal)
+
+    for (const chunk of input.run.chunks) {
+      if (chunk.status === 'running') {
+        chunk.status = 'pending'
       }
     }
-  }
 
-  input.run.status = 'completed'
-  input.run.completedAt = nowIso()
-  input.run.lastError = undefined
-
-  await persistRunAndEvent({
-    run: input.run,
-    runPath: input.paths.runPath,
-    eventPath: input.paths.eventPath,
-    event: {
-      type: 'run_completed',
-      planId: input.plan.planId,
-    },
-  })
-
-  return {
-    run: input.run,
-    status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
-    runPath: input.paths.runPath,
-    eventPath: input.paths.eventPath,
+    if (input.run.status === 'running') {
+      input.run.status = 'paused'
+      await persistRunAndEvent({
+        run: input.run,
+        runPath: input.paths.runPath,
+        eventPath: input.paths.eventPath,
+        event: {
+          type: 'run_paused',
+          planId: input.plan.planId,
+          reason: 'process_exit',
+        },
+      })
+    }
   }
 }
 
@@ -398,7 +437,7 @@ export async function executeBackfillRun(input: {
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
-  execute?: (sql: string) => Promise<void>
+  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
   const execution = input.execution ?? {}
   const { plan, stateDir } = await readPlan({
@@ -434,9 +473,13 @@ export async function executeBackfillRun(input: {
   }
 
   if (run.status === 'completed' && !execution.replayDone && !execution.replayFailed) {
-    throw new BackfillConfigError(
-      `Run already completed for plan ${plan.planId}. Use --replay-done to run completed chunks again.`
-    )
+    return {
+      run,
+      status: summarizeRunStatus(run, paths.runPath, paths.eventPath),
+      runPath: paths.runPath,
+      eventPath: paths.eventPath,
+      noop: true,
+    }
   }
   if (run.status === 'cancelled') {
     throw new BackfillConfigError(
@@ -459,7 +502,7 @@ export async function resumeBackfillRun(input: {
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
-  execute?: (sql: string) => Promise<void>
+  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
@@ -533,6 +576,7 @@ export async function getBackfillStatus(input: {
         skipped: 0,
       },
       attempts: 0,
+      rowsWritten: 0,
       updatedAt: plan.createdAt,
       runPath: paths.runPath,
       eventPath: paths.eventPath,

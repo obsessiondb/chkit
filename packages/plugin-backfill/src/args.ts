@@ -17,6 +17,7 @@ export const PLAN_FLAGS = defineFlags([
   { name: '--chunk-hours', type: 'string', description: 'Hours per chunk', placeholder: '<hours>' },
   { name: '--time-column', type: 'string', description: 'Time column for WHERE clause', placeholder: '<column>' },
   { name: '--force-large-window', type: 'boolean', description: 'Allow large time windows without confirmation' },
+  { name: '--force', type: 'boolean', description: 'Delete existing plan and regenerate from scratch' },
 ] as const)
 
 export const RUN_FLAGS = defineFlags([
@@ -79,6 +80,7 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
   const rawChunkHours = f['--chunk-hours']
   const timeColumn = f['--time-column']
   const forceLargeWindow = f['--force-large-window'] === true
+  const force = f['--force'] === true
 
   let chunkHours: number | undefined
   if (rawChunkHours !== undefined) {
@@ -100,6 +102,7 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
     chunkHours,
     timeColumn: timeColumn?.trim() || undefined,
     forceLargeWindow,
+    force,
   }
 }
 
