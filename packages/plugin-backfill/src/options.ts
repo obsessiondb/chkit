@@ -24,6 +24,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as Partial<T>
+}
+
 function parsePositiveNumber(value: unknown, key: string): number | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
@@ -58,7 +62,7 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
     if (!isRecord(options.defaults)) {
       throw new BackfillConfigError('Invalid plugin option "defaults". Expected object.')
     }
-    normalized.defaults = {
+    normalized.defaults = stripUndefined({
       chunkHours: parsePositiveNumber(options.defaults.chunkHours, 'defaults.chunkHours'),
       maxParallelChunks: parsePositiveNumber(
         options.defaults.maxParallelChunks,
@@ -73,14 +77,14 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
         'defaults.requireIdempotencyToken'
       ),
       timeColumn: parseString(options.defaults.timeColumn, 'defaults.timeColumn'),
-    }
+    })
   }
 
   if (options.policy !== undefined) {
     if (!isRecord(options.policy)) {
       throw new BackfillConfigError('Invalid plugin option "policy". Expected object.')
     }
-    normalized.policy = {
+    normalized.policy = stripUndefined({
       requireDryRunBeforeRun: parseBoolean(
         options.policy.requireDryRunBeforeRun,
         'policy.requireDryRunBeforeRun'
@@ -97,17 +101,17 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
         options.policy.failCheckOnRequiredPendingBackfill,
         'policy.failCheckOnRequiredPendingBackfill'
       ),
-    }
+    })
   }
 
   if (options.limits !== undefined) {
     if (!isRecord(options.limits)) {
       throw new BackfillConfigError('Invalid plugin option "limits". Expected object.')
     }
-    normalized.limits = {
+    normalized.limits = stripUndefined({
       maxWindowHours: parsePositiveNumber(options.limits.maxWindowHours, 'limits.maxWindowHours'),
       minChunkMinutes: parsePositiveNumber(options.limits.minChunkMinutes, 'limits.minChunkMinutes'),
-    }
+    })
   }
 
   return normalized
@@ -160,6 +164,27 @@ export function mergeOptions(
 }
 
 export function validateBaseOptions(options: NormalizedBackfillPluginOptions): void {
+  if (typeof options.defaults.chunkHours !== 'number' || !Number.isFinite(options.defaults.chunkHours)) {
+    throw new BackfillConfigError('defaults.chunkHours is required and must be a finite number.')
+  }
+  if (
+    typeof options.defaults.maxParallelChunks !== 'number' ||
+    !Number.isFinite(options.defaults.maxParallelChunks)
+  ) {
+    throw new BackfillConfigError('defaults.maxParallelChunks is required and must be a finite number.')
+  }
+  if (
+    typeof options.defaults.maxRetriesPerChunk !== 'number' ||
+    !Number.isFinite(options.defaults.maxRetriesPerChunk)
+  ) {
+    throw new BackfillConfigError('defaults.maxRetriesPerChunk is required and must be a finite number.')
+  }
+  if (typeof options.limits.minChunkMinutes !== 'number' || !Number.isFinite(options.limits.minChunkMinutes)) {
+    throw new BackfillConfigError('limits.minChunkMinutes is required and must be a finite number.')
+  }
+  if (typeof options.limits.maxWindowHours !== 'number' || !Number.isFinite(options.limits.maxWindowHours)) {
+    throw new BackfillConfigError('limits.maxWindowHours is required and must be a finite number.')
+  }
   if (options.defaults.chunkHours * 60 < options.limits.minChunkMinutes) {
     throw new BackfillConfigError(
       `defaults.chunkHours (${options.defaults.chunkHours}) must be >= limits.minChunkMinutes (${options.limits.minChunkMinutes}m).`
