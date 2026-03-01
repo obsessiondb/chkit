@@ -190,8 +190,12 @@ describe('@chkit/cli doppler env e2e', () => {
           throw new Error('expected generated migration file')
         }
 
-        const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(planResult.exitCode).toBe(0)
+        const planResult = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], { extraEnv: cliEnv })
+        if (planResult.exitCode !== 0) {
+          throw new Error(
+            `migrate --json plan failed (exit=${planResult.exitCode})\nstdout:\n${planResult.stdout}\nstderr:\n${planResult.stderr}`
+          )
+        }
         const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
         expect(planPayload.pending.length).toBe(1)
 

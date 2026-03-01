@@ -58,7 +58,12 @@ export async function buildDriftPayload(
         name: def.name,
       }))
     const expectedDatabases = new Set(expectedObjects.map((def) => def.database))
-    const actualInScope = actualObjects.filter((item) => expectedDatabases.has(item.database))
+    const actualInScope = actualObjects.filter((item) => {
+      if (!expectedDatabases.has(item.database)) return false
+      if (!selectedTables) return true
+      if (item.kind !== 'table') return true
+      return selectedTables.has(`${item.database}.${item.name}`)
+    })
 
     const { missing, extra, kindMismatches, objectDrift } = compareSchemaObjects(
       expectedObjects,
