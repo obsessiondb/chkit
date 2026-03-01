@@ -117,6 +117,34 @@ async function selectFromCandidates(
   }
 }
 
+type BackfillCommandContext = Parameters<BackfillPlugin['commands'][number]['run']>[0]
+
+function createBackfillCommand(
+  base: NormalizedBackfillPluginOptions,
+  input: {
+    name: string
+    label: string
+    run: (ctx: {
+      context: BackfillCommandContext
+      effectiveOptions: NormalizedBackfillPluginOptions
+    }) => Promise<number>
+  }
+): BackfillPlugin['commands'][number]['run'] {
+  return async (context) =>
+    wrapPluginRun({
+      command: input.name,
+      label: input.label,
+      jsonMode: context.jsonMode,
+      print: context.print,
+      configErrorClass: BackfillConfigError,
+      fn: async () => {
+        const effectiveOptions = mergeOptions(base, context.options)
+        validateBaseOptions(effectiveOptions)
+        return input.run({ context, effectiveOptions })
+      },
+    })
+}
+
 export function createBackfillPlugin(options: BackfillPluginOptions = {}): BackfillPlugin {
   const base = normalizeBackfillOptions(options)
   validateBaseOptions(base)
@@ -131,264 +159,206 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
         name: 'plan',
         description: 'Build a deterministic backfill plan and persist immutable plan state',
         flags: PLAN_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
-          return wrapPluginRun({
-            command: 'plan',
-            label: 'Backfill plan',
-            jsonMode,
-            print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const parsed = parsePlanArgs(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions)
-              validateBaseOptions(effectiveOptions)
+        run: createBackfillCommand(base, {
+          name: 'plan',
+          label: 'Backfill plan',
+          async run({ context, effectiveOptions }) {
+            const parsed = parsePlanArgs(context.flags)
+            const timeColumn = await resolveTimeColumn({
+              flagValue: parsed.timeColumn,
+              defaults: effectiveOptions.defaults,
+              target: parsed.target,
+              schemaGlobs: context.config.schema,
+              configPath: context.configPath,
+              jsonMode: context.jsonMode,
+            })
 
-              const timeColumn = await resolveTimeColumn({
-                flagValue: parsed.timeColumn,
-                defaults: effectiveOptions.defaults,
-                target: parsed.target,
-                schemaGlobs: config.schema,
-                configPath,
-                jsonMode,
-              })
+            const output = await buildBackfillPlan({
+              target: parsed.target,
+              from: parsed.from,
+              to: parsed.to,
+              timeColumn,
+              config: context.config,
+              configPath: context.configPath,
+              options: effectiveOptions,
+              chunkHours: parsed.chunkHours,
+              forceLargeWindow: parsed.forceLargeWindow,
+            })
 
-              const output = await buildBackfillPlan({
-                target: parsed.target,
-                from: parsed.from,
-                to: parsed.to,
-                timeColumn,
-                config,
-                configPath,
-                options: effectiveOptions,
-                chunkHours: parsed.chunkHours,
-                forceLargeWindow: parsed.forceLargeWindow,
-              })
+            const payload = planPayload(output)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks at ${payload.chunkHours}h, time column: ${payload.timeColumn}) -> ${payload.planPath}${payload.existed ? ' [existing]' : ''}`
+              )
+            }
 
-              const payload = planPayload(output)
-              if (jsonMode) {
-                print(payload)
-              } else {
-                print(
-                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks at ${payload.chunkHours}h, time column: ${payload.timeColumn}) -> ${payload.planPath}${payload.existed ? ' [existing]' : ''}`
-                )
-              }
-
-              return 0
-            },
-          })
-        },
+            return 0
+          },
+        }),
       },
       {
         name: 'run',
         description: 'Execute a planned backfill with checkpointed chunk progress',
         flags: RUN_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
-          return wrapPluginRun({
-            command: 'run',
-            label: 'Backfill run',
-            jsonMode,
-            print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const parsed = parseRunArgs(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions)
-              validateBaseOptions(effectiveOptions)
-
-              const output = await executeBackfillRun({
-                planId: parsed.planId,
-                config,
-                configPath,
-                options: effectiveOptions,
-                execution: {
-                  replayDone: parsed.replayDone,
-                  replayFailed: parsed.replayFailed,
-                  forceOverlap: parsed.forceOverlap,
-                  forceCompatibility: parsed.forceCompatibility,
-                  simulation: {
-                    failChunkId: parsed.simulateFailChunk,
-                    failCount: parsed.simulateFailCount,
-                  },
+        run: createBackfillCommand(base, {
+          name: 'run',
+          label: 'Backfill run',
+          async run({ context, effectiveOptions }) {
+            const parsed = parseRunArgs(context.flags)
+            const output = await executeBackfillRun({
+              planId: parsed.planId,
+              config: context.config,
+              configPath: context.configPath,
+              options: effectiveOptions,
+              execution: {
+                replayDone: parsed.replayDone,
+                replayFailed: parsed.replayFailed,
+                forceOverlap: parsed.forceOverlap,
+                forceCompatibility: parsed.forceCompatibility,
+                simulation: {
+                  failChunkId: parsed.simulateFailChunk,
+                  failCount: parsed.simulateFailCount,
                 },
-              })
+              },
+            })
 
-              const payload = {
-                ...runPayload(output),
-                command: 'run' as const,
-              }
-
-              if (jsonMode) {
-                print(payload)
-              } else {
-                print(
-                  `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
-                )
-              }
-
-              return payload.ok ? 0 : 1
-            },
-          })
-        },
+            const payload = {
+              ...runPayload(output),
+              command: 'run' as const,
+            }
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
       {
         name: 'resume',
         description: 'Resume a backfill run from last checkpoint',
         flags: RESUME_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
-          return wrapPluginRun({
-            command: 'resume',
-            label: 'Backfill resume',
-            jsonMode,
-            print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const parsed = parseResumeArgs(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions)
-              validateBaseOptions(effectiveOptions)
+        run: createBackfillCommand(base, {
+          name: 'resume',
+          label: 'Backfill resume',
+          async run({ context, effectiveOptions }) {
+            const parsed = parseResumeArgs(context.flags)
+            const output = await resumeBackfillRun({
+              planId: parsed.planId,
+              config: context.config,
+              configPath: context.configPath,
+              options: effectiveOptions,
+              execution: {
+                replayDone: parsed.replayDone,
+                replayFailed: parsed.replayFailed,
+                forceOverlap: parsed.forceOverlap,
+                forceCompatibility: parsed.forceCompatibility,
+              },
+            })
 
-              const output = await resumeBackfillRun({
-                planId: parsed.planId,
-                config,
-                configPath,
-                options: effectiveOptions,
-                execution: {
-                  replayDone: parsed.replayDone,
-                  replayFailed: parsed.replayFailed,
-                  forceOverlap: parsed.forceOverlap,
-                  forceCompatibility: parsed.forceCompatibility,
-                },
-              })
-
-              const payload = {
-                ...runPayload(output),
-                command: 'resume' as const,
-              }
-
-              if (jsonMode) {
-                print(payload)
-              } else {
-                print(
-                  `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
-                )
-              }
-
-              return payload.ok ? 0 : 1
-            },
-          })
-        },
+            const payload = {
+              ...runPayload(output),
+              command: 'resume' as const,
+            }
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
       {
         name: 'status',
         description: 'Show checkpoint and chunk progress for a backfill run',
         flags: PLAN_ID_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
-          return wrapPluginRun({
-            command: 'status',
-            label: 'Backfill status',
-            jsonMode,
-            print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const parsed = parseStatusArgs(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions)
-              validateBaseOptions(effectiveOptions)
-
-              const summary = await getBackfillStatus({
-                planId: parsed.planId,
-                config,
-                configPath,
-                options: effectiveOptions,
-              })
-              const payload = statusPayload(summary)
-
-              if (jsonMode) {
-                print(payload)
-              } else {
-                print(
-                  `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed})`
-                )
-              }
-
-              return payload.ok ? 0 : 1
-            },
-          })
-        },
+        run: createBackfillCommand(base, {
+          name: 'status',
+          label: 'Backfill status',
+          async run({ context, effectiveOptions }) {
+            const parsed = parseStatusArgs(context.flags)
+            const summary = await getBackfillStatus({
+              planId: parsed.planId,
+              config: context.config,
+              configPath: context.configPath,
+              options: effectiveOptions,
+            })
+            const payload = statusPayload(summary)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed})`
+              )
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
       {
         name: 'cancel',
         description: 'Cancel an in-progress backfill run and prevent further chunk execution',
         flags: PLAN_ID_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
-          return wrapPluginRun({
-            command: 'cancel',
-            label: 'Backfill cancel',
-            jsonMode,
-            print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const parsed = parseCancelArgs(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions)
-              validateBaseOptions(effectiveOptions)
-
-              const summary = await cancelBackfillRun({
-                planId: parsed.planId,
-                config,
-                configPath,
-                options: effectiveOptions,
-              })
-              const payload = cancelPayload(summary)
-
-              if (jsonMode) {
-                print(payload)
-              } else {
-                print(
-                  `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
-                )
-              }
-
-              return payload.ok ? 0 : 1
-            },
-          })
-        },
+        run: createBackfillCommand(base, {
+          name: 'cancel',
+          label: 'Backfill cancel',
+          async run({ context, effectiveOptions }) {
+            const parsed = parseCancelArgs(context.flags)
+            const summary = await cancelBackfillRun({
+              planId: parsed.planId,
+              config: context.config,
+              configPath: context.configPath,
+              options: effectiveOptions,
+            })
+            const payload = cancelPayload(summary)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
       {
         name: 'doctor',
         description: 'Provide actionable remediation steps for failed or pending backfill runs',
         flags: PLAN_ID_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config, configPath }) {
-          return wrapPluginRun({
-            command: 'doctor',
-            label: 'Backfill doctor',
-            jsonMode,
-            print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const parsed = parseDoctorArgs(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions)
-              validateBaseOptions(effectiveOptions)
-
-              const report = await getBackfillDoctorReport({
-                planId: parsed.planId,
-                config,
-                configPath,
-                options: effectiveOptions,
-              })
-              const payload = doctorPayload(report)
-
-              if (jsonMode) {
-                print(payload)
-              } else {
-                print(
-                  `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`
-                )
-                for (const recommendation of payload.recommendations) {
-                  print(`- ${recommendation}`)
-                }
+        run: createBackfillCommand(base, {
+          name: 'doctor',
+          label: 'Backfill doctor',
+          async run({ context, effectiveOptions }) {
+            const parsed = parseDoctorArgs(context.flags)
+            const report = await getBackfillDoctorReport({
+              planId: parsed.planId,
+              config: context.config,
+              configPath: context.configPath,
+              options: effectiveOptions,
+            })
+            const payload = doctorPayload(report)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`
+              )
+              for (const recommendation of payload.recommendations) {
+                context.print(`- ${recommendation}`)
               }
-
-              return payload.ok ? 0 : 1
-            },
-          })
-        },
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
     ],
     hooks: {
