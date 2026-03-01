@@ -1,75 +1,29 @@
 /**
- * Shared E2E test utilities for live ClickHouse tests.
+ * CLI-specific E2E test utilities.
  *
- * Hard-fails on missing env — never skips.
+ * Re-exports shared ClickHouse utilities from @chkit/clickhouse/e2e-testkit
+ * and adds CLI runner helpers (Bun-specific).
  */
 
-import { createClient, type ClickHouseClient } from '@clickhouse/client'
 import { join, resolve } from 'node:path'
+
+// Re-export all shared utilities so CLI tests only need one import
+export {
+  type LiveEnv,
+  getRequiredEnv,
+  createLiveExecutor,
+  quoteIdent,
+  createRunTag,
+  createPrefix,
+  createJournalTableName,
+  waitForTable,
+  waitForView,
+  waitForColumn,
+} from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
 export const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 export const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
-
-// ---------------------------------------------------------------------------
-// Environment
-// ---------------------------------------------------------------------------
-
-export interface LiveEnv {
-  clickhouseUrl: string
-  clickhouseUser: string
-  clickhousePassword: string
-  clickhouseDatabase: string
-}
-
-/**
- * Reads and validates required ClickHouse env vars.
- * Throws immediately if anything is missing — tests must not silently skip.
- */
-export function getRequiredEnv(): LiveEnv {
-  const clickhouseHost = process.env.CLICKHOUSE_HOST?.trim()
-  const clickhouseUrl =
-    process.env.CLICKHOUSE_URL?.trim() || (clickhouseHost ? `https://${clickhouseHost}` : '')
-  const clickhouseUser = process.env.CLICKHOUSE_USER?.trim() || 'default'
-  const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
-  const clickhouseDatabase = process.env.CLICKHOUSE_DB?.trim() || 'default'
-
-  if (!clickhouseUrl) {
-    throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
-  }
-
-  if (!clickhousePassword) {
-    throw new Error('Missing CLICKHOUSE_PASSWORD')
-  }
-
-  return { clickhouseUrl, clickhouseUser, clickhousePassword, clickhouseDatabase }
-}
-
-// ---------------------------------------------------------------------------
-// ClickHouse client helpers
-// ---------------------------------------------------------------------------
-
-export function createLiveClient(env: LiveEnv): ClickHouseClient {
-  return createClient({
-    url: env.clickhouseUrl,
-    username: env.clickhouseUser,
-    password: env.clickhousePassword,
-    database: env.clickhouseDatabase,
-    request_timeout: 10_000,
-    clickhouse_settings: {
-      wait_end_of_query: 1,
-      async_insert: 0,
-    },
-  })
-}
-
-export async function runSql(client: ClickHouseClient, sql: string): Promise<void> {
-  await client.command({ query: sql })
-}
-
-export function quoteIdent(value: string): string {
-  return `\`${value.replace(/`/g, '``')}\``
-}
 
 // ---------------------------------------------------------------------------
 // CLI runner
@@ -127,105 +81,6 @@ export async function runCliWithRetry(
     await new Promise((r) => setTimeout(r, delayMs))
   }
   return runCli(cwd, args, extraEnv)
-}
-
-// ---------------------------------------------------------------------------
-// Run tags & naming
-// ---------------------------------------------------------------------------
-
-export function createRunTag(): string {
-  return `${process.pid}_${Date.now()}_${Math.floor(Math.random() * 100000)}`
-}
-
-export function createPrefix(label: string): string {
-  return `chkit_e2e_${label}_${Date.now()}_${Math.floor(Math.random() * 100000)}_`
-}
-
-export function createJournalTableName(label: string): string {
-  const runTag =
-    process.env.GITHUB_RUN_ID?.trim() ||
-    `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-  return `_chkit_migrations_${label}_${runTag}`
-}
-
-// ---------------------------------------------------------------------------
-// State-based polling (replaces blind retries)
-// ---------------------------------------------------------------------------
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms))
-}
-
-/**
- * Polls ClickHouse until a table exists. Throws after timeout.
- */
-export async function waitForTable(
-  client: ClickHouseClient,
-  database: string,
-  tableName: string,
-  { timeoutMs = 15_000, intervalMs = 500 } = {}
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rs = await client.query({
-      query: `SELECT 1 FROM system.tables WHERE database = {db:String} AND name = {table:String}`,
-      query_params: { db: database, table: tableName },
-      format: 'JSONEachRow',
-    })
-    const rows = await rs.json<Array<Record<string, unknown>>>()
-    if (rows.length > 0) return
-    await sleep(intervalMs)
-  }
-  throw new Error(`waitForTable: ${database}.${tableName} did not appear within ${timeoutMs}ms`)
-}
-
-/**
- * Polls ClickHouse until a view exists. Throws after timeout.
- */
-export async function waitForView(
-  client: ClickHouseClient,
-  database: string,
-  viewName: string,
-  { timeoutMs = 15_000, intervalMs = 500 } = {}
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rs = await client.query({
-      query: `SELECT 1 FROM system.tables WHERE database = {db:String} AND name = {view:String} AND engine LIKE '%View%'`,
-      query_params: { db: database, view: viewName },
-      format: 'JSONEachRow',
-    })
-    const rows = await rs.json<Array<Record<string, unknown>>>()
-    if (rows.length > 0) return
-    await sleep(intervalMs)
-  }
-  throw new Error(`waitForView: ${database}.${viewName} did not appear within ${timeoutMs}ms`)
-}
-
-/**
- * Polls ClickHouse until a column exists on a table. Throws after timeout.
- */
-export async function waitForColumn(
-  client: ClickHouseClient,
-  database: string,
-  tableName: string,
-  columnName: string,
-  { timeoutMs = 15_000, intervalMs = 500 } = {}
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rs = await client.query({
-      query: `SELECT 1 FROM system.columns WHERE database = {db:String} AND table = {table:String} AND name = {col:String}`,
-      query_params: { db: database, table: tableName, col: columnName },
-      format: 'JSONEachRow',
-    })
-    const rows = await rs.json<Array<Record<string, unknown>>>()
-    if (rows.length > 0) return
-    await sleep(intervalMs)
-  }
-  throw new Error(
-    `waitForColumn: ${database}.${tableName}.${columnName} did not appear within ${timeoutMs}ms`
-  )
 }
 
 // ---------------------------------------------------------------------------

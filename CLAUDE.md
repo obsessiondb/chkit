@@ -60,7 +60,7 @@ E2E tests run against a live ClickHouse Cloud instance. They require these envir
 - `CLICKHOUSE_PASSWORD` — authentication
 - `CLICKHOUSE_DB` — target database (optional, defaults to `default`)
 
-Shared test utilities live in `packages/cli/src/e2e-testkit.ts`. Use them in CLI E2E tests. The `plugin-pull` test keeps minimal inline utilities because it's in a separate package.
+Shared ClickHouse test utilities (env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/e2e-testkit.ts` which re-exports the shared ones.
 
 Key conventions:
 

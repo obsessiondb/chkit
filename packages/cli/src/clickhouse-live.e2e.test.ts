@@ -6,14 +6,13 @@ import { tmpdir } from 'node:os'
 import {
   CORE_ENTRY,
   createJournalTableName,
-  createLiveClient,
+  createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
   getRequiredEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
-  runSql,
   waitForTable,
   waitForView,
 } from './e2e-testkit.js'
@@ -60,10 +59,10 @@ async function createFixture(input: {
 
 describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const client = createLiveClient(liveEnv)
+  const executor = createLiveExecutor(liveEnv)
 
   afterAll(async () => {
-    await client.close()
+    await executor.close()
   })
 
   test(
@@ -136,9 +135,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(generatedSql.length).toBeGreaterThan(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -222,9 +221,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(statusPayload.pending).toBe(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -261,7 +260,7 @@ describe('@chkit/cli doppler env e2e', () => {
         }
 
         // Wait for table to be visible before proceeding (ClickHouse Cloud DDL is eventually consistent)
-        await waitForTable(client, database, usersTable)
+        await waitForTable(executor, database, usersTable)
 
         await writeFile(
           fixture.schemaPath,
@@ -293,7 +292,7 @@ describe('@chkit/cli doppler env e2e', () => {
         }
 
         // Wait for view to be visible before check
-        await waitForView(client, database, usersView)
+        await waitForView(executor, database, usersView)
 
         const check = await runCliWithRetry(
           fixture.dir,
@@ -319,9 +318,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(checkPayload.drifted).toBe(false)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
