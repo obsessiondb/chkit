@@ -15,6 +15,7 @@
   "changesets": [
     "add-pkg-links",
     "add-plugin-obsessiondb",
+    "backfill-options-merge-fix",
     "backfill-time-column",
     "custom-cli-framework",
     "fix-docs-deploy",
