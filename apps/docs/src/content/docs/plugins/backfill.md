@@ -183,10 +183,20 @@ Execute a planned backfill with checkpointed chunk progress.
 | `--replay-failed` | No | Re-execute failed chunks |
 | `--force-overlap` | No | Allow concurrent runs for the same target |
 | `--force-compatibility` | No | Skip compatibility token check |
+| `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
 
 ### `chkit plugin backfill resume`
 
-Resume a backfill run from last checkpoint. Same flags as `run` minus simulation flags.
+Resume a backfill run from last checkpoint.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
+| `--replay-done` | No | Re-execute already-completed chunks |
+| `--replay-failed` | No | Re-execute failed chunks |
+| `--force-overlap` | No | Allow concurrent runs for the same target |
+| `--force-compatibility` | No | Skip compatibility token check |
+| `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
 
 ### `chkit plugin backfill status`
 
@@ -235,7 +245,21 @@ All state is persisted to the configured `stateDir`:
   events/<planId>.ndjson    # Append-only event log
 ```
 
-Plan IDs are deterministic: `sha256("<target>|<from>|<to>|<chunkHours>|<timeColumn>")` truncated to 16 hex characters. Re-planning with the same parameters produces the same plan ID.
+Plan IDs are deterministic: `sha256("<target>|<from>|<to>|<chunkHours>|<timeColumn>|<envFingerprint>")` truncated to 16 hex characters. When a ClickHouse connection is configured, an environment fingerprint is included in the plan ID, so different clusters/databases automatically produce different plan files. Re-planning with the same parameters produces the same plan ID.
+
+### Environment binding
+
+When `clickhouse` is configured in `clickhouse.config.ts`, backfill plans are **bound to the specific ClickHouse cluster and database** to prevent accidental cross-environment execution. The plan file stores:
+
+- `environment.fingerprint` — A 16-char hash of the URL origin + database name
+- `environment.url` — The cluster URL (for human readability)
+- `environment.database` — The target database
+
+When running or resuming a plan, chkit verifies the plan's environment matches the current config. If there's a mismatch (e.g., you created the plan against staging but switched to production), execution is blocked with a clear error message.
+
+To override the check (e.g., intentionally backfilling production using a staging plan), use `--force-environment` on the `run` or `resume` command.
+
+Plans created without a ClickHouse config (offline/dry-run) have no environment binding and can run against any environment.
 
 ## Common workflows
 
