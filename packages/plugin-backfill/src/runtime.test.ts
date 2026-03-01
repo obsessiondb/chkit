@@ -269,6 +269,148 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
   })
 })
 
+describe('@chkit/plugin-backfill execute callback', () => {
+  test('calls execute for each chunk when provided', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      const executedSql: string[] = []
+      const execute = async (sql: string) => {
+        executedSql.push(sql)
+      }
+
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execute,
+      })
+
+      expect(ran.status.status).toBe('completed')
+      expect(ran.status.totals.done).toBe(3)
+      expect(executedSql).toHaveLength(3)
+      for (const sql of executedSql) {
+        expect(sql).toContain('INSERT INTO app.events')
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('retries and succeeds chunk when execute fails then recovers', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 3 },
+      })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      let callCount = 0
+      const execute = async (_sql: string) => {
+        callCount++
+        if (callCount === 1) {
+          throw new Error('Temporary network error')
+        }
+      }
+
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execute,
+      })
+
+      expect(ran.status.status).toBe('completed')
+      expect(ran.status.totals.done).toBe(3)
+      expect(ran.status.totals.failed).toBe(0)
+
+      const firstChunkState = ran.run.chunks[0]
+      expect(firstChunkState?.attempts).toBe(2)
+      expect(firstChunkState?.lastError).toBeUndefined()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('retries and fails chunk when execute throws', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 2 },
+      })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      let callCount = 0
+      const execute = async (_sql: string) => {
+        callCount++
+        if (callCount <= 2) {
+          throw new Error('Connection refused')
+        }
+      }
+
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execute,
+      })
+
+      expect(ran.status.status).toBe('failed')
+      expect(ran.status.totals.failed).toBe(1)
+      expect(ran.status.lastError).toContain('Connection refused')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('@chkit/plugin-backfill check integration', () => {
   test('reports pending required backfills when plan exists but run is missing', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))

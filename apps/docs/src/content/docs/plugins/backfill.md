@@ -8,7 +8,8 @@ This document covers practical usage of the optional `backfill` plugin.
 ## What it does
 
 - Builds deterministic, immutable backfill plans that divide a time window into chunks.
-- Executes with per-chunk checkpointing, automatic retries, and idempotency tokens.
+- Executes backfills against ClickHouse with per-chunk checkpointing, automatic retries, and idempotency tokens.
+- Detects materialized views and automatically generates correct CTE-wrapped replay queries.
 - Supports resume from checkpoint, cancel, status monitoring, and doctor-style diagnostics.
 - Integrates with [`chkit check`](/cli/check/) for CI enforcement of pending backfills.
 - Persists all state as JSON/NDJSON on disk.
@@ -59,6 +60,31 @@ export default defineConfig({
   ],
 })
 ```
+
+The `run` and `resume` commands execute SQL against ClickHouse when a connection is configured. Configure `clickhouse` at the top level of `clickhouse.config.ts`:
+
+```ts
+export default defineConfig({
+  clickhouse: {
+    url: process.env.CLICKHOUSE_URL || 'http://localhost:8123',
+    username: 'default',
+    password: '',
+    database: 'default',
+  },
+  schema: './src/db/schema/**/*.ts',
+  plugins: [backfill(...)],
+})
+```
+
+The URL and credentials can come from environment variables in CI environments.
+
+## Backfill strategies
+
+The plugin supports two strategies for backfilling data, chosen automatically based on your schema:
+
+**Table backfill** (`table` strategy): For direct table targets, inserts data by selecting from the same table within the time window. This is the most common case.
+
+**Materialized view replay** (`mv_replay` strategy): When the target is a materialized view's `to` table, the plugin detects the view's aggregation query and wraps it in a CTE (Common Table Expression). This re-materializes the aggregation for each chunk window, ensuring correctness for aggregate backfills. Requires `requireIdempotencyToken: true` for safe resumable retries.
 
 ## Time column resolution
 
