@@ -17,17 +17,105 @@ export interface MigrationOperationSummary {
   summary: string
 }
 
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = []
+  let current = ''
+  let inSingleQuote = false
+  let inDoubleQuote = false
+  let inBacktick = false
+  let inBlockComment = false
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i] ?? ''
+    const next = sql[i + 1] ?? ''
+
+    if (inBlockComment) {
+      current += ch
+      if (ch === '*' && next === '/') {
+        current += next
+        i += 1
+        inBlockComment = false
+      }
+      continue
+    }
+
+    if (inSingleQuote) {
+      current += ch
+      if (ch === "'" && next === "'") {
+        current += next
+        i += 1
+        continue
+      }
+      if (ch === "'" && sql[i - 1] !== '\\') {
+        inSingleQuote = false
+      }
+      continue
+    }
+
+    if (inDoubleQuote) {
+      current += ch
+      if (ch === '"' && sql[i - 1] !== '\\') {
+        inDoubleQuote = false
+      }
+      continue
+    }
+
+    if (inBacktick) {
+      current += ch
+      if (ch === '`') {
+        inBacktick = false
+      }
+      continue
+    }
+
+    if (ch === '/' && next === '*') {
+      current += ch
+      current += next
+      i += 1
+      inBlockComment = true
+      continue
+    }
+
+    if (ch === "'") {
+      current += ch
+      inSingleQuote = true
+      continue
+    }
+
+    if (ch === '"') {
+      current += ch
+      inDoubleQuote = true
+      continue
+    }
+
+    if (ch === '`') {
+      current += ch
+      inBacktick = true
+      continue
+    }
+
+    if (ch === ';') {
+      const trimmed = current.trim()
+      if (trimmed.length > 0) statements.push(`${trimmed};`)
+      current = ''
+      continue
+    }
+
+    current += ch
+  }
+
+  const tail = current.trim()
+  if (tail.length > 0) statements.push(`${tail};`)
+  return statements
+}
+
 export function extractExecutableStatements(sql: string): string[] {
   const nonCommentLines = sql
     .split('\n')
     .filter((line) => !line.trim().startsWith('--'))
     .join('\n')
 
-  return nonCommentLines
-    .split(';')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
-    .map((part) => `${part};`)
+  return splitSqlStatements(nonCommentLines)
 }
 
 export function migrationContainsDangerOperation(sql: string): boolean {
