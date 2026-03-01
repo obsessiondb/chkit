@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { createClient, type ClickHouseClient } from '@clickhouse/client'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -56,53 +56,17 @@ async function runSql(client: ClickHouseClient, sql: string): Promise<void> {
   await client.command({ query: sql })
 }
 
-async function querySql<T>(client: ClickHouseClient, sql: string): Promise<T[]> {
-  const result = await client.query({
-    query: sql,
-    format: 'JSONEachRow',
-  })
-  return result.json<T>()
-}
-
-async function cleanupPrefixedObjects(client: ClickHouseClient, env: LiveEnv, prefixes: Set<string>): Promise<void> {
-  if (prefixes.size === 0) return
-
-  const dbLiteral = env.clickhouseDatabase.replace(/'/g, "''")
-  const conditions = [...prefixes]
-    .map((prefix) => `name LIKE '${prefix.replace(/'/g, "''")}%'`)
-    .join(' OR ')
-
-  if (conditions.length === 0) return
-
-  const rows = await querySql<{ name: string; engine: string }>(
-    client,
-    `SELECT name, engine FROM system.tables WHERE database = '${dbLiteral}' AND (${conditions})`
-  )
-
-  rows.sort((a, b) => {
-    const rank = (engine: string): number => {
-      if (engine === 'MaterializedView') return 0
-      if (engine === 'View') return 1
-      return 2
-    }
-    return rank(a.engine) - rank(b.engine)
-  })
-
-  for (const row of rows) {
-    const db = quoteIdent(env.clickhouseDatabase)
-    const table = quoteIdent(row.name)
-    const stmt = row.engine === 'View' ? `DROP VIEW IF EXISTS ${db}.${table}` : `DROP TABLE IF EXISTS ${db}.${table}`
-    await runSql(client, stmt)
-  }
-}
-
-function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
+function runCli(
+  cwd: string,
+  args: string[],
+  extraEnv: Record<string, string> = {}
+): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync({
     cmd: ['bun', CLI_ENTRY, ...args],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
-    env: process.env,
+    env: { ...process.env, ...extraEnv },
   })
 
   return {
@@ -140,19 +104,28 @@ async function runSqlWithUnknownTableRetry(
 async function runCliWithRetry(
   cwd: string,
   args: string[],
-  { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {},
+  {
+    maxAttempts = 5,
+    delayMs = 2000,
+    extraEnv = {},
+  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = runCli(cwd, args)
+    const result = runCli(cwd, args, extraEnv)
     if (result.exitCode === 0) return result
     if (attempt === maxAttempts) return result
     await sleep(delayMs)
   }
-  return runCli(cwd, args)
+  return runCli(cwd, args, extraEnv)
 }
 
 function createPrefix(label: string): string {
   return `chkit_e2e_drift_${label}_${Date.now()}_${Math.floor(Math.random() * 100000)}_`
+}
+
+function createJournalTableName(label: string): string {
+  const runTag = process.env.GITHUB_RUN_ID?.trim() || `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+  return `_chkit_migrations_drift_${label}_${runTag}`
 }
 
 function renderBaseSchema(database: string, usersTableName: string): string {
@@ -194,38 +167,35 @@ async function createFixture(input: {
 
 describe('@chkit/cli drift depth env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const prefixes = new Set<string>()
   const client = createClickHouseClient(liveEnv)
 
-  beforeAll(async () => {
-    await runSql(client, `CREATE DATABASE IF NOT EXISTS ${quoteIdent(liveEnv.clickhouseDatabase)}`)
-  })
-
   afterAll(async () => {
-    try {
-      await cleanupPrefixedObjects(client, liveEnv, prefixes)
-    } finally {
-      await client.close()
-    }
+    await client.close()
   })
 
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('manual')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('manual')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const manualView = `${prefix}manual_view`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
       })
 
       try {
-        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(generated.exitCode).toBe(0)
 
-        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(
+          fixture.dir,
+          ['migrate', '--config', fixture.configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -234,14 +204,14 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await runSqlWithUnknownTableRetry(
           client,
-          `ALTER TABLE ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
+          `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
         await runSql(
           client,
-          `CREATE VIEW ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(manualView)} AS SELECT 1 AS one`
+          `CREATE VIEW ${quoteIdent(database)}.${quoteIdent(manualView)} AS SELECT 1 AS one`
         )
 
-        const driftResult = runCli(fixture.dir, ['drift', '--config', fixture.configPath, '--json'])
+        const driftResult = runCli(fixture.dir, ['drift', '--config', fixture.configPath, '--json'], cliEnv)
         expect(driftResult.exitCode).toBe(0)
         const driftPayload = JSON.parse(driftResult.stdout) as {
           drifted: boolean
@@ -251,13 +221,11 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         expect(driftPayload.drifted).toBe(true)
         expect(driftPayload.objectDrift.some((item) => item.code === 'extra_object')).toBe(true)
-        const usersTableDrift = driftPayload.tableDrift.find(
-          (item) => item.table === `${liveEnv.clickhouseDatabase}.${usersTable}`
-        )
+        const usersTableDrift = driftPayload.tableDrift.find((item) => item.table === `${database}.${usersTable}`)
         expect(usersTableDrift).toBeTruthy()
         expect(usersTableDrift?.reasonCodes).toContain('extra_column')
 
-        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'])
+        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'], cliEnv)
         expect(checkResult.exitCode).toBe(1)
         const checkPayload = JSON.parse(checkResult.stdout) as {
           failedChecks: string[]
@@ -273,6 +241,9 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.driftReasonTotals.table > 0).toBe(true)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(manualView)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -281,19 +252,25 @@ describe('@chkit/cli drift depth env e2e', () => {
   test(
     'detects unique-key and projection drift reasons and exposes them in check summary',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('keys')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('keys')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
       })
 
       try {
-        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(generated.exitCode).toBe(0)
 
-        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(
+          fixture.dir,
+          ['migrate', '--config', fixture.configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -302,13 +279,13 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await writeFile(
           fixture.schemaPath,
-          renderUniqueProjectionSchema(liveEnv.clickhouseDatabase, usersTable),
+          renderUniqueProjectionSchema(database, usersTable),
           'utf8'
         )
-        const driftGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const driftGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(driftGenerate.exitCode).toBe(0)
 
-        const driftResult = runCli(fixture.dir, ['drift', '--config', fixture.configPath, '--json'])
+        const driftResult = runCli(fixture.dir, ['drift', '--config', fixture.configPath, '--json'], cliEnv)
         expect(driftResult.exitCode).toBe(0)
         const driftPayload = JSON.parse(driftResult.stdout) as {
           drifted: boolean
@@ -316,14 +293,12 @@ describe('@chkit/cli drift depth env e2e', () => {
         }
 
         expect(driftPayload.drifted).toBe(true)
-        const usersTableDrift = driftPayload.tableDrift.find(
-          (item) => item.table === `${liveEnv.clickhouseDatabase}.${usersTable}`
-        )
+        const usersTableDrift = driftPayload.tableDrift.find((item) => item.table === `${database}.${usersTable}`)
         expect(usersTableDrift).toBeTruthy()
         expect(usersTableDrift?.reasonCodes).toContain('unique_key_mismatch')
         expect(usersTableDrift?.reasonCodes).toContain('projection_mismatch')
 
-        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'])
+        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'], cliEnv)
         expect(checkResult.exitCode).toBe(1)
         const checkPayload = JSON.parse(checkResult.stdout) as {
           driftReasonCounts: Record<string, number>
@@ -332,6 +307,8 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect((checkPayload.driftReasonCounts.projection_mismatch ?? 0) > 0).toBe(true)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -340,19 +317,25 @@ describe('@chkit/cli drift depth env e2e', () => {
   test(
     'respects failOnDrift=false policy when drift exists',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('policy')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('policy')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
       })
 
       try {
-        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(generated.exitCode).toBe(0)
 
-        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(
+          fixture.dir,
+          ['migrate', '--config', fixture.configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -361,16 +344,16 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await runSqlWithUnknownTableRetry(
           client,
-          `ALTER TABLE ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
+          `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${liveEnv.clickhouseUrl}',\n    username: '${liveEnv.clickhouseUser}',\n    password: '${liveEnv.clickhousePassword}',\n    database: '${liveEnv.clickhouseDatabase}',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${liveEnv.clickhouseUrl}',\n    username: '${liveEnv.clickhouseUser}',\n    password: '${liveEnv.clickhousePassword}',\n    database: '${database}',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
           'utf8'
         )
 
-        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'])
+        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'], cliEnv)
         expect(checkResult.exitCode).toBe(0)
         const checkPayload = JSON.parse(checkResult.stdout) as {
           ok: boolean
@@ -384,6 +367,8 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.failedChecks).not.toContain('schema_drift')
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -392,19 +377,25 @@ describe('@chkit/cli drift depth env e2e', () => {
   test(
     'check --strict overrides failOnDrift=false when drift exists',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('strict')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('strict')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
       })
 
       try {
-        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(generated.exitCode).toBe(0)
 
-        const executed = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'])
+        const executed = await runCliWithRetry(
+          fixture.dir,
+          ['migrate', '--config', fixture.configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
         if (executed.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
@@ -413,16 +404,20 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await runSqlWithUnknownTableRetry(
           client,
-          `ALTER TABLE ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
+          `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${liveEnv.clickhouseUrl}',\n    username: '${liveEnv.clickhouseUser}',\n    password: '${liveEnv.clickhousePassword}',\n    database: '${liveEnv.clickhouseDatabase}',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${join(fixture.dir, 'chkit/migrations')}',\n  metaDir: '${join(fixture.dir, 'chkit/meta')}',\n  clickhouse: {\n    url: '${liveEnv.clickhouseUrl}',\n    username: '${liveEnv.clickhouseUser}',\n    password: '${liveEnv.clickhousePassword}',\n    database: '${database}',\n  },\n  check: {\n    failOnDrift: false,\n  },\n}\n`,
           'utf8'
         )
 
-        const checkResult = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--strict', '--json'])
+        const checkResult = runCli(
+          fixture.dir,
+          ['check', '--config', fixture.configPath, '--strict', '--json'],
+          cliEnv
+        )
         expect(checkResult.exitCode).toBe(1)
         const checkPayload = JSON.parse(checkResult.stdout) as {
           strict: boolean
@@ -438,6 +433,8 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.failedChecks).toContain('schema_drift')
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { createClient, type ClickHouseClient } from '@clickhouse/client'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -38,42 +38,6 @@ function quoteIdent(value: string): string {
   return `\`${value.replace(/`/g, '``')}\``
 }
 
-async function cleanupPrefixedObjects(
-  client: ClickHouseClient,
-  env: LiveEnv,
-  prefixes: Set<string>
-): Promise<void> {
-  if (prefixes.size === 0) return
-
-  const dbLiteral = env.clickhouseDatabase.replace(/'/g, "''")
-  const conditions = [...prefixes]
-    .map((prefix) => `name LIKE '${prefix.replace(/'/g, "''")}%'`)
-    .join(' OR ')
-
-  if (conditions.length === 0) return
-
-  const rows = await querySql<{ name: string; engine: string }>(
-    client,
-    `SELECT name, engine FROM system.tables WHERE database = '${dbLiteral}' AND (${conditions})`
-  )
-
-  rows.sort((a, b) => {
-    const rank = (engine: string): number => {
-      if (engine === 'MaterializedView') return 0
-      if (engine === 'View') return 1
-      return 2
-    }
-    return rank(a.engine) - rank(b.engine)
-  })
-
-  for (const row of rows) {
-    const db = quoteIdent(env.clickhouseDatabase)
-    const table = quoteIdent(row.name)
-    const stmt = row.engine === 'View' ? `DROP VIEW IF EXISTS ${db}.${table}` : `DROP TABLE IF EXISTS ${db}.${table}`
-    await runSql(client, stmt)
-  }
-}
-
 function createClickHouseClient(env: LiveEnv): ClickHouseClient {
   return createClient({
     url: env.clickhouseUrl,
@@ -92,21 +56,17 @@ async function runSql(client: ClickHouseClient, sql: string): Promise<void> {
   await client.command({ query: sql })
 }
 
-async function querySql<T>(client: ClickHouseClient, sql: string): Promise<T[]> {
-  const result = await client.query({
-    query: sql,
-    format: 'JSONEachRow',
-  })
-  return result.json<T>()
-}
-
-function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
+function runCli(
+  cwd: string,
+  args: string[],
+  extraEnv: Record<string, string> = {}
+): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync({
     cmd: ['bun', CLI_ENTRY, ...args],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
-    env: process.env,
+    env: { ...process.env, ...extraEnv },
   })
 
   return {
@@ -128,20 +88,29 @@ function isValidJson(str: string): boolean {
 async function runCliWithRetry(
   cwd: string,
   args: string[],
-  { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {}
+  {
+    maxAttempts = 5,
+    delayMs = 2000,
+    extraEnv = {},
+  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const expectJson = args.includes('--json')
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = runCli(cwd, args)
+    const result = runCli(cwd, args, extraEnv)
     if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
     if (attempt === maxAttempts) return result
     await new Promise((r) => setTimeout(r, delayMs))
   }
-  return runCli(cwd, args)
+  return runCli(cwd, args, extraEnv)
 }
 
 function createPrefix(label: string): string {
   return `chkit_e2e_${label}_${Date.now()}_${Math.floor(Math.random() * 100000)}_`
+}
+
+function createJournalTableName(label: string): string {
+  const runTag = process.env.GITHUB_RUN_ID?.trim() || `${Date.now()}_${Math.floor(Math.random() * 100000)}`
+  return `_chkit_migrations_${label}_${runTag}`
 }
 
 function renderBaseSchema(database: string, usersTableName: string): string {
@@ -186,39 +155,32 @@ async function createFixture(input: {
 
 describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const prefixes = new Set<string>()
   const client = createClickHouseClient(liveEnv)
 
-  beforeAll(async () => {
-    await runSql(client, `CREATE DATABASE IF NOT EXISTS ${quoteIdent(liveEnv.clickhouseDatabase)}`)
-  })
-
   afterAll(async () => {
-    try {
-      await cleanupPrefixedObjects(client, liveEnv, prefixes)
-    } finally {
-      await client.close()
-    }
+    await client.close()
   })
 
   test(
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('flow')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('flow')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const usersView = `${prefix}users_view`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
         usersViewName: usersView,
       })
 
       try {
-        const initResult = runCli(fixture.dir, ['init'])
+        const initResult = runCli(fixture.dir, ['init'], cliEnv)
         expect(initResult.exitCode).toBe(0)
 
-        const generateResult = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const generateResult = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(generateResult.exitCode).toBe(0)
         const generatePayload = JSON.parse(generateResult.stdout) as { migrationFile: string | null }
         expect(generatePayload.migrationFile).toBeTruthy()
@@ -226,7 +188,7 @@ describe('@chkit/cli doppler env e2e', () => {
           throw new Error('expected generated migration file')
         }
 
-        const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
+        const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(planResult.exitCode).toBe(0)
         const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
         expect(planPayload.pending.length).toBe(1)
@@ -237,7 +199,7 @@ describe('@chkit/cli doppler env e2e', () => {
           fixture.configPath,
           '--execute',
           '--json',
-        ])
+        ], { extraEnv: cliEnv })
         if (executeResult.exitCode !== 0) {
           throw new Error(
             `migrate --execute failed (exit=${executeResult.exitCode})\nstdout:\n${executeResult.stdout}\nstderr:\n${executeResult.stderr}`
@@ -251,7 +213,7 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(executePayload.mode).toBe('execute')
         expect(executePayload.applied.length).toBe(1)
 
-        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'])
+        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
         expect(statusResult.exitCode).toBe(0)
         const statusPayload = JSON.parse(statusResult.stdout) as {
           total: number
@@ -271,6 +233,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(generatedSql.length).toBeGreaterThan(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -279,18 +244,20 @@ describe('@chkit/cli doppler env e2e', () => {
   test(
     'runs additive second migration cycle in a separate project flow',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('additive')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('additive')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const usersView = `${prefix}users_view`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
         usersViewName: usersView,
       })
 
       try {
-        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(firstGenerate.exitCode).toBe(0)
 
         const firstExecute = await runCliWithRetry(fixture.dir, [
@@ -299,7 +266,7 @@ describe('@chkit/cli doppler env e2e', () => {
           fixture.configPath,
           '--execute',
           '--json',
-        ])
+        ], { extraEnv: cliEnv })
         if (firstExecute.exitCode !== 0) {
           throw new Error(
             `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
@@ -309,11 +276,11 @@ describe('@chkit/cli doppler env e2e', () => {
 
         await writeFile(
           fixture.schemaPath,
-          renderEvolvedSchema(liveEnv.clickhouseDatabase, usersTable, usersView),
+          renderEvolvedSchema(database, usersTable, usersView),
           'utf8'
         )
 
-        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(secondGenerate.exitCode).toBe(0)
         const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as {
           operationCount: number
@@ -322,7 +289,7 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
         expect(secondGeneratePayload.migrationFile).toBeTruthy()
 
-        const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'])
+        const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], cliEnv)
         if (secondPlan.exitCode !== 0) {
           throw new Error(
             `second migrate --json plan failed (exit=${secondPlan.exitCode})\nstdout:\n${secondPlan.stdout}\nstderr:\n${secondPlan.stderr}`
@@ -338,7 +305,7 @@ describe('@chkit/cli doppler env e2e', () => {
           fixture.configPath,
           '--execute',
           '--json',
-        ])
+        ], { extraEnv: cliEnv })
         if (secondExecute.exitCode !== 0) {
           throw new Error(
             `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
@@ -346,7 +313,7 @@ describe('@chkit/cli doppler env e2e', () => {
         }
         expect(secondExecute.exitCode).toBe(0)
 
-        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'])
+        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
         expect(statusResult.exitCode).toBe(0)
         const statusPayload = JSON.parse(statusResult.stdout) as {
           total: number
@@ -358,6 +325,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(statusPayload.pending).toBe(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
@@ -366,18 +336,20 @@ describe('@chkit/cli doppler env e2e', () => {
   test(
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('check')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('check')
-      prefixes.add(prefix)
       const usersTable = `${prefix}users`
       const usersView = `${prefix}users_view`
       const fixture = await createFixture({
-        database: liveEnv.clickhouseDatabase,
+        database,
         usersTableName: usersTable,
         usersViewName: usersView,
       })
 
       try {
-        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(firstGenerate.exitCode).toBe(0)
         const firstExecute = await runCliWithRetry(fixture.dir, [
           'migrate',
@@ -385,7 +357,7 @@ describe('@chkit/cli doppler env e2e', () => {
           fixture.configPath,
           '--execute',
           '--json',
-        ])
+        ], { extraEnv: cliEnv })
         if (firstExecute.exitCode !== 0) {
           throw new Error(
             `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
@@ -394,18 +366,18 @@ describe('@chkit/cli doppler env e2e', () => {
 
         await writeFile(
           fixture.schemaPath,
-          renderEvolvedSchema(liveEnv.clickhouseDatabase, usersTable, usersView),
+          renderEvolvedSchema(database, usersTable, usersView),
           'utf8'
         )
 
-        const secondPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+        const secondPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--dryrun', '--json'], cliEnv)
         expect(secondPlan.exitCode).toBe(0)
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as {
           operations: Array<{ type: string }>
         }
         expect(secondPlanPayload.operations.some((op) => op.type === 'drop_table')).toBe(false)
 
-        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'])
+        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(secondGenerate.exitCode).toBe(0)
         const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as { operationCount: number }
         expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
@@ -416,14 +388,14 @@ describe('@chkit/cli doppler env e2e', () => {
           fixture.configPath,
           '--execute',
           '--json',
-        ])
+        ], { extraEnv: cliEnv })
         if (secondExecute.exitCode !== 0) {
           throw new Error(
             `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
           )
         }
 
-        const check = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'])
+        const check = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'], cliEnv)
         expect(check.exitCode).toBe(0)
         const checkPayload = JSON.parse(check.stdout) as {
           ok: boolean
@@ -441,6 +413,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(checkPayload.drifted).toBe(false)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
+        await runSql(client, `DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await runSql(client, `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
       }
     },
     240_000
