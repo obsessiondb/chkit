@@ -1,11 +1,13 @@
 import { mkdir } from 'node:fs/promises'
 
 import { summarizeDriftReasons } from '../../drift.js'
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
 import { withClickHouseExecutor } from '../clickhouse-resource.js'
+import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
 import { createJournalStore } from '../journal-store.js'
 import { findChecksumMismatches, listMigrations, readSnapshot } from '../migration-store.js'
+import { resolveTableScope, tableKeysFromDefinitions } from '../table-scope.js'
 import { buildDriftPayload } from './drift.js'
 
 export const checkCommand: CommandDef = {
@@ -19,8 +21,10 @@ export const checkCommand: CommandDef = {
 
 async function cmdCheck(ctx: CommandRunContext): Promise<void> {
   const { flags, config, configPath, dirs, pluginRuntime } = ctx
-  const strict = flags['--strict'] === true
-  const jsonMode = flags['--json'] === true
+  const f = typedFlags(flags, [...GLOBAL_FLAGS, { name: '--strict', type: 'boolean', description: 'Enable all policy checks' }] as const)
+  const strict = f['--strict'] === true
+  const jsonMode = f['--json'] === true
+  const tableSelector = f['--table']
   const { migrationsDir, metaDir } = dirs
   await mkdir(migrationsDir, { recursive: true })
 
@@ -37,7 +41,30 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
     const pending = files.filter((f) => !appliedNames.has(f))
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
     const snapshot = await readSnapshot(metaDir)
-    const drift = snapshot ? await buildDriftPayload(config, metaDir, snapshot) : null
+    const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
+    if (tableScope.enabled && tableScope.matchCount === 0) {
+      const payload = {
+        strict,
+        ok: true,
+        failedChecks: [],
+        pendingCount: 0,
+        checksumMismatchCount: 0,
+        drifted: false,
+        driftEvaluated: false,
+        driftReasonCounts: {},
+        driftReasonTotals: { total: 0, object: 0, table: 0 },
+        plugins: {},
+        scope: tableScope,
+        warning: `No tables matched selector "${tableScope.selector ?? ''}".`,
+      }
+      if (jsonMode) {
+        emitJson('check', payload)
+      } else {
+        console.log(`No tables matched selector "${tableScope.selector ?? ''}". Check is a no-op.`)
+      }
+      return
+    }
+    const drift = snapshot ? await buildDriftPayload(config, metaDir, snapshot, tableScope) : null
 
     const policy = {
       failOnPending: strict ? true : config.check?.failOnPending ?? true,
@@ -49,6 +76,7 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
       command: 'check',
       config,
       configPath,
+      tableScope,
       flags,
     })
     const pluginResults = await pluginRuntime.runOnCheck({
@@ -56,6 +84,7 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
       config,
       configPath,
       jsonMode,
+      tableScope,
       flags,
     })
 
@@ -103,6 +132,7 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
           },
         ])
       ),
+      scope: tableScope,
     }
 
     if (jsonMode) {
@@ -117,6 +147,10 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
     )
     console.log(`Pending migrations: ${pending.length}`)
     console.log(`Checksum mismatches: ${checksumMismatches.length}`)
+    if (tableScope.enabled) {
+      console.log(`Table scope: ${tableScope.selector ?? ''} (${tableScope.matchCount} matched)`)
+      for (const table of tableScope.matchedTables) console.log(`- ${table}`)
+    }
     if (drift === null) {
       console.log('Schema drift: not evaluated (missing snapshot or clickhouse config)')
     } else {
