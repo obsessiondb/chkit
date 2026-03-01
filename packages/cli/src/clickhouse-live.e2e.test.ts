@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -59,15 +59,11 @@ async function createFixture(input: {
 
 describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const executor = createLiveExecutor(liveEnv)
-
-  afterAll(async () => {
-    await executor.close()
-  })
 
   test(
     'runs init + generate + migrate + status against live ClickHouse',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('flow')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -138,6 +134,7 @@ describe('@chkit/cli doppler env e2e', () => {
         await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000
@@ -146,6 +143,7 @@ describe('@chkit/cli doppler env e2e', () => {
   test(
     'runs additive second migration cycle in a separate project flow',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('additive')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -224,6 +222,7 @@ describe('@chkit/cli doppler env e2e', () => {
         await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000
@@ -233,6 +232,7 @@ describe('@chkit/cli doppler env e2e', () => {
   test.skipIf(new Date() < new Date('2026-03-02'))(
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('check')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -321,6 +321,7 @@ describe('@chkit/cli doppler env e2e', () => {
         await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000

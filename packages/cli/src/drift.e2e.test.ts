@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -56,15 +56,11 @@ async function createFixture(input: {
 
 describe('@chkit/cli drift depth env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const executor = createLiveExecutor(liveEnv)
-
-  afterAll(async () => {
-    await executor.close()
-  })
 
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('drift_manual')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -90,14 +86,14 @@ describe('@chkit/cli drift depth env e2e', () => {
         }
 
         // Wait for the table to be visible before altering it
-        await waitForTable(executor,database, usersTable)
+        await waitForTable(executor, database, usersTable)
 
         await executor.execute(
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
         // Wait for the column to propagate (ClickHouse Cloud DDL is eventually consistent)
-        await waitForColumn(executor,database, usersTable, 'rogue')
+        await waitForColumn(executor, database, usersTable, 'rogue')
 
         await executor.execute(
           `CREATE VIEW ${quoteIdent(database)}.${quoteIdent(manualView)} AS SELECT 1 AS one`
@@ -136,6 +132,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(manualView)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000
@@ -144,6 +141,7 @@ describe('@chkit/cli drift depth env e2e', () => {
   test(
     'detects unique-key and projection drift reasons and exposes them in check summary',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('drift_keys')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -199,6 +197,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         await rm(fixture.dir, { recursive: true, force: true })
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000
@@ -207,6 +206,7 @@ describe('@chkit/cli drift depth env e2e', () => {
   test(
     'respects failOnDrift=false policy when drift exists',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('drift_policy')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -230,13 +230,13 @@ describe('@chkit/cli drift depth env e2e', () => {
           throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
         }
 
-        await waitForTable(executor,database, usersTable)
+        await waitForTable(executor, database, usersTable)
 
         await executor.execute(
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
-        await waitForColumn(executor,database, usersTable, 'rogue')
+        await waitForColumn(executor, database, usersTable, 'rogue')
 
         await writeFile(
           fixture.configPath,
@@ -260,6 +260,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         await rm(fixture.dir, { recursive: true, force: true })
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000
@@ -268,6 +269,7 @@ describe('@chkit/cli drift depth env e2e', () => {
   test(
     'check --strict overrides failOnDrift=false when drift exists',
     async () => {
+      const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('drift_strict')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -291,13 +293,13 @@ describe('@chkit/cli drift depth env e2e', () => {
           throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
         }
 
-        await waitForTable(executor,database, usersTable)
+        await waitForTable(executor, database, usersTable)
 
         await executor.execute(
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
-        await waitForColumn(executor,database, usersTable, 'rogue')
+        await waitForColumn(executor, database, usersTable, 'rogue')
 
         await writeFile(
           fixture.configPath,
@@ -327,6 +329,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         await rm(fixture.dir, { recursive: true, force: true })
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
         await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
       }
     },
     240_000
