@@ -184,6 +184,38 @@ describe('@chkit/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  test('treats wrapped low-cardinality nullable column forms as equivalent', () => {
+    const expected = table({
+      database: 'app',
+      name: 'users',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'region', type: 'LowCardinality(String)', nullable: true },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      uniqueKey: undefined,
+      partitionBy: undefined,
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'region', type: 'LowCardinality(String)', nullable: true },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+      ttl: undefined,
+    })
+
+    expect(result).toBeNull()
+  })
+
   test('emits reason codes for semantic drift', () => {
     const expected = table({
       database: 'app',

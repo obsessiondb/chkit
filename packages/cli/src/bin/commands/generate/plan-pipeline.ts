@@ -8,6 +8,22 @@ import type {
 
 import type { ColumnRenameMapping, TableRenameMapping } from './rename-mappings.js'
 
+const SIMPLE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function formatIdentifier(value: string): string {
+  const trimmed = value.trim()
+  if (SIMPLE_IDENTIFIER.test(trimmed)) return trimmed
+  return `\`${trimmed.replace(/`/g, '``')}\``
+}
+
+function quoteIdentifier(value: string): string {
+  return `\`${value.replace(/`/g, '``')}\``
+}
+
+function formatQualifiedName(database: string, name: string): string {
+  return `${formatIdentifier(database)}.${formatIdentifier(name)}`
+}
+
 export function applySelectedRenameSuggestions(
   plan: MigrationPlan,
   selectedSuggestions: ColumnRenameSuggestion[]
@@ -75,7 +91,7 @@ export function applyExplicitTableRenames(
           type: 'create_database',
           key: dbKey,
           risk: 'safe',
-          sql: `CREATE DATABASE IF NOT EXISTS ${mapping.newDatabase};`,
+          sql: `CREATE DATABASE IF NOT EXISTS ${formatIdentifier(mapping.newDatabase)};`,
         })
         createDatabaseOps.add(dbKey)
       }
@@ -84,7 +100,7 @@ export function applyExplicitTableRenames(
       type: 'alter_table_rename_table',
       key: `table:${mapping.newDatabase}.${mapping.newName}:rename_table`,
       risk: 'caution',
-      sql: `RENAME TABLE ${mapping.oldDatabase}.${mapping.oldName} TO ${mapping.newDatabase}.${mapping.newName};`,
+      sql: `RENAME TABLE ${formatQualifiedName(mapping.oldDatabase, mapping.oldName)} TO ${formatQualifiedName(mapping.newDatabase, mapping.newName)};`,
     })
   }
 
@@ -129,7 +145,7 @@ export function buildExplicitColumnRenameSuggestions(
           : 'Explicitly confirmed by schema metadata (renamedFrom).',
       dropOperationKey,
       addOperationKey,
-      confirmationSQL: `ALTER TABLE ${mapping.database}.${mapping.table} RENAME COLUMN \`${mapping.from}\` TO \`${mapping.to}\`;`,
+      confirmationSQL: `ALTER TABLE ${formatQualifiedName(mapping.database, mapping.table)} RENAME COLUMN ${quoteIdentifier(mapping.from)} TO ${quoteIdentifier(mapping.to)};`,
     })
   }
 

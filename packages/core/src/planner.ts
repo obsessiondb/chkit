@@ -22,6 +22,7 @@ import {
   renderAlterResetSetting,
   toCreateSQL,
 } from './sql.js'
+import { formatIdentifier, formatQualifiedName, quoteIdentifier } from './identifiers.js'
 import { assertValidDefinitions } from './validate.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
@@ -38,7 +39,7 @@ function pushDropOperation(
       type: 'drop_table',
       key: definitionKey(def),
       risk,
-      sql: `DROP TABLE IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP TABLE IF EXISTS ${formatQualifiedName(def.database, def.name)};`,
     })
     return
   }
@@ -47,7 +48,7 @@ function pushDropOperation(
       type: 'drop_view',
       key: definitionKey(def),
       risk,
-      sql: `DROP VIEW IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP VIEW IF EXISTS ${formatQualifiedName(def.database, def.name)};`,
     })
     return
   }
@@ -55,7 +56,7 @@ function pushDropOperation(
     type: 'drop_materialized_view',
     key: definitionKey(def),
     risk,
-    sql: `DROP TABLE IF EXISTS ${def.database}.${def.name} SYNC;`,
+    sql: `DROP TABLE IF EXISTS ${formatQualifiedName(def.database, def.name)} SYNC;`,
   })
 }
 
@@ -99,7 +100,7 @@ function pushCreateDatabaseOperation(
     type: 'create_database',
     key: `database:${database}`,
     risk,
-    sql: `CREATE DATABASE IF NOT EXISTS ${database};`,
+    sql: `CREATE DATABASE IF NOT EXISTS ${formatIdentifier(database)};`,
   })
 }
 
@@ -137,7 +138,7 @@ function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name
 }
 
 function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
-  return `ALTER TABLE ${table.database}.${table.name} RENAME COLUMN \`${from}\` TO \`${to}\`;`
+  return `ALTER TABLE ${formatQualifiedName(table.database, table.name)} RENAME COLUMN ${quoteIdentifier(from)} TO ${quoteIdentifier(to)};`
 }
 
 function inferColumnRenameSuggestions(
@@ -196,7 +197,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
           type: 'drop_table',
           key: definitionKey(newDef),
           risk: 'danger',
-          sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name};`,
+          sql: `DROP TABLE IF EXISTS ${formatQualifiedName(newDef.database, newDef.name)};`,
         },
         {
           type: 'create_table',

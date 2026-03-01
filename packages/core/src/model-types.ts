@@ -29,10 +29,17 @@ export interface ColumnDefinition {
   comment?: string
 }
 
+export type KnownSkipIndexType =
+  | 'minmax'
+  | 'set'
+  | 'bloom_filter'
+  | 'tokenbf_v1'
+  | 'ngrambf_v1'
+
 export interface SkipIndexDefinition {
   name: string
   expression: string
-  type: 'minmax' | 'set' | 'bloom_filter' | 'tokenbf_v1' | 'ngrambf_v1'
+  type: KnownSkipIndexType | (string & {})
   granularity: number
 }
 

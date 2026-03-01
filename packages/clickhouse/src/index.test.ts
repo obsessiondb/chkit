@@ -11,6 +11,8 @@ import {
   parseSettingsFromCreateTableQuery,
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
+  parseSystemColumnType,
+  normalizeSkipIndexType,
 } from './index'
 
 describe('@chkit/clickhouse smoke', () => {
@@ -98,5 +100,43 @@ ORDER BY id;`
         query: 'SELECT id ORDER BY id LIMIT 10',
       },
     ])
+  })
+
+  test('extracts projection body when column defaults contain doubled quotes', () => {
+    const query = `CREATE TABLE app.events
+(
+  id UInt64,
+  source String DEFAULT 'it''s fine',
+  PROJECTION p_by_source (SELECT source, count() GROUP BY source)
+)
+ENGINE = MergeTree()
+ORDER BY id;`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      {
+        name: 'p_by_source',
+        query: 'SELECT source, count() GROUP BY source',
+      },
+    ])
+  })
+
+  test('parses nullable wrappers for system column types without losing wrappers', () => {
+    expect(parseSystemColumnType('Nullable(String)')).toEqual({
+      type: 'String',
+      nullable: true,
+    })
+    expect(parseSystemColumnType('LowCardinality(Nullable(String))')).toEqual({
+      type: 'LowCardinality(String)',
+      nullable: true,
+    })
+    expect(parseSystemColumnType('Array(Nullable(String))')).toEqual({
+      type: 'Array(Nullable(String))',
+      nullable: undefined,
+    })
+  })
+
+  test('preserves unknown skip-index types from introspection', () => {
+    expect(normalizeSkipIndexType('set')).toBe('set')
+    expect(normalizeSkipIndexType('new_index_type_v2')).toBe('new_index_type_v2')
   })
 })

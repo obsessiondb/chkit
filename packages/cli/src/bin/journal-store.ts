@@ -10,6 +10,12 @@ export interface JournalStore {
 }
 
 const DEFAULT_JOURNAL_TABLE = '_chkit_migrations'
+const SIMPLE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function formatIdentifier(value: string): string {
+  if (SIMPLE_IDENTIFIER.test(value)) return value
+  return `\`${value.replace(/`/g, '``')}\``
+}
 
 function resolveJournalTableName(): string {
   const candidate = process.env.CHKIT_JOURNAL_TABLE?.trim()
@@ -36,7 +42,7 @@ function isRetryableInsertRace(error: unknown): boolean {
 }
 
 export function createJournalStore(db: ClickHouseExecutor): JournalStore {
-  const journalTable = resolveJournalTableName()
+  const journalTable = formatIdentifier(resolveJournalTableName())
   const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable} (
     name String,
     applied_at DateTime64(3, 'UTC'),

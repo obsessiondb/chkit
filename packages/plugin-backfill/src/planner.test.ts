@@ -505,4 +505,25 @@ describe('injectTimeFilter', () => {
     // Inner WHERE must remain intact
     expect(result).toContain('WHERE inner = 1')
   })
+
+  test('handles SQL-escaped single quotes while scanning for keywords', () => {
+    const query = "SELECT * FROM app.events WHERE message = 'it''s fine' ORDER BY ts"
+    const result = injectTimeFilter(query, 'event_time', from, to)
+
+    expect(result).toContain("message = 'it''s fine'")
+    expect(result).toContain("AND event_time >= parseDateTimeBestEffort('")
+    expect(result).toContain("AND event_time < parseDateTimeBestEffort('")
+  })
+
+  test('ignores keywords inside comments while choosing insertion point', () => {
+    const query = `SELECT id
+FROM app.events
+-- ORDER BY fake_col
+/* WHERE fake = 1 */
+GROUP BY id`
+    const result = injectTimeFilter(query, 'event_time', from, to)
+
+    expect(result).toContain("WHERE event_time >= parseDateTimeBestEffort('")
+    expect(result.indexOf('WHERE event_time')).toBeLessThan(result.indexOf('GROUP BY id'))
+  })
 })
