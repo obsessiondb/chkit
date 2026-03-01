@@ -1,6 +1,7 @@
 import process from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
+import { createClickHouseExecutor } from '@chkit/clickhouse'
 import { wrapPluginRun } from '@chkit/core'
 
 import {
@@ -207,35 +208,48 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
           label: 'Backfill run',
           async run({ context, effectiveOptions }) {
             const parsed = parseRunArgs(context.flags)
-            const output = await executeBackfillRun({
-              planId: parsed.planId,
-              config: context.config,
-              configPath: context.configPath,
-              options: effectiveOptions,
-              execution: {
-                replayDone: parsed.replayDone,
-                replayFailed: parsed.replayFailed,
-                forceOverlap: parsed.forceOverlap,
-                forceCompatibility: parsed.forceCompatibility,
-                simulation: {
-                  failChunkId: parsed.simulateFailChunk,
-                  failCount: parsed.simulateFailCount,
-                },
-              },
-            })
 
-            const payload = {
-              ...runPayload(output),
-              command: 'run' as const,
-            }
-            if (context.jsonMode) {
-              context.print(payload)
-            } else {
-              context.print(
-                `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+            if (!context.config.clickhouse) {
+              throw new BackfillConfigError(
+                'ClickHouse connection config is required for backfill run. Set clickhouse in your chkit config.'
               )
             }
-            return payload.ok ? 0 : 1
+            const db = createClickHouseExecutor(context.config.clickhouse)
+
+            try {
+              const output = await executeBackfillRun({
+                planId: parsed.planId,
+                config: context.config,
+                configPath: context.configPath,
+                options: effectiveOptions,
+                execution: {
+                  replayDone: parsed.replayDone,
+                  replayFailed: parsed.replayFailed,
+                  forceOverlap: parsed.forceOverlap,
+                  forceCompatibility: parsed.forceCompatibility,
+                  simulation: {
+                    failChunkId: parsed.simulateFailChunk,
+                    failCount: parsed.simulateFailCount,
+                  },
+                },
+                execute: (sql) => db.execute(sql),
+              })
+
+              const payload = {
+                ...runPayload(output),
+                command: 'run' as const,
+              }
+              if (context.jsonMode) {
+                context.print(payload)
+              } else {
+                context.print(
+                  `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+                )
+              }
+              return payload.ok ? 0 : 1
+            } finally {
+              await db.close()
+            }
           },
         }),
       },
@@ -248,31 +262,44 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
           label: 'Backfill resume',
           async run({ context, effectiveOptions }) {
             const parsed = parseResumeArgs(context.flags)
-            const output = await resumeBackfillRun({
-              planId: parsed.planId,
-              config: context.config,
-              configPath: context.configPath,
-              options: effectiveOptions,
-              execution: {
-                replayDone: parsed.replayDone,
-                replayFailed: parsed.replayFailed,
-                forceOverlap: parsed.forceOverlap,
-                forceCompatibility: parsed.forceCompatibility,
-              },
-            })
 
-            const payload = {
-              ...runPayload(output),
-              command: 'resume' as const,
-            }
-            if (context.jsonMode) {
-              context.print(payload)
-            } else {
-              context.print(
-                `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+            if (!context.config.clickhouse) {
+              throw new BackfillConfigError(
+                'ClickHouse connection config is required for backfill resume. Set clickhouse in your chkit config.'
               )
             }
-            return payload.ok ? 0 : 1
+            const db = createClickHouseExecutor(context.config.clickhouse)
+
+            try {
+              const output = await resumeBackfillRun({
+                planId: parsed.planId,
+                config: context.config,
+                configPath: context.configPath,
+                options: effectiveOptions,
+                execution: {
+                  replayDone: parsed.replayDone,
+                  replayFailed: parsed.replayFailed,
+                  forceOverlap: parsed.forceOverlap,
+                  forceCompatibility: parsed.forceCompatibility,
+                },
+                execute: (sql) => db.execute(sql),
+              })
+
+              const payload = {
+                ...runPayload(output),
+                command: 'resume' as const,
+              }
+              if (context.jsonMode) {
+                context.print(payload)
+              } else {
+                context.print(
+                  `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+                )
+              }
+              return payload.ok ? 0 : 1
+            } finally {
+              await db.close()
+            }
           },
         }),
       },
