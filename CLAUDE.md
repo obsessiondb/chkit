@@ -50,6 +50,29 @@ bun run typecheck    # type-check all packages
 bun run lint         # lint all packages
 ```
 
+## Testing
+
+### E2E Tests
+
+E2E tests run against a live ClickHouse Cloud instance. They require these environment variables (hard-fail, never skip):
+
+- `CLICKHOUSE_HOST` or `CLICKHOUSE_URL` — ClickHouse endpoint
+- `CLICKHOUSE_PASSWORD` — authentication
+- `CLICKHOUSE_DB` — target database (optional, defaults to `default`)
+
+Shared ClickHouse test utilities (env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/e2e-testkit.ts` which re-exports the shared ones.
+
+Key conventions:
+
+- **Hard-fail on missing env** — never `test.skip()` or silently pass when credentials are absent.
+- **State-based polling** — use `waitForTable()`, `waitForView()`, `waitForColumn()` instead of blind retry loops. ClickHouse Cloud DDL is eventually consistent.
+- **Unique naming** — every test run uses `createPrefix()` / `createJournalTableName()` with timestamps and random suffixes to avoid collisions.
+- **Structured diagnostics** — use `formatTestDiagnostic()` for CLI failure messages.
+
+### CI
+
+CI runs a single **verify** job that executes `turbo run typecheck lint test build`. ClickHouse secrets are passed as environment variables for E2E tests. `turbo.json` passes through `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task.
+
 ## Release
 
 Uses changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump versions.

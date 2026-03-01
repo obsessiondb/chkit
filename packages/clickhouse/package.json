@@ -26,6 +26,10 @@
       "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./e2e-testkit": {
+      "bun": "./src/e2e-testkit.ts",
+      "default": "./src/e2e-testkit.ts"
     }
   },
   "files": [
