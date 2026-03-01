@@ -43,6 +43,7 @@ export default defineConfig({
         chunkHours: 6,
         maxParallelChunks: 1,
         maxRetriesPerChunk: 3,
+        retryDelayMs: 1000,
         requireIdempotencyToken: true,
         timeColumn: 'created_at',
       },
@@ -133,6 +134,7 @@ Configuration is organized into three groups plus a top-level `stateDir`.
 | `chunkHours` | `number` | `6` | Hours per chunk |
 | `maxParallelChunks` | `number` | `1` | Max concurrent chunks |
 | `maxRetriesPerChunk` | `number` | `3` | Retry budget per chunk |
+| `retryDelayMs` | `number` | `1000` | Exponential backoff delay between retries (milliseconds) |
 | `requireIdempotencyToken` | `boolean` | `true` | Generate deterministic tokens |
 | `timeColumn` | `string` | auto-detect | Fallback column name for time-based WHERE clause (overridden by schema-level config) |
 
@@ -187,13 +189,13 @@ Execute a planned backfill with checkpointed chunk progress.
 
 ### `chkit plugin backfill resume`
 
-Resume a backfill run from last checkpoint.
+Resume a backfill run from last checkpoint. Automatically retries failed chunks.
 
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
 | `--replay-done` | No | Re-execute already-completed chunks |
-| `--replay-failed` | No | Re-execute failed chunks |
+| `--replay-failed` | No | Re-execute failed chunks (enabled by default on resume) |
 | `--force-overlap` | No | Allow concurrent runs for the same target |
 | `--force-compatibility` | No | Skip compatibility token check |
 | `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
@@ -276,7 +278,7 @@ chkit plugin backfill status --plan-id <planId>
 ```sh
 chkit plugin backfill plan --target analytics.events --from 2025-01-01 --to 2025-02-01
 chkit plugin backfill run --plan-id <planId>   # some chunks fail
-chkit plugin backfill resume --plan-id <planId> --replay-failed
+chkit plugin backfill resume --plan-id <planId>   # automatically retries failed chunks
 ```
 
 **CI enforcement:**

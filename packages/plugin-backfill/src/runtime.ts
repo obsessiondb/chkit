@@ -116,10 +116,15 @@ export async function evaluateBackfillCheck(input: {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function executeChunk(input: {
   run: BackfillRunState
   chunk: BackfillRunChunkState
   maxRetries: number
+  retryDelayMs: number
   runPath: string
   eventPath: string
   execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
@@ -150,88 +155,46 @@ async function executeChunk(input: {
     const shouldSimulateFailure =
       input.simulation?.failChunkId === input.chunk.id && input.chunk.attempts <= failureBudget
 
-    if (!shouldSimulateFailure) {
-      let executionError: string | undefined
-      let executionResult: void | { rowsWritten?: number } | undefined
-      if (input.execute) {
-        try {
-          executionResult = await input.execute(input.chunk.sqlTemplate)
-        } catch (error) {
-          executionError = error instanceof Error ? error.message : String(error)
-        }
+    let attemptError: string | undefined
+    let executionResult: void | { rowsWritten?: number } | undefined
+
+    if (shouldSimulateFailure) {
+      attemptError = `Simulated failure for chunk ${input.chunk.id} attempt ${input.chunk.attempts}`
+    } else if (input.execute) {
+      try {
+        executionResult = await input.execute(input.chunk.sqlTemplate)
+      } catch (error) {
+        attemptError = error instanceof Error ? error.message : String(error)
       }
+    }
 
-      if (!executionError) {
-        input.chunk.status = 'done'
-        input.chunk.completedAt = nowIso()
-        input.chunk.lastError = undefined
-        if (executionResult && typeof executionResult === 'object' && typeof executionResult.rowsWritten === 'number') {
-          input.chunk.rowsWritten = executionResult.rowsWritten
-        }
-
-        await persistRunAndEvent({
-          run: input.run,
-          runPath: input.runPath,
-          eventPath: input.eventPath,
-          event: {
-            type: 'chunk_done',
-            planId: input.run.planId,
-            chunkId: input.chunk.id,
-            attempt: input.chunk.attempts,
-          },
-        })
-
-        return { ok: true }
+    if (!attemptError) {
+      input.chunk.status = 'done'
+      input.chunk.completedAt = nowIso()
+      input.chunk.lastError = undefined
+      if (executionResult && typeof executionResult === 'object' && typeof executionResult.rowsWritten === 'number') {
+        input.chunk.rowsWritten = executionResult.rowsWritten
       }
-
-      input.chunk.lastError = executionError
-
-      if (input.chunk.attempts >= input.maxRetries) {
-        input.chunk.status = 'failed'
-        input.run.status = 'failed'
-        input.run.lastError = executionError
-
-        await persistRunAndEvent({
-          run: input.run,
-          runPath: input.runPath,
-          eventPath: input.eventPath,
-          event: {
-            type: 'chunk_failed_retry_exhausted',
-            planId: input.run.planId,
-            chunkId: input.chunk.id,
-            attempt: input.chunk.attempts,
-            message: executionError,
-          },
-        })
-
-        return { ok: false, error: executionError }
-      }
-
-      input.chunk.status = 'pending'
 
       await persistRunAndEvent({
         run: input.run,
         runPath: input.runPath,
         eventPath: input.eventPath,
         event: {
-          type: 'chunk_retry_scheduled',
+          type: 'chunk_done',
           planId: input.run.planId,
           chunkId: input.chunk.id,
           attempt: input.chunk.attempts,
-          nextAttempt: input.chunk.attempts + 1,
         },
       })
 
-      continue
+      return { ok: true }
     }
 
-    const errorMessage = `Simulated failure for chunk ${input.chunk.id} attempt ${input.chunk.attempts}`
-    input.chunk.lastError = errorMessage
+    input.chunk.lastError = attemptError
 
     if (input.chunk.attempts >= input.maxRetries) {
       input.chunk.status = 'failed'
-      input.run.status = 'failed'
-      input.run.lastError = errorMessage
 
       await persistRunAndEvent({
         run: input.run,
@@ -242,11 +205,11 @@ async function executeChunk(input: {
           planId: input.run.planId,
           chunkId: input.chunk.id,
           attempt: input.chunk.attempts,
-          message: errorMessage,
+          message: attemptError,
         },
       })
 
-      return { ok: false, error: errorMessage }
+      return { ok: false, error: attemptError }
     }
 
     input.chunk.status = 'pending'
@@ -263,6 +226,11 @@ async function executeChunk(input: {
         nextAttempt: input.chunk.attempts + 1,
       },
     })
+
+    if (input.retryDelayMs > 0) {
+      const delay = input.retryDelayMs * Math.pow(2, input.chunk.attempts - 1)
+      await sleep(delay)
+    }
   }
 
   return {
@@ -279,6 +247,7 @@ async function executeRunLoop(input: {
     eventPath: string
   }
   execution: BackfillExecutionOptions
+  retryDelayMs: number
   execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
   const maxRetries = input.plan.options.maxRetriesPerChunk
@@ -312,29 +281,8 @@ async function executeRunLoop(input: {
 
       if (chunk.status === 'failed') {
         if (!input.run.replayFailed) {
-          input.run.status = 'failed'
-          input.run.lastError =
-            chunk.lastError ??
-            `Chunk ${chunk.id} is failed and resume requires --replay-failed to re-run failed chunks.`
-
-          await persistRunAndEvent({
-            run: input.run,
-            runPath: input.paths.runPath,
-            eventPath: input.paths.eventPath,
-            event: {
-              type: 'run_blocked_failed_chunk',
-              planId: input.plan.planId,
-              chunkId: chunk.id,
-              message: input.run.lastError,
-            },
-          })
-
-          return {
-            run: input.run,
-            status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
-            runPath: input.paths.runPath,
-            eventPath: input.paths.eventPath,
-          }
+          // Skip previously failed chunk — continue to remaining chunks
+          continue
         }
 
         chunk.status = 'pending'
@@ -352,6 +300,7 @@ async function executeRunLoop(input: {
         run: input.run,
         chunk,
         maxRetries,
+        retryDelayMs: input.retryDelayMs,
         runPath: input.paths.runPath,
         eventPath: input.paths.eventPath,
         execute: input.execute,
@@ -359,13 +308,37 @@ async function executeRunLoop(input: {
       })
 
       if (!executed.ok) {
-        input.run.completedAt = nowIso()
-        return {
-          run: input.run,
-          status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
-          runPath: input.paths.runPath,
-          eventPath: input.paths.eventPath,
-        }
+        // Continue processing remaining chunks instead of stopping
+        continue
+      }
+    }
+
+    // Determine final run status after all chunks have been attempted
+    const failedChunks = input.run.chunks.filter((c) => c.status === 'failed')
+
+    if (!aborted && failedChunks.length > 0) {
+      input.run.status = 'failed'
+      input.run.lastError =
+        failedChunks[failedChunks.length - 1]?.lastError ?? 'One or more chunks failed'
+      input.run.completedAt = nowIso()
+
+      await persistRunAndEvent({
+        run: input.run,
+        runPath: input.paths.runPath,
+        eventPath: input.paths.eventPath,
+        event: {
+          type: 'run_completed_with_failures',
+          planId: input.plan.planId,
+          failedCount: failedChunks.length,
+          totalCount: input.run.chunks.length,
+        },
+      })
+
+      return {
+        run: input.run,
+        status: summarizeRunStatus(input.run, input.paths.runPath, input.paths.eventPath),
+        runPath: input.paths.runPath,
+        eventPath: input.paths.eventPath,
       }
     }
 
@@ -501,6 +474,7 @@ export async function executeBackfillRun(input: {
     run,
     paths,
     execution,
+    retryDelayMs: input.options.defaults.retryDelayMs,
     execute: input.execute,
   })
 }
@@ -555,11 +529,19 @@ export async function resumeBackfillRun(input: {
     )
   }
 
+  // Resume always retries failed chunks — the whole point of resume is to
+  // recover from failures.  Users shouldn't need --replay-failed for this.
+  const execution: BackfillExecutionOptions = {
+    ...input.execution,
+    replayFailed: true,
+  }
+
   return executeRunLoop({
     plan,
     run,
     paths,
-    execution: input.execution ?? {},
+    execution,
+    retryDelayMs: input.options.defaults.retryDelayMs,
     execute: input.execute,
   })
 }

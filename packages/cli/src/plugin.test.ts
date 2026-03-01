@@ -369,7 +369,7 @@ describe('plugin runtime', () => {
         chunkCounts: { done: number; failed: number }
       }
       expect(failedPayload.status).toBe('failed')
-      expect(failedPayload.chunkCounts.done).toBe(1)
+      expect(failedPayload.chunkCounts.done).toBe(2)
       expect(failedPayload.chunkCounts.failed).toBe(1)
 
       const resumed = runCli([

@@ -4,6 +4,7 @@ export interface BackfillPluginDefaults {
   chunkHours?: number
   maxParallelChunks?: number
   maxRetriesPerChunk?: number
+  retryDelayMs?: number
   requireIdempotencyToken?: boolean
   timeColumn?: string
 }
@@ -31,6 +32,7 @@ export interface NormalizedBackfillDefaults {
   chunkHours: number
   maxParallelChunks: number
   maxRetriesPerChunk: number
+  retryDelayMs: number
   requireIdempotencyToken: boolean
   timeColumn?: string
 }
