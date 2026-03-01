@@ -76,6 +76,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         defaults: {
           chunkHours: 2,
           maxRetriesPerChunk: 1,
+          retryDelayMs: 0,
         },
       })
 
@@ -105,7 +106,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
       })
 
       expect(firstRun.status.status).toBe('failed')
-      expect(firstRun.status.totals.done).toBe(1)
+      expect(firstRun.status.totals.done).toBe(2)
       expect(firstRun.status.totals.failed).toBe(1)
 
       const resumed = await resumeBackfillRun({
@@ -142,10 +143,10 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         metaDir: './chkit/meta',
       })
       const planOptions = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
       })
       const changedOptions = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 5 },
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 5, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -228,7 +229,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
       ).rejects.toThrow('already completed')
 
       const options2 = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
       })
       const planned2 = await buildBackfillPlan({
         target: 'app.events',
@@ -324,7 +325,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 3 },
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 3, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -374,7 +375,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 2 },
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 2, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -405,6 +406,105 @@ describe('@chkit/plugin-backfill execute callback', () => {
       expect(ran.status.status).toBe('failed')
       expect(ran.status.totals.failed).toBe(1)
       expect(ran.status.lastError).toContain('Connection refused')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('@chkit/plugin-backfill continue past failures', () => {
+  test('continues to remaining chunks after a chunk fails permanently', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
+      })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      const failChunkId = planned.plan.chunks[0]?.id
+      expect(failChunkId).toBeTruthy()
+
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execution: {
+          simulation: { failChunkId, failCount: 1 },
+        },
+      })
+
+      expect(ran.status.status).toBe('failed')
+      expect(ran.status.totals.done).toBe(2)
+      expect(ran.status.totals.failed).toBe(1)
+      expect(ran.run.chunks[0]?.status).toBe('failed')
+      expect(ran.run.chunks[1]?.status).toBe('done')
+      expect(ran.run.chunks[2]?.status).toBe('done')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('resume retries failed chunks without requiring --replay-failed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
+      })
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        configPath,
+        config,
+        options,
+      })
+
+      const failChunkId = planned.plan.chunks[1]?.id
+      expect(failChunkId).toBeTruthy()
+
+      await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execution: {
+          simulation: { failChunkId, failCount: 1 },
+        },
+      })
+
+      // Resume WITHOUT --replay-failed — should still retry the failed chunk
+      const resumed = await resumeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+      })
+
+      expect(resumed.status.status).toBe('completed')
+      expect(resumed.status.totals.done).toBe(3)
+      expect(resumed.status.totals.failed).toBe(0)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -44,6 +44,9 @@ export function computeCompatibilityToken(input: {
   plan: BackfillPlanState
   options: NormalizedBackfillPluginOptions
 }): string {
+  // Exclude retryDelayMs — it's a runtime behavior setting that doesn't
+  // affect data integrity and shouldn't break compatibility on upgrade.
+  const { retryDelayMs: _, ...compatDefaults } = input.options.defaults
   return hashId(
     stableSerialize({
       planId: input.plan.planId,
@@ -51,7 +54,7 @@ export function computeCompatibilityToken(input: {
       from: input.plan.from,
       to: input.plan.to,
       planOptions: input.plan.options,
-      runtimeDefaults: input.options.defaults,
+      runtimeDefaults: compatDefaults,
       runtimePolicy: input.options.policy,
       runtimeLimits: input.options.limits,
     })
