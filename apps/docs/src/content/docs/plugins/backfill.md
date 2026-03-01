@@ -61,7 +61,7 @@ export default defineConfig({
 })
 ```
 
-The `run` and `resume` commands require a ClickHouse connection. Configure `clickhouse` at the top level of `clickhouse.config.ts`:
+The `run` and `resume` commands execute SQL against ClickHouse when a connection is configured. Configure `clickhouse` at the top level of `clickhouse.config.ts`:
 
 ```ts
 export default defineConfig({

@@ -209,12 +209,9 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
           async run({ context, effectiveOptions }) {
             const parsed = parseRunArgs(context.flags)
 
-            if (!context.config.clickhouse) {
-              throw new BackfillConfigError(
-                'ClickHouse connection config is required for backfill run. Set clickhouse in your chkit config.'
-              )
-            }
-            const db = createClickHouseExecutor(context.config.clickhouse)
+            const db = context.config.clickhouse
+              ? createClickHouseExecutor(context.config.clickhouse)
+              : undefined
 
             try {
               const output = await executeBackfillRun({
@@ -232,7 +229,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                     failCount: parsed.simulateFailCount,
                   },
                 },
-                execute: (sql) => db.execute(sql),
+                execute: db ? (sql) => db.execute(sql) : undefined,
               })
 
               const payload = {
@@ -248,7 +245,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               }
               return payload.ok ? 0 : 1
             } finally {
-              await db.close()
+              await db?.close()
             }
           },
         }),
@@ -263,12 +260,9 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
           async run({ context, effectiveOptions }) {
             const parsed = parseResumeArgs(context.flags)
 
-            if (!context.config.clickhouse) {
-              throw new BackfillConfigError(
-                'ClickHouse connection config is required for backfill resume. Set clickhouse in your chkit config.'
-              )
-            }
-            const db = createClickHouseExecutor(context.config.clickhouse)
+            const db = context.config.clickhouse
+              ? createClickHouseExecutor(context.config.clickhouse)
+              : undefined
 
             try {
               const output = await resumeBackfillRun({
@@ -282,7 +276,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   forceOverlap: parsed.forceOverlap,
                   forceCompatibility: parsed.forceCompatibility,
                 },
-                execute: (sql) => db.execute(sql),
+                execute: db ? (sql) => db.execute(sql) : undefined,
               })
 
               const payload = {
@@ -298,7 +292,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               }
               return payload.ok ? 0 : 1
             } finally {
-              await db.close()
+              await db?.close()
             }
           },
         }),
