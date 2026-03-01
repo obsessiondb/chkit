@@ -45,14 +45,24 @@ function runCli(cwd: string, args: string[]): { exitCode: number; stdout: string
   }
 }
 
+function isValidJson(str: string): boolean {
+  try {
+    JSON.parse(str)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function runCliWithRetry(
   cwd: string,
   args: string[],
   { maxAttempts = 5, delayMs = 2000 }: { maxAttempts?: number; delayMs?: number } = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const expectJson = args.includes('--json')
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = runCli(cwd, args)
-    if (result.exitCode === 0) return result
+    if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
     if (attempt === maxAttempts) return result
     await new Promise((r) => setTimeout(r, delayMs))
   }
