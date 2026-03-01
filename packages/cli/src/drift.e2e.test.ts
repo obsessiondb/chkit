@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { createClient, type ClickHouseClient } from '@clickhouse/client'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -34,54 +35,36 @@ function getRequiredEnv(): LiveEnv {
 }
 
 function quoteIdent(value: string): string {
-  return '`' + value.replace(/`/g, '``') + '`'
+  return `\`${value.replace(/`/g, '``')}\``
 }
 
-async function runSql(url: string, username: string, password: string, sql: string): Promise<void> {
-  const auth = Buffer.from(`${username}:${password}`).toString('base64')
-  const response = await fetch(url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(10_000),
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'text/plain',
+function createClickHouseClient(env: LiveEnv): ClickHouseClient {
+  return createClient({
+    url: env.clickhouseUrl,
+    username: env.clickhouseUser,
+    password: env.clickhousePassword,
+    database: env.clickhouseDatabase,
+    request_timeout: 10_000,
+    clickhouse_settings: {
+      wait_end_of_query: 1,
+      async_insert: 0,
     },
-    body: sql,
   })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`ClickHouse SQL failed (${response.status}): ${body}`)
-  }
 }
 
-async function querySql<T>(url: string, username: string, password: string, sql: string): Promise<T[]> {
-  const auth = Buffer.from(`${username}:${password}`).toString('base64')
-  const response = await fetch(url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(10_000),
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'text/plain',
-    },
-    body: `${sql}\nFORMAT JSONEachRow`,
-  })
-
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`ClickHouse query failed (${response.status}): ${body}`)
-  }
-
-  const body = await response.text()
-  const trimmed = body.trim()
-  if (trimmed.length === 0) return []
-  return trimmed
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as T)
+async function runSql(client: ClickHouseClient, sql: string): Promise<void> {
+  await client.command({ query: sql })
 }
 
-async function cleanupPrefixedObjects(env: LiveEnv, prefixes: Set<string>): Promise<void> {
+async function querySql<T>(client: ClickHouseClient, sql: string): Promise<T[]> {
+  const result = await client.query({
+    query: sql,
+    format: 'JSONEachRow',
+  })
+  return result.json<T>()
+}
+
+async function cleanupPrefixedObjects(client: ClickHouseClient, env: LiveEnv, prefixes: Set<string>): Promise<void> {
   if (prefixes.size === 0) return
 
   const dbLiteral = env.clickhouseDatabase.replace(/'/g, "''")
@@ -92,9 +75,7 @@ async function cleanupPrefixedObjects(env: LiveEnv, prefixes: Set<string>): Prom
   if (conditions.length === 0) return
 
   const rows = await querySql<{ name: string; engine: string }>(
-    env.clickhouseUrl,
-    env.clickhouseUser,
-    env.clickhousePassword,
+    client,
     `SELECT name, engine FROM system.tables WHERE database = '${dbLiteral}' AND (${conditions})`
   )
 
@@ -111,7 +92,7 @@ async function cleanupPrefixedObjects(env: LiveEnv, prefixes: Set<string>): Prom
     const db = quoteIdent(env.clickhouseDatabase)
     const table = quoteIdent(row.name)
     const stmt = row.engine === 'View' ? `DROP VIEW IF EXISTS ${db}.${table}` : `DROP TABLE IF EXISTS ${db}.${table}`
-    await runSql(env.clickhouseUrl, env.clickhouseUser, env.clickhousePassword, stmt)
+    await runSql(client, stmt)
   }
 }
 
@@ -141,15 +122,13 @@ async function sleep(ms: number): Promise<void> {
 }
 
 async function runSqlWithUnknownTableRetry(
-  url: string,
-  username: string,
-  password: string,
+  client: ClickHouseClient,
   sql: string,
   attempts = 5
 ): Promise<void> {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      await runSql(url, username, password, sql)
+      await runSql(client, sql)
       return
     } catch (error) {
       if (!isUnknownTableError(error) || attempt === attempts) throw error
@@ -216,18 +195,18 @@ async function createFixture(input: {
 describe('@chkit/cli drift depth env e2e', () => {
   const liveEnv = getRequiredEnv()
   const prefixes = new Set<string>()
+  const client = createClickHouseClient(liveEnv)
 
   beforeAll(async () => {
-    await runSql(
-      liveEnv.clickhouseUrl,
-      liveEnv.clickhouseUser,
-      liveEnv.clickhousePassword,
-      `CREATE DATABASE IF NOT EXISTS ${quoteIdent(liveEnv.clickhouseDatabase)}`
-    )
+    await runSql(client, `CREATE DATABASE IF NOT EXISTS ${quoteIdent(liveEnv.clickhouseDatabase)}`)
   })
 
   afterAll(async () => {
-    await cleanupPrefixedObjects(liveEnv, prefixes)
+    try {
+      await cleanupPrefixedObjects(client, liveEnv, prefixes)
+    } finally {
+      await client.close()
+    }
   })
 
   test(
@@ -254,15 +233,11 @@ describe('@chkit/cli drift depth env e2e', () => {
         }
 
         await runSqlWithUnknownTableRetry(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
+          client,
           `ALTER TABLE ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
         await runSql(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
+          client,
           `CREATE VIEW ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(manualView)} AS SELECT 1 AS one`
         )
 
@@ -385,9 +360,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         }
 
         await runSqlWithUnknownTableRetry(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
+          client,
           `ALTER TABLE ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
@@ -439,9 +412,7 @@ describe('@chkit/cli drift depth env e2e', () => {
         }
 
         await runSqlWithUnknownTableRetry(
-          liveEnv.clickhouseUrl,
-          liveEnv.clickhouseUser,
-          liveEnv.clickhousePassword,
+          client,
           `ALTER TABLE ${quoteIdent(liveEnv.clickhouseDatabase)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
