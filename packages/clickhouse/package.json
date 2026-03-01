@@ -28,7 +28,8 @@
       "default": "./dist/index.js"
     },
     "./e2e-testkit": {
-      "source": "./src/e2e-testkit.ts"
+      "bun": "./src/e2e-testkit.ts",
+      "default": "./src/e2e-testkit.ts"
     }
   },
   "files": [
