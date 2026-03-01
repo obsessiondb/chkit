@@ -41,9 +41,11 @@ export function runPayload(output: ExecuteBackfillRunOutput): {
   status: BackfillPlanStatus
   chunkCounts: BackfillStatusSummary['totals']
   attempts: number
+  rowsWritten: number
   runPath: string
   eventPath: string
   lastError?: string
+  noop?: boolean
 } {
   return {
     ok: output.status.status === 'completed',
@@ -52,9 +54,11 @@ export function runPayload(output: ExecuteBackfillRunOutput): {
     status: output.status.status,
     chunkCounts: output.status.totals,
     attempts: output.status.attempts,
+    rowsWritten: output.status.rowsWritten,
     runPath: output.runPath,
     eventPath: output.eventPath,
     lastError: output.status.lastError,
+    noop: output.noop,
   }
 }
 
@@ -65,6 +69,7 @@ export function statusPayload(summary: BackfillStatusSummary): {
   status: BackfillPlanStatus
   chunkCounts: BackfillStatusSummary['totals']
   attempts: number
+  rowsWritten: number
   runPath: string
   eventPath: string
   updatedAt: string
@@ -77,6 +82,7 @@ export function statusPayload(summary: BackfillStatusSummary): {
     status: summary.status,
     chunkCounts: summary.totals,
     attempts: summary.attempts,
+    rowsWritten: summary.rowsWritten,
     runPath: summary.runPath,
     eventPath: summary.eventPath,
     updatedAt: summary.updatedAt,

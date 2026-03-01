@@ -1,4 +1,5 @@
 import { dirname } from 'node:path'
+import { unlink } from 'node:fs/promises'
 
 import { loadSchemaDefinitions } from '@chkit/core'
 import type { ResolvedChxConfig } from '@chkit/core'
@@ -409,6 +410,7 @@ export async function buildBackfillPlan(input: {
   options: NormalizedBackfillPluginOptions
   chunkHours?: number
   forceLargeWindow?: boolean
+  force?: boolean
 }): Promise<BuildBackfillPlanOutput> {
   const chunkHours = input.chunkHours ?? input.options.defaults.chunkHours
   if (chunkHours * 60 < input.options.limits.minChunkMinutes) {
@@ -482,6 +484,14 @@ export async function buildBackfillPlan(input: {
     },
     policy: input.options.policy,
     limits: input.options.limits,
+  }
+
+  if (input.force) {
+    for (const filePath of [paths.planPath, paths.runPath, paths.eventPath]) {
+      await unlink(filePath).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== 'ENOENT') throw err
+      })
+    }
   }
 
   const existing = await readExistingPlan(paths.planPath)
