@@ -395,8 +395,16 @@ describe('@chkit/cli doppler env e2e', () => {
           )
         }
 
-        const check = runCli(fixture.dir, ['check', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(check.exitCode).toBe(0)
+        const check = await runCliWithRetry(
+          fixture.dir,
+          ['check', '--config', fixture.configPath, '--json'],
+          { maxAttempts: 5, delayMs: 1500, extraEnv: cliEnv }
+        )
+        if (check.exitCode !== 0) {
+          throw new Error(
+            `check --json failed (exit=${check.exitCode})\nstdout:\n${check.stdout}\nstderr:\n${check.stderr}`
+          )
+        }
         const checkPayload = JSON.parse(check.stdout) as {
           ok: boolean
           failedChecks: string[]
