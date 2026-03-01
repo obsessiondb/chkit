@@ -60,6 +60,7 @@ export interface BackfillPlanState {
   target: string
   createdAt: string
   status: BackfillPlanStatus
+  strategy?: 'table' | 'mv_replay'
   from: string
   to: string
   chunks: BackfillChunk[]

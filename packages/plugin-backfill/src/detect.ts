@@ -1,7 +1,7 @@
 import { dirname } from 'node:path'
 
 import { loadSchemaDefinitions } from '@chkit/core'
-import type { SchemaDefinition, TableDefinition } from '@chkit/core'
+import type { MaterializedViewDefinition, SchemaDefinition, TableDefinition } from '@chkit/core'
 
 import './table-config.js'
 import type { TimeColumnCandidate } from './types.js'
@@ -22,6 +22,23 @@ function isDateTimeType(type: string): boolean {
   if (type.startsWith('DateTime64(')) return true
   if (type.startsWith("DateTime('")) return true
   return false
+}
+
+export function findMvForTarget(
+  definitions: SchemaDefinition[],
+  database: string,
+  table: string
+): MaterializedViewDefinition | undefined {
+  for (const def of definitions) {
+    if (
+      def.kind === 'materialized_view' &&
+      def.to.database === database &&
+      def.to.name === table
+    ) {
+      return def
+    }
+  }
+  return undefined
 }
 
 export function findTableForTarget(

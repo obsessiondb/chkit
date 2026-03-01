@@ -1,5 +1,9 @@
+import { dirname } from 'node:path'
+
+import { loadSchemaDefinitions } from '@chkit/core'
 import type { ResolvedChxConfig } from '@chkit/core'
 
+import { findMvForTarget } from './detect.js'
 import { BackfillConfigError } from './errors.js'
 import {
   backfillPaths,
@@ -37,6 +41,13 @@ function ensureHoursWithinLimits(input: {
   }
 }
 
+function buildSettingsClause(token: string): string {
+  if (token) {
+    return `SETTINGS async_insert=0, insert_deduplication_token='${token}'`
+  }
+  return `SETTINGS async_insert=0`
+}
+
 function buildChunkSqlTemplate(chunk: {
   planId: string
   chunkId: string
@@ -45,14 +56,33 @@ function buildChunkSqlTemplate(chunk: {
   from: string
   to: string
   timeColumn: string
+  mvAsQuery?: string
 }): string {
+  const header = `/* chkit backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`
+  const settings = buildSettingsClause(chunk.token)
+
+  if (chunk.mvAsQuery) {
+    return [
+      header,
+      `INSERT INTO ${chunk.target}`,
+      `WITH _backfill_source AS (`,
+      `  ${chunk.mvAsQuery}`,
+      `)`,
+      `SELECT * FROM _backfill_source`,
+      `WHERE ${chunk.timeColumn} >= parseDateTimeBestEffort('${chunk.from}')`,
+      `  AND ${chunk.timeColumn} < parseDateTimeBestEffort('${chunk.to}')`,
+      settings,
+    ].join('\n')
+  }
+
   return [
-    `/* chkit backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`,
+    header,
     `INSERT INTO ${chunk.target}`,
     `SELECT *`,
     `FROM ${chunk.target}`,
-    `WHERE ${chunk.timeColumn} >= toDateTime('${chunk.from}')`,
-    `  AND ${chunk.timeColumn} < toDateTime('${chunk.to}');`,
+    `WHERE ${chunk.timeColumn} >= parseDateTimeBestEffort('${chunk.from}')`,
+    `  AND ${chunk.timeColumn} < parseDateTimeBestEffort('${chunk.to}')`,
+    settings,
   ].join('\n')
 }
 
@@ -64,6 +94,7 @@ function buildChunks(input: {
   chunkHours: number
   requireIdempotencyToken: boolean
   timeColumn: string
+  mvAsQuery?: string
 }): BackfillChunk[] {
   const fromMillis = new Date(input.from).getTime()
   const toMillis = new Date(input.to).getTime()
@@ -95,6 +126,7 @@ function buildChunks(input: {
         from: chunkFrom,
         to: chunkTo,
         timeColumn: input.timeColumn,
+        mvAsQuery: input.mvAsQuery,
       }),
     })
 
@@ -110,7 +142,7 @@ export async function buildBackfillPlan(input: {
   to: string
   timeColumn: string
   configPath: string
-  config: Pick<ResolvedChxConfig, 'metaDir'>
+  config: Pick<ResolvedChxConfig, 'metaDir' | 'schema'>
   options: NormalizedBackfillPluginOptions
   chunkHours?: number
   forceLargeWindow?: boolean
@@ -133,11 +165,31 @@ export async function buildBackfillPlan(input: {
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
   const paths = backfillPaths(stateDir, planId)
 
+  let strategy: 'table' | 'mv_replay' = 'table'
+  let mvAsQuery: string | undefined
+
+  const [database, table] = input.target.split('.')
+  if (database && table) {
+    try {
+      const definitions = await loadSchemaDefinitions(input.config.schema, {
+        cwd: dirname(input.configPath),
+      })
+      const mv = findMvForTarget(definitions, database, table)
+      if (mv) {
+        strategy = 'mv_replay'
+        mvAsQuery = mv.as
+      }
+    } catch {
+      // Schema load failed — fall back to plain table strategy
+    }
+  }
+
   const plan = {
     planId,
     target: input.target,
     createdAt: '1970-01-01T00:00:00.000Z',
     status: 'planned' as const,
+    strategy,
     from: input.from,
     to: input.to,
     chunks: buildChunks({
@@ -148,6 +200,7 @@ export async function buildBackfillPlan(input: {
       chunkHours,
       requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
       timeColumn: input.timeColumn,
+      mvAsQuery,
     }),
     options: {
       chunkHours,

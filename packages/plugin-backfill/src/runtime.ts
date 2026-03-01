@@ -120,6 +120,7 @@ async function executeChunk(input: {
   maxRetries: number
   runPath: string
   eventPath: string
+  execute?: (sql: string) => Promise<void>
   simulation?: {
     failChunkId?: string
     failCount?: number
@@ -148,23 +149,74 @@ async function executeChunk(input: {
       input.simulation?.failChunkId === input.chunk.id && input.chunk.attempts <= failureBudget
 
     if (!shouldSimulateFailure) {
-      input.chunk.status = 'done'
-      input.chunk.completedAt = nowIso()
-      input.chunk.lastError = undefined
+      let executionError: string | undefined
+      if (input.execute) {
+        try {
+          await input.execute(input.chunk.sqlTemplate)
+        } catch (error) {
+          executionError = error instanceof Error ? error.message : String(error)
+        }
+      }
+
+      if (!executionError) {
+        input.chunk.status = 'done'
+        input.chunk.completedAt = nowIso()
+        input.chunk.lastError = undefined
+
+        await persistRunAndEvent({
+          run: input.run,
+          runPath: input.runPath,
+          eventPath: input.eventPath,
+          event: {
+            type: 'chunk_done',
+            planId: input.run.planId,
+            chunkId: input.chunk.id,
+            attempt: input.chunk.attempts,
+          },
+        })
+
+        return { ok: true }
+      }
+
+      input.chunk.lastError = executionError
+
+      if (input.chunk.attempts >= input.maxRetries) {
+        input.chunk.status = 'failed'
+        input.run.status = 'failed'
+        input.run.lastError = executionError
+
+        await persistRunAndEvent({
+          run: input.run,
+          runPath: input.runPath,
+          eventPath: input.eventPath,
+          event: {
+            type: 'chunk_failed_retry_exhausted',
+            planId: input.run.planId,
+            chunkId: input.chunk.id,
+            attempt: input.chunk.attempts,
+            message: executionError,
+          },
+        })
+
+        return { ok: false, error: executionError }
+      }
+
+      input.chunk.status = 'pending'
 
       await persistRunAndEvent({
         run: input.run,
         runPath: input.runPath,
         eventPath: input.eventPath,
         event: {
-          type: 'chunk_done',
+          type: 'chunk_retry_scheduled',
           planId: input.run.planId,
           chunkId: input.chunk.id,
           attempt: input.chunk.attempts,
+          nextAttempt: input.chunk.attempts + 1,
         },
       })
 
-      return { ok: true }
+      continue
     }
 
     const errorMessage = `Simulated failure for chunk ${input.chunk.id} attempt ${input.chunk.attempts}`
@@ -221,6 +273,7 @@ async function executeRunLoop(input: {
     eventPath: string
   }
   execution: BackfillExecutionOptions
+  execute?: (sql: string) => Promise<void>
 }): Promise<ExecuteBackfillRunOutput> {
   const maxRetries = input.plan.options.maxRetriesPerChunk
 
@@ -287,6 +340,7 @@ async function executeRunLoop(input: {
       maxRetries,
       runPath: input.paths.runPath,
       eventPath: input.paths.eventPath,
+      execute: input.execute,
       simulation: input.execution.simulation,
     })
 
@@ -344,6 +398,7 @@ export async function executeBackfillRun(input: {
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
+  execute?: (sql: string) => Promise<void>
 }): Promise<ExecuteBackfillRunOutput> {
   const execution = input.execution ?? {}
   const { plan, stateDir } = await readPlan({
@@ -394,6 +449,7 @@ export async function executeBackfillRun(input: {
     run,
     paths,
     execution,
+    execute: input.execute,
   })
 }
 
@@ -403,6 +459,7 @@ export async function resumeBackfillRun(input: {
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
+  execute?: (sql: string) => Promise<void>
 }): Promise<ExecuteBackfillRunOutput> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
@@ -443,6 +500,7 @@ export async function resumeBackfillRun(input: {
     run,
     paths,
     execution: input.execution ?? {},
+    execute: input.execute,
   })
 }
 

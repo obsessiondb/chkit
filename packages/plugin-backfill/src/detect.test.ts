@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { table, materializedView } from '@chkit/core'
 import type { SchemaDefinition } from '@chkit/core'
 
-import { detectCandidatesFromTable, extractSchemaTimeColumn, findTableForTarget } from './detect.js'
+import { detectCandidatesFromTable, extractSchemaTimeColumn, findMvForTarget, findTableForTarget } from './detect.js'
 
 describe('@chkit/plugin-backfill detect', () => {
   test('finds DateTime column in ORDER BY as top candidate', () => {
@@ -232,5 +232,67 @@ describe('@chkit/plugin-backfill detect', () => {
     })
 
     expect(extractSchemaTimeColumn(def)).toBeUndefined()
+  })
+
+  test('findMvForTarget returns MV matching target to.database and to.name', () => {
+    const mv = materializedView({
+      database: 'app',
+      name: 'events_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT count() FROM app.events',
+    })
+    const definitions: SchemaDefinition[] = [
+      table({
+        database: 'app',
+        name: 'events_agg',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+      mv,
+    ]
+
+    const found = findMvForTarget(definitions, 'app', 'events_agg')
+
+    expect(found).toBeDefined()
+    expect(found!.name).toBe('events_mv')
+    expect(found!.as).toBe('SELECT count() FROM app.events')
+  })
+
+  test('findMvForTarget returns undefined when no MV targets the table', () => {
+    const definitions: SchemaDefinition[] = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    expect(findMvForTarget(definitions, 'app', 'events')).toBeUndefined()
+  })
+
+  test('findMvForTarget returns first MV when multiple target the same table', () => {
+    const mv1 = materializedView({
+      database: 'app',
+      name: 'hourly_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT toStartOfHour(ts) AS ts, count() AS c FROM app.events GROUP BY ts',
+    })
+    const mv2 = materializedView({
+      database: 'app',
+      name: 'daily_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT toStartOfDay(ts) AS ts, count() AS c FROM app.events GROUP BY ts',
+    })
+    const definitions: SchemaDefinition[] = [mv1, mv2]
+
+    const found = findMvForTarget(definitions, 'app', 'events_agg')
+
+    expect(found).toBeDefined()
+    expect(found!.name).toBe('hourly_mv')
   })
 })

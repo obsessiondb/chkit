@@ -41,6 +41,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*"
   }
 }
