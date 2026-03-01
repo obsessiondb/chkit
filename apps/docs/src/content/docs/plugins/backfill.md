@@ -170,6 +170,7 @@ Build a deterministic backfill plan and persist immutable plan state.
 | `--chunk-hours <n>` | No | Override chunk size (defaults to `defaults.chunkHours`) |
 | `--time-column <column>` | No | Time column for WHERE clause (auto-detected if omitted) |
 | `--force-large-window` | No | Allow windows exceeding `limits.maxWindowHours` |
+| `--force` | No | Delete existing plan and regenerate from scratch |
 
 ### `chkit plugin backfill run`
 
