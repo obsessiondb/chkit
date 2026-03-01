@@ -6,6 +6,7 @@ const DEFAULT_OPTIONS: NormalizedBackfillPluginOptions = {
     chunkHours: 6,
     maxParallelChunks: 1,
     maxRetriesPerChunk: 3,
+    retryDelayMs: 1000,
     requireIdempotencyToken: true,
   },
   policy: {
@@ -32,6 +33,14 @@ function parsePositiveNumber(value: unknown, key: string): number | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     throw new BackfillConfigError(`Invalid plugin option "${key}". Expected a positive number.`)
+  }
+  return value
+}
+
+function parseNonNegativeNumber(value: unknown, key: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new BackfillConfigError(`Invalid plugin option "${key}". Expected a non-negative number.`)
   }
   return value
 }
@@ -72,6 +81,7 @@ function normalizeRuntimeOptions(options: Record<string, unknown>): BackfillPlug
         options.defaults.maxRetriesPerChunk,
         'defaults.maxRetriesPerChunk'
       ),
+      retryDelayMs: parseNonNegativeNumber(options.defaults.retryDelayMs, 'defaults.retryDelayMs'),
       requireIdempotencyToken: parseBoolean(
         options.defaults.requireIdempotencyToken,
         'defaults.requireIdempotencyToken'
