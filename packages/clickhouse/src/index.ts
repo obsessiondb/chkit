@@ -74,6 +74,11 @@ export interface IntrospectedTable {
   ttl?: string
 }
 
+export interface ParsedSystemColumnType {
+  type: string
+  nullable?: boolean
+}
+
 export {
   parseEngineFromCreateTableQuery,
   parseOrderByFromCreateTableQuery,
@@ -92,38 +97,62 @@ export function inferSchemaKindFromEngine(engine: string): SchemaObjectRef['kind
   return 'table'
 }
 
+function unwrapTypeWrapper(type: string, wrapper: string): string | null {
+  const trimmed = type.trim()
+  const prefix = `${wrapper}(`
+  if (!trimmed.startsWith(prefix) || !trimmed.endsWith(')')) return null
+  return trimmed.slice(prefix.length, -1).trim()
+}
+
+export function parseSystemColumnType(type: string): ParsedSystemColumnType {
+  let normalizedType = type.trim()
+  let nullable = false
+
+  const outerNullable = unwrapTypeWrapper(normalizedType, 'Nullable')
+  if (outerNullable) {
+    normalizedType = outerNullable
+    nullable = true
+  }
+
+  const lowCardinality = unwrapTypeWrapper(normalizedType, 'LowCardinality')
+  if (lowCardinality) {
+    const lowCardinalityNullable = unwrapTypeWrapper(lowCardinality, 'Nullable')
+    if (lowCardinalityNullable) {
+      normalizedType = `LowCardinality(${lowCardinalityNullable})`
+      nullable = true
+    }
+  }
+
+  return {
+    type: normalizedType,
+    nullable: nullable || undefined,
+  }
+}
 
 function normalizeColumnFromSystemRow(row: SystemColumnRow): ColumnDefinition {
-  const nullableMatch = row.type.match(/^Nullable\((.+)\)$/)
-  const type = nullableMatch?.[1] ? nullableMatch[1] : row.type
-  const nullable = Boolean(nullableMatch?.[1])
+  const normalizedType = parseSystemColumnType(row.type)
   let defaultValue: ColumnDefinition['default'] | undefined
   if (row.default_expression && row.default_kind === 'DEFAULT') {
     defaultValue = normalizeSQLFragment(row.default_expression)
   }
   return {
     name: row.name,
-    type,
-    nullable: nullable || undefined,
+    type: normalizedType.type,
+    nullable: normalizedType.nullable,
     default: defaultValue,
     comment: row.comment?.trim() || undefined,
   }
 }
 
-function normalizeIndexType(value: string): SkipIndexDefinition['type'] {
-  if (value === 'minmax') return 'minmax'
-  if (value === 'set') return 'set'
-  if (value === 'bloom_filter') return 'bloom_filter'
-  if (value === 'tokenbf_v1') return 'tokenbf_v1'
-  if (value === 'ngrambf_v1') return 'ngrambf_v1'
-  return 'set'
+export function normalizeSkipIndexType(value: string): SkipIndexDefinition['type'] {
+  return value.trim()
 }
 
 function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefinition {
   return {
     name: row.name,
     expression: normalizeSQLFragment(row.expr),
-    type: normalizeIndexType(row.type),
+    type: normalizeSkipIndexType(row.type),
     granularity: row.granularity,
   }
 }

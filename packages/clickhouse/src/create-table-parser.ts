@@ -33,8 +33,13 @@ function extractCreateTableBody(createTableQuery: string | undefined): string | 
   let stringQuote = "'"
   for (let i = openIndex; i < left.length; i += 1) {
     const char = left[i]
+    const next = left[i + 1]
     if (!char) continue
     if (inString) {
+      if (char === stringQuote && next === stringQuote) {
+        i += 1
+        continue
+      }
       if (char === stringQuote && left[i - 1] !== '\\') {
         inString = false
       }

@@ -71,13 +71,22 @@ async function filterPendingByScope(
   migrationsDir: string,
   pending: string[],
   selectedTables: ReadonlySet<string>
-): Promise<string[]> {
+): Promise<{ files: string[]; warnings: string[] }> {
   const selectedDatabases = new Set([...selectedTables].map((table) => table.split('.')[0] ?? ''))
 
   const inScope: string[] = []
+  const warnings: string[] = []
   for (const file of pending) {
     const sql = await readFile(join(migrationsDir, file), 'utf8')
     const operations = extractMigrationOperationSummaries(sql)
+    if (operations.length === 0) {
+      inScope.push(file)
+      warnings.push(
+        `Migration "${file}" has no operation metadata comments; included in scoped run as a safety fallback.`
+      )
+      continue
+    }
+
     const matches = operations.some((operation) => {
       const tableKey = tableKeyFromOperationKey(operation.key)
       if (tableKey) return selectedTables.has(tableKey)
@@ -91,7 +100,11 @@ async function filterPendingByScope(
     if (matches) inScope.push(file)
   }
 
-  return inScope
+  return { files: inScope, warnings }
+}
+
+export const __testUtils = {
+  filterPendingByScope,
 }
 
 async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
@@ -161,9 +174,10 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
       return
     }
 
-    const pending = tableScope.enabled
+    const scopedSelection = tableScope.enabled
       ? await filterPendingByScope(migrationsDir, pendingAll, new Set(tableScope.matchedTables))
-      : pendingAll
+      : { files: pendingAll, warnings: [] }
+    const pending = scopedSelection.files
 
     if (pending.length === 0) {
       if (jsonMode) {
@@ -172,9 +186,13 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
           scope: tableScope,
           pending: [],
           applied: [],
+          warnings: scopedSelection.warnings.length > 0 ? scopedSelection.warnings : undefined,
         })
       } else {
         console.log('No pending migrations.')
+        for (const warning of scopedSelection.warnings) {
+          console.warn(`Warning: ${warning}`)
+        }
       }
       return
     }
@@ -186,7 +204,10 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
     }
 
     if (jsonMode && !executeRequested) {
-      emitJson('migrate', planned)
+      emitJson('migrate', {
+        ...planned,
+        warnings: scopedSelection.warnings.length > 0 ? scopedSelection.warnings : undefined,
+      })
       return
     }
 
@@ -197,6 +218,9 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
       }
       console.log(`Pending migrations: ${pending.length}`)
       for (const file of pending) console.log(`- ${file}`)
+      for (const warning of scopedSelection.warnings) {
+        console.warn(`Warning: ${warning}`)
+      }
     }
 
     let shouldExecute = executeRequested
@@ -315,6 +339,7 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
         mode: 'execute',
         scope: tableScope,
         applied: appliedNow,
+        warnings: scopedSelection.warnings.length > 0 ? scopedSelection.warnings : undefined,
       })
       return
     }

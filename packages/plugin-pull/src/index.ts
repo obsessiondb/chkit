@@ -298,9 +298,13 @@ async function pullSchema(input: {
 
   if (usesDefaultIntrospector || selectedDatabases.length === 0) {
     const db = createClickHouseExecutor(input.config.clickhouse)
-    objects = await db.listSchemaObjects()
-    if (selectedDatabases.length === 0) {
-      selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+    try {
+      objects = await db.listSchemaObjects()
+      if (selectedDatabases.length === 0) {
+        selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+      }
+    } finally {
+      await db.close()
     }
   }
 
@@ -329,12 +333,16 @@ async function defaultIntrospector(input: {
   databases: string[]
 }): Promise<IntrospectedObject[]> {
   const db = createClickHouseExecutor(input.config)
-  const tables = await db.listTableDetails(input.databases)
-  const nonTableRows = await listNonTableRows(db, input.databases)
-  const nonTableObjects = nonTableRows
-    .map(mapSystemTableRowToDefinition)
-    .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)
-  return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
+  try {
+    const tables = await db.listTableDetails(input.databases)
+    const nonTableRows = await listNonTableRows(db, input.databases)
+    const nonTableObjects = nonTableRows
+      .map(mapSystemTableRowToDefinition)
+      .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)
+    return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
+  } finally {
+    await db.close()
+  }
 }
 
 function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefinition {

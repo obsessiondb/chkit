@@ -21,6 +21,18 @@ import type {
   NormalizedBackfillPluginOptions,
 } from './types.js'
 
+const SIMPLE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function formatIdentifier(value: string): string {
+  const trimmed = value.trim()
+  if (SIMPLE_IDENTIFIER.test(trimmed)) return trimmed
+  return `\`${trimmed.replace(/`/g, '``')}\``
+}
+
+function formatQualifiedName(database: string, name: string): string {
+  return `${formatIdentifier(database)}.${formatIdentifier(name)}`
+}
+
 function ensureHoursWithinLimits(input: {
   from: string
   to: string
@@ -48,6 +60,12 @@ function buildSettingsClause(token: string): string {
   return `SETTINGS async_insert=0`
 }
 
+function formatTargetReference(target: string): string {
+  const [database, table, ...rest] = target.split('.')
+  if (!database || !table || rest.length > 0) return target
+  return formatQualifiedName(database, table)
+}
+
 /**
  * Inject a time-range filter directly into a SQL query.
  *
@@ -72,19 +90,79 @@ export function injectTimeFilter(
   type KWHit = { keyword: string; position: number }
   const hits: KWHit[] = []
   let depth = 0
+  let inSingleQuote = false
+  let inDoubleQuote = false
+  let inBacktick = false
+  let inLineComment = false
+  let inBlockComment = false
 
   for (let i = 0; i < trimmed.length; i++) {
     const ch = trimmed[i]
-    if (ch === '(') { depth++; continue }
-    if (ch === ')') { depth--; continue }
-    if (ch === "'") {
-      i++
-      while (i < trimmed.length && trimmed[i] !== "'") {
-        if (trimmed[i] === '\\') i++
-        i++
+    const next = trimmed[i + 1]
+    if (!ch) continue
+
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false
+      continue
+    }
+
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false
+        i += 1
       }
       continue
     }
+
+    if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
+      if (ch === '-' && next === '-') {
+        inLineComment = true
+        i += 1
+        continue
+      }
+      if (ch === '/' && next === '*') {
+        inBlockComment = true
+        i += 1
+        continue
+      }
+    }
+
+    if (inSingleQuote) {
+      if (ch === "'" && next === "'") {
+        i += 1
+        continue
+      }
+      if (ch === "'") inSingleQuote = false
+      continue
+    }
+    if (inDoubleQuote) {
+      if (ch === '"' && next === '"') {
+        i += 1
+        continue
+      }
+      if (ch === '"') inDoubleQuote = false
+      continue
+    }
+    if (inBacktick) {
+      if (ch === '`') inBacktick = false
+      continue
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true
+      continue
+    }
+    if (ch === '"') {
+      inDoubleQuote = true
+      continue
+    }
+    if (ch === '`') {
+      inBacktick = true
+      continue
+    }
+
+    if (ch === '(') { depth++; continue }
+    if (ch === ')') { depth = Math.max(0, depth - 1); continue }
     if (depth !== 0) continue
 
     // Must be preceded by whitespace or be at start
@@ -131,20 +209,21 @@ function buildChunkSqlTemplate(chunk: {
 }): string {
   const header = `/* chkit backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`
   const settings = buildSettingsClause(chunk.token)
+  const formattedTarget = formatTargetReference(chunk.target)
 
   if (chunk.mvAsQuery) {
     const filtered = injectTimeFilter(chunk.mvAsQuery, chunk.timeColumn, chunk.from, chunk.to)
     const insertClause = chunk.targetColumns?.length
-      ? `INSERT INTO ${chunk.target} (${chunk.targetColumns.join(', ')})`
-      : `INSERT INTO ${chunk.target}`
+      ? `INSERT INTO ${formattedTarget} (${chunk.targetColumns.map((name) => formatIdentifier(name)).join(', ')})`
+      : `INSERT INTO ${formattedTarget}`
     return [header, insertClause, filtered, settings].join('\n')
   }
 
   return [
     header,
-    `INSERT INTO ${chunk.target}`,
+    `INSERT INTO ${formattedTarget}`,
     `SELECT *`,
-    `FROM ${chunk.target}`,
+    `FROM ${formattedTarget}`,
     `WHERE ${chunk.timeColumn} >= parseDateTimeBestEffort('${chunk.from}')`,
     `  AND ${chunk.timeColumn} < parseDateTimeBestEffort('${chunk.to}')`,
     settings,
