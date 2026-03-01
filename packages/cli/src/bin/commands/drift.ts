@@ -1,9 +1,9 @@
 import { join } from 'node:path'
 
-import { createClickHouseExecutor } from '@chkit/clickhouse'
 import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
 
 import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { withClickHouseExecutor } from '../clickhouse-resource.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
 import {
   compareSchemaObjects,
@@ -44,63 +44,64 @@ export async function buildDriftPayload(
   const selectedTables =
     scope?.enabled && scope.matchCount > 0 ? new Set(scope.matchedTables) : undefined
   if (!config.clickhouse) throw new Error('clickhouse config is required for drift checks')
-  const db = createClickHouseExecutor(config.clickhouse)
-  const actualObjects = await db.listSchemaObjects()
-  const expectedObjects = snapshot.definitions
-    .filter((def) => {
+  return withClickHouseExecutor(config.clickhouse, async (db) => {
+    const actualObjects = await db.listSchemaObjects()
+    const expectedObjects = snapshot.definitions
+      .filter((def) => {
+        if (!selectedTables) return true
+        if (def.kind !== 'table') return true
+        return selectedTables.has(`${def.database}.${def.name}`)
+      })
+      .map((def) => ({
+        kind: def.kind,
+        database: def.database,
+        name: def.name,
+      }))
+    const expectedDatabases = new Set(expectedObjects.map((def) => def.database))
+    const actualInScope = actualObjects.filter((item) => expectedDatabases.has(item.database))
+
+    const { missing, extra, kindMismatches, objectDrift } = compareSchemaObjects(
+      expectedObjects,
+      actualInScope
+    )
+
+    const expectedTables = snapshot.definitions.filter((def): def is TableDefinition => {
+      if (def.kind !== 'table') return false
       if (!selectedTables) return true
-      if (def.kind !== 'table') return true
       return selectedTables.has(`${def.database}.${def.name}`)
     })
-    .map((def) => ({
-      kind: def.kind,
-      database: def.database,
-      name: def.name,
-    }))
-  const expectedDatabases = new Set(expectedObjects.map((def) => def.database))
-  const actualInScope = actualObjects.filter((item) => expectedDatabases.has(item.database))
+    const expectedTableMap = new Map(
+      expectedTables.map((table) => [`${table.database}.${table.name}`, table])
+    )
+    const actualTables = await db.listTableDetails([...expectedDatabases])
+    const tableDrift = actualTables
+      .map((actual) => {
+        const expected = expectedTableMap.get(`${actual.database}.${actual.name}`)
+        if (!expected) return null
+        return compareTableShape(expected, actual)
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((a, b) => a.table.localeCompare(b.table))
 
-  const { missing, extra, kindMismatches, objectDrift } = compareSchemaObjects(
-    expectedObjects,
-    actualInScope
-  )
-
-  const expectedTables = snapshot.definitions.filter((def): def is TableDefinition => {
-    if (def.kind !== 'table') return false
-    if (!selectedTables) return true
-    return selectedTables.has(`${def.database}.${def.name}`)
+    const drifted =
+      missing.length > 0 ||
+      extra.length > 0 ||
+      kindMismatches.length > 0 ||
+      objectDrift.length > 0 ||
+      tableDrift.length > 0
+    return {
+      scope,
+      snapshotFile: join(metaDir, 'snapshot.json'),
+      expectedCount: expectedObjects.length,
+      actualCount: actualInScope.length,
+      drifted,
+      missing,
+      extra,
+      kindMismatches,
+      objectDrift,
+      tableDrift,
+    }
   })
-  const expectedTableMap = new Map(
-    expectedTables.map((table) => [`${table.database}.${table.name}`, table])
-  )
-  const actualTables = await db.listTableDetails([...expectedDatabases])
-  const tableDrift = actualTables
-    .map((actual) => {
-      const expected = expectedTableMap.get(`${actual.database}.${actual.name}`)
-      if (!expected) return null
-      return compareTableShape(expected, actual)
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null)
-    .sort((a, b) => a.table.localeCompare(b.table))
-
-  const drifted =
-    missing.length > 0 ||
-    extra.length > 0 ||
-    kindMismatches.length > 0 ||
-    objectDrift.length > 0 ||
-    tableDrift.length > 0
-  return {
-    scope,
-    snapshotFile: join(metaDir, 'snapshot.json'),
-    expectedCount: expectedObjects.length,
-    actualCount: actualInScope.length,
-    drifted,
-    missing,
-    extra,
-    kindMismatches,
-    objectDrift,
-    tableDrift,
-  }
 }
 
 async function cmdDrift(ctx: CommandRunContext): Promise<void> {

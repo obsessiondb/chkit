@@ -4,7 +4,6 @@ import { dirname, join, resolve } from 'node:path'
 
 import {
   createClickHouseExecutor,
-  inferSchemaKindFromEngine,
   type IntrospectedTable,
 } from '@chkit/clickhouse'
 import {
@@ -19,9 +18,17 @@ import {
   splitTopLevelComma,
   type TableDefinition,
   typedFlags,
-  type ViewDefinition,
   wrapPluginRun,
 } from '@chkit/core'
+export { renderSchemaFile } from './render-schema.js'
+import { renderSchemaFile } from './render-schema.js'
+import {
+  mapSystemTableRowToDefinition,
+  parseAsClause,
+  parseToClause,
+  type IntrospectedObject,
+  type SystemTableRow,
+} from './view-parser.js'
 
 export interface PullPluginOptions {
   outFile?: string
@@ -90,12 +97,6 @@ interface PullSchemaResult {
   skippedObjects: Array<{ kind: string; count: number }>
   content: string
 }
-
-type IntrospectedObject =
-  | ({ kind: 'table' } & IntrospectedTable)
-  | ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as'>)
-  | ({ kind: 'materialized_view' } & Pick<MaterializedViewDefinition, 'database' | 'name' | 'to' | 'as'>)
-  | IntrospectedTable
 
 const DEFAULT_OPTIONS: Required<Omit<PullPluginOptions, 'introspect'>> = {
   outFile: './src/db/schema/pulled.ts',
@@ -433,13 +434,6 @@ function normalizeWrappedTuple(input: string): string {
   return trimmed.slice(1, -1).trim()
 }
 
-interface SystemTableRow {
-  database: string
-  name: string
-  engine: string
-  create_table_query?: string
-}
-
 async function listNonTableRows(
   db: ReturnType<typeof createClickHouseExecutor>,
   databases: string[]
@@ -455,200 +449,11 @@ WHERE is_temporary = 0
   )
 }
 
-function mapSystemTableRowToDefinition(
-  row: SystemTableRow
-): Exclude<IntrospectedObject, IntrospectedTable> | null {
-  const kind = inferSchemaKindFromEngine(row.engine)
-  if (kind === 'view') {
-    const as = parseAsClause(row.create_table_query)
-    if (!as) return null
-    return { kind: 'view', database: row.database, name: row.name, as }
-  }
-  if (kind === 'materialized_view') {
-    const as = parseAsClause(row.create_table_query)
-    const to = parseToClause(row.create_table_query, row.database)
-    if (!as || !to) return null
-    return { kind: 'materialized_view', database: row.database, name: row.name, to, as }
-  }
-  return null
-}
-
-function parseAsClause(query: string | undefined): string | null {
-  if (!query) return null
-  const match = /\bAS\b([\s\S]*)$/i.exec(query)
-  if (!match?.[1]) return null
-  const asClause = match[1].trim().replace(/;$/, '').trim()
-  return asClause.length > 0 ? asClause : null
-}
-
-function parseToClause(
-  query: string | undefined,
-  fallbackDatabase: string
-): { database: string; name: string } | null {
-  if (!query) return null
-  const identifier = /(?:^|\s)TO\s+((?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)(?:\.(?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+))?)/i.exec(
-    query
-  )?.[1]
-  if (!identifier) return null
-  const parts = identifier.split('.').map((part) => part.replace(/^[`"]|[`"]$/g, '').trim())
-  if (parts.length === 1) {
-    const name = parts[0] ?? ''
-    if (name.length === 0) return null
-    return { database: fallbackDatabase, name }
-  }
-  if (parts.length === 2) {
-    const database = parts[0] ?? fallbackDatabase
-    const name = parts[1] ?? ''
-    if (database.length === 0 || name.length === 0) return null
-    return { database, name }
-  }
-  return null
-}
-
 export const __testUtils = {
   summarizeSkippedObjects,
   parseAsClause,
   parseToClause,
   mapSystemTableRowToDefinition,
-}
-
-export function renderSchemaFile(definitions: SchemaDefinition[]): string {
-  const canonical = canonicalizeDefinitions(definitions)
-  const declarationNames = new Map<string, number>()
-  const hasTable = canonical.some((definition) => definition.kind === 'table')
-  const hasView = canonical.some((definition) => definition.kind === 'view')
-  const hasMaterializedView = canonical.some((definition) => definition.kind === 'materialized_view')
-  const imports = ['schema']
-  if (hasTable) imports.push('table')
-  if (hasView) imports.push('view')
-  if (hasMaterializedView) imports.push('materializedView')
-  const lines: string[] = [
-    `import { ${imports.join(', ')} } from '@chkit/core'`,
-    '',
-    '// Pulled from live ClickHouse metadata via chkit plugin pull schema',
-    '',
-  ]
-
-  const references: string[] = []
-
-  for (const definition of canonical) {
-    const variableName = resolveTableVariableName(definition.database, definition.name, declarationNames)
-    references.push(variableName)
-
-    if (definition.kind === 'table') {
-      lines.push(`const ${variableName} = table({`)
-      lines.push(`  database: ${renderString(definition.database)},`)
-      lines.push(`  name: ${renderString(definition.name)},`)
-      lines.push(`  engine: ${renderString(definition.engine)},`)
-      lines.push('  columns: [')
-
-      for (const column of definition.columns) {
-        const parts: string[] = [
-          `name: ${renderString(column.name)}`,
-          `type: ${renderString(column.type)}`,
-        ]
-        if (column.nullable) parts.push('nullable: true')
-        if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
-        if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
-        lines.push(`    { ${parts.join(', ')} },`)
-      }
-
-      lines.push('  ],')
-      lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
-      lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
-      if (definition.uniqueKey && definition.uniqueKey.length > 0) {
-        lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
-      }
-      if (definition.partitionBy) {
-        lines.push(`  partitionBy: ${renderString(definition.partitionBy)},`)
-      }
-      if (definition.ttl) {
-        lines.push(`  ttl: ${renderString(definition.ttl)},`)
-      }
-      if (definition.settings && Object.keys(definition.settings).length > 0) {
-        lines.push('  settings: {')
-        for (const key of Object.keys(definition.settings).sort()) {
-          const value = definition.settings[key]
-          if (value === undefined) continue
-          lines.push(`    ${renderKey(key)}: ${renderLiteral(value)},`)
-        }
-        lines.push('  },')
-      }
-      if (definition.indexes && definition.indexes.length > 0) {
-        lines.push('  indexes: [')
-        for (const index of definition.indexes) {
-          lines.push(
-            `    { name: ${renderString(index.name)}, expression: ${renderString(index.expression)}, type: ${renderString(index.type)}, granularity: ${index.granularity} },`
-          )
-        }
-        lines.push('  ],')
-      }
-      if (definition.projections && definition.projections.length > 0) {
-        lines.push('  projections: [')
-        for (const projection of definition.projections) {
-          lines.push(
-            `    { name: ${renderString(projection.name)}, query: ${renderString(projection.query)} },`
-          )
-        }
-        lines.push('  ],')
-      }
-      lines.push('})')
-    } else if (definition.kind === 'view') {
-      lines.push(`const ${variableName} = view({`)
-      lines.push(`  database: ${renderString(definition.database)},`)
-      lines.push(`  name: ${renderString(definition.name)},`)
-      lines.push(`  as: ${renderString(definition.as)},`)
-      lines.push('})')
-    } else {
-      lines.push(`const ${variableName} = materializedView({`)
-      lines.push(`  database: ${renderString(definition.database)},`)
-      lines.push(`  name: ${renderString(definition.name)},`)
-      lines.push(`  to: { database: ${renderString(definition.to.database)}, name: ${renderString(definition.to.name)} },`)
-      lines.push(`  as: ${renderString(definition.as)},`)
-      lines.push('})')
-    }
-    lines.push('')
-  }
-
-  lines.push(`export default schema(${references.join(', ')})`)
-  return `${lines.join('\n')}\n`
-}
-
-function resolveTableVariableName(
-  database: string,
-  name: string,
-  counts: Map<string, number>
-): string {
-  const base = sanitizeIdentifier(`${database}_${name}`)
-  const current = counts.get(base) ?? 0
-  const next = current + 1
-  counts.set(base, next)
-  return next === 1 ? base : `${base}_${next}`
-}
-
-function sanitizeIdentifier(value: string): string {
-  const sanitized = value.replace(/[^a-zA-Z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '')
-  if (sanitized.length === 0) return 'table_ref'
-  if (/^[0-9]/.test(sanitized)) return `table_${sanitized}`
-  return sanitized
-}
-
-function renderString(value: string): string {
-  return JSON.stringify(value)
-}
-
-function renderStringArray(values: string[]): string {
-  return `[${values.map((value) => renderString(value)).join(', ')}]`
-}
-
-function renderLiteral(value: string | number | boolean): string {
-  if (typeof value === 'string') return renderString(value)
-  return String(value)
-}
-
-function renderKey(value: string): string {
-  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(value)) return value
-  return renderString(value)
 }
 
 async function writeSchemaFile(input: {
