@@ -92,12 +92,14 @@ async function runCliWithRetry(
     maxAttempts = 5,
     delayMs = 2000,
     extraEnv = {},
-  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
+    validate,
+  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string>; validate?: (result: { exitCode: number; stdout: string; stderr: string }) => boolean } = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const expectJson = args.includes('--json')
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = runCli(cwd, args, extraEnv)
-    if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
+    const ok = result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))
+    if (ok && (!validate || validate(result))) return result
     if (attempt === maxAttempts) return result
     await new Promise((r) => setTimeout(r, delayMs))
   }
@@ -213,7 +215,13 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(executePayload.mode).toBe('execute')
         expect(executePayload.applied.length).toBe(1)
 
-        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
+        const statusResult = await runCliWithRetry(fixture.dir, ['status', '--config', fixture.configPath, '--json'], {
+          extraEnv: cliEnv,
+          validate: (r) => {
+            const p = JSON.parse(r.stdout) as { applied: number }
+            return p.applied > 0
+          },
+        })
         expect(statusResult.exitCode).toBe(0)
         const statusPayload = JSON.parse(statusResult.stdout) as {
           total: number
@@ -313,7 +321,13 @@ describe('@chkit/cli doppler env e2e', () => {
         }
         expect(secondExecute.exitCode).toBe(0)
 
-        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
+        const statusResult = await runCliWithRetry(fixture.dir, ['status', '--config', fixture.configPath, '--json'], {
+          extraEnv: cliEnv,
+          validate: (r) => {
+            const p = JSON.parse(r.stdout) as { applied: number }
+            return p.applied >= 2
+          },
+        })
         expect(statusResult.exitCode).toBe(0)
         const statusPayload = JSON.parse(statusResult.stdout) as {
           total: number
