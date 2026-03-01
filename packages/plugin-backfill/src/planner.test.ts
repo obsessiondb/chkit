@@ -241,6 +241,67 @@ export const events_mv = {
     }
   })
 
+  test('MV replay INSERT includes explicit column list from target table', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+
+    try {
+      await writeFile(
+        schemaPath,
+        `export const sessions = {
+  kind: 'table',
+  database: 'app',
+  name: 'session_analytics',
+  columns: [
+    { name: 'session_date', type: 'Date' },
+    { name: 'session_id', type: 'String' },
+    { name: 'skills', type: 'Array(String)' },
+    { name: 'slash_commands', type: 'Array(String)' },
+    { name: 'ingested_at', type: 'DateTime' },
+  ],
+  engine: 'MergeTree',
+  primaryKey: ['session_date'],
+  orderBy: ['session_date', 'session_id'],
+}
+export const sessions_mv = {
+  kind: 'materialized_view',
+  database: 'app',
+  name: 'sessions_mv',
+  to: { database: 'app', name: 'session_analytics' },
+  as: "SELECT *, extractAll(content, 'skill') AS skills, extractAll(content, 'cmd') AS slash_commands FROM app.raw_sessions",
+}
+`
+      )
+
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({})
+
+      const output = await buildBackfillPlan({
+        target: 'app.session_analytics',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'session_date',
+        configPath,
+        config,
+        options,
+      })
+
+      expect(output.plan.strategy).toBe('mv_replay')
+
+      const chunk = output.plan.chunks[0]
+      // INSERT must include explicit column list to avoid positional mismatch
+      expect(chunk?.sqlTemplate).toContain(
+        'INSERT INTO app.session_analytics (session_date, session_id, skills, slash_commands, ingested_at)'
+      )
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test('omits insert_deduplication_token when requireIdempotencyToken is false', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
