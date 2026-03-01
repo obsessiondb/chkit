@@ -86,6 +86,7 @@ export interface BackfillRunChunkState {
   startedAt?: string
   completedAt?: string
   lastError?: string
+  rowsWritten?: number
 }
 
 export interface BackfillRunState {
@@ -117,6 +118,7 @@ export interface BackfillStatusSummary {
     skipped: number
   }
   attempts: number
+  rowsWritten: number
   updatedAt: string
   runPath: string
   eventPath: string
@@ -197,6 +199,7 @@ export interface ExecuteBackfillRunOutput {
   status: BackfillStatusSummary
   runPath: string
   eventPath: string
+  noop?: boolean
 }
 
 export interface BackfillPluginCommandContext {
@@ -257,6 +260,7 @@ export interface ParsedPlanArgs {
   chunkHours?: number
   timeColumn?: string
   forceLargeWindow: boolean
+  force: boolean
 }
 
 export interface ParsedRunArgs {
