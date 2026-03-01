@@ -14,6 +14,7 @@
     "test": {
       "dependsOn": ["^build"],
       "passThroughEnv": [
+        "CLICKHOUSE_DB",
         "CLICKHOUSE_HOST",
         "CLICKHOUSE_PASSWORD",
         "CLICKHOUSE_URL",

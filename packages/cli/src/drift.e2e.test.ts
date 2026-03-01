@@ -1,132 +1,22 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { createClient, type ClickHouseClient } from '@clickhouse/client'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
-const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
-const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
-
-interface LiveEnv {
-  clickhouseUrl: string
-  clickhouseUser: string
-  clickhousePassword: string
-  clickhouseDatabase: string
-}
-
-function getRequiredEnv(): LiveEnv {
-  const clickhouseHost = process.env.CLICKHOUSE_HOST?.trim()
-  const clickhouseUrl =
-    process.env.CLICKHOUSE_URL?.trim() || (clickhouseHost ? `https://${clickhouseHost}` : '')
-  const clickhouseUser = process.env.CLICKHOUSE_USER?.trim() || 'default'
-  const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
-  const clickhouseDatabase = process.env.CLICKHOUSE_DB?.trim() || 'default'
-
-  if (!clickhouseUrl) {
-    throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
-  }
-
-  if (!clickhousePassword) {
-    throw new Error('Missing CLICKHOUSE_PASSWORD')
-  }
-
-  return { clickhouseUrl, clickhouseUser, clickhousePassword, clickhouseDatabase }
-}
-
-function quoteIdent(value: string): string {
-  return `\`${value.replace(/`/g, '``')}\``
-}
-
-function createClickHouseClient(env: LiveEnv): ClickHouseClient {
-  return createClient({
-    url: env.clickhouseUrl,
-    username: env.clickhouseUser,
-    password: env.clickhousePassword,
-    database: env.clickhouseDatabase,
-    request_timeout: 10_000,
-    clickhouse_settings: {
-      wait_end_of_query: 1,
-      async_insert: 0,
-    },
-  })
-}
-
-async function runSql(client: ClickHouseClient, sql: string): Promise<void> {
-  await client.command({ query: sql })
-}
-
-function runCli(
-  cwd: string,
-  args: string[],
-  extraEnv: Record<string, string> = {}
-): { exitCode: number; stdout: string; stderr: string } {
-  const result = Bun.spawnSync({
-    cmd: ['bun', CLI_ENTRY, ...args],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: { ...process.env, ...extraEnv },
-  })
-
-  return {
-    exitCode: result.exitCode,
-    stdout: new TextDecoder().decode(result.stdout),
-    stderr: new TextDecoder().decode(result.stderr),
-  }
-}
-
-function isUnknownTableError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  return error.message.includes('UNKNOWN_TABLE')
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms))
-}
-
-async function runSqlWithUnknownTableRetry(
-  client: ClickHouseClient,
-  sql: string,
-  attempts = 5
-): Promise<void> {
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      await runSql(client, sql)
-      return
-    } catch (error) {
-      if (!isUnknownTableError(error) || attempt === attempts) throw error
-      await sleep(attempt * 200)
-    }
-  }
-}
-
-async function runCliWithRetry(
-  cwd: string,
-  args: string[],
-  {
-    maxAttempts = 5,
-    delayMs = 2000,
-    extraEnv = {},
-  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {},
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = runCli(cwd, args, extraEnv)
-    if (result.exitCode === 0) return result
-    if (attempt === maxAttempts) return result
-    await sleep(delayMs)
-  }
-  return runCli(cwd, args, extraEnv)
-}
-
-function createPrefix(label: string): string {
-  return `chkit_e2e_drift_${label}_${Date.now()}_${Math.floor(Math.random() * 100000)}_`
-}
-
-function createJournalTableName(label: string): string {
-  const runTag = process.env.GITHUB_RUN_ID?.trim() || `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-  return `_chkit_migrations_drift_${label}_${runTag}`
-}
+import {
+  CORE_ENTRY,
+  createJournalTableName,
+  createLiveClient,
+  createPrefix,
+  formatTestDiagnostic,
+  getRequiredEnv,
+  quoteIdent,
+  runCli,
+  runCliWithRetry,
+  runSql,
+  waitForColumn,
+  waitForTable,
+} from './e2e-testkit.js'
 
 function renderBaseSchema(database: string, usersTableName: string): string {
   return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
@@ -167,7 +57,7 @@ async function createFixture(input: {
 
 describe('@chkit/cli drift depth env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const client = createClickHouseClient(liveEnv)
+  const client = createLiveClient(liveEnv)
 
   afterAll(async () => {
     await client.close()
@@ -177,9 +67,9 @@ describe('@chkit/cli drift depth env e2e', () => {
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {
       const database = liveEnv.clickhouseDatabase
-      const journalTable = createJournalTableName('manual')
+      const journalTable = createJournalTableName('drift_manual')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-      const prefix = createPrefix('manual')
+      const prefix = createPrefix('drift_manual')
       const usersTable = `${prefix}users`
       const manualView = `${prefix}manual_view`
       const fixture = await createFixture({
@@ -197,15 +87,20 @@ describe('@chkit/cli drift depth env e2e', () => {
           { extraEnv: cliEnv }
         )
         if (executed.exitCode !== 0) {
-          throw new Error(
-            `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
         }
 
-        await runSqlWithUnknownTableRetry(
+        // Wait for the table to be visible before altering it
+        await waitForTable(client, database, usersTable)
+
+        await runSql(
           client,
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
+
+        // Wait for the column to propagate (ClickHouse Cloud DDL is eventually consistent)
+        await waitForColumn(client, database, usersTable, 'rogue')
+
         await runSql(
           client,
           `CREATE VIEW ${quoteIdent(database)}.${quoteIdent(manualView)} AS SELECT 1 AS one`
@@ -253,9 +148,9 @@ describe('@chkit/cli drift depth env e2e', () => {
     'detects unique-key and projection drift reasons and exposes them in check summary',
     async () => {
       const database = liveEnv.clickhouseDatabase
-      const journalTable = createJournalTableName('keys')
+      const journalTable = createJournalTableName('drift_keys')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-      const prefix = createPrefix('keys')
+      const prefix = createPrefix('drift_keys')
       const usersTable = `${prefix}users`
       const fixture = await createFixture({
         database,
@@ -272,9 +167,7 @@ describe('@chkit/cli drift depth env e2e', () => {
           { extraEnv: cliEnv }
         )
         if (executed.exitCode !== 0) {
-          throw new Error(
-            `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
         }
 
         await writeFile(
@@ -318,9 +211,9 @@ describe('@chkit/cli drift depth env e2e', () => {
     'respects failOnDrift=false policy when drift exists',
     async () => {
       const database = liveEnv.clickhouseDatabase
-      const journalTable = createJournalTableName('policy')
+      const journalTable = createJournalTableName('drift_policy')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-      const prefix = createPrefix('policy')
+      const prefix = createPrefix('drift_policy')
       const usersTable = `${prefix}users`
       const fixture = await createFixture({
         database,
@@ -337,15 +230,17 @@ describe('@chkit/cli drift depth env e2e', () => {
           { extraEnv: cliEnv }
         )
         if (executed.exitCode !== 0) {
-          throw new Error(
-            `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
         }
 
-        await runSqlWithUnknownTableRetry(
+        await waitForTable(client, database, usersTable)
+
+        await runSql(
           client,
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
+
+        await waitForColumn(client, database, usersTable, 'rogue')
 
         await writeFile(
           fixture.configPath,
@@ -378,9 +273,9 @@ describe('@chkit/cli drift depth env e2e', () => {
     'check --strict overrides failOnDrift=false when drift exists',
     async () => {
       const database = liveEnv.clickhouseDatabase
-      const journalTable = createJournalTableName('strict')
+      const journalTable = createJournalTableName('drift_strict')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-      const prefix = createPrefix('strict')
+      const prefix = createPrefix('drift_strict')
       const usersTable = `${prefix}users`
       const fixture = await createFixture({
         database,
@@ -397,15 +292,17 @@ describe('@chkit/cli drift depth env e2e', () => {
           { extraEnv: cliEnv }
         )
         if (executed.exitCode !== 0) {
-          throw new Error(
-            `migrate --execute failed (exit=${executed.exitCode})\nstdout:\n${executed.stdout}\nstderr:\n${executed.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
         }
 
-        await runSqlWithUnknownTableRetry(
+        await waitForTable(client, database, usersTable)
+
+        await runSql(
           client,
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
+
+        await waitForColumn(client, database, usersTable, 'rogue')
 
         await writeFile(
           fixture.configPath,

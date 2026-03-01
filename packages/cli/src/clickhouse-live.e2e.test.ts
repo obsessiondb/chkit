@@ -1,117 +1,22 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { createClient, type ClickHouseClient } from '@clickhouse/client'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
-const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
-const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
-
-interface LiveEnv {
-  clickhouseUrl: string
-  clickhouseUser: string
-  clickhousePassword: string
-  clickhouseDatabase: string
-}
-
-function getRequiredEnv(): LiveEnv {
-  const clickhouseHost = process.env.CLICKHOUSE_HOST?.trim()
-  const clickhouseUrl =
-    process.env.CLICKHOUSE_URL?.trim() || (clickhouseHost ? `https://${clickhouseHost}` : '')
-  const clickhouseUser = process.env.CLICKHOUSE_USER?.trim() || 'default'
-  const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
-  const clickhouseDatabase = process.env.CLICKHOUSE_DB?.trim() || 'default'
-
-  if (!clickhouseUrl) {
-    throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
-  }
-
-  if (!clickhousePassword) {
-    throw new Error('Missing CLICKHOUSE_PASSWORD')
-  }
-
-  return { clickhouseUrl, clickhouseUser, clickhousePassword, clickhouseDatabase }
-}
-
-function quoteIdent(value: string): string {
-  return `\`${value.replace(/`/g, '``')}\``
-}
-
-function createClickHouseClient(env: LiveEnv): ClickHouseClient {
-  return createClient({
-    url: env.clickhouseUrl,
-    username: env.clickhouseUser,
-    password: env.clickhousePassword,
-    database: env.clickhouseDatabase,
-    request_timeout: 10_000,
-    clickhouse_settings: {
-      wait_end_of_query: 1,
-      async_insert: 0,
-    },
-  })
-}
-
-async function runSql(client: ClickHouseClient, sql: string): Promise<void> {
-  await client.command({ query: sql })
-}
-
-function runCli(
-  cwd: string,
-  args: string[],
-  extraEnv: Record<string, string> = {}
-): { exitCode: number; stdout: string; stderr: string } {
-  const result = Bun.spawnSync({
-    cmd: ['bun', CLI_ENTRY, ...args],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: { ...process.env, ...extraEnv },
-  })
-
-  return {
-    exitCode: result.exitCode,
-    stdout: new TextDecoder().decode(result.stdout),
-    stderr: new TextDecoder().decode(result.stderr),
-  }
-}
-
-function isValidJson(str: string): boolean {
-  try {
-    JSON.parse(str)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function runCliWithRetry(
-  cwd: string,
-  args: string[],
-  {
-    maxAttempts = 5,
-    delayMs = 2000,
-    extraEnv = {},
-  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const expectJson = args.includes('--json')
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = runCli(cwd, args, extraEnv)
-    if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
-    if (attempt === maxAttempts) return result
-    await new Promise((r) => setTimeout(r, delayMs))
-  }
-  return runCli(cwd, args, extraEnv)
-}
-
-function createPrefix(label: string): string {
-  return `chkit_e2e_${label}_${Date.now()}_${Math.floor(Math.random() * 100000)}_`
-}
-
-function createJournalTableName(label: string): string {
-  const runTag = process.env.GITHUB_RUN_ID?.trim() || `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-  return `_chkit_migrations_${label}_${runTag}`
-}
+import {
+  CORE_ENTRY,
+  createJournalTableName,
+  createLiveClient,
+  createPrefix,
+  formatTestDiagnostic,
+  getRequiredEnv,
+  quoteIdent,
+  runCli,
+  runCliWithRetry,
+  runSql,
+  waitForTable,
+  waitForView,
+} from './e2e-testkit.js'
 
 function renderBaseSchema(database: string, usersTableName: string): string {
   return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
@@ -155,7 +60,7 @@ async function createFixture(input: {
 
 describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getRequiredEnv()
-  const client = createClickHouseClient(liveEnv)
+  const client = createLiveClient(liveEnv)
 
   afterAll(async () => {
     await client.close()
@@ -201,9 +106,7 @@ describe('@chkit/cli doppler env e2e', () => {
           '--json',
         ], { extraEnv: cliEnv })
         if (executeResult.exitCode !== 0) {
-          throw new Error(
-            `migrate --execute failed (exit=${executeResult.exitCode})\nstdout:\n${executeResult.stdout}\nstderr:\n${executeResult.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('migrate --execute failed', executeResult))
         }
         expect(executeResult.exitCode).toBe(0)
         const executePayload = JSON.parse(executeResult.stdout) as {
@@ -268,9 +171,7 @@ describe('@chkit/cli doppler env e2e', () => {
           '--json',
         ], { extraEnv: cliEnv })
         if (firstExecute.exitCode !== 0) {
-          throw new Error(
-            `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('first migrate --execute failed', firstExecute))
         }
         expect(firstExecute.exitCode).toBe(0)
 
@@ -291,9 +192,7 @@ describe('@chkit/cli doppler env e2e', () => {
 
         const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], cliEnv)
         if (secondPlan.exitCode !== 0) {
-          throw new Error(
-            `second migrate --json plan failed (exit=${secondPlan.exitCode})\nstdout:\n${secondPlan.stdout}\nstderr:\n${secondPlan.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('second migrate --json plan failed', secondPlan))
         }
         expect(secondPlan.exitCode).toBe(0)
         const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
@@ -307,9 +206,7 @@ describe('@chkit/cli doppler env e2e', () => {
           '--json',
         ], { extraEnv: cliEnv })
         if (secondExecute.exitCode !== 0) {
-          throw new Error(
-            `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('second migrate --execute failed', secondExecute))
         }
         expect(secondExecute.exitCode).toBe(0)
 
@@ -360,10 +257,11 @@ describe('@chkit/cli doppler env e2e', () => {
           '--json',
         ], { extraEnv: cliEnv })
         if (firstExecute.exitCode !== 0) {
-          throw new Error(
-            `first migrate --execute failed (exit=${firstExecute.exitCode})\nstdout:\n${firstExecute.stdout}\nstderr:\n${firstExecute.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('first migrate --execute failed', firstExecute))
         }
+
+        // Wait for table to be visible before proceeding (ClickHouse Cloud DDL is eventually consistent)
+        await waitForTable(client, database, usersTable)
 
         await writeFile(
           fixture.schemaPath,
@@ -391,10 +289,11 @@ describe('@chkit/cli doppler env e2e', () => {
           '--json',
         ], { extraEnv: cliEnv })
         if (secondExecute.exitCode !== 0) {
-          throw new Error(
-            `second migrate --execute failed (exit=${secondExecute.exitCode})\nstdout:\n${secondExecute.stdout}\nstderr:\n${secondExecute.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('second migrate --execute failed', secondExecute))
         }
+
+        // Wait for view to be visible before check
+        await waitForView(client, database, usersView)
 
         const check = await runCliWithRetry(
           fixture.dir,
@@ -402,9 +301,7 @@ describe('@chkit/cli doppler env e2e', () => {
           { maxAttempts: 5, delayMs: 1500, extraEnv: cliEnv }
         )
         if (check.exitCode !== 0) {
-          throw new Error(
-            `check --json failed (exit=${check.exitCode})\nstdout:\n${check.stdout}\nstderr:\n${check.stderr}`
-          )
+          throw new Error(formatTestDiagnostic('check --json failed', check))
         }
         const checkPayload = JSON.parse(check.stdout) as {
           ok: boolean
