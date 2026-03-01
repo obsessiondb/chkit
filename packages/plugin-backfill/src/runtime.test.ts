@@ -489,3 +489,175 @@ describe('@chkit/plugin-backfill check integration', () => {
     }
   })
 })
+
+describe('@chkit/plugin-backfill environment binding', () => {
+  test('rejects run against mismatched environment', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
+      const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'event_time',
+        configPath,
+        config,
+        options,
+        clickhouse: stagingCh,
+      })
+
+      await expect(
+        executeBackfillRun({
+          planId: planned.plan.planId,
+          configPath,
+          config,
+          options,
+          clickhouse: prodCh,
+        })
+      ).rejects.toThrow('Environment mismatch')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('--force-environment overrides mismatch check', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
+      const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'event_time',
+        configPath,
+        config,
+        options,
+        clickhouse: stagingCh,
+      })
+
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execution: { forceEnvironment: true },
+        clickhouse: prodCh,
+      })
+
+      expect(ran.status.status).toBe('completed')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('plans without environment can run against any environment (backward compat)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+
+      // Plan without clickhouse (no environment info)
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'event_time',
+        configPath,
+        config,
+        options,
+      })
+
+      expect(planned.plan.environment).toBeUndefined()
+
+      // Run against a specific environment — should succeed
+      const ran = await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        clickhouse: { url: 'https://prod.ch.cloud:8443', database: 'analytics' },
+      })
+
+      expect(ran.status.status).toBe('completed')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects resume against mismatched environment', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({
+        defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
+      })
+      const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
+      const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
+
+      const planned = await buildBackfillPlan({
+        target: 'app.events',
+        from: '2026-01-01T00:00:00.000Z',
+        to: '2026-01-01T06:00:00.000Z',
+        timeColumn: 'event_time',
+        configPath,
+        config,
+        options,
+        clickhouse: stagingCh,
+      })
+
+      // Run with staging to create run state, with a simulated failure
+      await executeBackfillRun({
+        planId: planned.plan.planId,
+        configPath,
+        config,
+        options,
+        execution: {
+          simulation: { failChunkId: planned.plan.chunks[1]?.id, failCount: 1 },
+        },
+        clickhouse: stagingCh,
+      })
+
+      // Resume with production should fail
+      await expect(
+        resumeBackfillRun({
+          planId: planned.plan.planId,
+          configPath,
+          config,
+          options,
+          execution: { replayFailed: true },
+          clickhouse: prodCh,
+        })
+      ).rejects.toThrow('Environment mismatch')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})

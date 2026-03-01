@@ -7,6 +7,7 @@ import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
 import type {
+  BackfillEnvironment,
   BackfillExecutionOptions,
   BackfillPathSet,
   BackfillPlanState,
@@ -57,8 +58,49 @@ export function computeCompatibilityToken(input: {
   )
 }
 
-export function planIdentity(target: string, from: string, to: string, chunkHours: number, timeColumn: string): string {
-  return `${target}|${from}|${to}|${chunkHours}|${timeColumn}`
+export function planIdentity(
+  target: string,
+  from: string,
+  to: string,
+  chunkHours: number,
+  timeColumn: string,
+  envFingerprint?: string
+): string {
+  const base = `${target}|${from}|${to}|${chunkHours}|${timeColumn}`
+  return envFingerprint ? `${base}|${envFingerprint}` : base
+}
+
+export function computeEnvironmentFingerprint(
+  clickhouse: { url: string; database: string } | undefined
+): BackfillEnvironment | undefined {
+  if (!clickhouse) return undefined
+  const origin = new URL(clickhouse.url).origin
+  return {
+    fingerprint: hashId(`${origin}|${clickhouse.database}`).slice(0, 16),
+    url: origin,
+    database: clickhouse.database,
+  }
+}
+
+export function ensureEnvironmentMatch(input: {
+  plan: BackfillPlanState
+  clickhouse: { url: string; database: string } | undefined
+  forceEnvironment: boolean
+}): void {
+  if (!input.plan.environment) return
+  if (!input.clickhouse) return
+
+  const current = computeEnvironmentFingerprint(input.clickhouse)
+  if (!current) return
+  if (input.plan.environment.fingerprint === current.fingerprint) return
+  if (input.forceEnvironment) return
+
+  throw new BackfillConfigError(
+    `Environment mismatch for plan ${input.plan.planId}. ` +
+      `Plan was created for ${input.plan.environment.url} (database: ${input.plan.environment.database}), ` +
+      `but current config points to ${current.url} (database: ${current.database}). ` +
+      `Retry with --force-environment to override.`
+  )
 }
 
 export function computeBackfillStateDir(
