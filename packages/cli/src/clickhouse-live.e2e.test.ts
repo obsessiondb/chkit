@@ -412,7 +412,7 @@ describe('@chkit/cli doppler env e2e', () => {
 
         const check = await runCliWithRetry(
           fixture.dir,
-          ['check', '--config', fixture.configPath, '--json'],
+          ['check', '--config', fixture.configPath, '--table', `${prefix}*`, '--json'],
           { maxAttempts: 5, delayMs: 1500, extraEnv: cliEnv }
         )
         if (check.exitCode !== 0) {
