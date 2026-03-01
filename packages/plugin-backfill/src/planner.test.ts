@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { resolveConfig } from '@chkit/core'
 
 import { normalizeBackfillOptions } from './options.js'
-import { buildBackfillPlan, injectTimeFilter } from './planner.js'
+import { buildBackfillPlan, injectTimeFilter, rewriteSelectColumns } from './planner.js'
 import { computeBackfillStateDir } from './state.js'
 
 describe('@chkit/plugin-backfill planning', () => {
@@ -241,7 +241,7 @@ export const events_mv = {
     }
   })
 
-  test('MV replay INSERT includes explicit column list from target table', async () => {
+  test('MV replay rewrites SELECT columns to match target table order', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
     const schemaPath = join(dir, 'schema.ts')
@@ -293,9 +293,12 @@ export const sessions_mv = {
       expect(output.plan.strategy).toBe('mv_replay')
 
       const chunk = output.plan.chunks[0]
-      // INSERT must include explicit column list to avoid positional mismatch
+      // INSERT should NOT include explicit column list (rewriteSelectColumns handles ordering)
+      expect(chunk?.sqlTemplate).toContain('INSERT INTO app.session_analytics')
+      expect(chunk?.sqlTemplate).not.toContain('INSERT INTO app.session_analytics (')
+      // SELECT must be rewritten with columns in target table order
       expect(chunk?.sqlTemplate).toContain(
-        'INSERT INTO app.session_analytics (session_date, session_id, skills, slash_commands, ingested_at)'
+        "SELECT session_date, session_id, extractAll(content, 'skill') AS skills, extractAll(content, 'cmd') AS slash_commands, ingested_at"
       )
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -366,6 +369,52 @@ export const sessions_mv = {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('rewriteSelectColumns', () => {
+  test('reorders SELECT columns to match target table order', () => {
+    const query = 'SELECT *, _foo as bar, _baz as qux FROM source WHERE status = 1'
+    const result = rewriteSelectColumns(query, ['col_a', 'bar', 'col_b', 'qux'])
+
+    expect(result).toContain('SELECT col_a, _foo as bar, col_b, _baz as qux')
+    expect(result).toContain('FROM source')
+    expect(result).toContain('WHERE status = 1')
+  })
+
+  test('preserves WITH clause when rewriting SELECT', () => {
+    const query = [
+      'WITH',
+      "  arrayDistinct(extractAll(content, '\\w+')) AS _skills,",
+      "  toUInt64(JSONExtractFloat(meta, 'input')) AS _input_tokens",
+      'SELECT *, _skills as skills, _input_tokens as input_tokens',
+      'FROM app.sessions',
+      'WHERE length(content) > 0',
+    ].join('\n')
+
+    const result = rewriteSelectColumns(query, ['session_id', 'skills', 'content', 'input_tokens'])
+
+    expect(result).toContain('arrayDistinct')
+    expect(result).toContain('_input_tokens')
+    expect(result).toContain('SELECT session_id, _skills as skills, content, _input_tokens as input_tokens')
+    expect(result).toContain('FROM app.sessions')
+    expect(result).toContain('WHERE length(content) > 0')
+  })
+
+  test('handles SELECT without star expansion', () => {
+    const query = 'SELECT toStartOfHour(event_time) AS event_time, count() AS cnt FROM events GROUP BY event_time'
+    const result = rewriteSelectColumns(query, ['cnt', 'event_time'])
+
+    expect(result).toContain('SELECT count() AS cnt, toStartOfHour(event_time) AS event_time')
+    expect(result).toContain('FROM events')
+    expect(result).toContain('GROUP BY event_time')
+  })
+
+  test('returns query unchanged when SELECT/FROM cannot be found', () => {
+    const query = 'INSERT INTO t VALUES (1, 2)'
+    const result = rewriteSelectColumns(query, ['a', 'b'])
+
+    expect(result).toBe(query)
   })
 })
 

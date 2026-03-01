@@ -118,6 +118,121 @@ export function injectTimeFilter(
   return `${before}\nWHERE ${timeCondition}${after ? '\n' + after : ''}`
 }
 
+/**
+ * Rewrite a SQL query's SELECT projection so its output columns are in the
+ * same positional order as `targetColumns`.
+ *
+ * Parses the existing SELECT clause to build an alias→expression map,
+ * then emits columns in `targetColumns` order. Columns that came from
+ * a `*` expansion are emitted as bare names; aliased expressions (e.g.
+ * `_skills as skills`) are preserved with their original expression.
+ */
+export function rewriteSelectColumns(query: string, targetColumns: string[]): string {
+  const trimmed = query.trimEnd()
+  const upper = trimmed.toUpperCase()
+
+  // Scan for top-level SELECT and FROM positions (outside parens and strings)
+  let selectPos = -1
+  let fromPos = -1
+  let depth = 0
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (ch === '(') { depth++; continue }
+    if (ch === ')') { depth--; continue }
+    if (ch === "'") {
+      i++
+      while (i < trimmed.length && trimmed[i] !== "'") {
+        if (trimmed[i] === '\\') i++
+        i++
+      }
+      continue
+    }
+    if (depth !== 0) continue
+
+    if (i > 0 && /\S/.test(trimmed[i - 1] ?? '')) continue
+
+    const rest = upper.slice(i)
+    if (selectPos === -1 && rest.startsWith('SELECT') && (i + 6 >= trimmed.length || /\s/.test(trimmed[i + 6] ?? ''))) {
+      selectPos = i
+    } else if (selectPos !== -1 && fromPos === -1 && rest.startsWith('FROM') && (i + 4 >= trimmed.length || /\s/.test(trimmed[i + 4] ?? ''))) {
+      fromPos = i
+    }
+  }
+
+  if (selectPos === -1 || fromPos === -1) return query
+
+  const projStart = selectPos + 6
+  const projText = trimmed.slice(projStart, fromPos).trim()
+
+  // Split projection by top-level commas
+  const items: string[] = []
+  let itemStart = 0
+  depth = 0
+
+  for (let i = 0; i < projText.length; i++) {
+    const ch = projText[i]
+    if (ch === '(') { depth++; continue }
+    if (ch === ')') { depth--; continue }
+    if (ch === "'") {
+      i++
+      while (i < projText.length && projText[i] !== "'") {
+        if (projText[i] === '\\') i++
+        i++
+      }
+      continue
+    }
+    if (depth === 0 && ch === ',') {
+      items.push(projText.slice(itemStart, i).trim())
+      itemStart = i + 1
+    }
+  }
+  items.push(projText.slice(itemStart).trim())
+
+  // Build alias → expression map from non-star items
+  const aliasMap = new Map<string, string>()
+  for (const item of items) {
+    if (item === '*') continue
+
+    const itemUpper = item.toUpperCase()
+    let asPos = -1
+    let d = 0
+
+    for (let i = 0; i < item.length; i++) {
+      const ch = item[i]
+      if (ch === '(') { d++; continue }
+      if (ch === ')') { d--; continue }
+      if (ch === "'") {
+        i++
+        while (i < item.length && item[i] !== "'") {
+          if (item[i] === '\\') i++
+          i++
+        }
+        continue
+      }
+      if (d !== 0) continue
+      if (i > 0 && /\S/.test(item[i - 1] ?? '')) continue
+
+      const rest = itemUpper.slice(i)
+      if (rest.startsWith('AS') && (i + 2 >= item.length || /\s/.test(item[i + 2] ?? ''))) {
+        asPos = i
+      }
+    }
+
+    if (asPos !== -1) {
+      const alias = item.slice(asPos + 2).trim()
+      aliasMap.set(alias, item)
+    }
+  }
+
+  // Emit columns in target order
+  const rewrittenCols = targetColumns.map(col => aliasMap.get(col) ?? col)
+
+  const before = trimmed.slice(0, projStart)
+  const after = trimmed.slice(fromPos)
+  return `${before} ${rewrittenCols.join(', ')}\n${after}`
+}
+
 function buildChunkSqlTemplate(chunk: {
   planId: string
   chunkId: string
@@ -134,10 +249,11 @@ function buildChunkSqlTemplate(chunk: {
 
   if (chunk.mvAsQuery) {
     const filtered = injectTimeFilter(chunk.mvAsQuery, chunk.timeColumn, chunk.from, chunk.to)
-    const insertClause = chunk.targetColumns?.length
-      ? `INSERT INTO ${chunk.target} (${chunk.targetColumns.join(', ')})`
-      : `INSERT INTO ${chunk.target}`
-    return [header, insertClause, filtered, settings].join('\n')
+    if (chunk.targetColumns?.length) {
+      const reordered = rewriteSelectColumns(filtered, chunk.targetColumns)
+      return [header, `INSERT INTO ${chunk.target}`, reordered, settings].join('\n')
+    }
+    return [header, `INSERT INTO ${chunk.target}`, filtered, settings].join('\n')
   }
 
   return [
