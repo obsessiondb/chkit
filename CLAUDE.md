@@ -71,12 +71,7 @@ Key conventions:
 
 ### CI
 
-CI is split into two jobs:
-
-- **verify** — lint, typecheck, build (no secrets needed, fast feedback)
-- **test** — all tests with ClickHouse secrets (runs after verify)
-
-`turbo.json` passes through `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task.
+CI runs a single **verify** job that executes `turbo run typecheck lint test build`. ClickHouse secrets are passed as environment variables for E2E tests. `turbo.json` passes through `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task.
 
 ## Release
 
