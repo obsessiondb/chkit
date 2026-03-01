@@ -48,6 +48,76 @@ function buildSettingsClause(token: string): string {
   return `SETTINGS async_insert=0`
 }
 
+/**
+ * Inject a time-range filter directly into a SQL query.
+ *
+ * Scans for top-level (not inside parentheses or string literals) SQL keywords
+ * to determine where to place the condition:
+ * - If a top-level WHERE exists, appends AND conditions at its end.
+ * - Otherwise, inserts a WHERE clause before trailing clauses (GROUP BY, etc.).
+ *
+ * This avoids wrapping the query in a CTE, which causes ClickHouse to infer
+ * Nullable wrappers on Array/Map columns — an illegal type combination.
+ */
+export function injectTimeFilter(
+  query: string,
+  timeColumn: string,
+  from: string,
+  to: string,
+): string {
+  const trimmed = query.trimEnd()
+  const upper = trimmed.toUpperCase()
+
+  // Scan for top-level keyword positions (outside parens and string literals)
+  type KWHit = { keyword: string; position: number }
+  const hits: KWHit[] = []
+  let depth = 0
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (ch === '(') { depth++; continue }
+    if (ch === ')') { depth--; continue }
+    if (ch === "'") {
+      i++
+      while (i < trimmed.length && trimmed[i] !== "'") {
+        if (trimmed[i] === '\\') i++
+        i++
+      }
+      continue
+    }
+    if (depth !== 0) continue
+
+    // Must be preceded by whitespace or be at start
+    if (i > 0 && /\S/.test(trimmed[i - 1] ?? '')) continue
+
+    const rest = upper.slice(i)
+    for (const kw of ['WHERE', 'GROUP BY', 'HAVING', 'ORDER BY', 'QUALIFY', 'LIMIT', 'SETTINGS']) {
+      if (rest.startsWith(kw) && (i + kw.length >= trimmed.length || /\s/.test(trimmed[i + kw.length] ?? ''))) {
+        hits.push({ keyword: kw, position: i })
+        break
+      }
+    }
+  }
+
+  const whereHit = hits.find(h => h.keyword === 'WHERE')
+  const trailingKeywords = ['GROUP BY', 'HAVING', 'ORDER BY', 'QUALIFY', 'LIMIT', 'SETTINGS']
+  const firstTrailing = hits
+    .filter(h => trailingKeywords.includes(h.keyword))
+    .filter(h => !whereHit || h.position > whereHit.position)[0]
+
+  const timeCondition =
+    `${timeColumn} >= parseDateTimeBestEffort('${from}')\n  AND ${timeColumn} < parseDateTimeBestEffort('${to}')`
+
+  const insertAt = firstTrailing ? firstTrailing.position : trimmed.length
+  const before = trimmed.slice(0, insertAt).trimEnd()
+  const after = trimmed.slice(insertAt)
+
+  if (whereHit) {
+    return `${before}\n  AND ${timeCondition}${after ? '\n' + after : ''}`
+  }
+  return `${before}\nWHERE ${timeCondition}${after ? '\n' + after : ''}`
+}
+
 function buildChunkSqlTemplate(chunk: {
   planId: string
   chunkId: string
@@ -62,17 +132,8 @@ function buildChunkSqlTemplate(chunk: {
   const settings = buildSettingsClause(chunk.token)
 
   if (chunk.mvAsQuery) {
-    return [
-      header,
-      `INSERT INTO ${chunk.target}`,
-      `WITH _backfill_source AS (`,
-      `  ${chunk.mvAsQuery}`,
-      `)`,
-      `SELECT * FROM _backfill_source`,
-      `WHERE ${chunk.timeColumn} >= parseDateTimeBestEffort('${chunk.from}')`,
-      `  AND ${chunk.timeColumn} < parseDateTimeBestEffort('${chunk.to}')`,
-      settings,
-    ].join('\n')
+    const filtered = injectTimeFilter(chunk.mvAsQuery, chunk.timeColumn, chunk.from, chunk.to)
+    return [header, `INSERT INTO ${chunk.target}`, filtered, settings].join('\n')
   }
 
   return [
