@@ -127,13 +127,17 @@ function buildChunkSqlTemplate(chunk: {
   to: string
   timeColumn: string
   mvAsQuery?: string
+  targetColumns?: string[]
 }): string {
   const header = `/* chkit backfill plan=${chunk.planId} chunk=${chunk.chunkId} token=${chunk.token} */`
   const settings = buildSettingsClause(chunk.token)
 
   if (chunk.mvAsQuery) {
     const filtered = injectTimeFilter(chunk.mvAsQuery, chunk.timeColumn, chunk.from, chunk.to)
-    return [header, `INSERT INTO ${chunk.target}`, filtered, settings].join('\n')
+    const insertClause = chunk.targetColumns?.length
+      ? `INSERT INTO ${chunk.target} (${chunk.targetColumns.join(', ')})`
+      : `INSERT INTO ${chunk.target}`
+    return [header, insertClause, filtered, settings].join('\n')
   }
 
   return [
@@ -156,6 +160,7 @@ function buildChunks(input: {
   requireIdempotencyToken: boolean
   timeColumn: string
   mvAsQuery?: string
+  targetColumns?: string[]
 }): BackfillChunk[] {
   const fromMillis = new Date(input.from).getTime()
   const toMillis = new Date(input.to).getTime()
@@ -188,6 +193,7 @@ function buildChunks(input: {
         to: chunkTo,
         timeColumn: input.timeColumn,
         mvAsQuery: input.mvAsQuery,
+        targetColumns: input.targetColumns,
       }),
     })
 
@@ -228,6 +234,7 @@ export async function buildBackfillPlan(input: {
 
   let strategy: 'table' | 'mv_replay' = 'table'
   let mvAsQuery: string | undefined
+  let targetColumns: string[] | undefined
 
   const [database, table] = input.target.split('.')
   if (database && table) {
@@ -239,6 +246,12 @@ export async function buildBackfillPlan(input: {
       if (mv) {
         strategy = 'mv_replay'
         mvAsQuery = mv.as
+        const tableDef = definitions.find(
+          (d) => d.kind === 'table' && d.database === database && d.name === table
+        )
+        if (tableDef && tableDef.kind === 'table') {
+          targetColumns = tableDef.columns.map((c) => c.name)
+        }
       }
     } catch {
       // Schema load failed — fall back to plain table strategy
@@ -262,6 +275,7 @@ export async function buildBackfillPlan(input: {
       requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
       timeColumn: input.timeColumn,
       mvAsQuery,
+      targetColumns,
     }),
     options: {
       chunkHours,
