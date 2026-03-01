@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { resolveConfig } from '@chkit/core'
 
 import { normalizeBackfillOptions } from './options.js'
-import { buildBackfillPlan } from './planner.js'
+import { buildBackfillPlan, injectTimeFilter } from './planner.js'
 import { computeBackfillStateDir } from './state.js'
 
 describe('@chkit/plugin-backfill planning', () => {
@@ -175,7 +175,7 @@ describe('@chkit/plugin-backfill planning', () => {
     expect(overriddenDir).toBe(resolve('/tmp/project/custom-state'))
   })
 
-  test('generates MV replay SQL with CTE wrapping when schema contains materialized view', async () => {
+  test('generates MV replay SQL with inline time filter when schema contains materialized view', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
     const schemaPath = join(dir, 'schema.ts')
@@ -225,10 +225,14 @@ export const events_mv = {
 
       const chunk = output.plan.chunks[0]
       expect(chunk?.sqlTemplate).toContain('INSERT INTO app.events_agg')
-      expect(chunk?.sqlTemplate).toContain('WITH _backfill_source AS (')
+      // Time filter is injected directly into the MV query (before GROUP BY), not via CTE
+      expect(chunk?.sqlTemplate).not.toContain('WITH _backfill_source AS (')
+      expect(chunk?.sqlTemplate).not.toContain('SELECT * FROM _backfill_source')
       expect(chunk?.sqlTemplate).toContain('SELECT toStartOfHour(event_time)')
-      expect(chunk?.sqlTemplate).toContain('SELECT * FROM _backfill_source')
-      expect(chunk?.sqlTemplate).toContain('parseDateTimeBestEffort(')
+      expect(chunk?.sqlTemplate).toContain('FROM app.events')
+      expect(chunk?.sqlTemplate).toContain("WHERE event_time >= parseDateTimeBestEffort('")
+      expect(chunk?.sqlTemplate).toContain("AND event_time < parseDateTimeBestEffort('")
+      expect(chunk?.sqlTemplate).toContain('GROUP BY event_time')
       expect(chunk?.sqlTemplate).toContain('SETTINGS async_insert=0')
       expect(chunk?.sqlTemplate).toContain(`insert_deduplication_token='${chunk?.idempotencyToken}'`)
       expect(chunk?.sqlTemplate).not.toContain('FROM app.events_agg')
@@ -301,5 +305,94 @@ export const events_mv = {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('injectTimeFilter', () => {
+  const from = '2025-01-01T00:00:00.000Z'
+  const to = '2025-01-01T06:00:00.000Z'
+
+  test('injects WHERE before GROUP BY when query has no WHERE clause', () => {
+    const query = 'SELECT toStartOfHour(event_time) AS event_time, count() AS count FROM app.events GROUP BY event_time'
+    const result = injectTimeFilter(query, 'event_time', from, to)
+
+    expect(result).toContain("WHERE event_time >= parseDateTimeBestEffort('2025-01-01T00:00:00.000Z')")
+    expect(result).toContain("AND event_time < parseDateTimeBestEffort('2025-01-01T06:00:00.000Z')")
+    expect(result).toContain('GROUP BY event_time')
+    // WHERE must appear before GROUP BY
+    expect(result.indexOf('WHERE')).toBeLessThan(result.indexOf('GROUP BY'))
+  })
+
+  test('appends AND to existing WHERE clause', () => {
+    const query = 'SELECT * FROM app.events WHERE status = 1'
+    const result = injectTimeFilter(query, 'event_time', from, to)
+
+    expect(result).toContain('WHERE status = 1')
+    expect(result).toContain("AND event_time >= parseDateTimeBestEffort('")
+    expect(result).toContain("AND event_time < parseDateTimeBestEffort('")
+    // Should NOT add a second WHERE
+    expect(result.match(/WHERE/g)?.length).toBe(1)
+  })
+
+  test('appends AND before GROUP BY when query has WHERE and GROUP BY', () => {
+    const query = 'SELECT id, count() AS c FROM app.events WHERE status = 1 GROUP BY id'
+    const result = injectTimeFilter(query, 'ts', from, to)
+
+    expect(result).toContain('WHERE status = 1')
+    expect(result).toContain("AND ts >= parseDateTimeBestEffort('")
+    expect(result.indexOf('AND ts')).toBeLessThan(result.indexOf('GROUP BY'))
+  })
+
+  test('handles query with WHERE and QUALIFY', () => {
+    const query = [
+      'SELECT *, skills',
+      'FROM app.sessions AS s',
+      'WHERE length(timestamps) > 0',
+      "QUALIFY ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY s.ts DESC) = 1",
+    ].join('\n')
+    const result = injectTimeFilter(query, 'session_date', from, to)
+
+    expect(result).toContain('WHERE length(timestamps) > 0')
+    expect(result).toContain("AND session_date >= parseDateTimeBestEffort('")
+    expect(result.indexOf('AND session_date')).toBeLessThan(result.indexOf('QUALIFY'))
+  })
+
+  test('handles MV query with WITH column expressions (Array-producing aliases)', () => {
+    const query = [
+      'WITH',
+      "  arrayDistinct(arrayFilter(x -> x != '', extractAll(content, '\\\\w+'))) AS _skills",
+      'SELECT',
+      '  id,',
+      '  _skills as skills,',
+      '  ts',
+      'FROM app.sessions',
+      'WHERE length(content) > 0',
+    ].join('\n')
+    const result = injectTimeFilter(query, 'ts', from, to)
+
+    // Should append AND, not add new WHERE
+    expect(result.match(/WHERE/g)?.length).toBe(1)
+    expect(result).toContain("AND ts >= parseDateTimeBestEffort('")
+    // WITH clause must remain intact
+    expect(result).toContain('arrayDistinct')
+  })
+
+  test('injects WHERE at end when query has no WHERE and no trailing clauses', () => {
+    const query = 'SELECT * FROM app.events'
+    const result = injectTimeFilter(query, 'event_time', from, to)
+
+    expect(result).toContain("WHERE event_time >= parseDateTimeBestEffort('")
+    expect(result).toContain("AND event_time < parseDateTimeBestEffort('")
+  })
+
+  test('ignores WHERE inside parenthesized subquery', () => {
+    const query = 'SELECT * FROM (SELECT * FROM app.events WHERE inner = 1) AS sub GROUP BY id'
+    const result = injectTimeFilter(query, 'ts', from, to)
+
+    // The inner WHERE is inside parens, so it must inject a new top-level WHERE before GROUP BY
+    expect(result).toContain("WHERE ts >= parseDateTimeBestEffort('")
+    expect(result.indexOf("WHERE ts")).toBeLessThan(result.indexOf('GROUP BY'))
+    // Inner WHERE must remain intact
+    expect(result).toContain('WHERE inner = 1')
   })
 })

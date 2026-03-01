@@ -53,6 +53,26 @@ async function runSql(url: string, username: string, password: string, sql: stri
   }
 }
 
+async function querySql(url: string, username: string, password: string, sql: string): Promise<string> {
+  const auth = Buffer.from(`${username}:${password}`).toString('base64')
+  const response = await fetch(url, {
+    method: 'POST',
+    signal: AbortSignal.timeout(20_000),
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'text/plain',
+    },
+    body: sql,
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`ClickHouse query failed (${response.status}): ${body}`)
+  }
+
+  return response.text()
+}
+
 async function dropDatabase(url: string, username: string, password: string, database: string): Promise<void> {
   await runSql(url, username, password, `DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
 }
@@ -213,6 +233,21 @@ describe('@chkit/plugin-pull live env e2e', () => {
             `CREATE TABLE ${quoteIdent(noiseDatabase)}.${quoteIdent(noiseTable)} (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
           )
         )
+
+        // ClickHouse Cloud DDL is eventually consistent — wait until all 5 objects
+        // (2 tables + 1 view + 1 rollup table + 1 materialized view) are visible.
+        await retry(15, 2000, async () => {
+          const result = await querySql(
+            liveEnv.clickhouseUrl,
+            liveEnv.clickhouseUser,
+            liveEnv.clickhousePassword,
+            `SELECT count() FROM system.tables WHERE database = '${targetDatabase}'`
+          )
+          const count = parseInt(result.trim(), 10)
+          if (count < 5) {
+            throw new Error(`Waiting for DDL visibility: expected 5 objects in ${targetDatabase}, found ${count}`)
+          }
+        })
 
         const output: unknown[] = []
         const exitCode = await command.run({
