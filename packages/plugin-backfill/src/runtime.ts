@@ -9,6 +9,7 @@ import {
   collectActiveRunTargets,
   computeBackfillStateDir,
   createRunState,
+  ensureEnvironmentMatch,
   ensureRunCompatibility,
   listPlanIds,
   nowIso,
@@ -438,6 +439,7 @@ export async function executeBackfillRun(input: {
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
   execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
+  clickhouse?: { url: string; database: string }
 }): Promise<ExecuteBackfillRunOutput> {
   const execution = input.execution ?? {}
   const { plan, stateDir } = await readPlan({
@@ -446,6 +448,13 @@ export async function executeBackfillRun(input: {
     config: input.config,
     options: input.options,
   })
+
+  ensureEnvironmentMatch({
+    plan,
+    clickhouse: input.clickhouse,
+    forceEnvironment: execution.forceEnvironment ?? false,
+  })
+
   const paths = backfillPaths(stateDir, plan.planId)
 
   if (input.options.policy.blockOverlappingRuns && !execution.forceOverlap) {
@@ -503,6 +512,7 @@ export async function resumeBackfillRun(input: {
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
   execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
+  clickhouse?: { url: string; database: string }
 }): Promise<ExecuteBackfillRunOutput> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
@@ -510,6 +520,13 @@ export async function resumeBackfillRun(input: {
     config: input.config,
     options: input.options,
   })
+
+  ensureEnvironmentMatch({
+    plan,
+    clickhouse: input.clickhouse,
+    forceEnvironment: input.execution?.forceEnvironment ?? false,
+  })
+
   const paths = backfillPaths(stateDir, plan.planId)
   const run = await readRun(paths.runPath)
 

@@ -26,6 +26,7 @@ export const RUN_FLAGS = defineFlags([
   { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
   { name: '--force-overlap', type: 'boolean', description: 'Allow overlapping runs' },
   { name: '--force-compatibility', type: 'boolean', description: 'Skip compatibility checks' },
+  { name: '--force-environment', type: 'boolean', description: 'Skip environment mismatch checks' },
   { name: '--simulate-fail-chunk', type: 'string', description: 'Simulate failure on chunk', placeholder: '<chunk-id>' },
   { name: '--simulate-fail-count', type: 'string', description: 'Number of simulated failures', placeholder: '<count>' },
 ] as const)
@@ -36,6 +37,7 @@ export const RESUME_FLAGS = defineFlags([
   { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
   { name: '--force-overlap', type: 'boolean', description: 'Allow overlapping runs' },
   { name: '--force-compatibility', type: 'boolean', description: 'Skip compatibility checks' },
+  { name: '--force-environment', type: 'boolean', description: 'Skip environment mismatch checks' },
 ] as const)
 
 export const PLAN_ID_FLAGS = defineFlags([
@@ -113,6 +115,7 @@ export function parseRunArgs(flags: ParsedFlags): ParsedRunArgs {
   const replayFailed = f['--replay-failed'] === true
   const forceOverlap = f['--force-overlap'] === true
   const forceCompatibility = f['--force-compatibility'] === true
+  const forceEnvironment = f['--force-environment'] === true
   const simulateFailChunk = f['--simulate-fail-chunk']
 
   let simulateFailCount = 1
@@ -133,6 +136,7 @@ export function parseRunArgs(flags: ParsedFlags): ParsedRunArgs {
     replayFailed,
     forceOverlap,
     forceCompatibility,
+    forceEnvironment,
     simulateFailChunk,
     simulateFailCount,
   }
@@ -146,6 +150,7 @@ export function parseResumeArgs(flags: ParsedFlags): ParsedResumeArgs {
     replayFailed: parsed.replayFailed,
     forceOverlap: parsed.forceOverlap,
     forceCompatibility: parsed.forceCompatibility,
+    forceEnvironment: parsed.forceEnvironment,
   }
 }
 

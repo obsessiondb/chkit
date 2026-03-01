@@ -185,6 +185,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
               chunkHours: parsed.chunkHours,
               forceLargeWindow: parsed.forceLargeWindow,
               force: parsed.force,
+              clickhouse: context.config.clickhouse,
             })
 
             const payload = planPayload(output)
@@ -225,12 +226,14 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   replayFailed: parsed.replayFailed,
                   forceOverlap: parsed.forceOverlap,
                   forceCompatibility: parsed.forceCompatibility,
+                  forceEnvironment: parsed.forceEnvironment,
                   simulation: {
                     failChunkId: parsed.simulateFailChunk,
                     failCount: parsed.simulateFailCount,
                   },
                 },
                 execute: db ? (sql) => db.execute(sql) : undefined,
+                clickhouse: context.config.clickhouse,
               })
 
               const payload = {
@@ -291,8 +294,10 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   replayFailed: parsed.replayFailed,
                   forceOverlap: parsed.forceOverlap,
                   forceCompatibility: parsed.forceCompatibility,
+                  forceEnvironment: parsed.forceEnvironment,
                 },
                 execute: db ? (sql) => db.execute(sql) : undefined,
+                clickhouse: context.config.clickhouse,
               })
 
               const payload = {

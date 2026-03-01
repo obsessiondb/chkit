@@ -42,6 +42,12 @@ export interface NormalizedBackfillPluginOptions {
   limits: Required<BackfillPluginLimits>
 }
 
+export interface BackfillEnvironment {
+  fingerprint: string
+  url: string
+  database: string
+}
+
 export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
 export interface BackfillChunk {
@@ -61,6 +67,7 @@ export interface BackfillPlanState {
   createdAt: string
   status: BackfillPlanStatus
   strategy?: 'table' | 'mv_replay'
+  environment?: BackfillEnvironment
   from: string
   to: string
   chunks: BackfillChunk[]
@@ -180,6 +187,7 @@ export interface BackfillExecutionOptions {
   replayFailed?: boolean
   forceOverlap?: boolean
   forceCompatibility?: boolean
+  forceEnvironment?: boolean
   simulation?: {
     failChunkId?: string
     failCount?: number
@@ -269,6 +277,7 @@ export interface ParsedRunArgs {
   replayFailed: boolean
   forceOverlap: boolean
   forceCompatibility: boolean
+  forceEnvironment: boolean
   simulateFailChunk?: string
   simulateFailCount: number
 }
@@ -279,6 +288,7 @@ export interface ParsedResumeArgs {
   replayFailed: boolean
   forceOverlap: boolean
   forceCompatibility: boolean
+  forceEnvironment: boolean
 }
 
 export interface ParsedStatusArgs {

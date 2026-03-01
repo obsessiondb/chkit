@@ -9,6 +9,7 @@ import { BackfillConfigError } from './errors.js'
 import {
   backfillPaths,
   computeBackfillStateDir,
+  computeEnvironmentFingerprint,
   hashId,
   planIdentity,
   readExistingPlan,
@@ -331,6 +332,7 @@ export async function buildBackfillPlan(input: {
   chunkHours?: number
   forceLargeWindow?: boolean
   force?: boolean
+  clickhouse?: { url: string; database: string }
 }): Promise<BuildBackfillPlanOutput> {
   const chunkHours = input.chunkHours ?? input.options.defaults.chunkHours
   if (chunkHours * 60 < input.options.limits.minChunkMinutes) {
@@ -346,7 +348,8 @@ export async function buildBackfillPlan(input: {
     forceLargeWindow: input.forceLargeWindow ?? false,
   })
 
-  const planId = hashId(planIdentity(input.target, input.from, input.to, chunkHours, input.timeColumn)).slice(0, 16)
+  const env = computeEnvironmentFingerprint(input.clickhouse)
+  const planId = hashId(planIdentity(input.target, input.from, input.to, chunkHours, input.timeColumn, env?.fingerprint)).slice(0, 16)
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
   const paths = backfillPaths(stateDir, planId)
 
@@ -382,6 +385,7 @@ export async function buildBackfillPlan(input: {
     createdAt: '1970-01-01T00:00:00.000Z',
     status: 'planned' as const,
     strategy,
+    ...(env ? { environment: env } : {}),
     from: input.from,
     to: input.to,
     chunks: buildChunks({
