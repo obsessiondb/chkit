@@ -92,14 +92,12 @@ async function runCliWithRetry(
     maxAttempts = 5,
     delayMs = 2000,
     extraEnv = {},
-    validate,
-  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string>; validate?: (result: { exitCode: number; stdout: string; stderr: string }) => boolean } = {}
+  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const expectJson = args.includes('--json')
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = runCli(cwd, args, extraEnv)
-    const ok = result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))
-    if (ok && (!validate || validate(result))) return result
+    if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
     if (attempt === maxAttempts) return result
     await new Promise((r) => setTimeout(r, delayMs))
   }
@@ -190,12 +188,8 @@ describe('@chkit/cli doppler env e2e', () => {
           throw new Error('expected generated migration file')
         }
 
-        const planResult = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], { extraEnv: cliEnv })
-        if (planResult.exitCode !== 0) {
-          throw new Error(
-            `migrate --json plan failed (exit=${planResult.exitCode})\nstdout:\n${planResult.stdout}\nstderr:\n${planResult.stderr}`
-          )
-        }
+        const planResult = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], cliEnv)
+        expect(planResult.exitCode).toBe(0)
         const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
         expect(planPayload.pending.length).toBe(1)
 
@@ -219,13 +213,7 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(executePayload.mode).toBe('execute')
         expect(executePayload.applied.length).toBe(1)
 
-        const statusResult = await runCliWithRetry(fixture.dir, ['status', '--config', fixture.configPath, '--json'], {
-          extraEnv: cliEnv,
-          validate: (r) => {
-            const p = JSON.parse(r.stdout) as { applied: number }
-            return p.applied > 0
-          },
-        })
+        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
         expect(statusResult.exitCode).toBe(0)
         const statusPayload = JSON.parse(statusResult.stdout) as {
           total: number
@@ -325,13 +313,7 @@ describe('@chkit/cli doppler env e2e', () => {
         }
         expect(secondExecute.exitCode).toBe(0)
 
-        const statusResult = await runCliWithRetry(fixture.dir, ['status', '--config', fixture.configPath, '--json'], {
-          extraEnv: cliEnv,
-          validate: (r) => {
-            const p = JSON.parse(r.stdout) as { applied: number }
-            return p.applied >= 2
-          },
-        })
+        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
         expect(statusResult.exitCode).toBe(0)
         const statusPayload = JSON.parse(statusResult.stdout) as {
           total: number
@@ -416,7 +398,7 @@ describe('@chkit/cli doppler env e2e', () => {
 
         const check = await runCliWithRetry(
           fixture.dir,
-          ['check', '--config', fixture.configPath, '--table', `${prefix}*`, '--json'],
+          ['check', '--config', fixture.configPath, '--json'],
           { maxAttempts: 5, delayMs: 1500, extraEnv: cliEnv }
         )
         if (check.exitCode !== 0) {

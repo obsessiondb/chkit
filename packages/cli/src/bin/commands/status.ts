@@ -35,7 +35,7 @@ async function cmdStatus(ctx: CommandRunContext): Promise<void> {
     const payload = {
       migrationsDir,
       total: files.length,
-      applied: appliedNames.size,
+      applied: journal.applied.length,
       pending: pending.length,
       pendingMigrations: pending,
       checksumMismatchCount: checksumMismatches.length,
@@ -49,7 +49,7 @@ async function cmdStatus(ctx: CommandRunContext): Promise<void> {
 
     console.log(`Migrations directory: ${migrationsDir}`)
     console.log(`Total migrations:     ${files.length}`)
-    console.log(`Applied:              ${appliedNames.size}`)
+    console.log(`Applied:              ${journal.applied.length}`)
     console.log(`Pending:              ${pending.length}`)
 
     if (pending.length > 0) {
