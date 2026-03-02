@@ -59,6 +59,9 @@
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
+      "devDependencies": {
+        "@clickhouse/client": "^1.11.0",
+      },
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
