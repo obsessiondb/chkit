@@ -43,5 +43,8 @@
   },
   "dependencies": {
     "fast-glob": "^3.3.2"
+  },
+  "devDependencies": {
+    "@clickhouse/client": "^1.11.0"
   }
 }
