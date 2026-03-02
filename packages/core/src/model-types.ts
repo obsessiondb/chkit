@@ -33,6 +33,7 @@ export interface SkipIndexDefinition {
   name: string
   expression: string
   type: 'minmax' | 'set' | 'bloom_filter' | 'tokenbf_v1' | 'ngrambf_v1'
+  typeArgs?: string
   granularity: number
 }
 

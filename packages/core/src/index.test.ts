@@ -695,6 +695,98 @@ describe('@chkit/core planner v1', () => {
     expect(planA.riskSummary).toEqual(planB.riskSummary)
   })
 
+  test('renders parameterized index type with typeArgs in CREATE TABLE', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      indexes: [
+        { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+        { name: 'idx_id', expression: 'id', type: 'minmax', granularity: 3 },
+        { name: 'idx_bloom', expression: 'source', type: 'bloom_filter', typeArgs: '0.01', granularity: 1 },
+      ],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('TYPE set(0) GRANULARITY 1')
+    expect(sql).toContain('TYPE minmax GRANULARITY 3')
+    expect(sql).toContain('TYPE bloom_filter(0.01) GRANULARITY 1')
+  })
+
+  test('renders parameterized index type with typeArgs in ALTER ADD INDEX', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'source', type: 'String' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'source', type: 'String' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [
+          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+        ],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.sql).toContain('TYPE set(0) GRANULARITY 1')
+  })
+
+  test('detects index change when typeArgs differs', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'source', type: 'String' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [
+          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+        ],
+      }),
+    ]
+
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'source', type: 'String' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [
+          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '100', granularity: 1 },
+        ],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_drop_index',
+      'alter_table_add_index',
+    ])
+    expect(plan.operations[1]?.sql).toContain('TYPE set(100) GRANULARITY 1')
+  })
+
   test('creates tables before views and materialized views', () => {
     const oldDefs: Parameters<typeof planDiff>[0] = []
 
