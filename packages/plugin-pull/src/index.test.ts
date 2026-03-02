@@ -29,6 +29,28 @@ describe('@chkit/plugin-pull renderSchemaFile', () => {
     expect(content).toContain("export default schema(app_events)")
   })
 
+  test('renders index typeArgs in pulled schema', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'source', type: 'String' }],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [
+          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_id', expression: 'id', type: 'minmax', granularity: 3 },
+        ],
+      },
+    ])
+
+    expect(content).toContain('type: "set", typeArgs: "0", granularity: 1')
+    expect(content).toContain('type: "minmax", granularity: 3')
+    expect(content).not.toContain('typeArgs: undefined')
+  })
+
   test('renders view and materialized view definitions', () => {
     const content = renderSchemaFile([
       {

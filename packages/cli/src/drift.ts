@@ -202,9 +202,10 @@ function normalizeColumnShape(column: ColumnDefinition): string {
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition): string {
+  const typeStr = index.typeArgs !== undefined ? `${index.type}(${index.typeArgs})` : index.type
   return [
     `expr=${normalizeSQLFragment(index.expression)}`,
-    `type=${index.type}`,
+    `type=${typeStr}`,
     `granularity=${index.granularity}`,
   ].join('|')
 }
