@@ -30,11 +30,15 @@ function renderKeyClauseColumns(columns: string[]): string {
     .join(', ')
 }
 
+function renderIndexType(idx: SkipIndexDefinition): string {
+  return idx.typeArgs !== undefined ? `${idx.type}(${idx.typeArgs})` : idx.type
+}
+
 function renderTableSQL(def: TableDefinition): string {
   const columns = def.columns.map(renderColumn)
   const indexes = (def.indexes ?? []).map(
     (idx) =>
-      `INDEX \`${idx.name}\` (${idx.expression}) TYPE ${idx.type} GRANULARITY ${idx.granularity}`
+      `INDEX \`${idx.name}\` (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.granularity}`
   )
   const projections = (def.projections ?? []).map(
     (projection) => `PROJECTION \`${projection.name}\` (${projection.query})`
@@ -89,7 +93,7 @@ export function renderAlterDropColumn(def: TableDefinition, columnName: string):
 }
 
 export function renderAlterAddIndex(def: TableDefinition, index: SkipIndexDefinition): string {
-  return `ALTER TABLE ${def.database}.${def.name} ADD INDEX IF NOT EXISTS \`${index.name}\` (${index.expression}) TYPE ${index.type} GRANULARITY ${index.granularity};`
+  return `ALTER TABLE ${def.database}.${def.name} ADD INDEX IF NOT EXISTS \`${index.name}\` (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${index.granularity};`
 }
 
 export function renderAlterDropIndex(def: TableDefinition, indexName: string): string {

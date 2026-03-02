@@ -65,9 +65,14 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
       if (definition.indexes && definition.indexes.length > 0) {
         lines.push('  indexes: [')
         for (const index of definition.indexes) {
-          lines.push(
-            `    { name: ${renderString(index.name)}, expression: ${renderString(index.expression)}, type: ${renderString(index.type)}, granularity: ${index.granularity} },`
-          )
+          const parts = [
+            `name: ${renderString(index.name)}`,
+            `expression: ${renderString(index.expression)}`,
+            `type: ${renderString(index.type)}`,
+          ]
+          if (index.typeArgs !== undefined) parts.push(`typeArgs: ${renderString(index.typeArgs)}`)
+          parts.push(`granularity: ${index.granularity}`)
+          lines.push(`    { ${parts.join(', ')} },`)
         }
         lines.push('  ],')
       }

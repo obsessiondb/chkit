@@ -110,20 +110,30 @@ function normalizeColumnFromSystemRow(row: SystemColumnRow): ColumnDefinition {
   }
 }
 
-function normalizeIndexType(value: string): SkipIndexDefinition['type'] {
-  if (value === 'minmax') return 'minmax'
-  if (value === 'set') return 'set'
-  if (value === 'bloom_filter') return 'bloom_filter'
-  if (value === 'tokenbf_v1') return 'tokenbf_v1'
-  if (value === 'ngrambf_v1') return 'ngrambf_v1'
-  return 'set'
+function parseIndexType(value: string): Pick<SkipIndexDefinition, 'type' | 'typeArgs'> {
+  const match = value.match(/^(\w+)\((.+)\)$/)
+  const baseName = match?.[1] ?? value
+  const args = match?.[2]
+
+  const KNOWN_TYPES: Record<string, SkipIndexDefinition['type'] | undefined> = {
+    minmax: 'minmax',
+    set: 'set',
+    bloom_filter: 'bloom_filter',
+    tokenbf_v1: 'tokenbf_v1',
+    ngrambf_v1: 'ngrambf_v1',
+  }
+
+  const type: SkipIndexDefinition['type'] = KNOWN_TYPES[baseName] ?? 'set'
+  return args !== undefined ? { type, typeArgs: args } : { type }
 }
 
 function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefinition {
+  const { type, typeArgs } = parseIndexType(row.type)
   return {
     name: row.name,
     expression: normalizeSQLFragment(row.expr),
-    type: normalizeIndexType(row.type),
+    type,
+    typeArgs,
     granularity: row.granularity,
   }
 }
