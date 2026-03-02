@@ -402,15 +402,16 @@ describe('SQL validation via EXPLAIN AST', () => {
     })
 
     test('expression in order by', async () => {
-      const def = baseTable({
-        columns: [
-          { name: 'id', type: 'UInt64' },
-          { name: 'created_at', type: 'DateTime' },
-        ],
-        primaryKey: ['id'],
-        orderBy: ['id', 'toDate(created_at)'],
-      })
-      await assertValidSQL(client, toCreateSQL(def))
+      // Bypass toCreateSQL validation since it rejects expressions in orderBy.
+      // We still want to verify ClickHouse can parse expression-based ORDER BY.
+      const sql = `CREATE TABLE IF NOT EXISTS default.test_expr_order
+(
+  \`id\` UInt64,
+  \`created_at\` DateTime
+) ENGINE = MergeTree()
+PRIMARY KEY (\`id\`)
+ORDER BY (\`id\`, toDate(\`created_at\`))`
+      await assertValidSQL(client, sql)
     })
   })
 
