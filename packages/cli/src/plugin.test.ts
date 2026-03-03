@@ -659,7 +659,7 @@ describe('plugin runtime', () => {
       expect(payload.outFile).toBe(outFile)
 
       const content = await readFile(outFile, 'utf8')
-      expect(content).toContain('export interface AppUsersRow')
+      expect(content).toContain('export type AppUsersRow = {')
       expect(content.endsWith('\n')).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
