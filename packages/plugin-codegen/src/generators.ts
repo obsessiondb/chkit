@@ -246,7 +246,7 @@ function renderTableInterface(
   interfaceName: string,
   options: Required<CodegenPluginOptions>
 ): { lines: string[]; findings: CodegenFinding[] } {
-  const lines: string[] = [`export interface ${interfaceName} {`]
+  const lines: string[] = [`export type ${interfaceName} = {`]
   const findings: CodegenFinding[] = []
   const zodFields: string[] = []
 
@@ -279,7 +279,7 @@ function renderViewInterface(
   const kind = definition.kind === 'view' ? 'view' : 'materialized_view'
   return {
     lines: [
-      `export interface ${interfaceName} {`,
+      `export type ${interfaceName} = {`,
       '  [key: string]: unknown',
       '}',
       '',
