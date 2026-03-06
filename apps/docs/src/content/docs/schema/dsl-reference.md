@@ -72,7 +72,7 @@ const events = table({
   ttl: 'received_at + INTERVAL 90 DAY',
   settings: { index_granularity: 8192 },
   indexes: [
-    { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
+    { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
   ],
   projections: [
     { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
@@ -167,11 +167,12 @@ Each entry in the `indexes` array is a `SkipIndexDefinition`.
 | `name` | `string` | Index name |
 | `expression` | `string` | Indexed expression |
 | `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1'` | Index type |
+| `typeArgs` | `string`, optional | Arguments for parameterized index types. **Required** for `set`, `tokenbf_v1`, `ngrambf_v1` (ClickHouse 26+) |
 | `granularity` | `number` | Index granularity |
 
 ```ts
 indexes: [
-  { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
+  { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
   { name: 'idx_ts', expression: 'received_at', type: 'minmax', granularity: 3 },
 ]
 ```

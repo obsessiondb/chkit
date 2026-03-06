@@ -29,13 +29,21 @@ export interface ColumnDefinition {
   comment?: string
 }
 
-export interface SkipIndexDefinition {
+interface SkipIndexBase {
   name: string
   expression: string
-  type: 'minmax' | 'set' | 'bloom_filter' | 'tokenbf_v1' | 'ngrambf_v1'
-  typeArgs?: string
   granularity: number
 }
+
+/**
+ * `set` requires a numeric argument (e.g. `typeArgs: '0'`).
+ * ClickHouse 26+ rejects bare `set` — use `set(0)` for unbounded.
+ */
+export type SkipIndexDefinition = SkipIndexBase &
+  (
+    | { type: 'minmax' | 'bloom_filter'; typeArgs?: string }
+    | { type: 'set' | 'tokenbf_v1' | 'ngrambf_v1'; typeArgs: string }
+  )
 
 export interface ProjectionDefinition {
   name: string
@@ -230,6 +238,7 @@ export type ValidationIssueCode =
   | 'duplicate_projection_name'
   | 'primary_key_missing_column'
   | 'order_by_missing_column'
+  | 'index_type_missing_args'
 
 export interface ValidationIssue {
   code: ValidationIssueCode
