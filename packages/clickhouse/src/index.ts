@@ -115,27 +115,29 @@ function parseIndexType(value: string): Pick<SkipIndexDefinition, 'type' | 'type
   const baseName = match?.[1] ?? value
   const args = match?.[2]
 
-  const KNOWN_TYPES: Record<string, SkipIndexDefinition['type'] | undefined> = {
-    minmax: 'minmax',
-    set: 'set',
-    bloom_filter: 'bloom_filter',
-    tokenbf_v1: 'tokenbf_v1',
-    ngrambf_v1: 'ngrambf_v1',
+  switch (baseName) {
+    case 'minmax':
+      return args !== undefined ? { type: 'minmax', typeArgs: args } : { type: 'minmax' }
+    case 'bloom_filter':
+      return args !== undefined ? { type: 'bloom_filter', typeArgs: args } : { type: 'bloom_filter' }
+    case 'tokenbf_v1':
+      return { type: 'tokenbf_v1', typeArgs: args ?? '0' }
+    case 'ngrambf_v1':
+      return { type: 'ngrambf_v1', typeArgs: args ?? '0' }
+    case 'set':
+    default:
+      return { type: 'set', typeArgs: args ?? '0' }
   }
-
-  const type: SkipIndexDefinition['type'] = KNOWN_TYPES[baseName] ?? 'set'
-  return args !== undefined ? { type, typeArgs: args } : { type }
 }
 
 function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefinition {
-  const { type, typeArgs } = parseIndexType(row.type)
+  const parsed = parseIndexType(row.type)
   return {
     name: row.name,
     expression: normalizeSQLFragment(row.expr),
-    type,
-    typeArgs,
     granularity: row.granularity,
-  }
+    ...parsed,
+  } as SkipIndexDefinition
 }
 
 const NETWORK_ERROR_LABELS: Record<string, string> = {

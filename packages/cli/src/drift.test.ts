@@ -212,7 +212,7 @@ describe('@chkit/cli drift comparer', () => {
         { name: 'source', type: 'String' },
       ],
       settings: { index_granularity: '4096' },
-      indexes: [{ name: 'idx_source', expression: 'source', type: 'set', granularity: 1 }],
+      indexes: [{ name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 }],
       projections: [{ name: 'p_fresh', query: 'SELECT id ORDER BY id LIMIT 5' }],
       ttl: undefined,
     })
