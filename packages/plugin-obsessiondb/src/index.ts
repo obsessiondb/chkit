@@ -60,18 +60,49 @@ export function stripSharedPrefix(engine: string): string {
   return engine.replace(/^Shared/, '')
 }
 
+function stripCloudSettings(settings: Record<string, string | number | boolean> | undefined): {
+  settings: Record<string, string | number | boolean> | undefined
+  stripped: string[]
+} {
+  if (!settings) return { settings, stripped: [] }
+  const CLOUD_ONLY_SETTINGS = ['storage_policy']
+  const stripped: string[] = []
+  let result: Record<string, string | number | boolean> | undefined
+  for (const key of CLOUD_ONLY_SETTINGS) {
+    if (key in settings) {
+      if (!result) result = { ...settings }
+      delete result[key]
+      stripped.push(key)
+    }
+  }
+  if (!result) return { settings, stripped: [] }
+  return {
+    settings: Object.keys(result).length > 0 ? result : undefined,
+    stripped,
+  }
+}
+
 export function rewriteSharedEngines(definitions: SchemaDefinition[]): {
   definitions: SchemaDefinition[]
   count: number
+  strippedSettings: string[]
 } {
   let count = 0
+  const allStrippedSettings: string[] = []
   const rewritten = definitions.map((def) => {
     if (def.kind !== 'table') return def
-    if (!def.engine.startsWith('Shared')) return def
-    count++
-    return { ...def, engine: stripSharedPrefix(def.engine) }
+    const hasSharedEngine = def.engine.startsWith('Shared')
+    const { settings, stripped } = stripCloudSettings(def.settings)
+    if (!hasSharedEngine && stripped.length === 0) return def
+    if (hasSharedEngine) count++
+    allStrippedSettings.push(...stripped)
+    return {
+      ...def,
+      engine: hasSharedEngine ? stripSharedPrefix(def.engine) : def.engine,
+      settings,
+    }
   })
-  return { definitions: rewritten, count }
+  return { definitions: rewritten, count, strippedSettings: allStrippedSettings }
 }
 
 function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionDBPlugin {
@@ -103,6 +134,12 @@ function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionD
         if (rewritten.count > 0) {
           console.log(
             `obsessiondb: Rewrote ${rewritten.count} Shared engine(s) to standard ClickHouse equivalents.`,
+          )
+        }
+        if (rewritten.strippedSettings.length > 0) {
+          const unique = [...new Set(rewritten.strippedSettings)]
+          console.log(
+            `obsessiondb: Stripped cloud-only setting(s): ${unique.join(', ')}`,
           )
         }
         return rewritten.definitions
