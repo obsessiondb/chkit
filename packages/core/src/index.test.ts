@@ -216,6 +216,7 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'source',
             type: 'set',
+            typeArgs: '0',
             granularity: 1,
           },
         ],
@@ -259,12 +260,14 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'source',
             type: 'set',
+            typeArgs: '0',
             granularity: 1,
           },
           {
             name: 'idx_old',
             expression: 'old_col',
             type: 'set',
+            typeArgs: '0',
             granularity: 1,
           },
         ],
@@ -288,6 +291,7 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'lower(source)',
             type: 'set',
+            typeArgs: '0',
             granularity: 2,
           },
         ],
@@ -582,8 +586,8 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id', 'missing_pk_col'],
         orderBy: ['id', 'missing_order_col'],
         indexes: [
-          { name: 'idx_source', expression: 'id', type: 'set', granularity: 1 },
-          { name: 'idx_source', expression: 'id', type: 'set', granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', typeArgs: '0', granularity: 1 },
         ],
       }),
     ]
@@ -615,6 +619,30 @@ describe('@chkit/core planner v1', () => {
 
     const issues = validateDefinitions(defs)
     expect(issues.map((issue) => issue.code)).toEqual(['duplicate_projection_name'])
+  })
+
+  test('validates set index type requires typeArgs', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [
+          // @ts-expect-error — intentionally omitting required typeArgs to test runtime validation
+          { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
+        ],
+      }),
+    ]
+
+    const issues = validateDefinitions(defs)
+    expect(issues.map((issue) => issue.code)).toEqual(['index_type_missing_args'])
+    expect(issues[0]?.message).toContain('typeArgs')
   })
 
   test('planDiff throws typed validation error for invalid schema', () => {

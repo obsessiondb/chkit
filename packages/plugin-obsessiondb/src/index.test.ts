@@ -22,7 +22,7 @@ function makeConfig(url?: string): ResolvedChxConfig {
   }
 }
 
-function makeTable(name: string, engine: string): SchemaDefinition {
+function makeTable(name: string, engine: string, settings?: Record<string, string | number | boolean>): SchemaDefinition {
   return {
     kind: 'table',
     database: 'default',
@@ -31,6 +31,7 @@ function makeTable(name: string, engine: string): SchemaDefinition {
     engine,
     primaryKey: ['id'],
     orderBy: ['id'],
+    ...(settings ? { settings } : {}),
   }
 }
 
@@ -148,6 +149,51 @@ describe('rewriteSharedEngines', () => {
     expect((result.definitions[0] as { engine: string }).engine).toBe('ReplacingMergeTree(ts)')
     expect((result.definitions[1] as { engine: string }).engine).toBe('MergeTree')
     expect((result.definitions[2] as { engine: string }).engine).toBe('MergeTree')
+  })
+
+  test('strips storage_policy from table settings', () => {
+    const definitions: SchemaDefinition[] = [
+      makeTable('events', 'MergeTree', { storage_policy: "'s3'", index_granularity: 8192 }),
+    ]
+    const result = rewriteSharedEngines(definitions)
+
+    expect(result.strippedSettings).toEqual(['storage_policy'])
+    const table = result.definitions[0] as { settings?: Record<string, string | number | boolean> }
+    expect(table.settings).toEqual({ index_granularity: 8192 })
+  })
+
+  test('removes settings entirely when storage_policy is the only setting', () => {
+    const definitions: SchemaDefinition[] = [
+      makeTable('events', 'MergeTree', { storage_policy: "'s3'" }),
+    ]
+    const result = rewriteSharedEngines(definitions)
+
+    expect(result.strippedSettings).toEqual(['storage_policy'])
+    const table = result.definitions[0] as { settings?: Record<string, string | number | boolean> }
+    expect(table.settings).toBeUndefined()
+  })
+
+  test('strips storage_policy and Shared engine together', () => {
+    const definitions: SchemaDefinition[] = [
+      makeTable('events', 'SharedMergeTree', { storage_policy: "'s3'", index_granularity: 4096 }),
+    ]
+    const result = rewriteSharedEngines(definitions)
+
+    expect(result.count).toBe(1)
+    expect(result.strippedSettings).toEqual(['storage_policy'])
+    const table = result.definitions[0] as { engine: string; settings?: Record<string, string | number | boolean> }
+    expect(table.engine).toBe('MergeTree')
+    expect(table.settings).toEqual({ index_granularity: 4096 })
+  })
+
+  test('does not strip non-cloud settings', () => {
+    const definitions: SchemaDefinition[] = [
+      makeTable('events', 'MergeTree', { index_granularity: 8192 }),
+    ]
+    const result = rewriteSharedEngines(definitions)
+
+    expect(result.strippedSettings).toEqual([])
+    expect(result.definitions).toEqual(definitions)
   })
 })
 
