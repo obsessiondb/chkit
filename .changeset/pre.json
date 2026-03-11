@@ -15,21 +15,32 @@
   "changesets": [
     "add-pkg-links",
     "add-plugin-obsessiondb",
+    "backfill-array-fix",
+    "backfill-env-binding",
+    "backfill-execute-fix",
     "backfill-options-merge-fix",
+    "backfill-retry-backoff",
     "backfill-time-column",
+    "backfill-ux-improvements",
     "custom-cli-framework",
     "fix-docs-deploy",
+    "fix-ingest-assignability",
     "fix-migration-ordering",
+    "fix-mv-backfill-select-column-order",
+    "fix-set-index-type-args",
     "fix-silent-error-output",
     "fix-skill-install-path",
     "fix-workspace-deps",
     "internal-refactors",
     "journal-in-clickhouse",
+    "mv-column-list",
     "mv-drop-sync",
+    "obsessiondb-strip-storage-policy",
     "open-source-audit",
     "rename-plugin-codegen",
     "rename-to-chkit",
     "skill-hint-agent-aware",
-    "skill-hint-plugin"
+    "skill-hint-plugin",
+    "validate-set-index-args"
   ]
 }
