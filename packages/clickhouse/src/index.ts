@@ -165,7 +165,6 @@ export {
   waitForView,
   waitForColumn,
   waitForTableAbsent,
-  type DDLPropagationOptions,
 } from './ddl-propagation.js'
 
 export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhouse']>): ClickHouseExecutor {
