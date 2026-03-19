@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 
@@ -328,7 +328,10 @@ describe('@chkit/plugin-codegen generation', () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-codegen-zod-'))
     const filePath = join(dir, 'types.ts')
     try {
-      await symlink(join(import.meta.dir, '..', 'node_modules'), join(dir, 'node_modules'))
+      const zodDir = dirname(require.resolve('zod/package.json'))
+      const nodeModulesDir = join(dir, 'node_modules')
+      await mkdir(nodeModulesDir)
+      await symlink(zodDir, join(nodeModulesDir, 'zod'))
       await writeFile(filePath, result.content, 'utf8')
       const mod = await import(filePath)
       expect(mod.AppUsersRowSchema).toBeDefined()

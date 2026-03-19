@@ -159,6 +159,14 @@ function wrapConnectionError(error: unknown, url: string): never {
   throw error
 }
 
+export {
+  waitForDDLPropagation,
+  waitForTable,
+  waitForView,
+  waitForColumn,
+  waitForTableAbsent,
+} from './ddl-propagation.js'
+
 export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhouse']>): ClickHouseExecutor {
   const client = createClient({
     url: config.url,

@@ -81,72 +81,7 @@ export function createJournalTableName(label: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// State-based polling (replaces blind retries)
+// State-based polling (re-exported from ddl-propagation for test convenience)
 // ---------------------------------------------------------------------------
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms))
-}
-
-/**
- * Polls ClickHouse until a table exists. Throws after timeout.
- */
-export async function waitForTable(
-  executor: ClickHouseExecutor,
-  database: string,
-  tableName: string,
-  { timeoutMs = 15_000, intervalMs = 500 } = {}
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = '${database}' AND name = '${tableName}'`
-    )
-    if (rows.length > 0) return
-    await sleep(intervalMs)
-  }
-  throw new Error(`waitForTable: ${database}.${tableName} did not appear within ${timeoutMs}ms`)
-}
-
-/**
- * Polls ClickHouse until a view exists. Throws after timeout.
- */
-export async function waitForView(
-  executor: ClickHouseExecutor,
-  database: string,
-  viewName: string,
-  { timeoutMs = 15_000, intervalMs = 500 } = {}
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = '${database}' AND name = '${viewName}' AND engine LIKE '%View%'`
-    )
-    if (rows.length > 0) return
-    await sleep(intervalMs)
-  }
-  throw new Error(`waitForView: ${database}.${viewName} did not appear within ${timeoutMs}ms`)
-}
-
-/**
- * Polls ClickHouse until a column exists on a table. Throws after timeout.
- */
-export async function waitForColumn(
-  executor: ClickHouseExecutor,
-  database: string,
-  tableName: string,
-  columnName: string,
-  { timeoutMs = 15_000, intervalMs = 500 } = {}
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.columns WHERE database = '${database}' AND table = '${tableName}' AND name = '${columnName}'`
-    )
-    if (rows.length > 0) return
-    await sleep(intervalMs)
-  }
-  throw new Error(
-    `waitForColumn: ${database}.${tableName}.${columnName} did not appear within ${timeoutMs}ms`
-  )
-}
+export { waitForTable, waitForView, waitForColumn } from './ddl-propagation.js'

@@ -228,6 +228,110 @@ describe('@chkit/cli doppler env e2e', () => {
     240_000
   )
 
+  test(
+    'migrate applies table + materialized view without DDL race condition',
+    async () => {
+      const executor = createLiveExecutor(liveEnv)
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('ddlrace')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+      const prefix = createPrefix('ddl_race')
+      const eventsTable = `${prefix}events`
+      const eventCountsTable = `${prefix}event_counts`
+      const eventCountsMv = `${prefix}event_counts_mv`
+
+      const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-e2e-ddlrace-'))
+      const schemaPath = join(dir, 'schema.ts')
+      const configPath = join(dir, 'clickhouse.config.ts')
+      const outDir = join(dir, 'chkit')
+      const migrationsDir = join(outDir, 'migrations')
+      const metaDir = join(outDir, 'meta')
+
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+
+      const schemaContent = `import { schema, table, materializedView } from '${CORE_ENTRY}'
+
+const events = table({
+  database: '${database}',
+  name: '${eventsTable}',
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'org_id', type: 'String' },
+    { name: 'received_at', type: 'DateTime64(3)' },
+  ],
+  engine: 'MergeTree()',
+  primaryKey: ['org_id'],
+  orderBy: ['org_id', 'received_at', 'id'],
+})
+
+const eventCounts = table({
+  database: '${database}',
+  name: '${eventCountsTable}',
+  columns: [
+    { name: 'org_id', type: 'String' },
+    { name: 'total', type: 'UInt64' },
+  ],
+  engine: 'SummingMergeTree()',
+  primaryKey: ['org_id'],
+  orderBy: ['org_id'],
+})
+
+const eventCountsMv = materializedView({
+  database: '${database}',
+  name: '${eventCountsMv}',
+  to: { database: '${database}', name: '${eventCountsTable}' },
+  as: \`SELECT org_id, count() AS total FROM ${database}.${eventsTable} GROUP BY org_id\`,
+})
+
+export default schema(events, eventCounts, eventCountsMv)
+`
+
+      await writeFile(schemaPath, schemaContent, 'utf8')
+      await writeFile(
+        configPath,
+        `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${database}',\n  },\n}\n`,
+        'utf8'
+      )
+
+      try {
+        const generateResult = runCli(dir, ['generate', '--config', configPath, '--json'], cliEnv)
+        expect(generateResult.exitCode).toBe(0)
+        const generatePayload = JSON.parse(generateResult.stdout) as { migrationFile: string | null }
+        expect(generatePayload.migrationFile).toBeTruthy()
+
+        const executeResult = await runCliWithRetry(dir, [
+          'migrate',
+          '--config',
+          configPath,
+          '--execute',
+          '--json',
+        ], { extraEnv: cliEnv })
+        if (executeResult.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('migrate --execute failed (DDL race test)', executeResult))
+        }
+        expect(executeResult.exitCode).toBe(0)
+        const executePayload = JSON.parse(executeResult.stdout) as {
+          mode: string
+          applied: Array<{ name: string }>
+        }
+        expect(executePayload.mode).toBe('execute')
+        expect(executePayload.applied.length).toBe(1)
+
+        await waitForTable(executor, database, eventsTable)
+        await waitForTable(executor, database, eventCountsTable)
+        await waitForView(executor, database, eventCountsMv)
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventCountsMv)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventCountsTable)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventsTable)}`)
+        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
+      }
+    },
+    240_000
+  )
+
   // TODO: Stabilize this test — it's flaky in CI because `check` reports drift for
   // extra objects in the shared database that belong to other test runs.
   test.skipIf(new Date() < new Date('2026-06-01'))(
