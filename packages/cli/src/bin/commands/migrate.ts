@@ -4,6 +4,7 @@ import process from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { waitForDDLPropagation } from '@chkit/clickhouse'
 import { withClickHouseExecutor } from '../clickhouse-resource.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
@@ -277,6 +278,7 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
       const fullPath = join(migrationsDir, file)
       const sql = await readFile(fullPath, 'utf8')
       const parsedStatements = extractExecutableStatements(sql)
+      const operationSummaries = extractMigrationOperationSummaries(sql)
       const statements = await pluginRuntime.runOnBeforeApply({
         command: 'migrate',
         config,
@@ -286,8 +288,13 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
         sql,
         statements: parsedStatements,
       })
-      for (const statement of statements) {
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i]!
         await db.execute(statement)
+        const operation = operationSummaries[i]
+        if (operation) {
+          await waitForDDLPropagation(db, operation.type, operation.key)
+        }
       }
 
       const entry: MigrationJournalEntry = {
