@@ -174,6 +174,9 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     password: config.password,
     database: config.database,
     session_id: crypto.randomUUID(),
+    http_headers: {
+      'X-DDL': '1',
+    },
     clickhouse_settings: {
       wait_end_of_query: 1,
       async_insert: 0,
