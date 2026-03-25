@@ -174,9 +174,6 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     password: config.password,
     database: config.database,
     session_id: crypto.randomUUID(),
-    http_headers: {
-      'X-DDL': '1',
-    },
     clickhouse_settings: {
       wait_end_of_query: 1,
       async_insert: 0,
@@ -186,7 +183,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
   return {
     async execute(sql: string): Promise<void> {
       try {
-        await client.command({ query: sql })
+        await client.command({ query: sql, http_headers: { 'X-DDL': '1' } })
       } catch (error) {
         wrapConnectionError(error, config.url)
       }
