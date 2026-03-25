@@ -183,7 +183,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
   return {
     async execute(sql: string): Promise<void> {
       try {
-        await client.command({ query: sql })
+        await client.command({ query: sql, http_headers: { 'X-DDL': '1' } })
       } catch (error) {
         wrapConnectionError(error, config.url)
       }
