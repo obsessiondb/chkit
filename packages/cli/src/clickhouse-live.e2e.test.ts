@@ -13,6 +13,7 @@ import {
   quoteIdent,
   runCli,
   runCliWithRetry,
+  waitForCliJson,
   waitForTable,
   waitForView,
 } from './e2e-testkit.js'
@@ -207,13 +208,16 @@ describe('@chkit/cli doppler env e2e', () => {
         }
         expect(secondExecute.exitCode).toBe(0)
 
-        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(statusResult.exitCode).toBe(0)
-        const statusPayload = JSON.parse(statusResult.stdout) as {
+        const { payload: statusPayload } = await waitForCliJson<{
           total: number
           applied: number
           pending: number
-        }
+        }>(
+          fixture.dir,
+          ['status', '--config', fixture.configPath, '--json'],
+          (p) => p.applied === 2,
+          { extraEnv: cliEnv }
+        )
         expect(statusPayload.total).toBe(2)
         expect(statusPayload.applied).toBe(2)
         expect(statusPayload.pending).toBe(0)
