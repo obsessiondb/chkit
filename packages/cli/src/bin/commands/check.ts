@@ -32,11 +32,13 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
     throw new Error('clickhouse config is required for check (journal is stored in ClickHouse)')
   }
 
+  const database = config.clickhouse.database
   await withClickHouseExecutor(config.clickhouse, async (db) => {
     const journalStore = createJournalStore(db)
 
     const files = await listMigrations(migrationsDir)
     const journal = await journalStore.readJournal()
+    const databaseMissing = journalStore.databaseMissing
     const appliedNames = new Set(journal.applied.map((entry) => entry.name))
     const pending = files.filter((f) => !appliedNames.has(f))
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
@@ -133,12 +135,18 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
         ])
       ),
       scope: tableScope,
+      ...(databaseMissing ? { databaseMissing: true, database } : {}),
     }
 
     if (jsonMode) {
       emitJson('check', payload)
       if (!ok) process.exitCode = 1
       return
+    }
+
+    if (databaseMissing) {
+      console.log(`\u26A0 Database "${database}" does not exist on the target server.`)
+      console.log('  It will be created when you run: chkit migrate --apply\n')
     }
 
     console.log(`Check status: ${ok ? 'ok' : 'failed'}`)

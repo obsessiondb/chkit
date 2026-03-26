@@ -159,6 +159,12 @@ function wrapConnectionError(error: unknown, url: string): never {
   throw error
 }
 
+export function isUnknownDatabaseError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  if (!('code' in error)) return false
+  return String(error.code) === '81'
+}
+
 export {
   waitForDDLPropagation,
   waitForTable,
@@ -185,6 +191,22 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
       try {
         await client.command({ query: sql, http_headers: { 'X-DDL': '1' } })
       } catch (error) {
+        if (isUnknownDatabaseError(error)) {
+          // The configured database doesn't exist yet. Retry without the
+          // session database so that CREATE DATABASE can succeed.
+          const fallback = createClient({
+            url: config.url,
+            username: config.username,
+            password: config.password,
+            clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
+          })
+          try {
+            await fallback.command({ query: sql, http_headers: { 'X-DDL': '1' } })
+          } finally {
+            await fallback.close()
+          }
+          return
+        }
         wrapConnectionError(error, config.url)
       }
     },

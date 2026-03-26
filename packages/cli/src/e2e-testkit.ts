@@ -84,6 +84,41 @@ export async function runCliWithRetry(
 }
 
 // ---------------------------------------------------------------------------
+// Polling helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Polls a CLI command until a predicate on the parsed JSON output passes.
+ * Useful for waiting on ClickHouse Cloud replication lag after writes.
+ */
+export async function waitForCliJson<T>(
+  cwd: string,
+  args: string[],
+  predicate: (payload: T) => boolean,
+  {
+    maxAttempts = 10,
+    delayMs = 1000,
+    extraEnv = {},
+  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
+): Promise<{ result: CliResult; payload: T }> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const result = runCli(cwd, args, extraEnv)
+    if (result.exitCode === 0 && isValidJson(result.stdout)) {
+      const payload = JSON.parse(result.stdout) as T
+      if (predicate(payload)) return { result, payload }
+    }
+    if (attempt === maxAttempts) {
+      throw new Error(
+        `waitForCliJson: predicate not satisfied after ${maxAttempts} attempts.\n` +
+          formatTestDiagnostic('last attempt', result)
+      )
+    }
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  throw new Error('waitForCliJson: unreachable')
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
 

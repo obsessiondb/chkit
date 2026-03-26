@@ -22,6 +22,7 @@ async function cmdStatus(ctx: CommandRunContext): Promise<void> {
     throw new Error('clickhouse config is required for status (journal is stored in ClickHouse)')
   }
 
+  const database = config.clickhouse.database
   await withClickHouseExecutor(config.clickhouse, async (db) => {
     const journalStore = createJournalStore(db)
 
@@ -32,6 +33,7 @@ async function cmdStatus(ctx: CommandRunContext): Promise<void> {
     const pending = files.filter((f) => !appliedNames.has(f))
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
 
+    const databaseMissing = journalStore.databaseMissing
     const payload = {
       migrationsDir,
       total: files.length,
@@ -40,11 +42,17 @@ async function cmdStatus(ctx: CommandRunContext): Promise<void> {
       pendingMigrations: pending,
       checksumMismatchCount: checksumMismatches.length,
       checksumMismatches,
+      ...(databaseMissing ? { databaseMissing: true, database } : {}),
     }
 
     if (jsonMode) {
       emitJson('status', payload)
       return
+    }
+
+    if (databaseMissing) {
+      console.log(`\u26A0 Database "${database}" does not exist on the target server.`)
+      console.log('  It will be created when you run: chkit migrate --apply\n')
     }
 
     console.log(`Migrations directory: ${migrationsDir}`)

@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 
+import { isUnknownDatabaseError, type SchemaObjectRef } from '@chkit/clickhouse'
 import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
 
 import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
@@ -21,6 +22,8 @@ export interface DriftPayload {
   expectedCount: number
   actualCount: number
   drifted: boolean
+  databaseMissing?: boolean
+  database?: string
   missing: string[]
   extra: string[]
   kindMismatches: Array<{ expected: string; actual: string; object: string }>
@@ -45,7 +48,35 @@ export async function buildDriftPayload(
     scope?.enabled && scope.matchCount > 0 ? new Set(scope.matchedTables) : undefined
   if (!config.clickhouse) throw new Error('clickhouse config is required for drift checks')
   return withClickHouseExecutor(config.clickhouse, async (db) => {
-    const actualObjects = await db.listSchemaObjects()
+    let actualObjects: SchemaObjectRef[]
+    try {
+      actualObjects = await db.listSchemaObjects()
+    } catch (error) {
+      if (isUnknownDatabaseError(error)) {
+        const allExpected = snapshot.definitions
+          .filter((def) => {
+            if (!selectedTables) return true
+            if (def.kind !== 'table') return true
+            return selectedTables.has(`${def.database}.${def.name}`)
+          })
+          .map((def) => `${def.database}.${def.name}`)
+        return {
+          scope,
+          snapshotFile: join(metaDir, 'snapshot.json'),
+          expectedCount: allExpected.length,
+          actualCount: 0,
+          drifted: allExpected.length > 0,
+          databaseMissing: true,
+          database: config.clickhouse?.database,
+          missing: allExpected,
+          extra: [],
+          kindMismatches: [],
+          objectDrift: [],
+          tableDrift: [],
+        }
+      }
+      throw error
+    }
     const expectedObjects = snapshot.definitions
       .filter((def) => {
         if (!selectedTables) return true
@@ -143,6 +174,11 @@ async function cmdDrift(ctx: CommandRunContext): Promise<void> {
   if (jsonMode) {
     emitJson('drift', payload)
     return
+  }
+
+  if (payload.databaseMissing) {
+    console.log(`\u26A0 Database "${payload.database ?? ''}" does not exist on the target server.`)
+    console.log('  It will be created when you run: chkit migrate --apply\n')
   }
 
   console.log(`Expected objects: ${payload.expectedCount}`)
