@@ -1,4 +1,4 @@
-import { createClickHouseExecutor, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { createClickHouseExecutor, isUnknownDatabaseError, type ClickHouseExecutor } from '@chkit/clickhouse'
 import type { ChxConfig } from '@chkit/core'
 
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
@@ -7,6 +7,7 @@ import { CLI_VERSION } from './version.js'
 export interface JournalStore {
   readJournal(): Promise<MigrationJournal>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
+  readonly databaseMissing: boolean
 }
 
 const DEFAULT_JOURNAL_TABLE = '_chkit_migrations'
@@ -46,6 +47,7 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
 ORDER BY (name)
 SETTINGS index_granularity = 1`
   let bootstrapped = false
+  let _databaseMissing = false
 
   async function ensureTable(): Promise<void> {
     if (bootstrapped) return
@@ -58,10 +60,24 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       bootstrapped = true
       return
-    } catch {
+    } catch (error) {
+      if (isUnknownDatabaseError(error)) {
+        _databaseMissing = true
+        bootstrapped = true
+        return
+      }
       // Table does not exist yet – create it below.
     }
-    await db.execute(createTableSql)
+    try {
+      await db.execute(createTableSql)
+    } catch (error) {
+      if (isUnknownDatabaseError(error)) {
+        _databaseMissing = true
+        bootstrapped = true
+        return
+      }
+      throw error
+    }
     // On ClickHouse Cloud, DDL propagation across nodes may lag behind the
     // CREATE TABLE acknowledgment. Wait until the table is queryable.
     for (let attempt = 0; attempt < 10; attempt++) {
@@ -76,8 +92,14 @@ SETTINGS index_granularity = 1`
   }
 
   return {
+    get databaseMissing() {
+      return _databaseMissing
+    },
     async readJournal(): Promise<MigrationJournal> {
       await ensureTable()
+      if (_databaseMissing) {
+        return { version: 1, applied: [] }
+      }
       try {
         await db.execute(`SYSTEM SYNC REPLICA ${journalTable}`)
       } catch {
@@ -97,6 +119,11 @@ SETTINGS index_granularity = 1`
     },
 
     async appendEntry(entry: MigrationJournalEntry): Promise<void> {
+      if (_databaseMissing) {
+        // A migration may have created the database — reset and retry.
+        _databaseMissing = false
+        bootstrapped = false
+      }
       await ensureTable()
       const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
       const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version) VALUES ('${esc(entry.name)}', '${esc(entry.appliedAt)}', '${esc(entry.checksum)}', '${esc(CLI_VERSION)}')`
