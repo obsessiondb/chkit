@@ -28,6 +28,11 @@
       "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./utils": {
+      "source": "./src/utils.ts",
+      "types": "./dist/utils.d.ts",
+      "default": "./dist/utils.js"
     }
   },
   "files": [

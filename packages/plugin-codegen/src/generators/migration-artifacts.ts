@@ -1,6 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 import type {
   GenerateMigrationArtifactsInput,
@@ -41,11 +40,11 @@ export async function generateMigrationArtifacts(
   const header = renderHeader(toolVersion)
   const migrationsArray = renderMigrationsArray(migrations)
 
-  const sqlSplitterSource = await readSqlSplitterSource()
-
   // biome-ignore lint/style/useTemplate: join+concat is clearer here
   const content = [
     ...header,
+    '',
+    "import { extractExecutableStatements } from '@chkit/core/utils'",
     '',
     'export interface MigrationEntry {',
     '  name: string',
@@ -59,8 +58,6 @@ export async function generateMigrationArtifacts(
     '',
     migrationsArray,
     '',
-    sqlSplitterSource,
-    '',
     RUN_MIGRATIONS_FUNCTION,
   ].join('\n').trimEnd() + '\n'
 
@@ -69,29 +66,6 @@ export async function generateMigrationArtifacts(
     outFile: normalized.migrationsOutFile,
     migrationCount: migrations.length,
   }
-}
-
-/**
- * Reads the sql-splitter.ts source from @chkit/core and strips the export
- * keywords so the functions are inlined as module-private in the generated file.
- */
-async function readSqlSplitterSource(): Promise<string> {
-  const require = createRequire(import.meta.url)
-  const corePath = require.resolve('@chkit/core')
-  const coreDir = dirname(corePath)
-  const splitterPath = join(coreDir, 'sql-splitter.ts')
-
-  let source: string
-  try {
-    source = await readFile(splitterPath, 'utf8')
-  } catch {
-    // Fallback: try .js in case we're running from dist
-    const jsPath = join(coreDir, 'sql-splitter.js')
-    source = await readFile(jsPath, 'utf8')
-  }
-
-  // Strip export keywords — these become module-private functions in the generated file
-  return source.replace(/^export /gm, '')
 }
 
 // The runMigrations function is static — it doesn't depend on the SQL splitter source,
