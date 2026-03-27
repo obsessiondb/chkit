@@ -18,7 +18,7 @@ import {
 } from './create-table-parser.js'
 
 export interface ClickHouseExecutor {
-  execute(sql: string): Promise<void>
+  command(sql: string): Promise<void>
   query<T>(sql: string): Promise<T[]>
   insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
@@ -186,7 +186,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
   })
 
   return {
-    async execute(sql: string): Promise<void> {
+    async command(sql: string): Promise<void> {
       try {
         await client.command({ query: sql, http_headers: { 'X-DDL': '1' } })
       } catch (error) {

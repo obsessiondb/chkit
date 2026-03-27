@@ -52,7 +52,7 @@ export async function generateMigrationArtifacts(
     '}',
     '',
     'export interface MigrationExecutor {',
-    '  execute(sql: string): Promise<void>',
+    '  command(sql: string): Promise<void>',
     '  query<T>(sql: string): Promise<T[]>',
     '}',
     '',
@@ -82,7 +82,7 @@ export async function runMigrations(
   const journalTable = options?.journalTable ?? '_chkit_migrations'
 
   // Ensure journal table exists
-  await executor.execute(\`
+  await executor.command(\`
     CREATE TABLE IF NOT EXISTS \${journalTable} (
       name String,
       applied_at DateTime64(3, 'UTC') DEFAULT now64(3),
@@ -107,11 +107,11 @@ export async function runMigrations(
 
     const statements = extractExecutableStatements(migration.sql)
     for (const statement of statements) {
-      await executor.execute(statement)
+      await executor.command(statement)
     }
 
     // Record in journal
-    await executor.execute(
+    await executor.command(
       \`INSERT INTO \${journalTable} (name, applied_at, checksum) VALUES ('\${migration.name}', now64(3), '')\`
     )
     result.applied.push(migration.name)

@@ -234,7 +234,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                     failCount: parsed.simulateFailCount,
                   },
                 },
-                execute: db ? async (sql) => { await db.execute(sql); return undefined } : undefined,
+                execute: db ? async (sql) => { await db.command(sql); return undefined } : undefined,
                 clickhouse: context.config.clickhouse,
               })
 
@@ -298,7 +298,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   forceCompatibility: parsed.forceCompatibility,
                   forceEnvironment: parsed.forceEnvironment,
                 },
-                execute: db ? async (sql) => { await db.execute(sql); return undefined } : undefined,
+                execute: db ? async (sql) => { await db.command(sql); return undefined } : undefined,
                 clickhouse: context.config.clickhouse,
               })
 

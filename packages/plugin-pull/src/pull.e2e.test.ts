@@ -53,19 +53,19 @@ describe('@chkit/plugin-pull live env e2e', () => {
       database: 'default',
     })
 
-    await executor.execute(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(targetDatabase)}`)
-    await executor.execute(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(noiseDatabase)}`)
+    await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(targetDatabase)}`)
+    await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(noiseDatabase)}`)
   })
 
   afterAll(async () => {
     try {
-      await executor.execute(`DROP DATABASE IF EXISTS ${quoteIdent(targetDatabase)}`)
+      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(targetDatabase)}`)
     } catch {
       // Best-effort cleanup for shared e2e environment.
     }
 
     try {
-      await executor.execute(`DROP DATABASE IF EXISTS ${quoteIdent(noiseDatabase)}`)
+      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(noiseDatabase)}`)
     } catch {
       // Best-effort cleanup for shared e2e environment.
     }
@@ -101,30 +101,30 @@ describe('@chkit/plugin-pull live env e2e', () => {
       }
 
       try {
-        await executor.execute(
+        await executor.command(
           `CREATE TABLE ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} (id UInt64, source String, received_at DateTime64(3) DEFAULT now64(3)) ENGINE = MergeTree() PARTITION BY toYYYYMM(received_at) PRIMARY KEY (id) ORDER BY (id) SETTINGS index_granularity = 8192`
         )
 
         // Wait for table to be visible before creating dependent objects
         await waitForTable(executor, targetDatabase, eventsTable)
 
-        await executor.execute(
+        await executor.command(
           `CREATE TABLE ${quoteIdent(targetDatabase)}.${quoteIdent(accountsTable)} (id UInt64, email Nullable(String), updated_at DateTime DEFAULT now()) ENGINE = MergeTree() PRIMARY KEY (id) ORDER BY (id)`
         )
-        await executor.execute(
+        await executor.command(
           `CREATE VIEW ${quoteIdent(targetDatabase)}.${quoteIdent(eventsView)} AS SELECT id, source FROM ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)}`
         )
-        await executor.execute(
+        await executor.command(
           `CREATE TABLE ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRollupTable)} (id UInt64, c UInt64) ENGINE = MergeTree() ORDER BY (id)`
         )
 
         // Wait for rollup table before creating MV that depends on it
         await waitForTable(executor, targetDatabase, eventsRollupTable)
 
-        await executor.execute(
+        await executor.command(
           `CREATE MATERIALIZED VIEW ${quoteIdent(targetDatabase)}.${quoteIdent(eventsMaterializedView)} TO ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRollupTable)} AS SELECT id, count() AS c FROM ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} GROUP BY id`
         )
-        await executor.execute(
+        await executor.command(
           `CREATE TABLE ${quoteIdent(noiseDatabase)}.${quoteIdent(noiseTable)} (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
         )
 

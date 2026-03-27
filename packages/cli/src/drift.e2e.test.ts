@@ -88,14 +88,14 @@ describe('@chkit/cli drift depth env e2e', () => {
         // Wait for the table to be visible before altering it
         await waitForTable(executor, database, usersTable)
 
-        await executor.execute(
+        await executor.command(
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
         // Wait for the column to propagate (ClickHouse Cloud DDL is eventually consistent)
         await waitForColumn(executor, database, usersTable, 'rogue')
 
-        await executor.execute(
+        await executor.command(
           `CREATE VIEW ${quoteIdent(database)}.${quoteIdent(manualView)} AS SELECT 1 AS one`
         )
 
@@ -129,9 +129,9 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.driftReasonTotals.table > 0).toBe(true)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(manualView)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(manualView)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
@@ -195,8 +195,8 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect((checkPayload.driftReasonCounts.projection_mismatch ?? 0) > 0).toBe(true)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
@@ -232,7 +232,7 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await waitForTable(executor, database, usersTable)
 
-        await executor.execute(
+        await executor.command(
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
@@ -258,8 +258,8 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.failedChecks).not.toContain('schema_drift')
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
@@ -295,7 +295,7 @@ describe('@chkit/cli drift depth env e2e', () => {
 
         await waitForTable(executor, database, usersTable)
 
-        await executor.execute(
+        await executor.command(
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
@@ -327,8 +327,8 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.failedChecks).toContain('schema_drift')
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },

@@ -14,13 +14,13 @@ import {
 } from './index'
 
 describe('@chkit/clickhouse smoke', () => {
-  test('creates executor with execute/query methods', () => {
+  test('creates executor with command/query methods', () => {
     const executor = createClickHouseExecutor({
       url: 'http://localhost:8123',
       database: 'default',
     })
 
-    expect(typeof executor.execute).toBe('function')
+    expect(typeof executor.command).toBe('function')
     expect(typeof executor.query).toBe('function')
     expect(typeof executor.listSchemaObjects).toBe('function')
   })
