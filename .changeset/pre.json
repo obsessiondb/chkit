@@ -25,6 +25,7 @@
     "backfill-time-column",
     "backfill-ux-improvements",
     "codegen-typed-sql-splitter",
+    "core-workerd-compat",
     "custom-cli-framework",
     "ddl-propagation-wait",
     "fix-docs-deploy",

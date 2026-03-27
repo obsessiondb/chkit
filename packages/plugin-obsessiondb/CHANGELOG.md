@@ -1,5 +1,27 @@
 # @chkit/plugin-obsessiondb
 
+## 0.1.0-beta.19
+
+### Patch Changes
+
+- a94a2a1: Add @chkit/plugin-obsessiondb for ObsessionDB engine compatibility.
+- a52a2b2: Strip `storage_policy` setting from tables during local migrations (for non-ObsessionDB targets). Improves local development experience by removing cloud-only settings automatically.
+- Updated dependencies [c63c74f]
+- Updated dependencies [ba60638]
+- Updated dependencies [c396fb5]
+- Updated dependencies [1a5caa3]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [cc1125e]
+- Updated dependencies [f719c50]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [bc0c6b1]
+- Updated dependencies [9a54433]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+- Updated dependencies [a52a2b2]
+  - @chkit/core@0.1.0-beta.19
+
 ## 0.1.0-beta.18
 
 ### Patch Changes
