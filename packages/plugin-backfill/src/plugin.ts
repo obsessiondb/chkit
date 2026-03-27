@@ -63,7 +63,8 @@ async function resolveTimeColumn(input: {
   }
 
   if (input.jsonMode) {
-    return candidates[0]?.name
+    // biome-ignore lint/style/noNonNullAssertion: length checked above
+    return candidates[0]!.name
   }
 
   if (candidates.length === 1) {
@@ -112,7 +113,8 @@ async function selectFromCandidates(
         `Invalid selection. Specify --time-column <column> explicitly.`
       )
     }
-    return candidates[index]?.name
+    // biome-ignore lint/style/noNonNullAssertion: index bounds checked above
+    return candidates[index]!.name
   } finally {
     rl.close()
   }
@@ -232,7 +234,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                     failCount: parsed.simulateFailCount,
                   },
                 },
-                execute: db ? (sql) => db.execute(sql) : undefined,
+                execute: db ? async (sql) => { await db.execute(sql); return undefined } : undefined,
                 clickhouse: context.config.clickhouse,
               })
 
@@ -296,7 +298,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   forceCompatibility: parsed.forceCompatibility,
                   forceEnvironment: parsed.forceEnvironment,
                 },
-                execute: db ? (sql) => db.execute(sql) : undefined,
+                execute: db ? async (sql) => { await db.execute(sql); return undefined } : undefined,
                 clickhouse: context.config.clickhouse,
               })
 

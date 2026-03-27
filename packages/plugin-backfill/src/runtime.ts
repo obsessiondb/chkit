@@ -296,7 +296,7 @@ async function executeRunLoop(input: {
         chunk.status = 'pending'
       }
 
-      const executed = await executeChunk({
+      await executeChunk({
         run: input.run,
         chunk,
         maxRetries,
@@ -307,8 +307,6 @@ async function executeRunLoop(input: {
         simulation: input.execution.simulation,
       })
 
-      if (!executed.ok) {
-      }
     }
 
     // Determine final run status after all chunks have been attempted
