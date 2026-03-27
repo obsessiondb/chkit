@@ -63,11 +63,12 @@ async function resolveTimeColumn(input: {
   }
 
   if (input.jsonMode) {
+    // biome-ignore lint/style/noNonNullAssertion: length checked above
     return candidates[0]!.name
   }
 
   if (candidates.length === 1) {
-    return confirmSingleCandidate(candidates[0]!, input.target)
+    return confirmSingleCandidate(candidates[0] as TimeColumnCandidate, input.target)
   }
 
   return selectFromCandidates(candidates, input.target)
@@ -101,7 +102,7 @@ async function selectFromCandidates(
   try {
     console.log(`Detected time column candidates for ${target}:`)
     for (let i = 0; i < candidates.length; i++) {
-      const c = candidates[i]!
+      const c = candidates[i] as TimeColumnCandidate
       const suffix = c.source === 'order_by' ? ', in ORDER BY' : ''
       console.log(`  ${i + 1}. ${c.name} (${c.type}${suffix})`)
     }
@@ -112,6 +113,7 @@ async function selectFromCandidates(
         `Invalid selection. Specify --time-column <column> explicitly.`
       )
     }
+    // biome-ignore lint/style/noNonNullAssertion: index bounds checked above
     return candidates[index]!.name
   } finally {
     rl.close()
@@ -232,7 +234,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                     failCount: parsed.simulateFailCount,
                   },
                 },
-                execute: db ? (sql) => db.execute(sql) : undefined,
+                execute: db ? async (sql) => { await db.execute(sql); return undefined } : undefined,
                 clickhouse: context.config.clickhouse,
               })
 
@@ -296,7 +298,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   forceCompatibility: parsed.forceCompatibility,
                   forceEnvironment: parsed.forceEnvironment,
                 },
-                execute: db ? (sql) => db.execute(sql) : undefined,
+                execute: db ? async (sql) => { await db.execute(sql); return undefined } : undefined,
                 clickhouse: context.config.clickhouse,
               })
 

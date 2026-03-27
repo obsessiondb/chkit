@@ -289,7 +289,7 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
         statements: parsedStatements,
       })
       for (let i = 0; i < statements.length; i++) {
-        const statement = statements[i]!
+        const statement = statements[i] as string
         await db.execute(statement)
         const operation = operationSummaries[i]
         if (operation) {
