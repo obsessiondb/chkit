@@ -69,7 +69,7 @@ SETTINGS index_granularity = 1`
       // Table does not exist yet – create it below.
     }
     try {
-      await db.execute(createTableSql)
+      await db.command(createTableSql)
     } catch (error) {
       if (isUnknownDatabaseError(error)) {
         _databaseMissing = true
@@ -101,7 +101,7 @@ SETTINGS index_granularity = 1`
         return { version: 1, applied: [] }
       }
       try {
-        await db.execute(`SYSTEM SYNC REPLICA ${journalTable}`)
+        await db.command(`SYSTEM SYNC REPLICA ${journalTable}`)
       } catch {
         // Non-replicated or single-node setups don't support SYSTEM SYNC REPLICA.
       }
@@ -130,7 +130,7 @@ SETTINGS index_granularity = 1`
       const maxAttempts = 5
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          await db.execute(insertSql)
+          await db.command(insertSql)
           break
         } catch (error) {
           if (!isRetryableInsertRace(error) || attempt === maxAttempts) {
@@ -140,7 +140,7 @@ SETTINGS index_granularity = 1`
         }
       }
       try {
-        await db.execute(`SYSTEM SYNC REPLICA ${journalTable}`)
+        await db.command(`SYSTEM SYNC REPLICA ${journalTable}`)
       } catch {
         // Non-replicated or single-node setups don't support SYSTEM SYNC REPLICA.
       }

@@ -132,9 +132,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(generatedSql.length).toBeGreaterThan(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
@@ -223,9 +223,9 @@ describe('@chkit/cli doppler env e2e', () => {
         expect(statusPayload.pending).toBe(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
@@ -326,10 +326,10 @@ export default schema(events, eventCounts, eventCountsMv)
         await waitForView(executor, database, eventCountsMv)
       } finally {
         await rm(dir, { recursive: true, force: true })
-        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventCountsMv)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventCountsTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventsTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventCountsMv)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventCountsTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(eventsTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
@@ -427,9 +427,9 @@ export default schema(events, eventCounts, eventCountsMv)
         expect(checkPayload.drifted).toBe(false)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.execute(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.execute(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
         await executor.close()
       }
     },
