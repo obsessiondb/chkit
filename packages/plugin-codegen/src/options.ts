@@ -13,6 +13,8 @@ const DEFAULT_OPTIONS: Required<CodegenPluginOptions> = {
   failOnUnsupportedType: true,
   emitIngest: false,
   ingestOutFile: './src/generated/chkit-ingest.ts',
+  emitMigrations: false,
+  migrationsOutFile: './src/generated/chkit-migrations.ts',
 }
 
 function parseBooleanOption(
@@ -63,6 +65,8 @@ export function normalizeRuntimeOptions(options: Record<string, unknown>): Codeg
   const failOnUnsupportedType = parseBooleanOption(options, 'failOnUnsupportedType')
   const emitIngest = parseBooleanOption(options, 'emitIngest')
   const ingestOutFile = parseStringOption(options, 'ingestOutFile')
+  const emitMigrations = parseBooleanOption(options, 'emitMigrations')
+  const migrationsOutFile = parseStringOption(options, 'migrationsOutFile')
 
   if (outFile !== undefined) normalized.outFile = outFile
   if (emitZod !== undefined) normalized.emitZod = emitZod
@@ -73,6 +77,8 @@ export function normalizeRuntimeOptions(options: Record<string, unknown>): Codeg
   if (failOnUnsupportedType !== undefined) normalized.failOnUnsupportedType = failOnUnsupportedType
   if (emitIngest !== undefined) normalized.emitIngest = emitIngest
   if (ingestOutFile !== undefined) normalized.ingestOutFile = ingestOutFile
+  if (emitMigrations !== undefined) normalized.emitMigrations = emitMigrations
+  if (migrationsOutFile !== undefined) normalized.migrationsOutFile = migrationsOutFile
 
   return normalized
 }
@@ -92,6 +98,8 @@ export const CODEGEN_FLAGS = defineFlags([
   { name: '--ingest-out-file', type: 'string', description: 'Ingest output file path', placeholder: '<path>' },
   { name: '--bigint-mode', type: 'string', description: 'How to represent large integers (string or bigint)', placeholder: '<mode>' },
   { name: '--include-views', type: 'boolean', description: 'Include views in generated output' },
+  { name: '--emit-migrations', type: 'boolean', description: 'Emit runtime migration module', negation: true },
+  { name: '--migrations-out-file', type: 'string', description: 'Migration module output file path', placeholder: '<path>' },
 ] as const)
 
 export function flagsToOverrides(flags: ParsedFlags): FlagOverrides {
@@ -108,6 +116,8 @@ export function flagsToOverrides(flags: ParsedFlags): FlagOverrides {
     includeViews: f['--include-views'],
     emitIngest: f['--emit-ingest'],
     ingestOutFile: f['--ingest-out-file'],
+    emitMigrations: f['--emit-migrations'],
+    migrationsOutFile: f['--migrations-out-file'],
     bigintMode: rawBigintMode,
   }
 }
@@ -128,6 +138,8 @@ export function mergeOptions(
     includeViews: overrides.includeViews ?? withRuntime.includeViews,
     emitIngest: overrides.emitIngest ?? withRuntime.emitIngest,
     ingestOutFile: overrides.ingestOutFile ?? withRuntime.ingestOutFile,
+    emitMigrations: overrides.emitMigrations ?? withRuntime.emitMigrations,
+    migrationsOutFile: overrides.migrationsOutFile ?? withRuntime.migrationsOutFile,
   })
 }
 

@@ -1,6 +1,6 @@
 ---
 title: Codegen Plugin
-description: Generate TypeScript row types, optional Zod schemas, and ingestion functions from chkit schema definitions.
+description: Generate TypeScript row types, optional Zod schemas, ingestion functions, and runtime migration modules from chkit schema definitions.
 ---
 
 This document covers practical usage of the optional `codegen` plugin.
@@ -10,6 +10,7 @@ This document covers practical usage of the optional `codegen` plugin.
 - Generates deterministic TypeScript row types from chkit schema definitions.
 - Optionally generates Zod schemas from the same definitions.
 - Optionally generates typed ingestion functions for inserting rows into ClickHouse tables.
+- Optionally generates a self-contained runtime migration module with all migration SQL inlined, for environments without filesystem access (e.g., Cloudflare Workers).
 
 ## How it fits your workflow
 
@@ -44,6 +45,8 @@ export default defineConfig({
       emitZod: false,
       emitIngest: false,
       ingestOutFile: './src/generated/chkit-ingest.ts',
+      emitMigrations: false,
+      migrationsOutFile: './src/generated/chkit-migrations.ts',
       tableNameStyle: 'pascal',
       bigintMode: 'string',
       includeViews: false,
@@ -62,6 +65,8 @@ Legacy path-based registration via `{ resolve: './plugins/codegen.ts', options: 
 - `emitZod` (default: `false`)
 - `emitIngest` (default: `false`)
 - `ingestOutFile` (default: `./src/generated/chkit-ingest.ts`)
+- `emitMigrations` (default: `false`)
+- `migrationsOutFile` (default: `./src/generated/chkit-migrations.ts`)
 - `tableNameStyle` (default: `pascal`) values: `pascal | camel | raw`
 - `bigintMode` (default: `string`) values: `string | bigint`
 - `includeViews` (default: `false`)
@@ -81,6 +86,8 @@ Invalid option values fail fast at startup via plugin config validation.
     - `codegen_stale_output` (types content drift)
     - `codegen_missing_ingest_output` (ingest file missing, when `emitIngest` is enabled)
     - `codegen_stale_ingest_output` (ingest content drift, when `emitIngest` is enabled)
+    - `codegen_missing_migrations_output` (migrations file missing, when `emitMigrations` is enabled)
+    - `codegen_stale_migrations_output` (migrations content drift, when `emitMigrations` is enabled)
 
 Useful flags:
 
@@ -88,6 +95,8 @@ Useful flags:
 - `--emit-zod` / `--no-emit-zod`
 - `--emit-ingest` / `--no-emit-ingest`
 - `--ingest-out-file <path>`
+- `--emit-migrations` / `--no-emit-migrations`
+- `--migrations-out-file <path>`
 - `--bigint-mode <string|bigint>`
 - `--include-views`
 

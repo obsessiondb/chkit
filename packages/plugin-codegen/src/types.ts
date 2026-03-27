@@ -18,6 +18,8 @@ export interface CodegenPluginOptions {
   failOnUnsupportedType?: boolean
   emitIngest?: boolean
   ingestOutFile?: string
+  emitMigrations?: boolean
+  migrationsOutFile?: string
 }
 
 export interface CodegenPluginCommandContext {
@@ -58,6 +60,8 @@ export interface CodegenFinding {
     | 'codegen_missing_output'
     | 'codegen_stale_ingest_output'
     | 'codegen_missing_ingest_output'
+    | 'codegen_stale_migrations_output'
+    | 'codegen_missing_migrations_output'
   message: string
   severity: 'warn' | 'error'
   path?: string
@@ -96,6 +100,18 @@ export interface GenerateIngestArtifactsOutput {
   functionCount: number
 }
 
+export interface GenerateMigrationArtifactsInput {
+  migrationsDir: string
+  options?: CodegenPluginOptions
+  toolVersion?: string
+}
+
+export interface GenerateMigrationArtifactsOutput {
+  content: string
+  outFile: string
+  migrationCount: number
+}
+
 export interface CodegenPluginCheckContext {
   command: 'check'
   config: ResolvedChxConfig
@@ -132,4 +148,6 @@ export interface FlagOverrides {
   includeViews?: boolean
   emitIngest?: boolean
   ingestOutFile?: string
+  emitMigrations?: boolean
+  migrationsOutFile?: string
 }
