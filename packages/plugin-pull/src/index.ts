@@ -10,7 +10,6 @@ import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
   defineFlags,
-  type MaterializedViewDefinition,
   normalizeEngine,
   type ParsedFlags,
   type ResolvedChxConfig,

@@ -1,5 +1,5 @@
 import pRetry from 'p-retry'
-import { type ClickHouseExecutor } from './index.js'
+import type { ClickHouseExecutor } from './index.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
 
@@ -81,7 +81,9 @@ function parseOperationKey(key: string):
   | undefined {
   const tableMatch = key.match(/^table:([^.]+)\.([^:]+)/)
   if (!tableMatch) return undefined
+  // biome-ignore lint/style/noNonNullAssertion: capture groups guaranteed by regex match
   const database = tableMatch[1]!
+  // biome-ignore lint/style/noNonNullAssertion: capture groups guaranteed by regex match
   const table = tableMatch[2]!
 
   const columnMatch = key.match(/:column:([^:]+)/)

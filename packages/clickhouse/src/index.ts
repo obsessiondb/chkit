@@ -124,7 +124,6 @@ function parseIndexType(value: string): Pick<SkipIndexDefinition, 'type' | 'type
       return { type: 'tokenbf_v1', typeArgs: args ?? '0' }
     case 'ngrambf_v1':
       return { type: 'ngrambf_v1', typeArgs: args ?? '0' }
-    case 'set':
     default:
       return { type: 'set', typeArgs: args ?? '0' }
   }

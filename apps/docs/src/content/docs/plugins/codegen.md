@@ -112,6 +112,48 @@ When `runOnGenerate` is enabled (default), [`chkit generate`](/cli/generate/) ru
 
 If codegen fails in that path, `chkit generate` fails.
 
+## Runtime migration module
+
+When `emitMigrations` is enabled, the plugin generates a self-contained TypeScript module that inlines all migration SQL. This is designed for environments without filesystem access at runtime — such as Cloudflare Workers, Deno Deploy, or serverless functions — where reading `.sql` files from disk is not possible.
+
+The generated file exports:
+
+- **`migrations`** — an array of `MigrationEntry` objects, each containing a `name` and the raw `sql` string.
+- **`runMigrations(executor, options?)`** — applies pending migrations against a provided executor, tracking progress in a `_chkit_migrations` journal table.
+
+### MigrationExecutor interface
+
+The `runMigrations` function accepts any object that satisfies the `MigrationExecutor` interface:
+
+```ts
+interface MigrationExecutor {
+  execute(sql: string): Promise<void>
+  query<T>(sql: string): Promise<T[]>
+}
+```
+
+This keeps the generated module independent of any specific ClickHouse client library. Wrap your client to match this interface.
+
+### Usage example
+
+```ts
+import { runMigrations } from './generated/chkit-migrations'
+
+const result = await runMigrations(executor)
+// result.applied  — migrations that were run
+// result.skipped  — migrations already in the journal
+```
+
+You can override the journal table name:
+
+```ts
+await runMigrations(executor, { journalTable: 'my_migrations' })
+```
+
+### How it stays in sync
+
+When `runOnGenerate` is enabled (the default), the migration module is regenerated every time `chkit generate` produces new migrations. `chkit check` and `chkit codegen --check` detect stale or missing migration output via the `codegen_missing_migrations_output` and `codegen_stale_migrations_output` error codes.
+
 ## Current limits
 
 - Query-level type inference is not included.

@@ -115,9 +115,9 @@ export function injectTimeFilter(
   const after = trimmed.slice(insertAt)
 
   if (whereHit) {
-    return `${before}\n  AND ${timeCondition}${after ? '\n' + after : ''}`
+    return `${before}\n  AND ${timeCondition}${after ? `\n${after}` : ''}`
   }
-  return `${before}\nWHERE ${timeCondition}${after ? '\n' + after : ''}`
+  return `${before}\nWHERE ${timeCondition}${after ? `\n${after}` : ''}`
 }
 
 /**

@@ -519,30 +519,30 @@ describe('computeEnvironmentFingerprint', () => {
     })
 
     expect(env).toBeDefined()
-    expect(env!.fingerprint).toMatch(/^[a-f0-9]{16}$/)
-    expect(env!.url).toBe('https://my-cluster.clickhouse.cloud:8443')
-    expect(env!.database).toBe('analytics')
+    expect(env?.fingerprint).toMatch(/^[a-f0-9]{16}$/)
+    expect(env?.url).toBe('https://my-cluster.clickhouse.cloud:8443')
+    expect(env?.database).toBe('analytics')
   })
 
   test('same URL+database produces same fingerprint', () => {
     const a = computeEnvironmentFingerprint({ url: 'https://host:8443/path', database: 'db1' })
     const b = computeEnvironmentFingerprint({ url: 'https://host:8443/other', database: 'db1' })
 
-    expect(a!.fingerprint).toBe(b!.fingerprint)
+    expect(a?.fingerprint).toBe(b?.fingerprint)
   })
 
   test('different database produces different fingerprint', () => {
     const a = computeEnvironmentFingerprint({ url: 'https://host:8443', database: 'staging' })
     const b = computeEnvironmentFingerprint({ url: 'https://host:8443', database: 'production' })
 
-    expect(a!.fingerprint).not.toBe(b!.fingerprint)
+    expect(a?.fingerprint).not.toBe(b?.fingerprint)
   })
 
   test('different host produces different fingerprint', () => {
     const a = computeEnvironmentFingerprint({ url: 'https://staging.ch.cloud:8443', database: 'db' })
     const b = computeEnvironmentFingerprint({ url: 'https://prod.ch.cloud:8443', database: 'db' })
 
-    expect(a!.fingerprint).not.toBe(b!.fingerprint)
+    expect(a?.fingerprint).not.toBe(b?.fingerprint)
   })
 })
 
@@ -570,9 +570,9 @@ describe('environment binding in plan', () => {
       })
 
       expect(output.plan.environment).toBeDefined()
-      expect(output.plan.environment!.fingerprint).toMatch(/^[a-f0-9]{16}$/)
-      expect(output.plan.environment!.url).toBe('https://my-cluster.ch.cloud:8443')
-      expect(output.plan.environment!.database).toBe('analytics')
+      expect(output.plan.environment?.fingerprint).toMatch(/^[a-f0-9]{16}$/)
+      expect(output.plan.environment?.url).toBe('https://my-cluster.ch.cloud:8443')
+      expect(output.plan.environment?.database).toBe('analytics')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

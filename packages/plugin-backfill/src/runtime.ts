@@ -127,7 +127,7 @@ async function executeChunk(input: {
   retryDelayMs: number
   runPath: string
   eventPath: string
-  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
+  execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
   simulation?: {
     failChunkId?: string
     failCount?: number
@@ -156,7 +156,7 @@ async function executeChunk(input: {
       input.simulation?.failChunkId === input.chunk.id && input.chunk.attempts <= failureBudget
 
     let attemptError: string | undefined
-    let executionResult: void | { rowsWritten?: number } | undefined
+    let executionResult: undefined | { rowsWritten?: number } | undefined
 
     if (shouldSimulateFailure) {
       attemptError = `Simulated failure for chunk ${input.chunk.id} attempt ${input.chunk.attempts}`
@@ -228,7 +228,7 @@ async function executeChunk(input: {
     })
 
     if (input.retryDelayMs > 0) {
-      const delay = input.retryDelayMs * Math.pow(2, input.chunk.attempts - 1)
+      const delay = input.retryDelayMs * 2 ** (input.chunk.attempts - 1)
       await sleep(delay)
     }
   }
@@ -248,7 +248,7 @@ async function executeRunLoop(input: {
   }
   execution: BackfillExecutionOptions
   retryDelayMs: number
-  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
+  execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
   const maxRetries = input.plan.options.maxRetriesPerChunk
   let aborted = false
@@ -296,7 +296,7 @@ async function executeRunLoop(input: {
         chunk.status = 'pending'
       }
 
-      const executed = await executeChunk({
+      await executeChunk({
         run: input.run,
         chunk,
         maxRetries,
@@ -307,10 +307,6 @@ async function executeRunLoop(input: {
         simulation: input.execution.simulation,
       })
 
-      if (!executed.ok) {
-        // Continue processing remaining chunks instead of stopping
-        continue
-      }
     }
 
     // Determine final run status after all chunks have been attempted
@@ -411,7 +407,7 @@ export async function executeBackfillRun(input: {
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
-  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
+  execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
   clickhouse?: { url: string; database: string }
 }): Promise<ExecuteBackfillRunOutput> {
   const execution = input.execution ?? {}
@@ -485,7 +481,7 @@ export async function resumeBackfillRun(input: {
   config: Pick<ResolvedChxConfig, 'metaDir'>
   options: NormalizedBackfillPluginOptions
   execution?: BackfillExecutionOptions
-  execute?: (sql: string) => Promise<void | { rowsWritten?: number }>
+  execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
   clickhouse?: { url: string; database: string }
 }): Promise<ExecuteBackfillRunOutput> {
   const { plan, stateDir } = await readPlan({
