@@ -9,10 +9,13 @@ import type {
   CodegenPluginOptions,
   CodegenPluginRegistration,
   GenerateIngestArtifactsOutput,
+  GenerateMigrationArtifactsOutput,
 } from './types.js'
 import { CodegenConfigError } from './errors.js'
 import { CODEGEN_FLAGS, flagsToOverrides, mergeOptions, normalizeCodegenOptions, normalizeRuntimeOptions } from './options.js'
-import { generateIngestArtifacts, generateTypeArtifacts } from './generators.js'
+import { generateTypeArtifacts } from './generators/type-artifacts.js'
+import { generateIngestArtifacts } from './generators/ingest-artifacts.js'
+import { generateMigrationArtifacts } from './generators/migration-artifacts.js'
 
 async function writeAtomic(targetPath: string, content: string): Promise<void> {
   await mkdir(dirname(targetPath), { recursive: true })
@@ -146,6 +149,16 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
                 ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
               }
 
+              let migrationsGenerated: GenerateMigrationArtifactsOutput | null = null
+              let migrationsOutFile: string | null = null
+              if (effectiveOptions.emitMigrations) {
+                migrationsGenerated = await generateMigrationArtifacts({
+                  migrationsDir: resolve(configDir, config.migrationsDir),
+                  options: effectiveOptions,
+                })
+                migrationsOutFile = resolve(configDir, effectiveOptions.migrationsOutFile)
+              }
+
               if (overrides.check) {
                 const current = await readMaybe(outFile)
                 const typeCheckResult = checkGeneratedOutput({
@@ -168,6 +181,18 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
                     current: ingestCurrent,
                     missingCode: 'codegen_missing_ingest_output',
                     staleCode: 'codegen_stale_ingest_output',
+                  }))
+                }
+
+                if (migrationsGenerated && migrationsOutFile) {
+                  const migrationsCurrent = await readMaybe(migrationsOutFile)
+                  results.push(checkGeneratedOutput({
+                    label: 'Codegen migrations',
+                    outFile: migrationsOutFile,
+                    expected: migrationsGenerated.content,
+                    current: migrationsCurrent,
+                    missingCode: 'codegen_missing_migrations_output',
+                    staleCode: 'codegen_stale_migrations_output',
                   }))
                 }
 
@@ -196,6 +221,10 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
 
               if (ingestGenerated && ingestOutFile) {
                 await writeAtomic(ingestOutFile, ingestGenerated.content)
+              }
+
+              if (migrationsGenerated && migrationsOutFile) {
+                await writeAtomic(migrationsOutFile, migrationsGenerated.content)
               }
 
               const payload = {
@@ -241,26 +270,44 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
           staleCode: 'codegen_stale_output',
         })
 
-        if (!effectiveOptions.emitIngest) {
-          return typeResult
+        const results: CodegenPluginCheckResult[] = [typeResult]
+
+        if (effectiveOptions.emitIngest) {
+          const ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
+          const ingestGenerated = generateIngestArtifacts({
+            definitions,
+            options: effectiveOptions,
+          })
+          const ingestCurrent = await readMaybe(ingestOutFile)
+          results.push(checkGeneratedOutput({
+            label: 'Codegen ingest',
+            outFile: ingestOutFile,
+            expected: ingestGenerated.content,
+            current: ingestCurrent,
+            missingCode: 'codegen_missing_ingest_output',
+            staleCode: 'codegen_stale_ingest_output',
+          }))
         }
 
-        const ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
-        const ingestGenerated = generateIngestArtifacts({
-          definitions,
-          options: effectiveOptions,
-        })
-        const ingestCurrent = await readMaybe(ingestOutFile)
-        const ingestResult = checkGeneratedOutput({
-          label: 'Codegen ingest',
-          outFile: ingestOutFile,
-          expected: ingestGenerated.content,
-          current: ingestCurrent,
-          missingCode: 'codegen_missing_ingest_output',
-          staleCode: 'codegen_stale_ingest_output',
-        })
+        if (effectiveOptions.emitMigrations) {
+          const migrationsOutFile = resolve(configDir, effectiveOptions.migrationsOutFile)
+          const migrationsGenerated = await generateMigrationArtifacts({
+            migrationsDir: resolve(configDir, config.migrationsDir),
+            options: effectiveOptions,
+          })
+          const migrationsCurrent = await readMaybe(migrationsOutFile)
+          results.push(checkGeneratedOutput({
+            label: 'Codegen migrations',
+            outFile: migrationsOutFile,
+            expected: migrationsGenerated.content,
+            current: migrationsCurrent,
+            missingCode: 'codegen_missing_migrations_output',
+            staleCode: 'codegen_stale_migrations_output',
+          }))
+        }
 
-        return mergeCheckResults([typeResult, ingestResult])
+        if (results.length === 1) return typeResult
+        return mergeCheckResults(results)
       },
       onCheckReport({ result, print }) {
         const findingCodes = result.findings.map((finding) => finding.code)

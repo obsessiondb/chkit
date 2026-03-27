@@ -1,11 +1,11 @@
 ---
 title: "chkit codegen"
-description: "Generate TypeScript types from schema definitions."
+description: "Generate TypeScript types, ingestion functions, and runtime migration modules from schema definitions."
 sidebar:
   order: 9
 ---
 
-Shortcut for `chkit plugin codegen codegen`. Generates TypeScript row types, optional Zod schemas, and ingestion functions from your schema definitions.
+Shortcut for `chkit plugin codegen codegen`. Generates TypeScript row types, optional Zod schemas, ingestion functions, and runtime migration modules from your schema definitions.
 
 ## Synopsis
 
@@ -24,6 +24,9 @@ chkit codegen [flags]
 | `--emit-ingest` | boolean | — | Enable ingestion function generation |
 | `--no-emit-ingest` | boolean | — | Disable ingestion function generation |
 | `--ingest-out-file <path>` | string | — | Override ingestion output file path |
+| `--emit-migrations` | boolean | — | Enable runtime migration module generation |
+| `--no-emit-migrations` | boolean | — | Disable runtime migration module generation |
+| `--migrations-out-file <path>` | string | — | Override migrations output file path |
 | `--bigint-mode <mode>` | string | — | Large integer mapping: `string` or `bigint` |
 | `--include-views` | boolean | `false` | Include views in generated output |
 
@@ -44,6 +47,8 @@ With `--check`, the command validates that generated artifacts are current witho
 - `codegen_stale_output` — types content has drifted
 - `codegen_missing_ingest_output` — ingest file missing (when `emitIngest` is enabled)
 - `codegen_stale_ingest_output` — ingest content has drifted
+- `codegen_missing_migrations_output` — migrations file missing (when `emitMigrations` is enabled)
+- `codegen_stale_migrations_output` — migrations content has drifted
 
 ## Examples
 
