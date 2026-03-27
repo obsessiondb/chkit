@@ -1,6 +1,8 @@
 export { createCodegenPlugin, codegen } from './plugin.js'
 export { normalizeCodegenOptions, isRunOnGenerateEnabled } from './options.js'
-export { mapColumnType, generateTypeArtifacts, generateIngestArtifacts } from './generators.js'
+export { mapColumnType, generateTypeArtifacts } from './generators/type-artifacts.js'
+export { generateIngestArtifacts } from './generators/ingest-artifacts.js'
+export { generateMigrationArtifacts } from './generators/migration-artifacts.js'
 export type {
   CodegenPluginOptions,
   CodegenPluginCommandContext,
@@ -11,6 +13,8 @@ export type {
   GenerateTypeArtifactsOutput,
   GenerateIngestArtifactsInput,
   GenerateIngestArtifactsOutput,
+  GenerateMigrationArtifactsInput,
+  GenerateMigrationArtifactsOutput,
   CodegenPluginCheckContext,
   CodegenPluginRegistration,
   CodegenPluginCheckResult,
