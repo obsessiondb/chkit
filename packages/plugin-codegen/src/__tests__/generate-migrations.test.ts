@@ -38,7 +38,7 @@ describe('generateMigrationArtifacts', () => {
       expect(result.content).toContain("name: '20260325114021_init',")
       expect(result.content).toContain('CREATE TABLE IF NOT EXISTS app.users')
       expect(result.content).toContain('export const migrations: MigrationEntry[]')
-      expect(result.content).toContain("import { extractExecutableStatements } from '@chkit/core/utils'")
+      expect(result.content).toContain("import { extractExecutableStatements } from '@chkit/core'")
       expect(result.content).toContain('export async function runMigrations(')
       expect(result.content).toContain('_chkit_migrations')
       expect(result.content).toContain('executor: MigrationExecutor')

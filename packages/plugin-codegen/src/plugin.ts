@@ -1,7 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import { loadSchemaDefinitions, wrapPluginRun } from '@chkit/core'
+import { wrapPluginRun } from '@chkit/core'
+import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import type {
   CodegenPlugin,
