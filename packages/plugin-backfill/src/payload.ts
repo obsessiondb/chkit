@@ -14,10 +14,13 @@ export function planPayload(output: BuildBackfillPlanOutput): {
   from: string
   to: string
   chunkCount: number
-  chunkHours: number
-  timeColumn: string
+  maxChunkBytes?: number
+  sortKeyColumn?: string
   planPath: string
   existed: boolean
+  strategy?: string
+  partitionCount?: number
+  totalBytes?: number
 } {
   return {
     ok: true,
@@ -27,10 +30,15 @@ export function planPayload(output: BuildBackfillPlanOutput): {
     from: output.plan.from,
     to: output.plan.to,
     chunkCount: output.plan.chunks.length,
-    chunkHours: output.plan.options.chunkHours,
-    timeColumn: output.plan.options.timeColumn,
+    maxChunkBytes: output.plan.options.maxChunkBytes,
+    sortKeyColumn: output.plan.options.sortKeyColumn,
     planPath: output.planPath,
     existed: output.existed,
+    strategy: output.plan.strategy,
+    partitionCount: output.plan.partitions?.length,
+    totalBytes: output.plan.partitions
+      ? output.plan.partitions.reduce((sum, p) => sum + p.bytesOnDisk, 0)
+      : undefined,
   }
 }
 

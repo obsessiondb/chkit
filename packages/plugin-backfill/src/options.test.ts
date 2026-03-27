@@ -6,7 +6,7 @@ describe('@chkit/plugin-backfill options', () => {
   test('normalizes documented defaults', () => {
     const options = normalizeBackfillOptions()
 
-    expect(options.defaults.chunkHours).toBe(6)
+    expect(options.defaults.maxChunkBytes).toBe(10 * 1024 ** 3)
     expect(options.defaults.maxParallelChunks).toBe(1)
     expect(options.defaults.maxRetriesPerChunk).toBe(3)
     expect(options.defaults.requireIdempotencyToken).toBe(true)
@@ -31,7 +31,7 @@ describe('@chkit/plugin-backfill options', () => {
     const base = normalizeBackfillOptions()
     const merged = mergeOptions(base, { defaults: { timeColumn: 'session_date' } })
 
-    expect(merged.defaults.chunkHours).toBe(6)
+    expect(merged.defaults.maxChunkBytes).toBe(10 * 1024 ** 3)
     expect(merged.defaults.maxParallelChunks).toBe(1)
     expect(merged.defaults.maxRetriesPerChunk).toBe(3)
     expect(merged.defaults.requireIdempotencyToken).toBe(true)

@@ -65,11 +65,11 @@ export function planIdentity(
   target: string,
   from: string,
   to: string,
-  chunkHours: number,
+  chunkParam: number | string,
   timeColumn: string,
   envFingerprint?: string
 ): string {
-  const base = `${target}|${from}|${to}|${chunkHours}|${timeColumn}`
+  const base = `${target}|${from}|${to}|${chunkParam}|${timeColumn}`
   return envFingerprint ? `${base}|${envFingerprint}` : base
 }
 
