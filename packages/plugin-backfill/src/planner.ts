@@ -1,7 +1,7 @@
 import { dirname } from 'node:path'
 import { unlink } from 'node:fs/promises'
 
-import { loadSchemaDefinitions } from '@chkit/core'
+import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import { findMvForTarget } from './detect.js'

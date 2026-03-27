@@ -29,10 +29,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./utils": {
-      "source": "./src/utils.ts",
-      "types": "./dist/utils.d.ts",
-      "default": "./dist/utils.js"
+    "./schema-loader": {
+      "source": "./src/schema-loader.ts",
+      "types": "./dist/schema-loader.d.ts",
+      "default": "./dist/schema-loader.js"
     }
   },
   "files": [

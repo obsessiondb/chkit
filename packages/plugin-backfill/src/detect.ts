@@ -1,6 +1,6 @@
 import { dirname } from 'node:path'
 
-import { loadSchemaDefinitions } from '@chkit/core'
+import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 import type { MaterializedViewDefinition, SchemaDefinition, TableDefinition } from '@chkit/core'
 
 import './table-config.js'
