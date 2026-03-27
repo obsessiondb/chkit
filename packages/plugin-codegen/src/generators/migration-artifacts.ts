@@ -44,7 +44,7 @@ export async function generateMigrationArtifacts(
   const content = [
     ...header,
     '',
-    "import { extractExecutableStatements } from '@chkit/core/utils'",
+    "import { extractExecutableStatements } from '@chkit/core'",
     '',
     'export interface MigrationEntry {',
     '  name: string',
