@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test, assert } from 'bun:test'
 
 import { table, materializedView } from '@chkit/core'
 import type { SchemaDefinition } from '@chkit/core'
@@ -23,8 +23,9 @@ describe('@chkit/plugin-backfill detect', () => {
     const candidates = detectCandidatesFromTable(def)
 
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]!.name).toBe('session_date')
-    expect(candidates[0]!.source).toBe('order_by')
+    assert(candidates[0])
+    expect(candidates[0].name).toBe('session_date')
+    expect(candidates[0].source).toBe('order_by')
   })
 
   test('finds common time column names via column scan', () => {
@@ -44,8 +45,8 @@ describe('@chkit/plugin-backfill detect', () => {
     const candidates = detectCandidatesFromTable(def)
 
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]!.name).toBe('created_at')
-    expect(candidates[0]!.source).toBe('column_scan')
+    expect(candidates[0]?.name).toBe('created_at')
+    expect(candidates[0]?.source).toBe('column_scan')
   })
 
   test('ranks ORDER BY candidates before column scan candidates', () => {
@@ -65,10 +66,10 @@ describe('@chkit/plugin-backfill detect', () => {
     const candidates = detectCandidatesFromTable(def)
 
     expect(candidates).toHaveLength(2)
-    expect(candidates[0]!.name).toBe('event_time')
-    expect(candidates[0]!.source).toBe('order_by')
-    expect(candidates[1]!.name).toBe('ingested_at')
-    expect(candidates[1]!.source).toBe('column_scan')
+    expect(candidates[0]?.name).toBe('event_time')
+    expect(candidates[0]?.source).toBe('order_by')
+    expect(candidates[1]?.name).toBe('ingested_at')
+    expect(candidates[1]?.source).toBe('column_scan')
   })
 
   test('returns empty candidates when no DateTime columns exist', () => {
@@ -105,7 +106,7 @@ describe('@chkit/plugin-backfill detect', () => {
     const candidates = detectCandidatesFromTable(def)
 
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]!.name).toBe('created_at')
+    expect(candidates[0]?.name).toBe('created_at')
   })
 
   test('does not duplicate column appearing in both ORDER BY and common names', () => {
@@ -124,8 +125,8 @@ describe('@chkit/plugin-backfill detect', () => {
     const candidates = detectCandidatesFromTable(def)
 
     expect(candidates).toHaveLength(1)
-    expect(candidates[0]!.name).toBe('event_time')
-    expect(candidates[0]!.source).toBe('order_by')
+    expect(candidates[0]?.name).toBe('event_time')
+    expect(candidates[0]?.source).toBe('order_by')
   })
 
   test('findTableForTarget resolves direct table match', () => {
@@ -142,8 +143,8 @@ describe('@chkit/plugin-backfill detect', () => {
 
     const found = findTableForTarget(definitions, 'app', 'events')
 
-    expect(found).toBeDefined()
-    expect(found!.name).toBe('events')
+    assert(found)
+    expect(found.name).toBe('events')
   })
 
   test('findTableForTarget resolves MV target to source table', () => {
@@ -169,8 +170,8 @@ describe('@chkit/plugin-backfill detect', () => {
     const definitions: SchemaDefinition[] = [sourceTable, mv]
     const found = findTableForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found!.name).toBe('raw_events')
+    assert(found)
+    expect(found.name).toBe('raw_events')
   })
 
   test('findTableForTarget returns undefined when no match', () => {
@@ -255,9 +256,9 @@ describe('@chkit/plugin-backfill detect', () => {
 
     const found = findMvForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found!.name).toBe('events_mv')
-    expect(found!.as).toBe('SELECT count() FROM app.events')
+    assert(found)
+    expect(found.name).toBe('events_mv')
+    expect(found.as).toBe('SELECT count() FROM app.events')
   })
 
   test('findMvForTarget returns undefined when no MV targets the table', () => {
@@ -292,7 +293,7 @@ describe('@chkit/plugin-backfill detect', () => {
 
     const found = findMvForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found!.name).toBe('hourly_mv')
+    assert(found)
+    expect(found?.name).toBe('hourly_mv')
   })
 })

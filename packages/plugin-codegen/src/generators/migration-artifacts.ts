@@ -43,6 +43,7 @@ export async function generateMigrationArtifacts(
 
   const sqlSplitterSource = await readSqlSplitterSource()
 
+  // biome-ignore lint/style/useTemplate: join+concat is clearer here
   const content = [
     ...header,
     '',

@@ -63,11 +63,11 @@ async function resolveTimeColumn(input: {
   }
 
   if (input.jsonMode) {
-    return candidates[0]!.name
+    return candidates[0]?.name
   }
 
   if (candidates.length === 1) {
-    return confirmSingleCandidate(candidates[0]!, input.target)
+    return confirmSingleCandidate(candidates[0] as TimeColumnCandidate, input.target)
   }
 
   return selectFromCandidates(candidates, input.target)
@@ -101,7 +101,7 @@ async function selectFromCandidates(
   try {
     console.log(`Detected time column candidates for ${target}:`)
     for (let i = 0; i < candidates.length; i++) {
-      const c = candidates[i]!
+      const c = candidates[i] as TimeColumnCandidate
       const suffix = c.source === 'order_by' ? ', in ORDER BY' : ''
       console.log(`  ${i + 1}. ${c.name} (${c.type}${suffix})`)
     }
@@ -112,7 +112,7 @@ async function selectFromCandidates(
         `Invalid selection. Specify --time-column <column> explicitly.`
       )
     }
-    return candidates[index]!.name
+    return candidates[index]?.name
   } finally {
     rl.close()
   }

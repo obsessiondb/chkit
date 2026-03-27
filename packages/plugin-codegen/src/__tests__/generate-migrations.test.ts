@@ -161,6 +161,7 @@ describe('generateMigrationArtifacts', () => {
       await mkdir(migrationsDir)
       await writeFile(
         join(migrationsDir, '20260325_dollar.sql'),
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${} in SQL
         "SELECT '${not_a_var}' FROM system.one;",
         'utf8'
       )
@@ -168,6 +169,7 @@ describe('generateMigrationArtifacts', () => {
       const result = await generateMigrationArtifacts({ migrationsDir })
 
       // ${not_a_var} should be escaped so it's not treated as template interpolation
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal ${} check
       expect(result.content).toContain('\\${not_a_var}')
     })
   })
