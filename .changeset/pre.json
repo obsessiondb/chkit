@@ -13,8 +13,10 @@
     "@chkit/plugin-obsessiondb": "0.1.0-beta.7"
   },
   "changesets": [
+    "add-emit-migrations",
     "add-pkg-links",
     "add-plugin-obsessiondb",
+    "add-xddl-header",
     "backfill-array-fix",
     "backfill-env-binding",
     "backfill-execute-fix",
@@ -23,6 +25,7 @@
     "backfill-time-column",
     "backfill-ux-improvements",
     "custom-cli-framework",
+    "ddl-propagation-wait",
     "fix-docs-deploy",
     "fix-ingest-assignability",
     "fix-migration-ordering",
@@ -31,6 +34,7 @@
     "fix-silent-error-output",
     "fix-skill-install-path",
     "fix-workspace-deps",
+    "handle-unknown-database",
     "internal-refactors",
     "journal-in-clickhouse",
     "mv-column-list",

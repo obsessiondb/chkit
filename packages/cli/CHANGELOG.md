@@ -1,5 +1,48 @@
 # chkit
 
+## 0.1.0-beta.17
+
+### Patch Changes
+
+- c63c74f: Add `emitMigrations` option to the codegen plugin. When enabled, generates a self-contained TypeScript module with all migration SQL inlined and a `runMigrations()` function for environments without filesystem access (e.g., Cloudflare Workers). Also extracts `splitSqlStatements` and `extractExecutableStatements` into `@chkit/core` as shared utilities.
+- ba60638: Add homepage and repository metadata to all packages, and link READMEs to the chkit CLI package and documentation site.
+- 6348ef2: Add X-DDL HTTP header to pin ClickHouse requests to a single node during migrations, fixing SharedMergeTree DDL race conditions.
+- fe34638: Make backfill time column configurable with smart auto-detection. Replace hardcoded `event_time` column with support for `--time-column` CLI flag, `defaults.timeColumn` config option, and interactive detection that scans schema definitions for DateTime columns in ORDER BY or by common naming conventions.
+- a94a2a1: Replace @stricli/core with a custom CLI framework, migrate plugins to declared flags, and refine the plugin API and error handling.
+- 638f75f: Fix: Migrations no longer fail with "table not found" errors on distributed ClickHouse setups when creating materialized views that reference tables created in the same migration. The migrate command now polls `system.tables`/`system.columns` after each DDL statement to confirm propagation before proceeding.
+- a94a2a1: Fix migration ordering so tables are created before views and materialized views that depend on them.
+- 1f8ad1b: Fix silent exit with no error output when ClickHouse is unreachable. The CLI now displays clear error messages for connection failures (connection refused, host not found, timeout, etc.) including the configured ClickHouse URL. Added fallback error formatting for any errors with empty messages.
+- 4afb7cf: Fix agent skill installation path when running from a monorepo subfolder. The skill hint now walks up to the repository root instead of installing into the current working directory.
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- 949a20c: Gracefully handle ClickHouse error 81 (UNKNOWN_DATABASE) when the configured database does not exist yet. Commands `status`, `drift`, `check`, and `migrate` no longer crash with a raw stack trace; instead they show a warning and continue with normal output.
+- a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
+- 3ab6919: Store migration journal in ClickHouse instead of a local file. Migration state is now tracked per-environment via a `_chkit_migrations` table, enabling multi-environment deployments where staging and production independently track applied migrations.
+- 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
+- c25503c: Make skill-hint plugin agent-aware to support all agents (Cursor, Windsurf, Roo, etc). Previously, the plugin only showed install prompts for Claude Code even when used in other agents. Now it detects the agent environment and displays agent-specific messages.
+- e858da9: Add onInit/onComplete plugin lifecycle hooks and hint users to install the chkit Claude agent skill. The skill hint prompts once per month in interactive mode and can be dismissed.
+- Updated dependencies [c63c74f]
+- Updated dependencies [ba60638]
+- Updated dependencies [6348ef2]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [638f75f]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [cc1125e]
+- Updated dependencies [1f8ad1b]
+- Updated dependencies [f719c50]
+- Updated dependencies [949a20c]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [3ab6919]
+- Updated dependencies [bc0c6b1]
+- Updated dependencies [9a54433]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+- Updated dependencies [a52a2b2]
+  - @chkit/core@0.1.0-beta.17
+  - @chkit/clickhouse@0.1.0-beta.17
+  - @chkit/codegen@0.1.0-beta.17
+
 ## 0.1.0-beta.16
 
 ### Patch Changes
