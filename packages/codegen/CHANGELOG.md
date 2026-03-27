@@ -1,5 +1,29 @@
 # @chkit/codegen
 
+## 0.1.0-beta.18
+
+### Patch Changes
+
+- ba60638: Add homepage and repository metadata to all packages, and link READMEs to the chkit CLI package and documentation site.
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
+- Updated dependencies [c63c74f]
+- Updated dependencies [ba60638]
+- Updated dependencies [c396fb5]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [cc1125e]
+- Updated dependencies [f719c50]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [bc0c6b1]
+- Updated dependencies [9a54433]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+- Updated dependencies [a52a2b2]
+  - @chkit/core@0.1.0-beta.18
+
 ## 0.1.0-beta.17
 
 ### Patch Changes
