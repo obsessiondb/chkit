@@ -4,10 +4,10 @@ import { BackfillConfigError } from './errors.js'
 import {
   backfillPaths,
   nowIso,
-  persistRunAndEvent,
   readPlan,
   readRun,
   summarizeRunStatus,
+  writeJson,
 } from './state.js'
 import type {
   BackfillDoctorReport,
@@ -37,20 +37,18 @@ export async function getBackfillStatus(input: {
       totals: {
         total: plan.chunks.length,
         pending: plan.chunks.length,
+        submitted: 0,
         running: 0,
         done: 0,
         failed: 0,
-        skipped: 0,
       },
-      attempts: 0,
       rowsWritten: 0,
       updatedAt: plan.createdAt,
       runPath: paths.runPath,
-      eventPath: paths.eventPath,
     }
   }
 
-  return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+  return summarizeRunStatus(run, paths.runPath, plan)
 }
 
 export async function cancelBackfillRun(input: {
@@ -77,29 +75,16 @@ export async function cancelBackfillRun(input: {
     throw new BackfillConfigError(`Run already completed for plan ${plan.planId}; cannot cancel.`)
   }
   if (run.status === 'cancelled') {
-    return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+    return summarizeRunStatus(run, paths.runPath, plan)
   }
 
   run.status = 'cancelled'
   run.completedAt = nowIso()
   run.lastError = 'Cancelled by operator'
-  for (const chunk of run.chunks) {
-    if (chunk.status === 'running') {
-      chunk.status = 'pending'
-    }
-  }
 
-  await persistRunAndEvent({
-    run,
-    runPath: paths.runPath,
-    eventPath: paths.eventPath,
-    event: {
-      type: 'run_cancelled',
-      planId: plan.planId,
-    },
-  })
+  await writeJson(paths.runPath, run)
 
-  return summarizeRunStatus(run, paths.runPath, paths.eventPath)
+  return summarizeRunStatus(run, paths.runPath, plan)
 }
 
 export async function getBackfillDoctorReport(input: {
@@ -118,25 +103,25 @@ export async function getBackfillDoctorReport(input: {
   const run = await readRun(paths.runPath)
 
   const status = run
-    ? summarizeRunStatus(run, paths.runPath, paths.eventPath)
+    ? summarizeRunStatus(run, paths.runPath, plan)
     : {
         planId: plan.planId,
         target: plan.target,
         status: 'planned' as const,
-        totals: { total: plan.chunks.length, pending: plan.chunks.length, running: 0, done: 0, failed: 0, skipped: 0 },
-        attempts: 0,
+        totals: { total: plan.chunks.length, pending: plan.chunks.length, submitted: 0, running: 0, done: 0, failed: 0 },
         rowsWritten: 0,
         updatedAt: plan.createdAt,
         runPath: paths.runPath,
-        eventPath: paths.eventPath,
       }
 
   const issueCodes: string[] = []
   const recommendations: string[] = []
   const failedChunkIds: string[] = []
 
-  for (const chunk of run?.chunks ?? []) {
-    if (chunk.status === 'failed') failedChunkIds.push(chunk.id)
+  if (run) {
+    for (const [chunkId, state] of Object.entries(run.progress)) {
+      if (state.status === 'failed') failedChunkIds.push(chunkId)
+    }
   }
 
   if (status.status === 'planned') {

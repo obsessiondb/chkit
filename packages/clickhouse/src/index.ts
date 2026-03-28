@@ -17,12 +17,35 @@ import {
   parseUniqueKeyFromCreateTableQuery,
 } from './create-table-parser.js'
 
+export interface QueryStatus {
+  status: 'running' | 'finished' | 'failed' | 'unknown'
+  writtenRows?: number
+  writtenBytes?: number
+  durationMs?: number
+  error?: string
+}
+
 export interface ClickHouseExecutor {
   command(sql: string): Promise<void>
   query<T>(sql: string): Promise<T[]>
   insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
   listTableDetails(databases: string[]): Promise<IntrospectedTable[]>
+
+  /** Submit a query asynchronously. ClickHouse accepts the query and processes it server-side.
+   *  Returns immediately without waiting for completion.
+   *  @param sql - The SQL to execute
+   *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
+   *  @returns The query_id assigned to this query. */
+  submit(sql: string, queryId?: string): Promise<string>
+
+  /** Check the status of a previously submitted query.
+   *  Checks system.processes first (running?), then system.query_log (finished/failed?).
+   *  @param queryId - The query_id returned by submit()
+   *  @param options.afterTime - Only consider query_log entries for queries started at or after this ISO timestamp.
+   *    Useful when resubmitting with the same query_id to ignore stale entries from previous attempts. */
+  queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus>
+
   close(): Promise<void>
 }
 
@@ -185,6 +208,16 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     },
   })
 
+  const fireAndForgetClient = createClient({
+    url: config.url,
+    username: config.username,
+    password: config.password,
+    database: config.database,
+    clickhouse_settings: {
+      wait_end_of_query: 0,
+    },
+  })
+
   return {
     async command(sql: string): Promise<void> {
       try {
@@ -211,7 +244,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     },
     async query<T>(sql: string): Promise<T[]> {
       try {
-        const result = await client.query({ query: sql, format: 'JSONEachRow' })
+        const result = await client.query({ query: sql, format: 'JSONEachRow', http_headers: { 'X-DDL': '1' } })
         return result.json<T>()
       } catch (error) {
         wrapConnectionError(error, config.url)
@@ -228,8 +261,74 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         wrapConnectionError(error, config.url)
       }
     },
+    async submit(sql: string, queryId?: string): Promise<string> {
+      const id = queryId ?? crypto.randomUUID()
+      try {
+        await fireAndForgetClient.command({ query: sql, query_id: id })
+      } catch (error) {
+        wrapConnectionError(error, config.url)
+      }
+      return id
+    },
+    async queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus> {
+      try {
+        const running = await client.query({
+          query: `SELECT count() AS cnt FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+          query_params: { qid: queryId },
+          format: 'JSONEachRow',
+        })
+        const runningRows = await running.json<{ cnt: string }>()
+        if (Number(runningRows[0]?.cnt) > 0) {
+          return { status: 'running' }
+        }
+
+        const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
+        const log = await client.query({
+          query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
+FROM clusterAllReplicas('parallel_replicas', system.query_log)
+WHERE query_id = {qid:String}
+  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND is_initial_query = 1
+  AND query_start_time >= parseDateTimeBestEffort({after:String})
+ORDER BY event_time DESC
+LIMIT 1
+SETTINGS skip_unavailable_shards = 1`,
+          query_params: { qid: queryId, after: afterTime },
+          format: 'JSONEachRow',
+        })
+        const logRows = await log.json<{
+          type: string
+          written_rows: string
+          written_bytes: string
+          query_duration_ms: string
+          exception: string
+        }>()
+
+        if (logRows.length === 0) {
+          return { status: 'unknown' }
+        }
+
+        const row = logRows[0]!
+        if (row.type === 'QueryFinish') {
+          return {
+            status: 'finished',
+            writtenRows: Number(row.written_rows),
+            writtenBytes: Number(row.written_bytes),
+            durationMs: Number(row.query_duration_ms),
+          }
+        }
+
+        return {
+          status: 'failed',
+          durationMs: Number(row.query_duration_ms),
+          error: row.exception,
+        }
+      } catch (error) {
+        wrapConnectionError(error, config.url)
+      }
+    },
     async close(): Promise<void> {
-      await client.close()
+      await Promise.all([client.close(), fireAndForgetClient.close()])
     },
     async listSchemaObjects(): Promise<SchemaObjectRef[]> {
       const rows = await this.query<SystemTableRow>(

@@ -36,7 +36,9 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@changesets/cli": "^2.29.8",
+    "@chkit/plugin-backfill": "workspace:*",
     "@types/node": "^24.0.0",
+    "p-map": "^7.0.4",
     "turbo": "^2.8.20",
     "typescript": "^5.8.0"
   },
