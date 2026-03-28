@@ -132,7 +132,7 @@ export async function syncProgress(
   const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
 
   const runningRows = await executor.query<{ query_id: string }>(
-    `SELECT query_id FROM system.processes WHERE query_id LIKE '${safePrefix}%'`
+    `SELECT query_id FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
   )
   const runningSet = new Set(runningRows.map((r) => r.query_id))
 
@@ -145,10 +145,12 @@ export async function syncProgress(
     exception: string
   }>(
     `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
-FROM system.query_log
+FROM clusterAllReplicas('parallel_replicas', system.query_log)
 WHERE query_id LIKE '${safePrefix}%'
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
-ORDER BY event_time DESC`
+  AND is_initial_query = 1
+ORDER BY event_time DESC
+SETTINGS skip_unavailable_shards = 1`
   )
 
   // Deduplicate: take the latest log entry per query_id (results are ordered by event_time DESC)
@@ -271,10 +273,14 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // ground truth. The deterministic query_id is reused; the afterTime filter
   // in queryStatus ensures we ignore stale query_log entries from prior attempts.
   if (replayFailed) {
+    // Stamp submittedAt with a 60s buffer so the afterTime filter in
+    // queryStatus ignores stale query_log entries from the prior failed
+    // attempt while tolerating clock skew between client and server.
+    const replayAfterTime = new Date(Date.now() - 60_000).toISOString()
     for (const chunk of chunks) {
       const state = progress[chunk.id]
       if (state?.status === 'failed') {
-        progress = updateChunk(progress, chunk.id, { status: 'pending' })
+        progress = updateChunk(progress, chunk.id, { status: 'pending', submittedAt: replayAfterTime })
       }
     }
   }
@@ -308,15 +314,18 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
       }
 
       // Submit and poll
+      // submittedAt is intentionally omitted on first submission — it's only
+      // used as an afterTime filter to ignore stale query_log entries when
+      // replaying a previously failed chunk with the same deterministic query_id.
+      // Setting it to local time here would cause clock-skew issues with the
+      // ClickHouse server, making the filter exclude valid entries.
       const queryId = chunkQueryId(planId, chunk.id)
       const sql = buildQuery(chunk)
-      const submittedAt = new Date().toISOString()
       await executor.submit(sql, queryId)
       const submitted: BackfillChunkState = {
         ...getChunk(progress, chunk.id),
         status: 'submitted',
         queryId,
-        submittedAt,
       }
       await setChunk(chunk.id, submitted)
 

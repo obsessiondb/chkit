@@ -244,7 +244,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     },
     async query<T>(sql: string): Promise<T[]> {
       try {
-        const result = await client.query({ query: sql, format: 'JSONEachRow' })
+        const result = await client.query({ query: sql, format: 'JSONEachRow', http_headers: { 'X-DDL': '1' } })
         return result.json<T>()
       } catch (error) {
         wrapConnectionError(error, config.url)
@@ -273,7 +273,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     async queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus> {
       try {
         const running = await client.query({
-          query: `SELECT count() AS cnt FROM system.processes WHERE query_id = {qid:String}`,
+          query: `SELECT count() AS cnt FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
           query_params: { qid: queryId },
           format: 'JSONEachRow',
         })
@@ -285,12 +285,14 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
         const log = await client.query({
           query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
-FROM system.query_log
+FROM clusterAllReplicas('parallel_replicas', system.query_log)
 WHERE query_id = {qid:String}
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})
 ORDER BY event_time DESC
-LIMIT 1`,
+LIMIT 1
+SETTINGS skip_unavailable_shards = 1`,
           query_params: { qid: queryId, after: afterTime },
           format: 'JSONEachRow',
         })
