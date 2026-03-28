@@ -1,6 +1,6 @@
 ---
 title: Backfill Plugin
-description: Plan, execute, and monitor time-windowed backfill operations with checkpointed progress and automatic retries.
+description: Plan, execute, and monitor time-windowed backfill operations with async query submission, concurrent execution, and checkpointed progress.
 ---
 
 This document covers practical usage of the optional `backfill` plugin.
@@ -8,21 +8,21 @@ This document covers practical usage of the optional `backfill` plugin.
 ## What it does
 
 - Builds deterministic, immutable backfill plans that divide a time window into chunks.
-- Executes backfills against ClickHouse with per-chunk checkpointing, automatic retries, and idempotency tokens.
+- Executes backfills via async query submission with configurable concurrency and server-side polling.
 - Detects materialized views and automatically generates correct CTE-wrapped replay queries.
 - Supports resume from checkpoint, cancel, status monitoring, and doctor-style diagnostics.
 - Integrates with [`chkit check`](/cli/check/) for CI enforcement of pending backfills.
-- Persists all state as JSON/NDJSON on disk.
+- Persists all state as JSON on disk.
 
 ## How it fits your workflow
 
 The plugin follows a plan-then-execute lifecycle:
 
 1. `plan` — Build an immutable backfill plan dividing the time window into chunks.
-2. `run` — Execute the plan with checkpointed progress.
+2. `run` — Submit chunks as async queries to ClickHouse with concurrent execution and progress polling.
 3. `status` — Monitor chunk progress and run state.
 
-Additional commands: `resume` (continue from checkpoint), `cancel` (stop execution), `doctor` (actionable diagnostics).
+Additional commands: `resume` (continue from checkpoint with optional failed-chunk replay), `cancel` (mark run as cancelled), `doctor` (actionable diagnostics).
 
 [`chkit check`](/cli/check/) integration reports pending or failed backfills in CI.
 
@@ -39,24 +39,17 @@ export default defineConfig({
   plugins: [
     backfill({
       stateDir: './chkit/backfill',
-      defaults: {
-        chunkHours: 6,
-        maxParallelChunks: 1,
-        maxRetriesPerChunk: 3,
-        retryDelayMs: 1000,
-        requireIdempotencyToken: true,
-        timeColumn: 'created_at',
-      },
-      policy: {
-        requireDryRunBeforeRun: true,
-        requireExplicitWindow: true,
-        blockOverlappingRuns: true,
-        failCheckOnRequiredPendingBackfill: true,
-      },
-      limits: {
-        maxWindowHours: 720,
-        minChunkMinutes: 15,
-      },
+      chunkHours: 6,
+      maxParallelChunks: 1,
+      maxRetriesPerChunk: 3,
+      requireIdempotencyToken: true,
+      timeColumn: 'created_at',
+      requireDryRunBeforeRun: true,
+      requireExplicitWindow: true,
+      blockOverlappingRuns: true,
+      failCheckOnRequiredPendingBackfill: true,
+      maxWindowHours: 720,
+      minChunkMinutes: 15,
     }),
   ],
 })
@@ -121,24 +114,23 @@ This requires importing `@chkit/plugin-backfill` somewhere in the project (typic
 
 ## Options
 
-Configuration is organized into three groups plus a top-level `stateDir`.
+All options are passed as a flat object to `backfill({...})`. They are grouped here by function for readability.
 
-**Top-level:**
+- `stateDir` (default: `<metaDir>/backfill`) — Directory for plan and run state files.
 
-- `stateDir` (default: `<metaDir>/backfill`) — Directory for plan, run, and event state files.
-
-**`defaults` group:**
+**Planning defaults:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `chunkHours` | `number` | `6` | Hours per chunk |
-| `maxParallelChunks` | `number` | `1` | Max concurrent chunks |
+| `maxChunkBytes` | `string \| number` | `10G` | Max bytes per chunk (accepts suffixes: `K`, `M`, `G`, `T`) |
+| `maxParallelChunks` | `number` | `1` | Max concurrent chunks in plan |
 | `maxRetriesPerChunk` | `number` | `3` | Retry budget per chunk |
 | `retryDelayMs` | `number` | `1000` | Exponential backoff delay between retries (milliseconds) |
 | `requireIdempotencyToken` | `boolean` | `true` | Generate deterministic tokens |
 | `timeColumn` | `string` | auto-detect | Fallback column name for time-based WHERE clause (overridden by schema-level config) |
 
-**`policy` group:**
+**Policy:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -147,7 +139,7 @@ Configuration is organized into three groups plus a top-level `stateDir`.
 | `blockOverlappingRuns` | `boolean` | `true` | Prevent concurrent runs |
 | `failCheckOnRequiredPendingBackfill` | `boolean` | `true` | Fail `chkit check` on incomplete backfills |
 
-**`limits` group:**
+**Limits:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -176,28 +168,25 @@ Build a deterministic backfill plan and persist immutable plan state.
 
 ### `chkit plugin backfill run`
 
-Execute a planned backfill with checkpointed chunk progress.
+Execute a planned backfill by submitting chunks as async queries to ClickHouse with concurrent execution and progress polling.
 
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-| `--replay-done` | No | Re-execute already-completed chunks |
-| `--replay-failed` | No | Re-execute failed chunks |
-| `--force-overlap` | No | Allow concurrent runs for the same target |
-| `--force-compatibility` | No | Skip compatibility token check |
+| `--concurrency <n>` | No | Max concurrent async queries (default: `3`) |
+| `--poll-interval <ms>` | No | Polling interval in milliseconds (default: `5000`) |
 | `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
 
 ### `chkit plugin backfill resume`
 
-Resume a backfill run from last checkpoint. Automatically retries failed chunks.
+Resume a backfill run from last checkpoint. Picks up where the previous run left off, executing only pending chunks.
 
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-| `--replay-done` | No | Re-execute already-completed chunks |
-| `--replay-failed` | No | Re-execute failed chunks (enabled by default on resume) |
-| `--force-overlap` | No | Allow concurrent runs for the same target |
-| `--force-compatibility` | No | Skip compatibility token check |
+| `--concurrency <n>` | No | Max concurrent async queries (default: `3`) |
+| `--poll-interval <ms>` | No | Polling interval in milliseconds (default: `5000`) |
+| `--replay-failed` | No | Reset failed chunks to pending and re-execute them |
 | `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
 
 ### `chkit plugin backfill status`
@@ -244,7 +233,6 @@ All state is persisted to the configured `stateDir`:
 <stateDir>/
   plans/<planId>.json       # Immutable plan state (written once)
   runs/<planId>.json        # Mutable run checkpoint (updated per chunk)
-  events/<planId>.ndjson    # Append-only event log
 ```
 
 Plan IDs are deterministic: `sha256("<target>|<from>|<to>|<chunkHours>|<timeColumn>|<envFingerprint>")` truncated to 16 hex characters. When a ClickHouse connection is configured, an environment fingerprint is included in the plan ID, so different clusters/databases automatically produce different plan files. Re-planning with the same parameters produces the same plan ID.
@@ -287,6 +275,3 @@ chkit plugin backfill resume --plan-id <planId>   # automatically retries failed
 chkit check   # fails if pending backfills exist
 ```
 
-## Current limits
-
-- `maxParallelChunks` is declared but execution is currently sequential.

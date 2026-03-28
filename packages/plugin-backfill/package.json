@@ -43,6 +43,7 @@
   "dependencies": {
     "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*",
+    "p-map": "^7.0.4",
     "zod": "^4.3.6"
   }
 }

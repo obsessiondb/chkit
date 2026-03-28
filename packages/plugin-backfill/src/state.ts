@@ -1,12 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
-import type { CompatOptions } from './options.js'
 import type {
   BackfillEnvironment,
   BackfillPathSet,
@@ -24,71 +23,26 @@ export function nowIso(): string {
   return new Date().toISOString()
 }
 
-export function stableSerialize(value: unknown): string {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value)
-  }
-
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableSerialize(item)).join(',')}]`
-  }
-
-  const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
-  return `{${entries
-    .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
-    .join(',')}}`
-}
-
-export function computeCompatibilityToken(input: {
-  plan: BackfillPlanState
-  opts: CompatOptions
-}): string {
-  return hashId(
-    stableSerialize({
-      planId: input.plan.planId,
-      target: input.plan.target,
-      from: input.plan.from,
-      to: input.plan.to,
-      planOptions: input.plan.options,
-      runtimeDefaults: {
-        maxChunkBytes: input.opts.maxChunkBytes,
-        maxParallelChunks: input.opts.maxParallelChunks,
-        maxRetriesPerChunk: input.opts.maxRetriesPerChunk,
-        requireIdempotencyToken: input.opts.requireIdempotencyToken,
-      },
-      runtimePolicy: {
-        blockOverlappingRuns: input.opts.blockOverlappingRuns,
-        failCheckOnRequiredPendingBackfill: input.opts.failCheckOnRequiredPendingBackfill,
-        requireDryRunBeforeRun: input.opts.requireDryRunBeforeRun,
-        requireExplicitWindow: input.opts.requireExplicitWindow,
-      },
-      runtimeLimits: {
-        maxWindowHours: input.opts.maxWindowHours,
-        minChunkMinutes: input.opts.minChunkMinutes,
-      },
-    })
-  )
-}
-
 export function randomPlanId(): string {
   return randomBytes(8).toString('hex')
 }
 
 export function computeEnvironmentFingerprint(
-  clickhouse: { url: string; database: string } | undefined
+  clickhouse: { url: string; database?: string } | undefined
 ): BackfillEnvironment | undefined {
   if (!clickhouse) return undefined
+  const database = clickhouse.database ?? 'default'
   const origin = new URL(clickhouse.url).origin
   return {
-    fingerprint: hashId(`${origin}|${clickhouse.database}`).slice(0, 16),
+    fingerprint: hashId(`${origin}|${database}`).slice(0, 16),
     url: origin,
-    database: clickhouse.database,
+    database,
   }
 }
 
 export function ensureEnvironmentMatch(input: {
   plan: BackfillPlanState
-  clickhouse: { url: string; database: string } | undefined
+  clickhouse: { url: string; database?: string } | undefined
   forceEnvironment: boolean
 }): void {
   if (!input.plan.environment) return
@@ -121,15 +75,12 @@ export function computeBackfillStateDir(
 export function backfillPaths(stateDir: string, planId: string): BackfillPathSet {
   const plansDir = join(stateDir, 'plans')
   const runsDir = join(stateDir, 'runs')
-  const eventsDir = join(stateDir, 'events')
   return {
     stateDir,
     plansDir,
     runsDir,
-    eventsDir,
     planPath: join(plansDir, `${planId}.json`),
     runPath: join(runsDir, `${planId}.json`),
-    eventPath: join(eventsDir, `${planId}.ndjson`),
   }
 }
 
@@ -141,11 +92,6 @@ async function readJsonMaybe<T>(filePath: string): Promise<T | null> {
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-async function appendEvent(eventPath: string, event: Record<string, unknown>): Promise<void> {
-  await mkdir(dirname(eventPath), { recursive: true })
-  await appendFile(eventPath, `${JSON.stringify({ at: nowIso(), ...event })}\n`, 'utf8')
 }
 
 export async function readPlan(input: {
@@ -171,54 +117,6 @@ export async function readRun(runPath: string): Promise<BackfillRunState | null>
   return readJsonMaybe<BackfillRunState>(runPath)
 }
 
-export function createRunState(input: {
-  plan: BackfillPlanState
-  opts: CompatOptions & { replayDone: boolean; replayFailed: boolean }
-}): BackfillRunState {
-  const startedAt = nowIso()
-  return {
-    planId: input.plan.planId,
-    target: input.plan.target,
-    status: 'planned',
-    createdAt: startedAt,
-    startedAt,
-    updatedAt: startedAt,
-    replayDone: input.opts.replayDone,
-    replayFailed: input.opts.replayFailed,
-    compatibilityToken: computeCompatibilityToken({
-      plan: input.plan,
-      opts: input.opts,
-    }),
-    options: input.plan.options,
-    chunks: input.plan.chunks.map((chunk) => ({
-      id: chunk.id,
-      from: chunk.from,
-      to: chunk.to,
-      status: 'pending',
-      attempts: 0,
-      idempotencyToken: chunk.idempotencyToken,
-      sqlTemplate: chunk.sqlTemplate,
-    })),
-  }
-}
-
-export async function collectActiveRunTargets(runsDir: string): Promise<Map<string, string>> {
-  const active = new Map<string, string>()
-  if (!existsSync(runsDir)) return active
-
-  const entries = await readdir(runsDir, { withFileTypes: true })
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
-    const file = join(runsDir, entry.name)
-    const run = await readRun(file)
-    if (!run) continue
-    if (run.status !== 'running') continue
-    active.set(run.planId, run.target)
-  }
-
-  return active
-}
-
 export async function listPlanIds(plansDir: string): Promise<string[]> {
   if (!existsSync(plansDir)) return []
   const entries = await readdir(plansDir, { withFileTypes: true })
@@ -231,69 +129,40 @@ export async function listPlanIds(plansDir: string): Promise<string[]> {
 export function summarizeRunStatus(
   run: BackfillRunState,
   runPath: string,
-  eventPath: string
+  plan: BackfillPlanState,
 ): BackfillStatusSummary {
-  const summary = {
-    total: run.chunks.length,
+  const totals = {
+    total: plan.chunks.length,
     pending: 0,
+    submitted: 0,
     running: 0,
     done: 0,
     failed: 0,
-    skipped: 0,
   }
 
-  let attempts = 0
   let rowsWritten = 0
-  for (const chunk of run.chunks) {
-    attempts += chunk.attempts
-    rowsWritten += chunk.rowsWritten ?? 0
-    if (chunk.status === 'pending') summary.pending += 1
-    if (chunk.status === 'running') summary.running += 1
-    if (chunk.status === 'done') summary.done += 1
-    if (chunk.status === 'failed') summary.failed += 1
-    if (chunk.status === 'skipped') summary.skipped += 1
+  for (const chunk of plan.chunks) {
+    const state = run.progress[chunk.id]
+    if (!state) {
+      totals.pending += 1
+      continue
+    }
+    rowsWritten += state.writtenRows ?? 0
+    if (state.status === 'pending') totals.pending += 1
+    else if (state.status === 'submitted') totals.submitted += 1
+    else if (state.status === 'running') totals.running += 1
+    else if (state.status === 'done') totals.done += 1
+    else if (state.status === 'failed') totals.failed += 1
   }
 
   return {
     planId: run.planId,
     target: run.target,
     status: run.status,
-    totals: summary,
-    attempts,
+    totals,
     rowsWritten,
     updatedAt: run.updatedAt,
     runPath,
-    eventPath,
     lastError: run.lastError,
   }
-}
-
-export async function persistRunAndEvent(input: {
-  run: BackfillRunState
-  runPath: string
-  eventPath: string
-  event: Record<string, unknown>
-}): Promise<void> {
-  input.run.updatedAt = nowIso()
-  await writeJson(input.runPath, input.run)
-  await appendEvent(input.eventPath, input.event)
-}
-
-export function ensureRunCompatibility(input: {
-  run: BackfillRunState
-  plan: BackfillPlanState
-  opts: CompatOptions
-  forceCompatibility: boolean
-}): void {
-  if (!input.run.compatibilityToken) return
-  const expected = computeCompatibilityToken({
-    plan: input.plan,
-    opts: input.opts,
-  })
-  if (input.run.compatibilityToken === expected) return
-  if (input.forceCompatibility) return
-
-  throw new BackfillConfigError(
-    `Run compatibility check failed for plan ${input.plan.planId}. Runtime options changed since last checkpoint. Retry with --force-compatibility to acknowledge override.`
-  )
 }

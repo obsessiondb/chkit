@@ -1,5 +1,6 @@
 import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core'
 
+import type { BackfillProgress } from './async-backfill.js'
 import type { PartitionInfo, SortKeyInfo } from './chunking/types.js'
 import type { PluginConfig } from './options.js'
 
@@ -65,34 +66,15 @@ export interface BackfillPlanState {
   }
 }
 
-export interface BackfillRunChunkState {
-  id: string
-  from: string
-  to: string
-  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
-  attempts: number
-  idempotencyToken: string
-  sqlTemplate: string
-  startedAt?: string
-  completedAt?: string
-  lastError?: string
-  rowsWritten?: number
-}
-
 export interface BackfillRunState {
   planId: string
   target: string
-  status: BackfillPlanStatus
-  createdAt: string
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
   startedAt: string
   updatedAt: string
   completedAt?: string
   lastError?: string
-  replayDone: boolean
-  replayFailed: boolean
-  compatibilityToken: string
-  options: BackfillPlanState['options']
-  chunks: BackfillRunChunkState[]
+  progress: BackfillProgress
 }
 
 export interface BackfillStatusSummary {
@@ -102,16 +84,14 @@ export interface BackfillStatusSummary {
   totals: {
     total: number
     pending: number
+    submitted: number
     running: number
     done: number
     failed: number
-    skipped: number
   }
-  attempts: number
   rowsWritten: number
   updatedAt: string
   runPath: string
-  eventPath: string
   lastError?: string
 }
 
@@ -158,10 +138,8 @@ export interface BackfillPathSet {
   stateDir: string
   plansDir: string
   runsDir: string
-  eventsDir: string
   planPath: string
   runPath: string
-  eventPath: string
 }
 
 export interface BackfillDoctorReport {
@@ -170,14 +148,6 @@ export interface BackfillDoctorReport {
   issueCodes: string[]
   recommendations: string[]
   failedChunkIds: string[]
-}
-
-export interface ExecuteBackfillRunOutput {
-  run: BackfillRunState
-  status: BackfillStatusSummary
-  runPath: string
-  eventPath: string
-  noop?: boolean
 }
 
 export interface BackfillPluginCommandContext {

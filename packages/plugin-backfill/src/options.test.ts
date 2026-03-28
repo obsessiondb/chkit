@@ -84,27 +84,20 @@ describe('RunSchema defaults', () => {
   test('applies documented defaults', () => {
     const opts = RunSchema.parse({ planId: 'abc123def456789a' })
 
-    expect(opts.replayDone).toBe(false)
-    expect(opts.replayFailed).toBe(false)
-    expect(opts.forceOverlap).toBe(false)
-    expect(opts.forceCompatibility).toBe(false)
     expect(opts.forceEnvironment).toBe(false)
-    expect(opts.maxRetriesPerChunk).toBe(3)
-    expect(opts.retryDelayMs).toBe(1000)
-    expect(opts.maxParallelChunks).toBe(1)
-    expect(opts.blockOverlappingRuns).toBe(true)
-    expect(opts.requireDryRunBeforeRun).toBe(true)
-    expect(opts.simulateFailCount).toBe(1)
+    expect(opts.concurrency).toBe(3)
+    expect(opts.pollIntervalMs).toBe(5000)
   })
 })
 
 describe('ResumeSchema', () => {
-  test('omits simulation fields', () => {
+  test('extends RunSchema with replayFailed', () => {
     const opts = ResumeSchema.parse({ planId: 'abc123def456789a' })
 
-    expect(opts).not.toHaveProperty('simulateFailChunk')
-    expect(opts).not.toHaveProperty('simulateFailCount')
-    expect(opts.replayDone).toBe(false)
+    expect(opts.forceEnvironment).toBe(false)
+    expect(opts.concurrency).toBe(3)
+    expect(opts.pollIntervalMs).toBe(5000)
+    expect(opts.replayFailed).toBe(false)
   })
 })
 
@@ -131,13 +124,13 @@ describe('resolveOptions', () => {
   test('runtime options override plugin config', () => {
     const opts = resolveOptions(
       RunSchema,
-      { maxRetriesPerChunk: 2 },
-      { maxRetriesPerChunk: 5 },
+      { concurrency: 2 },
+      { concurrency: 5 },
       { '--plan-id': 'abc123def456789a' },
       { '--plan-id': { key: 'planId', coerce: (v: string) => v } }
     )
 
-    expect(opts.maxRetriesPerChunk).toBe(5)
+    expect(opts.concurrency).toBe(5)
   })
 
   test('schema defaults apply when no override provided', () => {
@@ -149,9 +142,9 @@ describe('resolveOptions', () => {
       { '--plan-id': { key: 'planId', coerce: (v: string) => v } }
     )
 
-    expect(opts.maxRetriesPerChunk).toBe(3)
-    expect(opts.retryDelayMs).toBe(1000)
-    expect(opts.blockOverlappingRuns).toBe(true)
+    expect(opts.concurrency).toBe(3)
+    expect(opts.pollIntervalMs).toBe(5000)
+    expect(opts.forceEnvironment).toBe(false)
   })
 
   test('throws on invalid options', () => {
