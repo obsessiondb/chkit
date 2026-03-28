@@ -12,20 +12,19 @@ import {
 import type {
   BackfillDoctorReport,
   BackfillStatusSummary,
-  NormalizedBackfillPluginOptions,
 } from './types.js'
 
 export async function getBackfillStatus(input: {
   planId: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
+  stateDir?: string
 }): Promise<BackfillStatusSummary> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
     configPath: input.configPath,
     config: input.config,
-    options: input.options,
+    stateDir: input.stateDir,
   })
   const paths = backfillPaths(stateDir, plan.planId)
   const run = await readRun(paths.runPath)
@@ -58,13 +57,13 @@ export async function cancelBackfillRun(input: {
   planId: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
+  stateDir?: string
 }): Promise<BackfillStatusSummary> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
     configPath: input.configPath,
     config: input.config,
-    options: input.options,
+    stateDir: input.stateDir,
   })
   const paths = backfillPaths(stateDir, plan.planId)
   const run = await readRun(paths.runPath)
@@ -107,13 +106,13 @@ export async function getBackfillDoctorReport(input: {
   planId: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
+  stateDir?: string
 }): Promise<BackfillDoctorReport> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
     configPath: input.configPath,
     config: input.config,
-    options: input.options,
+    stateDir: input.stateDir,
   })
   const paths = backfillPaths(stateDir, plan.planId)
   const run = await readRun(paths.runPath)
