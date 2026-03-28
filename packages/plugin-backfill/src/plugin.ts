@@ -24,6 +24,7 @@ import type {
   BackfillPlugin,
   BackfillPluginOptions,
   BackfillPluginRegistration,
+  ExecuteBackfillRunOutput,
   NormalizedBackfillPluginOptions,
 } from './types.js'
 
@@ -36,6 +37,40 @@ function formatBytes(bytes: number): string {
 }
 
 type BackfillCommandContext = Parameters<BackfillPlugin['commands'][number]['run']>[0]
+
+function formatRunOutput(
+  output: ExecuteBackfillRunOutput,
+  command: string,
+  context: Pick<BackfillCommandContext, 'jsonMode' | 'print'>,
+): number {
+  const payload = {
+    ...runPayload(output),
+    command,
+  }
+  if (payload.noop) {
+    if (!context.jsonMode) {
+      context.print(
+        `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
+      )
+    } else {
+      context.print(payload)
+    }
+    return 0
+  }
+  if (context.jsonMode) {
+    context.print(payload)
+  } else {
+    let line = `Backfill ${command} ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
+    if (payload.lastError) line += ` \u2014 ${payload.lastError}`
+    context.print(line)
+    if (payload.status === 'completed' && payload.rowsWritten === 0) {
+      context.print(
+        'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+      )
+    }
+  }
+  return payload.ok ? 0 : 1
+}
 
 function createBackfillCommand(
   base: NormalizedBackfillPluginOptions,
@@ -100,7 +135,6 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 configPath: context.configPath,
                 options: effectiveOptions,
                 maxChunkBytes: parsed.maxChunkBytes,
-                force: parsed.force,
                 clickhouse: context.config.clickhouse,
                 clickhouseQuery: async <T>(sql: string) => {
                   const result = await db.query(sql)
@@ -120,7 +154,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                   ? `, sort key: ${output.plan.sortKey.column} (${output.plan.sortKey.category})`
                   : ''
                 context.print(
-                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}${payload.existed ? ' [existing]' : ''}`
+                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`
                 )
               }
 
@@ -166,33 +200,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 clickhouse: context.config.clickhouse,
               })
 
-              const payload = {
-                ...runPayload(output),
-                command: 'run' as const,
-              }
-              if (payload.noop) {
-                if (!context.jsonMode) {
-                  context.print(
-                    `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
-                  )
-                } else {
-                  context.print(payload)
-                }
-                return 0
-              }
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                let line = `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
-                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
-                context.print(line)
-                if (payload.status === 'completed' && payload.rowsWritten === 0) {
-                  context.print(
-                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
-                  )
-                }
-              }
-              return payload.ok ? 0 : 1
+              return formatRunOutput(output, 'run', context)
             } finally {
               await db?.close()
             }
@@ -230,33 +238,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 clickhouse: context.config.clickhouse,
               })
 
-              const payload = {
-                ...runPayload(output),
-                command: 'resume' as const,
-              }
-              if (payload.noop) {
-                if (!context.jsonMode) {
-                  context.print(
-                    `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
-                  )
-                } else {
-                  context.print(payload)
-                }
-                return 0
-              }
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                let line = `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
-                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
-                context.print(line)
-                if (payload.status === 'completed' && payload.rowsWritten === 0) {
-                  context.print(
-                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
-                  )
-                }
-              }
-              return payload.ok ? 0 : 1
+              return formatRunOutput(output, 'resume', context)
             } finally {
               await db?.close()
             }
@@ -383,7 +365,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
 
 export function backfill(options: BackfillPluginOptions = {}): BackfillPluginRegistration {
   return {
-    plugin: createBackfillPlugin(),
+    plugin: createBackfillPlugin(options),
     name: 'backfill',
     enabled: true,
     options,

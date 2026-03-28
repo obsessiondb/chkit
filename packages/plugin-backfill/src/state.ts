@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -61,16 +61,8 @@ export function computeCompatibilityToken(input: {
   )
 }
 
-export function planIdentity(
-  target: string,
-  from: string,
-  to: string,
-  chunkParam: number | string,
-  timeColumn: string,
-  envFingerprint?: string
-): string {
-  const base = `${target}|${from}|${to}|${chunkParam}|${timeColumn}`
-  return envFingerprint ? `${base}|${envFingerprint}` : base
+export function randomPlanId(): string {
+  return randomBytes(8).toString('hex')
 }
 
 export function computeEnvironmentFingerprint(
@@ -145,10 +137,6 @@ export async function writeJson(filePath: string, value: unknown): Promise<void>
 async function appendEvent(eventPath: string, event: Record<string, unknown>): Promise<void> {
   await mkdir(dirname(eventPath), { recursive: true })
   await appendFile(eventPath, `${JSON.stringify({ at: nowIso(), ...event })}\n`, 'utf8')
-}
-
-export async function readExistingPlan(planPath: string): Promise<BackfillPlanState | null> {
-  return readJsonMaybe<BackfillPlanState>(planPath)
 }
 
 export async function readPlan(input: {

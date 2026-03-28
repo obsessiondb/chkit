@@ -178,7 +178,6 @@ export interface BackfillPluginCheckResult {
 export interface BuildBackfillPlanOutput {
   plan: BackfillPlanState
   planPath: string
-  existed: boolean
 }
 
 export interface ReadPlanOutput {
@@ -281,7 +280,6 @@ export interface ParsedPlanArgs {
   from?: string
   to?: string
   maxChunkBytes?: number
-  force: boolean
 }
 
 export interface ParsedRunArgs {

@@ -33,7 +33,7 @@ function createMockQuery(opts: {
 }
 
 describe('@chkit/plugin-backfill planning', () => {
-  test('builds deterministic plan id and chunks for identical input', async () => {
+  test('each plan gets a unique random id', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -71,10 +71,8 @@ describe('@chkit/plugin-backfill planning', () => {
         clickhouseQuery: mockQuery,
       })
 
-      expect(first.plan.planId).toBe(second.plan.planId)
-      expect(first.plan.chunks).toEqual(second.plan.chunks)
-      expect(first.existed).toBe(false)
-      expect(second.existed).toBe(true)
+      expect(first.plan.planId).not.toBe(second.plan.planId)
+      expect(first.plan.planId).toMatch(/^[a-f0-9]{16}$/)
       expect(first.plan.chunks).toHaveLength(3)
 
       const chunk = first.plan.chunks[0]
@@ -156,7 +154,7 @@ describe('@chkit/plugin-backfill planning', () => {
     }
   })
 
-  test('different sort keys produce different plan IDs', async () => {
+  test('chunk IDs are deterministic within a plan (derived from planId)', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -167,23 +165,20 @@ describe('@chkit/plugin-backfill planning', () => {
       })
       const options = normalizeBackfillOptions({})
 
-      const planA = await buildBackfillPlan({
+      const output = await buildBackfillPlan({
         target: 'app.events',
         configPath,
         config,
         options,
-        clickhouseQuery: createMockQuery({ sortingKey: 'event_time', sortKeyType: 'DateTime' }),
+        clickhouseQuery: createMockQuery(),
       })
 
-      const planB = await buildBackfillPlan({
-        target: 'app.events',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: createMockQuery({ sortingKey: 'created_at', sortKeyType: 'DateTime' }),
-      })
-
-      expect(planA.plan.planId).not.toBe(planB.plan.planId)
+      const chunkIds = output.plan.chunks.map(c => c.id)
+      const uniqueIds = new Set(chunkIds)
+      expect(uniqueIds.size).toBe(chunkIds.length)
+      for (const id of chunkIds) {
+        expect(id).toMatch(/^[a-f0-9]{16}$/)
+      }
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -642,7 +637,7 @@ describe('environment binding in plan', () => {
     }
   })
 
-  test('different environments produce different plan IDs', async () => {
+  test('plan includes environment from different clickhouse configs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -670,7 +665,9 @@ describe('environment binding in plan', () => {
         clickhouse: { url: 'https://prod.ch.cloud:8443', database: 'analytics' },
       })
 
-      expect(staging.plan.planId).not.toBe(production.plan.planId)
+      expect(staging.plan.environment?.url).toBe('https://staging.ch.cloud:8443')
+      expect(production.plan.environment?.url).toBe('https://prod.ch.cloud:8443')
+      expect(staging.plan.environment?.fingerprint).not.toBe(production.plan.environment?.fingerprint)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -17,7 +17,6 @@ export function planPayload(output: BuildBackfillPlanOutput): {
   maxChunkBytes?: number
   sortKeyColumn?: string
   planPath: string
-  existed: boolean
   strategy?: string
   partitionCount?: number
   totalBytes?: number
@@ -33,7 +32,6 @@ export function planPayload(output: BuildBackfillPlanOutput): {
     maxChunkBytes: output.plan.options.maxChunkBytes,
     sortKeyColumn: output.plan.options.sortKeyColumn,
     planPath: output.planPath,
-    existed: output.existed,
     strategy: output.plan.strategy,
     partitionCount: output.plan.partitions?.length,
     totalBytes: output.plan.partitions

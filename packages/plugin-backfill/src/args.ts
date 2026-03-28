@@ -15,7 +15,6 @@ export const PLAN_FLAGS = defineFlags([
   { name: '--from', type: 'string', description: 'Filter partitions starting from timestamp', placeholder: '<timestamp>' },
   { name: '--to', type: 'string', description: 'Filter partitions up to timestamp', placeholder: '<timestamp>' },
   { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
-  { name: '--force', type: 'boolean', description: 'Delete existing plan and regenerate from scratch' },
 ] as const)
 
 export const RUN_FLAGS = defineFlags([
@@ -101,7 +100,6 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
   const from = f['--from']
   const to = f['--to']
   const rawMaxChunkBytes = f['--max-chunk-bytes']
-  const force = f['--force'] === true
 
   let maxChunkBytes: number | undefined
   if (rawMaxChunkBytes !== undefined) {
@@ -115,7 +113,6 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
     from: from ? normalizeTimestamp(from, '--from') : undefined,
     to: to ? normalizeTimestamp(to, '--to') : undefined,
     maxChunkBytes,
-    force,
   }
 }
 

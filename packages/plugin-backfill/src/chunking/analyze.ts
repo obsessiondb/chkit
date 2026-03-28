@@ -1,4 +1,4 @@
-import { hashId } from '../state.js'
+import { hashId, randomPlanId } from '../state.js'
 
 import { buildChunkBoundaries } from './build.js'
 import { introspectTable, querySortKeyRanges } from './introspect.js'
@@ -11,11 +11,11 @@ export interface AnalyzeAndChunkInput {
   to?: string
   maxChunkBytes: number
   requireIdempotencyToken: boolean
-  planId: string
   query: <T>(sql: string) => Promise<T[]>
 }
 
 export interface AnalyzeAndChunkResult {
+  planId: string
   partitions: PartitionInfo[]
   sortKey?: SortKeyInfo
   chunks: PlannedChunk[]
@@ -31,14 +31,16 @@ export async function analyzeAndChunk(input: AnalyzeAndChunkInput): Promise<Anal
     query: input.query,
   })
 
+  const planId = randomPlanId()
+
   const chunks = buildPlannedChunks({
-    planId: input.planId,
+    planId,
     partitions,
     boundaries,
     requireIdempotencyToken: input.requireIdempotencyToken,
   })
 
-  return { partitions, sortKey, chunks }
+  return { planId, partitions, sortKey, chunks }
 }
 
 export interface AnalyzeTableInput {

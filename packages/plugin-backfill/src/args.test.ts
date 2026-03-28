@@ -75,11 +75,4 @@ describe('parsePlanArgs', () => {
     expect(() => parsePlanArgs({})).toThrow('Missing required --target')
   })
 
-  test('parses --force flag', () => {
-    const result = parsePlanArgs({
-      '--target': 'default.events',
-      '--force': true,
-    })
-    expect(result.force).toBe(true)
-  })
 })

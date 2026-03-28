@@ -1,10 +1,9 @@
 import { dirname } from 'node:path'
-import { unlink } from 'node:fs/promises'
 
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 import type { ResolvedChxConfig } from '@chkit/core'
 
-import { analyzeTable, buildPlannedChunks } from './chunking/index.js'
+import { analyzeAndChunk } from './chunking/analyze.js'
 import { buildChunkSql } from './chunking/sql.js'
 import { findMvForTarget } from './detect.js'
 import { BackfillConfigError } from './errors.js'
@@ -12,10 +11,6 @@ import {
   backfillPaths,
   computeBackfillStateDir,
   computeEnvironmentFingerprint,
-  hashId,
-  planIdentity,
-  readExistingPlan,
-  stableSerialize,
   writeJson,
 } from './state.js'
 import type {
@@ -35,7 +30,6 @@ export async function buildBackfillPlan(input: {
   config: Pick<ResolvedChxConfig, 'metaDir' | 'schema'>
   options: NormalizedBackfillPluginOptions
   maxChunkBytes?: number
-  force?: boolean
   clickhouse?: { url: string; database: string }
   clickhouseQuery: <T>(sql: string) => Promise<T[]>
 }): Promise<BuildBackfillPlanOutput> {
@@ -47,13 +41,14 @@ export async function buildBackfillPlan(input: {
   const env = computeEnvironmentFingerprint(input.clickhouse)
   const maxChunkBytes = input.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES
 
-  // 1. Analyze table: introspect partitions, sort key, and build chunk boundaries
-  const { partitions, sortKey, boundaries } = await analyzeTable({
+  // 1. Analyze table and build planned chunks
+  const { planId, partitions, sortKey, chunks: plannedChunks } = await analyzeAndChunk({
     database,
     table,
     from: input.from,
     to: input.to,
     maxChunkBytes,
+    requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
     query: input.clickhouseQuery,
   })
 
@@ -63,26 +58,14 @@ export async function buildBackfillPlan(input: {
     )
   }
 
-  // 2. Compute plan identity (requires partition data for derived time bounds)
   const firstPartition = partitions[0] as PartitionInfo
   const derivedFrom = input.from ?? partitions.reduce((min, p) => (p.minTime < min ? p.minTime : min), firstPartition.minTime)
   const derivedTo = input.to ?? partitions.reduce((max, p) => (p.maxTime > max ? p.maxTime : max), firstPartition.maxTime)
 
-  const chunkParam = `partition:${maxChunkBytes}`
-  const sortKeyColumn = sortKey?.column ?? ''
-  const planId = hashId(planIdentity(input.target, derivedFrom, derivedTo, chunkParam, sortKeyColumn, env?.fingerprint)).slice(0, 16)
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
   const paths = backfillPaths(stateDir, planId)
 
-  // 3. Build planned chunks from boundaries (now that we have planId for deterministic IDs)
-  const plannedChunks = buildPlannedChunks({
-    planId,
-    partitions,
-    boundaries,
-    requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
-  })
-
-  // 4. Detect MV for replay strategy
+  // 2. Detect MV for replay strategy
   let mvAsQuery: string | undefined
   let targetColumns: string[] | undefined
 
@@ -104,7 +87,7 @@ export async function buildBackfillPlan(input: {
     // Schema load failed — fall back to direct copy
   }
 
-  // 5. Stamp SQL on each planned chunk to produce BackfillChunk[]
+  // 3. Stamp SQL on each planned chunk to produce BackfillChunk[]
   const chunks: BackfillChunk[] = plannedChunks.map(planned => {
     const sqlTemplate = buildChunkSql({
       planId,
@@ -155,41 +138,10 @@ export async function buildBackfillPlan(input: {
     limits: input.options.limits,
   }
 
-  return persistPlan(plan, paths, input.force)
-}
-
-async function persistPlan(
-  plan: BuildBackfillPlanOutput['plan'],
-  paths: ReturnType<typeof backfillPaths>,
-  force?: boolean
-): Promise<BuildBackfillPlanOutput> {
-  if (force) {
-    for (const filePath of [paths.planPath, paths.runPath, paths.eventPath]) {
-      await unlink(filePath).catch((err: NodeJS.ErrnoException) => {
-        if (err.code !== 'ENOENT') throw err
-      })
-    }
-  }
-
-  const existing = await readExistingPlan(paths.planPath)
-  if (existing) {
-    if (stableSerialize(existing) !== stableSerialize(plan)) {
-      throw new BackfillConfigError(
-        `Backfill plan already exists at ${paths.planPath} but differs from current planning output. Remove it if you intentionally changed planning parameters.`
-      )
-    }
-    return {
-      plan: existing,
-      planPath: paths.planPath,
-      existed: true,
-    }
-  }
-
   await writeJson(paths.planPath, plan)
 
   return {
     plan,
     planPath: paths.planPath,
-    existed: false,
   }
 }
