@@ -359,7 +359,7 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { maxRetriesPerChunk: 1 } })\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ maxRetriesPerChunk: 1 })\n`,
           'utf8'
         )
 
@@ -482,7 +482,7 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { chunkHours: 2 } })\n`,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ chunkHours: 2 })\n`,
         'utf8'
       )
 
@@ -515,12 +515,12 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { maxRetriesPerChunk: 1 } })\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ maxRetriesPerChunk: 1 })\n`,
           'utf8'
         )
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { maxRetriesPerChunk: 1 } } }],\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts', options: { maxRetriesPerChunk: 1 } }],\n}\n`,
           'utf8'
         )
 
@@ -562,7 +562,7 @@ describe('plugin runtime', () => {
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts', options: { defaults: { maxRetriesPerChunk: 5 } } }],\n}\n`,
+          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts', options: { maxRetriesPerChunk: 5 } }],\n}\n`,
           'utf8'
         )
 
@@ -619,7 +619,7 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ defaults: { maxRetriesPerChunk: 1 } })\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ maxRetriesPerChunk: 1 })\n`,
           'utf8'
         )
         await writeFile(
@@ -915,7 +915,7 @@ describe('plugin runtime', () => {
       expect(result.exitCode).toBe(2)
       const payload = JSON.parse(result.stdout) as { ok: boolean; error: string }
       expect(payload.ok).toBe(false)
-      expect(payload.error).toContain('Invalid plugin option "bigintMode"')
+      expect(payload.error).toContain('bigintMode:')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
