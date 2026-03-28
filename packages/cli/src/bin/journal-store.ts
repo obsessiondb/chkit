@@ -43,7 +43,7 @@ export function createJournalStore(db: ClickHouseExecutor): JournalStore {
     applied_at DateTime64(3, 'UTC'),
     checksum String,
     chkit_version String
-) ENGINE = MergeTree()
+) ENGINE = ReplacingMergeTree(applied_at)
 ORDER BY (name)
 SETTINGS index_granularity = 1`
   let bootstrapped = false

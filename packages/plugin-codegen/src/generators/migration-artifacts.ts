@@ -88,7 +88,7 @@ export async function runMigrations(
       applied_at DateTime64(3, 'UTC') DEFAULT now64(3),
       checksum String,
       chkit_version String DEFAULT 'runtime'
-    ) ENGINE = MergeTree() ORDER BY (name)
+    ) ENGINE = ReplacingMergeTree(applied_at) ORDER BY (name)
   \`)
 
   // Read already-applied migrations
