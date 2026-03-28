@@ -4,6 +4,8 @@ import pMap from 'p-map'
 export interface BackfillOptions {
   /** The executor to submit queries to (target ClickHouse) */
   executor: ClickHouseExecutor
+  /** Plan ID used as a namespace in deterministic query IDs */
+  planId: string
   /** The chunks to process (from buildChunks) */
   chunks: Array<{ id: string; from: string; to: string; [key: string]: unknown }>
   /** Build the SQL for a given chunk. Called once per chunk at submit time. */
@@ -12,10 +14,14 @@ export interface BackfillOptions {
   concurrency?: number
   /** Polling interval in ms. Default: 5000 */
   pollIntervalMs?: number
+  /** Max consecutive poll errors before marking a chunk as failed. Default: 10 */
+  maxPollErrors?: number
   /** Called whenever progress changes. Use this to persist state. */
   onProgress?: (progress: BackfillProgress) => void | Promise<void>
   /** Previously saved progress to resume from. */
   resumeFrom?: BackfillProgress
+  /** When true, reset chunks confirmed failed (both locally and on server) back to pending. */
+  replayFailed?: boolean
 }
 
 export interface BackfillChunkState {
@@ -40,6 +46,11 @@ export interface BackfillResult {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Build the deterministic query ID for a chunk. */
+function chunkQueryId(planId: string, chunkId: string): string {
+  return `backfill-${planId}-${chunkId}`
 }
 
 function applyQueryStatus(
@@ -92,17 +103,133 @@ function updateChunk(
   return { ...progress, [id]: next }
 }
 
+/**
+ * Reconcile local progress with server-side state.
+ *
+ * Queries system.processes and system.query_log for all chunk query IDs
+ * to discover queries that were submitted but whose status was never
+ * persisted locally (e.g. client crash between submit and state write).
+ */
+export async function syncProgress(
+  executor: ClickHouseExecutor,
+  planId: string,
+  chunks: Array<{ id: string }>,
+  progress: BackfillProgress,
+): Promise<BackfillProgress> {
+  const prefix = `backfill-${planId}-`
+
+  // Collect query IDs for non-terminal chunks that need reconciliation
+  const chunkIdsToSync: string[] = []
+  for (const chunk of chunks) {
+    const state = progress[chunk.id]
+    if (!state || state.status === 'done') continue
+    chunkIdsToSync.push(chunk.id)
+  }
+
+  if (chunkIdsToSync.length === 0) return progress
+
+  // Escape single-quotes in the prefix for safe SQL embedding
+  const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
+
+  const runningRows = await executor.query<{ query_id: string }>(
+    `SELECT query_id FROM system.processes WHERE query_id LIKE '${safePrefix}%'`
+  )
+  const runningSet = new Set(runningRows.map((r) => r.query_id))
+
+  const logRows = await executor.query<{
+    query_id: string
+    type: string
+    written_rows: string
+    written_bytes: string
+    query_duration_ms: string
+    exception: string
+  }>(
+    `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
+FROM system.query_log
+WHERE query_id LIKE '${safePrefix}%'
+  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+ORDER BY event_time DESC`
+  )
+
+  // Deduplicate: take the latest log entry per query_id (results are ordered by event_time DESC)
+  const latestLogByQueryId = new Map<string, (typeof logRows)[0]>()
+  for (const row of logRows) {
+    if (!latestLogByQueryId.has(row.query_id)) {
+      latestLogByQueryId.set(row.query_id, row)
+    }
+  }
+
+  let updated = { ...progress }
+
+  for (const chunkId of chunkIdsToSync) {
+    const queryId = chunkQueryId(planId, chunkId)
+    const current = updated[chunkId]
+    if (!current) continue
+
+    if (runningSet.has(queryId)) {
+      updated = updateChunk(updated, chunkId, { ...current, status: 'running', queryId })
+    } else {
+      const logEntry = latestLogByQueryId.get(queryId)
+      if (logEntry) {
+        if (logEntry.type === 'QueryFinish') {
+          updated = updateChunk(updated, chunkId, {
+            ...current,
+            status: 'done',
+            queryId,
+            finishedAt: new Date().toISOString(),
+            writtenRows: Number(logEntry.written_rows),
+            writtenBytes: Number(logEntry.written_bytes),
+            durationMs: Number(logEntry.query_duration_ms),
+          })
+        } else {
+          updated = updateChunk(updated, chunkId, {
+            ...current,
+            status: 'failed',
+            queryId,
+            finishedAt: new Date().toISOString(),
+            durationMs: Number(logEntry.query_duration_ms),
+            error: logEntry.exception,
+          })
+        }
+      }
+    }
+  }
+
+  return updated
+}
+
 async function pollChunk(
   executor: ClickHouseExecutor,
   initial: BackfillChunkState,
   pollIntervalMs: number,
+  maxPollErrors: number,
   onChanged: (state: BackfillChunkState) => void | Promise<void>,
 ): Promise<BackfillChunkState> {
   let state = initial
+  let consecutiveErrors = 0
   while (state.status === 'submitted' || state.status === 'running') {
     await sleep(pollIntervalMs)
     if (!state.queryId) break
-    const qs = await executor.queryStatus(state.queryId)
+    let qs: QueryStatus
+    try {
+      qs = await executor.queryStatus(state.queryId, {
+        afterTime: state.submittedAt,
+      })
+    } catch {
+      consecutiveErrors++
+      if (consecutiveErrors >= maxPollErrors) {
+        state = {
+          ...state,
+          status: 'failed',
+          finishedAt: new Date().toISOString(),
+          error: `Lost contact with query after ${consecutiveErrors} consecutive poll errors`,
+        }
+        await onChanged(state)
+        break
+      }
+      continue
+    }
+    consecutiveErrors = 0
     const result = applyQueryStatus(state, qs)
     if (result.changed) {
       state = result.state
@@ -115,24 +242,47 @@ async function pollChunk(
 export async function executeBackfill(options: BackfillOptions): Promise<BackfillResult> {
   const {
     executor,
+    planId,
     chunks,
     buildQuery,
     concurrency = 3,
     pollIntervalMs = 5000,
+    maxPollErrors = 10,
     onProgress,
     resumeFrom,
+    replayFailed,
   } = options
 
-  const initial: BackfillProgress = Object.fromEntries(
+  let progress: BackfillProgress = Object.fromEntries(
     chunks.map((chunk) => {
       const resumed = resumeFrom?.[chunk.id]
       return [chunk.id, resumed ? { ...resumed } : { status: 'pending' as const }]
     }),
   )
 
-  // Shared mutable ref so concurrent pMap workers see each other's updates.
-  // Each chunk's *state* is replaced immutably; only the container is shared.
-  let progress = initial
+  // When resuming, reconcile local state with the server before processing.
+  // This catches queries that were submitted but whose status was never
+  // persisted (e.g. client crash between submit() and state file write).
+  if (resumeFrom) {
+    progress = await syncProgress(executor, planId, chunks, progress)
+  }
+
+  // Reset confirmed-failed chunks to pending AFTER sync so we operate on
+  // ground truth. The deterministic query_id is reused; the afterTime filter
+  // in queryStatus ensures we ignore stale query_log entries from prior attempts.
+  if (replayFailed) {
+    for (const chunk of chunks) {
+      const state = progress[chunk.id]
+      if (state?.status === 'failed') {
+        progress = updateChunk(progress, chunk.id, { status: 'pending' })
+      }
+    }
+  }
+
+  // Persist the reconciled state so the caller's checkpoint is up to date
+  if (resumeFrom || replayFailed) {
+    await onProgress?.(progress)
+  }
 
   const setChunk = (id: string, next: BackfillChunkState) => {
     progress = updateChunk(progress, id, next)
@@ -152,24 +302,25 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         if (!state.queryId) {
           await setChunk(chunk.id, { ...state, status: 'pending' })
         } else {
-          await pollChunk(executor, state, pollIntervalMs, (s) => setChunk(chunk.id, s))
+          await pollChunk(executor, state, pollIntervalMs, maxPollErrors, (s) => setChunk(chunk.id, s))
           return
         }
       }
 
       // Submit and poll
-      const queryId = `backfill-${chunk.id}`
+      const queryId = chunkQueryId(planId, chunk.id)
       const sql = buildQuery(chunk)
+      const submittedAt = new Date().toISOString()
       await executor.submit(sql, queryId)
       const submitted: BackfillChunkState = {
         ...getChunk(progress, chunk.id),
         status: 'submitted',
         queryId,
-        submittedAt: new Date().toISOString(),
+        submittedAt,
       }
       await setChunk(chunk.id, submitted)
 
-      await pollChunk(executor, submitted, pollIntervalMs, (s) => setChunk(chunk.id, s))
+      await pollChunk(executor, submitted, pollIntervalMs, maxPollErrors, (s) => setChunk(chunk.id, s))
     },
     { concurrency },
   )

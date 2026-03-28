@@ -74,41 +74,24 @@ async function runBackfill(input: {
 
   // Check for existing run state
   const existingRun = await readRun(paths.runPath)
-  let resumeFrom = input.resumeFrom
+  const resumeFrom = input.resumeFrom
 
-  if (existingRun) {
-    if (existingRun.status === 'completed') {
-      if (input.jsonMode) {
-        input.print({
-          ok: true,
-          planId: plan.planId,
-          status: 'completed',
-          noop: true,
-        })
-      } else {
-        const summary = summarizeRunStatus(existingRun, paths.runPath, plan)
-        input.print(
-          `Plan ${plan.planId} is already completed (${summary.totals.done}/${summary.totals.total} chunks done). Nothing to do.`
-        )
-      }
-      return 0
+  if (existingRun && !resumeFrom) {
+    // `run` command (no resumeFrom) must not silently continue an existing run.
+    // Users should use `backfill resume` instead.
+    const status = existingRun.status
+    if (status === 'completed') {
+      throw new BackfillConfigError(
+        `Run already completed for plan ${plan.planId}. Nothing to do.`
+      )
     }
-    if (existingRun.status === 'cancelled') {
+    if (status === 'cancelled') {
       throw new BackfillConfigError(
         `Run is cancelled for plan ${plan.planId}. Create a new plan or inspect with backfill doctor.`
       )
     }
-    // Resume from existing progress
-    resumeFrom = existingRun.progress
-  }
-
-  // If replay-failed, reset failed chunks to pending in resumeFrom
-  if (input.replayFailed && resumeFrom) {
-    resumeFrom = Object.fromEntries(
-      Object.entries(resumeFrom).map(([id, state]) => [
-        id,
-        state.status === 'failed' ? { status: 'pending' as const } : state,
-      ]),
+    throw new BackfillConfigError(
+      `A run already exists for plan ${plan.planId} (status: ${status}). Use backfill resume to continue.`
     )
   }
 
@@ -128,6 +111,7 @@ async function runBackfill(input: {
 
     const result = await executeBackfill({
       executor: db,
+      planId: plan.planId,
       chunks: plan.chunks.map((c) => ({ id: c.id, from: c.from, to: c.to })),
       buildQuery: (chunk) => {
         const planChunk = plan.chunks.find((c) => c.id === chunk.id)
@@ -137,6 +121,7 @@ async function runBackfill(input: {
       concurrency: input.concurrency,
       pollIntervalMs: input.pollIntervalMs,
       resumeFrom,
+      replayFailed: input.replayFailed,
       onProgress: async (progress) => {
         runState.progress = progress
         runState.updatedAt = nowIso()
@@ -317,6 +302,11 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                   `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
                 )
               }
+              if (existingRun.status === 'completed') {
+                throw new BackfillConfigError(
+                  `Run already completed for plan ${opts.planId}. Nothing to resume.`
+                )
+              }
 
               return runBackfill({
                 planId: opts.planId,
@@ -324,6 +314,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 concurrency: opts.concurrency,
                 pollIntervalMs: opts.pollIntervalMs,
                 stateDir: opts.stateDir,
+                resumeFrom: existingRun.progress,
                 replayFailed: opts.replayFailed,
                 configPath: context.configPath,
                 config: context.config,

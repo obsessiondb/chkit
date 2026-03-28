@@ -41,8 +41,10 @@ export interface ClickHouseExecutor {
 
   /** Check the status of a previously submitted query.
    *  Checks system.processes first (running?), then system.query_log (finished/failed?).
-   *  @param queryId - The query_id returned by submit() */
-  queryStatus(queryId: string): Promise<QueryStatus>
+   *  @param queryId - The query_id returned by submit()
+   *  @param options.afterTime - Only consider query_log entries for queries started at or after this ISO timestamp.
+   *    Useful when resubmitting with the same query_id to ignore stale entries from previous attempts. */
+  queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus>
 
   close(): Promise<void>
 }
@@ -268,7 +270,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
       }
       return id
     },
-    async queryStatus(queryId: string): Promise<QueryStatus> {
+    async queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus> {
       try {
         const running = await client.query({
           query: `SELECT count() AS cnt FROM system.processes WHERE query_id = {qid:String}`,
@@ -280,18 +282,19 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
           return { status: 'running' }
         }
 
+        const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
         const log = await client.query({
-          query: `SELECT user, type, written_rows, written_bytes, query_duration_ms, exception
+          query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM system.query_log
 WHERE query_id = {qid:String}
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND query_start_time >= parseDateTimeBestEffort({after:String})
 ORDER BY event_time DESC
 LIMIT 1`,
-          query_params: { qid: queryId },
+          query_params: { qid: queryId, after: afterTime },
           format: 'JSONEachRow',
         })
         const logRows = await log.json<{
-          user: string
           type: string
           written_rows: string
           written_bytes: string
