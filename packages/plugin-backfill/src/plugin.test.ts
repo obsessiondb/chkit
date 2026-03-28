@@ -5,7 +5,7 @@ import { backfill, createBackfillPlugin } from './plugin.js'
 describe('@chkit/plugin-backfill plugin surface', () => {
   test('exposes commands and typed registration helper', () => {
     const plugin = createBackfillPlugin()
-    const registration = backfill({ defaults: { chunkHours: 4 } })
+    const registration = backfill({ defaults: { maxParallelChunks: 4 } })
 
     expect(plugin.manifest.name).toBe('backfill')
     expect(plugin.manifest.apiVersion).toBe(1)
@@ -19,6 +19,6 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     ])
     expect(registration.name).toBe('backfill')
     expect(registration.enabled).toBe(true)
-    expect(registration.options?.defaults?.chunkHours).toBe(4)
+    expect(registration.options?.defaults?.maxParallelChunks).toBe(4)
   })
 })

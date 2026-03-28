@@ -7,14 +7,26 @@ import { resolveConfig } from '@chkit/core'
 
 import { normalizeBackfillOptions } from './options.js'
 import { buildBackfillPlan } from './planner.js'
-import {
-  cancelBackfillRun,
-  evaluateBackfillCheck,
-  executeBackfillRun,
-  getBackfillDoctorReport,
-  getBackfillStatus,
-  resumeBackfillRun,
-} from './runtime.js'
+import { evaluateBackfillCheck } from './check.js'
+import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
+import { executeBackfillRun, resumeBackfillRun } from './runtime.js'
+
+function createMockQuery(opts: {
+  partitions?: Array<{ partition_id: string; total_rows: string; total_bytes: string; min_time: string; max_time: string }>
+} = {}): <T>(sql: string) => Promise<T[]> {
+  const partitions = opts.partitions ?? [
+    { partition_id: '202601a', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 00:00:00', max_time: '2026-01-01 02:00:00' },
+    { partition_id: '202601b', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 02:00:00', max_time: '2026-01-01 04:00:00' },
+    { partition_id: '202601c', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 04:00:00', max_time: '2026-01-01 06:00:00' },
+  ]
+
+  return async <T>(sql: string) => {
+    if (sql.includes('system.parts')) return partitions as T[]
+    if (sql.includes('system.tables')) return [{ sorting_key: 'event_time' }] as T[]
+    if (sql.includes('system.columns')) return [{ type: 'DateTime' }] as T[]
+    return [] as T[]
+  }
+}
 
 describe('@chkit/plugin-backfill run lifecycle', () => {
   test('runs plan chunks and reports completed status', async () => {
@@ -26,7 +38,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const options = normalizeBackfillOptions({})
 
       const planned = await buildBackfillPlan({
         target: 'app.events',
@@ -35,6 +47,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       const ran = await executeBackfillRun({
@@ -74,7 +87,6 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
       })
       const options = normalizeBackfillOptions({
         defaults: {
-          chunkHours: 2,
           maxRetriesPerChunk: 1,
           retryDelayMs: 0,
         },
@@ -87,6 +99,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       const failChunkId = planned.plan.chunks[1]?.id
@@ -143,10 +156,10 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         metaDir: './chkit/meta',
       })
       const planOptions = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
       })
       const changedOptions = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 5, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 5, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -156,6 +169,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         configPath,
         config,
         options: planOptions,
+        clickhouseQuery: createMockQuery(),
       })
       const failChunkId = planned.plan.chunks[1]?.id
       expect(failChunkId).toBeTruthy()
@@ -202,7 +216,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const options = normalizeBackfillOptions({})
 
       const planned = await buildBackfillPlan({
         target: 'app.events',
@@ -211,6 +225,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
       await executeBackfillRun({
         planId: planned.plan.planId,
@@ -229,7 +244,7 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
       ).rejects.toThrow('already completed')
 
       const options2 = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
       })
       const planned2 = await buildBackfillPlan({
         target: 'app.events',
@@ -238,6 +253,13 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         configPath,
         config,
         options: options2,
+        clickhouseQuery: createMockQuery({
+          partitions: [
+            { partition_id: '202601d', total_rows: '500', total_bytes: '250000', min_time: '2026-01-02 00:00:00', max_time: '2026-01-02 02:00:00' },
+            { partition_id: '202601e', total_rows: '500', total_bytes: '250000', min_time: '2026-01-02 02:00:00', max_time: '2026-01-02 04:00:00' },
+            { partition_id: '202601f', total_rows: '500', total_bytes: '250000', min_time: '2026-01-02 04:00:00', max_time: '2026-01-02 06:00:00' },
+          ],
+        }),
       })
       await executeBackfillRun({
         planId: planned2.plan.planId,
@@ -280,7 +302,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const options = normalizeBackfillOptions({})
 
       const planned = await buildBackfillPlan({
         target: 'app.events',
@@ -289,6 +311,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       const executedSql: string[] = []
@@ -325,7 +348,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 3, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 3, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -335,6 +358,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       let callCount = 0
@@ -375,7 +399,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 2, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 2, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -385,6 +409,7 @@ describe('@chkit/plugin-backfill execute callback', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       let callCount = 0
@@ -423,7 +448,7 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -433,6 +458,7 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       const failChunkId = planned.plan.chunks[0]?.id
@@ -469,7 +495,7 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1, retryDelayMs: 0 },
+        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
       })
 
       const planned = await buildBackfillPlan({
@@ -479,6 +505,7 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       const failChunkId = planned.plan.chunks[1]?.id
@@ -494,7 +521,6 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         },
       })
 
-      // Resume WITHOUT --replay-failed — should still retry the failed chunk
       const resumed = await resumeBackfillRun({
         planId: planned.plan.planId,
         configPath,
@@ -530,6 +556,7 @@ describe('@chkit/plugin-backfill check integration', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       const checkResult = await evaluateBackfillCheck({
@@ -566,6 +593,7 @@ describe('@chkit/plugin-backfill check integration', () => {
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
       await executeBackfillRun({
         planId: planned.plan.planId,
@@ -600,7 +628,7 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const options = normalizeBackfillOptions({})
       const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
       const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
 
@@ -608,11 +636,11 @@ describe('@chkit/plugin-backfill environment binding', () => {
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
         clickhouse: stagingCh,
+        clickhouseQuery: createMockQuery(),
       })
 
       await expect(
@@ -638,7 +666,7 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const options = normalizeBackfillOptions({})
       const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
       const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
 
@@ -646,11 +674,11 @@ describe('@chkit/plugin-backfill environment binding', () => {
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
         clickhouse: stagingCh,
+        clickhouseQuery: createMockQuery(),
       })
 
       const ran = await executeBackfillRun({
@@ -668,7 +696,7 @@ describe('@chkit/plugin-backfill environment binding', () => {
     }
   })
 
-  test('plans without environment can run against any environment (backward compat)', async () => {
+  test('plans without environment connection info can run against any environment', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -677,22 +705,20 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({ defaults: { chunkHours: 2 } })
+      const options = normalizeBackfillOptions({})
 
-      // Plan without clickhouse (no environment info)
       const planned = await buildBackfillPlan({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       expect(planned.plan.environment).toBeUndefined()
 
-      // Run against a specific environment — should succeed
       const ran = await executeBackfillRun({
         planId: planned.plan.planId,
         configPath,
@@ -717,7 +743,7 @@ describe('@chkit/plugin-backfill environment binding', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({
-        defaults: { chunkHours: 2, maxRetriesPerChunk: 1 },
+        defaults: { maxRetriesPerChunk: 1 },
       })
       const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
       const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
@@ -726,14 +752,13 @@ describe('@chkit/plugin-backfill environment binding', () => {
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
         clickhouse: stagingCh,
+        clickhouseQuery: createMockQuery(),
       })
 
-      // Run with staging to create run state, with a simulated failure
       await executeBackfillRun({
         planId: planned.plan.planId,
         configPath,
@@ -745,7 +770,6 @@ describe('@chkit/plugin-backfill environment binding', () => {
         clickhouse: stagingCh,
       })
 
-      // Resume with production should fail
       await expect(
         resumeBackfillRun({
           planId: planned.plan.planId,

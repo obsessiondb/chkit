@@ -6,11 +6,34 @@ import { tmpdir } from 'node:os'
 import { resolveConfig } from '@chkit/core'
 
 import { normalizeBackfillOptions } from './options.js'
-import { buildBackfillPlan, injectTimeFilter, rewriteSelectColumns } from './planner.js'
+import { buildBackfillPlan } from './planner.js'
+import { injectSortKeyFilter, rewriteSelectColumns } from './chunking/sql.js'
 import { computeBackfillStateDir, computeEnvironmentFingerprint } from './state.js'
 
+function createMockQuery(opts: {
+  partitions?: Array<{ partition_id: string; total_rows: string; total_bytes: string; min_time: string; max_time: string }>
+  sortingKey?: string
+  sortKeyType?: string
+  sortKeyRanges?: Array<{ partition_id: string; min_val: string; max_val: string }>
+} = {}): <T>(sql: string) => Promise<T[]> {
+  const partitions = opts.partitions ?? [
+    { partition_id: '202601', total_rows: '1000', total_bytes: '500000', min_time: '2026-01-01 00:00:00', max_time: '2026-01-01 18:00:00' },
+  ]
+  const sortingKey = opts.sortingKey ?? 'event_time'
+  const sortKeyType = opts.sortKeyType ?? 'DateTime'
+  const sortKeyRanges = opts.sortKeyRanges ?? []
+
+  return async <T>(sql: string) => {
+    if (sql.includes('system.parts')) return partitions as T[]
+    if (sql.includes('system.tables')) return [{ sorting_key: sortingKey }] as T[]
+    if (sql.includes('system.columns')) return [{ type: sortKeyType }] as T[]
+    if (sql.includes('min(') && sql.includes('max(')) return sortKeyRanges as T[]
+    return [] as T[]
+  }
+}
+
 describe('@chkit/plugin-backfill planning', () => {
-  test('builds deterministic plan id and chunks for identical input', async () => {
+  test('each plan gets a unique random id', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -20,37 +43,41 @@ describe('@chkit/plugin-backfill planning', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery({
+        partitions: [
+          { partition_id: '202601a', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 00:00:00', max_time: '2026-01-01 06:00:00' },
+          { partition_id: '202601b', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 06:00:00', max_time: '2026-01-01 12:00:00' },
+          { partition_id: '202601c', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 12:00:00', max_time: '2026-01-01 18:00:00' },
+        ],
+      })
 
       const first = await buildBackfillPlan({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T18:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: mockQuery,
       })
 
       const second = await buildBackfillPlan({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T18:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: mockQuery,
       })
 
-      expect(first.plan.planId).toBe(second.plan.planId)
-      expect(first.plan.chunks).toEqual(second.plan.chunks)
-      expect(first.existed).toBe(false)
-      expect(second.existed).toBe(true)
+      expect(first.plan.planId).not.toBe(second.plan.planId)
+      expect(first.plan.planId).toMatch(/^[a-f0-9]{16}$/)
       expect(first.plan.chunks).toHaveLength(3)
 
       const chunk = first.plan.chunks[0]
       expect(chunk?.idempotencyToken.length).toBe(64)
       expect(chunk?.sqlTemplate).toContain('INSERT INTO app.events')
-      expect(chunk?.sqlTemplate).toContain('parseDateTimeBestEffort(')
       expect(chunk?.sqlTemplate).toContain(`insert_deduplication_token='${chunk?.idempotencyToken}'`)
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -67,16 +94,23 @@ describe('@chkit/plugin-backfill planning', () => {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery({
+        partitions: [
+          { partition_id: '202601a', total_rows: '250', total_bytes: '125000', min_time: '2026-01-01 00:00:00', max_time: '2026-01-01 02:00:00' },
+          { partition_id: '202601b', total_rows: '250', total_bytes: '125000', min_time: '2026-01-01 02:00:00', max_time: '2026-01-01 04:00:00' },
+          { partition_id: '202601c', total_rows: '250', total_bytes: '125000', min_time: '2026-01-01 04:00:00', max_time: '2026-01-01 06:00:00' },
+          { partition_id: '202601d', total_rows: '250', total_bytes: '125000', min_time: '2026-01-01 06:00:00', max_time: '2026-01-01 07:00:00' },
+        ],
+      })
 
       const output = await buildBackfillPlan({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T07:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
-        chunkHours: 2,
+        clickhouseQuery: mockQuery,
       })
 
       const raw = await readFile(output.planPath, 'utf8')
@@ -89,7 +123,38 @@ describe('@chkit/plugin-backfill planning', () => {
     }
   })
 
-  test('uses provided time column name in SQL template', async () => {
+  test('detects sort key column from ClickHouse metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery({
+        sortingKey: 'session_date',
+        sortKeyType: 'Date',
+      })
+
+      const output = await buildBackfillPlan({
+        target: 'app.events',
+        configPath,
+        config,
+        options,
+        clickhouseQuery: mockQuery,
+      })
+
+      expect(output.plan.sortKey?.column).toBe('session_date')
+      expect(output.plan.sortKey?.category).toBe('datetime')
+      expect(output.plan.options.sortKeyColumn).toBe('session_date')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chunk IDs are deterministic within a plan (derived from planId)', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -102,56 +167,18 @@ describe('@chkit/plugin-backfill planning', () => {
 
       const output = await buildBackfillPlan({
         target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'session_date',
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
-      const chunk = output.plan.chunks[0]
-      expect(chunk?.sqlTemplate).toContain("WHERE session_date >= parseDateTimeBestEffort('")
-      expect(chunk?.sqlTemplate).toContain("AND session_date < parseDateTimeBestEffort('")
-      expect(chunk?.sqlTemplate).not.toContain('event_time')
-      expect(output.plan.options.timeColumn).toBe('session_date')
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  test('different time columns produce different plan IDs', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
-    const configPath = join(dir, 'clickhouse.config.ts')
-
-    try {
-      const config = resolveConfig({
-        schema: './schema.ts',
-        metaDir: './chkit/meta',
-      })
-      const options = normalizeBackfillOptions({})
-
-      const planA = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
-        configPath,
-        config,
-        options,
-      })
-
-      const planB = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'created_at',
-        configPath,
-        config,
-        options,
-      })
-
-      expect(planA.plan.planId).not.toBe(planB.plan.planId)
+      const chunkIds = output.plan.chunks.map(c => c.id)
+      const uniqueIds = new Set(chunkIds)
+      expect(uniqueIds.size).toBe(chunkIds.length)
+      for (const id of chunkIds) {
+        expect(id).toMatch(/^[a-f0-9]{16}$/)
+      }
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -175,7 +202,7 @@ describe('@chkit/plugin-backfill planning', () => {
     expect(overriddenDir).toBe(resolve('/tmp/project/custom-state'))
   })
 
-  test('generates MV replay SQL with inline time filter when schema contains materialized view', async () => {
+  test('generates MV replay SQL when schema contains materialized view', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
     const schemaPath = join(dir, 'schema.ts')
@@ -210,28 +237,23 @@ export const events_mv = {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery()
 
       const output = await buildBackfillPlan({
         target: 'app.events_agg',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: mockQuery,
       })
 
       expect(output.plan.strategy).toBe('mv_replay')
 
       const chunk = output.plan.chunks[0]
       expect(chunk?.sqlTemplate).toContain('INSERT INTO app.events_agg')
-      // Time filter is injected directly into the MV query (before GROUP BY), not via CTE
       expect(chunk?.sqlTemplate).not.toContain('WITH _backfill_source AS (')
-      expect(chunk?.sqlTemplate).not.toContain('SELECT * FROM _backfill_source')
       expect(chunk?.sqlTemplate).toContain('SELECT toStartOfHour(event_time)')
       expect(chunk?.sqlTemplate).toContain('FROM app.events')
-      expect(chunk?.sqlTemplate).toContain("WHERE event_time >= parseDateTimeBestEffort('")
-      expect(chunk?.sqlTemplate).toContain("AND event_time < parseDateTimeBestEffort('")
       expect(chunk?.sqlTemplate).toContain('GROUP BY event_time')
       expect(chunk?.sqlTemplate).toContain('SETTINGS async_insert=0')
       expect(chunk?.sqlTemplate).toContain(`insert_deduplication_token='${chunk?.idempotencyToken}'`)
@@ -279,24 +301,21 @@ export const sessions_mv = {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery()
 
       const output = await buildBackfillPlan({
         target: 'app.session_analytics',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'session_date',
         configPath,
         config,
         options,
+        clickhouseQuery: mockQuery,
       })
 
       expect(output.plan.strategy).toBe('mv_replay')
 
       const chunk = output.plan.chunks[0]
-      // INSERT should NOT include explicit column list (rewriteSelectColumns handles ordering)
       expect(chunk?.sqlTemplate).toContain('INSERT INTO app.session_analytics')
       expect(chunk?.sqlTemplate).not.toContain('INSERT INTO app.session_analytics (')
-      // SELECT must be rewritten with columns in target table order
       expect(chunk?.sqlTemplate).toContain(
         "SELECT session_date, session_id, extractAll(content, 'skill') AS skills, extractAll(content, 'cmd') AS slash_commands, ingested_at"
       )
@@ -317,15 +336,14 @@ export const sessions_mv = {
       const options = normalizeBackfillOptions({
         defaults: { requireIdempotencyToken: false },
       })
+      const mockQuery = createMockQuery()
 
       const output = await buildBackfillPlan({
         target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: mockQuery,
       })
 
       const chunk = output.plan.chunks[0]
@@ -337,7 +355,7 @@ export const sessions_mv = {
     }
   })
 
-  test('falls back to table strategy when no schema matches MV target', async () => {
+  test('uses partition strategy when no MV is found', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -347,25 +365,49 @@ export const sessions_mv = {
         metaDir: './chkit/meta',
       })
       const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery()
 
       const output = await buildBackfillPlan({
         target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: mockQuery,
       })
 
-      expect(output.plan.strategy).toBe('table')
+      expect(output.plan.strategy).toBe('partition')
 
       const chunk = output.plan.chunks[0]
       expect(chunk?.sqlTemplate).toContain('INSERT INTO app.events')
       expect(chunk?.sqlTemplate).toContain('FROM app.events')
-      expect(chunk?.sqlTemplate).toContain('parseDateTimeBestEffort(')
+      expect(chunk?.sqlTemplate).toContain('_partition_id')
       expect(chunk?.sqlTemplate).toContain('SETTINGS async_insert=0')
-      expect(chunk?.sqlTemplate).not.toContain('_backfill_source')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('throws when no partitions found', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+
+    try {
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const options = normalizeBackfillOptions({})
+      const mockQuery = createMockQuery({ partitions: [] })
+
+      await expect(
+        buildBackfillPlan({
+          target: 'app.events',
+          configPath,
+          config,
+          options,
+          clickhouseQuery: mockQuery,
+        })
+      ).rejects.toThrow('No partitions found')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -418,39 +460,37 @@ describe('rewriteSelectColumns', () => {
   })
 })
 
-describe('injectTimeFilter', () => {
+describe('injectSortKeyFilter', () => {
   const from = '2025-01-01T00:00:00.000Z'
   const to = '2025-01-01T06:00:00.000Z'
 
-  test('injects WHERE before GROUP BY when query has no WHERE clause', () => {
+  test('injects WHERE before GROUP BY for datetime filter', () => {
     const query = 'SELECT toStartOfHour(event_time) AS event_time, count() AS count FROM app.events GROUP BY event_time'
-    const result = injectTimeFilter(query, 'event_time', from, to)
+    const result = injectSortKeyFilter(query, 'event_time', 'datetime', from, to)
 
     expect(result).toContain("WHERE event_time >= parseDateTimeBestEffort('2025-01-01T00:00:00.000Z')")
     expect(result).toContain("AND event_time < parseDateTimeBestEffort('2025-01-01T06:00:00.000Z')")
     expect(result).toContain('GROUP BY event_time')
-    // WHERE must appear before GROUP BY
     expect(result.indexOf('WHERE')).toBeLessThan(result.indexOf('GROUP BY'))
   })
 
   test('appends AND to existing WHERE clause', () => {
     const query = 'SELECT * FROM app.events WHERE status = 1'
-    const result = injectTimeFilter(query, 'event_time', from, to)
+    const result = injectSortKeyFilter(query, 'event_time', 'datetime', from, to)
 
     expect(result).toContain('WHERE status = 1')
     expect(result).toContain("AND event_time >= parseDateTimeBestEffort('")
     expect(result).toContain("AND event_time < parseDateTimeBestEffort('")
-    // Should NOT add a second WHERE
     expect(result.match(/WHERE/g)?.length).toBe(1)
   })
 
-  test('appends AND before GROUP BY when query has WHERE and GROUP BY', () => {
-    const query = 'SELECT id, count() AS c FROM app.events WHERE status = 1 GROUP BY id'
-    const result = injectTimeFilter(query, 'ts', from, to)
+  test('numeric sort key uses direct comparison', () => {
+    const query = 'SELECT * FROM app.events WHERE status = 1'
+    const result = injectSortKeyFilter(query, 'id', 'numeric', '100', '200')
 
-    expect(result).toContain('WHERE status = 1')
-    expect(result).toContain("AND ts >= parseDateTimeBestEffort('")
-    expect(result.indexOf('AND ts')).toBeLessThan(result.indexOf('GROUP BY'))
+    expect(result).toContain("AND id >= '100'")
+    expect(result).toContain("AND id < '200'")
+    expect(result).not.toContain('parseDateTimeBestEffort')
   })
 
   test('handles query with WHERE and QUALIFY', () => {
@@ -460,14 +500,14 @@ describe('injectTimeFilter', () => {
       'WHERE length(timestamps) > 0',
       "QUALIFY ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY s.ts DESC) = 1",
     ].join('\n')
-    const result = injectTimeFilter(query, 'session_date', from, to)
+    const result = injectSortKeyFilter(query, 'session_date', 'datetime', from, to)
 
     expect(result).toContain('WHERE length(timestamps) > 0')
     expect(result).toContain("AND session_date >= parseDateTimeBestEffort('")
     expect(result.indexOf('AND session_date')).toBeLessThan(result.indexOf('QUALIFY'))
   })
 
-  test('handles MV query with WITH column expressions (Array-producing aliases)', () => {
+  test('handles MV query with WITH column expressions', () => {
     const query = [
       'WITH',
       "  arrayDistinct(arrayFilter(x -> x != '', extractAll(content, '\\\\w+'))) AS _skills",
@@ -478,18 +518,16 @@ describe('injectTimeFilter', () => {
       'FROM app.sessions',
       'WHERE length(content) > 0',
     ].join('\n')
-    const result = injectTimeFilter(query, 'ts', from, to)
+    const result = injectSortKeyFilter(query, 'ts', 'datetime', from, to)
 
-    // Should append AND, not add new WHERE
     expect(result.match(/WHERE/g)?.length).toBe(1)
     expect(result).toContain("AND ts >= parseDateTimeBestEffort('")
-    // WITH clause must remain intact
     expect(result).toContain('arrayDistinct')
   })
 
   test('injects WHERE at end when query has no WHERE and no trailing clauses', () => {
     const query = 'SELECT * FROM app.events'
-    const result = injectTimeFilter(query, 'event_time', from, to)
+    const result = injectSortKeyFilter(query, 'event_time', 'datetime', from, to)
 
     expect(result).toContain("WHERE event_time >= parseDateTimeBestEffort('")
     expect(result).toContain("AND event_time < parseDateTimeBestEffort('")
@@ -497,12 +535,10 @@ describe('injectTimeFilter', () => {
 
   test('ignores WHERE inside parenthesized subquery', () => {
     const query = 'SELECT * FROM (SELECT * FROM app.events WHERE inner = 1) AS sub GROUP BY id'
-    const result = injectTimeFilter(query, 'ts', from, to)
+    const result = injectSortKeyFilter(query, 'ts', 'datetime', from, to)
 
-    // The inner WHERE is inside parens, so it must inject a new top-level WHERE before GROUP BY
     expect(result).toContain("WHERE ts >= parseDateTimeBestEffort('")
     expect(result.indexOf("WHERE ts")).toBeLessThan(result.indexOf('GROUP BY'))
-    // Inner WHERE must remain intact
     expect(result).toContain('WHERE inner = 1')
   })
 })
@@ -560,13 +596,11 @@ describe('environment binding in plan', () => {
 
       const output = await buildBackfillPlan({
         target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
         clickhouse: { url: 'https://my-cluster.ch.cloud:8443', database: 'analytics' },
+        clickhouseQuery: createMockQuery(),
       })
 
       expect(output.plan.environment).toBeDefined()
@@ -578,7 +612,7 @@ describe('environment binding in plan', () => {
     }
   })
 
-  test('plan omits environment when clickhouse is not provided', async () => {
+  test('plan omits environment when clickhouse connection info is not provided', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -591,12 +625,10 @@ describe('environment binding in plan', () => {
 
       const output = await buildBackfillPlan({
         target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       })
 
       expect(output.plan.environment).toBeUndefined()
@@ -605,7 +637,7 @@ describe('environment binding in plan', () => {
     }
   })
 
-  test('different environments produce different plan IDs', async () => {
+  test('plan includes environment from different clickhouse configs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
     const configPath = join(dir, 'clickhouse.config.ts')
 
@@ -617,12 +649,10 @@ describe('environment binding in plan', () => {
       const options = normalizeBackfillOptions({})
       const common = {
         target: 'app.events' as const,
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
-        timeColumn: 'event_time',
         configPath,
         config,
         options,
+        clickhouseQuery: createMockQuery(),
       }
 
       const staging = await buildBackfillPlan({
@@ -635,7 +665,9 @@ describe('environment binding in plan', () => {
         clickhouse: { url: 'https://prod.ch.cloud:8443', database: 'analytics' },
       })
 
-      expect(staging.plan.planId).not.toBe(production.plan.planId)
+      expect(staging.plan.environment?.url).toBe('https://staging.ch.cloud:8443')
+      expect(production.plan.environment?.url).toBe('https://prod.ch.cloud:8443')
+      expect(staging.plan.environment?.fingerprint).not.toBe(production.plan.environment?.fingerprint)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
