@@ -9,15 +9,15 @@ import {
 } from './state.js'
 import type {
   BackfillPluginCheckResult,
-  NormalizedBackfillPluginOptions,
 } from './types.js'
 
 export async function evaluateBackfillCheck(input: {
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
+  stateDir?: string
+  failCheckOnRequiredPendingBackfill: boolean
 }): Promise<BackfillPluginCheckResult> {
-  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
   const plansDir = join(stateDir, 'plans')
   const runsDir = join(stateDir, 'runs')
 
@@ -58,7 +58,7 @@ export async function evaluateBackfillCheck(input: {
     findings.push({
       code: 'backfill_required_pending',
       message: `Required backfills pending completion: ${requiredCount}`,
-      severity: input.options.policy.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
+      severity: input.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
       metadata: {
         requiredCount,
       },
@@ -76,7 +76,7 @@ export async function evaluateBackfillCheck(input: {
     })
   }
 
-  if (!input.options.policy.failCheckOnRequiredPendingBackfill) {
+  if (!input.failCheckOnRequiredPendingBackfill) {
     findings.push({
       code: 'backfill_policy_relaxed',
       message: 'Backfill check policy is relaxed: failCheckOnRequiredPendingBackfill=false.',

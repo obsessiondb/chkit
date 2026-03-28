@@ -8,19 +8,9 @@ import type {
   ViewDefinition,
 } from '@chkit/core'
 
-export interface CodegenPluginOptions {
-  outFile?: string
-  emitZod?: boolean
-  tableNameStyle?: 'pascal' | 'camel' | 'raw'
-  bigintMode?: 'string' | 'bigint'
-  includeViews?: boolean
-  runOnGenerate?: boolean
-  failOnUnsupportedType?: boolean
-  emitIngest?: boolean
-  ingestOutFile?: string
-  emitMigrations?: boolean
-  migrationsOutFile?: string
-}
+import type { PluginConfig } from './options.js'
+
+export type CodegenPluginOptions = PluginConfig
 
 export interface CodegenPluginCommandContext {
   args: string[]
@@ -140,14 +130,3 @@ export interface ResolvedTableName {
   interfaceName: string
 }
 
-export interface FlagOverrides {
-  check: boolean
-  outFile?: string
-  emitZod?: boolean
-  bigintMode?: 'string' | 'bigint'
-  includeViews?: boolean
-  emitIngest?: boolean
-  ingestOutFile?: string
-  emitMigrations?: boolean
-  migrationsOutFile?: string
-}

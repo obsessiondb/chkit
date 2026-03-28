@@ -42,9 +42,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chkit/core": "workspace:*"
-  },
-  "devDependencies": {
+    "@chkit/core": "workspace:*",
     "zod": "^4.3.6"
-  }
+  },
+  "devDependencies": {}
 }

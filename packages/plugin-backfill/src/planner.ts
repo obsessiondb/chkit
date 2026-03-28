@@ -7,6 +7,7 @@ import { analyzeAndChunk } from './chunking/analyze.js'
 import { buildChunkSql } from './chunking/sql.js'
 import { findMvForTarget } from './detect.js'
 import { BackfillConfigError } from './errors.js'
+import type { PlanOptions } from './options.js'
 import {
   backfillPaths,
   computeBackfillStateDir,
@@ -16,53 +17,46 @@ import {
 import type {
   BackfillChunk,
   BuildBackfillPlanOutput,
-  NormalizedBackfillPluginOptions,
   PartitionInfo,
 } from './types.js'
 
-const DEFAULT_MAX_CHUNK_BYTES = 10 * 1024 ** 3 // 10 GiB
-
 export async function buildBackfillPlan(input: {
-  target: string
-  from?: string
-  to?: string
+  opts: PlanOptions
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir' | 'schema'>
-  options: NormalizedBackfillPluginOptions
-  maxChunkBytes?: number
   clickhouse?: { url: string; database: string }
   clickhouseQuery: <T>(sql: string) => Promise<T[]>
 }): Promise<BuildBackfillPlanOutput> {
-  const [database, table] = input.target.split('.')
+  const { opts } = input
+  const [database, table] = opts.target.split('.')
   if (!database || !table) {
     throw new BackfillConfigError('Invalid target format. Expected <database.table>.')
   }
 
   const env = computeEnvironmentFingerprint(input.clickhouse)
-  const maxChunkBytes = input.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES
 
   // 1. Analyze table and build planned chunks
   const { planId, partitions, sortKey, chunks: plannedChunks } = await analyzeAndChunk({
     database,
     table,
-    from: input.from,
-    to: input.to,
-    maxChunkBytes,
-    requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
+    from: opts.from,
+    to: opts.to,
+    maxChunkBytes: opts.maxChunkBytes,
+    requireIdempotencyToken: opts.requireIdempotencyToken,
     query: input.clickhouseQuery,
   })
 
   if (partitions.length === 0) {
     throw new BackfillConfigError(
-      `No partitions found for ${input.target}${input.from || input.to ? ' within the specified time range' : ''}. The table may be empty.`
+      `No partitions found for ${opts.target}${opts.from || opts.to ? ' within the specified time range' : ''}. The table may be empty.`
     )
   }
 
   const firstPartition = partitions[0] as PartitionInfo
-  const derivedFrom = input.from ?? partitions.reduce((min, p) => (p.minTime < min ? p.minTime : min), firstPartition.minTime)
-  const derivedTo = input.to ?? partitions.reduce((max, p) => (p.maxTime > max ? p.maxTime : max), firstPartition.maxTime)
+  const derivedFrom = opts.from ?? partitions.reduce((min, p) => (p.minTime < min ? p.minTime : min), firstPartition.minTime)
+  const derivedTo = opts.to ?? partitions.reduce((max, p) => (p.maxTime > max ? p.maxTime : max), firstPartition.maxTime)
 
-  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, opts.stateDir)
   const paths = backfillPaths(stateDir, planId)
 
   // 2. Detect MV for replay strategy
@@ -92,7 +86,7 @@ export async function buildBackfillPlan(input: {
     const sqlTemplate = buildChunkSql({
       planId,
       chunk: planned,
-      target: input.target,
+      target: opts.target,
       sortKey,
       mvAsQuery,
       targetColumns,
@@ -117,7 +111,7 @@ export async function buildBackfillPlan(input: {
 
   const plan = {
     planId,
-    target: input.target,
+    target: opts.target,
     createdAt: '1970-01-01T00:00:00.000Z',
     status: 'planned' as const,
     strategy: strategy as 'partition' | 'mv_replay',
@@ -128,14 +122,22 @@ export async function buildBackfillPlan(input: {
     partitions,
     sortKey,
     options: {
-      maxChunkBytes,
-      maxParallelChunks: input.options.defaults.maxParallelChunks,
-      maxRetriesPerChunk: input.options.defaults.maxRetriesPerChunk,
-      requireIdempotencyToken: input.options.defaults.requireIdempotencyToken,
+      maxChunkBytes: opts.maxChunkBytes,
+      maxParallelChunks: opts.maxParallelChunks,
+      maxRetriesPerChunk: opts.maxRetriesPerChunk,
+      requireIdempotencyToken: opts.requireIdempotencyToken,
       sortKeyColumn: sortKey?.column,
     },
-    policy: input.options.policy,
-    limits: input.options.limits,
+    policy: {
+      requireDryRunBeforeRun: opts.requireDryRunBeforeRun,
+      requireExplicitWindow: opts.requireExplicitWindow,
+      blockOverlappingRuns: opts.blockOverlappingRuns,
+      failCheckOnRequiredPendingBackfill: opts.failCheckOnRequiredPendingBackfill,
+    },
+    limits: {
+      maxWindowHours: opts.maxWindowHours,
+      minChunkMinutes: opts.minChunkMinutes,
+    },
   }
 
   await writeJson(paths.planPath, plan)

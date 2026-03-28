@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 
 import { resolveConfig } from '@chkit/core'
 
-import { normalizeBackfillOptions } from './options.js'
+import { PlanSchema, RunSchema, ResumeSchema } from './options.js'
 import { buildBackfillPlan } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
@@ -38,23 +38,24 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
-
-      const planned = await buildBackfillPlan({
+      const planOpts = PlanSchema.parse({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
+      })
+
+      const planned = await buildBackfillPlan({
+        opts: planOpts,
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
+      const runOpts = RunSchema.parse({ planId: planned.plan.planId })
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: runOpts,
         configPath,
         config,
-        options,
       })
 
       expect(ran.status.status).toBe('completed')
@@ -65,7 +66,6 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         planId: planned.plan.planId,
         configPath,
         config,
-        options,
       })
       expect(status.status).toBe('completed')
       expect(status.totals.done).toBe(3)
@@ -85,51 +85,50 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: {
-          maxRetriesPerChunk: 1,
-          retryDelayMs: 0,
-        },
-      })
-
-      const planned = await buildBackfillPlan({
+      const planOpts = PlanSchema.parse({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
+        maxRetriesPerChunk: 1,
+      })
+
+      const planned = await buildBackfillPlan({
+        opts: planOpts,
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
       const failChunkId = planned.plan.chunks[1]?.id
       expect(failChunkId).toBeTruthy()
 
-      const firstRun = await executeBackfillRun({
+      const runOpts = RunSchema.parse({
         planId: planned.plan.planId,
+        maxRetriesPerChunk: 1,
+        retryDelayMs: 0,
+        simulateFailChunk: failChunkId,
+        simulateFailCount: 1,
+      })
+      const firstRun = await executeBackfillRun({
+        opts: runOpts,
         configPath,
         config,
-        options,
-        execution: {
-          simulation: {
-            failChunkId,
-            failCount: 1,
-          },
-        },
       })
 
       expect(firstRun.status.status).toBe('failed')
       expect(firstRun.status.totals.done).toBe(2)
       expect(firstRun.status.totals.failed).toBe(1)
 
-      const resumed = await resumeBackfillRun({
+      const resumeOpts = ResumeSchema.parse({
         planId: planned.plan.planId,
+        maxRetriesPerChunk: 1,
+        retryDelayMs: 0,
+        replayFailed: true,
+      })
+      const resumed = await resumeBackfillRun({
+        opts: resumeOpts,
         configPath,
         config,
-        options,
-        execution: {
-          replayFailed: true,
-        },
       })
 
       expect(resumed.status.status).toBe('completed')
@@ -155,51 +154,58 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const planOptions = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
-      })
-      const changedOptions = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 5, retryDelayMs: 0 },
-      })
-
-      const planned = await buildBackfillPlan({
+      const planOpts = PlanSchema.parse({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
+        maxRetriesPerChunk: 1,
+      })
+
+      const planned = await buildBackfillPlan({
+        opts: planOpts,
         configPath,
         config,
-        options: planOptions,
         clickhouseQuery: createMockQuery(),
       })
       const failChunkId = planned.plan.chunks[1]?.id
       expect(failChunkId).toBeTruthy()
 
-      await executeBackfillRun({
+      const runOpts = RunSchema.parse({
         planId: planned.plan.planId,
+        maxRetriesPerChunk: 1,
+        retryDelayMs: 0,
+        simulateFailChunk: failChunkId,
+        simulateFailCount: 1,
+      })
+      await executeBackfillRun({
+        opts: runOpts,
         configPath,
         config,
-        options: planOptions,
-        execution: {
-          simulation: { failChunkId, failCount: 1 },
-        },
       })
 
       await expect(
         resumeBackfillRun({
-          planId: planned.plan.planId,
+          opts: ResumeSchema.parse({
+            planId: planned.plan.planId,
+            maxRetriesPerChunk: 5,
+            retryDelayMs: 0,
+            replayFailed: true,
+          }),
           configPath,
           config,
-          options: changedOptions,
-          execution: { replayFailed: true },
         })
       ).rejects.toThrow('Run compatibility check failed')
 
       const resumed = await resumeBackfillRun({
-        planId: planned.plan.planId,
+        opts: ResumeSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 5,
+          retryDelayMs: 0,
+          replayFailed: true,
+          forceCompatibility: true,
+        }),
         configPath,
         config,
-        options: changedOptions,
-        execution: { replayFailed: true, forceCompatibility: true },
       })
       expect(resumed.status.status).toBe('completed')
     } finally {
@@ -216,22 +222,22 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
-
-      const planned = await buildBackfillPlan({
+      const planOpts = PlanSchema.parse({
         target: 'app.events',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T06:00:00.000Z',
+      })
+
+      const planned = await buildBackfillPlan({
+        opts: planOpts,
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
       await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({ planId: planned.plan.planId }),
         configPath,
         config,
-        options,
       })
 
       await expect(
@@ -239,20 +245,19 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
           planId: planned.plan.planId,
           configPath,
           config,
-          options,
         })
       ).rejects.toThrow('already completed')
 
-      const options2 = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
-      })
-      const planned2 = await buildBackfillPlan({
+      const planOpts2 = PlanSchema.parse({
         target: 'app.events',
         from: '2026-01-02T00:00:00.000Z',
         to: '2026-01-02T06:00:00.000Z',
+        maxRetriesPerChunk: 1,
+      })
+      const planned2 = await buildBackfillPlan({
+        opts: planOpts2,
         configPath,
         config,
-        options: options2,
         clickhouseQuery: createMockQuery({
           partitions: [
             { partition_id: '202601d', total_rows: '500', total_bytes: '250000', min_time: '2026-01-02 00:00:00', max_time: '2026-01-02 02:00:00' },
@@ -262,19 +267,20 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         }),
       })
       await executeBackfillRun({
-        planId: planned2.plan.planId,
+        opts: RunSchema.parse({
+          planId: planned2.plan.planId,
+          maxRetriesPerChunk: 1,
+          retryDelayMs: 0,
+          simulateFailChunk: planned2.plan.chunks[1]?.id,
+          simulateFailCount: 1,
+        }),
         configPath,
         config,
-        options: options2,
-        execution: {
-          simulation: { failChunkId: planned2.plan.chunks[1]?.id, failCount: 1 },
-        },
       })
       const cancelled = await cancelBackfillRun({
         planId: planned2.plan.planId,
         configPath,
         config,
-        options,
       })
       expect(cancelled.status).toBe('cancelled')
 
@@ -282,7 +288,6 @@ describe('@chkit/plugin-backfill run lifecycle', () => {
         planId: planned2.plan.planId,
         configPath,
         config,
-        options,
       })
       expect(doctor.issueCodes).toContain('backfill_required_pending')
       expect(doctor.recommendations.join(' ')).toContain('backfill resume')
@@ -302,15 +307,15 @@ describe('@chkit/plugin-backfill execute callback', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
@@ -320,10 +325,9 @@ describe('@chkit/plugin-backfill execute callback', () => {
       }
 
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({ planId: planned.plan.planId }),
         configPath,
         config,
-        options,
         execute,
       })
 
@@ -347,17 +351,16 @@ describe('@chkit/plugin-backfill execute callback', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 3, retryDelayMs: 0 },
-      })
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+          maxRetriesPerChunk: 3,
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
@@ -370,10 +373,13 @@ describe('@chkit/plugin-backfill execute callback', () => {
       }
 
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 3,
+          retryDelayMs: 0,
+        }),
         configPath,
         config,
-        options,
         execute,
       })
 
@@ -398,17 +404,16 @@ describe('@chkit/plugin-backfill execute callback', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 2, retryDelayMs: 0 },
-      })
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+          maxRetriesPerChunk: 2,
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
@@ -421,10 +426,13 @@ describe('@chkit/plugin-backfill execute callback', () => {
       }
 
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 2,
+          retryDelayMs: 0,
+        }),
         configPath,
         config,
-        options,
         execute,
       })
 
@@ -447,17 +455,16 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
-      })
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+          maxRetriesPerChunk: 1,
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
@@ -465,13 +472,15 @@ describe('@chkit/plugin-backfill continue past failures', () => {
       expect(failChunkId).toBeTruthy()
 
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 1,
+          retryDelayMs: 0,
+          simulateFailChunk: failChunkId,
+          simulateFailCount: 1,
+        }),
         configPath,
         config,
-        options,
-        execution: {
-          simulation: { failChunkId, failCount: 1 },
-        },
       })
 
       expect(ran.status.status).toBe('failed')
@@ -494,17 +503,16 @@ describe('@chkit/plugin-backfill continue past failures', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 1, retryDelayMs: 0 },
-      })
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+          maxRetriesPerChunk: 1,
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
@@ -512,20 +520,25 @@ describe('@chkit/plugin-backfill continue past failures', () => {
       expect(failChunkId).toBeTruthy()
 
       await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 1,
+          retryDelayMs: 0,
+          simulateFailChunk: failChunkId,
+          simulateFailCount: 1,
+        }),
         configPath,
         config,
-        options,
-        execution: {
-          simulation: { failChunkId, failCount: 1 },
-        },
       })
 
       const resumed = await resumeBackfillRun({
-        planId: planned.plan.planId,
+        opts: ResumeSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 1,
+          retryDelayMs: 0,
+        }),
         configPath,
         config,
-        options,
       })
 
       expect(resumed.status.status).toBe('completed')
@@ -547,22 +560,22 @@ describe('@chkit/plugin-backfill check integration', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
 
       await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
       const checkResult = await evaluateBackfillCheck({
         configPath,
         config,
-        options,
+        failCheckOnRequiredPendingBackfill: true,
       })
 
       expect(checkResult.ok).toBe(false)
@@ -584,28 +597,27 @@ describe('@chkit/plugin-backfill check integration', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({
+          target: 'app.events',
+          from: '2026-01-01T00:00:00.000Z',
+          to: '2026-01-01T06:00:00.000Z',
+        }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
       await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({ planId: planned.plan.planId }),
         configPath,
         config,
-        options,
       })
 
       const checkResult = await evaluateBackfillCheck({
         configPath,
         config,
-        options,
+        failCheckOnRequiredPendingBackfill: true,
       })
 
       expect(checkResult.ok).toBe(true)
@@ -628,27 +640,22 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
       const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
       const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({ target: 'app.events', from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T06:00:00.000Z' }),
         configPath,
         config,
-        options,
         clickhouse: stagingCh,
         clickhouseQuery: createMockQuery(),
       })
 
       await expect(
         executeBackfillRun({
-          planId: planned.plan.planId,
+          opts: RunSchema.parse({ planId: planned.plan.planId }),
           configPath,
           config,
-          options,
           clickhouse: prodCh,
         })
       ).rejects.toThrow('Environment mismatch')
@@ -666,27 +673,21 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
       const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
       const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({ target: 'app.events', from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T06:00:00.000Z' }),
         configPath,
         config,
-        options,
         clickhouse: stagingCh,
         clickhouseQuery: createMockQuery(),
       })
 
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({ planId: planned.plan.planId, forceEnvironment: true }),
         configPath,
         config,
-        options,
-        execution: { forceEnvironment: true },
         clickhouse: prodCh,
       })
 
@@ -705,25 +706,20 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({ target: 'app.events', from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T06:00:00.000Z' }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
       expect(planned.plan.environment).toBeUndefined()
 
       const ran = await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({ planId: planned.plan.planId }),
         configPath,
         config,
-        options,
         clickhouse: { url: 'https://prod.ch.cloud:8443', database: 'analytics' },
       })
 
@@ -742,41 +738,40 @@ describe('@chkit/plugin-backfill environment binding', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: { maxRetriesPerChunk: 1 },
-      })
       const stagingCh = { url: 'https://staging.ch.cloud:8443', database: 'analytics' }
       const prodCh = { url: 'https://prod.ch.cloud:8443', database: 'analytics' }
 
       const planned = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T06:00:00.000Z',
+        opts: PlanSchema.parse({ target: 'app.events', from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T06:00:00.000Z', maxRetriesPerChunk: 1 }),
         configPath,
         config,
-        options,
         clickhouse: stagingCh,
         clickhouseQuery: createMockQuery(),
       })
 
       await executeBackfillRun({
-        planId: planned.plan.planId,
+        opts: RunSchema.parse({
+          planId: planned.plan.planId,
+          maxRetriesPerChunk: 1,
+          retryDelayMs: 0,
+          simulateFailChunk: planned.plan.chunks[1]?.id,
+          simulateFailCount: 1,
+        }),
         configPath,
         config,
-        options,
-        execution: {
-          simulation: { failChunkId: planned.plan.chunks[1]?.id, failCount: 1 },
-        },
         clickhouse: stagingCh,
       })
 
       await expect(
         resumeBackfillRun({
-          planId: planned.plan.planId,
+          opts: ResumeSchema.parse({
+            planId: planned.plan.planId,
+            maxRetriesPerChunk: 1,
+            retryDelayMs: 0,
+            replayFailed: true,
+          }),
           configPath,
           config,
-          options,
-          execution: { replayFailed: true },
           clickhouse: prodCh,
         })
       ).rejects.toThrow('Environment mismatch')

@@ -6,14 +6,13 @@ import { dirname, join, resolve } from 'node:path'
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
+import type { CompatOptions } from './options.js'
 import type {
   BackfillEnvironment,
-  BackfillExecutionOptions,
   BackfillPathSet,
   BackfillPlanState,
   BackfillRunState,
   BackfillStatusSummary,
-  NormalizedBackfillPluginOptions,
   ReadPlanOutput,
 } from './types.js'
 
@@ -42,11 +41,8 @@ export function stableSerialize(value: unknown): string {
 
 export function computeCompatibilityToken(input: {
   plan: BackfillPlanState
-  options: NormalizedBackfillPluginOptions
+  opts: CompatOptions
 }): string {
-  // Exclude retryDelayMs — it's a runtime behavior setting that doesn't
-  // affect data integrity and shouldn't break compatibility on upgrade.
-  const { retryDelayMs: _, ...compatDefaults } = input.options.defaults
   return hashId(
     stableSerialize({
       planId: input.plan.planId,
@@ -54,9 +50,22 @@ export function computeCompatibilityToken(input: {
       from: input.plan.from,
       to: input.plan.to,
       planOptions: input.plan.options,
-      runtimeDefaults: compatDefaults,
-      runtimePolicy: input.options.policy,
-      runtimeLimits: input.options.limits,
+      runtimeDefaults: {
+        maxChunkBytes: input.opts.maxChunkBytes,
+        maxParallelChunks: input.opts.maxParallelChunks,
+        maxRetriesPerChunk: input.opts.maxRetriesPerChunk,
+        requireIdempotencyToken: input.opts.requireIdempotencyToken,
+      },
+      runtimePolicy: {
+        blockOverlappingRuns: input.opts.blockOverlappingRuns,
+        failCheckOnRequiredPendingBackfill: input.opts.failCheckOnRequiredPendingBackfill,
+        requireDryRunBeforeRun: input.opts.requireDryRunBeforeRun,
+        requireExplicitWindow: input.opts.requireExplicitWindow,
+      },
+      runtimeLimits: {
+        maxWindowHours: input.opts.maxWindowHours,
+        minChunkMinutes: input.opts.minChunkMinutes,
+      },
     })
   )
 }
@@ -101,10 +110,10 @@ export function ensureEnvironmentMatch(input: {
 export function computeBackfillStateDir(
   config: Pick<ResolvedChxConfig, 'metaDir'>,
   configPath: string,
-  options: NormalizedBackfillPluginOptions
+  stateDir?: string
 ): string {
-  if (options.stateDir && options.stateDir.length > 0) {
-    return resolve(dirname(configPath), options.stateDir)
+  if (stateDir && stateDir.length > 0) {
+    return resolve(dirname(configPath), stateDir)
   }
   return resolve(dirname(configPath), config.metaDir, 'backfill')
 }
@@ -143,9 +152,9 @@ export async function readPlan(input: {
   planId: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
+  stateDir?: string
 }): Promise<ReadPlanOutput> {
-  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
   const paths = backfillPaths(stateDir, input.planId)
   const plan = await readJsonMaybe<BackfillPlanState>(paths.planPath)
   if (!plan) {
@@ -164,8 +173,7 @@ export async function readRun(runPath: string): Promise<BackfillRunState | null>
 
 export function createRunState(input: {
   plan: BackfillPlanState
-  options: NormalizedBackfillPluginOptions
-  execution: BackfillExecutionOptions
+  opts: CompatOptions & { replayDone: boolean; replayFailed: boolean }
 }): BackfillRunState {
   const startedAt = nowIso()
   return {
@@ -175,11 +183,11 @@ export function createRunState(input: {
     createdAt: startedAt,
     startedAt,
     updatedAt: startedAt,
-    replayDone: input.execution.replayDone ?? false,
-    replayFailed: input.execution.replayFailed ?? false,
+    replayDone: input.opts.replayDone,
+    replayFailed: input.opts.replayFailed,
     compatibilityToken: computeCompatibilityToken({
       plan: input.plan,
-      options: input.options,
+      opts: input.opts,
     }),
     options: input.plan.options,
     chunks: input.plan.chunks.map((chunk) => ({
@@ -274,13 +282,13 @@ export async function persistRunAndEvent(input: {
 export function ensureRunCompatibility(input: {
   run: BackfillRunState
   plan: BackfillPlanState
-  options: NormalizedBackfillPluginOptions
+  opts: CompatOptions
   forceCompatibility: boolean
 }): void {
   if (!input.run.compatibilityToken) return
   const expected = computeCompatibilityToken({
     plan: input.plan,
-    options: input.options,
+    opts: input.opts,
   })
   if (input.run.compatibilityToken === expected) return
   if (input.forceCompatibility) return

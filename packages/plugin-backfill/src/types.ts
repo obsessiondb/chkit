@@ -1,51 +1,11 @@
 import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core'
 
 import type { PartitionInfo, SortKeyInfo } from './chunking/types.js'
+import type { PluginConfig } from './options.js'
 
-export interface BackfillPluginDefaults {
-  chunkHours?: number
-  maxParallelChunks?: number
-  maxRetriesPerChunk?: number
-  retryDelayMs?: number
-  requireIdempotencyToken?: boolean
-  timeColumn?: string
-}
-
-export interface BackfillPluginPolicy {
-  requireDryRunBeforeRun?: boolean
-  requireExplicitWindow?: boolean
-  blockOverlappingRuns?: boolean
-  failCheckOnRequiredPendingBackfill?: boolean
-}
-
-export interface BackfillPluginLimits {
-  maxWindowHours?: number
-  minChunkMinutes?: number
-}
-
-export interface BackfillPluginOptions {
-  stateDir?: string
-  defaults?: BackfillPluginDefaults
-  policy?: BackfillPluginPolicy
-  limits?: BackfillPluginLimits
-}
-
-export interface NormalizedBackfillDefaults {
-  chunkHours?: number
-  maxChunkBytes: number
-  maxParallelChunks: number
-  maxRetriesPerChunk: number
-  retryDelayMs: number
-  requireIdempotencyToken: boolean
-  timeColumn?: string
-}
-
-export interface NormalizedBackfillPluginOptions {
-  stateDir?: string
-  defaults: NormalizedBackfillDefaults
-  policy: Required<BackfillPluginPolicy>
-  limits: Required<BackfillPluginLimits>
-}
+/** @deprecated Use {@link PluginConfig} instead. */
+export type BackfillPluginOptions = PluginConfig
+export type { PluginConfig }
 
 export interface BackfillEnvironment {
   fingerprint: string
@@ -93,8 +53,16 @@ export interface BackfillPlanState {
     timeColumn?: string
     sortKeyColumn?: string
   }
-  policy: Required<BackfillPluginPolicy>
-  limits: Required<BackfillPluginLimits>
+  policy: {
+    requireDryRunBeforeRun: boolean
+    requireExplicitWindow: boolean
+    blockOverlappingRuns: boolean
+    failCheckOnRequiredPendingBackfill: boolean
+  }
+  limits: {
+    maxWindowHours: number
+    minChunkMinutes: number
+  }
 }
 
 export interface BackfillRunChunkState {
@@ -196,18 +164,6 @@ export interface BackfillPathSet {
   eventPath: string
 }
 
-export interface BackfillExecutionOptions {
-  replayDone?: boolean
-  replayFailed?: boolean
-  forceOverlap?: boolean
-  forceCompatibility?: boolean
-  forceEnvironment?: boolean
-  simulation?: {
-    failChunkId?: string
-    failCount?: number
-  }
-}
-
 export interface BackfillDoctorReport {
   planId: string
   status: BackfillPlanStatus
@@ -266,50 +222,11 @@ export interface BackfillPlugin {
 
 export type BackfillPluginRegistration = ChxInlinePluginRegistration<
   BackfillPlugin,
-  BackfillPluginOptions
+  PluginConfig
 >
 
 export interface TimeColumnCandidate {
   name: string
   type: string
   source: 'order_by' | 'column_scan' | 'schema'
-}
-
-export interface ParsedPlanArgs {
-  target: string
-  from?: string
-  to?: string
-  maxChunkBytes?: number
-}
-
-export interface ParsedRunArgs {
-  planId: string
-  replayDone: boolean
-  replayFailed: boolean
-  forceOverlap: boolean
-  forceCompatibility: boolean
-  forceEnvironment: boolean
-  simulateFailChunk?: string
-  simulateFailCount: number
-}
-
-export interface ParsedResumeArgs {
-  planId: string
-  replayDone: boolean
-  replayFailed: boolean
-  forceOverlap: boolean
-  forceCompatibility: boolean
-  forceEnvironment: boolean
-}
-
-export interface ParsedStatusArgs {
-  planId: string
-}
-
-export interface ParsedCancelArgs {
-  planId: string
-}
-
-export interface ParsedDoctorArgs {
-  planId: string
 }

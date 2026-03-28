@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 
 import { resolveConfig } from '@chkit/core'
 
-import { normalizeBackfillOptions } from './options.js'
+import { PlanSchema } from './options.js'
 import { buildBackfillPlan } from './planner.js'
 import { injectSortKeyFilter, rewriteSelectColumns } from './chunking/sql.js'
 import { computeBackfillStateDir, computeEnvironmentFingerprint } from './state.js'
@@ -42,7 +42,7 @@ describe('@chkit/plugin-backfill planning', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events', from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T18:00:00.000Z' })
       const mockQuery = createMockQuery({
         partitions: [
           { partition_id: '202601a', total_rows: '500', total_bytes: '250000', min_time: '2026-01-01 00:00:00', max_time: '2026-01-01 06:00:00' },
@@ -51,25 +51,8 @@ describe('@chkit/plugin-backfill planning', () => {
         ],
       })
 
-      const first = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T18:00:00.000Z',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
-
-      const second = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T18:00:00.000Z',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const first = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
+      const second = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       expect(first.plan.planId).not.toBe(second.plan.planId)
       expect(first.plan.planId).toMatch(/^[a-f0-9]{16}$/)
@@ -93,7 +76,7 @@ describe('@chkit/plugin-backfill planning', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events', from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T07:00:00.000Z' })
       const mockQuery = createMockQuery({
         partitions: [
           { partition_id: '202601a', total_rows: '250', total_bytes: '125000', min_time: '2026-01-01 00:00:00', max_time: '2026-01-01 02:00:00' },
@@ -103,15 +86,7 @@ describe('@chkit/plugin-backfill planning', () => {
         ],
       })
 
-      const output = await buildBackfillPlan({
-        target: 'app.events',
-        from: '2026-01-01T00:00:00.000Z',
-        to: '2026-01-01T07:00:00.000Z',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       const raw = await readFile(output.planPath, 'utf8')
       const persisted = JSON.parse(raw) as { planId: string; chunks: Array<{ id: string }> }
@@ -132,19 +107,13 @@ describe('@chkit/plugin-backfill planning', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events' })
       const mockQuery = createMockQuery({
         sortingKey: 'session_date',
         sortKeyType: 'Date',
       })
 
-      const output = await buildBackfillPlan({
-        target: 'app.events',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       expect(output.plan.sortKey?.column).toBe('session_date')
       expect(output.plan.sortKey?.category).toBe('datetime')
@@ -163,15 +132,9 @@ describe('@chkit/plugin-backfill planning', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events' })
 
-      const output = await buildBackfillPlan({
-        target: 'app.events',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: createMockQuery(),
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: createMockQuery() })
 
       const chunkIds = output.plan.chunks.map(c => c.id)
       const uniqueIds = new Set(chunkIds)
@@ -191,12 +154,8 @@ describe('@chkit/plugin-backfill planning', () => {
     })
     const configPath = '/tmp/project/clickhouse.config.ts'
 
-    const defaultDir = computeBackfillStateDir(config, configPath, normalizeBackfillOptions())
-    const overriddenDir = computeBackfillStateDir(
-      config,
-      configPath,
-      normalizeBackfillOptions({ stateDir: './custom-state' })
-    )
+    const defaultDir = computeBackfillStateDir(config, configPath)
+    const overriddenDir = computeBackfillStateDir(config, configPath, './custom-state')
 
     expect(defaultDir).toBe(resolve('/tmp/project/chkit/meta/backfill'))
     expect(overriddenDir).toBe(resolve('/tmp/project/custom-state'))
@@ -236,16 +195,10 @@ export const events_mv = {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events_agg' })
       const mockQuery = createMockQuery()
 
-      const output = await buildBackfillPlan({
-        target: 'app.events_agg',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       expect(output.plan.strategy).toBe('mv_replay')
 
@@ -300,16 +253,10 @@ export const sessions_mv = {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.session_analytics' })
       const mockQuery = createMockQuery()
 
-      const output = await buildBackfillPlan({
-        target: 'app.session_analytics',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       expect(output.plan.strategy).toBe('mv_replay')
 
@@ -333,18 +280,10 @@ export const sessions_mv = {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({
-        defaults: { requireIdempotencyToken: false },
-      })
+      const opts = PlanSchema.parse({ target: 'app.events', requireIdempotencyToken: false })
       const mockQuery = createMockQuery()
 
-      const output = await buildBackfillPlan({
-        target: 'app.events',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       const chunk = output.plan.chunks[0]
       expect(chunk?.idempotencyToken).toBe('')
@@ -364,16 +303,10 @@ export const sessions_mv = {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events' })
       const mockQuery = createMockQuery()
 
-      const output = await buildBackfillPlan({
-        target: 'app.events',
-        configPath,
-        config,
-        options,
-        clickhouseQuery: mockQuery,
-      })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
 
       expect(output.plan.strategy).toBe('partition')
 
@@ -396,17 +329,11 @@ export const sessions_mv = {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
+      const opts = PlanSchema.parse({ target: 'app.events' })
       const mockQuery = createMockQuery({ partitions: [] })
 
       await expect(
-        buildBackfillPlan({
-          target: 'app.events',
-          configPath,
-          config,
-          options,
-          clickhouseQuery: mockQuery,
-        })
+        buildBackfillPlan({ opts, configPath, config, clickhouseQuery: mockQuery })
       ).rejects.toThrow('No partitions found')
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -592,13 +519,11 @@ describe('environment binding in plan', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
 
       const output = await buildBackfillPlan({
-        target: 'app.events',
+        opts: PlanSchema.parse({ target: 'app.events' }),
         configPath,
         config,
-        options,
         clickhouse: { url: 'https://my-cluster.ch.cloud:8443', database: 'analytics' },
         clickhouseQuery: createMockQuery(),
       })
@@ -621,13 +546,11 @@ describe('environment binding in plan', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
 
       const output = await buildBackfillPlan({
-        target: 'app.events',
+        opts: PlanSchema.parse({ target: 'app.events' }),
         configPath,
         config,
-        options,
         clickhouseQuery: createMockQuery(),
       })
 
@@ -646,23 +569,22 @@ describe('environment binding in plan', () => {
         schema: './schema.ts',
         metaDir: './chkit/meta',
       })
-      const options = normalizeBackfillOptions({})
-      const common = {
-        target: 'app.events' as const,
-        configPath,
-        config,
-        options,
-        clickhouseQuery: createMockQuery(),
-      }
+      const opts = PlanSchema.parse({ target: 'app.events' })
 
       const staging = await buildBackfillPlan({
-        ...common,
+        opts,
+        configPath,
+        config,
         clickhouse: { url: 'https://staging.ch.cloud:8443', database: 'analytics' },
+        clickhouseQuery: createMockQuery(),
       })
 
       const production = await buildBackfillPlan({
-        ...common,
+        opts,
+        configPath,
+        config,
         clickhouse: { url: 'https://prod.ch.cloud:8443', database: 'analytics' },
+        clickhouseQuery: createMockQuery(),
       })
 
       expect(staging.plan.environment?.url).toBe('https://staging.ch.cloud:8443')

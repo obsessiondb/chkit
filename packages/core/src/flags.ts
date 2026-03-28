@@ -47,6 +47,65 @@ export class MissingFlagValueError extends Error {
   }
 }
 
+// ───── Flag mapping & option resolution ─────
+
+export interface FlagMappingEntry {
+  key: string
+  coerce?: (value: string) => unknown
+}
+
+export type FlagMapping = Record<string, FlagMappingEntry>
+
+export function mapFlags(
+  flags: ParsedFlags,
+  mapping: FlagMapping
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [flagName, entry] of Object.entries(mapping)) {
+    const raw = flags[flagName]
+    if (raw === undefined) continue
+    if (entry.coerce && typeof raw === 'string') {
+      result[entry.key] = entry.coerce(raw)
+    } else {
+      result[entry.key] = raw
+    }
+  }
+  return result
+}
+
+/** Minimal interface compatible with Zod's safeParse — avoids a zod dependency in core. */
+export interface SafeParseable<T> {
+  safeParse(data: unknown):
+    | { success: true; data: T }
+    | { success: false; error: { issues: Array<{ path: PropertyKey[]; message: string }> } }
+}
+
+/**
+ * Three-layer option resolution: pluginConfig → runtimeOptions → CLI flags.
+ * Merges sources, validates through a schema, and throws ErrorClass on failure.
+ */
+export function resolveOptions<T>(
+  schema: SafeParseable<T>,
+  pluginConfig: Record<string, unknown>,
+  runtimeOptions: Record<string, unknown>,
+  flags: ParsedFlags,
+  flagMapping: FlagMapping,
+  ErrorClass: new (message: string) => Error = Error
+): T {
+  const cliOverrides = mapFlags(flags, flagMapping)
+  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
+  const result = schema.safeParse(merged)
+  if (!result.success) {
+    const issue = result.error.issues[0]
+    throw new ErrorClass(
+      issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid options'
+    )
+  }
+  return result.data
+}
+
+// ───── Flag parsing ─────
+
 export function parseFlags<const T extends readonly FlagDef[]>(argv: string[], flagDefs: T): InferFlags<T> {
   const lookup = new Map<string, FlagDef>()
   const negationMap = new Map<string, string>()
