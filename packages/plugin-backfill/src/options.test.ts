@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { resolveOptions } from '@chkit/core'
 
 import {
   parseByteSize,
@@ -7,7 +8,6 @@ import {
   ResumeSchema,
   CheckSchema,
   PluginConfigSchema,
-  resolveOptions,
 } from './options.js'
 
 describe('parseByteSize', () => {

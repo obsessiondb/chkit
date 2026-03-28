@@ -11,7 +11,9 @@ import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
   defineFlags,
+  type FlagMapping,
   normalizeEngine,
+  resolveOptions,
   type ResolvedChxConfig,
   type SchemaDefinition,
   splitTopLevelComma,
@@ -103,14 +105,7 @@ const PULL_SCHEMA_FLAGS = defineFlags([
   { name: '--database', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
 ] as const)
 
-// ───── Flag mappings ─────
-
-interface FlagMappingEntry {
-  key: string
-  coerce?: (value: string) => unknown
-}
-
-type FlagMapping = Record<string, FlagMappingEntry>
+// ───── Flag mapping ─────
 
 const PULL_FLAG_MAP: FlagMapping = {
   '--out-file': { key: 'outFile' },
@@ -119,26 +114,7 @@ const PULL_FLAG_MAP: FlagMapping = {
   '--database': { key: 'databases' },
 }
 
-// ───── mapFlags ─────
-
-function mapFlags(
-  flags: Record<string, string | string[] | boolean | undefined>,
-  mapping: FlagMapping
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const [flagName, entry] of Object.entries(mapping)) {
-    const raw = flags[flagName]
-    if (raw === undefined) continue
-    if (entry.coerce && typeof raw === 'string') {
-      result[entry.key] = entry.coerce(raw)
-    } else {
-      result[entry.key] = raw
-    }
-  }
-  return result
-}
-
-// ───── resolveOptions ─────
+// ───── Resolver ─────
 
 class PullConfigError extends Error {
   constructor(message: string) {
@@ -152,16 +128,7 @@ function resolvePullOptions(
   runtimeOptions: Record<string, unknown>,
   flags: Record<string, string | string[] | boolean | undefined>
 ): PullOptions {
-  const cliOverrides = mapFlags(flags, PULL_FLAG_MAP)
-  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
-  const result = PullSchema.safeParse(merged)
-  if (!result.success) {
-    const issue = result.error.issues[0]
-    throw new PullConfigError(
-      issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid pull options'
-    )
-  }
-  return result.data
+  return resolveOptions(PullSchema, pluginConfig, runtimeOptions, flags, PULL_FLAG_MAP, PullConfigError)
 }
 
 // ───── Plugin ─────

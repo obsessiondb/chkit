@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { defineFlags } from '@chkit/core'
+import { defineFlags, resolveOptions, type FlagMapping } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
 
@@ -203,13 +203,6 @@ export const PLAN_ID_FLAGS = defineFlags([
 
 // ───── Flag mappings ─────
 
-interface FlagMappingEntry {
-  key: string
-  coerce?: (value: string) => unknown
-}
-
-type FlagMapping = Record<string, FlagMappingEntry>
-
 const PLAN_FLAG_MAP: FlagMapping = {
   '--target': { key: 'target', coerce: normalizeTarget },
   '--from': { key: 'from', coerce: (v) => normalizeTimestamp(v, '--from') },
@@ -252,52 +245,14 @@ const PLAN_ID_FLAG_MAP: FlagMapping = {
   '--plan-id': { key: 'planId', coerce: normalizePlanId },
 }
 
-// ───── mapFlags ─────
-
-function mapFlags(
-  flags: Record<string, string | string[] | boolean | undefined>,
-  mapping: FlagMapping
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const [flagName, entry] of Object.entries(mapping)) {
-    const raw = flags[flagName]
-    if (raw === undefined) continue
-    if (entry.coerce && typeof raw === 'string') {
-      result[entry.key] = entry.coerce(raw)
-    } else {
-      result[entry.key] = raw
-    }
-  }
-  return result
-}
-
-// ───── resolveOptions ─────
-
-export function resolveOptions<T extends z.ZodTypeAny>(
-  schema: T,
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>,
-  flagMapping: FlagMapping
-): z.infer<T> {
-  const cliOverrides = mapFlags(flags, flagMapping)
-  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
-  const result = schema.safeParse(merged)
-  if (!result.success) {
-    const issue = result.error.issues[0]
-    throw new BackfillConfigError(
-      issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid backfill options'
-    )
-  }
-  return result.data
-}
+// ───── Per-command resolvers ─────
 
 export function resolvePlanOptions(
   pluginConfig: Record<string, unknown>,
   runtimeOptions: Record<string, unknown>,
   flags: Record<string, string | string[] | boolean | undefined>
 ): PlanOptions {
-  return resolveOptions(PlanSchema, pluginConfig, runtimeOptions, flags, PLAN_FLAG_MAP)
+  return resolveOptions(PlanSchema, pluginConfig, runtimeOptions, flags, PLAN_FLAG_MAP, BackfillConfigError)
 }
 
 export function resolveRunOptions(
@@ -305,7 +260,7 @@ export function resolveRunOptions(
   runtimeOptions: Record<string, unknown>,
   flags: Record<string, string | string[] | boolean | undefined>
 ): RunOptions {
-  return resolveOptions(RunSchema, pluginConfig, runtimeOptions, flags, RUN_FLAG_MAP)
+  return resolveOptions(RunSchema, pluginConfig, runtimeOptions, flags, RUN_FLAG_MAP, BackfillConfigError)
 }
 
 export function resolveResumeOptions(
@@ -313,7 +268,7 @@ export function resolveResumeOptions(
   runtimeOptions: Record<string, unknown>,
   flags: Record<string, string | string[] | boolean | undefined>
 ): ResumeOptions {
-  return resolveOptions(ResumeSchema, pluginConfig, runtimeOptions, flags, RESUME_FLAG_MAP)
+  return resolveOptions(ResumeSchema, pluginConfig, runtimeOptions, flags, RESUME_FLAG_MAP, BackfillConfigError)
 }
 
 export function resolveStatusOptions(
@@ -321,12 +276,12 @@ export function resolveStatusOptions(
   runtimeOptions: Record<string, unknown>,
   flags: Record<string, string | string[] | boolean | undefined>
 ): StatusOptions {
-  return resolveOptions(StatusSchema, pluginConfig, runtimeOptions, flags, PLAN_ID_FLAG_MAP)
+  return resolveOptions(StatusSchema, pluginConfig, runtimeOptions, flags, PLAN_ID_FLAG_MAP, BackfillConfigError)
 }
 
 export function resolveCheckOptions(
   pluginConfig: Record<string, unknown>,
   runtimeOptions: Record<string, unknown>
 ): CheckOptions {
-  return resolveOptions(CheckSchema, pluginConfig, runtimeOptions, {}, {})
+  return resolveOptions(CheckSchema, pluginConfig, runtimeOptions, {}, {}, BackfillConfigError)
 }

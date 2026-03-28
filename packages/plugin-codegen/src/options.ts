@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { defineFlags } from '@chkit/core'
+import { defineFlags, resolveOptions, type FlagMapping } from '@chkit/core'
 
 import { CodegenConfigError } from './errors.js'
 
@@ -52,14 +52,7 @@ export const CODEGEN_FLAGS = defineFlags([
   { name: '--migrations-out-file', type: 'string', description: 'Migration module output file path', placeholder: '<path>' },
 ] as const)
 
-// ───── Flag mappings ─────
-
-interface FlagMappingEntry {
-  key: string
-  coerce?: (value: string) => unknown
-}
-
-type FlagMapping = Record<string, FlagMappingEntry>
+// ───── Flag mapping ─────
 
 const CODEGEN_FLAG_MAP: FlagMapping = {
   '--out-file': { key: 'outFile' },
@@ -72,52 +65,14 @@ const CODEGEN_FLAG_MAP: FlagMapping = {
   '--migrations-out-file': { key: 'migrationsOutFile' },
 }
 
-// ───── mapFlags ─────
-
-function mapFlags(
-  flags: Record<string, string | string[] | boolean | undefined>,
-  mapping: FlagMapping
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const [flagName, entry] of Object.entries(mapping)) {
-    const raw = flags[flagName]
-    if (raw === undefined) continue
-    if (entry.coerce && typeof raw === 'string') {
-      result[entry.key] = entry.coerce(raw)
-    } else {
-      result[entry.key] = raw
-    }
-  }
-  return result
-}
-
-// ───── resolveOptions ─────
-
-function resolveOptions<T extends z.ZodTypeAny>(
-  schema: T,
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>,
-  flagMapping: FlagMapping
-): z.infer<T> {
-  const cliOverrides = mapFlags(flags, flagMapping)
-  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
-  const result = schema.safeParse(merged)
-  if (!result.success) {
-    const issue = result.error.issues[0]
-    throw new CodegenConfigError(
-      issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid codegen options'
-    )
-  }
-  return result.data
-}
+// ───── Resolvers ─────
 
 export function resolveCodegenOptions(
   pluginConfig: Record<string, unknown>,
   runtimeOptions: Record<string, unknown>,
   flags: Record<string, string | string[] | boolean | undefined>
 ): CodegenOptions {
-  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, flags, CODEGEN_FLAG_MAP)
+  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, flags, CODEGEN_FLAG_MAP, CodegenConfigError)
 }
 
 /** Fill defaults for partial options. Used by generators. */
@@ -129,5 +84,5 @@ export function isRunOnGenerateEnabled(
   pluginConfig: Record<string, unknown>,
   runtimeOptions: Record<string, unknown>
 ): boolean {
-  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, {}, {}).runOnGenerate
+  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, {}, {}, CodegenConfigError).runOnGenerate
 }
