@@ -29,9 +29,12 @@ export interface BackfillChunkState {
   queryId?: string
   submittedAt?: string
   finishedAt?: string
-  durationMs?: number
+  readRows?: number
+  readBytes?: number
   writtenRows?: number
   writtenBytes?: number
+  elapsedMs?: number
+  durationMs?: number
   error?: string
 }
 
@@ -58,7 +61,21 @@ function applyQueryStatus(
   qs: QueryStatus,
 ): { state: BackfillChunkState; changed: boolean } {
   if (qs.status === 'running') {
-    return { state: { ...state, status: 'running' }, changed: state.status !== 'running' }
+    const next: BackfillChunkState = {
+      ...state,
+      status: 'running',
+      readRows: qs.readRows,
+      readBytes: qs.readBytes,
+      writtenRows: qs.writtenRows,
+      writtenBytes: qs.writtenBytes,
+      elapsedMs: qs.elapsedMs,
+    }
+    const metricsChanged =
+      state.status !== 'running' ||
+      state.readRows !== qs.readRows ||
+      state.writtenRows !== qs.writtenRows ||
+      state.elapsedMs !== qs.elapsedMs
+    return { state: next, changed: metricsChanged }
   }
   if (qs.status === 'finished') {
     return {
