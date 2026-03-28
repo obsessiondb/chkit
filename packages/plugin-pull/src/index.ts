@@ -2,6 +2,7 @@ import { access, mkdir, rename, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
+import { z } from 'zod'
 import {
   createClickHouseExecutor,
   type IntrospectedTable,
@@ -11,12 +12,10 @@ import {
   type ChxInlinePluginRegistration,
   defineFlags,
   normalizeEngine,
-  type ParsedFlags,
   type ResolvedChxConfig,
   type SchemaDefinition,
   splitTopLevelComma,
   type TableDefinition,
-  typedFlags,
   wrapPluginRun,
 } from '@chkit/core'
 export { renderSchemaFile } from './render-schema.js'
@@ -29,6 +28,27 @@ import {
   type SystemTableRow,
 } from './view-parser.js'
 
+// ───── Plugin config schema (what pull({...}) accepts) ─────
+
+const PluginConfigSchema = z.object({
+  outFile: z.string().min(1).optional(),
+  databases: z.array(z.string()).optional(),
+  overwrite: z.boolean().optional(),
+})
+
+// ───── Pull command schema ─────
+
+const PullSchema = z.object({
+  outFile: z.string().min(1).default('./src/db/schema/pulled.ts'),
+  databases: z.array(z.string()).default([]).transform((arr) =>
+    [...new Set(arr.map((s) => s.trim()).filter((s) => s.length > 0))].sort()
+  ),
+  overwrite: z.boolean().default(false),
+})
+type PullOptions = z.infer<typeof PullSchema>
+
+// ───── Types ─────
+
 export interface PullPluginOptions {
   outFile?: string
   databases?: string[]
@@ -38,7 +58,7 @@ export interface PullPluginOptions {
 
 export interface PullPluginCommandContext {
   args: string[]
-  flags: ParsedFlags
+  flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
   options: Record<string, unknown>
   config: ResolvedChxConfig
@@ -73,6 +93,8 @@ export type PullIntrospector = (input: {
 
 export type PullPluginRegistration = ChxInlinePluginRegistration<PullPlugin, PullPluginOptions>
 
+// ───── CLI flag definitions ─────
+
 const PULL_SCHEMA_FLAGS = defineFlags([
   { name: '--dryrun', type: 'boolean', description: 'Preview without writing files' },
   { name: '--force', type: 'boolean', description: 'Overwrite existing output file' },
@@ -81,12 +103,68 @@ const PULL_SCHEMA_FLAGS = defineFlags([
   { name: '--database', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
 ] as const)
 
-interface FlagOverrides {
-  outFile?: string
-  databases: string[]
-  overwrite?: boolean
-  dryrun: boolean
+// ───── Flag mappings ─────
+
+interface FlagMappingEntry {
+  key: string
+  coerce?: (value: string) => unknown
 }
+
+type FlagMapping = Record<string, FlagMappingEntry>
+
+const PULL_FLAG_MAP: FlagMapping = {
+  '--out-file': { key: 'outFile' },
+  '--force': { key: 'overwrite' },
+  '--overwrite': { key: 'overwrite' },
+  '--database': { key: 'databases' },
+}
+
+// ───── mapFlags ─────
+
+function mapFlags(
+  flags: Record<string, string | string[] | boolean | undefined>,
+  mapping: FlagMapping
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [flagName, entry] of Object.entries(mapping)) {
+    const raw = flags[flagName]
+    if (raw === undefined) continue
+    if (entry.coerce && typeof raw === 'string') {
+      result[entry.key] = entry.coerce(raw)
+    } else {
+      result[entry.key] = raw
+    }
+  }
+  return result
+}
+
+// ───── resolveOptions ─────
+
+class PullConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PullConfigError'
+  }
+}
+
+function resolvePullOptions(
+  pluginConfig: Record<string, unknown>,
+  runtimeOptions: Record<string, unknown>,
+  flags: Record<string, string | string[] | boolean | undefined>
+): PullOptions {
+  const cliOverrides = mapFlags(flags, PULL_FLAG_MAP)
+  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
+  const result = PullSchema.safeParse(merged)
+  if (!result.success) {
+    const issue = result.error.issues[0]
+    throw new PullConfigError(
+      issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid pull options'
+    )
+  }
+  return result.data
+}
+
+// ───── Plugin ─────
 
 interface PullSchemaResult {
   outFile: string
@@ -97,21 +175,8 @@ interface PullSchemaResult {
   content: string
 }
 
-const DEFAULT_OPTIONS: Required<Omit<PullPluginOptions, 'introspect'>> = {
-  outFile: './src/db/schema/pulled.ts',
-  databases: [],
-  overwrite: false,
-}
-
-class PullConfigError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'PullConfigError'
-  }
-}
-
 export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
-  const base = normalizePullOptions(options)
+  const pluginConfig = PluginConfigSchema.parse(options)
   const introspector = options.introspect
 
   return {
@@ -132,18 +197,18 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
             print,
             configErrorClass: PullConfigError,
             fn: async () => {
-              const overrides = flagsToOverrides(flags)
-              const mergedOptions = mergeOptions(base, runtimeOptions, overrides)
+              const opts = resolvePullOptions(pluginConfig, runtimeOptions, flags)
+              const dryrun = flags['--dryrun'] === true
               const pulled = await pullSchema({
                 config,
-                options: { ...mergedOptions, introspect: introspector },
+                options: { ...opts, introspect: introspector },
               })
 
-              if (!overrides.dryrun) {
+              if (!dryrun) {
                 await writeSchemaFile({
                   outFile: pulled.outFile,
                   content: pulled.content,
-                  overwrite: mergedOptions.overwrite,
+                  overwrite: opts.overwrite,
                 })
               }
 
@@ -155,8 +220,8 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
                 tableCount: pulled.tableCount,
                 databases: pulled.databases,
                 skippedObjects: pulled.skippedObjects,
-                dryrun: overrides.dryrun,
-                ...(overrides.dryrun ? { content: pulled.content } : {}),
+                dryrun,
+                ...(dryrun ? { content: pulled.content } : {}),
               }
 
               if (jsonMode) {
@@ -164,7 +229,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
                 return 0
               }
 
-              if (overrides.dryrun) {
+              if (dryrun) {
                 print(
                   `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
                 )
@@ -192,98 +257,11 @@ export function pull(options: PullPluginOptions = {}): PullPluginRegistration {
   }
 }
 
-function normalizePullOptions(options: PullPluginOptions = {}): Required<Omit<PullPluginOptions, 'introspect'>> {
-  const outFile = normalizeOutFileOption(options.outFile)
-  const databases = normalizeDatabasesOption(options.databases, 'databases')
-  const overwrite = normalizeOverwriteOption(options.overwrite)
-
-  return {
-    ...DEFAULT_OPTIONS,
-    ...(outFile ? { outFile } : {}),
-    ...(databases ? { databases } : {}),
-    ...(overwrite !== undefined ? { overwrite } : {}),
-  }
-}
-
-function flagsToOverrides(flags: ParsedFlags): FlagOverrides {
-  const f = typedFlags(flags, PULL_SCHEMA_FLAGS)
-  const databases = normalizeDatabasesOption(f['--database'] ?? [], 'database flag') ?? []
-
-  return {
-    dryrun: f['--dryrun'] === true,
-    overwrite: f['--force'] === true || f['--overwrite'] === true || undefined,
-    outFile: f['--out-file'],
-    databases,
-  }
-}
-
-function mergeOptions(
-  baseOptions: Required<Omit<PullPluginOptions, 'introspect'>>,
-  runtimeOptions: Record<string, unknown>,
-  overrides: FlagOverrides
-): Required<Omit<PullPluginOptions, 'introspect'>> {
-  const runtime = normalizeRuntimeOptions(runtimeOptions)
-
-  return {
-    ...baseOptions,
-    ...runtime,
-    ...(overrides.outFile ? { outFile: overrides.outFile } : {}),
-    ...(overrides.databases.length > 0 ? { databases: overrides.databases } : {}),
-    ...(overrides.overwrite !== undefined ? { overwrite: overrides.overwrite } : {}),
-  }
-}
-
-function normalizeRuntimeOptions(
-  options: Record<string, unknown>
-): Partial<Required<Omit<PullPluginOptions, 'introspect'>>> {
-  const outFile = normalizeOutFileOption(options.outFile)
-  const databases = normalizeDatabasesOption(options.databases, 'databases')
-  const overwrite = normalizeOverwriteOption(options.overwrite)
-
-  const normalized: Partial<Required<Omit<PullPluginOptions, 'introspect'>>> = {}
-  if (outFile) normalized.outFile = outFile
-  if (databases) normalized.databases = databases
-  if (overwrite !== undefined) normalized.overwrite = overwrite
-  return normalized
-}
-
-function normalizeOutFileOption(value: unknown): string | undefined {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new PullConfigError('Invalid plugin option "outFile". Expected non-empty string.')
-  }
-  return value.trim()
-}
-
-function normalizeOverwriteOption(value: unknown): boolean | undefined {
-  if (value === undefined) return undefined
-  if (typeof value !== 'boolean') {
-    throw new PullConfigError('Invalid plugin option "overwrite". Expected boolean.')
-  }
-  return value
-}
-
-function normalizeDatabasesOption(value: unknown, label: string): string[] | undefined {
-  if (value === undefined) return undefined
-  if (!Array.isArray(value)) {
-    throw new PullConfigError(`Invalid plugin option "${label}". Expected string array.`)
-  }
-
-  const normalized = value
-    .map((entry) => {
-      if (typeof entry !== 'string') {
-        throw new PullConfigError(`Invalid plugin option "${label}". Expected string array.`)
-      }
-      return entry.trim()
-    })
-    .filter((entry) => entry.length > 0)
-
-  return [...new Set(normalized)].sort()
-}
+// ───── Internal helpers ─────
 
 async function pullSchema(input: {
   config: ResolvedChxConfig
-  options: Required<Omit<PullPluginOptions, 'introspect'>> & { introspect?: PullIntrospector }
+  options: PullOptions & { introspect?: PullIntrospector }
 }): Promise<PullSchemaResult> {
   if (!input.config.clickhouse) {
     throw new PullConfigError('clickhouse config is required for pull plugin')

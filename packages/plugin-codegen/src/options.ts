@@ -1,94 +1,44 @@
-import { defineFlags, typedFlags, type ParsedFlags } from '@chkit/core'
+import { z } from 'zod'
+import { defineFlags } from '@chkit/core'
 
-import type { CodegenPluginOptions, FlagOverrides } from './types.js'
 import { CodegenConfigError } from './errors.js'
 
-const DEFAULT_OPTIONS: Required<CodegenPluginOptions> = {
-  outFile: './src/generated/chkit-types.ts',
-  emitZod: false,
-  tableNameStyle: 'pascal',
-  bigintMode: 'string',
-  includeViews: false,
-  runOnGenerate: true,
-  failOnUnsupportedType: true,
-  emitIngest: false,
-  ingestOutFile: './src/generated/chkit-ingest.ts',
-  emitMigrations: false,
-  migrationsOutFile: './src/generated/chkit-migrations.ts',
-}
+// ───── Plugin config schema (what codegen({...}) accepts) ─────
 
-function parseBooleanOption(
-  options: Record<string, unknown>,
-  key: keyof CodegenPluginOptions
-): boolean | undefined {
-  const value = options[key]
-  if (value === undefined) return undefined
-  if (typeof value === 'boolean') return value
-  throw new CodegenConfigError(`Invalid plugin option "${key}". Expected boolean.`)
-}
+export const PluginConfigSchema = z.object({
+  outFile: z.string().min(1).optional(),
+  emitZod: z.boolean().optional(),
+  tableNameStyle: z.enum(['pascal', 'camel', 'raw']).optional(),
+  bigintMode: z.enum(['string', 'bigint']).optional(),
+  includeViews: z.boolean().optional(),
+  runOnGenerate: z.boolean().optional(),
+  failOnUnsupportedType: z.boolean().optional(),
+  emitIngest: z.boolean().optional(),
+  ingestOutFile: z.string().min(1).optional(),
+  emitMigrations: z.boolean().optional(),
+  migrationsOutFile: z.string().min(1).optional(),
+})
 
-function parseStringOption(
-  options: Record<string, unknown>,
-  key: keyof CodegenPluginOptions
-): string | undefined {
-  const value = options[key]
-  if (value === undefined) return undefined
-  if (typeof value === 'string' && value.length > 0) return value
-  throw new CodegenConfigError(`Invalid plugin option "${key}". Expected non-empty string.`)
-}
+export type PluginConfig = z.input<typeof PluginConfigSchema>
 
-export function normalizeRuntimeOptions(options: Record<string, unknown>): CodegenPluginOptions {
-  const rawTableNameStyle = options.tableNameStyle
-  if (
-    rawTableNameStyle !== undefined &&
-    rawTableNameStyle !== 'pascal' &&
-    rawTableNameStyle !== 'camel' &&
-    rawTableNameStyle !== 'raw'
-  ) {
-    throw new CodegenConfigError(
-      'Invalid plugin option "tableNameStyle". Expected one of: pascal, camel, raw.'
-    )
-  }
+// ───── Codegen command schema ─────
 
-  const rawBigintMode = options.bigintMode
-  if (rawBigintMode !== undefined && rawBigintMode !== 'string' && rawBigintMode !== 'bigint') {
-    throw new CodegenConfigError(
-      'Invalid plugin option "bigintMode". Expected one of: string, bigint.'
-    )
-  }
+export const CodegenSchema = z.object({
+  outFile: z.string().min(1).default('./src/generated/chkit-types.ts'),
+  emitZod: z.boolean().default(false),
+  tableNameStyle: z.enum(['pascal', 'camel', 'raw']).default('pascal'),
+  bigintMode: z.enum(['string', 'bigint']).default('string'),
+  includeViews: z.boolean().default(false),
+  runOnGenerate: z.boolean().default(true),
+  failOnUnsupportedType: z.boolean().default(true),
+  emitIngest: z.boolean().default(false),
+  ingestOutFile: z.string().min(1).default('./src/generated/chkit-ingest.ts'),
+  emitMigrations: z.boolean().default(false),
+  migrationsOutFile: z.string().min(1).default('./src/generated/chkit-migrations.ts'),
+})
+export type CodegenOptions = z.infer<typeof CodegenSchema>
 
-  const normalized: CodegenPluginOptions = {}
-  const outFile = parseStringOption(options, 'outFile')
-  const emitZod = parseBooleanOption(options, 'emitZod')
-  const includeViews = parseBooleanOption(options, 'includeViews')
-  const runOnGenerate = parseBooleanOption(options, 'runOnGenerate')
-  const failOnUnsupportedType = parseBooleanOption(options, 'failOnUnsupportedType')
-  const emitIngest = parseBooleanOption(options, 'emitIngest')
-  const ingestOutFile = parseStringOption(options, 'ingestOutFile')
-  const emitMigrations = parseBooleanOption(options, 'emitMigrations')
-  const migrationsOutFile = parseStringOption(options, 'migrationsOutFile')
-
-  if (outFile !== undefined) normalized.outFile = outFile
-  if (emitZod !== undefined) normalized.emitZod = emitZod
-  if (rawTableNameStyle !== undefined) normalized.tableNameStyle = rawTableNameStyle
-  if (rawBigintMode !== undefined) normalized.bigintMode = rawBigintMode
-  if (includeViews !== undefined) normalized.includeViews = includeViews
-  if (runOnGenerate !== undefined) normalized.runOnGenerate = runOnGenerate
-  if (failOnUnsupportedType !== undefined) normalized.failOnUnsupportedType = failOnUnsupportedType
-  if (emitIngest !== undefined) normalized.emitIngest = emitIngest
-  if (ingestOutFile !== undefined) normalized.ingestOutFile = ingestOutFile
-  if (emitMigrations !== undefined) normalized.emitMigrations = emitMigrations
-  if (migrationsOutFile !== undefined) normalized.migrationsOutFile = migrationsOutFile
-
-  return normalized
-}
-
-export function normalizeCodegenOptions(options: CodegenPluginOptions = {}): Required<CodegenPluginOptions> {
-  return {
-    ...DEFAULT_OPTIONS,
-    ...options,
-  }
-}
+// ───── CLI flag definitions ─────
 
 export const CODEGEN_FLAGS = defineFlags([
   { name: '--check', type: 'boolean', description: 'Check if generated output is up-to-date' },
@@ -102,52 +52,82 @@ export const CODEGEN_FLAGS = defineFlags([
   { name: '--migrations-out-file', type: 'string', description: 'Migration module output file path', placeholder: '<path>' },
 ] as const)
 
-export function flagsToOverrides(flags: ParsedFlags): FlagOverrides {
-  const f = typedFlags(flags, CODEGEN_FLAGS)
-  const rawBigintMode = f['--bigint-mode']
-  if (rawBigintMode !== undefined && rawBigintMode !== 'string' && rawBigintMode !== 'bigint') {
-    throw new CodegenConfigError('Invalid value for --bigint-mode. Expected string or bigint.')
-  }
+// ───── Flag mappings ─────
 
-  return {
-    check: f['--check'] === true,
-    outFile: f['--out-file'],
-    emitZod: f['--emit-zod'],
-    includeViews: f['--include-views'],
-    emitIngest: f['--emit-ingest'],
-    ingestOutFile: f['--ingest-out-file'],
-    emitMigrations: f['--emit-migrations'],
-    migrationsOutFile: f['--migrations-out-file'],
-    bigintMode: rawBigintMode,
-  }
+interface FlagMappingEntry {
+  key: string
+  coerce?: (value: string) => unknown
 }
 
-export function mergeOptions(
-  baseOptions: Required<CodegenPluginOptions>,
-  runtimeOptions: Record<string, unknown>,
-  overrides: FlagOverrides
-): Required<CodegenPluginOptions> {
-  const fromRuntime = normalizeRuntimeOptions(runtimeOptions)
-  const withRuntime = normalizeCodegenOptions({ ...baseOptions, ...fromRuntime })
+type FlagMapping = Record<string, FlagMappingEntry>
 
-  return normalizeCodegenOptions({
-    ...withRuntime,
-    outFile: overrides.outFile ?? withRuntime.outFile,
-    emitZod: overrides.emitZod ?? withRuntime.emitZod,
-    bigintMode: overrides.bigintMode ?? withRuntime.bigintMode,
-    includeViews: overrides.includeViews ?? withRuntime.includeViews,
-    emitIngest: overrides.emitIngest ?? withRuntime.emitIngest,
-    ingestOutFile: overrides.ingestOutFile ?? withRuntime.ingestOutFile,
-    emitMigrations: overrides.emitMigrations ?? withRuntime.emitMigrations,
-    migrationsOutFile: overrides.migrationsOutFile ?? withRuntime.migrationsOutFile,
-  })
+const CODEGEN_FLAG_MAP: FlagMapping = {
+  '--out-file': { key: 'outFile' },
+  '--emit-zod': { key: 'emitZod' },
+  '--emit-ingest': { key: 'emitIngest' },
+  '--ingest-out-file': { key: 'ingestOutFile' },
+  '--bigint-mode': { key: 'bigintMode' },
+  '--include-views': { key: 'includeViews' },
+  '--emit-migrations': { key: 'emitMigrations' },
+  '--migrations-out-file': { key: 'migrationsOutFile' },
+}
+
+// ───── mapFlags ─────
+
+function mapFlags(
+  flags: Record<string, string | string[] | boolean | undefined>,
+  mapping: FlagMapping
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [flagName, entry] of Object.entries(mapping)) {
+    const raw = flags[flagName]
+    if (raw === undefined) continue
+    if (entry.coerce && typeof raw === 'string') {
+      result[entry.key] = entry.coerce(raw)
+    } else {
+      result[entry.key] = raw
+    }
+  }
+  return result
+}
+
+// ───── resolveOptions ─────
+
+function resolveOptions<T extends z.ZodTypeAny>(
+  schema: T,
+  pluginConfig: Record<string, unknown>,
+  runtimeOptions: Record<string, unknown>,
+  flags: Record<string, string | string[] | boolean | undefined>,
+  flagMapping: FlagMapping
+): z.infer<T> {
+  const cliOverrides = mapFlags(flags, flagMapping)
+  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
+  const result = schema.safeParse(merged)
+  if (!result.success) {
+    const issue = result.error.issues[0]
+    throw new CodegenConfigError(
+      issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid codegen options'
+    )
+  }
+  return result.data
+}
+
+export function resolveCodegenOptions(
+  pluginConfig: Record<string, unknown>,
+  runtimeOptions: Record<string, unknown>,
+  flags: Record<string, string | string[] | boolean | undefined>
+): CodegenOptions {
+  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, flags, CODEGEN_FLAG_MAP)
+}
+
+/** Fill defaults for partial options. Used by generators. */
+export function normalizeCodegenOptions(options: PluginConfig = {}): CodegenOptions {
+  return CodegenSchema.parse(options)
 }
 
 export function isRunOnGenerateEnabled(
-  baseOptions: Required<CodegenPluginOptions>,
+  pluginConfig: Record<string, unknown>,
   runtimeOptions: Record<string, unknown>
 ): boolean {
-  const fromRuntime = normalizeRuntimeOptions(runtimeOptions)
-  const effective = normalizeCodegenOptions({ ...baseOptions, ...fromRuntime })
-  return effective.runOnGenerate
+  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, {}, {}).runOnGenerate
 }

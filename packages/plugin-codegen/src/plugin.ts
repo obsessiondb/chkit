@@ -13,7 +13,7 @@ import type {
   GenerateMigrationArtifactsOutput,
 } from './types.js'
 import { CodegenConfigError } from './errors.js'
-import { CODEGEN_FLAGS, flagsToOverrides, mergeOptions, normalizeCodegenOptions, normalizeRuntimeOptions } from './options.js'
+import { CODEGEN_FLAGS, PluginConfigSchema, resolveCodegenOptions } from './options.js'
 import { generateTypeArtifacts } from './generators/type-artifacts.js'
 import { generateIngestArtifacts } from './generators/ingest-artifacts.js'
 import { generateMigrationArtifacts } from './generators/migration-artifacts.js'
@@ -103,7 +103,7 @@ function mergeCheckResults(results: CodegenPluginCheckResult[]): CodegenPluginCh
 }
 
 export function createCodegenPlugin(options: CodegenPluginOptions = {}): CodegenPlugin {
-  const base = normalizeCodegenOptions(options)
+  const pluginConfig = PluginConfigSchema.parse(options)
 
   return {
     manifest: {
@@ -130,8 +130,8 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
             print,
             configErrorClass: CodegenConfigError,
             fn: async () => {
-              const overrides = flagsToOverrides(flags)
-              const effectiveOptions = mergeOptions(base, runtimeOptions, overrides)
+              const effectiveOptions = resolveCodegenOptions(pluginConfig, runtimeOptions, flags)
+              const checkMode = flags['--check'] === true
               const configDir = resolve(configPath, '..')
               const outFile = resolve(configDir, effectiveOptions.outFile)
               const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
@@ -160,7 +160,7 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
                 migrationsOutFile = resolve(configDir, effectiveOptions.migrationsOutFile)
               }
 
-              if (overrides.check) {
+              if (checkMode) {
                 const current = await readMaybe(outFile)
                 const typeCheckResult = checkGeneratedOutput({
                   label: 'Codegen',
@@ -250,13 +250,13 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
     ],
     hooks: {
       onConfigLoaded({ options: runtimeOptions }) {
-        normalizeRuntimeOptions(runtimeOptions)
+        resolveCodegenOptions(pluginConfig, runtimeOptions, {})
       },
-      async onCheck({ config, configPath, options: runtimeOptions }) {
-        const effectiveOptions = mergeOptions(base, runtimeOptions, { check: false })
+      async onCheck({ config: appConfig, configPath, options: runtimeOptions }) {
+        const effectiveOptions = resolveCodegenOptions(pluginConfig, runtimeOptions, {})
         const configDir = resolve(configPath, '..')
         const outFile = resolve(configDir, effectiveOptions.outFile)
-        const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
+        const definitions = await loadSchemaDefinitions(appConfig.schema, { cwd: configDir })
         const generated = generateTypeArtifacts({
           definitions,
           options: effectiveOptions,
@@ -293,7 +293,7 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
         if (effectiveOptions.emitMigrations) {
           const migrationsOutFile = resolve(configDir, effectiveOptions.migrationsOutFile)
           const migrationsGenerated = await generateMigrationArtifacts({
-            migrationsDir: resolve(configDir, config.migrationsDir),
+            migrationsDir: resolve(configDir, appConfig.migrationsDir),
             options: effectiveOptions,
           })
           const migrationsCurrent = await readMaybe(migrationsOutFile)
