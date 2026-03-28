@@ -41,7 +41,8 @@ WHERE database = '${input.database}'
   AND table = '${input.table}'
   AND active = 1
 GROUP BY partition_id
-ORDER BY partition_id`
+ORDER BY partition_id
+SETTINGS select_sequential_consistency = 1`
   )
 
   const partitions: PartitionInfo[] = rows.map((row) => ({
