@@ -45,7 +45,7 @@ async function waitForParts(
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     // Sync replica state for the target table first, then check system.parts
-    await db.query(`SELECT 1 FROM ${database}.${table} LIMIT 0 SETTINGS select_sequential_consistency = 1`)
+    await db.query(`SELECT 1 FROM ${database}.${table} LIMIT 1 SETTINGS select_sequential_consistency = 1`)
     const rows = await db.query<{ cnt: string }>(
       `SELECT count(DISTINCT partition) AS cnt FROM system.parts WHERE database = '${database}' AND table = '${table}' AND active SETTINGS select_sequential_consistency = 1`
     )

@@ -28,7 +28,7 @@ export async function queryPartitionInfo(input: {
   // tables, so this preliminary query ensures the replica has caught up with
   // all pending writes before we inspect part metadata.
   await input.query(
-    `SELECT 1 FROM ${input.database}.${input.table} LIMIT 0 SETTINGS select_sequential_consistency = 1`
+    `SELECT 1 FROM ${input.database}.${input.table} LIMIT 1 SETTINGS select_sequential_consistency = 1`
   )
 
   const rows = await input.query<{
@@ -118,7 +118,7 @@ export async function querySortKeyRanges(input: {
     min_val: string
     max_val: string
   }>(
-    `SELECT _partition_id AS partition_id, toString(min(${input.sortKeyColumn})) AS min_val, toString(max(${input.sortKeyColumn})) AS max_val FROM ${input.database}.${input.table} WHERE _partition_id IN (${inList}) GROUP BY _partition_id`
+    `SELECT _partition_id AS partition_id, toString(min(${input.sortKeyColumn})) AS min_val, toString(max(${input.sortKeyColumn})) AS max_val FROM ${input.database}.${input.table} WHERE _partition_id IN (${inList}) GROUP BY _partition_id SETTINGS select_sequential_consistency = 1`
   )
 
   const result = new Map<string, { min: string; max: string }>()
