@@ -3,7 +3,7 @@ import type { BackfillPluginOptions, NormalizedBackfillDefaults, NormalizedBackf
 
 const DEFAULT_OPTIONS: NormalizedBackfillPluginOptions = {
   defaults: {
-    chunkHours: 6,
+    maxChunkBytes: 10 * 1024 ** 3, // 10 GiB
     maxParallelChunks: 1,
     maxRetriesPerChunk: 3,
     retryDelayMs: 1000,
@@ -174,9 +174,6 @@ export function mergeOptions(
 }
 
 export function validateBaseOptions(options: NormalizedBackfillPluginOptions): void {
-  if (typeof options.defaults.chunkHours !== 'number' || !Number.isFinite(options.defaults.chunkHours)) {
-    throw new BackfillConfigError('defaults.chunkHours is required and must be a finite number.')
-  }
   if (
     typeof options.defaults.maxParallelChunks !== 'number' ||
     !Number.isFinite(options.defaults.maxParallelChunks)
@@ -189,15 +186,11 @@ export function validateBaseOptions(options: NormalizedBackfillPluginOptions): v
   ) {
     throw new BackfillConfigError('defaults.maxRetriesPerChunk is required and must be a finite number.')
   }
-  if (typeof options.limits.minChunkMinutes !== 'number' || !Number.isFinite(options.limits.minChunkMinutes)) {
-    throw new BackfillConfigError('limits.minChunkMinutes is required and must be a finite number.')
-  }
-  if (typeof options.limits.maxWindowHours !== 'number' || !Number.isFinite(options.limits.maxWindowHours)) {
-    throw new BackfillConfigError('limits.maxWindowHours is required and must be a finite number.')
-  }
-  if (options.defaults.chunkHours * 60 < options.limits.minChunkMinutes) {
-    throw new BackfillConfigError(
-      `defaults.chunkHours (${options.defaults.chunkHours}) must be >= limits.minChunkMinutes (${options.limits.minChunkMinutes}m).`
-    )
+  if (
+    typeof options.defaults.maxChunkBytes !== 'number' ||
+    !Number.isFinite(options.defaults.maxChunkBytes) ||
+    options.defaults.maxChunkBytes <= 0
+  ) {
+    throw new BackfillConfigError('defaults.maxChunkBytes is required and must be a positive number.')
   }
 }

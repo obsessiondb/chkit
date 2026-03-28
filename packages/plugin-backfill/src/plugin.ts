@@ -1,6 +1,3 @@
-import process from 'node:process'
-import { createInterface } from 'node:readline/promises'
-
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import { wrapPluginRun } from '@chkit/core'
 
@@ -16,111 +13,64 @@ import {
   parseRunArgs,
   parseStatusArgs,
 } from './args.js'
-import { loadTimeColumnInfo } from './detect.js'
 import { BackfillConfigError } from './errors.js'
 import { normalizeBackfillOptions, mergeOptions, validateBaseOptions } from './options.js'
 import { planPayload, runPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
 import { buildBackfillPlan } from './planner.js'
-import {
-  cancelBackfillRun,
-  evaluateBackfillCheck,
-  executeBackfillRun,
-  getBackfillDoctorReport,
-  getBackfillStatus,
-  resumeBackfillRun,
-} from './runtime.js'
+import { evaluateBackfillCheck } from './check.js'
+import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
+import { executeBackfillRun, resumeBackfillRun } from './runtime.js'
 import type {
   BackfillPlugin,
   BackfillPluginOptions,
   BackfillPluginRegistration,
+  ExecuteBackfillRunOutput,
   NormalizedBackfillPluginOptions,
-  TimeColumnCandidate,
 } from './types.js'
 
-async function resolveTimeColumn(input: {
-  flagValue?: string
-  defaults: NormalizedBackfillPluginOptions['defaults']
-  target: string
-  schemaGlobs: string | string[]
-  configPath: string
-  jsonMode: boolean
-}): Promise<string> {
-  if (input.flagValue) return input.flagValue
-
-  const { schemaTimeColumn, candidates } = await loadTimeColumnInfo(
-    input.target,
-    input.schemaGlobs,
-    input.configPath
-  )
-
-  if (schemaTimeColumn) return schemaTimeColumn
-  if (input.defaults.timeColumn) return input.defaults.timeColumn
-
-  if (candidates.length === 0) {
-    throw new BackfillConfigError(
-      `Cannot determine time column for ${input.target}. Specify --time-column <column>, set plugins.backfill.timeColumn in table schema, or set defaults.timeColumn in plugin config.`
-    )
-  }
-
-  if (input.jsonMode) {
-    // biome-ignore lint/style/noNonNullAssertion: length checked above
-    return candidates[0]!.name
-  }
-
-  if (candidates.length === 1) {
-    return confirmSingleCandidate(candidates[0] as TimeColumnCandidate, input.target)
-  }
-
-  return selectFromCandidates(candidates, input.target)
-}
-
-async function confirmSingleCandidate(
-  candidate: TimeColumnCandidate,
-  target: string
-): Promise<string> {
-  const label = `${candidate.name} (${candidate.type}${candidate.source === 'order_by' ? ', in ORDER BY' : ''})`
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  try {
-    const response = await rl.question(`Detected time column for ${target}: ${label}\nUse ${candidate.name}? [Y/n]: `)
-    const trimmed = response.trim().toLowerCase()
-    if (trimmed === '' || trimmed === 'y' || trimmed === 'yes') {
-      return candidate.name
-    }
-    throw new BackfillConfigError(
-      `Time column not confirmed. Specify --time-column <column> explicitly.`
-    )
-  } finally {
-    rl.close()
-  }
-}
-
-async function selectFromCandidates(
-  candidates: TimeColumnCandidate[],
-  target: string
-): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  try {
-    console.log(`Detected time column candidates for ${target}:`)
-    for (let i = 0; i < candidates.length; i++) {
-      const c = candidates[i] as TimeColumnCandidate
-      const suffix = c.source === 'order_by' ? ', in ORDER BY' : ''
-      console.log(`  ${i + 1}. ${c.name} (${c.type}${suffix})`)
-    }
-    const response = await rl.question(`Select time column [1-${candidates.length}]: `)
-    const index = Number(response.trim()) - 1
-    if (!Number.isInteger(index) || index < 0 || index >= candidates.length) {
-      throw new BackfillConfigError(
-        `Invalid selection. Specify --time-column <column> explicitly.`
-      )
-    }
-    // biome-ignore lint/style/noNonNullAssertion: index bounds checked above
-    return candidates[index]!.name
-  } finally {
-    rl.close()
-  }
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(1)} TiB`
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${bytes} B`
 }
 
 type BackfillCommandContext = Parameters<BackfillPlugin['commands'][number]['run']>[0]
+
+function formatRunOutput(
+  output: ExecuteBackfillRunOutput,
+  command: string,
+  context: Pick<BackfillCommandContext, 'jsonMode' | 'print'>,
+): number {
+  const payload = {
+    ...runPayload(output),
+    command,
+  }
+  if (payload.noop) {
+    if (!context.jsonMode) {
+      context.print(
+        `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
+      )
+    } else {
+      context.print(payload)
+    }
+    return 0
+  }
+  if (context.jsonMode) {
+    context.print(payload)
+  } else {
+    let line = `Backfill ${command} ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
+    if (payload.lastError) line += ` \u2014 ${payload.lastError}`
+    context.print(line)
+    if (payload.status === 'completed' && payload.rowsWritten === 0) {
+      context.print(
+        'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+      )
+    }
+  }
+  return payload.ok ? 0 : 1
+}
 
 function createBackfillCommand(
   base: NormalizedBackfillPluginOptions,
@@ -167,39 +117,51 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
           label: 'Backfill plan',
           async run({ context, effectiveOptions }) {
             const parsed = parsePlanArgs(context.flags)
-            const timeColumn = await resolveTimeColumn({
-              flagValue: parsed.timeColumn,
-              defaults: effectiveOptions.defaults,
-              target: parsed.target,
-              schemaGlobs: context.config.schema,
-              configPath: context.configPath,
-              jsonMode: context.jsonMode,
-            })
 
-            const output = await buildBackfillPlan({
-              target: parsed.target,
-              from: parsed.from,
-              to: parsed.to,
-              timeColumn,
-              config: context.config,
-              configPath: context.configPath,
-              options: effectiveOptions,
-              chunkHours: parsed.chunkHours,
-              forceLargeWindow: parsed.forceLargeWindow,
-              force: parsed.force,
-              clickhouse: context.config.clickhouse,
-            })
-
-            const payload = planPayload(output)
-            if (context.jsonMode) {
-              context.print(payload)
-            } else {
-              context.print(
-                `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks at ${payload.chunkHours}h, time column: ${payload.timeColumn}) -> ${payload.planPath}${payload.existed ? ' [existing]' : ''}`
+            if (!context.config.clickhouse) {
+              throw new BackfillConfigError(
+                'ClickHouse connection is required for backfill planning. Configure clickhouse in your clickhouse.config.ts.'
               )
             }
 
-            return 0
+            const db = createClickHouseExecutor(context.config.clickhouse)
+
+            try {
+              const output = await buildBackfillPlan({
+                target: parsed.target,
+                from: parsed.from,
+                to: parsed.to,
+                config: context.config,
+                configPath: context.configPath,
+                options: effectiveOptions,
+                maxChunkBytes: parsed.maxChunkBytes,
+                clickhouse: context.config.clickhouse,
+                clickhouseQuery: async <T>(sql: string) => {
+                  const result = await db.query(sql)
+                  return result as T[]
+                },
+              })
+
+              const payload = planPayload(output)
+              if (context.jsonMode) {
+                context.print(payload)
+              } else {
+                const partitionCount = output.plan.partitions?.length ?? 0
+                const totalBytes = output.plan.partitions
+                  ? formatBytes(output.plan.partitions.reduce((sum, p) => sum + p.bytesOnDisk, 0))
+                  : 'unknown'
+                const sortKeyLabel = output.plan.sortKey
+                  ? `, sort key: ${output.plan.sortKey.column} (${output.plan.sortKey.category})`
+                  : ''
+                context.print(
+                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`
+                )
+              }
+
+              return 0
+            } finally {
+              await db.close()
+            }
           },
         }),
       },
@@ -238,33 +200,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 clickhouse: context.config.clickhouse,
               })
 
-              const payload = {
-                ...runPayload(output),
-                command: 'run' as const,
-              }
-              if (payload.noop) {
-                if (!context.jsonMode) {
-                  context.print(
-                    `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
-                  )
-                } else {
-                  context.print(payload)
-                }
-                return 0
-              }
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                let line = `Backfill run ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
-                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
-                context.print(line)
-                if (payload.status === 'completed' && payload.rowsWritten === 0) {
-                  context.print(
-                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
-                  )
-                }
-              }
-              return payload.ok ? 0 : 1
+              return formatRunOutput(output, 'run', context)
             } finally {
               await db?.close()
             }
@@ -302,33 +238,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
                 clickhouse: context.config.clickhouse,
               })
 
-              const payload = {
-                ...runPayload(output),
-                command: 'resume' as const,
-              }
-              if (payload.noop) {
-                if (!context.jsonMode) {
-                  context.print(
-                    `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
-                  )
-                } else {
-                  context.print(payload)
-                }
-                return 0
-              }
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                let line = `Backfill resume ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
-                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
-                context.print(line)
-                if (payload.status === 'completed' && payload.rowsWritten === 0) {
-                  context.print(
-                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
-                  )
-                }
-              }
-              return payload.ok ? 0 : 1
+              return formatRunOutput(output, 'resume', context)
             } finally {
               await db?.close()
             }
@@ -455,7 +365,7 @@ export function createBackfillPlugin(options: BackfillPluginOptions = {}): Backf
 
 export function backfill(options: BackfillPluginOptions = {}): BackfillPluginRegistration {
   return {
-    plugin: createBackfillPlugin(),
+    plugin: createBackfillPlugin(options),
     name: 'backfill',
     enabled: true,
     options,

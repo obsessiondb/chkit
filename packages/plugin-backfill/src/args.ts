@@ -12,12 +12,9 @@ import type {
 
 export const PLAN_FLAGS = defineFlags([
   { name: '--target', type: 'string', description: 'Target table (database.table)', placeholder: '<database.table>' },
-  { name: '--from', type: 'string', description: 'Start timestamp', placeholder: '<timestamp>' },
-  { name: '--to', type: 'string', description: 'End timestamp', placeholder: '<timestamp>' },
-  { name: '--chunk-hours', type: 'string', description: 'Hours per chunk', placeholder: '<hours>' },
-  { name: '--time-column', type: 'string', description: 'Time column for WHERE clause', placeholder: '<column>' },
-  { name: '--force-large-window', type: 'boolean', description: 'Allow large time windows without confirmation' },
-  { name: '--force', type: 'boolean', description: 'Delete existing plan and regenerate from scratch' },
+  { name: '--from', type: 'string', description: 'Filter partitions starting from timestamp', placeholder: '<timestamp>' },
+  { name: '--to', type: 'string', description: 'Filter partitions up to timestamp', placeholder: '<timestamp>' },
+  { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
 ] as const)
 
 export const RUN_FLAGS = defineFlags([
@@ -66,6 +63,29 @@ function normalizeTarget(raw: string): string {
   return value
 }
 
+const BYTE_SUFFIXES: Record<string, number> = {
+  T: 1024 ** 4,
+  G: 1024 ** 3,
+  M: 1024 ** 2,
+  K: 1024,
+}
+
+export function parseByteSize(raw: string): number {
+  const trimmed = raw.trim().toUpperCase()
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*([TGMK])?$/)
+  if (!match) {
+    throw new BackfillConfigError(`Invalid byte size: ${raw}. Expected a number with optional suffix (K, M, G, T).`)
+  }
+  const value = Number(match[1])
+  const suffix = match[2]
+  const multiplier = suffix ? BYTE_SUFFIXES[suffix] ?? 1 : 1
+  const result = value * multiplier
+  if (!Number.isFinite(result) || result <= 0) {
+    throw new BackfillConfigError(`Invalid byte size: ${raw}. Must be a positive number.`)
+  }
+  return result
+}
+
 function normalizePlanId(raw: string): string {
   const value = raw.trim()
   if (!/^[a-f0-9]{16}$/.test(value)) {
@@ -79,32 +99,20 @@ export function parsePlanArgs(flags: ParsedFlags): ParsedPlanArgs {
   const target = f['--target']
   const from = f['--from']
   const to = f['--to']
-  const rawChunkHours = f['--chunk-hours']
-  const timeColumn = f['--time-column']
-  const forceLargeWindow = f['--force-large-window'] === true
-  const force = f['--force'] === true
+  const rawMaxChunkBytes = f['--max-chunk-bytes']
 
-  let chunkHours: number | undefined
-  if (rawChunkHours !== undefined) {
-    const parsed = Number(rawChunkHours)
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      throw new BackfillConfigError('Invalid value for --chunk-hours. Expected a positive number.')
-    }
-    chunkHours = parsed
+  let maxChunkBytes: number | undefined
+  if (rawMaxChunkBytes !== undefined) {
+    maxChunkBytes = parseByteSize(rawMaxChunkBytes)
   }
 
   if (!target) throw new BackfillConfigError('Missing required --target <database.table>')
-  if (!from) throw new BackfillConfigError('Missing required --from <timestamp>')
-  if (!to) throw new BackfillConfigError('Missing required --to <timestamp>')
 
   return {
     target: normalizeTarget(target),
-    from: normalizeTimestamp(from, '--from'),
-    to: normalizeTimestamp(to, '--to'),
-    chunkHours,
-    timeColumn: timeColumn?.trim() || undefined,
-    forceLargeWindow,
-    force,
+    from: from ? normalizeTimestamp(from, '--from') : undefined,
+    to: to ? normalizeTimestamp(to, '--to') : undefined,
+    maxChunkBytes,
   }
 }
 

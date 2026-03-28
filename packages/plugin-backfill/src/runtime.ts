@@ -1,17 +1,14 @@
-import { join } from 'node:path'
-import process from 'node:process'
-
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
+import { executeWorkItems } from './executor.js'
+import type { ProgressEvent, WorkItem } from './executor.js'
 import {
   backfillPaths,
   collectActiveRunTargets,
-  computeBackfillStateDir,
   createRunState,
   ensureEnvironmentMatch,
   ensureRunCompatibility,
-  listPlanIds,
   nowIso,
   persistRunAndEvent,
   readPlan,
@@ -19,224 +16,33 @@ import {
   summarizeRunStatus,
 } from './state.js'
 import type {
-  BackfillDoctorReport,
-  BackfillPlanState,
   BackfillExecutionOptions,
-  BackfillPluginCheckResult,
+  BackfillPlanState,
   BackfillRunChunkState,
   BackfillRunState,
-  BackfillStatusSummary,
   ExecuteBackfillRunOutput,
   NormalizedBackfillPluginOptions,
 } from './types.js'
 
-export async function evaluateBackfillCheck(input: {
-  configPath: string
-  config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
-}): Promise<BackfillPluginCheckResult> {
-  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.options)
-  const plansDir = join(stateDir, 'plans')
-  const runsDir = join(stateDir, 'runs')
-
-  const planIds = await listPlanIds(plansDir)
-  if (planIds.length === 0) {
-    return {
-      plugin: 'backfill',
-      evaluated: true,
-      ok: true,
-      findings: [],
-      metadata: {
-        requiredCount: 0,
-        activeRuns: 0,
-        failedRuns: 0,
-      },
-    }
-  }
-
-  let requiredCount = 0
-  let activeRuns = 0
-  let failedRuns = 0
-
-  for (const planId of planIds) {
-    const runPath = join(runsDir, `${planId}.json`)
-    const run = await readRun(runPath)
-    if (!run) {
-      requiredCount += 1
-      continue
-    }
-
-    if (run.status === 'running') activeRuns += 1
-    if (run.status === 'failed') failedRuns += 1
-    if (run.status !== 'completed') requiredCount += 1
-  }
-
-  const findings: BackfillPluginCheckResult['findings'] = []
-  if (requiredCount > 0) {
-    findings.push({
-      code: 'backfill_required_pending',
-      message: `Required backfills pending completion: ${requiredCount}`,
-      severity: input.options.policy.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
-      metadata: {
-        requiredCount,
-      },
-    })
-  }
-
-  if (failedRuns > 0) {
-    findings.push({
-      code: 'backfill_chunk_failed_retry_exhausted',
-      message: `Backfill runs failed after retry budget: ${failedRuns}`,
-      severity: 'error',
-      metadata: {
-        failedRuns,
-      },
-    })
-  }
-
-  if (!input.options.policy.failCheckOnRequiredPendingBackfill) {
-    findings.push({
-      code: 'backfill_policy_relaxed',
-      message: 'Backfill check policy is relaxed: failCheckOnRequiredPendingBackfill=false.',
-      severity: 'warn',
-    })
-  }
-
-  const ok = findings.every((finding) => finding.severity !== 'error')
-  return {
-    plugin: 'backfill',
-    evaluated: true,
-    ok,
-    findings,
-    metadata: {
-      requiredCount,
-      activeRuns,
-      failedRuns,
-    },
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function executeChunk(input: {
-  run: BackfillRunState
+/** Adapter that bridges a BackfillRunChunkState to the generic WorkItem interface. */
+interface ChunkWorkItem extends WorkItem {
   chunk: BackfillRunChunkState
-  maxRetries: number
-  retryDelayMs: number
-  runPath: string
-  eventPath: string
-  execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
-  simulation?: {
-    failChunkId?: string
-    failCount?: number
-  }
-}): Promise<{ ok: true } | { ok: false; error: string }> {
-  const failureBudget = input.simulation?.failCount ?? 0
+  sqlTemplate: string
+}
 
-  while (input.chunk.attempts < input.maxRetries) {
-    input.chunk.status = 'running'
-    input.chunk.attempts += 1
-    input.chunk.startedAt = nowIso()
+function toWorkItems(chunks: BackfillRunChunkState[]): ChunkWorkItem[] {
+  return chunks.map((chunk) => ({
+    id: chunk.id,
+    status: chunk.status,
+    attempts: chunk.attempts,
+    chunk,
+    sqlTemplate: chunk.sqlTemplate,
+  }))
+}
 
-    await persistRunAndEvent({
-      run: input.run,
-      runPath: input.runPath,
-      eventPath: input.eventPath,
-      event: {
-        type: 'chunk_started',
-        planId: input.run.planId,
-        chunkId: input.chunk.id,
-        attempt: input.chunk.attempts,
-      },
-    })
-
-    const shouldSimulateFailure =
-      input.simulation?.failChunkId === input.chunk.id && input.chunk.attempts <= failureBudget
-
-    let attemptError: string | undefined
-    let executionResult: undefined | { rowsWritten?: number } | undefined
-
-    if (shouldSimulateFailure) {
-      attemptError = `Simulated failure for chunk ${input.chunk.id} attempt ${input.chunk.attempts}`
-    } else if (input.execute) {
-      try {
-        executionResult = await input.execute(input.chunk.sqlTemplate)
-      } catch (error) {
-        attemptError = error instanceof Error ? error.message : String(error)
-      }
-    }
-
-    if (!attemptError) {
-      input.chunk.status = 'done'
-      input.chunk.completedAt = nowIso()
-      input.chunk.lastError = undefined
-      if (executionResult && typeof executionResult === 'object' && typeof executionResult.rowsWritten === 'number') {
-        input.chunk.rowsWritten = executionResult.rowsWritten
-      }
-
-      await persistRunAndEvent({
-        run: input.run,
-        runPath: input.runPath,
-        eventPath: input.eventPath,
-        event: {
-          type: 'chunk_done',
-          planId: input.run.planId,
-          chunkId: input.chunk.id,
-          attempt: input.chunk.attempts,
-        },
-      })
-
-      return { ok: true }
-    }
-
-    input.chunk.lastError = attemptError
-
-    if (input.chunk.attempts >= input.maxRetries) {
-      input.chunk.status = 'failed'
-
-      await persistRunAndEvent({
-        run: input.run,
-        runPath: input.runPath,
-        eventPath: input.eventPath,
-        event: {
-          type: 'chunk_failed_retry_exhausted',
-          planId: input.run.planId,
-          chunkId: input.chunk.id,
-          attempt: input.chunk.attempts,
-          message: attemptError,
-        },
-      })
-
-      return { ok: false, error: attemptError }
-    }
-
-    input.chunk.status = 'pending'
-
-    await persistRunAndEvent({
-      run: input.run,
-      runPath: input.runPath,
-      eventPath: input.eventPath,
-      event: {
-        type: 'chunk_retry_scheduled',
-        planId: input.run.planId,
-        chunkId: input.chunk.id,
-        attempt: input.chunk.attempts,
-        nextAttempt: input.chunk.attempts + 1,
-      },
-    })
-
-    if (input.retryDelayMs > 0) {
-      const delay = input.retryDelayMs * 2 ** (input.chunk.attempts - 1)
-      await sleep(delay)
-    }
-  }
-
-  return {
-    ok: false,
-    error: `Retry budget exhausted for chunk ${input.chunk.id}`,
-  }
+function syncBackFromWorkItem(item: ChunkWorkItem): void {
+  item.chunk.status = item.status
+  item.chunk.attempts = item.attempts
 }
 
 async function executeRunLoop(input: {
@@ -251,9 +57,9 @@ async function executeRunLoop(input: {
   execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
   const maxRetries = input.plan.options.maxRetriesPerChunk
-  let aborted = false
+  const ac = new AbortController()
 
-  const onSignal = () => { aborted = true }
+  const onSignal = () => { ac.abort() }
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
 
@@ -274,17 +80,15 @@ async function executeRunLoop(input: {
       },
     })
 
+    // Prepare chunks: apply skip/reset logic, then filter to executable set.
+    const executableItems: ChunkWorkItem[] = []
     for (const chunk of input.run.chunks) {
-      if (aborted) break
-
       if (chunk.status === 'done' && !input.run.replayDone) continue
 
       if (chunk.status === 'failed') {
         if (!input.run.replayFailed) {
-          // Skip previously failed chunk — continue to remaining chunks
           continue
         }
-
         chunk.status = 'pending'
         chunk.attempts = 0
         chunk.lastError = undefined
@@ -296,23 +100,106 @@ async function executeRunLoop(input: {
         chunk.status = 'pending'
       }
 
-      await executeChunk({
-        run: input.run,
-        chunk,
-        maxRetries,
-        retryDelayMs: input.retryDelayMs,
-        runPath: input.paths.runPath,
-        eventPath: input.paths.eventPath,
-        execute: input.execute,
-        simulation: input.execution.simulation,
-      })
-
+      executableItems.push(...toWorkItems([chunk]))
     }
 
-    // Determine final run status after all chunks have been attempted
+    // Simulation support: wrap the execute function to inject failures.
+    const failureBudget = input.execution.simulation?.failCount ?? 0
+    const failChunkId = input.execution.simulation?.failChunkId
+
+    const wrappedExecute = async (item: ChunkWorkItem): Promise<void> => {
+      // The executor has already incremented item.attempts and set
+      // item.status = 'running' before calling execute.  Use item.attempts
+      // (already incremented) for the simulation budget check.
+      const shouldSimulateFailure =
+        failChunkId === item.id && item.attempts <= failureBudget
+
+      if (shouldSimulateFailure) {
+        throw new Error(`Simulated failure for chunk ${item.id} attempt ${item.attempts}`)
+      }
+
+      if (input.execute) {
+        const result = await input.execute(item.sqlTemplate)
+        if (result && typeof result === 'object' && typeof result.rowsWritten === 'number') {
+          item.chunk.rowsWritten = result.rowsWritten
+        }
+      }
+    }
+
+    const result = await executeWorkItems(
+      executableItems,
+      wrappedExecute,
+      { maxRetries, retryDelayMs: input.retryDelayMs },
+      {
+        onProgress: async (item: ChunkWorkItem, event: ProgressEvent, meta) => {
+          // Keep the chunk state in sync with the work item
+          syncBackFromWorkItem(item)
+
+          if (event === 'item_started') {
+            item.chunk.startedAt = nowIso()
+            await persistRunAndEvent({
+              run: input.run,
+              runPath: input.paths.runPath,
+              eventPath: input.paths.eventPath,
+              event: {
+                type: 'chunk_started',
+                planId: input.run.planId,
+                chunkId: item.id,
+                attempt: item.attempts,
+              },
+            })
+          } else if (event === 'item_done') {
+            item.chunk.completedAt = nowIso()
+            item.chunk.lastError = undefined
+            await persistRunAndEvent({
+              run: input.run,
+              runPath: input.paths.runPath,
+              eventPath: input.paths.eventPath,
+              event: {
+                type: 'chunk_done',
+                planId: input.run.planId,
+                chunkId: item.id,
+                attempt: item.attempts,
+              },
+            })
+          } else if (event === 'item_retry') {
+            item.chunk.lastError = meta?.error
+            await persistRunAndEvent({
+              run: input.run,
+              runPath: input.paths.runPath,
+              eventPath: input.paths.eventPath,
+              event: {
+                type: 'chunk_retry_scheduled',
+                planId: input.run.planId,
+                chunkId: item.id,
+                attempt: item.attempts,
+                nextAttempt: meta?.nextAttempt,
+              },
+            })
+          } else if (event === 'item_failed') {
+            item.chunk.lastError = meta?.error
+            await persistRunAndEvent({
+              run: input.run,
+              runPath: input.paths.runPath,
+              eventPath: input.paths.eventPath,
+              event: {
+                type: 'chunk_failed_retry_exhausted',
+                planId: input.run.planId,
+                chunkId: item.id,
+                attempt: item.attempts,
+                message: meta?.error,
+              },
+            })
+          }
+        },
+      },
+      ac.signal,
+    )
+
+    // Determine final run status
     const failedChunks = input.run.chunks.filter((c) => c.status === 'failed')
 
-    if (!aborted && failedChunks.length > 0) {
+    if (!result.aborted && failedChunks.length > 0) {
       input.run.status = 'failed'
       input.run.lastError =
         failedChunks[failedChunks.length - 1]?.lastError ?? 'One or more chunks failed'
@@ -338,7 +225,7 @@ async function executeRunLoop(input: {
       }
     }
 
-    if (!aborted) {
+    if (!result.aborted) {
       input.run.status = 'completed'
       input.run.completedAt = nowIso()
       input.run.lastError = undefined
@@ -540,142 +427,4 @@ export async function resumeBackfillRun(input: {
     retryDelayMs: input.options.defaults.retryDelayMs,
     execute: input.execute,
   })
-}
-
-export async function getBackfillStatus(input: {
-  planId: string
-  configPath: string
-  config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
-}): Promise<BackfillStatusSummary> {
-  const { plan, stateDir } = await readPlan({
-    planId: input.planId,
-    configPath: input.configPath,
-    config: input.config,
-    options: input.options,
-  })
-  const paths = backfillPaths(stateDir, plan.planId)
-  const run = await readRun(paths.runPath)
-
-  if (!run) {
-    return {
-      planId: plan.planId,
-      target: plan.target,
-      status: 'planned',
-      totals: {
-        total: plan.chunks.length,
-        pending: plan.chunks.length,
-        running: 0,
-        done: 0,
-        failed: 0,
-        skipped: 0,
-      },
-      attempts: 0,
-      rowsWritten: 0,
-      updatedAt: plan.createdAt,
-      runPath: paths.runPath,
-      eventPath: paths.eventPath,
-    }
-  }
-
-  return summarizeRunStatus(run, paths.runPath, paths.eventPath)
-}
-
-export async function cancelBackfillRun(input: {
-  planId: string
-  configPath: string
-  config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
-}): Promise<BackfillStatusSummary> {
-  const { plan, stateDir } = await readPlan({
-    planId: input.planId,
-    configPath: input.configPath,
-    config: input.config,
-    options: input.options,
-  })
-  const paths = backfillPaths(stateDir, plan.planId)
-  const run = await readRun(paths.runPath)
-
-  if (!run) {
-    throw new BackfillConfigError(
-      `Run state not found for plan ${plan.planId}. Start with backfill run before cancel.`
-    )
-  }
-  if (run.status === 'completed') {
-    throw new BackfillConfigError(`Run already completed for plan ${plan.planId}; cannot cancel.`)
-  }
-  if (run.status === 'cancelled') {
-    return summarizeRunStatus(run, paths.runPath, paths.eventPath)
-  }
-
-  run.status = 'cancelled'
-  run.completedAt = nowIso()
-  run.lastError = 'Cancelled by operator'
-  for (const chunk of run.chunks) {
-    if (chunk.status === 'running') {
-      chunk.status = 'pending'
-    }
-  }
-
-  await persistRunAndEvent({
-    run,
-    runPath: paths.runPath,
-    eventPath: paths.eventPath,
-    event: {
-      type: 'run_cancelled',
-      planId: plan.planId,
-    },
-  })
-
-  return summarizeRunStatus(run, paths.runPath, paths.eventPath)
-}
-
-export async function getBackfillDoctorReport(input: {
-  planId: string
-  configPath: string
-  config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
-}): Promise<BackfillDoctorReport> {
-  const status = await getBackfillStatus(input)
-  const issueCodes: string[] = []
-  const recommendations: string[] = []
-  const failedChunkIds: string[] = []
-
-  const run = await readRun(status.runPath)
-  for (const chunk of run?.chunks ?? []) {
-    if (chunk.status === 'failed') failedChunkIds.push(chunk.id)
-  }
-
-  if (status.status === 'planned') {
-    issueCodes.push('backfill_plan_missing')
-    recommendations.push(`Run: chkit plugin backfill run --plan-id ${status.planId}`)
-  }
-  if (status.status === 'failed') {
-    issueCodes.push('backfill_chunk_failed_retry_exhausted')
-    recommendations.push(`Inspect status: chkit plugin backfill status --plan-id ${status.planId}`)
-    recommendations.push(
-      `Retry failed chunks: chkit plugin backfill resume --plan-id ${status.planId} --replay-failed`
-    )
-  }
-  if (status.status === 'cancelled') {
-    issueCodes.push('backfill_required_pending')
-    recommendations.push(
-      `Resume execution: chkit plugin backfill resume --plan-id ${status.planId} --replay-failed`
-    )
-  }
-  if (status.status === 'running') {
-    issueCodes.push('backfill_required_pending')
-    recommendations.push(`Monitor progress: chkit plugin backfill status --plan-id ${status.planId}`)
-  }
-  if (issueCodes.length === 0) {
-    recommendations.push('No remediation required.')
-  }
-
-  return {
-    planId: status.planId,
-    status: status.status,
-    issueCodes,
-    recommendations,
-    failedChunkIds,
-  }
 }

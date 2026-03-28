@@ -1,5 +1,7 @@
 import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core'
 
+import type { PartitionInfo, SortKeyInfo } from './chunking/types.js'
+
 export interface BackfillPluginDefaults {
   chunkHours?: number
   maxParallelChunks?: number
@@ -29,7 +31,8 @@ export interface BackfillPluginOptions {
 }
 
 export interface NormalizedBackfillDefaults {
-  chunkHours: number
+  chunkHours?: number
+  maxChunkBytes: number
   maxParallelChunks: number
   maxRetriesPerChunk: number
   retryDelayMs: number
@@ -52,6 +55,8 @@ export interface BackfillEnvironment {
 
 export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
+export type { ChunkBoundary, PartitionInfo, PlannedChunk, SortKeyInfo } from './chunking/types.js'
+
 export interface BackfillChunk {
   id: string
   from: string
@@ -61,6 +66,10 @@ export interface BackfillChunk {
   idempotencyToken: string
   sqlTemplate: string
   lastError?: string
+  partitionId: string
+  estimatedBytes: number
+  sortKeyFrom?: string
+  sortKeyTo?: string
 }
 
 export interface BackfillPlanState {
@@ -68,17 +77,21 @@ export interface BackfillPlanState {
   target: string
   createdAt: string
   status: BackfillPlanStatus
-  strategy?: 'table' | 'mv_replay'
+  strategy?: 'table' | 'mv_replay' | 'partition'
   environment?: BackfillEnvironment
   from: string
   to: string
   chunks: BackfillChunk[]
+  partitions?: PartitionInfo[]
+  sortKey?: SortKeyInfo
   options: {
-    chunkHours: number
+    chunkHours?: number
+    maxChunkBytes?: number
     maxParallelChunks: number
     maxRetriesPerChunk: number
     requireIdempotencyToken: boolean
-    timeColumn: string
+    timeColumn?: string
+    sortKeyColumn?: string
   }
   policy: Required<BackfillPluginPolicy>
   limits: Required<BackfillPluginLimits>
@@ -165,7 +178,6 @@ export interface BackfillPluginCheckResult {
 export interface BuildBackfillPlanOutput {
   plan: BackfillPlanState
   planPath: string
-  existed: boolean
 }
 
 export interface ReadPlanOutput {
@@ -265,12 +277,9 @@ export interface TimeColumnCandidate {
 
 export interface ParsedPlanArgs {
   target: string
-  from: string
-  to: string
-  chunkHours?: number
-  timeColumn?: string
-  forceLargeWindow: boolean
-  force: boolean
+  from?: string
+  to?: string
+  maxChunkBytes?: number
 }
 
 export interface ParsedRunArgs {
