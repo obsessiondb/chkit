@@ -107,31 +107,15 @@ export type PlanOptions = z.infer<typeof PlanSchema>
 
 export const RunSchema = z.object({
   planId: z.string(),
-  replayDone: z.boolean().default(false),
-  replayFailed: z.boolean().default(false),
-  forceOverlap: z.boolean().default(false),
-  forceCompatibility: z.boolean().default(false),
   forceEnvironment: z.boolean().default(false),
-  simulateFailChunk: z.string().optional(),
-  simulateFailCount: z.number().int().positive().default(1),
-  maxRetriesPerChunk: z.number().int().positive().default(3),
-  retryDelayMs: z.number().nonnegative().default(1000),
-  maxParallelChunks: z.number().int().positive().default(1),
-  maxChunkBytes: z.number().positive().default(10 * GiB),
-  requireIdempotencyToken: z.boolean().default(true),
-  blockOverlappingRuns: z.boolean().default(true),
-  requireDryRunBeforeRun: z.boolean().default(true),
-  requireExplicitWindow: z.boolean().default(true),
-  failCheckOnRequiredPendingBackfill: z.boolean().default(true),
-  maxWindowHours: z.number().positive().default(720),
-  minChunkMinutes: z.number().positive().default(15),
+  concurrency: z.number().int().positive().default(3),
+  pollIntervalMs: z.number().nonnegative().default(5000),
   stateDir: z.string().min(1).optional(),
 })
 export type RunOptions = z.infer<typeof RunSchema>
 
-export const ResumeSchema = RunSchema.omit({
-  simulateFailChunk: true,
-  simulateFailCount: true,
+export const ResumeSchema = RunSchema.extend({
+  replayFailed: z.boolean().default(false),
 })
 export type ResumeOptions = z.infer<typeof ResumeSchema>
 
@@ -153,21 +137,6 @@ export const CheckSchema = z.object({
 })
 export type CheckOptions = z.infer<typeof CheckSchema>
 
-/** Fields used by computeCompatibilityToken — shared by RunOptions and ResumeOptions. */
-export type CompatOptions = Pick<
-  RunOptions,
-  | 'maxChunkBytes'
-  | 'maxParallelChunks'
-  | 'maxRetriesPerChunk'
-  | 'requireIdempotencyToken'
-  | 'requireDryRunBeforeRun'
-  | 'requireExplicitWindow'
-  | 'blockOverlappingRuns'
-  | 'failCheckOnRequiredPendingBackfill'
-  | 'maxWindowHours'
-  | 'minChunkMinutes'
->
-
 // ───── CLI flag definitions ─────
 
 export const PLAN_FLAGS = defineFlags([
@@ -179,22 +148,17 @@ export const PLAN_FLAGS = defineFlags([
 
 export const RUN_FLAGS = defineFlags([
   { name: '--plan-id', type: 'string', description: 'Plan ID to execute', placeholder: '<id>' },
-  { name: '--replay-done', type: 'boolean', description: 'Re-execute already completed chunks' },
-  { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
-  { name: '--force-overlap', type: 'boolean', description: 'Allow overlapping runs' },
-  { name: '--force-compatibility', type: 'boolean', description: 'Skip compatibility checks' },
   { name: '--force-environment', type: 'boolean', description: 'Skip environment mismatch checks' },
-  { name: '--simulate-fail-chunk', type: 'string', description: 'Simulate failure on chunk', placeholder: '<chunk-id>' },
-  { name: '--simulate-fail-count', type: 'string', description: 'Number of simulated failures', placeholder: '<count>' },
+  { name: '--concurrency', type: 'string', description: 'Max concurrent async queries', placeholder: '<n>' },
+  { name: '--poll-interval', type: 'string', description: 'Polling interval in ms', placeholder: '<ms>' },
 ] as const)
 
 export const RESUME_FLAGS = defineFlags([
   { name: '--plan-id', type: 'string', description: 'Plan ID to resume', placeholder: '<id>' },
-  { name: '--replay-done', type: 'boolean', description: 'Re-execute already completed chunks' },
-  { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
-  { name: '--force-overlap', type: 'boolean', description: 'Allow overlapping runs' },
-  { name: '--force-compatibility', type: 'boolean', description: 'Skip compatibility checks' },
   { name: '--force-environment', type: 'boolean', description: 'Skip environment mismatch checks' },
+  { name: '--concurrency', type: 'string', description: 'Max concurrent async queries', placeholder: '<n>' },
+  { name: '--poll-interval', type: 'string', description: 'Polling interval in ms', placeholder: '<ms>' },
+  { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
 ] as const)
 
 export const PLAN_ID_FLAGS = defineFlags([
@@ -210,35 +174,27 @@ const PLAN_FLAG_MAP: FlagMapping = {
   '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: parseByteSize },
 }
 
+function coercePositiveInt(v: string, flag: string): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
+    throw new BackfillConfigError(`Invalid value for ${flag}. Expected integer > 0.`)
+  }
+  return n
+}
+
 const RUN_FLAG_MAP: FlagMapping = {
   '--plan-id': { key: 'planId', coerce: normalizePlanId },
-  '--replay-done': { key: 'replayDone' },
-  '--replay-failed': { key: 'replayFailed' },
-  '--force-overlap': { key: 'forceOverlap' },
-  '--force-compatibility': { key: 'forceCompatibility' },
   '--force-environment': { key: 'forceEnvironment' },
-  '--simulate-fail-chunk': { key: 'simulateFailChunk' },
-  '--simulate-fail-count': {
-    key: 'simulateFailCount',
-    coerce: (v) => {
-      const n = Number(v)
-      if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
-        throw new BackfillConfigError(
-          'Invalid value for --simulate-fail-count. Expected integer > 0.'
-        )
-      }
-      return n
-    },
-  },
+  '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
+  '--poll-interval': { key: 'pollIntervalMs', coerce: (v) => coercePositiveInt(v, '--poll-interval') },
 }
 
 const RESUME_FLAG_MAP: FlagMapping = {
   '--plan-id': { key: 'planId', coerce: normalizePlanId },
-  '--replay-done': { key: 'replayDone' },
-  '--replay-failed': { key: 'replayFailed' },
-  '--force-overlap': { key: 'forceOverlap' },
-  '--force-compatibility': { key: 'forceCompatibility' },
   '--force-environment': { key: 'forceEnvironment' },
+  '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
+  '--poll-interval': { key: 'pollIntervalMs', coerce: (v) => coercePositiveInt(v, '--poll-interval') },
+  '--replay-failed': { key: 'replayFailed' },
 }
 
 const PLAN_ID_FLAG_MAP: FlagMapping = {

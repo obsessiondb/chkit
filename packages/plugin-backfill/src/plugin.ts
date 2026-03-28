@@ -1,6 +1,7 @@
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import { wrapPluginRun } from '@chkit/core'
 
+import { executeBackfill, type BackfillProgress } from './async-backfill.js'
 import { BackfillConfigError } from './errors.js'
 import {
   PLAN_FLAGS,
@@ -15,15 +16,23 @@ import {
   resolveStatusOptions,
   type PluginConfig,
 } from './options.js'
-import { planPayload, runPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
+import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
 import { buildBackfillPlan } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
-import { executeBackfillRun, resumeBackfillRun } from './runtime.js'
+import {
+  backfillPaths,
+  ensureEnvironmentMatch,
+  nowIso,
+  readPlan,
+  readRun,
+  summarizeRunStatus,
+  writeJson,
+} from './state.js'
 import type {
   BackfillPlugin,
   BackfillPluginRegistration,
-  ExecuteBackfillRunOutput,
+  BackfillRunState,
 } from './types.js'
 
 function formatBytes(bytes: number): string {
@@ -34,40 +43,144 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
-type BackfillCommandContext = Parameters<BackfillPlugin['commands'][number]['run']>[0]
+async function runBackfill(input: {
+  planId: string
+  forceEnvironment: boolean
+  concurrency: number
+  pollIntervalMs: number
+  stateDir?: string
+  resumeFrom?: BackfillProgress
+  replayFailed?: boolean
+  configPath: string
+  config: Parameters<typeof readPlan>[0]['config']
+  clickhouse: NonNullable<Parameters<typeof createClickHouseExecutor>[0]>
+  print: (value: unknown) => void
+  jsonMode: boolean
+}): Promise<number> {
+  const { plan, stateDir } = await readPlan({
+    planId: input.planId,
+    configPath: input.configPath,
+    config: input.config,
+    stateDir: input.stateDir,
+  })
 
-function formatRunOutput(
-  output: ExecuteBackfillRunOutput,
-  command: string,
-  context: Pick<BackfillCommandContext, 'jsonMode' | 'print'>,
-): number {
-  const payload = {
-    ...runPayload(output),
-    command,
-  }
-  if (payload.noop) {
-    if (!context.jsonMode) {
-      context.print(
-        `Plan ${payload.planId} is already completed (${payload.chunkCounts.done}/${payload.chunkCounts.total} chunks done). Nothing to do.`
+  ensureEnvironmentMatch({
+    plan,
+    clickhouse: input.clickhouse,
+    forceEnvironment: input.forceEnvironment,
+  })
+
+  const paths = backfillPaths(stateDir, plan.planId)
+
+  // Check for existing run state
+  const existingRun = await readRun(paths.runPath)
+  let resumeFrom = input.resumeFrom
+
+  if (existingRun) {
+    if (existingRun.status === 'completed') {
+      if (input.jsonMode) {
+        input.print({
+          ok: true,
+          planId: plan.planId,
+          status: 'completed',
+          noop: true,
+        })
+      } else {
+        const summary = summarizeRunStatus(existingRun, paths.runPath, plan)
+        input.print(
+          `Plan ${plan.planId} is already completed (${summary.totals.done}/${summary.totals.total} chunks done). Nothing to do.`
+        )
+      }
+      return 0
+    }
+    if (existingRun.status === 'cancelled') {
+      throw new BackfillConfigError(
+        `Run is cancelled for plan ${plan.planId}. Create a new plan or inspect with backfill doctor.`
       )
+    }
+    // Resume from existing progress
+    resumeFrom = existingRun.progress
+  }
+
+  // If replay-failed, reset failed chunks to pending in resumeFrom
+  if (input.replayFailed && resumeFrom) {
+    resumeFrom = Object.fromEntries(
+      Object.entries(resumeFrom).map(([id, state]) => [
+        id,
+        state.status === 'failed' ? { status: 'pending' as const } : state,
+      ]),
+    )
+  }
+
+  const db = createClickHouseExecutor(input.clickhouse)
+
+  try {
+    const runState: BackfillRunState = {
+      planId: plan.planId,
+      target: plan.target,
+      status: 'running',
+      startedAt: existingRun?.startedAt ?? nowIso(),
+      updatedAt: nowIso(),
+      progress: resumeFrom ?? {},
+    }
+
+    await writeJson(paths.runPath, runState)
+
+    const result = await executeBackfill({
+      executor: db,
+      chunks: plan.chunks.map((c) => ({ id: c.id, from: c.from, to: c.to })),
+      buildQuery: (chunk) => {
+        const planChunk = plan.chunks.find((c) => c.id === chunk.id)
+        if (!planChunk) throw new Error(`Chunk ${chunk.id} not found in plan`)
+        return planChunk.sqlTemplate
+      },
+      concurrency: input.concurrency,
+      pollIntervalMs: input.pollIntervalMs,
+      resumeFrom,
+      onProgress: async (progress) => {
+        runState.progress = progress
+        runState.updatedAt = nowIso()
+        await writeJson(paths.runPath, runState)
+      },
+    })
+
+    runState.status = result.failed > 0 ? 'failed' : 'completed'
+    runState.completedAt = nowIso()
+    runState.updatedAt = nowIso()
+    runState.progress = result.progress
+    if (result.failed > 0) {
+      const failedEntry = Object.values(result.progress).find((c) => c.status === 'failed')
+      runState.lastError = failedEntry?.error ?? 'One or more chunks failed'
+    }
+    await writeJson(paths.runPath, runState)
+
+    const summary = summarizeRunStatus(runState, paths.runPath, plan)
+
+    if (input.jsonMode) {
+      input.print({
+        ok: result.failed === 0,
+        planId: plan.planId,
+        status: runState.status,
+        chunkCounts: summary.totals,
+        rowsWritten: summary.rowsWritten,
+        runPath: paths.runPath,
+        lastError: runState.lastError,
+      })
     } else {
-      context.print(payload)
+      let line = `Backfill ${plan.planId}: ${runState.status} (done=${summary.totals.done}/${summary.totals.total}, ${summary.rowsWritten} rows written)`
+      if (runState.lastError) line += ` \u2014 ${runState.lastError}`
+      input.print(line)
+      if (runState.status === 'completed' && summary.rowsWritten === 0) {
+        input.print(
+          'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+        )
+      }
     }
-    return 0
+
+    return result.failed > 0 ? 1 : 0
+  } finally {
+    await db.close()
   }
-  if (context.jsonMode) {
-    context.print(payload)
-  } else {
-    let line = `Backfill ${command} ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, ${payload.rowsWritten} rows written)`
-    if (payload.lastError) line += ` \u2014 ${payload.lastError}`
-    context.print(line)
-    if (payload.status === 'completed' && payload.rowsWritten === 0) {
-      context.print(
-        'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
-      )
-    }
-  }
-  return payload.ok ? 0 : 1
 }
 
 export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin {
@@ -138,7 +251,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       },
       {
         name: 'run',
-        description: 'Execute a planned backfill with checkpointed chunk progress',
+        description: 'Execute a planned backfill with async query submission and polling',
         flags: RUN_FLAGS,
         run: async (context) =>
           wrapPluginRun({
@@ -150,23 +263,24 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             fn: async () => {
               const opts = resolveRunOptions(config, context.options, context.flags)
 
-              const db = context.config.clickhouse
-                ? createClickHouseExecutor(context.config.clickhouse)
-                : undefined
-
-              try {
-                const output = await executeBackfillRun({
-                  opts,
-                  configPath: context.configPath,
-                  config: context.config,
-                  execute: db ? async (sql) => { await db.command(sql); return undefined } : undefined,
-                  clickhouse: context.config.clickhouse,
-                })
-
-                return formatRunOutput(output, 'run', context)
-              } finally {
-                await db?.close()
+              if (!context.config.clickhouse) {
+                throw new BackfillConfigError(
+                  'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
+                )
               }
+
+              return runBackfill({
+                planId: opts.planId,
+                forceEnvironment: opts.forceEnvironment,
+                concurrency: opts.concurrency,
+                pollIntervalMs: opts.pollIntervalMs,
+                stateDir: opts.stateDir,
+                configPath: context.configPath,
+                config: context.config,
+                clickhouse: context.config.clickhouse,
+                print: context.print,
+                jsonMode: context.jsonMode,
+              })
             },
           }),
       },
@@ -184,23 +298,39 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             fn: async () => {
               const opts = resolveResumeOptions(config, context.options, context.flags)
 
-              const db = context.config.clickhouse
-                ? createClickHouseExecutor(context.config.clickhouse)
-                : undefined
-
-              try {
-                const output = await resumeBackfillRun({
-                  opts,
-                  configPath: context.configPath,
-                  config: context.config,
-                  execute: db ? async (sql) => { await db.command(sql); return undefined } : undefined,
-                  clickhouse: context.config.clickhouse,
-                })
-
-                return formatRunOutput(output, 'resume', context)
-              } finally {
-                await db?.close()
+              if (!context.config.clickhouse) {
+                throw new BackfillConfigError(
+                  'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
+                )
               }
+
+              const { stateDir } = await readPlan({
+                planId: opts.planId,
+                configPath: context.configPath,
+                config: context.config,
+                stateDir: opts.stateDir,
+              })
+              const paths = backfillPaths(stateDir, opts.planId)
+              const existingRun = await readRun(paths.runPath)
+              if (!existingRun) {
+                throw new BackfillConfigError(
+                  `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
+                )
+              }
+
+              return runBackfill({
+                planId: opts.planId,
+                forceEnvironment: opts.forceEnvironment,
+                concurrency: opts.concurrency,
+                pollIntervalMs: opts.pollIntervalMs,
+                stateDir: opts.stateDir,
+                replayFailed: opts.replayFailed,
+                configPath: context.configPath,
+                config: context.config,
+                clickhouse: context.config.clickhouse,
+                print: context.print,
+                jsonMode: context.jsonMode,
+              })
             },
           }),
       },
