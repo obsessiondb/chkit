@@ -253,7 +253,7 @@ describe('plugin runtime', () => {
       await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
       await db.close()
     }
-  })
+  }, 120_000)
 
   test('chkit plugin backfill run and status complete planned chunks', async () => {
     const chEnv = getClickHouseEnv()
@@ -344,7 +344,7 @@ describe('plugin runtime', () => {
       await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
       await db.close()
     }
-  })
+  }, 120_000)
 
   test('chkit plugin backfill resume on completed run is a no-op', async () => {
     const chEnv = getClickHouseEnv()
@@ -426,7 +426,7 @@ describe('plugin runtime', () => {
       await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
       await db.close()
     }
-  })
+  }, 120_000)
 
   test('chkit check --json requires clickhouse config', async () => {
     const fixture = await createFixture()
@@ -536,7 +536,7 @@ describe('plugin runtime', () => {
       await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
       await db.close()
     }
-  })
+  }, 120_000)
 
   test('chkit plugin backfill cancel and doctor provide operator remediation flow', async () => {
     const chEnv = getClickHouseEnv()
@@ -618,6 +618,10 @@ describe('plugin runtime', () => {
         expect(cancelCompleted.exitCode).toBe(2)
         expect(cancelCompleted.stdout).toContain('already completed')
 
+        // Insert data for the second plan's time range
+        await db.command(`INSERT INTO ${chEnv.database}.${tableName} VALUES (4, '2026-01-05 12:00:00'), (5, '2026-01-06 12:00:00')`)
+        await waitForParts(db, chEnv.database, tableName, 5)
+
         // Plan a second backfill that we won't run — doctor should flag it
         const planned2 = runCli([
           'plugin',
@@ -659,7 +663,7 @@ describe('plugin runtime', () => {
       await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
       await db.close()
     }
-  })
+  }, 120_000)
 
   test('chkit codegen writes output file', async () => {
     const fixture = await createFixture()

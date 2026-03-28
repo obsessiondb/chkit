@@ -303,9 +303,12 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 )
               }
               if (existingRun.status === 'completed') {
-                throw new BackfillConfigError(
-                  `Run already completed for plan ${opts.planId}. Nothing to resume.`
-                )
+                if (context.jsonMode) {
+                  context.print({ ok: true, noop: true, planId: opts.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
+                } else {
+                  context.print(`Backfill ${opts.planId}: already completed. Nothing to resume.`)
+                }
+                return 0
               }
 
               return runBackfill({
