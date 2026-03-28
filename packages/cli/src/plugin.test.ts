@@ -44,8 +44,10 @@ async function waitForParts(
 ): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
+    // Sync replica state for the target table first, then check system.parts
+    await db.query(`SELECT 1 FROM ${database}.${table} LIMIT 0 SETTINGS select_sequential_consistency = 1`)
     const rows = await db.query<{ cnt: string }>(
-      `SELECT count(DISTINCT partition) AS cnt FROM system.parts WHERE database = '${database}' AND table = '${table}' AND active`
+      `SELECT count(DISTINCT partition) AS cnt FROM system.parts WHERE database = '${database}' AND table = '${table}' AND active SETTINGS select_sequential_consistency = 1`
     )
     const count = Number(rows[0]?.cnt ?? 0)
     if (count >= expectedPartitions) return

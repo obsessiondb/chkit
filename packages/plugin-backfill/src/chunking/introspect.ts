@@ -23,6 +23,14 @@ export async function queryPartitionInfo(input: {
   to?: string
   query: <T>(sql: string) => Promise<T[]>
 }): Promise<PartitionInfo[]> {
+  // Force replica sync on the target table before reading system.parts.
+  // select_sequential_consistency is only effective on user tables, not system
+  // tables, so this preliminary query ensures the replica has caught up with
+  // all pending writes before we inspect part metadata.
+  await input.query(
+    `SELECT 1 FROM ${input.database}.${input.table} LIMIT 0 SETTINGS select_sequential_consistency = 1`
+  )
+
   const rows = await input.query<{
     partition_id: string
     total_rows: string
