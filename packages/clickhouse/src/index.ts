@@ -19,8 +19,11 @@ import {
 
 export interface QueryStatus {
   status: 'running' | 'finished' | 'failed' | 'unknown'
+  readRows?: number
+  readBytes?: number
   writtenRows?: number
   writtenBytes?: number
+  elapsedMs?: number
   durationMs?: number
   error?: string
 }
@@ -273,13 +276,27 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     async queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus> {
       try {
         const running = await client.query({
-          query: `SELECT count() AS cnt FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+          query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id = {qid:String} SETTINGS skip_unavailable_shards = 1 LIMIT 1`,
           query_params: { qid: queryId },
           format: 'JSONEachRow',
         })
-        const runningRows = await running.json<{ cnt: string }>()
-        if (Number(runningRows[0]?.cnt) > 0) {
-          return { status: 'running' }
+        const runningRows = await running.json<{
+          read_rows: string
+          read_bytes: string
+          written_rows: string
+          written_bytes: string
+          elapsed: string
+        }>()
+        if (runningRows.length > 0) {
+          const proc = runningRows[0]!
+          return {
+            status: 'running',
+            readRows: Number(proc.read_rows),
+            readBytes: Number(proc.read_bytes),
+            writtenRows: Number(proc.written_rows),
+            writtenBytes: Number(proc.written_bytes),
+            elapsedMs: Math.round(Number(proc.elapsed) * 1000),
+          }
         }
 
         const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
