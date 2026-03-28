@@ -17,7 +17,7 @@
     },
     "apps/docs": {
       "name": "@chkit/docs",
-      "version": "0.0.2-beta.5",
+      "version": "0.0.2-beta.8",
       "dependencies": {
         "@astrojs/starlight": "^0.37.6",
         "astro": "^5.6.1",
@@ -27,7 +27,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -41,7 +41,7 @@
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
@@ -50,14 +50,14 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
@@ -67,35 +67,35 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
+        "zod": "^4.3.6",
       },
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
-      },
-      "devDependencies": {
         "zod": "^4.3.6",
       },
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.0-beta.16",
+      "version": "0.1.0-beta.19",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
+        "zod": "^4.3.6",
       },
     },
   },
@@ -1254,7 +1254,11 @@
 
     "@astrojs/telemetry/ci-info": ["ci-info@4.4.0", "", {}, "sha512-77PSwercCZU2Fc4sX94eF8k8Pxte6JAwL4/ICZLFjJLqegs7kCuAsqqj/70NQF6TvDpgFjkubQB2FW2ZZddvQg=="],
 
+    "@chkit/plugin-backfill/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
     "@chkit/plugin-codegen/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-pull/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@manypkg/find-root/@types/node": ["@types/node@12.20.55", "", {}, "sha512-J8xLz7q2OFulZ2cyGTLE1TbbZcjpno7FaN6zdJNrgAdrJ+DZzh/uFR6YrTb4C+nXakvud8Q4+rbhoIWlYQbUFQ=="],
 

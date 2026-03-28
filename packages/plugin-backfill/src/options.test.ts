@@ -1,58 +1,188 @@
 import { describe, expect, test } from 'bun:test'
+import { resolveOptions } from '@chkit/core'
 
-import { mergeOptions, normalizeBackfillOptions } from './options.js'
+import {
+  parseByteSize,
+  PlanSchema,
+  RunSchema,
+  ResumeSchema,
+  CheckSchema,
+  PluginConfigSchema,
+} from './options.js'
 
-describe('@chkit/plugin-backfill options', () => {
-  test('normalizes documented defaults', () => {
-    const options = normalizeBackfillOptions()
-
-    expect(options.defaults.maxChunkBytes).toBe(10 * 1024 ** 3)
-    expect(options.defaults.maxParallelChunks).toBe(1)
-    expect(options.defaults.maxRetriesPerChunk).toBe(3)
-    expect(options.defaults.requireIdempotencyToken).toBe(true)
-    expect(options.defaults.timeColumn).toBeUndefined()
-    expect(options.policy.requireDryRunBeforeRun).toBe(true)
-    expect(options.policy.requireExplicitWindow).toBe(true)
-    expect(options.policy.blockOverlappingRuns).toBe(true)
-    expect(options.policy.failCheckOnRequiredPendingBackfill).toBe(true)
-    expect(options.limits.maxWindowHours).toBe(24 * 30)
-    expect(options.limits.minChunkMinutes).toBe(15)
+describe('parseByteSize', () => {
+  test('parses gigabytes', () => {
+    expect(parseByteSize('10G')).toBe(10 * 1024 ** 3)
   })
 
-  test('passes through configured timeColumn', () => {
-    const options = normalizeBackfillOptions({
-      defaults: { timeColumn: 'created_at' },
+  test('parses megabytes', () => {
+    expect(parseByteSize('500M')).toBe(500 * 1024 ** 2)
+  })
+
+  test('parses terabytes', () => {
+    expect(parseByteSize('1T')).toBe(1024 ** 4)
+  })
+
+  test('parses kilobytes', () => {
+    expect(parseByteSize('256K')).toBe(256 * 1024)
+  })
+
+  test('parses plain number as bytes', () => {
+    expect(parseByteSize('1048576')).toBe(1048576)
+  })
+
+  test('parses decimal values', () => {
+    expect(parseByteSize('1.5G')).toBe(1.5 * 1024 ** 3)
+  })
+
+  test('is case-insensitive', () => {
+    expect(parseByteSize('10g')).toBe(10 * 1024 ** 3)
+    expect(parseByteSize('500m')).toBe(500 * 1024 ** 2)
+  })
+
+  test('trims whitespace', () => {
+    expect(parseByteSize('  10G  ')).toBe(10 * 1024 ** 3)
+  })
+
+  test('throws on invalid input', () => {
+    expect(() => parseByteSize('abc')).toThrow('Invalid byte size')
+    expect(() => parseByteSize('')).toThrow('Invalid byte size')
+    expect(() => parseByteSize('10X')).toThrow('Invalid byte size')
+  })
+})
+
+describe('PlanSchema defaults', () => {
+  test('applies documented defaults', () => {
+    const opts = PlanSchema.parse({ target: 'default.events' })
+
+    expect(opts.maxChunkBytes).toBe(10 * 1024 ** 3)
+    expect(opts.maxParallelChunks).toBe(1)
+    expect(opts.maxRetriesPerChunk).toBe(3)
+    expect(opts.requireIdempotencyToken).toBe(true)
+    expect(opts.requireExplicitWindow).toBe(true)
+    expect(opts.blockOverlappingRuns).toBe(true)
+    expect(opts.requireDryRunBeforeRun).toBe(true)
+    expect(opts.failCheckOnRequiredPendingBackfill).toBe(true)
+    expect(opts.maxWindowHours).toBe(720)
+    expect(opts.minChunkMinutes).toBe(15)
+    expect(opts.timeColumn).toBeUndefined()
+  })
+
+  test('overrides work', () => {
+    const opts = PlanSchema.parse({
+      target: 'default.events',
+      maxChunkBytes: 5 * 1024 ** 3,
+      requireIdempotencyToken: false,
     })
 
-    expect(options.defaults.timeColumn).toBe('created_at')
+    expect(opts.maxChunkBytes).toBe(5 * 1024 ** 3)
+    expect(opts.requireIdempotencyToken).toBe(false)
+  })
+})
+
+describe('RunSchema defaults', () => {
+  test('applies documented defaults', () => {
+    const opts = RunSchema.parse({ planId: 'abc123def456789a' })
+
+    expect(opts.replayDone).toBe(false)
+    expect(opts.replayFailed).toBe(false)
+    expect(opts.forceOverlap).toBe(false)
+    expect(opts.forceCompatibility).toBe(false)
+    expect(opts.forceEnvironment).toBe(false)
+    expect(opts.maxRetriesPerChunk).toBe(3)
+    expect(opts.retryDelayMs).toBe(1000)
+    expect(opts.maxParallelChunks).toBe(1)
+    expect(opts.blockOverlappingRuns).toBe(true)
+    expect(opts.requireDryRunBeforeRun).toBe(true)
+    expect(opts.simulateFailCount).toBe(1)
+  })
+})
+
+describe('ResumeSchema', () => {
+  test('omits simulation fields', () => {
+    const opts = ResumeSchema.parse({ planId: 'abc123def456789a' })
+
+    expect(opts).not.toHaveProperty('simulateFailChunk')
+    expect(opts).not.toHaveProperty('simulateFailCount')
+    expect(opts.replayDone).toBe(false)
+  })
+})
+
+describe('resolveOptions', () => {
+  test('CLI flags override plugin config and runtime options', () => {
+    const opts = resolveOptions(
+      PlanSchema,
+      { maxChunkBytes: 5 * 1024 ** 3 },
+      { maxChunkBytes: 8 * 1024 ** 3 },
+      { '--target': 'app.events', '--max-chunk-bytes': '20G' },
+      {
+        '--target': { key: 'target', coerce: (v: string) => v },
+        '--max-chunk-bytes': {
+          key: 'maxChunkBytes',
+          coerce: (v: string) => parseByteSize(v),
+        },
+      }
+    )
+
+    expect(opts.target).toBe('app.events')
+    expect(opts.maxChunkBytes).toBe(20 * 1024 ** 3)
   })
 
-  test('mergeOptions preserves base defaults when runtime only sets timeColumn', () => {
-    const base = normalizeBackfillOptions()
-    const merged = mergeOptions(base, { defaults: { timeColumn: 'session_date' } })
+  test('runtime options override plugin config', () => {
+    const opts = resolveOptions(
+      RunSchema,
+      { maxRetriesPerChunk: 2 },
+      { maxRetriesPerChunk: 5 },
+      { '--plan-id': 'abc123def456789a' },
+      { '--plan-id': { key: 'planId', coerce: (v: string) => v } }
+    )
 
-    expect(merged.defaults.maxChunkBytes).toBe(10 * 1024 ** 3)
-    expect(merged.defaults.maxParallelChunks).toBe(1)
-    expect(merged.defaults.maxRetriesPerChunk).toBe(3)
-    expect(merged.defaults.requireIdempotencyToken).toBe(true)
-    expect(merged.defaults.timeColumn).toBe('session_date')
+    expect(opts.maxRetriesPerChunk).toBe(5)
   })
 
-  test('mergeOptions preserves base policy when runtime only sets one policy field', () => {
-    const base = normalizeBackfillOptions()
-    const merged = mergeOptions(base, { policy: { blockOverlappingRuns: false } })
+  test('schema defaults apply when no override provided', () => {
+    const opts = resolveOptions(
+      RunSchema,
+      {},
+      {},
+      { '--plan-id': 'abc123def456789a' },
+      { '--plan-id': { key: 'planId', coerce: (v: string) => v } }
+    )
 
-    expect(merged.policy.requireDryRunBeforeRun).toBe(true)
-    expect(merged.policy.requireExplicitWindow).toBe(true)
-    expect(merged.policy.blockOverlappingRuns).toBe(false)
-    expect(merged.policy.failCheckOnRequiredPendingBackfill).toBe(true)
+    expect(opts.maxRetriesPerChunk).toBe(3)
+    expect(opts.retryDelayMs).toBe(1000)
+    expect(opts.blockOverlappingRuns).toBe(true)
   })
 
-  test('mergeOptions preserves base limits when runtime only sets one limit field', () => {
-    const base = normalizeBackfillOptions()
-    const merged = mergeOptions(base, { limits: { maxWindowHours: 48 } })
+  test('throws on invalid options', () => {
+    expect(() =>
+      resolveOptions(PlanSchema, {}, {}, {}, {})
+    ).toThrow()
+  })
+})
 
-    expect(merged.limits.maxWindowHours).toBe(48)
-    expect(merged.limits.minChunkMinutes).toBe(15)
+describe('PluginConfigSchema', () => {
+  test('accepts empty config', () => {
+    const config = PluginConfigSchema.parse({})
+    expect(config).toEqual({})
+  })
+
+  test('accepts flat config fields', () => {
+    const config = PluginConfigSchema.parse({
+      maxRetriesPerChunk: 5,
+      blockOverlappingRuns: false,
+      maxWindowHours: 48,
+    })
+
+    expect(config.maxRetriesPerChunk).toBe(5)
+    expect(config.blockOverlappingRuns).toBe(false)
+    expect(config.maxWindowHours).toBe(48)
+  })
+})
+
+describe('CheckSchema', () => {
+  test('defaults failCheckOnRequiredPendingBackfill to true', () => {
+    const opts = CheckSchema.parse({})
+    expect(opts.failCheckOnRequiredPendingBackfill).toBe(true)
   })
 })

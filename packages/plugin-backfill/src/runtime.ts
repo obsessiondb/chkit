@@ -3,6 +3,7 @@ import type { ResolvedChxConfig } from '@chkit/core'
 import { BackfillConfigError } from './errors.js'
 import { executeWorkItems } from './executor.js'
 import type { ProgressEvent, WorkItem } from './executor.js'
+import type { RunOptions, ResumeOptions } from './options.js'
 import {
   backfillPaths,
   collectActiveRunTargets,
@@ -16,12 +17,10 @@ import {
   summarizeRunStatus,
 } from './state.js'
 import type {
-  BackfillExecutionOptions,
   BackfillPlanState,
   BackfillRunChunkState,
   BackfillRunState,
   ExecuteBackfillRunOutput,
-  NormalizedBackfillPluginOptions,
 } from './types.js'
 
 /** Adapter that bridges a BackfillRunChunkState to the generic WorkItem interface. */
@@ -52,7 +51,10 @@ async function executeRunLoop(input: {
     runPath: string
     eventPath: string
   }
-  execution: BackfillExecutionOptions
+  replayDone: boolean
+  replayFailed: boolean
+  simulateFailChunk?: string
+  simulateFailCount: number
   retryDelayMs: number
   execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
 }): Promise<ExecuteBackfillRunOutput> {
@@ -65,8 +67,8 @@ async function executeRunLoop(input: {
 
   try {
     input.run.status = 'running'
-    input.run.replayDone = input.execution.replayDone ?? false
-    input.run.replayFailed = input.execution.replayFailed ?? false
+    input.run.replayDone = input.replayDone
+    input.run.replayFailed = input.replayFailed
 
     await persistRunAndEvent({
       run: input.run,
@@ -104,13 +106,10 @@ async function executeRunLoop(input: {
     }
 
     // Simulation support: wrap the execute function to inject failures.
-    const failureBudget = input.execution.simulation?.failCount ?? 0
-    const failChunkId = input.execution.simulation?.failChunkId
+    const failureBudget = input.simulateFailCount
+    const failChunkId = input.simulateFailChunk
 
     const wrappedExecute = async (item: ChunkWorkItem): Promise<void> => {
-      // The executor has already incremented item.attempts and set
-      // item.status = 'running' before calling execute.  Use item.attempts
-      // (already incremented) for the simulation budget check.
       const shouldSimulateFailure =
         failChunkId === item.id && item.attempts <= failureBudget
 
@@ -289,31 +288,29 @@ async function assertNoOverlappingActiveRun(input: {
 }
 
 export async function executeBackfillRun(input: {
-  planId: string
+  opts: RunOptions
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
-  execution?: BackfillExecutionOptions
   execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
   clickhouse?: { url: string; database: string }
 }): Promise<ExecuteBackfillRunOutput> {
-  const execution = input.execution ?? {}
+  const { opts } = input
   const { plan, stateDir } = await readPlan({
-    planId: input.planId,
+    planId: opts.planId,
     configPath: input.configPath,
     config: input.config,
-    options: input.options,
+    stateDir: opts.stateDir,
   })
 
   ensureEnvironmentMatch({
     plan,
     clickhouse: input.clickhouse,
-    forceEnvironment: execution.forceEnvironment ?? false,
+    forceEnvironment: opts.forceEnvironment,
   })
 
   const paths = backfillPaths(stateDir, plan.planId)
 
-  if (input.options.policy.blockOverlappingRuns && !execution.forceOverlap) {
+  if (opts.blockOverlappingRuns && !opts.forceOverlap) {
     await assertNoOverlappingActiveRun({
       runsDir: paths.runsDir,
       planId: plan.planId,
@@ -323,21 +320,17 @@ export async function executeBackfillRun(input: {
 
   let run = await readRun(paths.runPath)
   if (!run) {
-    run = createRunState({
-      plan,
-      options: input.options,
-      execution,
-    })
+    run = createRunState({ plan, opts })
   } else {
     ensureRunCompatibility({
       run,
       plan,
-      options: input.options,
-      forceCompatibility: execution.forceCompatibility ?? false,
+      opts,
+      forceCompatibility: opts.forceCompatibility,
     })
   }
 
-  if (run.status === 'completed' && !execution.replayDone && !execution.replayFailed) {
+  if (run.status === 'completed' && !opts.replayDone && !opts.replayFailed) {
     return {
       run,
       status: summarizeRunStatus(run, paths.runPath, paths.eventPath),
@@ -356,32 +349,34 @@ export async function executeBackfillRun(input: {
     plan,
     run,
     paths,
-    execution,
-    retryDelayMs: input.options.defaults.retryDelayMs,
+    replayDone: opts.replayDone,
+    replayFailed: opts.replayFailed,
+    simulateFailChunk: opts.simulateFailChunk,
+    simulateFailCount: opts.simulateFailCount,
+    retryDelayMs: opts.retryDelayMs,
     execute: input.execute,
   })
 }
 
 export async function resumeBackfillRun(input: {
-  planId: string
+  opts: ResumeOptions
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
-  options: NormalizedBackfillPluginOptions
-  execution?: BackfillExecutionOptions
   execute?: (sql: string) => Promise<undefined | { rowsWritten?: number }>
   clickhouse?: { url: string; database: string }
 }): Promise<ExecuteBackfillRunOutput> {
+  const { opts } = input
   const { plan, stateDir } = await readPlan({
-    planId: input.planId,
+    planId: opts.planId,
     configPath: input.configPath,
     config: input.config,
-    options: input.options,
+    stateDir: opts.stateDir,
   })
 
   ensureEnvironmentMatch({
     plan,
     clickhouse: input.clickhouse,
-    forceEnvironment: input.execution?.forceEnvironment ?? false,
+    forceEnvironment: opts.forceEnvironment,
   })
 
   const paths = backfillPaths(stateDir, plan.planId)
@@ -396,10 +391,10 @@ export async function resumeBackfillRun(input: {
   ensureRunCompatibility({
     run,
     plan,
-    options: input.options,
-    forceCompatibility: input.execution?.forceCompatibility ?? false,
+    opts,
+    forceCompatibility: opts.forceCompatibility,
   })
-  if (input.options.policy.blockOverlappingRuns && !input.execution?.forceOverlap) {
+  if (opts.blockOverlappingRuns && !opts.forceOverlap) {
     await assertNoOverlappingActiveRun({
       runsDir: paths.runsDir,
       planId: plan.planId,
@@ -414,17 +409,15 @@ export async function resumeBackfillRun(input: {
 
   // Resume always retries failed chunks — the whole point of resume is to
   // recover from failures.  Users shouldn't need --replay-failed for this.
-  const execution: BackfillExecutionOptions = {
-    ...input.execution,
-    replayFailed: true,
-  }
-
   return executeRunLoop({
     plan,
     run,
     paths,
-    execution,
-    retryDelayMs: input.options.defaults.retryDelayMs,
+    replayDone: opts.replayDone,
+    replayFailed: true,
+    simulateFailChunk: undefined,
+    simulateFailCount: 0,
+    retryDelayMs: opts.retryDelayMs,
     execute: input.execute,
   })
 }
