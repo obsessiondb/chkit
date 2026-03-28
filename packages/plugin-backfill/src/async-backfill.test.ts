@@ -129,6 +129,44 @@ describe('executeBackfill', () => {
     expect(lastSnapshot.c1.status).toBe('done')
   })
 
+  test('reports intermediate metrics while running', async () => {
+    const statuses = new Map<string, QueryStatus[]>([
+      [`backfill-${PLAN_ID}-c1`, [
+        { status: 'running', readRows: 100, readBytes: 400, writtenRows: 0, writtenBytes: 0, elapsedMs: 1000 },
+        { status: 'running', readRows: 500, readBytes: 2000, writtenRows: 50, writtenBytes: 200, elapsedMs: 3000 },
+        { status: 'finished', writtenRows: 200, writtenBytes: 800, durationMs: 5000 },
+      ]],
+    ])
+
+    const progressSnapshots: BackfillProgress[] = []
+
+    await executeBackfill({
+      executor: createMockExecutor(statuses),
+      planId: PLAN_ID,
+      chunks: [chunks[0]],
+      buildQuery: () => 'SELECT 1',
+      pollIntervalMs: 10,
+      onProgress: (p) => { progressSnapshots.push(structuredClone(p)) },
+    })
+
+    // Should have at least 3 progress calls: submitted, running (with metrics), done
+    expect(progressSnapshots.length).toBeGreaterThanOrEqual(3)
+
+    // Find the running snapshots with metrics
+    const runningSnapshots = progressSnapshots.filter((p) => p.c1.status === 'running')
+    expect(runningSnapshots.length).toBe(2)
+    expect(runningSnapshots[0].c1.readRows).toBe(100)
+    expect(runningSnapshots[0].c1.elapsedMs).toBe(1000)
+    expect(runningSnapshots[1].c1.readRows).toBe(500)
+    expect(runningSnapshots[1].c1.writtenRows).toBe(50)
+    expect(runningSnapshots[1].c1.elapsedMs).toBe(3000)
+
+    // Final snapshot should be done
+    const lastSnapshot = progressSnapshots[progressSnapshots.length - 1]
+    expect(lastSnapshot.c1.status).toBe('done')
+    expect(lastSnapshot.c1.writtenRows).toBe(200)
+  })
+
   test('resumes from saved progress', async () => {
     const queryId = `backfill-${PLAN_ID}-c2`
     const statuses = new Map<string, QueryStatus[]>([
