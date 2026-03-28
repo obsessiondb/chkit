@@ -51,9 +51,9 @@ describe('executeBackfill', () => {
     expect(result.total).toBe(2)
     expect(result.completed).toBe(2)
     expect(result.failed).toBe(0)
-    expect(result.progress['c1'].status).toBe('done')
-    expect(result.progress['c2'].status).toBe('done')
-    expect(result.progress['c1'].writtenRows).toBe(100)
+    expect(result.progress.c1.status).toBe('done')
+    expect(result.progress.c2.status).toBe('done')
+    expect(result.progress.c1.writtenRows).toBe(100)
   })
 
   test('reports failed chunks', async () => {
@@ -73,9 +73,9 @@ describe('executeBackfill', () => {
 
     expect(result.completed).toBe(1)
     expect(result.failed).toBe(1)
-    expect(result.progress['c1'].status).toBe('failed')
-    expect(result.progress['c1'].error).toBe('OOM')
-    expect(result.progress['c2'].status).toBe('done')
+    expect(result.progress.c1.status).toBe('failed')
+    expect(result.progress.c1.error).toBe('OOM')
+    expect(result.progress.c2.status).toBe('done')
   })
 
   test('respects concurrency limit', async () => {
@@ -126,7 +126,7 @@ describe('executeBackfill', () => {
 
     expect(progressSnapshots.length).toBeGreaterThanOrEqual(1)
     const lastSnapshot = progressSnapshots[progressSnapshots.length - 1]
-    expect(lastSnapshot['c1'].status).toBe('done')
+    expect(lastSnapshot.c1.status).toBe('done')
   })
 
   test('resumes from saved progress', async () => {
@@ -151,8 +151,8 @@ describe('executeBackfill', () => {
 
     expect(result.completed).toBe(2)
     expect(result.failed).toBe(0)
-    expect(result.progress['c1'].status).toBe('done')
-    expect(result.progress['c1'].writtenRows).toBe(100)
+    expect(result.progress.c1.status).toBe('done')
+    expect(result.progress.c1.writtenRows).toBe(100)
   })
 
   test('handles transient poll errors gracefully', async () => {
@@ -175,7 +175,7 @@ describe('executeBackfill', () => {
 
     expect(result.completed).toBe(1)
     expect(result.failed).toBe(0)
-    expect(result.progress['c1'].status).toBe('done')
+    expect(result.progress.c1.status).toBe('done')
   })
 
   test('fails chunk after max consecutive poll errors', async () => {
@@ -195,8 +195,8 @@ describe('executeBackfill', () => {
 
     expect(result.completed).toBe(0)
     expect(result.failed).toBe(1)
-    expect(result.progress['c1'].status).toBe('failed')
-    expect(result.progress['c1'].error).toContain('3 consecutive poll errors')
+    expect(result.progress.c1.status).toBe('failed')
+    expect(result.progress.c1.error).toContain('3 consecutive poll errors')
   })
 
   test('replayFailed resets failed chunks after sync', async () => {
@@ -223,8 +223,8 @@ describe('executeBackfill', () => {
 
     expect(result.completed).toBe(2)
     expect(result.failed).toBe(0)
-    expect(result.progress['c1'].status).toBe('done')
-    expect(result.progress['c1'].writtenRows).toBe(42)
+    expect(result.progress.c1.status).toBe('done')
+    expect(result.progress.c1.writtenRows).toBe(42)
   })
 })
 
@@ -264,13 +264,13 @@ describe('syncProgress', () => {
     const synced = await syncProgress(executor, PLAN_ID, chunks, progress)
 
     // c1 was found completed in query_log
-    expect(synced['c1'].status).toBe('done')
-    expect(synced['c1'].writtenRows).toBe(500)
+    expect(synced.c1.status).toBe('done')
+    expect(synced.c1.writtenRows).toBe(500)
     // c2 was found running in system.processes
-    expect(synced['c2'].status).toBe('running')
-    expect(synced['c2'].queryId).toBe(`backfill-${PLAN_ID}-c2`)
+    expect(synced.c2.status).toBe('running')
+    expect(synced.c2.queryId).toBe(`backfill-${PLAN_ID}-c2`)
     // c3 had no server state — stays pending
-    expect(synced['c3'].status).toBe('pending')
+    expect(synced.c3.status).toBe('pending')
   })
 
   test('does not downgrade done chunks', async () => {
@@ -282,8 +282,8 @@ describe('syncProgress', () => {
     }
 
     const synced = await syncProgress(executor, PLAN_ID, [{ id: 'c1' }], progress)
-    expect(synced['c1'].status).toBe('done')
-    expect(synced['c1'].writtenRows).toBe(100)
+    expect(synced.c1.status).toBe('done')
+    expect(synced.c1.writtenRows).toBe(100)
   })
 
   test('updates failed server state for locally submitted chunk', async () => {
@@ -308,7 +308,7 @@ describe('syncProgress', () => {
     }
 
     const synced = await syncProgress(executor, PLAN_ID, [{ id: 'c1' }], progress)
-    expect(synced['c1'].status).toBe('failed')
-    expect(synced['c1'].error).toBe('Memory limit exceeded')
+    expect(synced.c1.status).toBe('failed')
+    expect(synced.c1.error).toBe('Memory limit exceeded')
   })
 })
