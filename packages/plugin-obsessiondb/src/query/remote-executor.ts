@@ -7,7 +7,15 @@ import {
   type SystemTableRow,
 } from '@chkit/clickhouse'
 import type { Credentials } from '../auth/index.js'
-import { createApiClient } from '../client.js'
+import { createApiClient, type ApiClient } from '../client.js'
+
+function throwIfError(
+  res: Awaited<ReturnType<ApiClient['workbench']['query']['execute']>>,
+): void {
+  if (res.error) {
+    throw new Error(res.error)
+  }
+}
 
 export function createRemoteExecutor(deps: {
   credentials: Credentials
@@ -18,11 +26,13 @@ export function createRemoteExecutor(deps: {
 
   const executor: ClickHouseExecutor = {
     async command(sql) {
-      await client.workbench.query.execute({ serviceId, query: sql })
+      const res = await client.workbench.query.execute({ serviceId, query: sql })
+      throwIfError(res)
     },
 
     async query<T>(sql: string): Promise<T[]> {
       const res = await client.workbench.query.execute({ serviceId, query: sql })
+      throwIfError(res)
       return res.data as T[]
     },
 
@@ -44,11 +54,12 @@ export function createRemoteExecutor(deps: {
     },
 
     async submit(sql, queryId?) {
-      await client.workbench.query.execute({
+      const res = await client.workbench.query.execute({
         serviceId,
         query: sql,
         settings: queryId ? { query_id: queryId } : undefined,
       })
+      throwIfError(res)
       return queryId ?? 'submitted'
     },
 
