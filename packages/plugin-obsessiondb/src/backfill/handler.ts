@@ -66,11 +66,7 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
 
     const result = await handler(input, effectiveCreds)
 
-    if (context.jsonMode) {
-      context.print(result)
-    } else {
-      context.print(result)
-    }
+    context.print(result)
 
     return { handled: true, exitCode: 0 }
   } catch (error) {

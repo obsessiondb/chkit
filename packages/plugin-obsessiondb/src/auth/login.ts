@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { platform } from 'node:os'
 
 import { getSession, pollDeviceToken, requestDeviceCode } from './api-client.js'
@@ -6,7 +6,7 @@ import { clearCredentials, loadCredentials, saveCredentials } from './credential
 
 function openBrowser(url: string): void {
   const cmd = platform() === 'darwin' ? 'open' : platform() === 'win32' ? 'start' : 'xdg-open'
-  exec(`${cmd} ${JSON.stringify(url)}`, () => {
+  execFile(cmd, [url], () => {
     // Silently ignore errors — user can open the URL manually
   })
 }

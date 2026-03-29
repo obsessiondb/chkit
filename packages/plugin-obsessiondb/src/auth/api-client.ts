@@ -66,6 +66,11 @@ export async function pollDeviceToken(
       body: JSON.stringify({ client_id: CLIENT_ID, device_code: deviceCode }),
     })
 
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`Token poll failed: ${res.status} ${text}`)
+    }
+
     const body = (await res.json()) as TokenPollResponse
 
     if (body.access_token) return body.access_token
