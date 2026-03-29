@@ -290,6 +290,7 @@ export async function loadPluginRuntime(input: {
             ctx = { ...ctx, ...result, hasExecutor: true }
           }
         } catch (error) {
+          await ctx.executor.close()
           throw formatPluginError(item.plugin.manifest.name, 'getContext', error)
         }
       }
