@@ -7,6 +7,9 @@ import type {
 import { AUTH_COMMANDS, loadCredentials } from './auth/index.js'
 import { BACKFILL_EXTEND_COMMANDS, handleBackfillCommand } from './backfill/index.js'
 
+export { loadCredentials, resolveBaseUrl, type Credentials } from './auth/index.js'
+export { createJobsClient, type JobsClient } from './backfill/index.js'
+
 export type ObsessionDBPluginOptions = Record<string, never>
 
 interface PluginCommand {
