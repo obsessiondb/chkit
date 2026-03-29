@@ -16,6 +16,7 @@ import { formatGlobalHelp, formatCommandHelp } from './help.js'
 import { loadPluginRuntime } from './plugin-runtime.js'
 import { getInternalPlugins } from './internal-plugins/index.js'
 import { CLI_VERSION } from './version.js'
+import { debug } from './debug.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
@@ -74,6 +75,7 @@ function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRunt
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   const commandName = argv[0]
+  debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
 
   if (!commandName || commandName === '-h' || commandName === '--help') {
     const configPathArg = extractConfigPath(argv)
@@ -135,6 +137,7 @@ async function main(): Promise<void> {
   })
 
   const resolved = registry.get(commandName)
+  debug('cli', `command "${commandName}" resolved: ${resolved ? (resolved.isPlugin ? 'plugin' : 'core') : 'not found'}`)
 
   if (!resolved) {
     const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
@@ -188,6 +191,7 @@ main()
     } catch {
       // onComplete errors must not mask the original error
     }
+    debug('cli', 'fatal error', error instanceof Error ? { message: error.message, stack: error.stack, ...(('code' in error) ? { code: (error as NodeJS.ErrnoException).code } : {}) } : error)
     console.error(formatFatalError(error))
     process.exit(1)
   })
