@@ -35,6 +35,7 @@ import {
   resolveActiveTableMappings,
 } from './generate/rename-mappings.js'
 import { emitGenerateApplyOutput, emitGeneratePlanOutput } from './generate/output.js'
+import { debug } from '../debug.js'
 
 const GENERATE_FLAGS = defineFlags([
   { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },
@@ -59,6 +60,8 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
   const tableSelector = f['--table']
   const planMode = f['--dryrun'] === true
   const jsonMode = f['--json'] === true
+
+  debug('generate', `flags: name=${migrationName ?? '(auto)'}, dryrun=${planMode}, json=${jsonMode}`)
 
   await pluginRuntime.runOnConfigLoaded({
     command: 'generate',
@@ -119,6 +122,8 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
     activeTableMappings
   )
 
+  debug('generate', `previous snapshot: ${previousDefinitions.length} definitions, current: ${definitions.length} definitions`)
+
   let plan: ReturnType<typeof planDiff>
   try {
     plan = planDiff(remappedPreviousDefinitions, definitions)
@@ -172,6 +177,8 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
         renameMappings: activeTableMappings,
       })
     : definitions
+
+  debug('generate', `plan: ${plan.operations.length} operations — writing artifacts`)
 
   const result = await generateArtifacts({
     definitions: artifactDefinitions,

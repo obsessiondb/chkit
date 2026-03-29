@@ -11,6 +11,7 @@ import {
   type ObjectDriftDetail,
   type TableDriftDetail,
 } from '../../drift.js'
+import { debug } from '../debug.js'
 import { emitJson } from '../json-output.js'
 import { readSnapshot } from '../migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions, type TableScope } from '../table-scope.js'
@@ -49,6 +50,7 @@ export async function buildDriftPayload(
   if (!executor) throw new Error('clickhouse config is required for drift checks')
   const db = executor
 
+  debug('drift', `building drift payload — expected: ${snapshot.definitions.length} definitions`)
   let actualObjects: SchemaObjectRef[]
   try {
     actualObjects = await db.listSchemaObjects()
@@ -114,6 +116,8 @@ export async function buildDriftPayload(
     })
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.table.localeCompare(b.table))
+
+  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}`)
 
   const drifted =
     missing.length > 0 ||

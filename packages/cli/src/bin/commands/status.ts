@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 
 import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import { debug } from '../debug.js'
 import { emitJson } from '../json-output.js'
 import { createJournalStore } from '../journal-store.js'
 import { findChecksumMismatches, listMigrations } from '../migration-store.js'
@@ -30,6 +31,8 @@ async function cmdStatus(runCtx: CommandRunContext): Promise<void> {
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pending = files.filter((f) => !appliedNames.has(f))
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
+
+  debug('status', `files=${files.length}, applied=${journal.applied.length}, pending=${pending.length}, checksumMismatches=${checksumMismatches.length}`)
 
   const databaseMissing = journalStore.databaseMissing
   const payload = {

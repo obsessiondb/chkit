@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 
 import { summarizeDriftReasons } from '../../drift.js'
 import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { debug } from '../debug.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
 import { createJournalStore } from '../journal-store.js'
@@ -25,6 +26,7 @@ async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
   const jsonMode = f['--json'] === true
   const tableSelector = f['--table']
   const { migrationsDir, metaDir } = dirs
+  debug('check', `flags: strict=${strict}, json=${jsonMode}`)
   await mkdir(migrationsDir, { recursive: true })
 
   if (!ctx.hasExecutor) {
@@ -100,6 +102,7 @@ async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
         failedChecks.push(`plugin:${result.plugin}`)
       }
     }
+    debug('check', `results: pending=${pending.length}, checksumMismatches=${checksumMismatches.length}, drift=${drift?.drifted ?? 'n/a'}, pluginChecks=${pluginResults.length}, failedChecks=[${failedChecks.join(', ')}]`)
     const ok = failedChecks.length === 0
     const driftReasonSummary = drift
       ? summarizeDriftReasons({

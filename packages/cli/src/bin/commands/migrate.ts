@@ -23,6 +23,7 @@ import {
   type DestructiveOperationMarker,
 } from '../safety-markers.js'
 import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../table-scope.js'
+import { debug } from '../debug.js'
 
 const MIGRATE_FLAGS = defineFlags([
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
@@ -103,6 +104,7 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
   const jsonMode = f['--json'] === true
 
   const { migrationsDir, metaDir } = dirs
+  debug('migrate', `flags: execute=${executeRequested}, allowDestructive=${allowDestructive}, json=${jsonMode}`)
 
   if (!ctx.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
@@ -127,7 +129,11 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
     const journal = await journalStore.readJournal()
     const appliedNames = new Set(journal.applied.map((entry) => entry.name))
     const pendingAll = files.filter((f) => !appliedNames.has(f))
+    debug('migrate', `migrations: total=${files.length}, applied=${journal.applied.length}, pending=${pendingAll.length}`)
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
+    if (checksumMismatches.length > 0) {
+      debug('migrate', `checksum mismatches: ${checksumMismatches.map((m) => m.name).join(', ')}`)
+    }
 
     if (checksumMismatches.length > 0) {
       if (jsonMode) {
@@ -275,10 +281,12 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
     const appliedNow: MigrationJournalEntry[] = []
 
     for (const file of pending) {
+      debug('migrate', `applying ${file}`)
       const fullPath = join(migrationsDir, file)
       const sql = await readFile(fullPath, 'utf8')
       const parsedStatements = extractExecutableStatements(sql)
       const operationSummaries = extractMigrationOperationSummaries(sql)
+      debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
       const statements = await pluginRuntime.runOnBeforeApply({
         command: 'migrate',
         config,
