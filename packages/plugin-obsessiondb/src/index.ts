@@ -4,24 +4,54 @@ import type {
   SchemaDefinition,
 } from '@chkit/core'
 
+import { AUTH_COMMANDS, loadCredentials } from './auth/index.js'
+import { BACKFILL_EXTEND_COMMANDS, handleBackfillCommand } from './backfill/index.js'
+
 export type ObsessionDBPluginOptions = Record<string, never>
+
+interface PluginCommand {
+  name: string
+  description: string
+  flags?: ReadonlyArray<{ name: string; type: string; description: string }>
+  run: (context: Record<string, unknown>) => unknown
+}
+
+interface BeforePluginCommandContext {
+  targetPlugin: string
+  command: string
+  config: Record<string, unknown>
+  configPath: string
+  jsonMode: boolean
+  args: string[]
+  flags: Record<string, string | string[] | boolean | undefined>
+  options: Record<string, unknown>
+  print: (value: unknown) => void
+}
+
+interface BeforePluginCommandResult {
+  handled: boolean
+  exitCode?: number
+}
 
 interface ObsessionDBPlugin {
   manifest: { name: 'obsessiondb'; apiVersion: 1 }
+  commands: PluginCommand[]
   extendCommands: Array<{
     command: string[]
     flags: Array<{
       name: string
-      type: 'boolean'
+      type: 'boolean' | 'string'
       description: string
     }>
   }>
   hooks: {
+    onInit(context: { command: string; isInteractive: boolean; jsonMode: boolean }): Promise<void>
     onSchemaLoaded(context: {
       config: ResolvedChxConfig
       flags: Record<string, string | string[] | boolean | undefined>
       definitions: SchemaDefinition[]
     }): SchemaDefinition[] | undefined
+    onBeforePluginCommand(context: BeforePluginCommandContext): Promise<BeforePluginCommandResult>
   }
 }
 
@@ -108,6 +138,7 @@ export function rewriteSharedEngines(definitions: SchemaDefinition[]): {
 function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionDBPlugin {
   return {
     manifest: { name: 'obsessiondb', apiVersion: 1 },
+    commands: AUTH_COMMANDS as unknown as PluginCommand[],
     extendCommands: [
       {
         command: ['generate', 'migrate', 'status', 'drift', 'check'],
@@ -124,8 +155,18 @@ function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionD
           },
         ],
       },
+      ...BACKFILL_EXTEND_COMMANDS,
     ],
     hooks: {
+      async onInit(context) {
+        if (context.jsonMode) return
+        const creds = await loadCredentials()
+        if (creds) {
+          console.log(
+            'obsessiondb: authenticated, backfill commands will execute remotely (use --local to override)',
+          )
+        }
+      },
       onSchemaLoaded(context) {
         const shouldStrip = resolveStripBehavior(context.config, context.flags)
         if (!shouldStrip) return
@@ -143,6 +184,9 @@ function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionD
           )
         }
         return rewritten.definitions
+      },
+      async onBeforePluginCommand(context) {
+        return handleBackfillCommand(context)
       },
     },
   }

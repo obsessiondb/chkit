@@ -15,6 +15,8 @@ import type {
   ChxOnCheckResult,
   ChxOnAfterApplyContext,
   ChxOnBeforeApplyContext,
+  ChxOnBeforePluginCommandContext,
+  ChxOnBeforePluginCommandResult,
   ChxOnCompleteContext,
   ChxOnConfigLoadedContext,
   ChxOnInitContext,
@@ -57,6 +59,11 @@ export interface PluginRuntime {
     context: Omit<ChxOnCheckContext, 'options' | 'tableScope'> & { tableScope?: TableScope }
   ): Promise<ChxOnCheckResult[]>
   runOnCheckReport(results: ChxOnCheckResult[], print: (line: string) => void): Promise<void>
+  runOnBeforePluginCommand(
+    pluginName: string,
+    commandName: string,
+    context: Omit<ChxOnBeforePluginCommandContext, 'targetPlugin' | 'command' | 'options'>
+  ): Promise<ChxOnBeforePluginCommandResult>
   runPluginCommand(
     pluginName: string,
     commandName: string,
@@ -210,6 +217,30 @@ export async function loadPluginRuntime(input: {
     byName.set(plugin.manifest.name, item)
   }
 
+  async function runBeforePluginCommandHooks(
+    pluginName: string,
+    commandName: string,
+    context: Omit<ChxOnBeforePluginCommandContext, 'targetPlugin' | 'command' | 'options'>
+  ): Promise<ChxOnBeforePluginCommandResult> {
+    for (const item of loaded) {
+      if (item.plugin.manifest.name === pluginName) continue
+      const hook = item.plugin.hooks?.onBeforePluginCommand
+      if (!hook) continue
+      try {
+        const result = await hook({
+          ...context,
+          targetPlugin: pluginName,
+          command: commandName,
+          options: item.options,
+        })
+        if (result.handled) return result
+      } catch (error) {
+        throw formatPluginError(item.plugin.manifest.name, 'onBeforePluginCommand', error)
+      }
+    }
+    return { handled: false }
+  }
+
   return {
     plugins: loaded,
     getCommand(pluginName, commandName) {
@@ -345,11 +376,25 @@ export async function loadPluginRuntime(input: {
         }
       }
     },
+    runOnBeforePluginCommand: runBeforePluginCommandHooks,
     async runPluginCommand(pluginName, commandName, context) {
       const item = byName.get(pluginName)
       if (!item) return 1
       const command = (item.plugin.commands ?? []).find((entry) => entry.name === commandName)
       if (!command) return 1
+
+      // Run onBeforePluginCommand hooks — if any returns handled, skip the command
+      const beforeResult = await runBeforePluginCommandHooks(pluginName, commandName, {
+        config: context.config,
+        configPath: context.configPath,
+        jsonMode: context.jsonMode,
+        args: context.args,
+        flags: context.flags,
+        tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
+        print: context.print,
+      })
+      if (beforeResult.handled) return beforeResult.exitCode
+
       try {
         const code = await command.run({
           ...context,

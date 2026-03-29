@@ -126,6 +126,85 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('onBeforePluginCommand intercepts another plugin command', async () => {
+    const fixture = await createFixture()
+    const targetPath = join(fixture.dir, 'target-plugin.ts')
+    const interceptorPath = join(fixture.dir, 'interceptor-plugin.ts')
+    try {
+      await writeFile(
+        targetPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      run({ print }) {\n        print({ source: 'original' })\n        return 0\n      },\n    },\n  ],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        interceptorPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'interceptor', apiVersion: 1 },\n  hooks: {\n    onBeforePluginCommand(context) {\n      if (context.targetPlugin === 'target' && context.command === 'greet') {\n        context.print({ source: 'intercepted', target: context.targetPlugin })\n        return { handled: true, exitCode: 0 }\n      }\n      return { handled: false }\n    },\n  },\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { resolve: './target-plugin.ts' },\n    { resolve: './interceptor-plugin.ts' },\n  ],\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'plugin',
+        'target',
+        'greet',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { source: string; target: string }
+      expect(payload.source).toBe('intercepted')
+      expect(payload.target).toBe('target')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('onBeforePluginCommand returning handled: false falls through to original', async () => {
+    const fixture = await createFixture()
+    const targetPath = join(fixture.dir, 'target-plugin.ts')
+    const interceptorPath = join(fixture.dir, 'interceptor-plugin.ts')
+    try {
+      await writeFile(
+        targetPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      run({ print }) {\n        print({ source: 'original' })\n        return 0\n      },\n    },\n  ],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        interceptorPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'interceptor', apiVersion: 1 },\n  hooks: {\n    onBeforePluginCommand() {\n      return { handled: false }\n    },\n  },\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { resolve: './target-plugin.ts' },\n    { resolve: './interceptor-plugin.ts' },\n  ],\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'plugin',
+        'target',
+        'greet',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { source: string }
+      expect(payload.source).toBe('original')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('plugin pull schema command writes pulled schema artifact', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'pull-plugin.ts')

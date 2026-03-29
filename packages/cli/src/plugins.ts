@@ -123,6 +123,23 @@ export interface ChxOnCheckResult {
   metadata?: Record<string, unknown>
 }
 
+export interface ChxOnBeforePluginCommandContext {
+  targetPlugin: string
+  command: string
+  config: ResolvedChxConfig
+  configPath: string
+  jsonMode: boolean
+  args: string[]
+  flags: ParsedFlags
+  options: Record<string, unknown>
+  tableScope: TableScope
+  print: (value: unknown) => void
+}
+
+export type ChxOnBeforePluginCommandResult =
+  | { handled: true; exitCode: number }
+  | { handled: false }
+
 export interface ChxPluginCommandContext {
   pluginName: string
   config: ResolvedChxConfig
@@ -145,6 +162,9 @@ export interface ChxPluginCommand {
 export interface ChxPluginHooks {
   onInit?: (context: ChxOnInitContext) => void | Promise<void>
   onComplete?: (context: ChxOnCompleteContext) => void | Promise<void>
+  onBeforePluginCommand?: (
+    context: ChxOnBeforePluginCommandContext
+  ) => ChxOnBeforePluginCommandResult | Promise<ChxOnBeforePluginCommandResult>
   onConfigLoaded?: (context: ChxOnConfigLoadedContext) => void | Promise<void>
   onSchemaLoaded?: (
     context: ChxOnSchemaLoadedContext
