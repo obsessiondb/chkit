@@ -9,8 +9,10 @@ import {
   type ResolvedChxConfig,
   type SchemaDefinition,
 } from '@chkit/core'
+import { createClickHouseExecutor, type ClickHouseExecutor } from '@chkit/clickhouse'
 
 import type {
+  ChxGetContextInput,
   ChxOnCheckContext,
   ChxOnCheckResult,
   ChxOnAfterApplyContext,
@@ -25,6 +27,7 @@ import type {
   ChxPlugin,
   ChxPluginCommand,
   ChxPluginCommandContext,
+  PluginContext,
 } from '../plugins.js'
 import { isInlinePluginRegistration } from '../plugins.js'
 import type { TableScope } from './table-scope.js'
@@ -43,6 +46,8 @@ const UNFILTERED_TABLE_SCOPE: TableScope = {
 export interface PluginRuntime {
   plugins: ReadonlyArray<LoadedPlugin>
   getCommand(pluginName: string, commandName: string): { command: ChxPluginCommand; plugin: LoadedPlugin } | null
+  resolveContext(input: Omit<ChxGetContextInput, 'defaults'>): Promise<PluginContext>
+  disposeContext(ctx: PluginContext): Promise<void>
   runOnInit(context: Omit<ChxOnInitContext, 'options'>): Promise<void>
   runOnComplete(context: Omit<ChxOnCompleteContext, 'options' | 'exitCode'> & { exitCode?: number }): Promise<void>
   runOnConfigLoaded(
@@ -241,8 +246,59 @@ export async function loadPluginRuntime(input: {
     return { handled: false }
   }
 
+  const NULL_EXECUTOR: ClickHouseExecutor = (() => {
+    const err = () => {
+      throw new Error('No ClickHouse connection configured and no plugin provided an executor')
+    }
+    return {
+      command: err,
+      query: err,
+      insert: err,
+      submit: err,
+      queryStatus: err,
+      listSchemaObjects: err,
+      listTableDetails: err,
+      close: () => Promise.resolve(),
+    }
+  })()
+
   return {
     plugins: loaded,
+    async resolveContext(input) {
+      const hasClickhouseConfig = !!input.config.clickhouse
+      const defaults: PluginContext = {
+        executor: hasClickhouseConfig
+          ? createClickHouseExecutor(input.config.clickhouse!)
+          : NULL_EXECUTOR,
+        hasExecutor: hasClickhouseConfig,
+      }
+      let ctx = defaults
+      for (const item of loaded) {
+        const hook = item.plugin.hooks?.getContext
+        if (!hook) continue
+        try {
+          const result = await hook({ ...input, defaults })
+          if (result && typeof result === 'object' && 'executor' in result && result.executor) {
+            // Plugin returned an executor override — close the default one
+            if (ctx.executor !== defaults.executor) {
+              // A previous plugin already overrode — close that one
+              await ctx.executor.close()
+            } else if (ctx === defaults && defaults.executor !== NULL_EXECUTOR) {
+              // First override — close the default executor
+              await defaults.executor.close()
+            }
+            ctx = { ...ctx, ...result, hasExecutor: true }
+          }
+        } catch (error) {
+          await ctx.executor.close()
+          throw formatPluginError(item.plugin.manifest.name, 'getContext', error)
+        }
+      }
+      return ctx
+    },
+    async disposeContext(ctx) {
+      await ctx.executor.close()
+    },
     getCommand(pluginName, commandName) {
       const item = byName.get(pluginName)
       if (!item) return null

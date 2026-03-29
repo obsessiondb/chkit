@@ -4,8 +4,11 @@ import type {
   SchemaDefinition,
 } from '@chkit/core'
 
-import { AUTH_COMMANDS, loadCredentials } from './auth/index.js'
+import { AUTH_COMMANDS, loadCredentials, resolveBaseUrl } from './auth/index.js'
 import { BACKFILL_EXTEND_COMMANDS, handleBackfillCommand } from './backfill/index.js'
+import { createRemoteExecutor } from './query/remote-executor.js'
+import { SELECT_SERVICE_COMMAND } from './service/commands.js'
+import { loadSelectedService } from './service/storage.js'
 
 export { loadCredentials, resolveBaseUrl, type Credentials } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
@@ -36,6 +39,14 @@ interface BeforePluginCommandResult {
   exitCode?: number
 }
 
+interface GetContextInput {
+  config: ResolvedChxConfig
+  configPath: string
+  command: string
+  flags: Record<string, unknown>
+  defaults: Record<string, unknown>
+}
+
 interface ObsessionDBPlugin {
   manifest: { name: 'obsessiondb'; apiVersion: 1 }
   commands: PluginCommand[]
@@ -48,7 +59,8 @@ interface ObsessionDBPlugin {
     }>
   }>
   hooks: {
-    onInit(context: { command: string; isInteractive: boolean; jsonMode: boolean }): Promise<void>
+    getContext(input: GetContextInput): Promise<{ executor: unknown } | void>
+    onInit(context: { command: string; configPath: string; isInteractive: boolean; jsonMode: boolean }): Promise<void>
     onSchemaLoaded(context: {
       config: ResolvedChxConfig
       flags: Record<string, string | string[] | boolean | undefined>
@@ -141,7 +153,7 @@ export function rewriteSharedEngines(definitions: SchemaDefinition[]): {
 function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionDBPlugin {
   return {
     manifest: { name: 'obsessiondb', apiVersion: 1 },
-    commands: AUTH_COMMANDS as unknown as PluginCommand[],
+    commands: [...AUTH_COMMANDS, SELECT_SERVICE_COMMAND] as unknown as PluginCommand[],
     extendCommands: [
       {
         command: ['generate', 'migrate', 'status', 'drift', 'check'],
@@ -161,12 +173,31 @@ function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionD
       ...BACKFILL_EXTEND_COMMANDS,
     ],
     hooks: {
+      async getContext({ configPath }) {
+        const creds = await loadCredentials()
+        if (!creds) return
+        const service = await loadSelectedService(configPath)
+        if (!service) return
+        const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
+        return {
+          executor: createRemoteExecutor({
+            credentials: effectiveCreds,
+            serviceId: service.service_id,
+          }),
+        }
+      },
       async onInit(context) {
         if (context.jsonMode) return
         const creds = await loadCredentials()
-        if (creds) {
+        if (!creds) return
+        const service = await loadSelectedService(context.configPath)
+        if (service) {
           console.log(
-            'obsessiondb: authenticated, backfill commands will execute remotely (use --local to override)',
+            `obsessiondb: routing queries through ${service.service_name}`,
+          )
+        } else {
+          console.log(
+            'obsessiondb: authenticated but no service selected (run `chkit obsessiondb select-service`)',
           )
         }
       },
