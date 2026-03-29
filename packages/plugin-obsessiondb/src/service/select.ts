@@ -13,13 +13,13 @@ export async function selectServiceInteractive(
 
   if (services.length === 1) {
     const service = services[0]!
-    print(`Auto-selected service: ${service.name}${service.region ? ` (${service.region})` : ''}`)
+    print(`Auto-selected service: ${service.name} (${service.status})`)
     return service
   }
 
   print('\nAvailable services:')
   for (const [i, service] of services.entries()) {
-    print(`  ${i + 1}. ${service.name}${service.region ? ` (${service.region})` : ''}`)
+    print(`  ${i + 1}. ${service.name} (${service.status})`)
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout })

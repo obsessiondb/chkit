@@ -1,13 +1,5 @@
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
-import {
-  cancelRemoteBackfill,
-  getRemoteBackfillDoctor,
-  getRemoteBackfillStatus,
-  isSessionExpiredError,
-  resumeRemoteBackfill,
-  runRemoteBackfill,
-  submitBackfillPlan,
-} from './api-client.js'
+import { createJobsClient, isSessionExpiredError, type JobsClient } from './client.js'
 
 interface BeforePluginCommandContext {
   targetPlugin: string
@@ -25,17 +17,7 @@ type HandlerResult =
   | { handled: true; exitCode: number }
   | { handled: false }
 
-const BACKFILL_SUBCOMMANDS: Record<
-  string,
-  (input: Record<string, unknown>, creds: { access_token: string; base_url: string }) => Promise<unknown>
-> = {
-  plan: submitBackfillPlan,
-  run: runRemoteBackfill,
-  resume: resumeRemoteBackfill,
-  status: getRemoteBackfillStatus,
-  cancel: cancelRemoteBackfill,
-  doctor: getRemoteBackfillDoctor,
-}
+const REMOTE_SUBCOMMANDS = new Set(['status', 'cancel', 'list'])
 
 export async function handleBackfillCommand(context: BeforePluginCommandContext): Promise<HandlerResult> {
   if (context.targetPlugin !== 'backfill') return { handled: false }
@@ -43,8 +25,7 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
   // --local flag bypasses remote execution
   if (context.flags['--local'] === true) return { handled: false }
 
-  const handler = BACKFILL_SUBCOMMANDS[context.command]
-  if (!handler) return { handled: false }
+  if (!REMOTE_SUBCOMMANDS.has(context.command)) return { handled: false }
 
   const creds = await loadCredentials()
   if (!creds) {
@@ -54,18 +35,11 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
 
   // Allow OBSESSIONDB_API_URL env var to override the stored base_url
   const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
+  const client = createJobsClient(effectiveCreds)
 
   try {
-    const input = {
-      command: context.command,
-      args: context.args,
-      flags: context.flags,
-    }
-
-    const result = await handler(input, effectiveCreds)
-
+    const result = await dispatchCommand(client, context.command, context.flags)
     context.print(result)
-
     return { handled: true, exitCode: 0 }
   } catch (error) {
     if (isSessionExpiredError(error)) {
@@ -73,5 +47,32 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
       return { handled: true, exitCode: 1 }
     }
     throw error
+  }
+}
+
+async function dispatchCommand(
+  client: JobsClient,
+  command: string,
+  flags: Record<string, string | string[] | boolean | undefined>,
+): Promise<unknown> {
+  const jobId = typeof flags['--job-id'] === 'string' ? flags['--job-id'] : undefined
+  const serviceId = typeof flags['--service-id'] === 'string' ? flags['--service-id'] : undefined
+
+  switch (command) {
+    case 'status': {
+      if (jobId) return client.get({ jobId })
+      if (serviceId) return client.list({ serviceId })
+      throw new Error('Either --job-id or --service-id is required for remote status')
+    }
+    case 'cancel': {
+      if (!jobId) throw new Error('--job-id is required for remote cancel')
+      return client.cancel({ jobId })
+    }
+    case 'list': {
+      if (!serviceId) throw new Error('--service-id is required for remote list')
+      return client.list({ serviceId })
+    }
+    default:
+      throw new Error(`Unsupported remote command: ${command}`)
   }
 }

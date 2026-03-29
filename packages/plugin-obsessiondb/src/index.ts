@@ -10,6 +10,9 @@ import { createRemoteExecutor } from './query/remote-executor.js'
 import { SELECT_SERVICE_COMMAND } from './service/commands.js'
 import { loadSelectedService } from './service/storage.js'
 
+export { loadCredentials, resolveBaseUrl, type Credentials } from './auth/index.js'
+export { createJobsClient, type JobsClient } from './backfill/index.js'
+
 export type ObsessionDBPluginOptions = Record<string, never>
 
 interface PluginCommand {

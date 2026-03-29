@@ -11,18 +11,25 @@ function makeContext(overrides: Partial<Parameters<typeof handleBackfillCommand>
   return {
     context: {
       targetPlugin: 'backfill',
-      command: 'run',
+      command: 'status',
       config: {},
       configPath: '/fake/clickhouse.config.ts',
       jsonMode: false,
       args: [],
-      flags: {},
+      flags: { '--job-id': 'job-123' },
       options: {},
       print: (v: unknown) => printed.push(v),
       ...overrides,
     },
     printed,
   }
+}
+
+function orpcResponse(data: unknown): Response {
+  return new Response(JSON.stringify({ json: data }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
 describe('handleBackfillCommand', () => {
@@ -73,19 +80,34 @@ describe('handleBackfillCommand', () => {
     expect(printed[0]).toContain('chkit obsessiondb login')
   })
 
-  test('routes to remote API when authenticated', async () => {
+  test('routes status to remote ORPC get when authenticated', async () => {
     await setupAuth()
 
-    globalThis.fetch = mock(async () =>
-      new Response(JSON.stringify({ ok: true, run_id: 'r-123' }), { status: 200 })
-    ) as typeof fetch
+    const jobDetail = {
+      id: 'job-123',
+      serviceId: 'svc-1',
+      type: 'backfill',
+      target: 'my_table',
+      status: 'running',
+      concurrency: 4,
+      totalTasks: 10,
+      completedTasks: 3,
+      failedTasks: 0,
+      createdAt: '2026-03-29T00:00:00Z',
+      updatedAt: '2026-03-29T01:00:00Z',
+      workflowId: null,
+      metadata: null,
+      tasks: [],
+    }
+
+    globalThis.fetch = mock(async () => orpcResponse(jobDetail)) as typeof fetch
 
     const { context, printed } = makeContext()
     const result = await handleBackfillCommand(context)
 
     expect(result).toEqual({ handled: true, exitCode: 0 })
     expect(printed).toHaveLength(1)
-    expect((printed[0] as Record<string, unknown>).ok).toBe(true)
+    expect((printed[0] as Record<string, unknown>).id).toBe('job-123')
   })
 
   test('handles 401 with session expired message', async () => {
@@ -106,6 +128,57 @@ describe('handleBackfillCommand', () => {
     await setupAuth()
 
     const { context } = makeContext({ command: 'unknown-subcommand' })
+    const result = await handleBackfillCommand(context)
+    expect(result).toEqual({ handled: false })
+  })
+
+  test('routes cancel to remote ORPC cancel', async () => {
+    await setupAuth()
+
+    globalThis.fetch = mock(async () => orpcResponse({})) as typeof fetch
+
+    const { context, printed } = makeContext({ command: 'cancel', flags: { '--job-id': 'job-456' } })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    expect(printed).toHaveLength(1)
+  })
+
+  test('routes list to remote ORPC list', async () => {
+    await setupAuth()
+
+    const listResponse = {
+      jobs: [
+        {
+          id: 'job-1',
+          serviceId: 'svc-1',
+          type: 'backfill',
+          target: 'table_a',
+          status: 'completed',
+          concurrency: 2,
+          totalTasks: 5,
+          completedTasks: 5,
+          failedTasks: 0,
+          createdAt: '2026-03-28T00:00:00Z',
+          updatedAt: '2026-03-28T01:00:00Z',
+        },
+      ],
+    }
+
+    globalThis.fetch = mock(async () => orpcResponse(listResponse)) as typeof fetch
+
+    const { context, printed } = makeContext({ command: 'list', flags: { '--service-id': 'svc-1' } })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    expect(printed).toHaveLength(1)
+    expect((printed[0] as { jobs: unknown[] }).jobs).toHaveLength(1)
+  })
+
+  test('returns handled: false for non-remote commands like run', async () => {
+    await setupAuth()
+
+    const { context } = makeContext({ command: 'run' })
     const result = await handleBackfillCommand(context)
     expect(result).toEqual({ handled: false })
   })

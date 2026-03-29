@@ -58,14 +58,14 @@ export interface SchemaObjectRef {
   name: string
 }
 
-interface SystemTableRow {
+export interface SystemTableRow {
   database: string
   name: string
   engine: string
   create_table_query?: string
 }
 
-interface SystemColumnRow {
+export interface SystemColumnRow {
   database: string
   table: string
   name: string
@@ -76,7 +76,7 @@ interface SystemColumnRow {
   position: number
 }
 
-interface SystemSkippingIndexRow {
+export interface SystemSkippingIndexRow {
   database: string
   table: string
   name: string
@@ -119,7 +119,7 @@ export function inferSchemaKindFromEngine(engine: string): SchemaObjectRef['kind
 }
 
 
-function normalizeColumnFromSystemRow(row: SystemColumnRow): ColumnDefinition {
+export function normalizeColumnFromSystemRow(row: SystemColumnRow): ColumnDefinition {
   const nullableMatch = row.type.match(/^Nullable\((.+)\)$/)
   const type = nullableMatch?.[1] ? nullableMatch[1] : row.type
   const nullable = Boolean(nullableMatch?.[1])
@@ -155,7 +155,7 @@ function parseIndexType(value: string): Pick<SkipIndexDefinition, 'type' | 'type
   }
 }
 
-function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefinition {
+export function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefinition {
   const parsed = parseIndexType(row.type)
   return {
     name: row.name,
@@ -163,6 +163,57 @@ function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIndexDefi
     granularity: row.granularity,
     ...parsed,
   } as SkipIndexDefinition
+}
+
+export function buildIntrospectedTables(
+  tables: SystemTableRow[],
+  columns: SystemColumnRow[],
+  indexes: SystemSkippingIndexRow[],
+): IntrospectedTable[] {
+  const tableRows = tables.filter((row) => inferSchemaKindFromEngine(row.engine) === 'table')
+  if (tableRows.length === 0) return []
+
+  const columnsByTable = new Map<string, SystemColumnRow[]>()
+  for (const row of columns) {
+    const key = `${row.database}.${row.table}`
+    const rows = columnsByTable.get(key)
+    if (rows) rows.push(row)
+    else columnsByTable.set(key, [row])
+  }
+
+  const indexesByTable = new Map<string, SystemSkippingIndexRow[]>()
+  for (const row of indexes) {
+    const key = `${row.database}.${row.table}`
+    const rows = indexesByTable.get(key)
+    if (rows) rows.push(row)
+    else indexesByTable.set(key, [row])
+  }
+
+  return tableRows
+    .map((row) => {
+      const key = `${row.database}.${row.name}`
+      const columnRows = (columnsByTable.get(key) ?? []).sort((a, b) => a.position - b.position)
+      const indexRows = indexesByTable.get(key) ?? []
+      return {
+        database: row.database,
+        name: row.name,
+        engine: parseEngineFromCreateTableQuery(row.create_table_query),
+        primaryKey: parsePrimaryKeyFromCreateTableQuery(row.create_table_query),
+        orderBy: parseOrderByFromCreateTableQuery(row.create_table_query),
+        uniqueKey: parseUniqueKeyFromCreateTableQuery(row.create_table_query),
+        partitionBy: parsePartitionByFromCreateTableQuery(row.create_table_query),
+        columns: columnRows.map(normalizeColumnFromSystemRow),
+        settings: parseSettingsFromCreateTableQuery(row.create_table_query),
+        indexes: indexRows.map(normalizeIndexFromSystemRow),
+        projections: parseProjectionsFromCreateTableQuery(row.create_table_query),
+        ttl: parseTTLFromCreateTableQuery(row.create_table_query),
+      }
+    })
+    .sort((a, b) => {
+      const dbOrder = a.database.localeCompare(b.database)
+      if (dbOrder !== 0) return dbOrder
+      return a.name.localeCompare(b.name)
+    })
 }
 
 const NETWORK_ERROR_LABELS: Record<string, string> = {
@@ -378,9 +429,6 @@ FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})`
       )
-      const tableRows = tables.filter((row) => inferSchemaKindFromEngine(row.engine) === 'table')
-      if (tableRows.length === 0) return []
-
       const columns = await this.query<SystemColumnRow>(
         `SELECT database, table, name, type, default_kind, default_expression, comment, position
 FROM system.columns
@@ -392,53 +440,7 @@ FROM system.data_skipping_indices
 WHERE database IN (${quotedDatabases})`
       )
 
-      const columnsByTable = new Map<string, SystemColumnRow[]>()
-      for (const row of columns) {
-        const key = `${row.database}.${row.table}`
-        const rows = columnsByTable.get(key)
-        if (rows) {
-          rows.push(row)
-        } else {
-          columnsByTable.set(key, [row])
-        }
-      }
-
-      const indexesByTable = new Map<string, SystemSkippingIndexRow[]>()
-      for (const row of indexes) {
-        const key = `${row.database}.${row.table}`
-        const rows = indexesByTable.get(key)
-        if (rows) {
-          rows.push(row)
-        } else {
-          indexesByTable.set(key, [row])
-        }
-      }
-
-      return tableRows
-        .map((row) => {
-          const key = `${row.database}.${row.name}`
-          const columnRows = (columnsByTable.get(key) ?? []).sort((a, b) => a.position - b.position)
-          const indexRows = indexesByTable.get(key) ?? []
-          return {
-            database: row.database,
-            name: row.name,
-            engine: parseEngineFromCreateTableQuery(row.create_table_query),
-            primaryKey: parsePrimaryKeyFromCreateTableQuery(row.create_table_query),
-            orderBy: parseOrderByFromCreateTableQuery(row.create_table_query),
-            uniqueKey: parseUniqueKeyFromCreateTableQuery(row.create_table_query),
-            partitionBy: parsePartitionByFromCreateTableQuery(row.create_table_query),
-            columns: columnRows.map(normalizeColumnFromSystemRow),
-            settings: parseSettingsFromCreateTableQuery(row.create_table_query),
-            indexes: indexRows.map(normalizeIndexFromSystemRow),
-            projections: parseProjectionsFromCreateTableQuery(row.create_table_query),
-            ttl: parseTTLFromCreateTableQuery(row.create_table_query),
-          }
-        })
-        .sort((a, b) => {
-          const dbOrder = a.database.localeCompare(b.database)
-          if (dbOrder !== 0) return dbOrder
-          return a.name.localeCompare(b.name)
-        })
+      return buildIntrospectedTables(tables, columns, indexes)
     },
   }
 }
