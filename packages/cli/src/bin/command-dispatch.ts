@@ -3,6 +3,7 @@ import { parseFlags, UnknownFlagError, MissingFlagValueError, type ParsedFlags }
 import { typedFlags } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { resolveDirs } from './config.js'
+import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
 import { printOutput } from './json-output.js'
 import type { PluginRuntime } from './plugin-runtime.js'
@@ -214,8 +215,10 @@ export async function runResolvedCommand(input: {
   onAmbiguousPluginSubcommand?: () => void
 }): Promise<void> {
   if (input.resolved.isPlugin && !input.resolved.run) {
+    debug('dispatch', `routing to plugin command "${input.commandName}"`)
     await runPluginCommand(input)
     return
   }
+  debug('dispatch', `routing to core command "${input.commandName}"`)
   await runCoreOrBuiltinCommand(input)
 }

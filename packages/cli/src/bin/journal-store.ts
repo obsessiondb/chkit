@@ -3,6 +3,7 @@ import type { ChxConfig } from '@chkit/core'
 
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
 import { CLI_VERSION } from './version.js'
+import { debug } from './debug.js'
 
 export interface JournalStore {
   readJournal(): Promise<MigrationJournal>
@@ -38,6 +39,7 @@ function isRetryableInsertRace(error: unknown): boolean {
 
 export function createJournalStore(db: ClickHouseExecutor): JournalStore {
   const journalTable = resolveJournalTableName()
+  debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}`)
   const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable} (
     name String,
     applied_at DateTime64(3, 'UTC'),
@@ -51,38 +53,36 @@ SETTINGS index_granularity = 1`
 
   async function ensureTable(): Promise<void> {
     if (bootstrapped) return
-    // Probe whether the table already exists before issuing CREATE TABLE.
-    // On ClickHouse Cloud, repeated CREATE TABLE IF NOT EXISTS can fail with
-    // "already exists in metadata backend with different schema" because the
-    // engine normalisation (SharedMergeTree vs SharedMergeTree()) differs
-    // between the stored metadata and the new DDL statement.
+    debug('journal', `probing journal table "${journalTable}"`)
     try {
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
+      debug('journal', 'journal table exists')
       bootstrapped = true
       return
     } catch (error) {
       if (isUnknownDatabaseError(error)) {
+        debug('journal', 'database does not exist')
         _databaseMissing = true
         bootstrapped = true
         return
       }
-      // Table does not exist yet – create it below.
     }
+    debug('journal', 'creating journal table')
     try {
       await db.command(createTableSql)
     } catch (error) {
       if (isUnknownDatabaseError(error)) {
+        debug('journal', 'database missing on CREATE — deferring')
         _databaseMissing = true
         bootstrapped = true
         return
       }
       throw error
     }
-    // On ClickHouse Cloud, DDL propagation across nodes may lag behind the
-    // CREATE TABLE acknowledgment. Wait until the table is queryable.
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
+        debug('journal', `DDL propagation confirmed (attempt ${attempt + 1})`)
         break
       } catch {
         await new Promise((r) => setTimeout(r, 250))
@@ -96,8 +96,10 @@ SETTINGS index_granularity = 1`
       return _databaseMissing
     },
     async readJournal(): Promise<MigrationJournal> {
+      debug('journal', 'reading journal')
       await ensureTable()
       if (_databaseMissing) {
+        debug('journal', 'database missing — returning empty journal')
         return { version: 1, applied: [] }
       }
       try {
@@ -108,6 +110,7 @@ SETTINGS index_granularity = 1`
       const rows = await db.query<MigrationRow>(
         `SELECT name, applied_at, checksum, chkit_version FROM ${journalTable} ORDER BY name SETTINGS select_sequential_consistency = 1`
       )
+      debug('journal', `journal has ${rows.length} applied entries`)
       return {
         version: 1,
         applied: rows.map((row) => ({
@@ -119,8 +122,9 @@ SETTINGS index_granularity = 1`
     },
 
     async appendEntry(entry: MigrationJournalEntry): Promise<void> {
+      debug('journal', `appending entry: ${entry.name} (checksum: ${entry.checksum})`)
       if (_databaseMissing) {
-        // A migration may have created the database — reset and retry.
+        debug('journal', 'resetting databaseMissing flag — migration may have created the database')
         _databaseMissing = false
         bootstrapped = false
       }
@@ -136,6 +140,7 @@ SETTINGS index_granularity = 1`
           if (!isRetryableInsertRace(error) || attempt === maxAttempts) {
             throw error
           }
+          debug('journal', `insert race detected — retrying (attempt ${attempt}/${maxAttempts})`)
           await new Promise((r) => setTimeout(r, attempt * 150))
         }
       }

@@ -12,6 +12,7 @@ import {
   type ChxConfigInput,
   type ResolvedChxConfig,
 } from '@chkit/core'
+import { debug } from './debug.js'
 
 export const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
 
@@ -24,6 +25,7 @@ export async function loadConfig(
   env: ChxConfigEnv = {}
 ): Promise<{ config: ResolvedChxConfig; path: string }> {
   const configPath = resolve(process.cwd(), configPathArg ?? DEFAULT_CONFIG_FILE)
+  debug('config', `resolving config at ${configPath}`)
   if (!existsSync(configPath)) {
     throw new Error(`Config not found at ${configPath}. Run 'chkit init' first.`)
   }
@@ -36,12 +38,20 @@ export async function loadConfig(
     )
   }
 
-  const userConfig = isConfigFunction(candidate) ? await candidate(env) : (candidate as ChxConfig)
+  const isFn = isConfigFunction(candidate)
+  debug('config', `config export is ${isFn ? 'function' : 'object'}`)
+  const userConfig = isFn ? await candidate(env) : (candidate as ChxConfig)
+  const config = resolveConfig(userConfig)
 
-  return {
-    config: resolveConfig(userConfig),
-    path: configPath,
-  }
+  debug('config', `loaded`, {
+    schema: config.schema,
+    outDir: config.outDir,
+    migrationsDir: config.migrationsDir,
+    clickhouse: config.clickhouse ? `${config.clickhouse.url} (db: ${config.clickhouse.database ?? 'default'})` : 'not configured',
+    plugins: (config.plugins ?? []).length,
+  })
+
+  return { config, path: configPath }
 }
 
 export async function writeIfMissing(filePath: string, content: string): Promise<void> {

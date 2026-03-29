@@ -31,6 +31,7 @@ import type {
 } from '../plugins.js'
 import { isInlinePluginRegistration } from '../plugins.js'
 import type { TableScope } from './table-scope.js'
+import { debug, isDebugEnabled } from './debug.js'
 
 interface LoadedPlugin {
   options: Record<string, unknown>
@@ -126,6 +127,99 @@ function normalizePluginRegistration(
   }
 }
 
+function wrapExecutorWithDebug(executor: ClickHouseExecutor): ClickHouseExecutor {
+  if (!isDebugEnabled()) return executor
+
+  return {
+    async command(sql: string): Promise<void> {
+      debug('clickhouse', `command: ${sql.slice(0, 200)}${sql.length > 200 ? '...' : ''}`)
+      const start = performance.now()
+      try {
+        await executor.command(sql)
+        debug('clickhouse', `command OK (${Math.round(performance.now() - start)}ms)`)
+      } catch (error) {
+        debug('clickhouse', `command FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async query<T>(sql: string): Promise<T[]> {
+      debug('clickhouse', `query: ${sql.slice(0, 200)}${sql.length > 200 ? '...' : ''}`)
+      const start = performance.now()
+      try {
+        const rows = await executor.query<T>(sql)
+        debug('clickhouse', `query OK — ${rows.length} rows (${Math.round(performance.now() - start)}ms)`)
+        return rows
+      } catch (error) {
+        debug('clickhouse', `query FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void> {
+      debug('clickhouse', `insert into ${params.table} — ${params.values.length} rows`)
+      const start = performance.now()
+      try {
+        await executor.insert(params)
+        debug('clickhouse', `insert OK (${Math.round(performance.now() - start)}ms)`)
+      } catch (error) {
+        debug('clickhouse', `insert FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async submit(sql: string, queryId?: string): Promise<string> {
+      debug('clickhouse', `submit${queryId ? ` (id: ${queryId})` : ''}: ${sql.slice(0, 200)}${sql.length > 200 ? '...' : ''}`)
+      const start = performance.now()
+      try {
+        const id = await executor.submit(sql, queryId)
+        debug('clickhouse', `submit OK — id: ${id} (${Math.round(performance.now() - start)}ms)`)
+        return id
+      } catch (error) {
+        debug('clickhouse', `submit FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async queryStatus(queryId: string, options?: { afterTime?: string }) {
+      debug('clickhouse', `queryStatus for ${queryId}`)
+      const start = performance.now()
+      try {
+        const status = await executor.queryStatus(queryId, options)
+        debug('clickhouse', `queryStatus: ${status.status} (${Math.round(performance.now() - start)}ms)`)
+        return status
+      } catch (error) {
+        debug('clickhouse', `queryStatus FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async listSchemaObjects() {
+      debug('clickhouse', 'listSchemaObjects')
+      const start = performance.now()
+      try {
+        const objects = await executor.listSchemaObjects()
+        debug('clickhouse', `listSchemaObjects OK — ${objects.length} objects (${Math.round(performance.now() - start)}ms)`)
+        return objects
+      } catch (error) {
+        debug('clickhouse', `listSchemaObjects FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async listTableDetails(databases: string[]) {
+      debug('clickhouse', `listTableDetails for databases: [${databases.join(', ')}]`)
+      const start = performance.now()
+      try {
+        const tables = await executor.listTableDetails(databases)
+        debug('clickhouse', `listTableDetails OK — ${tables.length} tables (${Math.round(performance.now() - start)}ms)`)
+        return tables
+      } catch (error) {
+        debug('clickhouse', `listTableDetails FAILED (${Math.round(performance.now() - start)}ms)`, error instanceof Error ? error.message : error)
+        throw error
+      }
+    },
+    async close(): Promise<void> {
+      debug('clickhouse', 'closing connections')
+      await executor.close()
+    },
+  }
+}
+
 function formatPluginError(pluginName: string, hook: string, error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error)
   return new Error(`Plugin "${pluginName}" failed in ${hook}: ${message}`)
@@ -207,6 +301,11 @@ export async function loadPluginRuntime(input: {
       throw new Error(`Duplicate plugin name "${plugin.manifest.name}" in config.plugins.`)
     }
 
+    debug('plugin', `loaded "${plugin.manifest.name}" v${plugin.manifest.version ?? '?'}`, {
+      hooks: Object.keys(plugin.hooks ?? {}),
+      commands: (plugin.commands ?? []).map((c) => c.name),
+    })
+
     const item: LoadedPlugin = {
       plugin,
       options: normalized.options,
@@ -231,6 +330,7 @@ export async function loadPluginRuntime(input: {
       if (item.plugin.manifest.name === pluginName) continue
       const hook = item.plugin.hooks?.onBeforePluginCommand
       if (!hook) continue
+      debug('hook', `onBeforePluginCommand → ${item.plugin.manifest.name} (target: ${pluginName}:${commandName})`)
       try {
         const result = await hook({
           ...context,
@@ -238,7 +338,10 @@ export async function loadPluginRuntime(input: {
           command: commandName,
           options: item.options,
         })
-        if (result.handled) return result
+        if (result.handled) {
+          debug('hook', `onBeforePluginCommand ← ${item.plugin.manifest.name} handled command (exitCode: ${result.exitCode})`)
+          return result
+        }
       } catch (error) {
         throw formatPluginError(item.plugin.manifest.name, 'onBeforePluginCommand', error)
       }
@@ -266,10 +369,12 @@ export async function loadPluginRuntime(input: {
     plugins: loaded,
     async resolveContext(input) {
       const hasClickhouseConfig = !!input.config.clickhouse
+      debug('context', `resolving executor — clickhouse config: ${hasClickhouseConfig ? 'yes' : 'no'}`)
+      const rawExecutor = hasClickhouseConfig
+        ? createClickHouseExecutor(input.config.clickhouse!)
+        : NULL_EXECUTOR
       const defaults: PluginContext = {
-        executor: hasClickhouseConfig
-          ? createClickHouseExecutor(input.config.clickhouse!)
-          : NULL_EXECUTOR,
+        executor: wrapExecutorWithDebug(rawExecutor),
         hasExecutor: hasClickhouseConfig,
       }
       let ctx = defaults
@@ -279,6 +384,7 @@ export async function loadPluginRuntime(input: {
         try {
           const result = await hook({ ...input, defaults })
           if (result && typeof result === 'object' && 'executor' in result && result.executor) {
+            debug('context', `plugin "${item.plugin.manifest.name}" provided executor override`)
             // Plugin returned an executor override — close the default one
             if (ctx.executor !== defaults.executor) {
               // A previous plugin already overrode — close that one
@@ -310,6 +416,7 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onInit
         if (!hook) continue
+        debug('hook', `onInit → ${item.plugin.manifest.name}`)
         try {
           await hook({ ...context, options: item.options })
         } catch (error) {
@@ -322,6 +429,7 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onComplete
         if (!hook) continue
+        debug('hook', `onComplete → ${item.plugin.manifest.name} (exitCode: ${exitCode})`)
         try {
           await hook({ ...context, exitCode, options: item.options })
         } catch (error) {
@@ -334,6 +442,7 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onConfigLoaded
         if (!hook) continue
+        debug('hook', `onConfigLoaded → ${item.plugin.manifest.name}`)
         try {
           await hook({ ...context, options: item.options, tableScope })
         } catch (error) {
@@ -346,9 +455,11 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onSchemaLoaded
         if (!hook) continue
+        debug('hook', `onSchemaLoaded → ${item.plugin.manifest.name} (${definitions.length} definitions)`)
         try {
           const next = await hook({ ...context, definitions })
           if (Array.isArray(next)) {
+            debug('hook', `onSchemaLoaded ← ${item.plugin.manifest.name} returned ${next.length} definitions`)
             definitions = canonicalizeDefinitions(next)
           }
         } catch (error) {
@@ -363,9 +474,13 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onPlanCreated
         if (!hook) continue
+        debug('hook', `onPlanCreated → ${item.plugin.manifest.name} (${plan.operations.length} operations)`)
         try {
           const next = await hook({ ...context, tableScope, plan })
-          if (next) plan = next
+          if (next) {
+            debug('hook', `onPlanCreated ← ${item.plugin.manifest.name} modified plan (${next.operations.length} operations)`)
+            plan = next
+          }
         } catch (error) {
           throw formatPluginError(item.plugin.manifest.name, 'onPlanCreated', error)
         }
@@ -377,9 +492,13 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onBeforeApply
         if (!hook) continue
+        debug('hook', `onBeforeApply → ${item.plugin.manifest.name} (${context.migration}, ${statements.length} statements)`)
         try {
           const result = await hook({ ...context, statements })
-          if (result?.statements) statements = result.statements
+          if (result?.statements) {
+            debug('hook', `onBeforeApply ← ${item.plugin.manifest.name} modified statements (${result.statements.length})`)
+            statements = result.statements
+          }
         } catch (error) {
           throw formatPluginError(item.plugin.manifest.name, 'onBeforeApply', error)
         }
@@ -390,6 +509,7 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onAfterApply
         if (!hook) continue
+        debug('hook', `onAfterApply → ${item.plugin.manifest.name} (${context.migration})`)
         try {
           await hook(context)
         } catch (error) {
@@ -403,9 +523,11 @@ export async function loadPluginRuntime(input: {
       for (const item of loaded) {
         const hook = item.plugin.hooks?.onCheck
         if (!hook) continue
+        debug('hook', `onCheck → ${item.plugin.manifest.name}`)
         try {
           const result = await hook({ ...context, options: item.options, tableScope })
           if (!result) continue
+          debug('hook', `onCheck ← ${item.plugin.manifest.name}: ok=${result.ok}, findings=${result.findings.length}`)
           results.push({
             plugin: result.plugin || item.plugin.manifest.name,
             evaluated: result.evaluated,
@@ -434,6 +556,7 @@ export async function loadPluginRuntime(input: {
     },
     runOnBeforePluginCommand: runBeforePluginCommandHooks,
     async runPluginCommand(pluginName, commandName, context) {
+      debug('command', `running plugin command "${pluginName}:${commandName}"`)
       const item = byName.get(pluginName)
       if (!item) return 1
       const command = (item.plugin.commands ?? []).find((entry) => entry.name === commandName)
