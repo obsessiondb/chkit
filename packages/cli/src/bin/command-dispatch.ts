@@ -154,14 +154,25 @@ async function runCoreOrBuiltinCommand(input: {
 
     const dirs = resolveDirs(input.config)
     if (!input.resolved.run) throw new Error(`Command '${input.commandName}' has no run handler`)
-    await input.resolved.run({
-      command: input.commandName,
-      flags,
+    const ctx = await input.pluginRuntime.resolveContext({
       config: input.config,
       configPath: input.configPath,
-      dirs,
-      pluginRuntime: input.pluginRuntime,
+      command: input.commandName,
+      flags,
     })
+    try {
+      await input.resolved.run({
+        command: input.commandName,
+        flags,
+        config: input.config,
+        configPath: input.configPath,
+        dirs,
+        pluginRuntime: input.pluginRuntime,
+        ctx,
+      })
+    } finally {
+      await input.pluginRuntime.disposeContext(ctx)
+    }
     return
   }
 
@@ -171,14 +182,25 @@ async function runCoreOrBuiltinCommand(input: {
 
   const dirs = resolveDirs(input.config)
   if (!input.resolved.run) throw new Error(`Command '${input.commandName}' has no run handler`)
-  await input.resolved.run({
-    command: input.commandName,
-    flags,
+  const ctx = await input.pluginRuntime.resolveContext({
     config: input.config,
     configPath: input.configPath,
-    dirs,
-    pluginRuntime: input.pluginRuntime,
+    command: input.commandName,
+    flags,
   })
+  try {
+    await input.resolved.run({
+      command: input.commandName,
+      flags,
+      config: input.config,
+      configPath: input.configPath,
+      dirs,
+      pluginRuntime: input.pluginRuntime,
+      ctx,
+    })
+  } finally {
+    await input.pluginRuntime.disposeContext(ctx)
+  }
 }
 
 export async function runResolvedCommand(input: {

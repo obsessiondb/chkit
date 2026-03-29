@@ -2,7 +2,6 @@ import { mkdir } from 'node:fs/promises'
 
 import { summarizeDriftReasons } from '../../drift.js'
 import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
-import { withClickHouseExecutor } from '../clickhouse-resource.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
 import { createJournalStore } from '../journal-store.js'
@@ -19,8 +18,8 @@ export const checkCommand: CommandDef = {
   run: cmdCheck,
 }
 
-async function cmdCheck(ctx: CommandRunContext): Promise<void> {
-  const { flags, config, configPath, dirs, pluginRuntime } = ctx
+async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
+  const { flags, config, configPath, dirs, pluginRuntime, ctx } = runCtx
   const f = typedFlags(flags, [...GLOBAL_FLAGS, { name: '--strict', type: 'boolean', description: 'Enable all policy checks' }] as const)
   const strict = f['--strict'] === true
   const jsonMode = f['--json'] === true
@@ -28,12 +27,13 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
   const { migrationsDir, metaDir } = dirs
   await mkdir(migrationsDir, { recursive: true })
 
-  if (!config.clickhouse) {
+  if (!ctx.hasExecutor) {
     throw new Error('clickhouse config is required for check (journal is stored in ClickHouse)')
   }
+  const db = ctx.executor
+  const database = config.clickhouse?.database
 
-  const database = config.clickhouse.database
-  await withClickHouseExecutor(config.clickhouse, async (db) => {
+  {
     const journalStore = createJournalStore(db)
 
     const files = await listMigrations(migrationsDir)
@@ -66,7 +66,7 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
       }
       return
     }
-    const drift = snapshot ? await buildDriftPayload(config, metaDir, snapshot, tableScope) : null
+    const drift = snapshot ? await buildDriftPayload(config, metaDir, snapshot, tableScope, db) : null
 
     const policy = {
       failOnPending: strict ? true : config.check?.failOnPending ?? true,
@@ -187,5 +187,5 @@ async function cmdCheck(ctx: CommandRunContext): Promise<void> {
       console.log(`Failed checks: ${failedChecks.join(', ')}`)
       process.exitCode = 1
     }
-  })
+  }
 }

@@ -7,6 +7,7 @@ import type {
   ResolvedChxConfig,
   SchemaDefinition,
 } from '@chkit/core'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import type { PluginRuntime } from './bin/plugin-runtime.js'
 import type { TableScope } from './bin/table-scope.js'
 
@@ -20,6 +21,20 @@ export {
   type InferFlags,
   type ParsedFlags,
 } from '@chkit/core'
+
+export interface PluginContext {
+  executor: ClickHouseExecutor
+  /** True when an executor was provided (either from config or a plugin). False when using the null executor. */
+  hasExecutor: boolean
+}
+
+export interface ChxGetContextInput {
+  config: ResolvedChxConfig
+  configPath: string
+  command: string
+  flags: ParsedFlags
+  defaults: PluginContext
+}
 
 export interface CommandDef {
   name: string
@@ -35,6 +50,7 @@ export interface CommandRunContext {
   configPath: string
   dirs: { outDir: string; migrationsDir: string; metaDir: string }
   pluginRuntime: PluginRuntime
+  ctx: PluginContext
 }
 
 export interface CommandExtension {
@@ -88,6 +104,7 @@ export interface ChxOnAfterApplyContext extends ChxPluginHookContextBase {
 
 export interface ChxOnInitContext {
   command: string
+  configPath: string
   isInteractive: boolean
   jsonMode: boolean
   options: Record<string, unknown>
@@ -160,6 +177,9 @@ export interface ChxPluginCommand {
 }
 
 export interface ChxPluginHooks {
+  getContext?: (
+    input: ChxGetContextInput
+  ) => PluginContext | Partial<PluginContext> | void | Promise<PluginContext | Partial<PluginContext> | void>
   onInit?: (context: ChxOnInitContext) => void | Promise<void>
   onComplete?: (context: ChxOnCompleteContext) => void | Promise<void>
   onBeforePluginCommand?: (

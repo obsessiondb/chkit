@@ -8,6 +8,7 @@ function resolveBaseUrlFromFlags(flags: Record<string, string | string[] | boole
 }
 
 interface PluginCommandContext {
+  configPath: string
   flags: Record<string, string | string[] | boolean | undefined>
   print: (value: unknown) => void
 }
@@ -31,7 +32,7 @@ export const LOGIN_COMMAND: PluginCommand = {
   ],
   async run(context) {
     const baseUrl = resolveBaseUrlFromFlags(context.flags)
-    return runLogin(baseUrl, (msg) => context.print(msg))
+    return runLogin(baseUrl, context.configPath, (msg) => context.print(msg))
   },
 }
 
