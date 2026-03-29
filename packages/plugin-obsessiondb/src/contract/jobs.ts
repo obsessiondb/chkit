@@ -1,3 +1,7 @@
+/**
+ * Copied from @obsessiondb/feature-jobs-contract — will be replaced
+ * by a direct dependency once the contract package is published.
+ */
 import { oc } from '@orpc/contract'
 import { z } from 'zod'
 
@@ -60,11 +64,15 @@ export const jobsContract = {
     )
     .output(z.object({ jobId: z.string() })),
 
-  get: oc.input(z.object({ jobId: z.string() })).output(jobDetailSchema),
+  get: oc
+    .input(z.object({ jobId: z.string() }))
+    .output(jobDetailSchema),
 
   list: oc
     .input(z.object({ serviceId: z.string() }))
     .output(z.object({ jobs: z.array(jobSummarySchema) })),
 
-  cancel: oc.input(z.object({ jobId: z.string() })).output(z.object({})),
+  cancel: oc
+    .input(z.object({ jobId: z.string() }))
+    .output(z.object({})),
 }
