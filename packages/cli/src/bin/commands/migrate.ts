@@ -5,7 +5,6 @@ import { createInterface } from 'node:readline/promises'
 
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
 import { waitForDDLPropagation } from '@chkit/clickhouse'
-import { withClickHouseExecutor } from '../clickhouse-resource.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
 import { emitJson } from '../json-output.js'
 import { createJournalStore } from '../journal-store.js'
@@ -95,8 +94,8 @@ async function filterPendingByScope(
   return inScope
 }
 
-async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
-  const { flags, config, configPath, dirs, pluginRuntime } = ctx
+async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
+  const { flags, config, configPath, dirs, pluginRuntime, ctx } = runCtx
   const f = typedFlags(flags, [...GLOBAL_FLAGS, ...MIGRATE_FLAGS] as const)
   const executeRequested = f['--apply'] === true || f['--execute'] === true
   const allowDestructive = f['--allow-destructive'] === true
@@ -105,11 +104,12 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
 
   const { migrationsDir, metaDir } = dirs
 
-  if (!config.clickhouse) {
+  if (!ctx.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
+  const db = ctx.executor
 
-  await withClickHouseExecutor(config.clickhouse, async (db) => {
+  {
     const journalStore = createJournalStore(db)
     const snapshot = await readSnapshot(metaDir)
     const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
@@ -327,5 +327,5 @@ async function cmdMigrate(ctx: CommandRunContext): Promise<void> {
     }
 
     console.log(`\nMigrations recorded in ClickHouse _chkit_migrations table.`)
-  })
+  }
 }
