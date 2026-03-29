@@ -63,7 +63,7 @@ export async function pollDeviceToken(
         'Content-Type': 'application/json',
         'User-Agent': userAgent(),
       },
-      body: JSON.stringify({ client_id: CLIENT_ID, device_code: deviceCode }),
+      body: JSON.stringify({ client_id: CLIENT_ID, device_code: deviceCode, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }),
     })
 
     if (!res.ok) {
