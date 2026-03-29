@@ -120,6 +120,7 @@ async function main(): Promise<void> {
 
   const initCtx = {
     command: commandName,
+    configPath,
     isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
     jsonMode: argv.includes('--json'),
   }
