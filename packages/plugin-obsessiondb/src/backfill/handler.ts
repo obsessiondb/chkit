@@ -43,11 +43,14 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
   // --local flag bypasses remote execution
   if (context.flags['--local'] === true) return { handled: false }
 
-  const creds = await loadCredentials()
-  if (!creds) return { handled: false }
-
   const handler = BACKFILL_SUBCOMMANDS[context.command]
   if (!handler) return { handled: false }
+
+  const creds = await loadCredentials()
+  if (!creds) {
+    context.print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
+    return { handled: true, exitCode: 1 }
+  }
 
   // Allow OBSESSIONDB_API_URL env var to override the stored base_url
   const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }

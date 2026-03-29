@@ -61,15 +61,16 @@ describe('handleBackfillCommand', () => {
     expect(result).toEqual({ handled: false })
   })
 
-  test('returns handled: false when not authenticated', async () => {
+  test('requires login when not authenticated', async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'chkit-bf-'))
     originalXdg = process.env.XDG_CONFIG_HOME
     process.env.XDG_CONFIG_HOME = tempDir
     // No credentials saved
 
-    const { context } = makeContext()
+    const { context, printed } = makeContext()
     const result = await handleBackfillCommand(context)
-    expect(result).toEqual({ handled: false })
+    expect(result).toEqual({ handled: true, exitCode: 1 })
+    expect(printed[0]).toContain('chkit obsessiondb login')
   })
 
   test('routes to remote API when authenticated', async () => {

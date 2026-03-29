@@ -364,16 +364,18 @@ describe('onBeforePluginCommand — backfill interception', () => {
     expect((printed[0] as Record<string, unknown>).run_id).toBe('r-abc')
   })
 
-  test('falls through when not authenticated', async () => {
+  test('requires login when not authenticated', async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'chkit-obd-'))
     originalXdg = process.env.XDG_CONFIG_HOME
     process.env.XDG_CONFIG_HOME = tempDir
 
-    const { context } = makeHookContext()
+    const { context, printed } = makeHookContext()
     const plugin = obsessiondb().plugin
     const result = await plugin.hooks.onBeforePluginCommand(context as Parameters<typeof plugin.hooks.onBeforePluginCommand>[0])
 
-    expect(result.handled).toBe(false)
+    expect(result.handled).toBe(true)
+    expect(result.exitCode).toBe(1)
+    expect(printed[0]).toContain('chkit obsessiondb login')
   })
 
   test('falls through with --local flag even when authenticated', async () => {
