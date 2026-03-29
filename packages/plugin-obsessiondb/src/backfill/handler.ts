@@ -60,8 +60,6 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
       command: context.command,
       args: context.args,
       flags: context.flags,
-      config: context.config,
-      configPath: context.configPath,
     }
 
     const result = await handler(input, effectiveCreds)
