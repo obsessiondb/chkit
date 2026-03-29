@@ -42,7 +42,7 @@
     "@orpc/contract": "1.13.4",
     "@types/node": "^24.0.0",
     "p-map": "^7.0.4",
-    "turbo": "^2.8.20",
+    "turbo": "^2.8.21",
     "typescript": "^5.8.0",
     "zod": "3.25.76"
   },

@@ -3,11 +3,9 @@ export { createJobsClient, type JobsClient } from './client.js'
 export {
   jobsContract,
   jobStatusSchema,
-  taskStatusSchema,
-  jobTaskSchema,
   jobSummarySchema,
   jobDetailSchema,
-} from './contract.js'
+} from '../contract/jobs.js'
 
 export const BACKFILL_EXTEND_COMMANDS = [
   {
