@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test, afterEach, mock } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ResolvedChxConfig, SchemaDefinition } from '@chkit/core'
 
+import { saveCredentials } from './auth/credentials'
 import {
   isObsessionDBHost,
   obsessiondb,
@@ -299,5 +303,96 @@ describe('obsessiondb plugin', () => {
 
     expect(result).toBeDefined()
     expect(result).toHaveLength(1)
+  })
+})
+
+describe('onBeforePluginCommand — backfill interception', () => {
+  let tempDir: string
+  let originalXdg: string | undefined
+  const originalFetch = globalThis.fetch
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch
+    if (originalXdg !== undefined) {
+      process.env.XDG_CONFIG_HOME = originalXdg
+    } else {
+      delete process.env.XDG_CONFIG_HOME
+    }
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  function makeHookContext(overrides: Record<string, unknown> = {}) {
+    const printed: unknown[] = []
+    return {
+      context: {
+        targetPlugin: 'backfill',
+        command: 'run',
+        config: {},
+        configPath: '/fake/clickhouse.config.ts',
+        jsonMode: false,
+        args: [],
+        flags: {},
+        options: {},
+        print: (v: unknown) => printed.push(v),
+        ...overrides,
+      },
+      printed,
+    }
+  }
+
+  async function setupAuth() {
+    tempDir = await mkdtemp(join(tmpdir(), 'chkit-obd-'))
+    originalXdg = process.env.XDG_CONFIG_HOME
+    process.env.XDG_CONFIG_HOME = tempDir
+    await saveCredentials({ access_token: 'test-tok', base_url: 'https://api.test.com' })
+  }
+
+  test('intercepts backfill commands when authenticated', async () => {
+    await setupAuth()
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ ok: true, run_id: 'r-abc' }), { status: 200 })
+    ) as typeof fetch
+
+    const { context, printed } = makeHookContext()
+    const plugin = obsessiondb().plugin
+    const result = await plugin.hooks.onBeforePluginCommand(context as Parameters<typeof plugin.hooks.onBeforePluginCommand>[0])
+
+    expect(result.handled).toBe(true)
+    expect(result.exitCode).toBe(0)
+    expect((printed[0] as Record<string, unknown>).run_id).toBe('r-abc')
+  })
+
+  test('falls through when not authenticated', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'chkit-obd-'))
+    originalXdg = process.env.XDG_CONFIG_HOME
+    process.env.XDG_CONFIG_HOME = tempDir
+
+    const { context } = makeHookContext()
+    const plugin = obsessiondb().plugin
+    const result = await plugin.hooks.onBeforePluginCommand(context as Parameters<typeof plugin.hooks.onBeforePluginCommand>[0])
+
+    expect(result.handled).toBe(false)
+  })
+
+  test('falls through with --local flag even when authenticated', async () => {
+    await setupAuth()
+
+    const { context } = makeHookContext({ flags: { '--local': true } })
+    const plugin = obsessiondb().plugin
+    const result = await plugin.hooks.onBeforePluginCommand(context as Parameters<typeof plugin.hooks.onBeforePluginCommand>[0])
+
+    expect(result.handled).toBe(false)
+  })
+
+  test('falls through for non-backfill plugins', async () => {
+    await setupAuth()
+
+    const { context } = makeHookContext({ targetPlugin: 'codegen' })
+    const plugin = obsessiondb().plugin
+    const result = await plugin.hooks.onBeforePluginCommand(context as Parameters<typeof plugin.hooks.onBeforePluginCommand>[0])
+
+    expect(result.handled).toBe(false)
   })
 })
