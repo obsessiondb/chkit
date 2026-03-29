@@ -41,6 +41,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chkit/core": "workspace:*"
+    "@chkit/core": "workspace:*",
+    "@orpc/client": "1.13.4",
+    "@orpc/contract": "1.13.4",
+    "zod": "3.25.76"
   }
 }
