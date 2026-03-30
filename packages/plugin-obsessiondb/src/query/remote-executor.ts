@@ -69,7 +69,7 @@ export function createRemoteExecutor(deps: {
         : ''
 
       const running = await executor.query<{ query_id: string }>(
-        `SELECT query_id FROM system.processes WHERE query_id = '${queryId}' LIMIT 1`,
+        `SELECT query_id FROM system.processes WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1`,
       )
       if (running.length > 0) return { status: 'running' as const }
 
@@ -82,7 +82,8 @@ export function createRemoteExecutor(deps: {
       }>(
         `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM system.query_log
-WHERE query_id = '${queryId}'
+WHERE user = currentUser()
+  AND query_id = '${queryId}'
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
   ${afterFilter}
 ORDER BY event_time DESC
