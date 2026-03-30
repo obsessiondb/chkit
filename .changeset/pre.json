@@ -13,10 +13,12 @@
     "@chkit/plugin-obsessiondb": "0.1.0-beta.7"
   },
   "changesets": [
+    "add-debug-logging",
     "add-emit-migrations",
     "add-pkg-links",
     "add-plugin-obsessiondb",
     "add-xddl-header",
+    "async-query-backfill",
     "backfill-array-fix",
     "backfill-env-binding",
     "backfill-execute-fix",
@@ -39,14 +41,20 @@
     "handle-unknown-database",
     "internal-refactors",
     "journal-in-clickhouse",
+    "journal-replacing-mergetree",
     "mv-column-list",
     "mv-drop-sync",
+    "obsessiondb-auth-backfill",
+    "obsessiondb-query-routing",
     "obsessiondb-strip-storage-policy",
     "open-source-audit",
+    "plugin-command-hook",
+    "query-progress-metrics",
     "rename-plugin-codegen",
     "rename-to-chkit",
     "skill-hint-agent-aware",
     "skill-hint-plugin",
+    "system-table-user-filter",
     "validate-set-index-args"
   ]
 }

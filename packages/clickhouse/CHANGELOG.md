@@ -1,5 +1,39 @@
 # @chkit/clickhouse
 
+## 0.1.0-beta.20
+
+### Patch Changes
+
+- ba60638: Add homepage and repository metadata to all packages, and link READMEs to the chkit CLI package and documentation site.
+- 6348ef2: Add X-DDL HTTP header to pin ClickHouse requests to a single node during migrations, fixing SharedMergeTree DDL race conditions.
+- cb09aaa: Replace sequential backfill execution with async query submission and server-side polling. Chunks are submitted as fire-and-forget queries to ClickHouse and polled via `system.processes`/`system.query_log`, with configurable concurrency (`--concurrency`) and poll interval (`--poll-interval`). Removes the old synchronous executor, runtime, simulation flags, compatibility tokens, and event logging.
+- 638f75f: Fix: Migrations no longer fail with "table not found" errors on distributed ClickHouse setups when creating materialized views that reference tables created in the same migration. The migrate command now polls `system.tables`/`system.columns` after each DDL statement to confirm propagation before proceeding.
+- cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
+- 1f8ad1b: Fix silent exit with no error output when ClickHouse is unreachable. The CLI now displays clear error messages for connection failures (connection refused, host not found, timeout, etc.) including the configured ClickHouse URL. Added fallback error formatting for any errors with empty messages.
+- f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
+- 949a20c: Gracefully handle ClickHouse error 81 (UNKNOWN_DATABASE) when the configured database does not exist yet. Commands `status`, `drift`, `check`, and `migrate` no longer crash with a raw stack trace; instead they show a warning and continue with normal output.
+- 3ab6919: Store migration journal in ClickHouse instead of a local file. Migration state is now tracked per-environment via a `_chkit_migrations` table, enabling multi-environment deployments where staging and production independently track applied migrations.
+- 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
+- 8112b46: Report intermediate query metrics (read_rows, written_rows, elapsed, etc.) from system.processes during backfill polling. Previously queryStatus returned only `{ status: 'running' }` with no metrics, and onProgress only fired on state transitions. Now every poll with metric changes triggers onProgress, giving visibility into long-running chunks.
+- a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
+- d983fdf: Rename internals and CLI binary from chkit to chkit.
+- 45ff0fe: Add `user = currentUser()` filter to all system.processes and system.query_log queries to satisfy ClickHouse row-level security policies.
+- Updated dependencies [c63c74f]
+- Updated dependencies [ba60638]
+- Updated dependencies [c396fb5]
+- Updated dependencies [1a5caa3]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [cc1125e]
+- Updated dependencies [f719c50]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [bc0c6b1]
+- Updated dependencies [9a54433]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+- Updated dependencies [a52a2b2]
+  - @chkit/core@0.1.0-beta.20
+
 ## 0.1.0-beta.19
 
 ### Patch Changes
