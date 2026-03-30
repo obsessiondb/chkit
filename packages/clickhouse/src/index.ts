@@ -327,7 +327,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     async queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus> {
       try {
         const running = await client.query({
-          query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+          query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
           query_params: { qid: queryId },
           format: 'JSONEachRow',
         })
@@ -354,7 +354,8 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         const log = await client.query({
           query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM clusterAllReplicas('parallel_replicas', system.query_log)
-WHERE query_id = {qid:String}
+WHERE user = currentUser()
+  AND query_id = {qid:String}
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
   AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})

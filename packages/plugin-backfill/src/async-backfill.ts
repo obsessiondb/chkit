@@ -149,7 +149,7 @@ export async function syncProgress(
   const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
 
   const runningRows = await executor.query<{ query_id: string }>(
-    `SELECT query_id FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
+    `SELECT query_id FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
   )
   const runningSet = new Set(runningRows.map((r) => r.query_id))
 
@@ -163,7 +163,8 @@ export async function syncProgress(
   }>(
     `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
 FROM clusterAllReplicas('parallel_replicas', system.query_log)
-WHERE query_id LIKE '${safePrefix}%'
+WHERE user = currentUser()
+  AND query_id LIKE '${safePrefix}%'
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
   AND is_initial_query = 1
 ORDER BY event_time DESC
