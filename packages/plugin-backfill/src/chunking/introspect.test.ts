@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { introspectTable, queryPartitionInfo, querySortKeyInfo, querySortKeyRanges } from './introspect.js'
+import { introspectTable, queryPartitionInfo, querySortKeyInfo, querySortKeyRanges, querySortKeys } from './introspect.js'
 
 describe('queryPartitionInfo', () => {
   test('maps system.parts rows to PartitionInfo array', async () => {
@@ -132,13 +132,53 @@ describe('querySortKeyInfo', () => {
   test('returns first column from multi-column sorting key', async () => {
     const query = async <T>(sql: string) => {
       if (sql.includes('system.tables')) return [{ sorting_key: 'event_time, id' }] as T[]
-      if (sql.includes('system.columns')) return [{ type: 'DateTime' }] as T[]
+      if (sql.includes('system.columns')) return [{ name: 'event_time', type: 'DateTime' }, { name: 'id', type: 'UInt64' }] as T[]
       return [] as T[]
     }
 
     const result = await querySortKeyInfo({ database: 'default', table: 'events', query })
 
     expect(result?.column).toBe('event_time')
+  })
+
+  test('extracts a single referenced column from function expressions with commas', async () => {
+    const query = async <T>(sql: string) => {
+      if (sql.includes('system.tables')) {
+        return [{ sorting_key: 'toStartOfInterval(ts, INTERVAL 5 MINUTE), user_id' }] as T[]
+      }
+      if (sql.includes('system.columns')) {
+        return [
+          { name: 'ts', type: 'DateTime' },
+          { name: 'user_id', type: 'String' },
+        ] as T[]
+      }
+      return [] as T[]
+    }
+
+    const result = await querySortKeys({ database: 'default', table: 'events', query })
+
+    expect(result.map((key) => key.column)).toEqual(['ts', 'user_id'])
+    expect(result.map((key) => key.category)).toEqual(['datetime', 'string'])
+  })
+
+  test('skips ambiguous tuple expressions that do not map to one physical column', async () => {
+    const query = async <T>(sql: string) => {
+      if (sql.includes('system.tables')) {
+        return [{ sorting_key: 'tuple(user_id, session_id), event_time' }] as T[]
+      }
+      if (sql.includes('system.columns')) {
+        return [
+          { name: 'user_id', type: 'String' },
+          { name: 'session_id', type: 'String' },
+          { name: 'event_time', type: 'DateTime' },
+        ] as T[]
+      }
+      return [] as T[]
+    }
+
+    const result = await querySortKeys({ database: 'default', table: 'events', query })
+
+    expect(result.map((key) => key.column)).toEqual(['event_time'])
   })
 })
 

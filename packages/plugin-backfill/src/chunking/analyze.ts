@@ -363,8 +363,18 @@ async function splitSliceWithBoundaries(
   const slices: PartitionSlice[] = []
 
   for (let index = 0; index < boundaries.length - 1; index++) {
-    const ranges = replaceSliceRange(slice, dimensionIndex, boundaries[index], boundaries[index + 1])
+    const from = boundaries[index]
+    const to = boundaries[index + 1]
+    if (from === undefined || to === undefined || from === to) {
+      continue
+    }
+
+    const ranges = replaceSliceRange(slice, dimensionIndex, from, to)
     const estimatedRows = await countRows(context, partition.partitionId, ranges)
+    if (estimatedRows <= 0) {
+      continue
+    }
+
     slices.push(buildSliceFromRows(partition, {
       ranges,
       estimatedRows,
@@ -516,6 +526,8 @@ function buildTemporalSlices(
   const slices: PartitionSlice[] = []
   let currentStart: string | undefined
   let currentRows = 0
+  const parentRange = getSliceRange(parentSlice, dimensionIndex)
+  const sliceEnd = parentRange.to ?? getPartitionEndExclusive(partition)
 
   for (let index = 0; index < buckets.length; index++) {
     const bucket = buckets[index]
@@ -547,7 +559,7 @@ function buildTemporalSlices(
 
     if (index === buckets.length - 1 && currentStart !== undefined) {
       slices.push(buildSliceFromRows(partition, {
-        ranges: replaceSliceRange(parentSlice, dimensionIndex, currentStart, getPartitionEndExclusive(partition)),
+        ranges: replaceSliceRange(parentSlice, dimensionIndex, currentStart, sliceEnd),
         estimatedRows: currentRows,
         isHotKey: parentSlice.isHotKey,
         hotDimensionIndex: parentSlice.hotDimensionIndex,
@@ -950,24 +962,34 @@ function buildEvenlySpacedBoundaries(
   if (sortKey.category === 'datetime') {
     const start = parsePlannerDateTime(from)
     const end = parsePlannerDateTime(to)
-    return Array.from({ length: subCount + 1 }, (_, index) =>
+    return uniqueBoundaries(Array.from({ length: subCount + 1 }, (_, index) =>
       new Date(start + Math.floor(((end - start) * index) / subCount)).toISOString()
-    )
+    ))
   }
 
   if (sortKey.category === 'numeric') {
     const start = Number(from)
     const end = Number(to)
-    return Array.from({ length: subCount + 1 }, (_, index) =>
+    return uniqueBoundaries(Array.from({ length: subCount + 1 }, (_, index) =>
       String(start + Math.floor(((end - start) * index) / subCount))
-    )
+    ))
   }
 
   const start = strToBigInt(from, 8)
   const end = strToBigInt(to, 8)
-  return Array.from({ length: subCount + 1 }, (_, index) =>
+  return uniqueBoundaries(Array.from({ length: subCount + 1 }, (_, index) =>
     bigIntToStr(start + ((end - start) * BigInt(index)) / BigInt(subCount), 8)
-  )
+  ))
+}
+
+function uniqueBoundaries(boundaries: string[]): string[] {
+  const unique: string[] = []
+  for (const boundary of boundaries) {
+    if (unique[unique.length - 1] !== boundary) {
+      unique.push(boundary)
+    }
+  }
+  return unique
 }
 
 function parsePlannerDateTime(value: string): number {

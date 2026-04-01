@@ -72,15 +72,92 @@ SETTINGS select_sequential_consistency = 1`
 }
 
 function extractSortKeyColumns(sortingKey: string): string[] {
-  return sortingKey
-    .split(',')
+  return splitTopLevelCsv(sortingKey)
     .map((part) => part.trim())
-    .map((part) => {
-      if (!part) return undefined
-      const match = part.match(/^\w+\((\w+)\)$/)
-      return match ? match[1] : part
-    })
-    .filter((part): part is string => Boolean(part && part.length > 0))
+    .filter((part): part is string => part.length > 0)
+}
+
+function splitTopLevelCsv(input: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let depth = 0
+  let quote: "'" | '"' | undefined
+
+  for (let index = 0; index < input.length; index++) {
+    const char = input[index]
+    if (char === undefined) continue
+
+    if (quote) {
+      current += char
+      if (char === quote && input[index - 1] !== '\\') {
+        quote = undefined
+      }
+      continue
+    }
+
+    if (char === '\'' || char === '"') {
+      quote = char
+      current += char
+      continue
+    }
+
+    if (char === '(') {
+      depth += 1
+      current += char
+      continue
+    }
+
+    if (char === ')') {
+      depth = Math.max(0, depth - 1)
+      current += char
+      continue
+    }
+
+    if (char === ',' && depth === 0) {
+      parts.push(current.trim())
+      current = ''
+      continue
+    }
+
+    current += char
+  }
+
+  if (current.trim().length > 0) {
+    parts.push(current.trim())
+  }
+
+  return parts
+}
+
+function resolveSortKeyColumn(expression: string, knownColumns: Set<string>): string | undefined {
+  const trimmed = expression.trim()
+  if (knownColumns.has(trimmed)) {
+    return trimmed
+  }
+
+  const identifiers = Array.from(trimmed.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\b/g))
+    .map((match) => match[0])
+    .filter((identifier): identifier is string => Boolean(identifier))
+
+  const matches = Array.from(new Set(identifiers.filter((identifier) => knownColumns.has(identifier))))
+  if (matches.length === 1) {
+    return matches[0]
+  }
+
+  return undefined
+}
+
+function resolveSortKeyColumnWithoutSchema(expression: string): string | undefined {
+  const trimmed = expression.trim()
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+    return trimmed
+  }
+
+  const identifiers = Array.from(trimmed.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\b/g))
+    .map((match) => match[0])
+    .filter((identifier): identifier is string => Boolean(identifier))
+
+  return identifiers.length > 0 ? identifiers[identifiers.length - 1] : undefined
 }
 
 export async function querySortKeys(input: {
@@ -95,24 +172,42 @@ export async function querySortKeys(input: {
   const sortingKey = tableRows[0]?.sorting_key
   if (!sortingKey) return []
 
-  const columnNames = extractSortKeyColumns(sortingKey)
-  if (columnNames.length === 0) return []
+  const expressions = extractSortKeyColumns(sortingKey)
+  if (expressions.length === 0) return []
 
-  const inList = columnNames.map((name) => `'${name}'`).join(', ')
   const columnRows = await input.query<{ name?: string; type: string }>(
-    `SELECT name, type FROM system.columns WHERE database = '${input.database}' AND table = '${input.table}' AND name IN (${inList})`
+    `SELECT name, type FROM system.columns WHERE database = '${input.database}' AND table = '${input.table}'`
   )
   const typeByName = new Map(
-    columnRows.map((row, index) => [row.name ?? columnNames[index] ?? columnNames[0], row.type])
+    columnRows
+      .filter((row): row is { name: string; type: string } => Boolean(row.name))
+      .map((row) => [row.name, row.type])
   )
+  const knownColumns = new Set(typeByName.keys())
 
-  return columnNames.map((column) => {
+  if (knownColumns.size === 0) {
+    return expressions.flatMap((expression, index) => {
+      const column = resolveSortKeyColumnWithoutSchema(expression)
+      const type = columnRows[index]?.type ?? columnRows[0]?.type
+      if (!column || !type) return []
+
+      return [{
+        column,
+        type,
+        category: classifySortKeyType(type),
+      }]
+    })
+  }
+
+  return expressions.flatMap((expression) => {
+    const column = resolveSortKeyColumn(expression, knownColumns)
+    if (!column) return []
     const type = typeByName.get(column) ?? 'String'
-    return {
+    return [{
       column,
       type,
       category: classifySortKeyType(type),
-    }
+    }]
   })
 }
 

@@ -32,4 +32,14 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     expect(sdk).toHaveProperty('executeBackfill')
     expect(sdk).toHaveProperty('buildChunkSql')
   })
+
+  test('package exports resolve root and sdk subpath separately', async () => {
+    const packageRoot = await import('@chkit/plugin-backfill')
+    const packageSdk = await import('@chkit/plugin-backfill/sdk')
+
+    expect(packageRoot).toHaveProperty('backfill')
+    expect(packageRoot).not.toHaveProperty('analyzeAndChunk')
+    expect(packageSdk).toHaveProperty('analyzeAndChunk')
+    expect(packageSdk).toHaveProperty('executeBackfill')
+  })
 })

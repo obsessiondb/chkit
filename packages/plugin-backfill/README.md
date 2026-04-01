@@ -35,6 +35,16 @@ export default defineConfig({
 
 See the [chkit documentation](https://chkit.obsessiondb.com).
 
+## SDK Internals
+
+The package root is limited to the plugin registration API.
+
+Chunk-planning and async execution internals are exposed from the SDK subpath:
+
+```ts
+import { analyzeAndChunk, executeBackfill } from '@chkit/plugin-backfill/sdk'
+```
+
 ## License
 
 [MIT](../../LICENSE)

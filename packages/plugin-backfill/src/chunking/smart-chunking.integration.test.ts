@@ -301,6 +301,10 @@ describe('smart chunking integration', () => {
 
     expect(result.chunks.length).toBeGreaterThan(1)
     expect(result.chunks.some((chunk) => strategyIds(chunk).includes('equal-width-split'))).toBe(true)
+    expect(result.chunks.every((chunk) => (chunk.estimatedRows ?? 0) > 0)).toBe(true)
+    expect(result.chunks.every((chunk) =>
+      chunk.ranges?.every((range) => range.from !== range.to) ?? true
+    )).toBe(true)
   })
 
   test('uses string-prefix splitting for string-distributed partitions', async () => {
@@ -373,6 +377,15 @@ describe('smart chunking integration', () => {
     expect(sql).toContain('user_id >=')
     expect(sql).toContain('event_time >=')
     expect(sql).toContain('parseDateTimeBestEffort')
+
+    const temporalRanges = hotChunks
+      .map((chunk) => chunk.ranges?.find((range) => range.dimensionIndex === 1))
+      .filter((range): range is NonNullable<typeof range> => Boolean(range))
+      .sort((left, right) => String(left.from).localeCompare(String(right.from)))
+
+    for (let index = 1; index < temporalRanges.length; index++) {
+      expect(temporalRanges[index - 1]?.to).toBe(temporalRanges[index]?.from)
+    }
   })
 
   test('combines string-prefix and quantile splitting on secondary numeric dimensions', async () => {
