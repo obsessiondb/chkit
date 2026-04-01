@@ -36,7 +36,14 @@ export async function buildBackfillPlan(input: {
   const env = computeEnvironmentFingerprint(input.clickhouse)
 
   // 1. Analyze table and build planned chunks
-  const { planId, partitions, sortKey, chunks: plannedChunks } = await analyzeAndChunk({
+  const {
+    planId,
+    partitions,
+    sortKey,
+    sortKeys,
+    chunks: plannedChunks,
+    partitionDiagnostics,
+  } = await analyzeAndChunk({
     database,
     table,
     from: opts.from,
@@ -88,6 +95,7 @@ export async function buildBackfillPlan(input: {
       chunk: planned,
       target: opts.target,
       sortKey,
+      sortKeys,
       mvAsQuery,
       targetColumns,
     })
@@ -102,8 +110,16 @@ export async function buildBackfillPlan(input: {
       sqlTemplate,
       partitionId: planned.partitionId,
       estimatedBytes: planned.estimatedBytes,
+      ...(planned.estimatedRows !== undefined ? { estimatedRows: planned.estimatedRows } : {}),
+      ...(planned.ranges ? { ranges: planned.ranges } : {}),
       ...(planned.sortKeyFrom !== undefined ? { sortKeyFrom: planned.sortKeyFrom } : {}),
       ...(planned.sortKeyTo !== undefined ? { sortKeyTo: planned.sortKeyTo } : {}),
+      ...(planned.isHotKey !== undefined ? { isHotKey: planned.isHotKey } : {}),
+      ...(planned.hotDimensionIndex !== undefined ? { hotDimensionIndex: planned.hotDimensionIndex } : {}),
+      ...(planned.hotKeyValue !== undefined ? { hotKeyValue: planned.hotKeyValue } : {}),
+      ...(planned.estimateConfidence !== undefined ? { estimateConfidence: planned.estimateConfidence } : {}),
+      ...(planned.estimateReason !== undefined ? { estimateReason: planned.estimateReason } : {}),
+      ...(planned.lineage ? { lineage: planned.lineage } : {}),
     }
   })
 
@@ -121,6 +137,8 @@ export async function buildBackfillPlan(input: {
     chunks,
     partitions,
     sortKey,
+    sortKeys,
+    partitionDiagnostics,
     options: {
       maxChunkBytes: opts.maxChunkBytes,
       maxParallelChunks: opts.maxParallelChunks,

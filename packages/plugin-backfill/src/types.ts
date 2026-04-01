@@ -1,7 +1,15 @@
 import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core'
 
 import type { BackfillProgress } from './async-backfill.js'
-import type { PartitionInfo, SortKeyInfo } from './chunking/types.js'
+import type {
+  PartitionDiagnostics,
+  PartitionInfo,
+  SliceLineageStep,
+  SliceRange,
+  SortKeyInfo,
+  EstimateConfidence,
+  EstimateReason,
+} from './chunking/types.js'
 import type { PluginConfig } from './options.js'
 
 /** @deprecated Use {@link PluginConfig} instead. */
@@ -29,8 +37,16 @@ export interface BackfillChunk {
   lastError?: string
   partitionId: string
   estimatedBytes: number
+  estimatedRows?: number
+  ranges?: SliceRange[]
   sortKeyFrom?: string
   sortKeyTo?: string
+  isHotKey?: boolean
+  hotDimensionIndex?: number
+  hotKeyValue?: string
+  estimateConfidence?: EstimateConfidence
+  estimateReason?: EstimateReason
+  lineage?: SliceLineageStep[]
 }
 
 export interface BackfillPlanState {
@@ -45,6 +61,8 @@ export interface BackfillPlanState {
   chunks: BackfillChunk[]
   partitions?: PartitionInfo[]
   sortKey?: SortKeyInfo
+  sortKeys?: SortKeyInfo[]
+  partitionDiagnostics?: PartitionDiagnostics[]
   options: {
     chunkHours?: number
     maxChunkBytes?: number

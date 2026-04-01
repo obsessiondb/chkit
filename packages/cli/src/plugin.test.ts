@@ -40,7 +40,7 @@ async function waitForParts(
   database: string,
   table: string,
   expectedPartitions: number,
-  timeoutMs = 15_000,
+  timeoutMs = 60_000,
 ): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {

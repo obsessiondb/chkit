@@ -7,17 +7,45 @@ function buildSettingsClause(token: string): string {
   return `SETTINGS async_insert=0`
 }
 
-function buildSortKeyCondition(
-  sortKeyColumn: string,
-  category: SortKeyInfo['category'],
-  from: string,
-  to: string,
-): string {
-  if (category === 'datetime') {
-    return `  AND ${sortKeyColumn} >= parseDateTimeBestEffort('${from}')\n  AND ${sortKeyColumn} < parseDateTimeBestEffort('${to}')`
+function quoteSqlString(value: string): string {
+  return `'${value.replaceAll('\\', '\\\\').replaceAll('\'', '\\\'')}'`
+}
+
+function formatBound(value: string, sortKey: SortKeyInfo): string {
+  if (sortKey.category === 'datetime') {
+    return `parseDateTimeBestEffort(${quoteSqlString(value)})`
   }
-  // numeric and string use direct comparison
-  return `  AND ${sortKeyColumn} >= '${from}'\n  AND ${sortKeyColumn} < '${to}'`
+  if (sortKey.category === 'string') {
+    return `unhex('${Buffer.from(value, 'latin1').toString('hex')}')`
+  }
+  return quoteSqlString(value)
+}
+
+function buildChunkConditions(chunk: PlannedChunk, sortKeys: SortKeyInfo[]): string[] {
+  if (chunk.ranges?.length) {
+    return chunk.ranges.flatMap((range) => {
+      const sortKey = sortKeys[range.dimensionIndex]
+      if (!sortKey) return []
+
+      const conditions: string[] = []
+      if (range.from !== undefined) {
+        conditions.push(`${sortKey.column} >= ${formatBound(range.from, sortKey)}`)
+      }
+      if (range.to !== undefined) {
+        conditions.push(`${sortKey.column} < ${formatBound(range.to, sortKey)}`)
+      }
+      return conditions
+    })
+  }
+
+  if (chunk.sortKeyFrom !== undefined && chunk.sortKeyTo !== undefined && sortKeys[0]) {
+    return [
+      `${sortKeys[0].column} >= ${formatBound(chunk.sortKeyFrom, sortKeys[0])}`,
+      `${sortKeys[0].column} < ${formatBound(chunk.sortKeyTo, sortKeys[0])}`,
+    ]
+  }
+
+  return []
 }
 
 export function buildChunkSql(input: {
@@ -25,24 +53,21 @@ export function buildChunkSql(input: {
   chunk: PlannedChunk
   target: string
   sortKey?: SortKeyInfo
+  sortKeys?: SortKeyInfo[]
   mvAsQuery?: string
   targetColumns?: string[]
 }): string {
   const header = `/* chkit backfill plan=${input.planId} chunk=${input.chunk.id} token=${input.chunk.idempotencyToken} */`
   const settings = buildSettingsClause(input.chunk.idempotencyToken)
   const { chunk } = input
+  const sortKeys = input.sortKeys ?? (input.sortKey ? [input.sortKey] : [])
+  const chunkConditions = buildChunkConditions(chunk, sortKeys)
 
   if (input.mvAsQuery) {
     // MV replay: inject partition + sort key filters into the MV's AS query
     let filtered = injectPartitionFilter(input.mvAsQuery, chunk.partitionId)
-    if (chunk.sortKeyFrom !== undefined && chunk.sortKeyTo !== undefined && input.sortKey) {
-      filtered = injectSortKeyFilter(
-        filtered,
-        input.sortKey.column,
-        input.sortKey.category,
-        chunk.sortKeyFrom,
-        chunk.sortKeyTo,
-      )
+    for (const condition of chunkConditions) {
+      filtered = injectWhereCondition(filtered, condition)
     }
     if (input.targetColumns?.length) {
       filtered = rewriteSelectColumns(filtered, input.targetColumns)
@@ -59,13 +84,8 @@ export function buildChunkSql(input: {
     `WHERE _partition_id = '${chunk.partitionId}'`,
   ]
 
-  if (chunk.sortKeyFrom !== undefined && chunk.sortKeyTo !== undefined && input.sortKey) {
-    lines.push(buildSortKeyCondition(
-      input.sortKey.column,
-      input.sortKey.category,
-      chunk.sortKeyFrom,
-      chunk.sortKeyTo,
-    ))
+  for (const condition of chunkConditions) {
+    lines.push(`  AND ${condition}`)
   }
 
   lines.push(settings)
@@ -88,9 +108,11 @@ export function injectSortKeyFilter(
 ): string {
   let condition: string
   if (category === 'datetime') {
-    condition = `${sortKeyColumn} >= parseDateTimeBestEffort('${from}')\n  AND ${sortKeyColumn} < parseDateTimeBestEffort('${to}')`
+    condition = `${sortKeyColumn} >= parseDateTimeBestEffort(${quoteSqlString(from)})\n  AND ${sortKeyColumn} < parseDateTimeBestEffort(${quoteSqlString(to)})`
+  } else if (category === 'string') {
+    condition = `${sortKeyColumn} >= unhex('${Buffer.from(from, 'latin1').toString('hex')}')\n  AND ${sortKeyColumn} < unhex('${Buffer.from(to, 'latin1').toString('hex')}')`
   } else {
-    condition = `${sortKeyColumn} >= '${from}'\n  AND ${sortKeyColumn} < '${to}'`
+    condition = `${sortKeyColumn} >= ${quoteSqlString(from)}\n  AND ${sortKeyColumn} < ${quoteSqlString(to)}`
   }
   return injectWhereCondition(query, condition)
 }
