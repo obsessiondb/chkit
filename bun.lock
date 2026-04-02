@@ -93,6 +93,7 @@
       "name": "@chkit/plugin-obsessiondb",
       "version": "0.1.0-beta.19",
       "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
         "@orpc/client": "1.13.4",
         "@orpc/contract": "1.13.4",
