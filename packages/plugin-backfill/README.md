@@ -42,7 +42,14 @@ The package root is limited to the plugin registration API.
 Chunk-planning and async execution internals are exposed from the SDK subpath:
 
 ```ts
-import { analyzeAndChunk, executeBackfill } from '@chkit/plugin-backfill/sdk'
+import {
+  analyzeAndChunk,
+  buildWhereClauseFromChunk,
+  decodeChunkPlanFromPersistence,
+  encodeChunkPlanForPersistence,
+  executeBackfill,
+  generateIdempotencyToken,
+} from '@chkit/plugin-backfill/sdk'
 ```
 
 ## License

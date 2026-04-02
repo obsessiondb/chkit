@@ -39,6 +39,10 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     expect(sdk).toHaveProperty('generateChunkPlan')
     expect(sdk).toHaveProperty('executeBackfill')
     expect(sdk).toHaveProperty('buildChunkExecutionSql')
+    expect(sdk).toHaveProperty('buildWhereClauseFromChunk')
+    expect(sdk).toHaveProperty('encodeChunkPlanForPersistence')
+    expect(sdk).toHaveProperty('decodeChunkPlanFromPersistence')
+    expect(sdk).toHaveProperty('generateIdempotencyToken')
   })
 
   test('package exports declare root and sdk subpath separately', () => {
