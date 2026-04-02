@@ -2,13 +2,7 @@ import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core
 
 import type { BackfillProgress } from './async-backfill.js'
 import type {
-  PartitionDiagnostics,
-  PartitionInfo,
-  SliceLineageStep,
-  SliceRange,
-  SortKeyInfo,
-  EstimateConfidence,
-  EstimateReason,
+  ChunkPlan,
 } from './chunking/types.js'
 import type { PluginConfig } from './options.js'
 
@@ -24,52 +18,41 @@ export interface BackfillEnvironment {
 
 export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
-export type { ChunkBoundary, PartitionInfo, PlannedChunk, SortKeyInfo } from './chunking/types.js'
+export type {
+  Chunk,
+  ChunkDerivationStep,
+  ChunkPlan,
+  ChunkRange,
+  EstimateConfidence,
+  EstimateReason,
+  FocusedValue,
+  Partition,
+  PartitionDiagnostics,
+  SortKey,
+} from './chunking/types.js'
 
-export interface BackfillChunk {
-  id: string
-  from: string
-  to: string
-  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped'
-  attempts: number
-  idempotencyToken: string
-  sqlTemplate: string
-  lastError?: string
-  partitionId: string
-  estimatedBytes: number
-  estimatedRows?: number
-  ranges?: SliceRange[]
-  sortKeyFrom?: string
-  sortKeyTo?: string
-  isHotKey?: boolean
-  hotDimensionIndex?: number
-  hotKeyValue?: string
-  estimateConfidence?: EstimateConfidence
-  estimateReason?: EstimateReason
-  lineage?: SliceLineageStep[]
+export interface BackfillExecutionPlan {
+  mode: 'copy' | 'mv_replay'
+  sourceTarget: string
+  mvAsQuery?: string
+  targetColumns?: string[]
+  requireIdempotencyToken: boolean
 }
 
 export interface BackfillPlanState {
   planId: string
   target: string
   createdAt: string
-  status: BackfillPlanStatus
-  strategy?: 'table' | 'mv_replay' | 'partition'
   environment?: BackfillEnvironment
   from: string
   to: string
-  chunks: BackfillChunk[]
-  partitions?: PartitionInfo[]
-  sortKey?: SortKeyInfo
-  sortKeys?: SortKeyInfo[]
-  partitionDiagnostics?: PartitionDiagnostics[]
+  chunkPlan: ChunkPlan
+  execution: BackfillExecutionPlan
   options: {
-    chunkHours?: number
     maxChunkBytes?: number
     maxParallelChunks: number
     maxRetriesPerChunk: number
     requireIdempotencyToken: boolean
-    timeColumn?: string
     sortKeyColumn?: string
   }
   policy: {

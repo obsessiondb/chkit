@@ -7,9 +7,9 @@ export interface BackfillOptions {
   /** Plan ID used as a namespace in deterministic query IDs */
   planId: string
   /** The chunks to process (from buildChunks) */
-  chunks: Array<{ id: string; from: string; to: string; [key: string]: unknown }>
+  chunks: Array<{ id: string; from?: string; to?: string; [key: string]: unknown }>
   /** Build the SQL for a given chunk. Called once per chunk at submit time. */
-  buildQuery: (chunk: { id: string; from: string; to: string }) => string
+  buildQuery: (chunk: { id: string; from?: string; to?: string }) => string
   /** Max concurrent queries running on the server. Default: 3 */
   concurrency?: number
   /** Polling interval in ms. Default: 5000 */

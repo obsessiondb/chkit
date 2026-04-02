@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
 import { analyzeAndChunk } from './analyze.js'
-import { buildChunkSql } from './sql.js'
-import type { SortKeyInfo } from './types.js'
+import { buildChunkExecutionSql } from './sql.js'
+import type { Chunk, ChunkPlan } from './types.js'
 
 const MiB = 1024 ** 2
 
@@ -35,8 +35,7 @@ function createFixtureQuery(input: {
     }
 
     if (sql.includes('FROM system.parts')) {
-      const partitions = summarizePartitions(input.rows, bytesPerRow, uncompressedBytesPerRow)
-      return partitions as T[]
+      return summarizePartitions(input.rows, bytesPerRow, uncompressedBytesPerRow) as T[]
     }
 
     if (sql.includes('FROM system.tables')) {
@@ -75,9 +74,7 @@ function createFixtureQuery(input: {
 
       const grouped = new Map<string, number>()
       for (const row of filteredRows) {
-        const bucket = grain === 'day'
-          ? toStartOfDay(String(row[column]))
-          : toStartOfHour(String(row[column]))
+        const bucket = grain === 'day' ? toStartOfDay(String(row[column])) : toStartOfHour(String(row[column]))
         grouped.set(bucket, (grouped.get(bucket) ?? 0) + 1)
       }
 
@@ -150,10 +147,10 @@ function evaluateClause(clause: string, row: FixtureRow): boolean {
   match = clause.match(/^(\w+) < parseDateTimeBestEffort\('([^']+)'\)$/)
   if (match) return Date.parse(String(row[match[1]])) < Date.parse(match[2])
 
-  match = clause.match(/^(\w+) >= unhex\('([0-9a-f]+)'\)$/i)
+  match = clause.match(/^(\w+) >= unhex\('([0-9a-f]*)'\)$/i)
   if (match) return compareLatin1(String(row[match[1]] ?? ''), Buffer.from(match[2], 'hex').toString('latin1')) >= 0
 
-  match = clause.match(/^(\w+) < unhex\('([0-9a-f]+)'\)$/i)
+  match = clause.match(/^(\w+) < unhex\('([0-9a-f]*)'\)$/i)
   if (match) return compareLatin1(String(row[match[1]] ?? ''), Buffer.from(match[2], 'hex').toString('latin1')) < 0
 
   match = clause.match(/^(\w+) >= '([^']+)'$/)
@@ -182,7 +179,7 @@ function compareValues(left: RowValue, right: RowValue): number {
 }
 
 function formatValueForMinMax(value: RowValue): string {
-  return typeof value === 'number' ? String(value) : String(value)
+  return String(value)
 }
 
 function compareLatin1(left: string, right: string): number {
@@ -196,21 +193,14 @@ function toStartOfDay(value: string): string {
 
 function toStartOfHour(value: string): string {
   const date = new Date(value)
-  return new Date(Date.UTC(
-    date.getUTCFullYear(),
-    date.getUTCMonth(),
-    date.getUTCDate(),
-    date.getUTCHours(),
-    0,
-    0,
-  )).toISOString()
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), 0, 0)).toISOString()
 }
 
 async function planFixture(input: {
   rows: FixtureRow[]
   sortKeys: Array<{ column: string; type: string }>
   maxChunkBytes: number
-}) {
+}): Promise<ChunkPlan> {
   const query = createFixtureQuery({
     database: 'app',
     table: 'events',
@@ -221,23 +211,22 @@ async function planFixture(input: {
   return analyzeAndChunk({
     database: 'app',
     table: 'events',
-    maxChunkBytes: input.maxChunkBytes,
-    requireIdempotencyToken: true,
+    targetChunkBytes: input.maxChunkBytes,
     query,
   })
 }
 
-function strategyIds(chunk: { lineage?: Array<{ strategyId: string }> }): string[] {
-  return chunk.lineage?.map((step) => step.strategyId) ?? []
+function strategyIds(chunk: Pick<Chunk, 'analysis'>): string[] {
+  return chunk.analysis.lineage.map((step) => step.strategyId)
 }
 
-function buildSqlForChunk(chunk: Awaited<ReturnType<typeof planFixture>>['chunks'][number], sortKeys: SortKeyInfo[]) {
-  return buildChunkSql({
+function buildSqlForChunk(plan: ChunkPlan, chunk: Chunk): string {
+  return buildChunkExecutionSql({
     planId: 'fixture-plan',
     chunk,
     target: 'app.events',
-    sortKey: sortKeys[0],
-    sortKeys,
+    sourceTarget: 'app.events',
+    table: plan.table,
   })
 }
 
@@ -256,15 +245,15 @@ describe('smart chunking integration', () => {
       id: index,
     }))
 
-    const result = await planFixture({
+    const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'id', type: 'UInt64' }],
       maxChunkBytes: 64 * MiB,
     })
 
-    expect(result.chunks).toHaveLength(1)
-    expect(result.chunks[0]?.estimateReason).toBe('partition-metadata')
-    expect(strategyIds(result.chunks[0] ?? {})).toHaveLength(0)
+    expect(plan.chunks).toHaveLength(1)
+    expect(plan.chunks[0]?.estimate.reason).toBe('partition-metadata')
+    expect(strategyIds(requireChunk(plan.chunks[0], 'metadata chunk'))).toHaveLength(0)
   })
 
   test('uses quantile range splitting for wide numeric distributions', async () => {
@@ -274,15 +263,16 @@ describe('smart chunking integration', () => {
       id: index,
     }))
 
-    const result = await planFixture({
+    const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'id', type: 'UInt64' }],
       maxChunkBytes: 30 * 1024,
     })
 
-    expect(result.chunks.length).toBeGreaterThanOrEqual(3)
-    expect(result.chunks.every((chunk) => strategyIds(chunk).includes('quantile-range-split'))).toBe(true)
-    const estimatedRows = result.chunks.map((chunk) => chunk.estimatedRows ?? 0)
+    expect(plan.chunks.length).toBeGreaterThanOrEqual(3)
+    expect(plan.chunks.every((chunk) => strategyIds(chunk).includes('quantile-range-split'))).toBe(true)
+
+    const estimatedRows = plan.chunks.map((chunk) => chunk.estimate.rows)
     expect(Math.max(...estimatedRows) - Math.min(...estimatedRows)).toBeLessThanOrEqual(4)
   })
 
@@ -293,17 +283,17 @@ describe('smart chunking integration', () => {
       id: 100 + (index % 2),
     }))
 
-    const result = await planFixture({
+    const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'id', type: 'UInt64' }],
       maxChunkBytes: 20 * 1024,
     })
 
-    expect(result.chunks.length).toBeGreaterThan(1)
-    expect(result.chunks.some((chunk) => strategyIds(chunk).includes('equal-width-split'))).toBe(true)
-    expect(result.chunks.every((chunk) => (chunk.estimatedRows ?? 0) > 0)).toBe(true)
-    expect(result.chunks.every((chunk) =>
-      chunk.ranges?.every((range) => range.from !== range.to) ?? true
+    expect(plan.chunks.length).toBeGreaterThan(1)
+    expect(plan.chunks.some((chunk) => strategyIds(chunk).includes('equal-width-split'))).toBe(true)
+    expect(plan.chunks.every((chunk) => chunk.estimate.rows > 0)).toBe(true)
+    expect(plan.chunks.every((chunk) =>
+      chunk.ranges.every((range) => range.from !== range.to)
     )).toBe(true)
   })
 
@@ -319,20 +309,20 @@ describe('smart chunking integration', () => {
       }
     }
 
-    const result = await planFixture({
+    const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'slug', type: 'String' }],
       maxChunkBytes: 24 * 1024,
     })
 
-    expect(result.chunks.length).toBeGreaterThan(2)
-    expect(result.chunks.some((chunk) => strategyIds(chunk).includes('string-prefix-split'))).toBe(true)
+    expect(plan.chunks.length).toBeGreaterThan(2)
+    expect(plan.chunks.some((chunk) => strategyIds(chunk).includes('string-prefix-split'))).toBe(true)
 
-    const sql = buildSqlForChunk(requireChunk(result.chunks[0], 'string-prefix first chunk'), result.sortKeys)
+    const sql = buildSqlForChunk(plan, requireChunk(plan.chunks[0], 'string-prefix first chunk'))
     expect(sql).toContain("unhex('")
   })
 
-  test('combines string-prefix and temporal splitting for hot-key time windows', async () => {
+  test('combines string-prefix and temporal splitting for focused time windows', async () => {
     const rows: FixtureRow[] = []
 
     for (let day = 1; day <= 3; day++) {
@@ -355,7 +345,7 @@ describe('smart chunking integration', () => {
       })
     }
 
-    const result = await planFixture({
+    const plan = await planFixture({
       rows,
       sortKeys: [
         { column: 'user_id', type: 'String' },
@@ -364,22 +354,22 @@ describe('smart chunking integration', () => {
       maxChunkBytes: 18 * 1024,
     })
 
-    const hotChunks = result.chunks.filter((chunk) =>
+    const hotChunks = plan.chunks.filter((chunk) =>
       strategyIds(chunk).includes('temporal-bucket-split') &&
-      (chunk.ranges?.some((range) => range.dimensionIndex === 0) ?? false) &&
-      (chunk.ranges?.some((range) => range.dimensionIndex === 1) ?? false)
+      chunk.ranges.some((range) => range.dimensionIndex === 0) &&
+      chunk.ranges.some((range) => range.dimensionIndex === 1)
     )
 
     expect(hotChunks.length).toBeGreaterThan(0)
-    expect(hotChunks.every((chunk) => chunk.isHotKey || (chunk.hotKeyValue !== undefined))).toBe(true)
+    expect(hotChunks.every((chunk) => chunk.analysis.focusedValue?.value === 'hot')).toBe(true)
 
-    const sql = buildSqlForChunk(requireChunk(hotChunks[0], 'temporal combo chunk'), result.sortKeys)
+    const sql = buildSqlForChunk(plan, requireChunk(hotChunks[0], 'temporal combo chunk'))
     expect(sql).toContain('user_id >=')
     expect(sql).toContain('event_time >=')
     expect(sql).toContain('parseDateTimeBestEffort')
 
     const temporalRanges = hotChunks
-      .map((chunk) => chunk.ranges?.find((range) => range.dimensionIndex === 1))
+      .map((chunk) => chunk.ranges.find((range) => range.dimensionIndex === 1))
       .filter((range): range is NonNullable<typeof range> => Boolean(range))
       .sort((left, right) => String(left.from).localeCompare(String(right.from)))
 
@@ -409,7 +399,7 @@ describe('smart chunking integration', () => {
       })
     }
 
-    const result = await planFixture({
+    const plan = await planFixture({
       rows,
       sortKeys: [
         { column: 'account', type: 'String' },
@@ -418,15 +408,15 @@ describe('smart chunking integration', () => {
       maxChunkBytes: 24 * 1024,
     })
 
-    const comboChunks = result.chunks.filter((chunk) =>
+    const comboChunks = plan.chunks.filter((chunk) =>
       strategyIds(chunk).includes('quantile-range-split') &&
-      (chunk.ranges?.some((range) => range.dimensionIndex === 0) ?? false) &&
-      (chunk.ranges?.some((range) => range.dimensionIndex === 1) ?? false)
+      chunk.ranges.some((range) => range.dimensionIndex === 0) &&
+      chunk.ranges.some((range) => range.dimensionIndex === 1)
     )
 
     expect(comboChunks.length).toBeGreaterThan(0)
 
-    const sql = buildSqlForChunk(requireChunk(comboChunks[0], 'numeric combo chunk'), result.sortKeys)
+    const sql = buildSqlForChunk(plan, requireChunk(comboChunks[0], 'numeric combo chunk'))
     expect(sql).toContain('account >=')
     expect(sql).toContain("seq >= '")
   })

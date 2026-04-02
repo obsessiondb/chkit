@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 
 import * as sdk from './sdk.js'
 import * as root from './index.js'
 import { backfill, createBackfillPlugin } from './plugin.js'
+
+const pluginBackfillPackage = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+) as {
+  exports: Record<string, { source: string; types: string; default: string }>
+}
 
 describe('@chkit/plugin-backfill plugin surface', () => {
   test('exposes commands and typed registration helper', () => {
@@ -29,17 +36,21 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     expect(root).not.toHaveProperty('executeBackfill')
 
     expect(sdk).toHaveProperty('analyzeAndChunk')
+    expect(sdk).toHaveProperty('generateChunkPlan')
     expect(sdk).toHaveProperty('executeBackfill')
-    expect(sdk).toHaveProperty('buildChunkSql')
+    expect(sdk).toHaveProperty('buildChunkExecutionSql')
   })
 
-  test('package exports resolve root and sdk subpath separately', async () => {
-    const packageRoot = await import('@chkit/plugin-backfill')
-    const packageSdk = await import('@chkit/plugin-backfill/sdk')
-
-    expect(packageRoot).toHaveProperty('backfill')
-    expect(packageRoot).not.toHaveProperty('analyzeAndChunk')
-    expect(packageSdk).toHaveProperty('analyzeAndChunk')
-    expect(packageSdk).toHaveProperty('executeBackfill')
+  test('package exports declare root and sdk subpath separately', () => {
+    expect(pluginBackfillPackage.exports['.']).toEqual({
+      source: './src/index.ts',
+      types: './dist/index.d.ts',
+      default: './dist/index.js',
+    })
+    expect(pluginBackfillPackage.exports['./sdk']).toEqual({
+      source: './src/sdk.ts',
+      types: './dist/sdk.d.ts',
+      default: './dist/sdk.js',
+    })
   })
 })

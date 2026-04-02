@@ -27,15 +27,13 @@ export function planPayload(output: BuildBackfillPlanOutput): {
     target: output.plan.target,
     from: output.plan.from,
     to: output.plan.to,
-    chunkCount: output.plan.chunks.length,
+    chunkCount: output.plan.chunkPlan.chunks.length,
     maxChunkBytes: output.plan.options.maxChunkBytes,
     sortKeyColumn: output.plan.options.sortKeyColumn,
     planPath: output.planPath,
-    strategy: output.plan.strategy,
-    partitionCount: output.plan.partitions?.length,
-    totalBytes: output.plan.partitions
-      ? output.plan.partitions.reduce((sum, p) => sum + p.bytesOnDisk, 0)
-      : undefined,
+    strategy: output.plan.execution.mode,
+    partitionCount: output.plan.chunkPlan.partitions.length,
+    totalBytes: output.plan.chunkPlan.totalBytesCompressed,
   }
 }
 

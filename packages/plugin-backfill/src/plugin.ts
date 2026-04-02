@@ -2,6 +2,8 @@ import { createClickHouseExecutor } from '@chkit/clickhouse'
 import { wrapPluginRun } from '@chkit/core'
 
 import { executeBackfill, type BackfillProgress } from './async-backfill.js'
+import { buildChunkExecutionSql } from './chunking/sql.js'
+import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
 import {
   PLAN_FLAGS,
@@ -112,11 +114,22 @@ async function runBackfill(input: {
     const result = await executeBackfill({
       executor: db,
       planId: plan.planId,
-      chunks: plan.chunks.map((c) => ({ id: c.id, from: c.from, to: c.to })),
+      chunks: plan.chunkPlan.chunks.map((chunk) => ({ id: chunk.id })),
       buildQuery: (chunk) => {
-        const planChunk = plan.chunks.find((c) => c.id === chunk.id)
+        const planChunk = plan.chunkPlan.chunks.find((candidate) => candidate.id === chunk.id)
         if (!planChunk) throw new Error(`Chunk ${chunk.id} not found in plan`)
-        return planChunk.sqlTemplate
+        return buildChunkExecutionSql({
+          planId: plan.planId,
+          chunk: planChunk,
+          target: plan.target,
+          sourceTarget: plan.execution.sourceTarget,
+          table: plan.chunkPlan.table,
+          mvAsQuery: plan.execution.mvAsQuery,
+          targetColumns: plan.execution.targetColumns,
+          idempotencyToken: plan.execution.requireIdempotencyToken
+            ? generateIdempotencyToken(plan.planId, planChunk.id)
+            : '',
+        })
       },
       concurrency: input.concurrency,
       pollIntervalMs: input.pollIntervalMs,
@@ -215,12 +228,11 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 if (context.jsonMode) {
                   context.print(payload)
                 } else {
-                  const partitionCount = output.plan.partitions?.length ?? 0
-                  const totalBytes = output.plan.partitions
-                    ? formatBytes(output.plan.partitions.reduce((sum, p) => sum + p.bytesOnDisk, 0))
-                    : 'unknown'
-                  const sortKeyLabel = output.plan.sortKey
-                    ? `, sort key: ${output.plan.sortKey.column} (${output.plan.sortKey.category})`
+                  const partitionCount = output.plan.chunkPlan.partitions.length
+                  const totalBytes = formatBytes(output.plan.chunkPlan.totalBytesCompressed)
+                  const primarySortKey = output.plan.chunkPlan.table.sortKeys[0]
+                  const sortKeyLabel = primarySortKey
+                    ? `, sort key: ${primarySortKey.name} (${primarySortKey.category})`
                     : ''
                   context.print(
                     `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`

@@ -1,6 +1,7 @@
 export { executeBackfill, syncProgress } from './async-backfill.js'
-export { analyzeAndChunk, analyzeTable, buildPlannedChunks } from './chunking/analyze.js'
-export { buildChunkSql, injectSortKeyFilter, rewriteSelectColumns } from './chunking/sql.js'
+export { analyzeAndChunk, analyzeTable } from './chunking/analyze.js'
+export { generateChunkPlan } from './chunking/planner.js'
+export { buildChunkExecutionSql, injectSortKeyFilter, rewriteSelectColumns } from './chunking/sql.js'
 
 export type {
   BackfillOptions,
@@ -17,13 +18,14 @@ export type {
 } from './chunking/analyze.js'
 
 export type {
-  ChunkBoundary,
+  Chunk,
+  ChunkDerivationStep,
+  ChunkPlan,
+  ChunkRange,
   EstimateConfidence,
   EstimateReason,
+  FocusedValue,
+  Partition,
   PartitionDiagnostics,
-  PartitionInfo,
-  PlannedChunk,
-  SliceLineageStep,
-  SliceRange,
-  SortKeyInfo,
+  SortKey,
 } from './chunking/types.js'

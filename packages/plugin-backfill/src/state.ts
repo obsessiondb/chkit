@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
 
+import { decodeChunkPlanFromPersistence } from './chunking/boundary-codec.js'
 import { BackfillConfigError } from './errors.js'
 import type {
   BackfillEnvironment,
@@ -89,6 +90,13 @@ async function readJsonMaybe<T>(filePath: string): Promise<T | null> {
   return JSON.parse(await readFile(filePath, 'utf8')) as T
 }
 
+function decodePlan(plan: BackfillPlanState): BackfillPlanState {
+  return {
+    ...plan,
+    chunkPlan: decodeChunkPlanFromPersistence(plan.chunkPlan),
+  }
+}
+
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -102,12 +110,21 @@ export async function readPlan(input: {
 }): Promise<ReadPlanOutput> {
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
   const paths = backfillPaths(stateDir, input.planId)
-  const plan = await readJsonMaybe<BackfillPlanState>(paths.planPath)
-  if (!plan) {
+  const rawPlan = await readJsonMaybe<Record<string, unknown>>(paths.planPath)
+  if (!rawPlan) {
     throw new BackfillConfigError(`Backfill plan not found: ${paths.planPath}`)
   }
+
+  if (!('chunkPlan' in rawPlan)) {
+    throw new BackfillConfigError(
+      `Backfill plan ${input.planId} uses a previous chunking format and can no longer be loaded. Recreate the plan.`
+    )
+  }
+
+  const plan = rawPlan as unknown as BackfillPlanState
+
   return {
-    plan,
+    plan: decodePlan(plan),
     planPath: paths.planPath,
     stateDir,
   }
@@ -132,7 +149,7 @@ export function summarizeRunStatus(
   plan: BackfillPlanState,
 ): BackfillStatusSummary {
   const totals = {
-    total: plan.chunks.length,
+    total: plan.chunkPlan.chunks.length,
     pending: 0,
     submitted: 0,
     running: 0,
@@ -141,7 +158,7 @@ export function summarizeRunStatus(
   }
 
   let rowsWritten = 0
-  for (const chunk of plan.chunks) {
+  for (const chunk of plan.chunkPlan.chunks) {
     const state = run.progress[chunk.id]
     if (!state) {
       totals.pending += 1
