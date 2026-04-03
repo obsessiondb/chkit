@@ -126,7 +126,7 @@ export function buildEstimateSql(
 ): string {
   const whereClause = buildWhereClauseFromFilter(filter, sortKeys)
   if (rowProbeStrategy === 'count') {
-    return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${whereClause}`
+    return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${whereClause} SETTINGS enable_parallel_replicas=0`
   }
   return `EXPLAIN ESTIMATE SELECT count() FROM ${context.database}.${context.table} WHERE ${whereClause}`
 }
@@ -136,7 +136,7 @@ export function buildCountSql(
   sortKeys: SortKey[],
   context: Pick<PlannerContext, 'database' | 'table'>,
 ): string {
-  return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${buildWhereClauseFromFilter(filter, sortKeys)}`
+  return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${buildWhereClauseFromFilter(filter, sortKeys)} SETTINGS enable_parallel_replicas=0`
 }
 
 function buildWhereClauseFromFilter(

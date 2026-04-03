@@ -70,7 +70,7 @@ export async function countPartitionRows(
   partitionId: string,
 ): Promise<number> {
   const rows = await context.query<{ cnt: string }>(
-    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}'`
+    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}' SETTINGS enable_parallel_replicas=0`
   )
   return Number(rows[0]?.cnt ?? 0)
 }
