@@ -8,6 +8,13 @@ import type {
   TableProfile,
 } from './types.js'
 
+// ObsessionDB (ClickHouse Cloud) enables parallel replicas by default, which
+// causes aggregate queries (count, sum, GROUP BY count) to return inflated
+// results — each replica counts independently and the initiator sums them.
+// We disable this for all planning queries until ObsessionDB handles it at
+// the profile level.
+export const DISABLE_PARALLEL_REPLICAS = 'SETTINGS enable_parallel_replicas=0'
+
 export function quoteSqlString(value: string): string {
   return `'${value.replaceAll('\\', '\\\\').replaceAll('\'', '\\\'')}'`
 }
@@ -126,7 +133,7 @@ export function buildEstimateSql(
 ): string {
   const whereClause = buildWhereClauseFromFilter(filter, sortKeys)
   if (rowProbeStrategy === 'count') {
-    return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${whereClause} SETTINGS enable_parallel_replicas=0`
+    return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${whereClause} ${DISABLE_PARALLEL_REPLICAS}`
   }
   return `EXPLAIN ESTIMATE SELECT count() FROM ${context.database}.${context.table} WHERE ${whereClause}`
 }
@@ -136,7 +143,7 @@ export function buildCountSql(
   sortKeys: SortKey[],
   context: Pick<PlannerContext, 'database' | 'table'>,
 ): string {
-  return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${buildWhereClauseFromFilter(filter, sortKeys)} SETTINGS enable_parallel_replicas=0`
+  return `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE ${buildWhereClauseFromFilter(filter, sortKeys)} ${DISABLE_PARALLEL_REPLICAS}`
 }
 
 function buildWhereClauseFromFilter(

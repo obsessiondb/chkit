@@ -1,4 +1,4 @@
-import { buildCountSql, buildEstimateSql, buildWhereClauseFromRanges } from '../sql.js'
+import { buildCountSql, buildEstimateSql, buildWhereClauseFromRanges, DISABLE_PARALLEL_REPLICAS } from '../sql.js'
 import type {
   ChunkRange,
   EstimateFilter,
@@ -70,7 +70,7 @@ export async function countPartitionRows(
   partitionId: string,
 ): Promise<number> {
   const rows = await context.query<{ cnt: string }>(
-    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}' SETTINGS enable_parallel_replicas=0`
+    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}' ${DISABLE_PARALLEL_REPLICAS}`
   )
   return Number(rows[0]?.cnt ?? 0)
 }
@@ -87,7 +87,8 @@ SELECT
   toString(min(${sortKey.name})) AS minVal,
   toString(max(${sortKey.name})) AS maxVal
 FROM ${context.database}.${context.table}
-WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}`)
+WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
+${DISABLE_PARALLEL_REPLICAS}`)
 
   if (rows.length === 0) return undefined
   return {

@@ -1,4 +1,4 @@
-import { buildWhereClauseFromRanges } from '../sql.js'
+import { buildWhereClauseFromRanges, DISABLE_PARALLEL_REPLICAS } from '../sql.js'
 import type {
   ChunkRange,
   PlannerContext,
@@ -26,7 +26,8 @@ SELECT
 FROM ${context.database}.${context.table}
 WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
 GROUP BY prefix
-ORDER BY prefix`)
+ORDER BY prefix
+${DISABLE_PARALLEL_REPLICAS}`)
 
   return rows.map((row) => ({
     value: row.prefix,
@@ -57,7 +58,8 @@ SELECT
 FROM ${context.database}.${context.table}
 WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
 GROUP BY bucket
-ORDER BY bucket`)
+ORDER BY bucket
+${DISABLE_PARALLEL_REPLICAS}`)
 
   return rows.map((row) => ({
     start: row.bucket,
