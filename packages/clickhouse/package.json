@@ -46,6 +46,7 @@
   "dependencies": {
     "@chkit/core": "workspace:*",
     "@clickhouse/client": "^1.11.0",
+    "@logtape/logtape": "^2.0.5",
     "p-retry": "^7.1.1"
   }
 }
