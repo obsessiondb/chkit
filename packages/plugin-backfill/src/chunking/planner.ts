@@ -169,9 +169,18 @@ async function splitOversizedSlice(
     const focusedValue = findFocusedValue(preparedSlice, sortKeys)
 
     if (sortKey.category === 'string') {
-      const stringSlices = await splitSliceWithStringPrefixes(context, partition, preparedSlice, sortKeys, dimensionIndex)
-      if (isEffectiveSplit(preparedSlice, stringSlices)) {
-        return applyFocusedValue(stringSlices, focusedValue)
+      if (rootLike) {
+        // First pass: equal-width EXPLAIN ESTIMATE (fast, metadata-only)
+        const estimateSlices = await splitWithEqualWidthEstimate(context, partition, preparedSlice, sortKeys, dimensionIndex)
+        if (isEffectiveSplit(preparedSlice, estimateSlices)) {
+          return applyFocusedValue(estimateSlices, focusedValue)
+        }
+      } else {
+        // Refinement pass: GROUP BY prefix (exact, scans sorted key column)
+        const stringSlices = await splitSliceWithStringPrefixes(context, partition, preparedSlice, sortKeys, dimensionIndex)
+        if (isEffectiveSplit(preparedSlice, stringSlices)) {
+          return applyFocusedValue(stringSlices, focusedValue)
+        }
       }
     }
 
@@ -229,6 +238,20 @@ async function splitWithRanges(
     range.to,
     subCount
   )
+}
+
+async function splitWithEqualWidthEstimate(
+  context: PlannerContext,
+  partition: Partition,
+  slice: PartitionSlice,
+  sortKeys: SortKey[],
+  dimensionIndex: number,
+): Promise<PartitionSlice[]> {
+  const estimateContext: PlannerContext = {
+    ...context,
+    rowProbeStrategy: 'explain-estimate',
+  }
+  return splitWithRanges(estimateContext, partition, slice, sortKeys, dimensionIndex)
 }
 
 async function buildQuantileBoundaries(
