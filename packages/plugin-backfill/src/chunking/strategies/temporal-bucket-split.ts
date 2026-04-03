@@ -30,7 +30,7 @@ export async function splitSliceWithTemporalBuckets(
   if (dayBuckets.length === 0) return [slice]
 
   const daySlices = buildTemporalSlices(partition, slice, dimensionIndex, dayBuckets, context.targetChunkBytes)
-  if (daySlices.every((candidate) => candidate.estimate.bytesCompressed <= context.targetChunkBytes * TARGET_BYTES_FUZZ_FACTOR)) {
+  if (daySlices.every((candidate) => candidate.estimate.bytesUncompressed <= context.targetChunkBytes * TARGET_BYTES_FUZZ_FACTOR)) {
     return daySlices
   }
 

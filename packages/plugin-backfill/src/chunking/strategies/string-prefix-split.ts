@@ -78,7 +78,7 @@ async function buildPrefixSlices(
     const bucketSlice = buildBucketSlice(partition, slice, dimensionIndex, rangeFrom, rangeTo, bucket)
     if (!bucketSlice) continue
 
-    if (bucketSlice.estimate.bytesCompressed <= context.targetChunkBytes * TARGET_BYTES_FUZZ_FACTOR) {
+    if (bucketSlice.estimate.bytesUncompressed <= context.targetChunkBytes * TARGET_BYTES_FUZZ_FACTOR) {
       slices.push(bucketSlice)
       continue
     }

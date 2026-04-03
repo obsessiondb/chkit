@@ -266,7 +266,7 @@ describe('smart chunking integration', () => {
     const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'id', type: 'UInt64' }],
-      maxChunkBytes: 30 * 1024,
+      maxChunkBytes: 60 * 1024,
     })
 
     expect(plan.chunks.length).toBeGreaterThanOrEqual(3)
@@ -286,7 +286,7 @@ describe('smart chunking integration', () => {
     const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'id', type: 'UInt64' }],
-      maxChunkBytes: 20 * 1024,
+      maxChunkBytes: 40 * 1024,
     })
 
     expect(plan.chunks.length).toBeGreaterThan(1)
@@ -312,7 +312,7 @@ describe('smart chunking integration', () => {
     const plan = await planFixture({
       rows,
       sortKeys: [{ column: 'slug', type: 'String' }],
-      maxChunkBytes: 24 * 1024,
+      maxChunkBytes: 48 * 1024,
     })
 
     expect(plan.chunks.length).toBeGreaterThan(2)
@@ -351,7 +351,7 @@ describe('smart chunking integration', () => {
         { column: 'user_id', type: 'String' },
         { column: 'event_time', type: 'DateTime' },
       ],
-      maxChunkBytes: 18 * 1024,
+      maxChunkBytes: 36 * 1024,
     })
 
     const hotChunks = plan.chunks.filter((chunk) =>
@@ -405,7 +405,7 @@ describe('smart chunking integration', () => {
         { column: 'account', type: 'String' },
         { column: 'seq', type: 'UInt64' },
       ],
-      maxChunkBytes: 24 * 1024,
+      maxChunkBytes: 48 * 1024,
     })
 
     const comboChunks = plan.chunks.filter((chunk) =>

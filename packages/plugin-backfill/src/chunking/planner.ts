@@ -61,7 +61,7 @@ export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<
   }
 
   const chunks = assignChunkIds(planId, slices)
-  const chunkBytes = chunks.map((chunk) => chunk.estimate.bytesCompressed)
+  const chunkBytes = chunks.map((chunk) => chunk.estimate.bytesUncompressed)
 
   return {
     planId,
@@ -76,7 +76,7 @@ export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<
     totalBytesUncompressed: partitions.reduce((sum, partition) => sum + partition.bytesUncompressed, 0),
     stats: {
       totalPartitions: partitions.length,
-      oversizedPartitions: partitions.filter((partition) => partition.bytesCompressed > context.targetChunkBytes).length,
+      oversizedPartitions: partitions.filter((partition) => partition.bytesUncompressed > context.targetChunkBytes).length,
       focusedChunks: chunks.filter((chunk) => chunk.analysis.focusedValue !== undefined).length,
       totalChunks: chunks.length,
       avgChunkBytes: chunkBytes.length > 0
@@ -93,7 +93,7 @@ async function planPartition(
   partition: Partition,
   table: TableProfile,
 ): Promise<PartitionBuildResult> {
-  if (partition.bytesCompressed <= context.targetChunkBytes || table.sortKeys.length === 0) {
+  if (partition.bytesUncompressed <= context.targetChunkBytes || table.sortKeys.length === 0) {
     return refinePartitionSlices(
       context,
       partition,
@@ -128,7 +128,7 @@ async function splitSliceRecursively(
   sortKeys: SortKey[],
   depth: number,
 ): Promise<PartitionSlice[]> {
-  if (slice.estimate.bytesCompressed <= context.targetChunkBytes * STOP_SPLIT_FUZZ_FACTOR) {
+  if (slice.estimate.bytesUncompressed <= context.targetChunkBytes * STOP_SPLIT_FUZZ_FACTOR) {
     return [slice]
   }
 
@@ -211,7 +211,7 @@ async function splitWithRanges(
   if (range.from === undefined || range.to === undefined) return [slice]
   if (sortKey.category === 'string' && isExactChunkRange(range)) return [slice]
 
-  const subCount = Math.ceil(slice.estimate.bytesCompressed / context.targetChunkBytes)
+  const subCount = Math.ceil(slice.estimate.bytesUncompressed / context.targetChunkBytes)
   if (subCount <= 1) return [slice]
 
   const quantileBoundaries = await buildQuantileBoundaries(context, slice, sortKeys, dimensionIndex, subCount)

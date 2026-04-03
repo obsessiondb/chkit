@@ -73,8 +73,8 @@ export function getTargetChunkRows(
   partition: Partition,
   targetChunkBytes: number,
 ): number {
-  if (partition.bytesCompressed <= 0) return partition.rows
-  return (targetChunkBytes * partition.rows) / partition.bytesCompressed
+  if (partition.bytesUncompressed <= 0) return partition.rows
+  return (targetChunkBytes * partition.rows) / partition.bytesUncompressed
 }
 
 export function mergeAdjacentSlices(
@@ -96,7 +96,7 @@ export function mergeAdjacentSlices(
       !current.analysis.focusedValue &&
       !slice.analysis.focusedValue &&
       haveSameTrailingRanges(current.ranges, slice.ranges) &&
-      current.estimate.bytesCompressed + slice.estimate.bytesCompressed <= targetChunkBytes * 1.1
+      current.estimate.bytesUncompressed + slice.estimate.bytesUncompressed <= targetChunkBytes * 1.1
 
     if (!canMerge) {
       merged.push(current)
@@ -112,6 +112,7 @@ export function mergeAdjacentSlices(
         rows: current.estimate.rows + slice.estimate.rows,
         bytesCompressed: current.estimate.bytesCompressed + slice.estimate.bytesCompressed,
         bytesUncompressed: current.estimate.bytesUncompressed + slice.estimate.bytesUncompressed,
+
       },
     }
   }
