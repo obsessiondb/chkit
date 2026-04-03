@@ -9,6 +9,8 @@ import type {
 import { replaceChunkRange } from '../utils/ranges.js'
 import { buildEvenlySpacedBoundaries } from './quantile-range-split.js'
 
+export const DEFAULT_OVERSAMPLING_MULTIPLIER = 5
+
 export async function splitSliceWithEqualWidthRanges(
   context: PlannerContext,
   partition: Partition,
@@ -18,12 +20,13 @@ export async function splitSliceWithEqualWidthRanges(
   rangeFrom: string,
   rangeTo: string,
   subCount: number,
+  oversamplingMultiplier: number = DEFAULT_OVERSAMPLING_MULTIPLIER,
 ): Promise<PartitionSlice[]> {
   const sortKey = sortKeys[dimensionIndex]
   if (!sortKey) return [slice]
 
   const boundaries = Array.from(
-    new Set(buildEvenlySpacedBoundaries(rangeFrom, rangeTo, subCount, sortKey))
+    new Set(buildEvenlySpacedBoundaries(rangeFrom, rangeTo, subCount * oversamplingMultiplier, sortKey))
   )
   if (boundaries.length <= 2) return [slice]
 
