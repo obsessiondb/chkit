@@ -9,7 +9,7 @@ import type {
 import { replaceChunkRange } from '../utils/ranges.js'
 import { buildEvenlySpacedBoundaries } from './quantile-range-split.js'
 
-export const DEFAULT_OVERSAMPLING_MULTIPLIER = 5
+export const DEFAULT_OVERSAMPLING_MULTIPLIER = 3
 
 export async function splitSliceWithEqualWidthRanges(
   context: PlannerContext,
