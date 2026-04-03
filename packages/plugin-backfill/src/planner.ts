@@ -22,7 +22,8 @@ export async function buildBackfillPlan(input: {
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir' | 'schema'>
   clickhouse?: { url: string; database: string }
-  clickhouseQuery: <T>(sql: string) => Promise<T[]>
+  clickhouseQuery: <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => Promise<T[]>
+  querySettings?: Record<string, string | number | boolean | undefined>
 }): Promise<BuildBackfillPlanOutput> {
   const { opts } = input
   const [database, table] = opts.target.split('.')
@@ -37,6 +38,7 @@ export async function buildBackfillPlan(input: {
     to: opts.to,
     targetChunkBytes: opts.maxChunkBytes,
     query: input.clickhouseQuery,
+    querySettings: input.querySettings,
   })
 
   const firstPartition = chunkPlan.partitions[0]

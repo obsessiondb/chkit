@@ -1,4 +1,4 @@
-import { buildCountSql, buildEstimateSql, buildWhereClauseFromRanges, DISABLE_PARALLEL_REPLICAS } from '../sql.js'
+import { buildCountSql, buildEstimateSql, buildWhereClauseFromRanges } from '../sql.js'
 import type {
   ChunkRange,
   EstimateFilter,
@@ -6,6 +6,8 @@ import type {
   RowProbeStrategy,
   SortKey,
 } from '../types.js'
+
+type QueryContext = Pick<PlannerContext, 'database' | 'table' | 'query' | 'querySettings'>
 
 export function getRowProbeStrategy(context: Pick<PlannerContext, 'rowProbeStrategy'>): RowProbeStrategy {
   return context.rowProbeStrategy
@@ -21,7 +23,8 @@ export async function estimateRows(
   }
 
   const rows = await context.query<Record<string, string | number | undefined>>(
-    buildEstimateSql(filter, sortKeys, context, getRowProbeStrategy(context))
+    buildEstimateSql(filter, sortKeys, context, getRowProbeStrategy(context)),
+    context.querySettings,
   )
 
   const firstRow = rows[0]
@@ -42,16 +45,16 @@ export async function estimateRows(
 }
 
 export async function countRowsExact(
-  context: Pick<PlannerContext, 'database' | 'table' | 'query'>,
+  context: QueryContext,
   filter: EstimateFilter,
   sortKeys: SortKey[],
 ): Promise<number> {
-  const rows = await context.query<{ cnt: string }>(buildCountSql(filter, sortKeys, context))
+  const rows = await context.query<{ cnt: string }>(buildCountSql(filter, sortKeys, context), context.querySettings)
   return Number(rows[0]?.cnt ?? 0)
 }
 
 export async function countRows(
-  context: Pick<PlannerContext, 'database' | 'table' | 'query'>,
+  context: QueryContext,
   partitionId: string,
   ranges: ChunkRange[],
   sortKeys: SortKey[],
@@ -66,17 +69,18 @@ export async function countRows(
 }
 
 export async function countPartitionRows(
-  context: Pick<PlannerContext, 'database' | 'table' | 'query'>,
+  context: QueryContext,
   partitionId: string,
 ): Promise<number> {
   const rows = await context.query<{ cnt: string }>(
-    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}' ${DISABLE_PARALLEL_REPLICAS}`
+    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}'`,
+    context.querySettings,
   )
   return Number(rows[0]?.cnt ?? 0)
 }
 
 export async function getSortKeyRange(
-  context: Pick<PlannerContext, 'database' | 'table' | 'query'>,
+  context: QueryContext,
   partitionId: string,
   ranges: ChunkRange[],
   sortKeys: SortKey[],
@@ -87,8 +91,9 @@ SELECT
   toString(min(${sortKey.name})) AS minVal,
   toString(max(${sortKey.name})) AS maxVal
 FROM ${context.database}.${context.table}
-WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
-${DISABLE_PARALLEL_REPLICAS}`)
+WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}`,
+    context.querySettings,
+  )
 
   if (rows.length === 0) return undefined
   return {

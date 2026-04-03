@@ -218,10 +218,14 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                   configPath: context.configPath,
                   config: context.config,
                   clickhouse: context.config.clickhouse,
-                  clickhouseQuery: async <T>(sql: string) => {
-                    const result = await db.query(sql)
+                  clickhouseQuery: async <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => {
+                    const result = await db.query(sql, settings)
                     return result as T[]
                   },
+                  // ObsessionDB (ClickHouse Cloud) enables parallel replicas by default,
+                  // which inflates aggregate results (count, GROUP BY). Disable for planning
+                  // queries until ObsessionDB handles it at the profile level.
+                  querySettings: { enable_parallel_replicas: 0 },
                 })
 
                 const payload = planPayload(output)

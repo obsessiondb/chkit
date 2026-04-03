@@ -1,4 +1,4 @@
-import { buildWhereClauseFromRanges, DISABLE_PARALLEL_REPLICAS } from '../sql.js'
+import { buildWhereClauseFromRanges } from '../sql.js'
 import type {
   ChunkRange,
   PlannerContext,
@@ -7,8 +7,10 @@ import type {
   TemporalBucket,
 } from '../types.js'
 
+type QueryContext = Pick<PlannerContext, 'database' | 'table' | 'query' | 'querySettings'>
+
 export async function probeStringPrefixDistribution(
-  context: Pick<PlannerContext, 'database' | 'table' | 'query'>,
+  context: QueryContext,
   partitionId: string,
   ranges: ChunkRange[],
   sortKey: SortKey,
@@ -26,8 +28,9 @@ SELECT
 FROM ${context.database}.${context.table}
 WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
 GROUP BY prefix
-ORDER BY prefix
-${DISABLE_PARALLEL_REPLICAS}`)
+ORDER BY prefix`,
+    context.querySettings,
+  )
 
   return rows.map((row) => ({
     value: row.prefix,
@@ -37,7 +40,7 @@ ${DISABLE_PARALLEL_REPLICAS}`)
 }
 
 export async function probeTemporalDistribution(
-  context: Pick<PlannerContext, 'database' | 'table' | 'query'>,
+  context: QueryContext,
   partitionId: string,
   ranges: ChunkRange[],
   sortKeys: SortKey[],
@@ -58,8 +61,9 @@ SELECT
 FROM ${context.database}.${context.table}
 WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
 GROUP BY bucket
-ORDER BY bucket
-${DISABLE_PARALLEL_REPLICAS}`)
+ORDER BY bucket`,
+    context.querySettings,
+  )
 
   return rows.map((row) => ({
     start: row.bucket,

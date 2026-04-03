@@ -36,6 +36,7 @@ export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<
     to: input.to,
     targetChunkBytes: input.targetChunkBytes,
     query: input.query,
+    querySettings: input.querySettings,
     rowProbeStrategy: input.rowProbeStrategy ?? 'count',
   }
 

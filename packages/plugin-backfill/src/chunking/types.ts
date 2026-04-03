@@ -110,7 +110,7 @@ export interface ChunkPlan {
   stats: ChunkPlanStats
 }
 
-export type PlannerQuery = <T>(sql: string) => Promise<T[]>
+export type PlannerQuery = <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => Promise<T[]>
 
 export interface PlannerContext {
   database: string
@@ -119,6 +119,7 @@ export interface PlannerContext {
   to?: string
   targetChunkBytes: number
   query: PlannerQuery
+  querySettings?: Record<string, string | number | boolean | undefined>
   rowProbeStrategy: RowProbeStrategy
 }
 
@@ -163,5 +164,6 @@ export interface GenerateChunkPlanInput {
   to?: string
   targetChunkBytes: number
   query: PlannerQuery
+  querySettings?: Record<string, string | number | boolean | undefined>
   rowProbeStrategy?: RowProbeStrategy
 }

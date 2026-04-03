@@ -1,4 +1,4 @@
-import { createClient } from '@clickhouse/client'
+import { createClient, type ClickHouseSettings } from '@clickhouse/client'
 import {
   normalizeSQLFragment,
   type ChxConfig,
@@ -29,9 +29,11 @@ export interface QueryStatus {
   error?: string
 }
 
+export type { ClickHouseSettings }
+
 export interface ClickHouseExecutor {
   command(sql: string): Promise<void>
-  query<T>(sql: string): Promise<T[]>
+  query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
   insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
   listTableDetails(databases: string[]): Promise<IntrospectedTable[]>
@@ -344,9 +346,9 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         wrapConnectionError(error, config.url)
       }
     },
-    async query<T>(sql: string): Promise<T[]> {
+    async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
       try {
-        const result = await client.query({ query: sql, format: 'JSONEachRow', http_headers: { 'X-DDL': '1' } })
+        const result = await client.query({ query: sql, format: 'JSONEachRow', http_headers: { 'X-DDL': '1' }, ...(settings ? { clickhouse_settings: settings } : {}) })
         const rows = await result.json<T>()
         logProfiling(profiler, sql, result.query_id, parseSummaryFromHeaders(result.response_headers))
         return rows
