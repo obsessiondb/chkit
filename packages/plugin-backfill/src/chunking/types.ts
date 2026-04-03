@@ -10,6 +10,7 @@ export type EstimateReason =
   | 'partition-metadata'
   | 'quantile-estimate'
   | 'string-prefix-distribution'
+  | 'group-by-key-distribution'
   | 'temporal-distribution'
   | 'equal-width-distribution'
   | 'exact-count'

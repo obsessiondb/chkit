@@ -8,6 +8,7 @@ import {
   splitSliceWithQuantiles,
 } from './strategies/quantile-range-split.js'
 import { refinePartitionSlices } from './strategies/refinement.js'
+import { splitSliceWithGroupByKey } from './strategies/group-by-key-split.js'
 import { buildRootStringUpperBound, splitSliceWithStringPrefixes } from './strategies/string-prefix-split.js'
 import { splitSliceWithTemporalBuckets } from './strategies/temporal-bucket-split.js'
 import { getCandidateDimensions } from './strategy-policy.js'
@@ -108,6 +109,7 @@ async function planPartition(
   const mergedSlices = mergeAdjacentSlices(splitSlices, context.targetChunkBytes)
   const usedDistributionFallback = mergedSlices.some((slice) =>
     slice.estimate.reason === 'string-prefix-distribution' ||
+    slice.estimate.reason === 'group-by-key-distribution' ||
     slice.estimate.reason === 'temporal-distribution' ||
     slice.estimate.reason === 'equal-width-distribution'
   )
@@ -176,7 +178,23 @@ async function splitOversizedSlice(
           return applyFocusedValue(estimateSlices, focusedValue)
         }
       } else {
-        // Refinement pass: GROUP BY prefix (exact, scans sorted key column)
+        // Refinement pass: full GROUP BY key to detect hot keys directly
+        const keySlices = await splitSliceWithGroupByKey(context, partition, preparedSlice, sortKeys, dimensionIndex)
+        if (keySlices && isEffectiveSplit(preparedSlice, keySlices)) {
+          return applyFocusedValue(keySlices, focusedValue)
+        }
+
+        // Single hot key: narrow the range and re-enter dispatch so focusedValue is detected
+        if (keySlices?.length === 1 && keySlices[0]?.analysis.focusedValue) {
+          const refined = keySlices[0]
+          const currentRange = getChunkRange(preparedSlice, dimensionIndex)
+          const refinedRange = getChunkRange(refined, dimensionIndex)
+          if (currentRange.from !== refinedRange.from || currentRange.to !== refinedRange.to) {
+            return splitOversizedSlice(context, partition, refined, sortKeys, depth)
+          }
+        }
+
+        // Fallback: GROUP BY prefix when too many distinct keys
         const stringSlices = await splitSliceWithStringPrefixes(context, partition, preparedSlice, sortKeys, dimensionIndex)
         if (isEffectiveSplit(preparedSlice, stringSlices)) {
           return applyFocusedValue(stringSlices, focusedValue)

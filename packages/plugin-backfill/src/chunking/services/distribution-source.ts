@@ -39,6 +39,43 @@ ORDER BY prefix`,
   }))
 }
 
+export interface StringKeyBucket {
+  value: string
+  rowCount: number
+}
+
+export async function probeStringKeyDistribution(
+  context: QueryContext,
+  partitionId: string,
+  ranges: ChunkRange[],
+  sortKey: SortKey,
+  dimensionIndex: number,
+  sortKeys: SortKey[],
+  limit: number,
+): Promise<StringKeyBucket[] | undefined> {
+  const range = ranges.find((candidate) => candidate.dimensionIndex === dimensionIndex)
+  if (!range?.from || !range.to) return undefined
+
+  const rows = await context.query<{ key: string; cnt: string }>(`
+SELECT
+  ${sortKey.name} AS key,
+  count() AS cnt
+FROM ${context.database}.${context.table}
+WHERE ${buildWhereClauseFromRanges(partitionId, ranges, sortKeys)}
+GROUP BY key
+ORDER BY cnt DESC
+LIMIT ${limit + 1}`,
+    context.querySettings,
+  )
+
+  if (rows.length > limit) return undefined
+
+  return rows.map((row) => ({
+    value: row.key,
+    rowCount: Number(row.cnt),
+  }))
+}
+
 export async function probeTemporalDistribution(
   context: QueryContext,
   partitionId: string,
