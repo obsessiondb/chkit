@@ -43,6 +43,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
     "test": "bun test src",
+    "test:env": "doppler run --project chkit --config ci -- bun test src",
+    "seed:env": "doppler run --project chkit --config ci -- bun run src/chunking/e2e/seed.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

@@ -1,3 +1,4 @@
+import pMap from 'p-map'
 import { buildSliceFromRows } from '../partition-slices.js'
 import { estimateRows, parsePlannerDateTime } from '../services/row-probe.js'
 import type {
@@ -10,6 +11,7 @@ import { bigIntToStr, strToBigInt } from '../utils/binary-string.js'
 import { getChunkRange, replaceChunkRange } from '../utils/ranges.js'
 
 const BINARY_SEARCH_STEPS = 24
+const ESTIMATE_CONCURRENCY = 50
 
 export async function splitSliceWithQuantiles(
   context: PlannerContext,
@@ -19,26 +21,25 @@ export async function splitSliceWithQuantiles(
   dimensionIndex: number,
   boundaries: string[],
 ): Promise<PartitionSlice[]> {
-  const slices: PartitionSlice[] = []
-
+  const intervals: Array<{ from: string; to: string }> = []
   for (let index = 0; index < boundaries.length - 1; index++) {
     const from = boundaries[index]
     const to = boundaries[index + 1]
     if (from === undefined || to === undefined || from === to) continue
+    intervals.push({ from, to })
+  }
 
-    const ranges = replaceChunkRange(slice, dimensionIndex, from, to)
-    const rows = await estimateRows(
-      context,
-      {
-        partitionId: partition.partitionId,
-        ranges,
-      },
-      sortKeys
-    )
-    if (rows <= 0) continue
-
-    slices.push(
-      buildSliceFromRows(partition, {
+  const results = await pMap(
+    intervals,
+    async ({ from, to }) => {
+      const ranges = replaceChunkRange(slice, dimensionIndex, from, to)
+      const rows = await estimateRows(
+        context,
+        { partitionId: partition.partitionId, ranges },
+        sortKeys,
+      )
+      if (rows <= 0) return null
+      return buildSliceFromRows(partition, {
         ranges,
         rows,
         focusedValue: slice.analysis.focusedValue,
@@ -52,10 +53,11 @@ export async function splitSliceWithQuantiles(
           },
         ]),
       })
-    )
-  }
+    },
+    { concurrency: ESTIMATE_CONCURRENCY },
+  )
 
-  return slices
+  return results.filter((s): s is PartitionSlice => s !== null)
 }
 
 export async function findQuantileBoundaryOnDimension(
@@ -108,11 +110,16 @@ export function buildEvenlySpacedBoundaries(
     )
   }
 
-  const start = strToBigInt(rangeFrom, 8)
-  const end = strToBigInt(rangeTo, 8)
-  return Array.from({ length: subCount + 1 }, (_, index) =>
-    bigIntToStr(start + ((end - start) * BigInt(index)) / BigInt(subCount), 8)
+  const width = Math.max(rangeFrom.length, rangeTo.length)
+  const start = strToBigInt(rangeFrom, width)
+  const end = strToBigInt(rangeTo, width)
+  const boundaries = Array.from({ length: subCount + 1 }, (_, index) =>
+    bigIntToStr(start + ((end - start) * BigInt(index)) / BigInt(subCount), width, width)
   )
+  // Use original values at endpoints to avoid round-trip length changes
+  boundaries[0] = rangeFrom
+  boundaries[boundaries.length - 1] = rangeTo
+  return boundaries
 }
 
 async function findStringBoundary(
@@ -124,20 +131,21 @@ async function findStringBoundary(
   rangeTo: string,
   targetCumRows: number,
 ): Promise<string> {
-  let low = strToBigInt(rangeFrom, 8)
-  let high = strToBigInt(rangeTo, 8)
+  const width = Math.max(rangeFrom.length, rangeTo.length)
+  let low = strToBigInt(rangeFrom, width)
+  let high = strToBigInt(rangeTo, width)
 
   for (let step = 0; step < BINARY_SEARCH_STEPS; step++) {
     const midpoint = (low + high) / 2n
     if (midpoint === low || midpoint === high) break
 
-    const mid = bigIntToStr(midpoint, 8)
+    const mid = bigIntToStr(midpoint, width, width)
     const rows = await estimateRowsUntil(context, slice, sortKeys, dimensionIndex, rangeFrom, mid)
     if (rows < targetCumRows) low = midpoint
     else high = midpoint
   }
 
-  return bigIntToStr((low + high) / 2n, 8)
+  return bigIntToStr((low + high) / 2n, width, width)
 }
 
 async function findDateTimeBoundary(

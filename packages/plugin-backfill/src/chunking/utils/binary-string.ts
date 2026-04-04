@@ -42,7 +42,7 @@ export function strToBigInt(value: string, padTo: number): bigint {
   return result
 }
 
-export function bigIntToStr(value: bigint, length: number): string {
+export function bigIntToStr(value: bigint, length: number, minLength = 0): string {
   const buffer = Buffer.alloc(length)
   let remaining = value
 
@@ -51,5 +51,12 @@ export function bigIntToStr(value: bigint, length: number): string {
     remaining >>= 8n
   }
 
-  return buffer.toString('latin1')
+  // Strip trailing null bytes so boundaries match real string values
+  // in ClickHouse comparisons (where "abc" < "abc\0"), but preserve
+  // at least minLength bytes to avoid losing meaningful trailing nulls
+  // (e.g. from buildObservedStringUpperBound which appends "\0").
+  let end = length
+  while (end > minLength && buffer[end - 1] === 0) end--
+
+  return buffer.subarray(0, end).toString('latin1')
 }
