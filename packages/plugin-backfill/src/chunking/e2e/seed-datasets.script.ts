@@ -70,6 +70,46 @@ export const datasets: DatasetConfig[] = [
       return rows
     },
   },
+  {
+    name: 'multiple_hot_keys',
+    columns: [
+      'tenant_id String',
+      'seq UInt64',
+      'event_time DateTime',
+      'padding String',
+    ].join(', '),
+    orderBy: '(tenant_id, seq)',
+    partitionBy: 'toYYYYMM(event_time)',
+    generate() {
+      const rows: Record<string, unknown>[] = []
+
+      // 3 hot tenants, ~30% each — 3,000 rows each = 9,000 rows
+      for (const tenant of ['alpha-corp', 'beta-corp', 'gamma-corp']) {
+        for (let i = 0; i < 3000; i++) {
+          rows.push({
+            tenant_id: tenant,
+            seq: i,
+            event_time: dayHour(1 + (i % 28), i % 24),
+            padding: pad(512),
+          })
+        }
+      }
+
+      // 10%: 100 small tenants, 10 rows each — 1,000 rows
+      for (let t = 0; t < 100; t++) {
+        for (let i = 0; i < 10; i++) {
+          rows.push({
+            tenant_id: `small-${String(t).padStart(4, '0')}`,
+            seq: i,
+            event_time: dayHour(1 + ((t * 10 + i) % 28), (t + i) % 24),
+            padding: pad(512),
+          })
+        }
+      }
+
+      return rows
+    },
+  },
 ]
 
 const BATCH_SIZE = 5000

@@ -210,3 +210,88 @@ describe('e2e: skewed power law', () => {
     expect(totalCounted).toBe(totalRows)
   }, 60_000)
 })
+
+// ---------------------------------------------------------------------------
+// Scenario 2: Multiple Hot Keys
+//
+// Three tenants each hold ~30% of rows ("alpha-corp", "beta-corp",
+// "gamma-corp"), with ~10% spread across 100 small tenants.
+// Sort key: (tenant_id, seq).
+//
+// Expected behavior:
+//   - Each hot tenant is detected as a focused value
+//   - Each hot tenant is independently split on dim 1 (seq)
+//   - Small tenants are covered by non-focused chunks
+//   - All rows are accounted for with no gaps
+// ---------------------------------------------------------------------------
+
+describe('e2e: multiple hot keys', () => {
+  const table = `${TABLE_PREFIX}_multiple_hot_keys`
+  const hotTenants = ['alpha-corp', 'beta-corp', 'gamma-corp']
+  let plan: ChunkPlan
+  let totalRows: number
+
+  beforeAll(async () => {
+    totalRows = await requireSeededTable(table)
+    const uncompressedBytes = await getPartitionUncompressedBytes(table)
+
+    // Target ~10 chunks so each hot tenant (~30% = ~3x target) clearly needs splitting
+    const targetChunkBytes = Math.floor(uncompressedBytes / 10)
+    plan = await chunkPlan(table, targetChunkBytes)
+  }, 60_000)
+
+  test('produces multiple chunks', () => {
+    expect(plan.chunks.length).toBeGreaterThan(3)
+  })
+
+  test('detects all three hot tenants as focused values', () => {
+    const focusedValues = new Set(
+      plan.chunks
+        .map((c) => c.analysis.focusedValue?.value)
+        .filter(Boolean),
+    )
+    for (const tenant of hotTenants) {
+      expect(focusedValues.has(tenant)).toBe(true)
+    }
+  })
+
+  test('each hot tenant has chunks with ranges on both dimensions', () => {
+    for (const tenant of hotTenants) {
+      const tenantChunks = plan.chunks.filter(
+        (c) => c.analysis.focusedValue?.value === tenant,
+      )
+      expect(tenantChunks.length).toBeGreaterThanOrEqual(1)
+
+      for (const chunk of tenantChunks) {
+        const dims = new Set(chunk.ranges.map((r) => r.dimensionIndex))
+        expect(dims.has(0)).toBe(true) // tenant_id
+        expect(dims.has(1)).toBe(true) // seq
+      }
+    }
+  })
+
+  test('estimated row sum is within 20% of actual count', () => {
+    const estimatedTotal = plan.chunks.reduce((sum, c) => sum + c.estimate.rows, 0)
+    const ratio = estimatedTotal / totalRows
+    expect(ratio).toBeGreaterThanOrEqual(0.8)
+    expect(ratio).toBeLessThanOrEqual(1.2)
+  })
+
+  test('no chunk exceeds 2x the target size', () => {
+    for (const chunk of plan.chunks) {
+      expect(chunk.estimate.bytesUncompressed).toBeLessThan(plan.targetChunkBytes * 2)
+    }
+  })
+
+  test('executing all chunk queries returns the full row count', async () => {
+    let totalCounted = 0
+    for (const chunk of plan.chunks) {
+      const where = buildWhereClauseFromChunk(chunk, plan.table)
+      const countSql = `SELECT count() AS cnt FROM ${db}.${table} WHERE ${where}`
+      const [row] = await executor.query<{ cnt: string }>(countSql)
+      totalCounted += Number(row?.cnt ?? 0)
+    }
+
+    expect(totalCounted).toBe(totalRows)
+  }, 60_000)
+})
