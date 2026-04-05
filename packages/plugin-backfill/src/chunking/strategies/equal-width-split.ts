@@ -1,3 +1,4 @@
+import pMap from 'p-map'
 import { buildSliceFromRows } from '../partition-slices.js'
 import { estimateRows } from '../services/row-probe.js'
 import type {
@@ -10,6 +11,7 @@ import { replaceChunkRange } from '../utils/ranges.js'
 import { buildEvenlySpacedBoundaries } from './quantile-range-split.js'
 
 export const DEFAULT_OVERSAMPLING_MULTIPLIER = 3
+const ESTIMATE_CONCURRENCY = 50
 
 export async function splitSliceWithEqualWidthRanges(
   context: PlannerContext,
@@ -30,26 +32,25 @@ export async function splitSliceWithEqualWidthRanges(
   )
   if (boundaries.length <= 2) return [slice]
 
-  const slices: PartitionSlice[] = []
-
+  const intervals: Array<{ from: string; to: string }> = []
   for (let index = 0; index < boundaries.length - 1; index++) {
     const from = boundaries[index]
     const to = boundaries[index + 1]
     if (from === undefined || to === undefined || from === to) continue
+    intervals.push({ from, to })
+  }
 
-    const ranges = replaceChunkRange(slice, dimensionIndex, from, to)
-    const rows = await estimateRows(
-      context,
-      {
-        partitionId: partition.partitionId,
-        ranges,
-      },
-      sortKeys
-    )
-    if (rows <= 0) continue
-
-    slices.push(
-      buildSliceFromRows(partition, {
+  const results = await pMap(
+    intervals,
+    async ({ from, to }) => {
+      const ranges = replaceChunkRange(slice, dimensionIndex, from, to)
+      const rows = await estimateRows(
+        context,
+        { partitionId: partition.partitionId, ranges },
+        sortKeys,
+      )
+      if (rows <= 0) return null
+      return buildSliceFromRows(partition, {
         ranges,
         rows,
         focusedValue: slice.analysis.focusedValue,
@@ -63,8 +64,10 @@ export async function splitSliceWithEqualWidthRanges(
           },
         ]),
       })
-    )
-  }
+    },
+    { concurrency: ESTIMATE_CONCURRENCY },
+  )
 
+  const slices = results.filter((s): s is PartitionSlice => s !== null)
   return slices.length > 0 ? slices : [slice]
 }

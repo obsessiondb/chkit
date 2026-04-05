@@ -1,5 +1,12 @@
 import type { Partition, PlannerContext, SortKey, SortKeyCategory } from '../types.js'
 
+/** ClickHouse returns timestamps without timezone — they are always UTC. */
+function parseClickHouseUTCTimestamp(value: string): string {
+  const trimmed = value.trim()
+  const normalized = trimmed.includes('T') ? trimmed : `${trimmed.replace(' ', 'T')}Z`
+  return new Date(normalized.endsWith('Z') ? normalized : `${normalized}Z`).toISOString()
+}
+
 const NUMERIC_TYPES = /^(U?Int|Float|Decimal)/
 const DATETIME_TYPES = /^(Date|DateTime)/
 
@@ -112,8 +119,8 @@ SETTINGS select_sequential_consistency = 1`)
       rows: Number(row.total_rows),
       bytesCompressed: Number(row.total_bytes),
       bytesUncompressed: Number(row.total_uncompressed_bytes ?? row.total_bytes),
-      minTime: new Date(row.min_time).toISOString(),
-      maxTime: new Date(row.max_time).toISOString(),
+      minTime: parseClickHouseUTCTimestamp(row.min_time),
+      maxTime: parseClickHouseUTCTimestamp(row.max_time),
     }))
     .filter((partition) => {
       if (context.from && partition.maxTime < context.from) return false

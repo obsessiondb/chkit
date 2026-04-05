@@ -48,6 +48,30 @@ function createFixtureQuery(input: {
 
     const filteredRows = filterRows(sql, input.rows)
 
+    if (sql.startsWith('EXPLAIN ESTIMATE')) {
+      return [{ rows: String(filteredRows.length) }] as T[]
+    }
+
+    if (sql.includes(' AS key') && sql.includes('GROUP BY key')) {
+      const match = sql.match(/^\s*SELECT\s+(\w+)\s+AS key/m)
+      const column = match?.[1]
+      if (!column) return [] as T[]
+
+      const limitMatch = sql.match(/LIMIT\s+(\d+)/)
+      const limit = limitMatch ? Number(limitMatch[1]) : Infinity
+
+      const grouped = new Map<string, number>()
+      for (const row of filteredRows) {
+        const value = String(row[column] ?? '')
+        grouped.set(value, (grouped.get(value) ?? 0) + 1)
+      }
+
+      return Array.from(grouped.entries())
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, limit)
+        .map(([key, cnt]) => ({ key, cnt: String(cnt) })) as T[]
+    }
+
     if (sql.includes('substring(')) {
       const match = sql.match(/substring\((\w+), 1, (\d+)\) AS prefix/)
       const column = match?.[1]
@@ -297,7 +321,7 @@ describe('smart chunking integration', () => {
     )).toBe(true)
   })
 
-  test('uses string-prefix splitting for string-distributed partitions', async () => {
+  test('uses string key splitting for string-distributed partitions', async () => {
     const rows: FixtureRow[] = []
     for (const prefix of ['apple', 'apricot', 'banana', 'berry', 'citrus']) {
       for (let index = 0; index < 24; index++) {
@@ -316,9 +340,13 @@ describe('smart chunking integration', () => {
     })
 
     expect(plan.chunks.length).toBeGreaterThan(2)
-    expect(plan.chunks.some((chunk) => strategyIds(chunk).includes('string-prefix-split'))).toBe(true)
+    const usesStringStrategy = plan.chunks.some((chunk) =>
+      strategyIds(chunk).includes('group-by-key-split') ||
+      strategyIds(chunk).includes('string-prefix-split')
+    )
+    expect(usesStringStrategy).toBe(true)
 
-    const sql = buildSqlForChunk(plan, requireChunk(plan.chunks[0], 'string-prefix first chunk'))
+    const sql = buildSqlForChunk(plan, requireChunk(plan.chunks[0], 'string-key first chunk'))
     expect(sql).toContain("unhex('")
   })
 

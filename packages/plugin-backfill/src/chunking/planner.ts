@@ -1,3 +1,4 @@
+import pMap from 'p-map'
 import { buildRootSlice, mergeAdjacentSlices } from './partition-slices.js'
 import { introspectPartitions, introspectSortKeys } from './services/metadata-source.js'
 import { getRowProbeStrategy, getSortKeyRange, parsePlannerDateTime } from './services/row-probe.js'
@@ -282,18 +283,16 @@ async function buildQuantileBoundaries(
   const range = getChunkRange(slice, dimensionIndex)
   if (range.from === undefined || range.to === undefined) return undefined
 
-  const boundaries: string[] = [range.from]
-  for (let step = 1; step < subCount; step++) {
-    const targetCumRows = Math.round((slice.estimate.rows * step) / subCount)
-    const boundary = await findQuantileBoundaryOnDimension(
-      context,
-      slice,
-      sortKeys,
-      dimensionIndex,
-      targetCumRows
-    )
-    boundaries.push(boundary)
-  }
+  const steps = Array.from({ length: subCount - 1 }, (_, i) => i + 1)
+  const foundBoundaries = await pMap(
+    steps,
+    (step) => {
+      const targetCumRows = Math.round((slice.estimate.rows * step) / subCount)
+      return findQuantileBoundaryOnDimension(context, slice, sortKeys, dimensionIndex, targetCumRows)
+    },
+    { concurrency: 10 },
+  )
+  const boundaries = [range.from, ...foundBoundaries]
 
   const uniqueBoundaryCount = new Set(boundaries).size
   if (uniqueBoundaryCount <= Math.max(2, Math.ceil(subCount / 3))) {
