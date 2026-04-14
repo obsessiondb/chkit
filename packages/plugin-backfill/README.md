@@ -163,17 +163,7 @@ configureSync({
 })
 ```
 
-To capture every SQL statement the planner runs (with timing, server-side stats, and per-strategy classification), wrap your `query` function instead of relying solely on logging — see [`playground/bench-real-planner.ts`](../../playground/bench-real-planner.ts) for a full example that writes a JSONL trace.
-
-### More patterns
-
-The [`playground/`](../../playground) directory contains runnable scripts that exercise the SDK against a real ClickHouse instance and were used while designing the planner. Useful starting points:
-
-- `bench-real-planner.ts` — instrument every planner query with classification, timing, and a JSONL trace
-- `bench-first-pass-strategy.ts` / `bench-string-prefix.ts` / `bench-temporal-bucket.ts` — micro-benchmarks for individual split strategies
-- `bench-explain-estimate.ts` — compare `count` vs `explain-estimate` row probe strategies
-- `slice22-drill.ts` — drill into a single problem partition to understand why the planner produced the chunks it did
-- `00-discover.ts` — pure introspection without producing a plan
+To capture every SQL statement the planner runs (with timing, server-side stats, and per-strategy classification), wrap your `query` function instead of relying solely on logging — the wrapper sees the raw SQL and settings on every call and can record query IDs, response headers, and durations alongside the structured logs.
 
 ## License
 
