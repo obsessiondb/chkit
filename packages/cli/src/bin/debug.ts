@@ -1,22 +1,15 @@
-import process from 'node:process'
+import { getLogger } from '@logtape/logtape'
 
-const enabled = process.env.CHKIT_DEBUG === '1' || process.env.CHKIT_DEBUG === 'true'
-
-function timestamp(): string {
-  const now = new Date()
-  return now.toISOString().slice(11, 23) // HH:mm:ss.SSS
-}
+import { isDebugEnabled } from './logging.js'
 
 export function debug(category: string, message: string, detail?: unknown): void {
-  if (!enabled) return
-  const prefix = `[chkit:${category}]`
+  if (!isDebugEnabled()) return
+  const logger = getLogger(['chkit', category])
   if (detail !== undefined) {
-    console.error(`${timestamp()} ${prefix} ${message}`, detail)
-  } else {
-    console.error(`${timestamp()} ${prefix} ${message}`)
+    logger.debug(message, { detail })
+    return
   }
+  logger.debug(message)
 }
 
-export function isDebugEnabled(): boolean {
-  return enabled
-}
+export { isDebugEnabled } from './logging.js'

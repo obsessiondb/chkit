@@ -43,6 +43,7 @@
     "@chkit/clickhouse": "workspace:*",
     "@chkit/codegen": "workspace:*",
     "@chkit/core": "workspace:*",
+    "@logtape/logtape": "^2.0.5",
     "fast-glob": "^3.3.2"
   }
 }

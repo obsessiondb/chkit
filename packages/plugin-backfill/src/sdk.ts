@@ -1,3 +1,5 @@
+export * from '@logtape/logtape'
+
 export { executeBackfill, syncProgress } from './async-backfill.js'
 export { analyzeAndChunk, analyzeTable } from './chunking/analyze.js'
 export {
@@ -5,6 +7,11 @@ export {
   encodeChunkPlanForPersistence,
 } from './chunking/boundary-codec.js'
 export { generateChunkPlan } from './chunking/planner.js'
+export {
+  CHKIT_BACKFILL_LOGGER_CATEGORY,
+  CHKIT_LOGGER_CATEGORY,
+  getBackfillLogger,
+} from './logging.js'
 export {
   buildChunkExecutionSql,
   buildWhereClauseFromChunk,

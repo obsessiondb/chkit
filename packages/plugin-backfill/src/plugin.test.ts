@@ -36,7 +36,10 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     expect(root).not.toHaveProperty('executeBackfill')
 
     expect(sdk).toHaveProperty('analyzeAndChunk')
+    expect(sdk).toHaveProperty('configureSync')
     expect(sdk).toHaveProperty('generateChunkPlan')
+    expect(sdk).toHaveProperty('getBackfillLogger')
+    expect(sdk).toHaveProperty('getConsoleSink')
     expect(sdk).toHaveProperty('executeBackfill')
     expect(sdk).toHaveProperty('buildChunkExecutionSql')
     expect(sdk).toHaveProperty('buildWhereClauseFromChunk')

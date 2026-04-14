@@ -1,4 +1,14 @@
 import pMap from 'p-map'
+import {
+  describeSqlContext,
+  describeSqlOperation,
+  formatBytes,
+  getBackfillLogger,
+  SLOW_CLICKHOUSE_QUERY_MS,
+  SLOW_CLICKHOUSE_QUERY_REPEAT_INITIAL_MS,
+  SLOW_CLICKHOUSE_QUERY_REPEAT_MAX_MS,
+  summarizeSql,
+} from '../logging.js'
 import { buildRootSlice, mergeAdjacentSlices } from './partition-slices.js'
 import { introspectPartitions, introspectSortKeys } from './services/metadata-source.js'
 import { getRowProbeStrategy, getSortKeyRange, parsePlannerDateTime } from './services/row-probe.js'
@@ -21,6 +31,7 @@ import type {
   PartitionBuildResult,
   PartitionSlice,
   PlannerContext,
+  PlannerQuery,
   SortKey,
   TableProfile,
 } from './types.js'
@@ -29,19 +40,27 @@ import { getChunkRange, isExactChunkRange, replaceChunkRange } from './utils/ran
 
 const MAX_SPLIT_DEPTH_MULTIPLIER = 3
 const STOP_SPLIT_FUZZ_FACTOR = 1.5
+const logger = getBackfillLogger('chunking', 'planner')
+const queryLogger = getBackfillLogger('chunking', 'clickhouse')
 
 export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<ChunkPlan> {
+  const planStartedAt = performance.now()
   const context: PlannerContext = {
     database: input.database,
     table: input.table,
     from: input.from,
     to: input.to,
     targetChunkBytes: input.targetChunkBytes,
-    query: input.query,
+    query: createTimedPlannerQuery(input),
     querySettings: input.querySettings,
     rowProbeStrategy: input.rowProbeStrategy ?? 'count',
   }
 
+  logger.info(
+    `starting chunk plan for ${input.database}.${input.table} (target chunk size ${formatBytes(input.targetChunkBytes)}, row probe ${context.rowProbeStrategy})`
+  )
+
+  const introspectionStartedAt = performance.now()
   const partitions = await introspectPartitions(context)
   const sortKeys = await introspectSortKeys(context)
   const table: TableProfile = {
@@ -50,6 +69,10 @@ export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<
     sortKeys,
   }
   const planId = generatePlanId()
+
+  logger.info(
+    `introspection completed for ${input.database}.${input.table}: ${partitions.length} partitions, ${partitions.filter((partition) => partition.bytesUncompressed > context.targetChunkBytes).length} oversized partitions, ${sortKeys.length} sort keys (${Math.round(performance.now() - introspectionStartedAt)}ms)`
+  )
 
   const slices: PartitionSlice[] = []
   const plannedPartitions: Partition[] = []
@@ -64,6 +87,21 @@ export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<
 
   const chunks = assignChunkIds(planId, slices)
   const chunkBytes = chunks.map((chunk) => chunk.estimate.bytesUncompressed)
+  const stats = {
+    totalPartitions: partitions.length,
+    oversizedPartitions: partitions.filter((partition) => partition.bytesUncompressed > context.targetChunkBytes).length,
+    focusedChunks: chunks.filter((chunk) => chunk.analysis.focusedValue !== undefined).length,
+    totalChunks: chunks.length,
+    avgChunkBytes: chunkBytes.length > 0
+      ? Math.round(chunkBytes.reduce((sum, value) => sum + value, 0) / chunkBytes.length)
+      : 0,
+    maxChunkBytes: chunkBytes.length > 0 ? Math.max(...chunkBytes) : 0,
+    minChunkBytes: chunkBytes.length > 0 ? Math.min(...chunkBytes) : 0,
+  }
+
+  logger.info(
+    `finished chunk plan for ${input.database}.${input.table}: ${chunks.length} chunks across ${partitions.length} partitions, ${formatBytes(partitions.reduce((sum, partition) => sum + partition.bytesUncompressed, 0))} uncompressed (${Math.round(performance.now() - planStartedAt)}ms)`
+  )
 
   return {
     planId,
@@ -76,17 +114,7 @@ export async function generateChunkPlan(input: GenerateChunkPlanInput): Promise<
     totalRows: partitions.reduce((sum, partition) => sum + partition.rows, 0),
     totalBytesCompressed: partitions.reduce((sum, partition) => sum + partition.bytesCompressed, 0),
     totalBytesUncompressed: partitions.reduce((sum, partition) => sum + partition.bytesUncompressed, 0),
-    stats: {
-      totalPartitions: partitions.length,
-      oversizedPartitions: partitions.filter((partition) => partition.bytesUncompressed > context.targetChunkBytes).length,
-      focusedChunks: chunks.filter((chunk) => chunk.analysis.focusedValue !== undefined).length,
-      totalChunks: chunks.length,
-      avgChunkBytes: chunkBytes.length > 0
-        ? Math.round(chunkBytes.reduce((sum, value) => sum + value, 0) / chunkBytes.length)
-        : 0,
-      maxChunkBytes: chunkBytes.length > 0 ? Math.max(...chunkBytes) : 0,
-      minChunkBytes: chunkBytes.length > 0 ? Math.min(...chunkBytes) : 0,
-    },
+    stats,
   }
 }
 
@@ -95,14 +123,25 @@ async function planPartition(
   partition: Partition,
   table: TableProfile,
 ): Promise<PartitionBuildResult> {
+  const startedAt = performance.now()
+  logger.info(
+    `planning partition ${partition.partitionId} (${partition.rows.toLocaleString()} rows, ${formatBytes(partition.bytesUncompressed)} uncompressed, target ${formatBytes(context.targetChunkBytes)})`
+  )
+
   if (partition.bytesUncompressed <= context.targetChunkBytes || table.sortKeys.length === 0) {
-    return refinePartitionSlices(
+    const refined = await refinePartitionSlices(
       context,
       partition,
       buildSingleChunkPartition(partition),
       table.sortKeys,
       false
     )
+
+    logger.info(
+      `kept partition ${partition.partitionId} as a single chunk (${Math.round(performance.now() - startedAt)}ms, ${partition.bytesUncompressed <= context.targetChunkBytes ? 'within target size' : 'no sort keys available'})`
+    )
+
+    return refined
   }
 
   const rootSlice = buildRootSlice(partition)
@@ -115,13 +154,23 @@ async function planPartition(
     slice.estimate.reason === 'equal-width-distribution'
   )
 
-  return refinePartitionSlices(
+  logger.debug(
+    `partition ${partition.partitionId} produced ${splitSlices.length} candidate slices before refinement (${mergedSlices.length} after merge, distribution fallback ${usedDistributionFallback ? 'used' : 'not used'})`
+  )
+
+  const refined = await refinePartitionSlices(
     context,
     partition,
     mergedSlices,
     table.sortKeys,
     usedDistributionFallback
   )
+
+  logger.info(
+    `finished partition ${partition.partitionId}: ${refined.slices.length} chunks (${Math.round(performance.now() - startedAt)}ms)`
+  )
+
+  return refined
 }
 
 async function splitSliceRecursively(
@@ -132,15 +181,22 @@ async function splitSliceRecursively(
   depth: number,
 ): Promise<PartitionSlice[]> {
   if (slice.estimate.bytesUncompressed <= context.targetChunkBytes * STOP_SPLIT_FUZZ_FACTOR) {
+    logger.debug(
+      `stopped splitting slice for partition ${partition.partitionId} at depth ${depth}: ${formatBytes(slice.estimate.bytesUncompressed)} is within threshold ${formatBytes(Math.round(context.targetChunkBytes * STOP_SPLIT_FUZZ_FACTOR))}`
+    )
     return [slice]
   }
 
   if (depth >= sortKeys.length * MAX_SPLIT_DEPTH_MULTIPLIER) {
+    logger.debug(
+      `stopped splitting slice for partition ${partition.partitionId}: reached max depth ${sortKeys.length * MAX_SPLIT_DEPTH_MULTIPLIER}`
+    )
     return [slice]
   }
 
   const children = await splitOversizedSlice(context, partition, slice, sortKeys, depth)
   if (children.length <= 1) {
+    logger.debug(`slice could not be split further for partition ${partition.partitionId} at depth ${depth}`)
     return [slice]
   }
 
@@ -161,6 +217,10 @@ async function splitOversizedSlice(
 ): Promise<PartitionSlice[]> {
   const candidateDimensions = getCandidateDimensions(sortKeys, slice)
 
+  logger.debug(
+    `attempting oversized slice split for partition ${partition.partitionId} at depth ${depth} (${formatBytes(slice.estimate.bytesUncompressed)} uncompressed across ${candidateDimensions.length} candidate dimensions)`
+  )
+
   for (const dimensionIndex of candidateDimensions) {
     const preparedSlice = await hydrateSliceRange(context, slice, sortKeys, dimensionIndex)
     if (!preparedSlice) continue
@@ -171,17 +231,23 @@ async function splitOversizedSlice(
     const rootLike = depth === 0
     const focusedValue = findFocusedValue(preparedSlice, sortKeys)
 
+    logger.debug(
+      `trying split dimension ${dimensionIndex} on ${partition.partitionId} using ${sortKey.name} (${sortKey.category})`
+    )
+
     if (sortKey.category === 'string') {
       if (rootLike) {
         // First pass: equal-width EXPLAIN ESTIMATE (fast, metadata-only)
         const estimateSlices = await splitWithEqualWidthEstimate(context, partition, preparedSlice, sortKeys, dimensionIndex)
         if (isEffectiveSplit(preparedSlice, estimateSlices)) {
+          logger.debug(`equal-width estimate split succeeded for partition ${partition.partitionId}: ${estimateSlices.length} slices`)
           return applyFocusedValue(estimateSlices, focusedValue)
         }
       } else {
         // Refinement pass: full GROUP BY key to detect hot keys directly
         const keySlices = await splitSliceWithGroupByKey(context, partition, preparedSlice, sortKeys, dimensionIndex)
         if (keySlices && isEffectiveSplit(preparedSlice, keySlices)) {
+          logger.debug(`group-by-key split succeeded for partition ${partition.partitionId}: ${keySlices.length} slices`)
           return applyFocusedValue(keySlices, focusedValue)
         }
 
@@ -191,6 +257,7 @@ async function splitOversizedSlice(
           const currentRange = getChunkRange(preparedSlice, dimensionIndex)
           const refinedRange = getChunkRange(refined, dimensionIndex)
           if (currentRange.from !== refinedRange.from || currentRange.to !== refinedRange.to) {
+            logger.debug(`narrowed single hot key for partition ${partition.partitionId}, re-entering dispatch`)
             return splitOversizedSlice(context, partition, refined, sortKeys, depth)
           }
         }
@@ -198,6 +265,7 @@ async function splitOversizedSlice(
         // Fallback: GROUP BY prefix when too many distinct keys
         const stringSlices = await splitSliceWithStringPrefixes(context, partition, preparedSlice, sortKeys, dimensionIndex)
         if (isEffectiveSplit(preparedSlice, stringSlices)) {
+          logger.debug(`string-prefix split succeeded for partition ${partition.partitionId}: ${stringSlices.length} slices`)
           return applyFocusedValue(stringSlices, focusedValue)
         }
       }
@@ -212,15 +280,19 @@ async function splitOversizedSlice(
         dimensionIndex
       )
       if (isEffectiveSplit(preparedSlice, temporalSlices)) {
+        logger.debug(`temporal bucket split succeeded for partition ${partition.partitionId}: ${temporalSlices.length} slices`)
         return applyFocusedValue(temporalSlices, focusedValue)
       }
     }
 
     const rangedSlices = await splitWithRanges(context, partition, preparedSlice, sortKeys, dimensionIndex)
     if (isEffectiveSplit(preparedSlice, rangedSlices)) {
+      logger.debug(`range-based split succeeded for partition ${partition.partitionId}: ${rangedSlices.length} slices`)
       return applyFocusedValue(rangedSlices, focusedValue)
     }
   }
+
+  logger.debug(`no effective split found for partition ${partition.partitionId} at depth ${depth}`)
 
   return [slice]
 }
@@ -244,8 +316,15 @@ async function splitWithRanges(
 
   const quantileBoundaries = await buildQuantileBoundaries(context, slice, sortKeys, dimensionIndex, subCount)
   if (quantileBoundaries) {
+    logger.debug(
+      `using quantile-aligned range split for partition ${partition.partitionId} on dimension ${dimensionIndex} with ${quantileBoundaries.length} boundaries`
+    )
     return splitSliceWithQuantiles(context, partition, slice, sortKeys, dimensionIndex, quantileBoundaries)
   }
+
+  logger.debug(
+    `falling back to equal-width range split for partition ${partition.partitionId} on dimension ${dimensionIndex} with ${subCount} subranges`
+  )
 
   return splitSliceWithEqualWidthRanges(
     context,
@@ -296,6 +375,9 @@ async function buildQuantileBoundaries(
 
   const uniqueBoundaryCount = new Set(boundaries).size
   if (uniqueBoundaryCount <= Math.max(2, Math.ceil(subCount / 3))) {
+    logger.debug(
+      `discarded quantile boundaries for partition ${slice.partitionId} on dimension ${dimensionIndex} because only ${uniqueBoundaryCount} unique boundaries remained`
+    )
     return undefined
   }
 
@@ -318,6 +400,10 @@ async function hydrateSliceRange(
 
   const observedRange = await getSortKeyRange(context, slice.partitionId, slice.ranges, sortKeys, sortKey)
   if (!observedRange) return undefined
+
+  logger.debug(
+    `hydrated missing sort-key range for partition ${slice.partitionId} on ${sortKey.name}: [${observedRange.min}, ${observedRange.max}]`
+  )
 
   return {
     ...slice,
@@ -396,4 +482,65 @@ function assignChunkIds(planId: string, slices: PartitionSlice[]): Chunk[] {
       id: generateChunkId(planId, slice.partitionId, currentIndex),
     }
   })
+}
+
+function createTimedPlannerQuery(
+  input: Pick<GenerateChunkPlanInput, 'database' | 'table' | 'query'>,
+): PlannerQuery {
+  return async function timedPlannerQuery<T>(
+    sql: string,
+    settings?: Record<string, string | number | boolean | undefined>,
+  ): Promise<T[]> {
+    const startedAt = performance.now()
+    const sqlSummary = summarizeSql(sql)
+    const operation = describeSqlOperation(sql)
+    const context = describeSqlContext(sql)
+    const queryLabel = context ? `${operation} (${context})` : operation
+    let repeatTimer: ReturnType<typeof setTimeout> | undefined
+    let repeatDelayMs = SLOW_CLICKHOUSE_QUERY_REPEAT_INITIAL_MS
+    const scheduleRepeatWarning = () => {
+      repeatTimer = setTimeout(() => {
+        const elapsedRepeatMs = Math.round(performance.now() - startedAt)
+        queryLogger.warning(
+          `clickhouse query still running for ${input.database}.${input.table} after ${elapsedRepeatMs}ms: ${queryLabel}`
+        )
+        repeatDelayMs = Math.min(repeatDelayMs * 2, SLOW_CLICKHOUSE_QUERY_REPEAT_MAX_MS)
+        scheduleRepeatWarning()
+      }, repeatDelayMs)
+    }
+    const slowTimer = setTimeout(() => {
+      const elapsedMs = Math.round(performance.now() - startedAt)
+      queryLogger.warning(
+        `clickhouse query still running for ${input.database}.${input.table} after ${elapsedMs}ms: ${queryLabel} | ${sqlSummary}`
+      )
+      scheduleRepeatWarning()
+    }, SLOW_CLICKHOUSE_QUERY_MS)
+
+    queryLogger.debug(`clickhouse query started for ${input.database}.${input.table}: ${sqlSummary}`)
+
+    try {
+      const rows = await input.query<T>(sql, settings)
+      const durationMs = Math.round(performance.now() - startedAt)
+
+      if (durationMs >= SLOW_CLICKHOUSE_QUERY_MS) {
+        queryLogger.debug(
+          `slow clickhouse query completed for ${input.database}.${input.table} in ${durationMs}ms (${rows.length} rows): ${queryLabel}`
+        )
+      } else {
+        queryLogger.debug(
+          `clickhouse query completed for ${input.database}.${input.table} in ${durationMs}ms (${rows.length} rows): ${sqlSummary}`
+        )
+      }
+
+      return rows
+    } catch (error) {
+      queryLogger.error(
+        `clickhouse query failed for ${input.database}.${input.table} after ${Math.round(performance.now() - startedAt)}ms: ${sqlSummary}`
+      )
+      throw error
+    } finally {
+      clearTimeout(slowTimer)
+      if (repeatTimer) clearTimeout(repeatTimer)
+    }
+  }
 }
