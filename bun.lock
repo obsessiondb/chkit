@@ -23,7 +23,7 @@
     },
     "apps/docs": {
       "name": "@chkit/docs",
-      "version": "0.0.2-beta.8",
+      "version": "0.0.2-beta.9",
       "dependencies": {
         "@astrojs/starlight": "^0.37.6",
         "astro": "^5.6.1",
@@ -33,7 +33,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -42,28 +42,30 @@
         "@chkit/codegen": "workspace:*",
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
+        "@logtape/logtape": "^2.0.5",
         "fast-glob": "^3.3.2",
       },
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
+        "@logtape/logtape": "^2.0.5",
         "p-retry": "^7.1.1",
       },
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
@@ -73,17 +75,18 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
+        "@logtape/logtape": "^2.0.5",
         "p-map": "^7.0.4",
         "zod": "^4.3.6",
       },
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "zod": "^4.3.6",
@@ -91,8 +94,9 @@
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
         "@orpc/client": "1.13.4",
         "@orpc/contract": "1.13.4",
@@ -101,7 +105,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.0-beta.19",
+      "version": "0.1.0-beta.20",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -347,6 +351,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.9", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.0.3", "@jridgewell/sourcemap-codec": "^1.4.10" } }, "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ=="],
+
+    "@logtape/logtape": ["@logtape/logtape@2.0.5", "", {}, "sha512-UizDkh20ZPJVOddRxG1F77WhHdlNl/sbQgoO8T534R7XvUBMAJ9En9f35u+meW2tRsNLvjz6R87Zanwf53tspQ=="],
 
     "@manypkg/find-root": ["@manypkg/find-root@1.1.0", "", { "dependencies": { "@babel/runtime": "^7.5.5", "@types/node": "^12.7.1", "find-up": "^4.1.0", "fs-extra": "^8.1.0" } }, "sha512-mki5uBvhHzO8kYYix/WRy2WX8S3B5wdVSc9D6KcU5lQNglP2yt58/VfLuAK49glRXChosY8ap2oJ1qgma3GUVA=="],
 

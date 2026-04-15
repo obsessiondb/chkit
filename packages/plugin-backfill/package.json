@@ -27,6 +27,11 @@
       "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./sdk": {
+      "source": "./src/sdk.ts",
+      "types": "./dist/sdk.d.ts",
+      "default": "./dist/sdk.js"
     }
   },
   "files": [
@@ -38,11 +43,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
     "test": "bun test src",
+    "test:env": "doppler run --project chkit --config ci -- bun test src",
+    "seed:env": "doppler run --project chkit --config ci -- bun run src/chunking/e2e/seed-datasets.script.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*",
+    "@logtape/logtape": "^2.0.5",
     "p-map": "^7.0.4",
     "zod": "^4.3.6"
   }

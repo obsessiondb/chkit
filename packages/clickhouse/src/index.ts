@@ -1,4 +1,4 @@
-import { createClient } from '@clickhouse/client'
+import { createClient, type ClickHouseSettings } from '@clickhouse/client'
 import {
   normalizeSQLFragment,
   type ChxConfig,
@@ -6,6 +6,7 @@ import {
   type ProjectionDefinition,
   type SkipIndexDefinition,
 } from '@chkit/core'
+import { getLogger } from '@logtape/logtape'
 import {
   parseEngineFromCreateTableQuery,
   parseOrderByFromCreateTableQuery,
@@ -28,9 +29,11 @@ export interface QueryStatus {
   error?: string
 }
 
+export type { ClickHouseSettings }
+
 export interface ClickHouseExecutor {
   command(sql: string): Promise<void>
-  query<T>(sql: string): Promise<T[]>
+  query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
   insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
   listTableDetails(databases: string[]): Promise<IntrospectedTable[]>
@@ -249,7 +252,54 @@ export {
   waitForTableAbsent,
 } from './ddl-propagation.js'
 
+function parseSummaryFromHeaders(headers: Record<string, string | string[] | undefined>): {
+  read_rows: string
+  read_bytes: string
+  written_rows: string
+  written_bytes: string
+  result_rows: string
+  result_bytes: string
+  elapsed_ns: string
+} | undefined {
+  const raw = headers['x-clickhouse-summary']
+  if (!raw || typeof raw !== 'string') return undefined
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+}
+
+function logProfiling(
+  logger: ReturnType<typeof getLogger>,
+  query: string,
+  queryId: string,
+  summary?: {
+    read_rows: string
+    read_bytes: string
+    written_rows: string
+    written_bytes: string
+    result_rows?: string
+    result_bytes?: string
+    elapsed_ns: string
+  },
+): void {
+  logger.trace('Query completed: {query}', {
+    query,
+    queryId,
+    readRows: Number(summary?.read_rows ?? 0),
+    readBytes: Number(summary?.read_bytes ?? 0),
+    writtenRows: Number(summary?.written_rows ?? 0),
+    writtenBytes: Number(summary?.written_bytes ?? 0),
+    elapsedMs: Number(summary?.elapsed_ns ?? 0) / 1_000_000,
+    resultRows: Number(summary?.result_rows ?? 0),
+    resultBytes: Number(summary?.result_bytes ?? 0),
+  })
+}
+
 export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhouse']>): ClickHouseExecutor {
+  const profiler = getLogger(['chkit', 'profiling'])
+
   const client = createClient({
     url: config.url,
     username: config.username,
@@ -259,6 +309,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     clickhouse_settings: {
       wait_end_of_query: 1,
       async_insert: 0,
+      send_progress_in_http_headers: 1,
     },
   })
 
@@ -275,11 +326,10 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
   return {
     async command(sql: string): Promise<void> {
       try {
-        await client.command({ query: sql, http_headers: { 'X-DDL': '1' } })
+        const result = await client.command({ query: sql, http_headers: { 'X-DDL': '1' } })
+        logProfiling(profiler, sql, result.query_id, result.summary)
       } catch (error) {
         if (isUnknownDatabaseError(error)) {
-          // The configured database doesn't exist yet. Retry without the
-          // session database so that CREATE DATABASE can succeed.
           const fallback = createClient({
             url: config.url,
             username: config.username,
@@ -296,21 +346,24 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         wrapConnectionError(error, config.url)
       }
     },
-    async query<T>(sql: string): Promise<T[]> {
+    async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
       try {
-        const result = await client.query({ query: sql, format: 'JSONEachRow', http_headers: { 'X-DDL': '1' } })
-        return result.json<T>()
+        const result = await client.query({ query: sql, format: 'JSONEachRow', http_headers: { 'X-DDL': '1' }, ...(settings ? { clickhouse_settings: settings } : {}) })
+        const rows = await result.json<T>()
+        logProfiling(profiler, sql, result.query_id, parseSummaryFromHeaders(result.response_headers))
+        return rows
       } catch (error) {
         wrapConnectionError(error, config.url)
       }
     },
     async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void> {
       try {
-        await client.insert({
+        const result = await client.insert({
           table: params.table,
           values: params.values,
           format: 'JSONEachRow',
         })
+        logProfiling(profiler, `INSERT INTO ${params.table}`, result.query_id, result.summary)
       } catch (error) {
         wrapConnectionError(error, config.url)
       }
@@ -327,7 +380,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
     async queryStatus(queryId: string, options?: { afterTime?: string }): Promise<QueryStatus> {
       try {
         const running = await client.query({
-          query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+          query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('cluster', system.processes) WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
           query_params: { qid: queryId },
           format: 'JSONEachRow',
         })
@@ -353,7 +406,7 @@ export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhou
         const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
         const log = await client.query({
           query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
-FROM clusterAllReplicas('parallel_replicas', system.query_log)
+FROM clusterAllReplicas('cluster', system.query_log)
 WHERE user = currentUser()
   AND query_id = {qid:String}
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')

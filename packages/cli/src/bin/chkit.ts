@@ -17,6 +17,7 @@ import { loadPluginRuntime } from './plugin-runtime.js'
 import { getInternalPlugins } from './internal-plugins/index.js'
 import { CLI_VERSION } from './version.js'
 import { debug } from './debug.js'
+import { configureCliLogging } from './logging.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
@@ -73,6 +74,8 @@ function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRunt
 }
 
 async function main(): Promise<void> {
+  configureCliLogging()
+
   const argv = process.argv.slice(2)
   const commandName = argv[0]
   debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
