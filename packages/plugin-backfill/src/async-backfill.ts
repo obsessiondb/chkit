@@ -7,9 +7,9 @@ export interface BackfillOptions {
   /** Plan ID used as a namespace in deterministic query IDs */
   planId: string
   /** The chunks to process (from buildChunks) */
-  chunks: Array<{ id: string; from: string; to: string; [key: string]: unknown }>
+  chunks: Array<{ id: string; from?: string; to?: string; [key: string]: unknown }>
   /** Build the SQL for a given chunk. Called once per chunk at submit time. */
-  buildQuery: (chunk: { id: string; from: string; to: string }) => string
+  buildQuery: (chunk: { id: string; from?: string; to?: string }) => string
   /** Max concurrent queries running on the server. Default: 3 */
   concurrency?: number
   /** Polling interval in ms. Default: 5000 */
@@ -149,7 +149,7 @@ export async function syncProgress(
   const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
 
   const runningRows = await executor.query<{ query_id: string }>(
-    `SELECT query_id FROM clusterAllReplicas('parallel_replicas', system.processes) WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
+    `SELECT query_id FROM clusterAllReplicas('cluster', system.processes) WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
   )
   const runningSet = new Set(runningRows.map((r) => r.query_id))
 
@@ -162,7 +162,7 @@ export async function syncProgress(
     exception: string
   }>(
     `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
-FROM clusterAllReplicas('parallel_replicas', system.query_log)
+FROM clusterAllReplicas('cluster', system.query_log)
 WHERE user = currentUser()
   AND query_id LIKE '${safePrefix}%'
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')

@@ -12,6 +12,10 @@ import { loadSelectedService } from './service/storage.js'
 
 export { loadCredentials, resolveBaseUrl, type Credentials } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
+export {
+  loadSelectedService,
+} from './service/storage.js'
+export type { SelectedService } from './service/types.js'
 
 export type ObsessionDBPluginOptions = Record<string, never>
 
