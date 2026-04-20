@@ -3,6 +3,8 @@ import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
   ColumnRenameSuggestion,
+  MaterializedViewDefinition,
+  MaterializedViewRefresh,
   MigrationOperation,
   MigrationPlan,
   RiskLevel,
@@ -17,6 +19,7 @@ import {
   renderAlterDropIndex,
   renderAlterDropProjection,
   renderAlterModifyColumn,
+  renderAlterModifyRefresh,
   renderAlterModifySetting,
   renderAlterModifyTTL,
   renderAlterResetSetting,
@@ -186,6 +189,61 @@ function inferColumnRenameSuggestions(
     if (fromOrder !== 0) return fromOrder
     return a.to.localeCompare(b.to)
   })
+}
+
+function refreshEqual(
+  oldRefresh: MaterializedViewRefresh | undefined,
+  newRefresh: MaterializedViewRefresh | undefined
+): boolean {
+  return JSON.stringify(oldRefresh ?? null) === JSON.stringify(newRefresh ?? null)
+}
+
+function diffMaterializedView(
+  oldDef: MaterializedViewDefinition,
+  newDef: MaterializedViewDefinition
+): MigrationOperation[] {
+  const oldAppend = oldDef.refresh?.append === true
+  const newAppend = newDef.refresh?.append === true
+  const hasOldRefresh = oldDef.refresh !== undefined
+  const hasNewRefresh = newDef.refresh !== undefined
+
+  const structuralChange =
+    newDef.as !== oldDef.as ||
+    newDef.comment !== oldDef.comment ||
+    newDef.to.database !== oldDef.to.database ||
+    newDef.to.name !== oldDef.to.name ||
+    hasOldRefresh !== hasNewRefresh ||
+    oldAppend !== newAppend
+
+  if (structuralChange) {
+    return [
+      {
+        type: 'drop_materialized_view',
+        key: definitionKey(newDef),
+        risk: 'caution',
+        sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name} SYNC;`,
+      },
+      {
+        type: 'create_materialized_view',
+        key: definitionKey(newDef),
+        risk: 'caution',
+        sql: toCreateSQL(newDef),
+      },
+    ]
+  }
+
+  if (hasNewRefresh && !refreshEqual(oldDef.refresh, newDef.refresh)) {
+    return [
+      {
+        type: 'alter_materialized_view_modify_refresh',
+        key: `materialized_view:${newDef.database}.${newDef.name}:refresh`,
+        risk: 'caution',
+        sql: renderAlterModifyRefresh(newDef),
+      },
+    ]
+  }
+
+  return []
 }
 
 function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
@@ -391,15 +449,8 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
       newDef.kind === 'materialized_view' &&
       oldDef.kind === 'materialized_view'
     ) {
-      const changed =
-        newDef.as !== oldDef.as ||
-        newDef.comment !== oldDef.comment ||
-        newDef.to.database !== oldDef.to.database ||
-        newDef.to.name !== oldDef.to.name
-      if (changed) {
-        pushDropOperation(operations, oldDef, 'caution')
-        pushCreateOperation(operations, newDef, 'caution')
-      }
+      const mvOps = diffMaterializedView(oldDef, newDef)
+      operations.push(...mvOps)
       continue
     }
 
@@ -424,6 +475,7 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
   operations.sort((a, b) => {
     const rank = (op: MigrationOperation): number => {
       if (op.type.startsWith('drop_')) return 0
+      if (op.type === 'alter_materialized_view_modify_refresh') return 1
       if (op.type.startsWith('alter_')) return 1
       if (op.type === 'create_database') return 2
       if (op.type === 'create_table') return 3

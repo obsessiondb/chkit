@@ -1,6 +1,7 @@
 import type {
   ColumnDefinition,
   MaterializedViewDefinition,
+  MaterializedViewRefresh,
   SchemaDefinition,
   SkipIndexDefinition,
   TableDefinition,
@@ -69,8 +70,58 @@ function renderViewSQL(def: ViewDefinition): string {
   return `CREATE VIEW IF NOT EXISTS ${def.database}.${def.name} AS\n${def.as};`
 }
 
+function renderRefreshSettings(settings: Record<string, string | number>): string {
+  return Object.entries(settings)
+    .map(([k, v]) => `${k} = ${typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : v}`)
+    .join(', ')
+}
+
+function renderDependsOn(dependsOn: Array<{ database: string; name: string }>): string {
+  return dependsOn.map((dep) => `${dep.database}.${dep.name}`).join(', ')
+}
+
+/**
+ * Renders the REFRESH clause block for a refreshable materialized view.
+ * Grammar order: REFRESH EVERY|AFTER <interval> [OFFSET <interval>] [RANDOMIZE FOR <interval>]
+ *                [DEPENDS ON <list>] [SETTINGS <kv>] [APPEND]
+ * Note: EMPTY belongs after TO in CREATE, so it's NOT included here.
+ */
+export function renderRefreshClause(refresh: MaterializedViewRefresh): string {
+  const parts: string[] = []
+  if (refresh.every) parts.push(`REFRESH EVERY ${refresh.every}`)
+  else if (refresh.after) parts.push(`REFRESH AFTER ${refresh.after}`)
+  if (refresh.offset) parts.push(`OFFSET ${refresh.offset}`)
+  if (refresh.randomize) parts.push(`RANDOMIZE FOR ${refresh.randomize}`)
+  if (refresh.dependsOn && refresh.dependsOn.length > 0) {
+    parts.push(`DEPENDS ON ${renderDependsOn(refresh.dependsOn)}`)
+  }
+  if (refresh.settings && Object.keys(refresh.settings).length > 0) {
+    parts.push(`SETTINGS ${renderRefreshSettings(refresh.settings)}`)
+  }
+  if (refresh.append) parts.push('APPEND')
+  return parts.join(' ')
+}
+
 function renderMaterializedViewSQL(def: MaterializedViewDefinition): string {
-  return `CREATE MATERIALIZED VIEW IF NOT EXISTS ${def.database}.${def.name} TO ${def.to.database}.${def.to.name} AS\n${def.as};`
+  const header = `CREATE MATERIALIZED VIEW IF NOT EXISTS ${def.database}.${def.name}`
+  const refreshBlock = def.refresh ? `\n${renderRefreshClause(def.refresh)}` : ''
+  const toClause = ` TO ${def.to.database}.${def.to.name}`
+  const emptyClause = def.refresh?.empty ? ' EMPTY' : ''
+  return `${header}${refreshBlock}${toClause}${emptyClause} AS\n${def.as};`
+}
+
+/**
+ * Renders ALTER TABLE ... MODIFY REFRESH for a refresh-only change.
+ * Per live validation: APPEND must be re-included if present, because ClickHouse
+ * treats omitting APPEND as "remove APPEND" and rejects.
+ */
+export function renderAlterModifyRefresh(def: MaterializedViewDefinition): string {
+  if (!def.refresh) {
+    throw new Error(
+      `Cannot render MODIFY REFRESH for ${def.database}.${def.name}: refresh is not set`
+    )
+  }
+  return `ALTER TABLE ${def.database}.${def.name} MODIFY ${renderRefreshClause(def.refresh)};`
 }
 
 export function toCreateSQL(def: SchemaDefinition): string {

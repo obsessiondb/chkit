@@ -13,3 +13,5 @@ coverage
 .vscode
 .idea
 .claude/settings.local.json
+# Local research, ticket exports, and other working notes — never committed.
+thoughts/

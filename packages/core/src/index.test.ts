@@ -860,3 +860,309 @@ describe('@chkit/core planner v1', () => {
     ])
   })
 })
+
+describe('@chkit/core refreshable materialized views', () => {
+  const baseMv = {
+    database: 'analytics',
+    name: 'daily_mv',
+    to: { database: 'analytics', name: 'daily_rollup' },
+    as: 'SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day',
+  }
+
+  test('renders CREATE with REFRESH EVERY + TO', () => {
+    const mv = materializedView({
+      ...baseMv,
+      refresh: { every: '1 HOUR' },
+    })
+    const sql = toCreateSQL(mv)
+    expect(sql).toContain('CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.daily_mv')
+    expect(sql).toContain('REFRESH EVERY 1 HOUR')
+    expect(sql).toContain('TO analytics.daily_rollup')
+    expect(sql).not.toContain('APPEND')
+    expect(sql).not.toContain('EMPTY')
+  })
+
+  test('renders CREATE with APPEND + OFFSET + RANDOMIZE + SETTINGS', () => {
+    const mv = materializedView({
+      ...baseMv,
+      refresh: {
+        every: '1 DAY',
+        offset: '2 HOUR',
+        randomize: '5 MINUTE',
+        settings: { refresh_retries: 3 },
+        append: true,
+      },
+    })
+    const sql = toCreateSQL(mv)
+    expect(sql).toContain('REFRESH EVERY 1 DAY OFFSET 2 HOUR RANDOMIZE FOR 5 MINUTE')
+    expect(sql).toContain('SETTINGS refresh_retries = 3')
+    expect(sql).toContain('APPEND')
+    expect(sql).toContain('TO analytics.daily_rollup')
+  })
+
+  test('renders CREATE with DEPENDS ON and EMPTY', () => {
+    const mv = materializedView({
+      ...baseMv,
+      refresh: {
+        every: '1 HOUR',
+        dependsOn: [{ database: 'analytics', name: 'upstream_mv' }],
+        empty: true,
+      },
+    })
+    const sql = toCreateSQL(mv)
+    expect(sql).toContain('REFRESH EVERY 1 HOUR DEPENDS ON analytics.upstream_mv')
+    expect(sql).toContain(' EMPTY AS')
+  })
+
+  test('diff: adding refresh to an existing MV triggers drop+recreate (structural)', () => {
+    const oldDefs = [materializedView(baseMv)]
+    const newDefs = [materializedView({ ...baseMv, refresh: { every: '1 HOUR' } })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'drop_materialized_view',
+      'create_materialized_view',
+    ])
+  })
+
+  test('diff: removing refresh triggers drop+recreate', () => {
+    const oldDefs = [materializedView({ ...baseMv, refresh: { every: '1 HOUR' } })]
+    const newDefs = [materializedView(baseMv)]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'drop_materialized_view',
+      'create_materialized_view',
+    ])
+  })
+
+  test('diff: toggling APPEND triggers drop+recreate (Rule 1)', () => {
+    const oldDefs = [
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR', append: true } }),
+    ]
+    const newDefs = [
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'drop_materialized_view',
+      'create_materialized_view',
+    ])
+  })
+
+  test('diff: schedule-only change emits MODIFY REFRESH', () => {
+    const oldDefs = [materializedView({ ...baseMv, refresh: { every: '1 HOUR' } })]
+    const newDefs = [materializedView({ ...baseMv, refresh: { every: '30 MINUTE' } })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    const op = plan.operations[0]
+    expect(op?.type).toBe('alter_materialized_view_modify_refresh')
+    expect(op?.sql).toContain('ALTER TABLE analytics.daily_mv MODIFY REFRESH EVERY 30 MINUTE')
+    expect(op?.sql).not.toContain('APPEND')
+  })
+
+  test('diff: schedule-only change on APPEND MV preserves APPEND in MODIFY REFRESH (Rule 2)', () => {
+    const oldDefs = [
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR', append: true } }),
+    ]
+    const newDefs = [
+      materializedView({ ...baseMv, refresh: { every: '30 SECOND', append: true } }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    const op = plan.operations[0]
+    expect(op?.type).toBe('alter_materialized_view_modify_refresh')
+    expect(op?.sql).toContain('MODIFY REFRESH EVERY 30 SECOND')
+    expect(op?.sql).toContain('APPEND')
+  })
+
+  test('diff: randomize/dependsOn/settings changes emit MODIFY REFRESH', () => {
+    const oldDefs = [materializedView({ ...baseMv, refresh: { every: '1 HOUR' } })]
+    const newDefs = [
+      materializedView({
+        ...baseMv,
+        refresh: {
+          every: '1 HOUR',
+          randomize: '1 MINUTE',
+          dependsOn: [{ database: 'analytics', name: 'upstream' }],
+          settings: { refresh_retries: 5 },
+        },
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    const op = plan.operations[0]
+    expect(op?.type).toBe('alter_materialized_view_modify_refresh')
+    expect(op?.sql).toContain('RANDOMIZE FOR 1 MINUTE')
+    expect(op?.sql).toContain('DEPENDS ON analytics.upstream')
+    expect(op?.sql).toContain('SETTINGS refresh_retries = 5')
+  })
+
+  test('diff: equivalent refresh yields no ops', () => {
+    const defs = [
+      materializedView({
+        ...baseMv,
+        refresh: { every: '1 HOUR', append: true },
+      }),
+    ]
+    const plan = planDiff(defs, defs)
+    expect(plan.operations).toEqual([])
+  })
+
+  test('MODIFY REFRESH ranks with other alters', () => {
+    const oldDefs = [
+      table({
+        database: 'analytics',
+        name: 'daily_rollup',
+        columns: [{ name: 'day', type: 'Date' }],
+        engine: 'MergeTree()',
+        primaryKey: ['day'],
+        orderBy: ['day'],
+      }),
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
+    ]
+    const newDefs = [
+      table({
+        database: 'analytics',
+        name: 'daily_rollup',
+        columns: [
+          { name: 'day', type: 'Date' },
+          { name: 'total', type: 'UInt64' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['day'],
+        orderBy: ['day'],
+      }),
+      materializedView({ ...baseMv, refresh: { every: '30 MINUTE' } }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    const types = plan.operations.map((op) => op.type)
+    // All alter ops come together (rank 1), neither before drops nor after creates.
+    const firstAlter = types.indexOf('alter_table_add_column')
+    const firstRefresh = types.indexOf('alter_materialized_view_modify_refresh')
+    expect(firstAlter).toBeGreaterThanOrEqual(0)
+    expect(firstRefresh).toBeGreaterThanOrEqual(0)
+    // No create_* follow the alters
+    const lastCreate = Math.max(
+      types.lastIndexOf('create_database'),
+      types.lastIndexOf('create_table'),
+      types.lastIndexOf('create_view'),
+      types.lastIndexOf('create_materialized_view')
+    )
+    expect(Math.max(firstAlter, firstRefresh)).toBeLessThan(
+      lastCreate === -1 ? Number.POSITIVE_INFINITY : lastCreate + 1
+    )
+  })
+
+  test('canonicalization uppercases intervals and sorts dependsOn/settings', () => {
+    const defs = canonicalizeDefinitions([
+      materializedView({
+        ...baseMv,
+        refresh: {
+          every: '1 hour',
+          randomize: '30 seconds',
+          dependsOn: [
+            { database: 'z', name: 'b' },
+            { database: 'a', name: 'a' },
+          ],
+          settings: { refresh_retries: 3, refresh_retry_initial_backoff_ms: 100 },
+        },
+      }),
+    ])
+    const mv = defs[0]
+    expect(mv?.kind).toBe('materialized_view')
+    if (mv?.kind !== 'materialized_view' || !mv.refresh) throw new Error('expected refresh')
+    expect(mv.refresh.every).toBe('1 HOUR')
+    expect(mv.refresh.randomize).toBe('30 SECOND')
+    expect(mv.refresh.dependsOn).toEqual([
+      { database: 'a', name: 'a' },
+      { database: 'z', name: 'b' },
+    ])
+    expect(Object.keys(mv.refresh.settings ?? {})).toEqual([
+      'refresh_retries',
+      'refresh_retry_initial_backoff_ms',
+    ])
+  })
+
+  test('validates refresh requires exactly one of every/after', () => {
+    const missing = validateDefinitions([
+      materializedView({ ...baseMv, refresh: {} }),
+    ])
+    expect(missing.map((i) => i.code)).toContain('refresh_requires_every_or_after')
+
+    const both = validateDefinitions([
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR', after: '10 MINUTE' } }),
+    ])
+    expect(both.map((i) => i.code)).toContain('refresh_every_after_mutually_exclusive')
+  })
+
+  test('validates interval format', () => {
+    const issues = validateDefinitions([
+      materializedView({ ...baseMv, refresh: { every: 'soonish' } }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('refresh_interval_format')
+  })
+
+  test('validates DEPENDS ON is only allowed with REFRESH EVERY', () => {
+    const withAfter = validateDefinitions([
+      materializedView({
+        ...baseMv,
+        refresh: {
+          after: '10 MINUTE',
+          dependsOn: [{ database: 'analytics', name: 'upstream' }],
+        },
+      }),
+    ])
+    expect(withAfter.map((i) => i.code)).toContain('refresh_depends_on_requires_every')
+
+    const withEvery = validateDefinitions([
+      materializedView({
+        ...baseMv,
+        refresh: {
+          every: '1 HOUR',
+          dependsOn: [{ database: 'analytics', name: 'upstream' }],
+        },
+      }),
+    ])
+    expect(withEvery.some((i) => i.code === 'refresh_depends_on_requires_every')).toBe(false)
+  })
+
+  test('validates non-APPEND RMV with replicated target (Rule 3)', () => {
+    const issues = validateDefinitions([
+      table({
+        database: 'analytics',
+        name: 'daily_rollup',
+        columns: [{ name: 'day', type: 'Date' }],
+        engine: 'SharedMergeTree',
+        primaryKey: ['day'],
+        orderBy: ['day'],
+      }),
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('refresh_append_required_for_replicated_target')
+  })
+
+  test('no issue when APPEND RMV targets replicated table', () => {
+    const issues = validateDefinitions([
+      table({
+        database: 'analytics',
+        name: 'daily_rollup',
+        columns: [{ name: 'day', type: 'Date' }],
+        engine: 'SharedMergeTree',
+        primaryKey: ['day'],
+        orderBy: ['day'],
+      }),
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR', append: true } }),
+    ])
+    expect(
+      issues.some((i) => i.code === 'refresh_append_required_for_replicated_target')
+    ).toBe(false)
+  })
+
+  test('no issue when target table is not in the schema (external)', () => {
+    const issues = validateDefinitions([
+      materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
+    ])
+    expect(
+      issues.some((i) => i.code === 'refresh_append_required_for_replicated_target')
+    ).toBe(false)
+  })
+})

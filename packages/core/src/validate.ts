@@ -1,6 +1,8 @@
 import { definitionKey } from './canonical.js'
 import { normalizeKeyColumns } from './key-clause.js'
 import type {
+  MaterializedViewDefinition,
+  MaterializedViewRefresh,
   SchemaDefinition,
   TableDefinition,
   ValidationIssue,
@@ -100,6 +102,86 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
   }
 }
 
+const INTERVAL_PATTERN =
+  /^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$/i
+
+const REPLICATED_ENGINE_PATTERN = /^(Shared|Replicated)/
+
+function validateInterval(
+  def: MaterializedViewDefinition,
+  issues: ValidationIssue[],
+  field: keyof MaterializedViewRefresh,
+  value: string | undefined
+): void {
+  if (value === undefined) return
+  if (!INTERVAL_PATTERN.test(value)) {
+    pushValidationIssue(
+      issues,
+      def,
+      'refresh_interval_format',
+      `Materialized view ${def.database}.${def.name} refresh.${String(field)} "${value}" is not a valid interval (expected e.g. "1 HOUR", "30 SECOND")`
+    )
+  }
+}
+
+function validateMaterializedViewDefinition(
+  def: MaterializedViewDefinition,
+  issues: ValidationIssue[],
+  definitions: SchemaDefinition[]
+): void {
+  const { refresh } = def
+  if (!refresh) return
+
+  const hasEvery = refresh.every !== undefined && refresh.every.length > 0
+  const hasAfter = refresh.after !== undefined && refresh.after.length > 0
+  if (!hasEvery && !hasAfter) {
+    pushValidationIssue(
+      issues,
+      def,
+      'refresh_requires_every_or_after',
+      `Materialized view ${def.database}.${def.name} refresh requires exactly one of "every" or "after"`
+    )
+  } else if (hasEvery && hasAfter) {
+    pushValidationIssue(
+      issues,
+      def,
+      'refresh_every_after_mutually_exclusive',
+      `Materialized view ${def.database}.${def.name} refresh specifies both "every" and "after"; choose one`
+    )
+  }
+
+  validateInterval(def, issues, 'every', refresh.every)
+  validateInterval(def, issues, 'after', refresh.after)
+  validateInterval(def, issues, 'offset', refresh.offset)
+  validateInterval(def, issues, 'randomize', refresh.randomize)
+
+  if (refresh.dependsOn && refresh.dependsOn.length > 0 && hasAfter && !hasEvery) {
+    pushValidationIssue(
+      issues,
+      def,
+      'refresh_depends_on_requires_every',
+      `Materialized view ${def.database}.${def.name} uses DEPENDS ON with REFRESH AFTER; ClickHouse only allows DEPENDS ON with REFRESH EVERY.`
+    )
+  }
+
+  if (!refresh.append) {
+    const target = definitions.find(
+      (other): other is TableDefinition =>
+        other.kind === 'table' &&
+        other.database === def.to.database &&
+        other.name === def.to.name
+    )
+    if (target && REPLICATED_ENGINE_PATTERN.test(target.engine)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'refresh_append_required_for_replicated_target',
+        `Materialized view ${def.database}.${def.name} refreshes a replicated target ${target.database}.${target.name} (${target.engine}) without APPEND. ClickHouse rejects this combination. Set refresh.append = true, or target a non-replicated table.`
+      )
+    }
+  }
+}
+
 export function validateDefinitions(definitions: SchemaDefinition[]): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   const objectKeys = new Set<string>()
@@ -118,6 +200,8 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
 
     if (def.kind === 'table') {
       validateTableDefinition(def, issues)
+    } else if (def.kind === 'materialized_view') {
+      validateMaterializedViewDefinition(def, issues, definitions)
     }
   }
 

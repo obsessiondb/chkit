@@ -74,6 +74,33 @@ describe('@chkit/plugin-pull renderSchemaFile', () => {
     expect(content).toContain('to: { database: "app", name: "events_rollup" }')
     expect(content).toContain('export default schema(app_events_view, app_events_mv)')
   })
+
+  test('renders refreshable materialized view with full refresh block', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'materialized_view',
+        database: 'analytics',
+        name: 'daily_mv',
+        to: { database: 'analytics', name: 'daily_rollup' },
+        refresh: {
+          every: '1 HOUR',
+          randomize: '30 SECOND',
+          dependsOn: [{ database: 'analytics', name: 'upstream' }],
+          settings: { refresh_retries: 3 },
+          append: true,
+        },
+        as: 'SELECT 1',
+      },
+    ])
+    expect(content).toContain('refresh: {')
+    expect(content).toContain('every: "1 HOUR",')
+    expect(content).toContain('randomize: "30 SECOND",')
+    expect(content).toContain('dependsOn: [')
+    expect(content).toContain('{ database: "analytics", name: "upstream" },')
+    expect(content).toContain('settings: {')
+    expect(content).toContain('refresh_retries: 3,')
+    expect(content).toContain('append: true,')
+  })
 })
 
 describe('@chkit/plugin-pull schema command', () => {
@@ -346,6 +373,77 @@ FROM app.users;`)
       create_table_query: 'CREATE MATERIALIZED VIEW app.mv_bad AS SELECT 1',
     })
     expect(definition).toBeNull()
+  })
+
+  test('parseRefreshClause returns null when no REFRESH present', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW app.mv TO app.t AS SELECT 1'
+    )
+    expect(refresh).toBeNull()
+  })
+
+  test('parseRefreshClause extracts REFRESH EVERY + APPEND', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 30 SECOND APPEND TO app.t AS SELECT 1'
+    )
+    expect(refresh).toEqual({ every: '30 SECOND', append: true })
+  })
+
+  test('parseRefreshClause extracts AFTER + OFFSET + RANDOMIZE + SETTINGS', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      `CREATE MATERIALIZED VIEW app.mv
+REFRESH AFTER 10 MINUTE OFFSET 5 MINUTE RANDOMIZE FOR 30 SECOND SETTINGS refresh_retries = 3, refresh_retry_initial_backoff_ms = 100
+TO app.t AS SELECT 1`
+    )
+    expect(refresh).toEqual({
+      after: '10 MINUTE',
+      offset: '5 MINUTE',
+      randomize: '30 SECOND',
+      settings: { refresh_retries: 3, refresh_retry_initial_backoff_ms: 100 },
+    })
+  })
+
+  test('parseRefreshClause extracts DEPENDS ON list', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR DEPENDS ON analytics.upstream_mv, other.dep TO app.t AS SELECT 1'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'analytics', name: 'upstream_mv' },
+      { database: 'other', name: 'dep' },
+    ])
+  })
+
+  test('parseRefreshClause ignores DEFINER / SQL SECURITY noise that Cloud auto-injects', () => {
+    const cloudDdl = `CREATE MATERIALIZED VIEW app.mv
+REFRESH EVERY 30 SECOND APPEND TO app.t
+(\`day\` Date, \`total\` UInt64)
+DEFINER = default SQL SECURITY DEFINER
+AS SELECT today() AS day, toUInt64(1) AS total`
+    const refresh = __testUtils.parseRefreshClause(cloudDdl)
+    expect(refresh).toEqual({ every: '30 SECOND', append: true })
+    // parseAsClause should also strip DEFINER/SQL SECURITY out of the AS body
+    const asClause = __testUtils.parseAsClause(cloudDdl)
+    expect(asClause).not.toContain('DEFINER')
+    expect(asClause).not.toContain('SQL SECURITY')
+    expect(asClause).toContain('SELECT today() AS day')
+  })
+
+  test('mapSystemTableRowToDefinition attaches parsed refresh metadata', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'mv',
+      engine: 'MaterializedView',
+      create_table_query:
+        'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR APPEND TO app.t AS SELECT 1',
+    })
+    expect(definition).toEqual({
+      kind: 'materialized_view',
+      database: 'app',
+      name: 'mv',
+      to: { database: 'app', name: 't' },
+      as: 'SELECT 1',
+      refresh: { every: '1 HOUR', append: true },
+    })
   })
 })
 

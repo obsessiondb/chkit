@@ -1,4 +1,8 @@
-import { canonicalizeDefinitions, type SchemaDefinition } from '@chkit/core'
+import {
+  canonicalizeDefinitions,
+  type MaterializedViewRefresh,
+  type SchemaDefinition,
+} from '@chkit/core'
 
 export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   const canonical = canonicalizeDefinitions(definitions)
@@ -97,6 +101,9 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
       lines.push(`  database: ${renderString(definition.database)},`)
       lines.push(`  name: ${renderString(definition.name)},`)
       lines.push(`  to: { database: ${renderString(definition.to.database)}, name: ${renderString(definition.to.name)} },`)
+      if (definition.refresh) {
+        lines.push(...renderRefreshLines(definition.refresh))
+      }
       lines.push(`  as: ${renderString(definition.as)},`)
       lines.push('})')
     }
@@ -137,6 +144,37 @@ function renderStringArray(values: string[]): string {
 function renderLiteral(value: string | number | boolean): string {
   if (typeof value === 'string') return renderString(value)
   return String(value)
+}
+
+function renderRefreshLines(refresh: MaterializedViewRefresh): string[] {
+  const lines: string[] = []
+  lines.push('  refresh: {')
+  if (refresh.every) lines.push(`    every: ${renderString(refresh.every)},`)
+  if (refresh.after) lines.push(`    after: ${renderString(refresh.after)},`)
+  if (refresh.offset) lines.push(`    offset: ${renderString(refresh.offset)},`)
+  if (refresh.randomize) lines.push(`    randomize: ${renderString(refresh.randomize)},`)
+  if (refresh.dependsOn && refresh.dependsOn.length > 0) {
+    lines.push('    dependsOn: [')
+    for (const dep of refresh.dependsOn) {
+      lines.push(
+        `      { database: ${renderString(dep.database)}, name: ${renderString(dep.name)} },`
+      )
+    }
+    lines.push('    ],')
+  }
+  if (refresh.settings && Object.keys(refresh.settings).length > 0) {
+    lines.push('    settings: {')
+    for (const key of Object.keys(refresh.settings).sort()) {
+      const value = refresh.settings[key]
+      if (value === undefined) continue
+      lines.push(`      ${renderKey(key)}: ${renderLiteral(value)},`)
+    }
+    lines.push('    },')
+  }
+  if (refresh.append) lines.push('    append: true,')
+  if (refresh.empty) lines.push('    empty: true,')
+  lines.push('  },')
+  return lines
 }
 
 function renderKey(value: string): string {

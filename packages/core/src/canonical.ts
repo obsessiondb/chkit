@@ -1,6 +1,7 @@
 import type {
   ColumnDefinition,
   MaterializedViewDefinition,
+  MaterializedViewRefresh,
   ProjectionDefinition,
   SchemaDefinition,
   SkipIndexDefinition,
@@ -91,8 +92,55 @@ function canonicalizeView(def: ViewDefinition): ViewDefinition {
   }
 }
 
+const INTERVAL_UNIT_PATTERN = /\b(second|minute|hour|day|week|month|year)s?\b/gi
+
+function canonicalizeInterval(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  return value
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(INTERVAL_UNIT_PATTERN, (unit) => unit.toUpperCase().replace(/S$/, ''))
+}
+
+function canonicalizeRefresh(
+  refresh: MaterializedViewRefresh | undefined
+): MaterializedViewRefresh | undefined {
+  if (!refresh) return undefined
+
+  const dependsOn = refresh.dependsOn
+    ? [...refresh.dependsOn]
+        .map((dep) => ({ database: dep.database.trim(), name: dep.name.trim() }))
+        .sort((a, b) => {
+          const aKey = `${a.database}.${a.name}`
+          const bKey = `${b.database}.${b.name}`
+          return aKey.localeCompare(bKey)
+        })
+    : undefined
+
+  const settings = refresh.settings
+    ? Object.fromEntries(
+        Object.entries(refresh.settings).sort(([a], [b]) => a.localeCompare(b))
+      )
+    : undefined
+
+  const canonical: MaterializedViewRefresh = {}
+  const every = canonicalizeInterval(refresh.every)
+  const after = canonicalizeInterval(refresh.after)
+  const offset = canonicalizeInterval(refresh.offset)
+  const randomize = canonicalizeInterval(refresh.randomize)
+  if (every !== undefined) canonical.every = every
+  if (after !== undefined) canonical.after = after
+  if (offset !== undefined) canonical.offset = offset
+  if (randomize !== undefined) canonical.randomize = randomize
+  if (dependsOn && dependsOn.length > 0) canonical.dependsOn = dependsOn
+  if (settings && Object.keys(settings).length > 0) canonical.settings = settings
+  if (refresh.append) canonical.append = true
+  if (refresh.empty) canonical.empty = true
+  return canonical
+}
+
 function canonicalizeMaterializedView(def: MaterializedViewDefinition): MaterializedViewDefinition {
-  return {
+  const canonical: MaterializedViewDefinition = {
     ...def,
     database: def.database.trim(),
     name: def.name.trim(),
@@ -103,6 +151,13 @@ function canonicalizeMaterializedView(def: MaterializedViewDefinition): Material
     as: normalizeSQLFragment(def.as),
     comment: def.comment?.trim(),
   }
+  const refresh = canonicalizeRefresh(def.refresh)
+  if (refresh) {
+    canonical.refresh = refresh
+  } else {
+    delete canonical.refresh
+  }
+  return canonical
 }
 
 export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition {

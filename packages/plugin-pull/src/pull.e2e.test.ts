@@ -86,6 +86,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
       const eventsView = `${prefix}events_view`
       const eventsRollupTable = `${prefix}events_rollup`
       const eventsMaterializedView = `${prefix}events_mv`
+      const eventsRefreshableView = `${prefix}events_rmv`
       const noiseTable = `${prefix}noise_table`
 
       const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-e2e-'))
@@ -124,6 +125,11 @@ describe('@chkit/plugin-pull live env e2e', () => {
         await executor.command(
           `CREATE MATERIALIZED VIEW ${quoteIdent(targetDatabase)}.${quoteIdent(eventsMaterializedView)} TO ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRollupTable)} AS SELECT id, count() AS c FROM ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} GROUP BY id`
         )
+        // Refreshable MV — must use APPEND on replicated (SharedMergeTree) targets,
+        // per the ClickHouse Cloud constraint verified on customer-benchmark.
+        await executor.command(
+          `CREATE MATERIALIZED VIEW ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRefreshableView)} REFRESH EVERY 1 HOUR APPEND TO ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRollupTable)} AS SELECT id, count() AS c FROM ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} GROUP BY id`
+        )
         await executor.command(
           `CREATE TABLE ${quoteIdent(noiseDatabase)}.${quoteIdent(noiseTable)} (id UInt64) ENGINE = MergeTree() ORDER BY (id)`
         )
@@ -159,7 +165,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
         }
         expect(payload.ok).toBe(true)
         expect(payload.command).toBe('schema')
-        expect(payload.definitionCount).toBe(5)
+        expect(payload.definitionCount).toBe(6)
         expect(payload.tableCount).toBe(3)
         expect(payload.databases).toEqual([targetDatabase])
         expect(payload.outFile).toBe(pulledSchemaPath)
@@ -174,6 +180,13 @@ describe('@chkit/plugin-pull live env e2e', () => {
         expect(pulledSchema).toContain(`name: "${eventsView}"`)
         expect(pulledSchema).toContain(`name: "${eventsMaterializedView}"`)
         expect(pulledSchema).toContain('materializedView({')
+        // Refreshable MV — assert the refresh block was parsed and rendered
+        expect(pulledSchema).toContain(`name: "${eventsRefreshableView}"`)
+        expect(pulledSchema).toContain('refresh: {')
+        expect(pulledSchema).toContain('every: "1 HOUR",')
+        expect(pulledSchema).toContain('append: true,')
+        expect(pulledSchema).not.toContain('DEFINER')
+        expect(pulledSchema).not.toContain('SQL SECURITY')
         expect(pulledSchema).not.toContain(noiseDatabase)
       } finally {
         await rm(dir, { recursive: true, force: true })

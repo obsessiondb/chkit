@@ -80,11 +80,23 @@ export interface ViewDefinition {
   comment?: string
 }
 
+export interface MaterializedViewRefresh {
+  every?: string
+  after?: string
+  offset?: string
+  randomize?: string
+  dependsOn?: Array<{ database: string; name: string }>
+  settings?: Record<string, string | number>
+  append?: boolean
+  empty?: boolean
+}
+
 export interface MaterializedViewDefinition {
   kind: 'materialized_view'
   database: string
   name: string
   to: { database: string; name: string }
+  refresh?: MaterializedViewRefresh
   as: string
   comment?: string
 }
@@ -192,6 +204,7 @@ export type MigrationOperationType =
   | 'drop_view'
   | 'create_materialized_view'
   | 'drop_materialized_view'
+  | 'alter_materialized_view_modify_refresh'
   | 'alter_table_add_column'
   | 'alter_table_modify_column'
   | 'alter_table_drop_column'
@@ -239,6 +252,11 @@ export type ValidationIssueCode =
   | 'primary_key_missing_column'
   | 'order_by_missing_column'
   | 'index_type_missing_args'
+  | 'refresh_requires_every_or_after'
+  | 'refresh_every_after_mutually_exclusive'
+  | 'refresh_interval_format'
+  | 'refresh_append_required_for_replicated_target'
+  | 'refresh_depends_on_requires_every'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

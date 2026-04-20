@@ -344,6 +344,336 @@ export default schema(events, eventCounts, eventCountsMv)
     240_000
   )
 
+  test(
+    'refreshable materialized view lifecycle: create → modify schedule → recreate → remove',
+    async () => {
+      const executor = createLiveExecutor(liveEnv)
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('rmv')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+      const prefix = createPrefix('rmv')
+      const targetTable = `${prefix}target`
+      const rmvName = `${prefix}mv`
+
+      const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-e2e-rmv-'))
+      const schemaPath = join(dir, 'schema.ts')
+      const configPath = join(dir, 'clickhouse.config.ts')
+      const outDir = join(dir, 'chkit')
+      const migrationsDir = join(outDir, 'migrations')
+      const metaDir = join(outDir, 'meta')
+
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+
+      const renderSchema = (options: {
+        includeRmv: boolean
+        every?: string
+        asQuery?: string
+      }): string => {
+        const targetDef = `const target = table({
+  database: '${database}',
+  name: '${targetTable}',
+  columns: [
+    { name: 'org_id', type: 'String' },
+    { name: 'total', type: 'UInt64' },
+  ],
+  engine: 'MergeTree()',
+  primaryKey: ['org_id'],
+  orderBy: ['org_id'],
+})`
+        if (!options.includeRmv) {
+          return `import { schema, table } from '${CORE_ENTRY}'\n\n${targetDef}\n\nexport default schema(target)\n`
+        }
+        const every = options.every ?? '1 HOUR'
+        const asQuery =
+          options.asQuery ??
+          `SELECT org_id, count() AS total FROM ${database}.${targetTable} GROUP BY org_id`
+        return `import { schema, table, materializedView } from '${CORE_ENTRY}'
+
+${targetDef}
+
+const rmv = materializedView({
+  database: '${database}',
+  name: '${rmvName}',
+  to: { database: '${database}', name: '${targetTable}' },
+  refresh: {
+    every: '${every}',
+    append: true,
+  },
+  as: \`${asQuery}\`,
+})
+
+export default schema(target, rmv)
+`
+      }
+
+      const writeSchema = (options: Parameters<typeof renderSchema>[0]) =>
+        writeFile(schemaPath, renderSchema(options), 'utf8')
+
+      await writeSchema({ includeRmv: true, every: '1 HOUR' })
+      await writeFile(
+        configPath,
+        `export default {\n  schema: '${schemaPath}',\n  outDir: '${outDir}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${metaDir}',\n  clickhouse: {\n    url: '${clickhouseUrl}',\n    username: '${clickhouseUser}',\n    password: '${clickhousePassword}',\n    database: '${database}',\n  },\n}\n`,
+        'utf8'
+      )
+
+      const queryCreate = async (): Promise<string | null> => {
+        const rows = await executor.query<{ create_table_query: string }>(
+          `SELECT create_table_query FROM system.tables WHERE database = '${database}' AND name = '${rmvName}'`
+        )
+        return rows[0]?.create_table_query ?? null
+      }
+
+      const queryShowCreate = async (): Promise<string | null> => {
+        try {
+          const rows = await executor.query<{ statement: string }>(
+            `SHOW CREATE TABLE ${database}.${rmvName}`
+          )
+          return rows[0]?.statement ?? null
+        } catch {
+          return null
+        }
+      }
+
+      // Both SHOW CREATE and system.tables.create_table_query can be stale on Cloud
+      // after MODIFY REFRESH / DROP+CREATE. Combine them and poll up to timeoutMs for
+      // the expected substring to appear in either.
+      const waitForRmvContent = async (
+        expected: string,
+        timeoutMs = 60_000
+      ): Promise<{ found: boolean; lastCombined: string }> => {
+        const deadline = Date.now() + timeoutMs
+        let lastCombined = ''
+        while (Date.now() < deadline) {
+          const [live, show] = await Promise.all([queryCreate(), queryShowCreate()])
+          lastCombined = `${live ?? ''}\n---\n${show ?? ''}`
+          if (lastCombined.includes(expected)) return { found: true, lastCombined }
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+        return { found: false, lastCombined }
+      }
+
+      // An RMV is considered "gone" when its create_table_query is absent or empty AND
+      // SHOW CREATE errors. system.tables row count alone is unreliable on Cloud —
+      // zombie rows with empty create_table_query can linger for a minute during
+      // SharedMergeTree replica convergence.
+      const queryGone = async (): Promise<boolean> => {
+        const live = await queryCreate()
+        if (live && live.trim().length > 0) return false
+        const show = await queryShowCreate()
+        if (show && show.trim().length > 0) return false
+        return true
+      }
+
+      try {
+        // -------- Step 1: create target table + refreshable MV --------
+        const gen1 = runCli(dir, ['generate', '--config', configPath, '--json'], cliEnv)
+        if (gen1.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate step 1 failed', gen1))
+        }
+        const gen1Payload = JSON.parse(gen1.stdout) as {
+          operationCount: number
+          migrationFile: string | null
+        }
+        expect(gen1Payload.operationCount).toBeGreaterThan(0)
+        expect(gen1Payload.migrationFile).toBeTruthy()
+        if (!gen1Payload.migrationFile) {
+          throw new Error('generate step 1 produced no migration file')
+        }
+
+        const migration1Sql = await readFile(
+          gen1Payload.migrationFile.startsWith('/')
+            ? gen1Payload.migrationFile
+            : join(migrationsDir, gen1Payload.migrationFile),
+          'utf8'
+        )
+        expect(migration1Sql).toContain('CREATE MATERIALIZED VIEW IF NOT EXISTS')
+        expect(migration1Sql).toContain('REFRESH EVERY 1 HOUR')
+        expect(migration1Sql).toContain('APPEND')
+
+        const exec1 = await runCliWithRetry(
+          dir,
+          ['migrate', '--config', configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
+        if (exec1.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('migrate step 1 failed', exec1))
+        }
+
+        await waitForTable(executor, database, targetTable)
+        await waitForView(executor, database, rmvName)
+
+        const createSqlAfterStep1 = await queryCreate()
+        expect(createSqlAfterStep1).toBeTruthy()
+        expect(createSqlAfterStep1).toContain('REFRESH EVERY 1 HOUR')
+        expect(createSqlAfterStep1).toContain('APPEND')
+
+        // Refresh row exists in system.view_refreshes
+        const refreshRows = await executor.query<{ c: string }>(
+          `SELECT count() AS c FROM system.view_refreshes WHERE database = '${database}' AND view = '${rmvName}'`
+        )
+        expect((refreshRows[0]?.c ?? '0') !== '0').toBe(true)
+
+        // -------- Step 2: schedule-only change → MODIFY REFRESH (preserves APPEND) --------
+        await writeSchema({ includeRmv: true, every: '30 MINUTE' })
+
+        // Dryrun first to assert the plan is exactly one MODIFY REFRESH op (Rules 1 & 2).
+        const plan2 = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)
+        if (plan2.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate --dryrun step 2 failed', plan2))
+        }
+        const plan2Payload = JSON.parse(plan2.stdout) as {
+          operationCount: number
+          operations: Array<{ type: string; sql: string }>
+        }
+        expect(plan2Payload.operationCount).toBe(1)
+        expect(plan2Payload.operations[0]?.type).toBe('alter_materialized_view_modify_refresh')
+        // Rule 2: APPEND must be re-included in MODIFY REFRESH for an APPEND MV.
+        expect(plan2Payload.operations[0]?.sql).toContain('MODIFY REFRESH EVERY 30 MINUTE')
+        expect(plan2Payload.operations[0]?.sql).toContain('APPEND')
+
+        const gen2 = runCli(dir, ['generate', '--config', configPath, '--json'], cliEnv)
+        if (gen2.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate step 2 failed', gen2))
+        }
+        const gen2Payload = JSON.parse(gen2.stdout) as {
+          operationCount: number
+          migrationFile: string | null
+        }
+        expect(gen2Payload.operationCount).toBe(1)
+
+        const exec2 = await runCliWithRetry(
+          dir,
+          ['migrate', '--config', configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
+        if (exec2.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('migrate step 2 failed', exec2))
+        }
+
+        // SHOW CREATE and create_table_query can each be stale on Cloud for tens of
+        // seconds after MODIFY REFRESH; poll both until one reflects the new schedule.
+        const scheduleCheck = await waitForRmvContent('30 MINUTE')
+        if (!scheduleCheck.found) {
+          throw new Error(
+            `MODIFY REFRESH not reflected in server metadata within 60s.\n${scheduleCheck.lastCombined}`
+          )
+        }
+        expect(scheduleCheck.lastCombined).toContain('APPEND')
+
+        // -------- Step 3: query change → drop + recreate --------
+        await writeSchema({
+          includeRmv: true,
+          every: '30 MINUTE',
+          asQuery: `SELECT org_id, count() * 2 AS total FROM ${database}.${targetTable} GROUP BY org_id`,
+        })
+        const plan3 = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)
+        if (plan3.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate --dryrun step 3 failed', plan3))
+        }
+        const plan3Payload = JSON.parse(plan3.stdout) as {
+          operationCount: number
+          operations: Array<{ type: string }>
+        }
+        expect(plan3Payload.operationCount).toBe(2)
+        expect(plan3Payload.operations.map((op) => op.type)).toEqual([
+          'drop_materialized_view',
+          'create_materialized_view',
+        ])
+
+        const gen3 = runCli(dir, ['generate', '--config', configPath, '--json'], cliEnv)
+        if (gen3.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate step 3 failed', gen3))
+        }
+
+        const exec3 = await runCliWithRetry(
+          dir,
+          ['migrate', '--config', configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
+        if (exec3.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('migrate step 3 failed', exec3))
+        }
+
+        await waitForView(executor, database, rmvName)
+        // After drop+recreate, poll both metadata sources for the new query — Cloud
+        // caches may take tens of seconds to reflect the new CREATE across replicas.
+        const recreateCheck = await waitForRmvContent('count() * 2')
+        if (!recreateCheck.found) {
+          throw new Error(
+            `drop+recreate not reflected in server metadata within 60s.\n${recreateCheck.lastCombined}`
+          )
+        }
+        expect(recreateCheck.lastCombined).toContain('REFRESH EVERY 30 MINUTE')
+        expect(recreateCheck.lastCombined).toContain('APPEND')
+
+        // -------- Step 4: remove RMV from schema → drop --------
+        await writeSchema({ includeRmv: false })
+        const plan4 = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)
+        if (plan4.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate --dryrun step 4 failed', plan4))
+        }
+        const plan4Payload = JSON.parse(plan4.stdout) as {
+          operationCount: number
+          operations: Array<{ type: string }>
+        }
+        expect(plan4Payload.operationCount).toBe(1)
+        expect(plan4Payload.operations[0]?.type).toBe('drop_materialized_view')
+
+        const gen4 = runCli(dir, ['generate', '--config', configPath, '--json'], cliEnv)
+        if (gen4.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('generate step 4 failed', gen4))
+        }
+
+        const exec4 = await runCliWithRetry(
+          dir,
+          [
+            'migrate',
+            '--config',
+            configPath,
+            '--execute',
+            '--allow-destructive',
+            '--json',
+          ],
+          { extraEnv: cliEnv }
+        )
+        if (exec4.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('migrate step 4 failed', exec4))
+        }
+
+        // Poll until both SHOW CREATE and system.tables.create_table_query confirm the
+        // RMV DDL is gone. Cloud DDL is eventually consistent; SharedMergeTree replicas
+        // can take 30s+ to converge after a DROP.
+        let gone = false
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          if (await queryGone()) {
+            gone = true
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+        if (!gone) {
+          const lingering = await queryCreate()
+          throw new Error(
+            `RMV ${database}.${rmvName} DDL still present after drop + 60s polling.\nStep 4 stdout:\n${exec4.stdout}\nLingering create_table_query:\n${lingering}`
+          )
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+        await executor.command(
+          `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(rmvName)} SYNC`
+        )
+        await executor.command(
+          `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(targetTable)}`
+        )
+        await executor.command(
+          `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`
+        )
+        await executor.close()
+      }
+    },
+    240_000
+  )
+
   // TODO: Stabilize this test — it's flaky in CI because `check` reports drift for
   // extra objects in the shared database that belong to other test runs.
   test.skipIf(new Date() < new Date('2026-06-01'))(
