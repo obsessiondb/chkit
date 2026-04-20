@@ -25,6 +25,7 @@ import { renderSchemaFile } from './render-schema.js'
 import {
   mapSystemTableRowToDefinition,
   parseAsClause,
+  parseRefreshClause,
   parseToClause,
   type IntrospectedObject,
   type SystemTableRow,
@@ -319,6 +320,7 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
       name: introspected.name,
       to: introspected.to,
       as: introspected.as,
+      ...(introspected.refresh ? { refresh: introspected.refresh } : {}),
     }
   }
   return mapIntrospectedTableToDefinition(introspected)
@@ -397,6 +399,7 @@ export const __testUtils = {
   summarizeSkippedObjects,
   parseAsClause,
   parseToClause,
+  parseRefreshClause,
   mapSystemTableRowToDefinition,
 }
 

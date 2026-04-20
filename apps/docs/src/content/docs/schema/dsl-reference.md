@@ -230,6 +230,7 @@ materializedView(input: Omit<MaterializedViewDefinition, 'kind'>): MaterializedV
 | `database` | `string` | yes | Database name |
 | `name` | `string` | yes | Materialized view name |
 | `to` | `{ database: string; name: string }` | yes | Target table for the view |
+| `refresh` | `MaterializedViewRefresh` | no | Refresh schedule — see [Refreshable materialized views](/schema/refreshable-views/) |
 | `as` | `string` | yes | SELECT query |
 | `comment` | `string` | no | View comment |
 
@@ -243,6 +244,20 @@ const eventCounts = materializedView({
   as: 'SELECT org_id, count() AS total FROM analytics.events GROUP BY org_id',
 })
 ```
+
+For a refreshable (scheduled) materialized view, add the `refresh` field:
+
+```ts
+const dailyReport = materializedView({
+  database: 'analytics',
+  name: 'daily_report_mv',
+  to: { database: 'analytics', name: 'daily_report' },
+  refresh: { every: '1 DAY', offset: '2 HOUR' },
+  as: 'SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day',
+})
+```
+
+See [Refreshable materialized views](/schema/refreshable-views/) for the full `refresh` field reference, including APPEND mode, `DEPENDS ON`, and the ClickHouse rules that chkit validates.
 
 ## Type system reference
 
