@@ -6,7 +6,7 @@
  * No DDL is executed — only parsing via EXPLAIN AST.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { createClient } from '@clickhouse/client'
 import type {
   ColumnDefinition,
@@ -23,6 +23,7 @@ import {
   renderAlterDropIndex,
   renderAlterAddProjection,
   renderAlterDropProjection,
+  renderAlterModifyRefresh,
   renderAlterModifySetting,
   renderAlterResetSetting,
   renderAlterModifyTTL,
@@ -116,7 +117,7 @@ function baseTable(overrides?: Partial<Omit<TableDefinition, 'kind'>>): TableDef
 describe('SQL validation via EXPLAIN AST', () => {
   let client: QueryClient
 
-  test('setup', () => {
+  beforeAll(() => {
     client = createQueryClient()
   })
 
@@ -699,6 +700,113 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       })
       await assertValidSQL(client, toCreateSQL(def))
     })
+
+    test('refreshable MV — REFRESH EVERY + TO', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv',
+        to: { database: 'default', name: 'rmv_target' },
+        refresh: { every: '1 HOUR' },
+        as: 'SELECT id, count() AS cnt FROM default.source GROUP BY id',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('refreshable MV — APPEND + OFFSET + RANDOMIZE + SETTINGS', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv_append',
+        to: { database: 'default', name: 'rmv_append_target' },
+        refresh: {
+          every: '1 DAY',
+          offset: '2 HOUR',
+          randomize: '5 MINUTE',
+          settings: { refresh_retries: 3 },
+          append: true,
+        },
+        as: 'SELECT toDate(created_at) AS day, count() AS c FROM default.events GROUP BY day',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('refreshable MV — REFRESH AFTER (no DEPENDS ON, per ClickHouse rule)', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv_after',
+        to: { database: 'default', name: 'rmv_after_target' },
+        refresh: { after: '10 MINUTE' },
+        as: 'SELECT id FROM default.source',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('refreshable MV — REFRESH EVERY + DEPENDS ON', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv_deps',
+        to: { database: 'default', name: 'rmv_deps_target' },
+        refresh: {
+          every: '1 HOUR',
+          dependsOn: [{ database: 'default', name: 'upstream_mv' }],
+        },
+        as: 'SELECT id FROM default.source',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('refreshable MV — EMPTY clause', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv_empty',
+        to: { database: 'default', name: 'rmv_empty_target' },
+        refresh: { every: '1 HOUR', empty: true },
+        as: 'SELECT id FROM default.source',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+  })
+
+  // =========================================================================
+  // ALTER TABLE — MODIFY REFRESH
+  // =========================================================================
+
+  describe('ALTER TABLE — MODIFY REFRESH', () => {
+    test('MODIFY REFRESH EVERY', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv',
+        to: { database: 'default', name: 'rmv_target' },
+        refresh: { every: '30 MINUTE' },
+        as: 'SELECT 1',
+      })
+      await assertValidSQL(client, renderAlterModifyRefresh(def))
+    })
+
+    test('MODIFY REFRESH with APPEND preserved (Rule 2)', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv',
+        to: { database: 'default', name: 'rmv_target' },
+        refresh: { every: '30 SECOND', append: true },
+        as: 'SELECT 1',
+      })
+      await assertValidSQL(client, renderAlterModifyRefresh(def))
+    })
+
+    test('MODIFY REFRESH AFTER + RANDOMIZE + SETTINGS', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv',
+        to: { database: 'default', name: 'rmv_target' },
+        refresh: {
+          after: '5 MINUTE',
+          randomize: '30 SECOND',
+          settings: { refresh_retries: 3 },
+        },
+        as: 'SELECT 1',
+      })
+      await assertValidSQL(client, renderAlterModifyRefresh(def))
+    })
   })
 
   // =========================================================================
@@ -1015,7 +1123,7 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
   // Cleanup
   // =========================================================================
 
-  test('teardown', async () => {
+  afterAll(async () => {
     await client.close()
   })
 }, { timeout: 60_000 })
