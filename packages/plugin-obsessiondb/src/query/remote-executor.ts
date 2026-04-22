@@ -33,7 +33,12 @@ export function createRemoteExecutor(deps: {
     async query<T>(sql: string): Promise<T[]> {
       const res = await client.workbench.query.execute({ serviceId, query: sql })
       throwIfError(res)
-      return res.data as T[]
+      const columns = res.meta.map((c) => c.name)
+      return res.data.map((row) =>
+        Array.isArray(row)
+          ? (Object.fromEntries(columns.map((name, i) => [name, row[i]])) as T)
+          : (row as T),
+      )
     },
 
     async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }) {
