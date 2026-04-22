@@ -34,6 +34,15 @@ function validateColumnCodec(
 ): void {
   if (!column.codec) return
   const steps = canonicalizeCodec(column.codec)
+  if (steps.length === 0) {
+    pushValidationIssue(
+      issues,
+      def,
+      'codec_chain_empty',
+      `Table ${def.database}.${def.name} column "${column.name}" codec chain is empty; provide at least one codec or omit the field`
+    )
+    return
+  }
   let generalCount = 0
   let generalIndex = -1
   for (let i = 0; i < steps.length; i++) {

@@ -1183,6 +1183,24 @@ describe('@chkit/core column codec', () => {
     expect(issues.some((i) => i.code === 'codec_chain_multiple_general')).toBe(false)
   })
 
+  test('flags empty codec chain', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'Int64', codec: [] },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.map((i) => i.code)).toContain('codec_chain_empty')
+  })
+
   test('raw codec atoms satisfy any chain position', () => {
     const defs = [
       table({

@@ -313,6 +313,7 @@ export type ValidationIssueCode =
   | 'refresh_depends_on_requires_every'
   | 'codec_chain_must_end_with_general'
   | 'codec_chain_multiple_general'
+  | 'codec_chain_empty'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

@@ -62,7 +62,8 @@ function parseAtom(raw: string): ColumnCodec | undefined {
   if (!match) return undefined
   const [, name, argsRaw] = match
   if (!name) return undefined
-  const args = argsRaw?.split(',').map((value) => value.trim())
+  const rawArgs = argsRaw?.split(',').map((value) => value.trim())
+  const args = rawArgs && !(rawArgs.length === 1 && rawArgs[0] === '') ? rawArgs : undefined
 
   switch (name) {
     case 'NONE':
@@ -70,15 +71,18 @@ function parseAtom(raw: string): ColumnCodec | undefined {
     case 'T64':
     case 'GCD':
     case 'ALP':
+      if (args !== undefined) return undefined
       return { kind: name }
     case 'LZ4HC': {
-      if (!args || args.length === 0 || args[0] === '') return { kind: 'LZ4HC' }
+      if (args === undefined) return { kind: 'LZ4HC' }
+      if (args.length !== 1) return undefined
       const level = Number(args[0])
       if (!Number.isFinite(level)) return undefined
       return { kind: 'LZ4HC', level }
     }
     case 'ZSTD': {
-      if (!args || args.length === 0 || args[0] === '') return { kind: 'ZSTD' }
+      if (args === undefined) return { kind: 'ZSTD' }
+      if (args.length !== 1) return undefined
       const level = Number(args[0])
       if (!Number.isFinite(level)) return undefined
       return { kind: 'ZSTD', level }
@@ -86,7 +90,8 @@ function parseAtom(raw: string): ColumnCodec | undefined {
     case 'Delta':
     case 'DoubleDelta':
     case 'Gorilla': {
-      if (!args || args.length === 0 || args[0] === '') return { kind: name }
+      if (args === undefined) return { kind: name }
+      if (args.length !== 1) return undefined
       const size = Number(args[0])
       if (size !== 1 && size !== 2 && size !== 4 && size !== 8) return undefined
       return { kind: name, size }

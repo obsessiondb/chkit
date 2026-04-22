@@ -103,6 +103,21 @@ describe('parseCodec', () => {
     expect(parsed).toBeDefined()
     expect(renderCodec(parsed!)).toBe('CODEC(SomeNewCodec(42))')
   })
+
+  test('falls back to raw when known codec has unexpected extra args', () => {
+    expect(parseCodec('CODEC(ZSTD(3, 1))')).toEqual([
+      { kind: 'raw', expression: 'ZSTD(3, 1)' },
+    ])
+    expect(parseCodec('CODEC(LZ4HC(9, 1))')).toEqual([
+      { kind: 'raw', expression: 'LZ4HC(9, 1)' },
+    ])
+    expect(parseCodec('CODEC(Delta(4, 2))')).toEqual([
+      { kind: 'raw', expression: 'Delta(4, 2)' },
+    ])
+    expect(parseCodec('CODEC(LZ4(1))')).toEqual([
+      { kind: 'raw', expression: 'LZ4(1)' },
+    ])
+  })
 })
 
 describe('canonicalizeCodec', () => {
