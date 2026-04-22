@@ -8,6 +8,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
+  createStatelessLiveExecutor,
   formatTestDiagnostic,
   getRequiredEnv,
   quoteIdent,
@@ -348,6 +349,10 @@ export default schema(events, eventCounts, eventCountsMv)
     'refreshable materialized view lifecycle: create → modify schedule → recreate → remove',
     async () => {
       const executor = createLiveExecutor(liveEnv)
+      // Metadata polling below intentionally queries SHOW CREATE and system.tables
+      // in parallel; use a stateless executor so those reads do not share one
+      // ClickHouse HTTP session.
+      const metadataExecutor = createStatelessLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('rmv')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
@@ -417,7 +422,7 @@ export default schema(target, rmv)
       )
 
       const queryCreate = async (): Promise<string | null> => {
-        const rows = await executor.query<{ create_table_query: string }>(
+        const rows = await metadataExecutor.query<{ create_table_query: string }>(
           `SELECT create_table_query FROM system.tables WHERE database = '${database}' AND name = '${rmvName}'`
         )
         return rows[0]?.create_table_query ?? null
@@ -425,7 +430,7 @@ export default schema(target, rmv)
 
       const queryShowCreate = async (): Promise<string | null> => {
         try {
-          const rows = await executor.query<{ statement: string }>(
+          const rows = await metadataExecutor.query<{ statement: string }>(
             `SHOW CREATE TABLE ${database}.${rmvName}`
           )
           return rows[0]?.statement ?? null
@@ -668,6 +673,7 @@ export default schema(target, rmv)
         await executor.command(
           `DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`
         )
+        await metadataExecutor.close()
         await executor.close()
       }
     },

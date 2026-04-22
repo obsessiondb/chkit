@@ -34,6 +34,48 @@ function safeMigrationId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, '')
 }
 
+function migrationFilePath(
+  migrationsDir: string,
+  timestamp: string,
+  migrationName: string,
+  collisionIndex: number
+): string {
+  const suffix = collisionIndex === 0 ? '' : `_${String(collisionIndex).padStart(3, '0')}`
+  return join(migrationsDir, `${timestamp}_${migrationName}${suffix}.sql`)
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'EEXIST'
+  )
+}
+
+async function writeNewMigrationFile(input: {
+  migrationsDir: string
+  timestamp: string
+  migrationName: string
+  sql: string
+}): Promise<string> {
+  for (let collisionIndex = 0; ; collisionIndex += 1) {
+    const filePath = migrationFilePath(
+      input.migrationsDir,
+      input.timestamp,
+      input.migrationName,
+      collisionIndex
+    )
+    try {
+      await writeFile(filePath, input.sql, { encoding: 'utf8', flag: 'wx' })
+      return filePath
+    } catch (error) {
+      if (isFileExistsError(error)) continue
+      throw error
+    }
+  }
+}
+
 function buildMigrationContent(input: {
   generatedAt: string
   cliVersion: string
@@ -84,14 +126,16 @@ export async function generateArtifacts(input: GenerateArtifactsInput): Promise<
   })
   const migrationFile =
     input.plan.operations.length > 0
-      ? join(input.migrationsDir, `${timestamp}_${migrationName}.sql`)
+      ? await writeNewMigrationFile({
+          migrationsDir: input.migrationsDir,
+          timestamp,
+          migrationName,
+          sql,
+        })
       : null
   const snapshotFile = join(input.metaDir, 'snapshot.json')
   const snapshot = createSnapshot(input.definitions)
 
-  if (migrationFile) {
-    await writeFile(migrationFile, sql, 'utf8')
-  }
   await writeFile(snapshotFile, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
 
   return {
