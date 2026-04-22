@@ -143,22 +143,56 @@ export function normalizeColumnFromSystemRow(row: SystemColumnRow): ColumnDefini
   }
 }
 
-function parseIndexType(value: string): Pick<SkipIndexDefinition, 'type' | 'typeArgs'> {
+type ParsedIndexShape =
+  | { type: 'minmax' }
+  | { type: 'set'; maxRows: number }
+  | { type: 'bloom_filter'; falsePositiveRate?: number }
+  | { type: 'tokenbf_v1'; sizeBytes: number; hashFunctions: number; randomSeed: number }
+  | {
+      type: 'ngrambf_v1'
+      ngramSize: number
+      sizeBytes: number
+      hashFunctions: number
+      randomSeed: number
+    }
+
+function splitArgs(args: string | undefined): number[] {
+  if (args === undefined) return []
+  return args
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((value) => !Number.isNaN(value))
+}
+
+function parseIndexType(value: string): ParsedIndexShape {
   const match = value.match(/^(\w+)\((.+)\)$/)
   const baseName = match?.[1] ?? value
-  const args = match?.[2]
+  const args = splitArgs(match?.[2])
 
   switch (baseName) {
     case 'minmax':
-      return args !== undefined ? { type: 'minmax', typeArgs: args } : { type: 'minmax' }
+      return { type: 'minmax' }
     case 'bloom_filter':
-      return args !== undefined ? { type: 'bloom_filter', typeArgs: args } : { type: 'bloom_filter' }
+      return args.length > 0
+        ? { type: 'bloom_filter', falsePositiveRate: args[0]! }
+        : { type: 'bloom_filter' }
     case 'tokenbf_v1':
-      return { type: 'tokenbf_v1', typeArgs: args ?? '0' }
+      return {
+        type: 'tokenbf_v1',
+        sizeBytes: args[0] ?? 0,
+        hashFunctions: args[1] ?? 0,
+        randomSeed: args[2] ?? 0,
+      }
     case 'ngrambf_v1':
-      return { type: 'ngrambf_v1', typeArgs: args ?? '0' }
+      return {
+        type: 'ngrambf_v1',
+        ngramSize: args[0] ?? 0,
+        sizeBytes: args[1] ?? 0,
+        hashFunctions: args[2] ?? 0,
+        randomSeed: args[3] ?? 0,
+      }
     default:
-      return { type: 'set', typeArgs: args ?? '0' }
+      return { type: 'set', maxRows: args[0] ?? 0 }
   }
 }
 
@@ -169,7 +203,7 @@ export function normalizeIndexFromSystemRow(row: SystemSkippingIndexRow): SkipIn
     expression: normalizeSQLFragment(row.expr),
     granularity: row.granularity,
     ...parsed,
-  } as SkipIndexDefinition
+  }
 }
 
 export function buildIntrospectedTables(

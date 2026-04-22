@@ -34,7 +34,20 @@ function renderKeyClauseColumns(columns: string[]): string {
 }
 
 function renderIndexType(idx: SkipIndexDefinition): string {
-  return idx.typeArgs !== undefined ? `${idx.type}(${idx.typeArgs})` : idx.type
+  switch (idx.type) {
+    case 'minmax':
+      return 'minmax'
+    case 'set':
+      return `set(${idx.maxRows})`
+    case 'bloom_filter':
+      return idx.falsePositiveRate !== undefined
+        ? `bloom_filter(${idx.falsePositiveRate})`
+        : 'bloom_filter'
+    case 'tokenbf_v1':
+      return `tokenbf_v1(${idx.sizeBytes}, ${idx.hashFunctions}, ${idx.randomSeed})`
+    case 'ngrambf_v1':
+      return `ngrambf_v1(${idx.ngramSize}, ${idx.sizeBytes}, ${idx.hashFunctions}, ${idx.randomSeed})`
+  }
 }
 
 function renderTableSQL(def: TableDefinition): string {

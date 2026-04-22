@@ -553,23 +553,62 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       },
       {
         label: 'set',
-        idx: { name: 'idx_status', expression: 'status', type: 'set', typeArgs: '100', granularity: 2 },
+        idx: {
+          name: 'idx_status',
+          expression: 'status',
+          type: 'set',
+          maxRows: 100,
+          granularity: 2,
+        },
+      },
+      {
+        label: 'set unbounded',
+        idx: {
+          name: 'idx_status_all',
+          expression: 'status',
+          type: 'set',
+          maxRows: 0,
+          granularity: 2,
+        },
       },
       {
         label: 'bloom_filter',
         idx: { name: 'idx_email', expression: 'email', type: 'bloom_filter', granularity: 1 },
       },
       {
-        label: 'bloom_filter with args',
-        idx: { name: 'idx_email2', expression: 'email', type: 'bloom_filter', typeArgs: '0.01', granularity: 1 },
+        label: 'bloom_filter with falsePositiveRate',
+        idx: {
+          name: 'idx_email2',
+          expression: 'email',
+          type: 'bloom_filter',
+          falsePositiveRate: 0.01,
+          granularity: 1,
+        },
       },
       {
         label: 'tokenbf_v1',
-        idx: { name: 'idx_body', expression: 'body', type: 'tokenbf_v1', typeArgs: '10240, 3, 0', granularity: 1 },
+        idx: {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'tokenbf_v1',
+          sizeBytes: 10240,
+          hashFunctions: 3,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
       {
         label: 'ngrambf_v1',
-        idx: { name: 'idx_name', expression: 'name', type: 'ngrambf_v1', typeArgs: '3, 256, 2, 0', granularity: 1 },
+        idx: {
+          name: 'idx_name',
+          expression: 'name',
+          type: 'ngrambf_v1',
+          ngramSize: 3,
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
       {
         label: 'expression index',
@@ -953,19 +992,52 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       },
       {
         label: 'set',
-        idx: { name: 'idx_status', expression: 'status', type: 'set', typeArgs: '100', granularity: 2 },
+        idx: {
+          name: 'idx_status',
+          expression: 'status',
+          type: 'set',
+          maxRows: 100,
+          granularity: 2,
+        },
       },
       {
         label: 'bloom_filter',
         idx: { name: 'idx_email', expression: 'email', type: 'bloom_filter', granularity: 1 },
       },
       {
+        label: 'bloom_filter with falsePositiveRate',
+        idx: {
+          name: 'idx_email_tuned',
+          expression: 'email',
+          type: 'bloom_filter',
+          falsePositiveRate: 0.01,
+          granularity: 1,
+        },
+      },
+      {
         label: 'tokenbf_v1',
-        idx: { name: 'idx_body', expression: 'body', type: 'tokenbf_v1', typeArgs: '10240, 3, 0', granularity: 1 },
+        idx: {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'tokenbf_v1',
+          sizeBytes: 10240,
+          hashFunctions: 3,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
       {
         label: 'ngrambf_v1',
-        idx: { name: 'idx_name', expression: 'name', type: 'ngrambf_v1', typeArgs: '3, 256, 2, 0', granularity: 1 },
+        idx: {
+          name: 'idx_name',
+          expression: 'name',
+          type: 'ngrambf_v1',
+          ngramSize: 3,
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
     ]
 

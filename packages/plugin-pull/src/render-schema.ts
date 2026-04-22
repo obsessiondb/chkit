@@ -84,7 +84,33 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
             `expression: ${renderString(index.expression)}`,
             `type: ${renderString(index.type)}`,
           ]
-          if (index.typeArgs !== undefined) parts.push(`typeArgs: ${renderString(index.typeArgs)}`)
+          switch (index.type) {
+            case 'minmax':
+              break
+            case 'set':
+              parts.push(`maxRows: ${index.maxRows}`)
+              break
+            case 'bloom_filter':
+              if (index.falsePositiveRate !== undefined) {
+                parts.push(`falsePositiveRate: ${index.falsePositiveRate}`)
+              }
+              break
+            case 'tokenbf_v1':
+              parts.push(
+                `sizeBytes: ${index.sizeBytes}`,
+                `hashFunctions: ${index.hashFunctions}`,
+                `randomSeed: ${index.randomSeed}`
+              )
+              break
+            case 'ngrambf_v1':
+              parts.push(
+                `ngramSize: ${index.ngramSize}`,
+                `sizeBytes: ${index.sizeBytes}`,
+                `hashFunctions: ${index.hashFunctions}`,
+                `randomSeed: ${index.randomSeed}`
+              )
+              break
+          }
           parts.push(`granularity: ${index.granularity}`)
           lines.push(`    { ${parts.join(', ')} },`)
         }

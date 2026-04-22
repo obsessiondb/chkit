@@ -67,7 +67,7 @@ const events = table({
   ttl: 'received_at + INTERVAL 90 DAY',
   settings: { index_granularity: 8192 },
   indexes: [
-    { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+    { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
   ],
 })
 

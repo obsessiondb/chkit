@@ -83,7 +83,6 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     validateColumnCodec(def, column, issues)
   }
 
-  const TYPES_REQUIRING_ARGS = new Set(['set', 'tokenbf_v1', 'ngrambf_v1'])
   const indexSeen = new Set<string>()
   for (const index of def.indexes ?? []) {
     if (indexSeen.has(index.name)) {
@@ -96,14 +95,6 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       continue
     }
     indexSeen.add(index.name)
-    if (TYPES_REQUIRING_ARGS.has(index.type) && !index.typeArgs) {
-      pushValidationIssue(
-        issues,
-        def,
-        'index_type_missing_args',
-        `Table ${def.database}.${def.name} index "${index.name}" uses type "${index.type}" which requires typeArgs (e.g. typeArgs: '0' for set(0))`
-      )
-    }
   }
 
   const projectionSeen = new Set<string>()

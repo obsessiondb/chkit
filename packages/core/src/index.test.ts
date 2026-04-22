@@ -217,7 +217,7 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'source',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 1,
           },
         ],
@@ -261,14 +261,14 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'source',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 1,
           },
           {
             name: 'idx_old',
             expression: 'old_col',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 1,
           },
         ],
@@ -292,7 +292,7 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'lower(source)',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 2,
           },
         ],
@@ -587,8 +587,8 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id', 'missing_pk_col'],
         orderBy: ['id', 'missing_order_col'],
         indexes: [
-          { name: 'idx_source', expression: 'id', type: 'set', typeArgs: '0', granularity: 1 },
-          { name: 'idx_source', expression: 'id', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', maxRows: 0, granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', maxRows: 0, granularity: 1 },
         ],
       }),
     ]
@@ -622,28 +622,22 @@ describe('@chkit/core planner v1', () => {
     expect(issues.map((issue) => issue.code)).toEqual(['duplicate_projection_name'])
   })
 
-  test('validates set index type requires typeArgs', () => {
-    const defs = [
-      table({
-        database: 'app',
-        name: 'events',
-        columns: [
-          { name: 'id', type: 'UInt64' },
-          { name: 'source', type: 'String' },
-        ],
-        engine: 'MergeTree()',
-        primaryKey: ['id'],
-        orderBy: ['id'],
-        indexes: [
-          // @ts-expect-error — intentionally omitting required typeArgs to test runtime validation
-          { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
-        ],
-      }),
-    ]
-
-    const issues = validateDefinitions(defs)
-    expect(issues.map((issue) => issue.code)).toEqual(['index_type_missing_args'])
-    expect(issues[0]?.message).toContain('typeArgs')
+  test('set index type requires maxRows at the type level', () => {
+    table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      indexes: [
+        // @ts-expect-error — set requires `maxRows` at compile time
+        { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
+      ],
+    })
   })
 
   test('planDiff throws typed validation error for invalid schema', () => {
@@ -724,21 +718,54 @@ describe('@chkit/core planner v1', () => {
     expect(planA.riskSummary).toEqual(planB.riskSummary)
   })
 
-  test('renders parameterized index type with typeArgs in CREATE TABLE', () => {
+  test('renders structured index args in CREATE TABLE', () => {
     const events = table({
       database: 'app',
       name: 'events',
       columns: [
         { name: 'id', type: 'UInt64' },
         { name: 'source', type: 'String' },
+        { name: 'body', type: 'String' },
+        { name: 'name', type: 'String' },
       ],
       engine: 'MergeTree()',
       primaryKey: ['id'],
       orderBy: ['id'],
       indexes: [
-        { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+        { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
         { name: 'idx_id', expression: 'id', type: 'minmax', granularity: 3 },
-        { name: 'idx_bloom', expression: 'source', type: 'bloom_filter', typeArgs: '0.01', granularity: 1 },
+        {
+          name: 'idx_bloom',
+          expression: 'source',
+          type: 'bloom_filter',
+          falsePositiveRate: 0.01,
+          granularity: 1,
+        },
+        {
+          name: 'idx_bloom_default',
+          expression: 'source',
+          type: 'bloom_filter',
+          granularity: 1,
+        },
+        {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'tokenbf_v1',
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
+        {
+          name: 'idx_name',
+          expression: 'name',
+          type: 'ngrambf_v1',
+          ngramSize: 3,
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
       ],
     })
 
@@ -746,9 +773,12 @@ describe('@chkit/core planner v1', () => {
     expect(sql).toContain('TYPE set(0) GRANULARITY 1')
     expect(sql).toContain('TYPE minmax GRANULARITY 3')
     expect(sql).toContain('TYPE bloom_filter(0.01) GRANULARITY 1')
+    expect(sql).toContain('`idx_bloom_default` (source) TYPE bloom_filter GRANULARITY 1')
+    expect(sql).toContain('TYPE tokenbf_v1(256, 2, 0) GRANULARITY 1')
+    expect(sql).toContain('TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1')
   })
 
-  test('renders parameterized index type with typeArgs in ALTER ADD INDEX', () => {
+  test('renders structured index args in ALTER ADD INDEX', () => {
     const oldDefs = [
       table({
         database: 'app',
@@ -769,7 +799,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
         ],
       }),
     ]
@@ -779,7 +809,7 @@ describe('@chkit/core planner v1', () => {
     expect(plan.operations[0]?.sql).toContain('TYPE set(0) GRANULARITY 1')
   })
 
-  test('detects index change when typeArgs differs', () => {
+  test('detects index change when structured args differ', () => {
     const oldDefs = [
       table({
         database: 'app',
@@ -789,7 +819,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
         ],
       }),
     ]
@@ -803,7 +833,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '100', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 100, granularity: 1 },
         ],
       }),
     ]

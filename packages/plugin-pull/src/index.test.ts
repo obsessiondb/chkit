@@ -29,26 +29,69 @@ describe('@chkit/plugin-pull renderSchemaFile', () => {
     expect(content).toContain("export default schema(app_events)")
   })
 
-  test('renders index typeArgs in pulled schema', () => {
+  test('renders structured index args in pulled schema', () => {
     const content = renderSchemaFile([
       {
         kind: 'table',
         database: 'app',
         name: 'events',
         engine: 'MergeTree()',
-        columns: [{ name: 'id', type: 'UInt64' }, { name: 'source', type: 'String' }],
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'source', type: 'String' },
+          { name: 'email', type: 'String' },
+          { name: 'body', type: 'String' },
+          { name: 'name', type: 'String' },
+        ],
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
           { name: 'idx_id', expression: 'id', type: 'minmax', granularity: 3 },
+          {
+            name: 'idx_bloom',
+            expression: 'email',
+            type: 'bloom_filter',
+            falsePositiveRate: 0.01,
+            granularity: 1,
+          },
+          { name: 'idx_bloom_default', expression: 'email', type: 'bloom_filter', granularity: 1 },
+          {
+            name: 'idx_body',
+            expression: 'body',
+            type: 'tokenbf_v1',
+            sizeBytes: 256,
+            hashFunctions: 2,
+            randomSeed: 0,
+            granularity: 1,
+          },
+          {
+            name: 'idx_name',
+            expression: 'name',
+            type: 'ngrambf_v1',
+            ngramSize: 3,
+            sizeBytes: 256,
+            hashFunctions: 2,
+            randomSeed: 0,
+            granularity: 1,
+          },
         ],
       },
     ])
 
-    expect(content).toContain('type: "set", typeArgs: "0", granularity: 1')
+    expect(content).toContain('type: "set", maxRows: 0, granularity: 1')
     expect(content).toContain('type: "minmax", granularity: 3')
-    expect(content).not.toContain('typeArgs: undefined')
+    expect(content).toContain('type: "bloom_filter", falsePositiveRate: 0.01, granularity: 1')
+    expect(content).toContain(
+      'name: "idx_bloom_default", expression: "email", type: "bloom_filter", granularity: 1'
+    )
+    expect(content).toContain(
+      'type: "tokenbf_v1", sizeBytes: 256, hashFunctions: 2, randomSeed: 0, granularity: 1'
+    )
+    expect(content).toContain(
+      'type: "ngrambf_v1", ngramSize: 3, sizeBytes: 256, hashFunctions: 2, randomSeed: 0, granularity: 1'
+    )
+    expect(content).not.toContain('typeArgs')
   })
 
   test('renders view and materialized view definitions', () => {
