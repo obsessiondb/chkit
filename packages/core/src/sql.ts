@@ -7,6 +7,7 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from './model.js'
+import { renderCodec } from './codec.js'
 import { normalizeKeyColumns } from './key-clause.js'
 import { assertValidDefinitions } from './validate.js'
 
@@ -22,6 +23,7 @@ function renderColumn(col: ColumnDefinition): string {
   let out = `\`${col.name}\` ${col.nullable ? `Nullable(${col.type})` : col.type}`
   if (col.default !== undefined) out += ` DEFAULT ${renderDefault(col.default)}`
   if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
+  if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
 }
 
@@ -32,7 +34,20 @@ function renderKeyClauseColumns(columns: string[]): string {
 }
 
 function renderIndexType(idx: SkipIndexDefinition): string {
-  return idx.typeArgs !== undefined ? `${idx.type}(${idx.typeArgs})` : idx.type
+  switch (idx.type) {
+    case 'minmax':
+      return 'minmax'
+    case 'set':
+      return `set(${idx.maxRows})`
+    case 'bloom_filter':
+      return idx.falsePositiveRate !== undefined
+        ? `bloom_filter(${idx.falsePositiveRate})`
+        : 'bloom_filter'
+    case 'tokenbf_v1':
+      return `tokenbf_v1(${idx.sizeBytes}, ${idx.hashFunctions}, ${idx.randomSeed})`
+    case 'ngrambf_v1':
+      return `ngrambf_v1(${idx.ngramSize}, ${idx.sizeBytes}, ${idx.hashFunctions}, ${idx.randomSeed})`
+  }
 }
 
 function renderTableSQL(def: TableDefinition): string {
@@ -141,6 +156,10 @@ export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefi
 
 export function renderAlterDropColumn(def: TableDefinition, columnName: string): string {
   return `ALTER TABLE ${def.database}.${def.name} DROP COLUMN IF EXISTS \`${columnName}\`;`
+}
+
+export function renderAlterRemoveCodec(def: TableDefinition, columnName: string): string {
+  return `ALTER TABLE ${def.database}.${def.name} MODIFY COLUMN \`${columnName}\` REMOVE CODEC;`
 }
 
 export function renderAlterAddIndex(def: TableDefinition, index: SkipIndexDefinition): string {

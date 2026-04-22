@@ -22,6 +22,7 @@ import {
   renderAlterModifyRefresh,
   renderAlterModifySetting,
   renderAlterModifyTTL,
+  renderAlterRemoveCodec,
   renderAlterResetSetting,
   toCreateSQL,
 } from './sql.js'
@@ -137,6 +138,21 @@ interface TableDiffResult {
 function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom'> {
   const { name: _name, renamedFrom: _renamedFrom, ...rest } = column
   return rest
+}
+
+function normalizeColumnWithoutCodec(
+  column: ColumnDefinition
+): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'codec'> {
+  const { codec: _codec, ...rest } = normalizeColumn(column)
+  return rest
+}
+
+function isCodecRemoval(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
+  if (!oldCol.codec || newCol.codec) return false
+  return (
+    JSON.stringify(normalizeColumnWithoutCodec(oldCol)) ===
+    JSON.stringify(normalizeColumnWithoutCodec(newCol))
+  )
 }
 
 function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
@@ -284,12 +300,15 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       sql: renderAlterAddColumn(newDef, column),
     })
   }
-  for (const { name, newItem } of columnDiff.changed) {
+  for (const { name, oldItem, newItem } of columnDiff.changed) {
+    const sql = isCodecRemoval(oldItem, newItem)
+      ? renderAlterRemoveCodec(newDef, name)
+      : renderAlterModifyColumn(newDef, newItem)
     ops.push( {
       type: 'alter_table_modify_column',
       key: `table:${newDef.database}.${newDef.name}:column:${name}`,
       risk: 'caution',
-      sql: renderAlterModifyColumn(newDef, newItem),
+      sql,
     })
   }
   for (const column of columnDiff.removed) {

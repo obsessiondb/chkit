@@ -1,5 +1,8 @@
 import {
   canonicalizeDefinitions,
+  isRawCodec,
+  type ColumnCodec,
+  type ColumnCodecSpec,
   type MaterializedViewRefresh,
   type SchemaDefinition,
 } from '@chkit/core'
@@ -10,10 +13,16 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   const hasTable = canonical.some((definition) => definition.kind === 'table')
   const hasView = canonical.some((definition) => definition.kind === 'view')
   const hasMaterializedView = canonical.some((definition) => definition.kind === 'materialized_view')
+  const hasRawCodec = canonical.some(
+    (definition) =>
+      definition.kind === 'table' &&
+      definition.columns.some((column) => column.codec && codecContainsRaw(column.codec))
+  )
   const imports = ['schema']
   if (hasTable) imports.push('table')
   if (hasView) imports.push('view')
   if (hasMaterializedView) imports.push('materializedView')
+  if (hasRawCodec) imports.push('codec')
   const lines: string[] = [
     `import { ${imports.join(', ')} } from '@chkit/core'`,
     '',
@@ -42,6 +51,7 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
         if (column.nullable) parts.push('nullable: true')
         if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
         if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
+        if (column.codec) parts.push(`codec: ${renderCodecSource(column.codec)}`)
         lines.push(`    { ${parts.join(', ')} },`)
       }
 
@@ -74,7 +84,33 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
             `expression: ${renderString(index.expression)}`,
             `type: ${renderString(index.type)}`,
           ]
-          if (index.typeArgs !== undefined) parts.push(`typeArgs: ${renderString(index.typeArgs)}`)
+          switch (index.type) {
+            case 'minmax':
+              break
+            case 'set':
+              parts.push(`maxRows: ${index.maxRows}`)
+              break
+            case 'bloom_filter':
+              if (index.falsePositiveRate !== undefined) {
+                parts.push(`falsePositiveRate: ${index.falsePositiveRate}`)
+              }
+              break
+            case 'tokenbf_v1':
+              parts.push(
+                `sizeBytes: ${index.sizeBytes}`,
+                `hashFunctions: ${index.hashFunctions}`,
+                `randomSeed: ${index.randomSeed}`
+              )
+              break
+            case 'ngrambf_v1':
+              parts.push(
+                `ngramSize: ${index.ngramSize}`,
+                `sizeBytes: ${index.sizeBytes}`,
+                `hashFunctions: ${index.hashFunctions}`,
+                `randomSeed: ${index.randomSeed}`
+              )
+              break
+          }
           parts.push(`granularity: ${index.granularity}`)
           lines.push(`    { ${parts.join(', ')} },`)
         }
@@ -180,4 +216,29 @@ function renderRefreshLines(refresh: MaterializedViewRefresh): string[] {
 function renderKey(value: string): string {
   if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(value)) return value
   return renderString(value)
+}
+
+function codecContainsRaw(spec: ColumnCodecSpec): boolean {
+  const steps = Array.isArray(spec) ? spec : [spec]
+  return steps.some((step) => isRawCodec(step))
+}
+
+function renderCodecStepSource(step: ColumnCodec): string {
+  if (isRawCodec(step)) return `codec.raw(${renderString(step.expression)})`
+  const parts: string[] = [`kind: ${renderString(step.kind)}`]
+  if (step.kind === 'ZSTD' || step.kind === 'LZ4HC') {
+    if (step.level !== undefined) parts.push(`level: ${step.level}`)
+  } else if (step.kind === 'Delta' || step.kind === 'DoubleDelta' || step.kind === 'Gorilla') {
+    if (step.size !== undefined) parts.push(`size: ${step.size}`)
+  } else if (step.kind === 'FPC') {
+    parts.push(`level: ${step.level}`)
+    parts.push(`floatSize: ${step.floatSize}`)
+  }
+  return `{ ${parts.join(', ')} }`
+}
+
+function renderCodecSource(spec: ColumnCodecSpec): string {
+  const steps = Array.isArray(spec) ? spec : [spec]
+  if (steps.length === 1) return renderCodecStepSource(steps[0]!)
+  return `[${steps.map(renderCodecStepSource).join(', ')}]`
 }
