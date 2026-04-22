@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   ChxValidationError,
   canonicalizeDefinitions,
+  codec,
   collectDefinitionsFromModule,
   materializedView,
   planDiff,
@@ -216,7 +217,7 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'source',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 1,
           },
         ],
@@ -260,14 +261,14 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'source',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 1,
           },
           {
             name: 'idx_old',
             expression: 'old_col',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 1,
           },
         ],
@@ -291,7 +292,7 @@ describe('@chkit/core planner v1', () => {
             name: 'idx_source',
             expression: 'lower(source)',
             type: 'set',
-            typeArgs: '0',
+            maxRows: 0,
             granularity: 2,
           },
         ],
@@ -586,8 +587,8 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id', 'missing_pk_col'],
         orderBy: ['id', 'missing_order_col'],
         indexes: [
-          { name: 'idx_source', expression: 'id', type: 'set', typeArgs: '0', granularity: 1 },
-          { name: 'idx_source', expression: 'id', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', maxRows: 0, granularity: 1 },
+          { name: 'idx_source', expression: 'id', type: 'set', maxRows: 0, granularity: 1 },
         ],
       }),
     ]
@@ -621,28 +622,22 @@ describe('@chkit/core planner v1', () => {
     expect(issues.map((issue) => issue.code)).toEqual(['duplicate_projection_name'])
   })
 
-  test('validates set index type requires typeArgs', () => {
-    const defs = [
-      table({
-        database: 'app',
-        name: 'events',
-        columns: [
-          { name: 'id', type: 'UInt64' },
-          { name: 'source', type: 'String' },
-        ],
-        engine: 'MergeTree()',
-        primaryKey: ['id'],
-        orderBy: ['id'],
-        indexes: [
-          // @ts-expect-error — intentionally omitting required typeArgs to test runtime validation
-          { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
-        ],
-      }),
-    ]
-
-    const issues = validateDefinitions(defs)
-    expect(issues.map((issue) => issue.code)).toEqual(['index_type_missing_args'])
-    expect(issues[0]?.message).toContain('typeArgs')
+  test('set index type requires maxRows at the type level', () => {
+    table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      indexes: [
+        // @ts-expect-error — set requires `maxRows` at compile time
+        { name: 'idx_source', expression: 'source', type: 'set', granularity: 1 },
+      ],
+    })
   })
 
   test('planDiff throws typed validation error for invalid schema', () => {
@@ -723,21 +718,54 @@ describe('@chkit/core planner v1', () => {
     expect(planA.riskSummary).toEqual(planB.riskSummary)
   })
 
-  test('renders parameterized index type with typeArgs in CREATE TABLE', () => {
+  test('renders structured index args in CREATE TABLE', () => {
     const events = table({
       database: 'app',
       name: 'events',
       columns: [
         { name: 'id', type: 'UInt64' },
         { name: 'source', type: 'String' },
+        { name: 'body', type: 'String' },
+        { name: 'name', type: 'String' },
       ],
       engine: 'MergeTree()',
       primaryKey: ['id'],
       orderBy: ['id'],
       indexes: [
-        { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+        { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
         { name: 'idx_id', expression: 'id', type: 'minmax', granularity: 3 },
-        { name: 'idx_bloom', expression: 'source', type: 'bloom_filter', typeArgs: '0.01', granularity: 1 },
+        {
+          name: 'idx_bloom',
+          expression: 'source',
+          type: 'bloom_filter',
+          falsePositiveRate: 0.01,
+          granularity: 1,
+        },
+        {
+          name: 'idx_bloom_default',
+          expression: 'source',
+          type: 'bloom_filter',
+          granularity: 1,
+        },
+        {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'tokenbf_v1',
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
+        {
+          name: 'idx_name',
+          expression: 'name',
+          type: 'ngrambf_v1',
+          ngramSize: 3,
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
       ],
     })
 
@@ -745,9 +773,12 @@ describe('@chkit/core planner v1', () => {
     expect(sql).toContain('TYPE set(0) GRANULARITY 1')
     expect(sql).toContain('TYPE minmax GRANULARITY 3')
     expect(sql).toContain('TYPE bloom_filter(0.01) GRANULARITY 1')
+    expect(sql).toContain('`idx_bloom_default` (source) TYPE bloom_filter GRANULARITY 1')
+    expect(sql).toContain('TYPE tokenbf_v1(256, 2, 0) GRANULARITY 1')
+    expect(sql).toContain('TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1')
   })
 
-  test('renders parameterized index type with typeArgs in ALTER ADD INDEX', () => {
+  test('renders structured index args in ALTER ADD INDEX', () => {
     const oldDefs = [
       table({
         database: 'app',
@@ -768,7 +799,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
         ],
       }),
     ]
@@ -778,7 +809,7 @@ describe('@chkit/core planner v1', () => {
     expect(plan.operations[0]?.sql).toContain('TYPE set(0) GRANULARITY 1')
   })
 
-  test('detects index change when typeArgs differs', () => {
+  test('detects index change when structured args differ', () => {
     const oldDefs = [
       table({
         database: 'app',
@@ -788,7 +819,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
         ],
       }),
     ]
@@ -802,7 +833,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         indexes: [
-          { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '100', granularity: 1 },
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 100, granularity: 1 },
         ],
       }),
     ]
@@ -858,6 +889,338 @@ describe('@chkit/core planner v1', () => {
       'create_view',
       'create_materialized_view',
     ])
+  })
+})
+
+describe('@chkit/core column codec', () => {
+  test('renders CODEC clause after DEFAULT', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime', codec: { kind: 'ZSTD', level: 3 }, default: 'fn:now()' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('`ts` DateTime DEFAULT now() CODEC(ZSTD(3))')
+  })
+
+  test('renders CODEC chain with preprocessor + general', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'delta', type: 'Int64', codec: [{ kind: 'Delta', size: 4 }, { kind: 'ZSTD' }] },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('`delta` Int64 CODEC(Delta(4), ZSTD)')
+  })
+
+  test('renders CODEC on nullable column', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'note', type: 'String', nullable: true, codec: { kind: 'ZSTD', level: 3 } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('`note` Nullable(String) CODEC(ZSTD(3))')
+  })
+
+  test('plan: add codec to column emits MODIFY COLUMN with CODEC', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    expect(plan.operations[0]?.sql).toContain('MODIFY COLUMN `payload` String CODEC(ZSTD(3))')
+  })
+
+  test('plan: change codec emits single MODIFY COLUMN', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 1 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 6 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    expect(plan.operations[0]?.sql).toContain('MODIFY COLUMN `payload` String CODEC(ZSTD(6))')
+    expect(plan.operations[0]?.sql).not.toContain('REMOVE CODEC')
+  })
+
+  test('plan: remove codec emits REMOVE CODEC when other fields unchanged', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('alter_table_modify_column')
+    expect(plan.operations[0]?.sql).toBe(
+      'ALTER TABLE app.events MODIFY COLUMN `payload` REMOVE CODEC;'
+    )
+  })
+
+  test('plan: drop codec + other change emits single MODIFY COLUMN (no separate REMOVE)', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'LowCardinality(String)' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('alter_table_modify_column')
+    expect(plan.operations[0]?.sql).toContain('LowCardinality(String)')
+    expect(plan.operations[0]?.sql).not.toContain('REMOVE CODEC')
+  })
+
+  test('plan: equal codec across canonicalization yields no diff', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD' } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 1 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toEqual([])
+  })
+
+  test('validates chain with multiple general codecs', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'payload',
+            type: 'String',
+            codec: [
+              { kind: 'ZSTD', level: 3 },
+              { kind: 'LZ4' },
+            ],
+          },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.map((i) => i.code)).toContain('codec_chain_multiple_general')
+  })
+
+  test('validates chain ending in preprocessor', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'payload',
+            type: 'Int64',
+            codec: [
+              { kind: 'ZSTD' },
+              { kind: 'Delta', size: 4 },
+            ],
+          },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.map((i) => i.code)).toContain('codec_chain_must_end_with_general')
+  })
+
+  test('allows standalone preprocessor codec (CH auto-appends default general)', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'delta', type: 'Int64', codec: { kind: 'Delta', size: 4 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.some((i) => i.code === 'codec_chain_must_end_with_general')).toBe(false)
+    expect(issues.some((i) => i.code === 'codec_chain_multiple_general')).toBe(false)
+  })
+
+  test('flags empty codec chain', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'Int64', codec: [] },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.map((i) => i.code)).toContain('codec_chain_empty')
+  })
+
+  test('raw codec atoms satisfy any chain position', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'exp',
+            type: 'Float32',
+            codec: [{ kind: 'Delta', size: 4 }, codec.raw('SomeNewCodec(42)')],
+          },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.some((i) => i.code.startsWith('codec_chain_'))).toBe(false)
   })
 })
 

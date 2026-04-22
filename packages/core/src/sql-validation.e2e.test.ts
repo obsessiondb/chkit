@@ -25,6 +25,7 @@ import {
   renderAlterDropProjection,
   renderAlterModifyRefresh,
   renderAlterModifySetting,
+  renderAlterRemoveCodec,
   renderAlterResetSetting,
   renderAlterModifyTTL,
 } from './sql.js'
@@ -249,6 +250,79 @@ describe('SQL validation via EXPLAIN AST', () => {
         await assertValidSQL(client, toCreateSQL(def))
       })
     }
+  })
+
+  // =========================================================================
+  // CREATE TABLE — Column CODEC
+  // =========================================================================
+
+  describe('CREATE TABLE — column codec', () => {
+    const codecCases: Array<{ label: string; col: ColumnDefinition }> = [
+      { label: 'ZSTD(3)', col: { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } } },
+      { label: 'LZ4HC(9)', col: { name: 'payload', type: 'String', codec: { kind: 'LZ4HC', level: 9 } } },
+      { label: 'NONE', col: { name: 'payload', type: 'String', codec: { kind: 'NONE' } } },
+      {
+        label: 'Delta(4) + ZSTD(3)',
+        col: {
+          name: 'payload',
+          type: 'Int64',
+          codec: [
+            { kind: 'Delta', size: 4 },
+            { kind: 'ZSTD', level: 3 },
+          ],
+        },
+      },
+      { label: 'T64', col: { name: 'payload', type: 'Int64', codec: { kind: 'T64' } } },
+    ]
+
+    for (const { label, col } of codecCases) {
+      test(`codec: ${label}`, async () => {
+        const def = baseTable({ columns: [{ name: 'id', type: 'UInt64' }, col] })
+        await assertValidSQL(client, toCreateSQL(def))
+      })
+    }
+
+    test('codec + DEFAULT combined', async () => {
+      const def = baseTable({
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'ts',
+            type: 'DateTime',
+            codec: { kind: 'ZSTD', level: 3 },
+            default: 'fn:now()',
+          },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('codec on nullable column', async () => {
+      const def = baseTable({
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'note', type: 'String', nullable: true, codec: { kind: 'ZSTD', level: 3 } },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('ALTER MODIFY COLUMN with codec', async () => {
+      const def = baseTable()
+      await assertValidSQL(
+        client,
+        renderAlterModifyColumn(def, {
+          name: 'value',
+          type: 'String',
+          codec: { kind: 'ZSTD', level: 6 },
+        })
+      )
+    })
+
+    test('ALTER MODIFY COLUMN REMOVE CODEC', async () => {
+      const def = baseTable()
+      await assertValidSQL(client, renderAlterRemoveCodec(def, 'payload'))
+    })
   })
 
   // =========================================================================
@@ -479,23 +553,62 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       },
       {
         label: 'set',
-        idx: { name: 'idx_status', expression: 'status', type: 'set', typeArgs: '100', granularity: 2 },
+        idx: {
+          name: 'idx_status',
+          expression: 'status',
+          type: 'set',
+          maxRows: 100,
+          granularity: 2,
+        },
+      },
+      {
+        label: 'set unbounded',
+        idx: {
+          name: 'idx_status_all',
+          expression: 'status',
+          type: 'set',
+          maxRows: 0,
+          granularity: 2,
+        },
       },
       {
         label: 'bloom_filter',
         idx: { name: 'idx_email', expression: 'email', type: 'bloom_filter', granularity: 1 },
       },
       {
-        label: 'bloom_filter with args',
-        idx: { name: 'idx_email2', expression: 'email', type: 'bloom_filter', typeArgs: '0.01', granularity: 1 },
+        label: 'bloom_filter with falsePositiveRate',
+        idx: {
+          name: 'idx_email2',
+          expression: 'email',
+          type: 'bloom_filter',
+          falsePositiveRate: 0.01,
+          granularity: 1,
+        },
       },
       {
         label: 'tokenbf_v1',
-        idx: { name: 'idx_body', expression: 'body', type: 'tokenbf_v1', typeArgs: '10240, 3, 0', granularity: 1 },
+        idx: {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'tokenbf_v1',
+          sizeBytes: 10240,
+          hashFunctions: 3,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
       {
         label: 'ngrambf_v1',
-        idx: { name: 'idx_name', expression: 'name', type: 'ngrambf_v1', typeArgs: '3, 256, 2, 0', granularity: 1 },
+        idx: {
+          name: 'idx_name',
+          expression: 'name',
+          type: 'ngrambf_v1',
+          ngramSize: 3,
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
       {
         label: 'expression index',
@@ -879,19 +992,52 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       },
       {
         label: 'set',
-        idx: { name: 'idx_status', expression: 'status', type: 'set', typeArgs: '100', granularity: 2 },
+        idx: {
+          name: 'idx_status',
+          expression: 'status',
+          type: 'set',
+          maxRows: 100,
+          granularity: 2,
+        },
       },
       {
         label: 'bloom_filter',
         idx: { name: 'idx_email', expression: 'email', type: 'bloom_filter', granularity: 1 },
       },
       {
+        label: 'bloom_filter with falsePositiveRate',
+        idx: {
+          name: 'idx_email_tuned',
+          expression: 'email',
+          type: 'bloom_filter',
+          falsePositiveRate: 0.01,
+          granularity: 1,
+        },
+      },
+      {
         label: 'tokenbf_v1',
-        idx: { name: 'idx_body', expression: 'body', type: 'tokenbf_v1', typeArgs: '10240, 3, 0', granularity: 1 },
+        idx: {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'tokenbf_v1',
+          sizeBytes: 10240,
+          hashFunctions: 3,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
       {
         label: 'ngrambf_v1',
-        idx: { name: 'idx_name', expression: 'name', type: 'ngrambf_v1', typeArgs: '3, 256, 2, 0', granularity: 1 },
+        idx: {
+          name: 'idx_name',
+          expression: 'name',
+          type: 'ngrambf_v1',
+          ngramSize: 3,
+          sizeBytes: 256,
+          hashFunctions: 2,
+          randomSeed: 0,
+          granularity: 1,
+        },
       },
     ]
 

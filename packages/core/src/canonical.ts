@@ -10,6 +10,7 @@ import type {
 } from './model.js'
 import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
+import { canonicalizeCodec } from './codec.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
@@ -29,6 +30,7 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
     renamedFrom: column.renamedFrom?.trim(),
     type: typeof column.type === 'string' ? column.type.trim() : column.type,
     comment: column.comment?.trim(),
+    codec: column.codec ? canonicalizeCodec(column.codec) : undefined,
   }
 }
 

@@ -72,7 +72,7 @@ const events = table({
   ttl: 'received_at + INTERVAL 90 DAY',
   settings: { index_granularity: 8192 },
   indexes: [
-    { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+    { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
   ],
   projections: [
     { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
@@ -160,20 +160,38 @@ Previous column name for rename tracking. See [Rename support](#rename-support).
 
 ## Skip indexes
 
-Each entry in the `indexes` array is a `SkipIndexDefinition`.
+Each entry in the `indexes` array is a `SkipIndexDefinition`. The shared base fields are:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Index name |
 | `expression` | `string` | Indexed expression |
 | `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1'` | Index type |
-| `typeArgs` | `string`, optional | Arguments for parameterized index types. **Required** for `set`, `tokenbf_v1`, `ngrambf_v1` (ClickHouse 26+) |
 | `granularity` | `number` | Index granularity |
+
+Type-specific fields:
+
+| Type | Required fields | Optional fields | Notes |
+|------|-----------------|-----------------|-------|
+| `minmax` | — | — | No arguments |
+| `set` | `maxRows: number` | — | `maxRows: 0` stores all unique values (ClickHouse 26+ requires `set(0)` rather than bare `set`) |
+| `bloom_filter` | — | `falsePositiveRate: number` | Defaults to `0.025` when omitted |
+| `tokenbf_v1` | `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `tokenbf_v1(size_bytes, n_hash, seed)` |
+| `ngrambf_v1` | `ngramSize`, `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `ngrambf_v1(n, size_bytes, n_hash, seed)` |
 
 ```ts
 indexes: [
-  { name: 'idx_source', expression: 'source', type: 'set', typeArgs: '0', granularity: 1 },
+  { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
   { name: 'idx_ts', expression: 'received_at', type: 'minmax', granularity: 3 },
+  {
+    name: 'idx_body',
+    expression: 'body',
+    type: 'tokenbf_v1',
+    sizeBytes: 256,
+    hashFunctions: 2,
+    randomSeed: 0,
+    granularity: 1,
+  },
 ]
 ```
 

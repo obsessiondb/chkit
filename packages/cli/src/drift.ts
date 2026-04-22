@@ -201,11 +201,27 @@ function normalizeColumnShape(column: ColumnDefinition): string {
   return parts.join('|')
 }
 
+function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
+  switch (index.type) {
+    case 'minmax':
+      return 'minmax'
+    case 'set':
+      return `set(${index.maxRows})`
+    case 'bloom_filter':
+      return index.falsePositiveRate !== undefined
+        ? `bloom_filter(${index.falsePositiveRate})`
+        : 'bloom_filter'
+    case 'tokenbf_v1':
+      return `tokenbf_v1(${index.sizeBytes}, ${index.hashFunctions}, ${index.randomSeed})`
+    case 'ngrambf_v1':
+      return `ngrambf_v1(${index.ngramSize}, ${index.sizeBytes}, ${index.hashFunctions}, ${index.randomSeed})`
+  }
+}
+
 function normalizeIndexShape(index: SkipIndexDefinition): string {
-  const typeStr = index.typeArgs !== undefined ? `${index.type}(${index.typeArgs})` : index.type
   return [
     `expr=${normalizeSQLFragment(index.expression)}`,
-    `type=${typeStr}`,
+    `type=${renderIndexTypeFingerprint(index)}`,
     `granularity=${index.granularity}`,
   ].join('|')
 }
