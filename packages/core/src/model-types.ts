@@ -20,6 +20,38 @@ export type PrimitiveColumnType =
   | 'DateTime'
   | 'DateTime64'
 
+/**
+ * General-purpose compression codecs. Exactly one ends a codec chain.
+ * Level ranges: LZ4HC 1–12 (default 9), ZSTD 1–22 (default 1).
+ */
+export type GeneralColumnCodec =
+  | { kind: 'NONE' | 'LZ4' | 'T64' | 'GCD' | 'ALP' }
+  | { kind: 'LZ4HC'; level?: number }
+  | { kind: 'ZSTD'; level?: number }
+
+/**
+ * Preprocessing codecs (zero or more) placed before the general codec.
+ * `size` (bytes) defaults to 1 in ClickHouse for Delta / DoubleDelta / Gorilla.
+ */
+export type PreprocessingColumnCodec =
+  | { kind: 'Delta' | 'DoubleDelta' | 'Gorilla'; size?: 1 | 2 | 4 | 8 }
+  | { kind: 'FPC'; level: number; floatSize: 4 | 8 }
+
+/**
+ * Escape hatch — passes the raw expression through unchanged. Useful for
+ * codecs we haven't typed (new CH versions, experimental codecs) or unusual
+ * arg shapes. Canonicalization is whitespace-only; round-trip may be noisy.
+ */
+export interface RawColumnCodec {
+  kind: 'raw'
+  expression: string
+}
+
+export type ColumnCodec = GeneralColumnCodec | PreprocessingColumnCodec | RawColumnCodec
+
+/** Single codec or a chain (preprocessors then exactly one general codec). */
+export type ColumnCodecSpec = ColumnCodec | ColumnCodec[]
+
 export interface ColumnDefinition {
   name: string
   type: PrimitiveColumnType | string
@@ -27,6 +59,7 @@ export interface ColumnDefinition {
   nullable?: boolean
   default?: string | number | boolean
   comment?: string
+  codec?: ColumnCodecSpec
 }
 
 interface SkipIndexBase {
@@ -257,6 +290,8 @@ export type ValidationIssueCode =
   | 'refresh_interval_format'
   | 'refresh_append_required_for_replicated_target'
   | 'refresh_depends_on_requires_every'
+  | 'codec_chain_must_end_with_general'
+  | 'codec_chain_multiple_general'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

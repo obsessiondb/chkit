@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   ChxValidationError,
   canonicalizeDefinitions,
+  codec,
   collectDefinitionsFromModule,
   materializedView,
   planDiff,
@@ -858,6 +859,320 @@ describe('@chkit/core planner v1', () => {
       'create_view',
       'create_materialized_view',
     ])
+  })
+})
+
+describe('@chkit/core column codec', () => {
+  test('renders CODEC clause between type and DEFAULT', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime', codec: { kind: 'ZSTD', level: 3 }, default: 'fn:now()' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('`ts` DateTime CODEC(ZSTD(3)) DEFAULT now()')
+  })
+
+  test('renders CODEC chain with preprocessor + general', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'delta', type: 'Int64', codec: [{ kind: 'Delta', size: 4 }, { kind: 'ZSTD' }] },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('`delta` Int64 CODEC(Delta(4), ZSTD)')
+  })
+
+  test('renders CODEC on nullable column', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'note', type: 'String', nullable: true, codec: { kind: 'ZSTD', level: 3 } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('`note` Nullable(String) CODEC(ZSTD(3))')
+  })
+
+  test('plan: add codec to column emits MODIFY COLUMN with CODEC', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    expect(plan.operations[0]?.sql).toContain('MODIFY COLUMN `payload` String CODEC(ZSTD(3))')
+  })
+
+  test('plan: change codec emits single MODIFY COLUMN', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 1 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 6 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    expect(plan.operations[0]?.sql).toContain('MODIFY COLUMN `payload` String CODEC(ZSTD(6))')
+    expect(plan.operations[0]?.sql).not.toContain('REMOVE CODEC')
+  })
+
+  test('plan: remove codec emits REMOVE CODEC when other fields unchanged', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('alter_table_modify_column')
+    expect(plan.operations[0]?.sql).toBe(
+      'ALTER TABLE app.events MODIFY COLUMN `payload` REMOVE CODEC;'
+    )
+  })
+
+  test('plan: drop codec + other change emits single MODIFY COLUMN (no separate REMOVE)', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'LowCardinality(String)' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('alter_table_modify_column')
+    expect(plan.operations[0]?.sql).toContain('LowCardinality(String)')
+    expect(plan.operations[0]?.sql).not.toContain('REMOVE CODEC')
+  })
+
+  test('plan: equal codec across canonicalization yields no diff', () => {
+    const oldDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD' } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const newDefs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'payload', type: 'String', codec: { kind: 'ZSTD', level: 1 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toEqual([])
+  })
+
+  test('validates chain with multiple general codecs', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'payload',
+            type: 'String',
+            codec: [
+              { kind: 'ZSTD', level: 3 },
+              { kind: 'LZ4' },
+            ],
+          },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.map((i) => i.code)).toContain('codec_chain_multiple_general')
+  })
+
+  test('validates chain ending in preprocessor', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'payload',
+            type: 'Int64',
+            codec: [
+              { kind: 'ZSTD' },
+              { kind: 'Delta', size: 4 },
+            ],
+          },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.map((i) => i.code)).toContain('codec_chain_must_end_with_general')
+  })
+
+  test('allows standalone preprocessor codec (CH auto-appends default general)', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'delta', type: 'Int64', codec: { kind: 'Delta', size: 4 } },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.some((i) => i.code === 'codec_chain_must_end_with_general')).toBe(false)
+    expect(issues.some((i) => i.code === 'codec_chain_multiple_general')).toBe(false)
+  })
+
+  test('raw codec atoms satisfy any chain position', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          {
+            name: 'exp',
+            type: 'Float32',
+            codec: [{ kind: 'Delta', size: 4 }, codec.raw('SomeNewCodec(42)')],
+          },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const issues = validateDefinitions(defs)
+    expect(issues.some((i) => i.code.startsWith('codec_chain_'))).toBe(false)
   })
 })
 

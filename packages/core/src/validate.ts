@@ -1,6 +1,8 @@
 import { definitionKey } from './canonical.js'
+import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import { normalizeKeyColumns } from './key-clause.js'
 import type {
+  ColumnDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   SchemaDefinition,
@@ -25,6 +27,44 @@ function pushValidationIssue(
   })
 }
 
+function validateColumnCodec(
+  def: TableDefinition,
+  column: ColumnDefinition,
+  issues: ValidationIssue[]
+): void {
+  if (!column.codec) return
+  const steps = canonicalizeCodec(column.codec)
+  let generalCount = 0
+  let generalIndex = -1
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!
+    if (isRawCodec(step)) continue
+    if (isGeneralCodec(step)) {
+      generalCount += 1
+      generalIndex = i
+    }
+  }
+
+  if (generalCount > 1) {
+    pushValidationIssue(
+      issues,
+      def,
+      'codec_chain_multiple_general',
+      `Table ${def.database}.${def.name} column "${column.name}" codec chain has more than one general codec; only one general codec is allowed at the end of a chain`
+    )
+    return
+  }
+
+  if (steps.length > 1 && generalCount === 1 && generalIndex !== steps.length - 1) {
+    pushValidationIssue(
+      issues,
+      def,
+      'codec_chain_must_end_with_general',
+      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, T64, GCD, ALP)`
+    )
+  }
+}
+
 function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]): void {
   const columnSeen = new Set<string>()
   const columnSet = new Set<string>()
@@ -40,6 +80,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     }
     columnSeen.add(column.name)
     columnSet.add(column.name)
+    validateColumnCodec(def, column, issues)
   }
 
   const TYPES_REQUIRING_ARGS = new Set(['set', 'tokenbf_v1', 'ngrambf_v1'])

@@ -7,6 +7,7 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from './model.js'
+import { renderCodec } from './codec.js'
 import { normalizeKeyColumns } from './key-clause.js'
 import { assertValidDefinitions } from './validate.js'
 
@@ -20,6 +21,7 @@ function renderDefault(value: string | number | boolean): string {
 
 function renderColumn(col: ColumnDefinition): string {
   let out = `\`${col.name}\` ${col.nullable ? `Nullable(${col.type})` : col.type}`
+  if (col.codec) out += ` ${renderCodec(col.codec)}`
   if (col.default !== undefined) out += ` DEFAULT ${renderDefault(col.default)}`
   if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
   return out
@@ -141,6 +143,10 @@ export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefi
 
 export function renderAlterDropColumn(def: TableDefinition, columnName: string): string {
   return `ALTER TABLE ${def.database}.${def.name} DROP COLUMN IF EXISTS \`${columnName}\`;`
+}
+
+export function renderAlterRemoveCodec(def: TableDefinition, columnName: string): string {
+  return `ALTER TABLE ${def.database}.${def.name} MODIFY COLUMN \`${columnName}\` REMOVE CODEC;`
 }
 
 export function renderAlterAddIndex(def: TableDefinition, index: SkipIndexDefinition): string {

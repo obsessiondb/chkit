@@ -103,7 +103,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
 
       try {
         await executor.command(
-          `CREATE TABLE ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} (id UInt64, source String, received_at DateTime64(3) DEFAULT now64(3)) ENGINE = MergeTree() PARTITION BY toYYYYMM(received_at) PRIMARY KEY (id) ORDER BY (id) SETTINGS index_granularity = 8192`
+          `CREATE TABLE ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} (id UInt64, source String, received_at DateTime64(3) DEFAULT now64(3), ts DateTime CODEC(Delta, ZSTD)) ENGINE = MergeTree() PARTITION BY toYYYYMM(received_at) PRIMARY KEY (id) ORDER BY (id) SETTINGS index_granularity = 8192`
         )
 
         // Wait for table to be visible before creating dependent objects
@@ -188,6 +188,10 @@ describe('@chkit/plugin-pull live env e2e', () => {
         expect(pulledSchema).not.toContain('DEFINER')
         expect(pulledSchema).not.toContain('SQL SECURITY')
         expect(pulledSchema).not.toContain(noiseDatabase)
+
+        // Codec column — assert structured codec is emitted and round-trips
+        expect(pulledSchema).toContain('codec: [{ kind: "Delta"')
+        expect(pulledSchema).toContain('{ kind: "ZSTD"')
       } finally {
         await rm(dir, { recursive: true, force: true })
       }

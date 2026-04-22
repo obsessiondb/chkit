@@ -1,6 +1,7 @@
 import { createClient, type ClickHouseSettings } from '@clickhouse/client'
 import {
   normalizeSQLFragment,
+  parseCodec,
   type ChxConfig,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -77,6 +78,7 @@ export interface SystemColumnRow {
   default_expression?: string
   comment?: string
   position: number
+  compression_codec?: string
 }
 
 export interface SystemSkippingIndexRow {
@@ -130,12 +132,14 @@ export function normalizeColumnFromSystemRow(row: SystemColumnRow): ColumnDefini
   if (row.default_expression && row.default_kind === 'DEFAULT') {
     defaultValue = normalizeSQLFragment(row.default_expression)
   }
+  const codecSteps = parseCodec(row.compression_codec)
   return {
     name: row.name,
     type,
     nullable: nullable || undefined,
     default: defaultValue,
     comment: row.comment?.trim() || undefined,
+    codec: codecSteps,
   }
 }
 
@@ -484,7 +488,7 @@ WHERE is_temporary = 0
   AND database IN (${quotedDatabases})`
       )
       const columns = await this.query<SystemColumnRow>(
-        `SELECT database, table, name, type, default_kind, default_expression, comment, position
+        `SELECT database, table, name, type, default_kind, default_expression, comment, position, compression_codec
 FROM system.columns
 WHERE database IN (${quotedDatabases})`
       )
