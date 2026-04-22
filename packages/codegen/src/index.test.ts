@@ -92,6 +92,57 @@ describe('@chkit/codegen smoke', () => {
     }
   })
 
+  test('does not overwrite an existing migration generated in the same second', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+
+    try {
+      const migrationsDir = join(workdir, 'migrations')
+      const metaDir = join(workdir, 'meta')
+      const now = new Date('2026-01-02T03:04:05.678Z')
+      const usersTable = table({
+        database: 'app',
+        name: 'users',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+      const eventsTable = table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+
+      const first = await generateArtifacts({
+        definitions: [usersTable],
+        plan: planDiff([], [usersTable]),
+        migrationsDir,
+        metaDir,
+        now,
+      })
+      if (!first.migrationFile) throw new Error('expected first migration file')
+      const originalFirstSql = await readFile(first.migrationFile, 'utf8')
+
+      const second = await generateArtifacts({
+        definitions: [eventsTable],
+        plan: planDiff([usersTable], [eventsTable]),
+        migrationsDir,
+        metaDir,
+        now,
+      })
+
+      expect(first.migrationFile.endsWith('20260102030405_auto.sql')).toBe(true)
+      expect(second.migrationFile?.endsWith('20260102030405_auto_001.sql')).toBe(true)
+      expect(await readFile(first.migrationFile, 'utf8')).toBe(originalFirstSql)
+      expect(await readFile(second.migrationFile ?? '', 'utf8')).toContain('CREATE TABLE IF NOT EXISTS app.events')
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+
   test('renders rename suggestion hints in migration header comments', async () => {
     const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
     try {

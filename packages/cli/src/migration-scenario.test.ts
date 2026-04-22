@@ -1,7 +1,11 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test as bunTest } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 
 import { CORE_ENTRY, createFixture, renderUsersSchema, runCli } from './testkit.test'
+
+// These scenarios shell out several times. Keep them serial even when the
+// package test script runs with --concurrent.
+const test = bunTest.serial
 
 describe('@chkit/cli migration scenario flows', () => {
   test('start state + schema changes produce expected diff and migrate destructive gate', async () => {

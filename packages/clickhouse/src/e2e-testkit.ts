@@ -5,7 +5,11 @@
  * Uses ClickHouseExecutor so any package that depends on @chkit/clickhouse can import this.
  */
 
-import { createClickHouseExecutor, type ClickHouseExecutor } from './index.js'
+import {
+  createClickHouseExecutor,
+  createStatelessClickHouseExecutor,
+  type ClickHouseExecutor,
+} from './index.js'
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -50,6 +54,20 @@ export function getRequiredEnv(): LiveEnv {
  */
 export function createLiveExecutor(env: LiveEnv): ClickHouseExecutor {
   return createClickHouseExecutor({
+    url: env.clickhouseUrl,
+    username: env.clickhouseUser,
+    password: env.clickhousePassword,
+    database: env.clickhouseDatabase,
+  })
+}
+
+/**
+ * Use only for live tests that intentionally issue parallel queries through one
+ * executor. The default live executor is session-bound and should be used for
+ * normal sequential DDL workflows.
+ */
+export function createStatelessLiveExecutor(env: LiveEnv): ClickHouseExecutor {
+  return createStatelessClickHouseExecutor({
     url: env.clickhouseUrl,
     username: env.clickhouseUser,
     password: env.clickhousePassword,
