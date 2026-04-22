@@ -2,6 +2,9 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   createClickHouseExecutor,
+  createSessionClickHouseClient,
+  createStatelessClickHouseExecutor,
+  createStatelessClickHouseClient,
   inferSchemaKindFromEngine,
   parseEngineFromCreateTableQuery,
   parseOrderByFromCreateTableQuery,
@@ -23,6 +26,31 @@ describe('@chkit/clickhouse smoke', () => {
     expect(typeof executor.command).toBe('function')
     expect(typeof executor.query).toBe('function')
     expect(typeof executor.listSchemaObjects).toBe('function')
+  })
+
+  test('creates stateless executor with command/query methods', () => {
+    const executor = createStatelessClickHouseExecutor({
+      url: 'http://localhost:8123',
+      database: 'default',
+    })
+
+    expect(typeof executor.command).toBe('function')
+    expect(typeof executor.query).toBe('function')
+    expect(typeof executor.listSchemaObjects).toBe('function')
+  })
+
+  test('exposes stateless and session-bound client constructors', async () => {
+    const config = {
+      url: 'http://localhost:8123',
+      database: 'default',
+    }
+    const stateless = createStatelessClickHouseClient(config)
+    const session = createSessionClickHouseClient(config)
+
+    expect(typeof stateless.query).toBe('function')
+    expect(typeof session.query).toBe('function')
+
+    await Promise.all([stateless.close(), session.close()])
   })
 
   test('infers schema kind from ClickHouse engine', () => {

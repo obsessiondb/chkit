@@ -105,6 +105,9 @@ export interface IntrospectedTable {
   ttl?: string
 }
 
+type ClickHouseClient = ReturnType<typeof createClient>
+type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
+
 export {
   parseEngineFromCreateTableQuery,
   parseOrderByFromCreateTableQuery,
@@ -335,31 +338,50 @@ function logProfiling(
   })
 }
 
-export function createClickHouseExecutor(config: NonNullable<ChxConfig['clickhouse']>): ClickHouseExecutor {
+const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
+  wait_end_of_query: 1,
+  async_insert: 0,
+  send_progress_in_http_headers: 1,
+}
+
+export function createStatelessClickHouseClient(
+  config: ClickHouseConfig,
+  clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
+): ClickHouseClient {
+  return createClient({
+    url: config.url,
+    username: config.username,
+    password: config.password,
+    database: config.database,
+    clickhouse_settings: clickhouseSettings,
+  })
+}
+
+/**
+ * Creates a ClickHouse client that sends one session_id with every request.
+ * Use only for workflows that need session state, such as temporary tables or
+ * session-level settings. ClickHouse allows only one in-flight query per HTTP
+ * session, so callers must serialize all requests made through this client.
+ */
+export function createSessionClickHouseClient(
+  config: ClickHouseConfig,
+  clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
+  sessionId = crypto.randomUUID(),
+): ClickHouseClient {
+  return createClient({
+    url: config.url,
+    username: config.username,
+    password: config.password,
+    database: config.database,
+    session_id: sessionId,
+    clickhouse_settings: clickhouseSettings,
+  })
+}
+
+function createExecutorWithClient(config: ClickHouseConfig, client: ClickHouseClient): ClickHouseExecutor {
   const profiler = getLogger(['chkit', 'profiling'])
 
-  const client = createClient({
-    url: config.url,
-    username: config.username,
-    password: config.password,
-    database: config.database,
-    session_id: crypto.randomUUID(),
-    clickhouse_settings: {
-      wait_end_of_query: 1,
-      async_insert: 0,
-      send_progress_in_http_headers: 1,
-    },
-  })
-
-  const fireAndForgetClient = createClient({
-    url: config.url,
-    username: config.username,
-    password: config.password,
-    database: config.database,
-    clickhouse_settings: {
-      wait_end_of_query: 0,
-    },
-  })
+  const fireAndForgetClient = createStatelessClickHouseClient(config, { wait_end_of_query: 0 })
 
   return {
     async command(sql: string): Promise<void> {
@@ -535,4 +557,14 @@ WHERE database IN (${quotedDatabases})`
       return buildIntrospectedTables(tables, columns, indexes)
     },
   }
+}
+
+export function createClickHouseExecutor(config: ClickHouseConfig): ClickHouseExecutor {
+  // Default executor is session-bound so DDL-heavy workflows run through a
+  // single ClickHouse HTTP session. Do not issue concurrent queries through it.
+  return createExecutorWithClient(config, createSessionClickHouseClient(config))
+}
+
+export function createStatelessClickHouseExecutor(config: ClickHouseConfig): ClickHouseExecutor {
+  return createExecutorWithClient(config, createStatelessClickHouseClient(config))
 }

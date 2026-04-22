@@ -12,6 +12,7 @@ export {
   type LiveEnv,
   getRequiredEnv,
   createLiveExecutor,
+  createStatelessLiveExecutor,
   quoteIdent,
   createRunTag,
   createPrefix,
