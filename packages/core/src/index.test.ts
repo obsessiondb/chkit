@@ -893,7 +893,7 @@ describe('@chkit/core planner v1', () => {
 })
 
 describe('@chkit/core column codec', () => {
-  test('renders CODEC clause between type and DEFAULT', () => {
+  test('renders CODEC clause after DEFAULT', () => {
     const events = table({
       database: 'app',
       name: 'events',
@@ -907,7 +907,7 @@ describe('@chkit/core column codec', () => {
     })
 
     const sql = toCreateSQL(events)
-    expect(sql).toContain('`ts` DateTime CODEC(ZSTD(3)) DEFAULT now()')
+    expect(sql).toContain('`ts` DateTime DEFAULT now() CODEC(ZSTD(3))')
   })
 
   test('renders CODEC chain with preprocessor + general', () => {

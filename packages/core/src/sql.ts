@@ -21,9 +21,9 @@ function renderDefault(value: string | number | boolean): string {
 
 function renderColumn(col: ColumnDefinition): string {
   let out = `\`${col.name}\` ${col.nullable ? `Nullable(${col.type})` : col.type}`
-  if (col.codec) out += ` ${renderCodec(col.codec)}`
   if (col.default !== undefined) out += ` DEFAULT ${renderDefault(col.default)}`
   if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
+  if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
 }
 
