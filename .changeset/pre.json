@@ -48,12 +48,17 @@
     "obsessiondb-query-routing",
     "obsessiondb-strip-storage-policy",
     "open-source-audit",
+    "per-column-codec",
     "plugin-command-hook",
     "query-progress-metrics",
+    "refreshable-materialized-views",
     "rename-plugin-codegen",
     "rename-to-chkit",
     "skill-hint-agent-aware",
     "skill-hint-plugin",
+    "skip-index-structured-args",
+    "smart-chunking-rewrite",
+    "structured-backfill-logging",
     "system-table-user-filter",
     "validate-set-index-args"
   ]
