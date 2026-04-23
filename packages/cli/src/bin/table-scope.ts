@@ -18,7 +18,7 @@ export interface TableScope {
   matchCount: number
 }
 
-export interface TableScopeFilterResult {
+interface TableScopeFilterResult {
   plan: MigrationPlan
   omittedOperationCount: number
 }
@@ -30,7 +30,7 @@ interface TableRenameMapping {
   newName: string
 }
 
-export function tableKey(database: string, name: string): string {
+function tableKey(database: string, name: string): string {
   return `${database}.${name}`
 }
 

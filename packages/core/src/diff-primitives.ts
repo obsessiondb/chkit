@@ -1,10 +1,10 @@
-export interface NamedDiffChange<T> {
+interface NamedDiffChange<T> {
   name: string
   oldItem: T
   newItem: T
 }
 
-export interface NamedDiffResult<T> {
+interface NamedDiffResult<T> {
   added: T[]
   removed: T[]
   changed: NamedDiffChange<T>[]
@@ -48,7 +48,7 @@ export function diffByName<T>(
   }
 }
 
-export interface SettingDiffResult {
+interface SettingDiffResult {
   changes: Array<
     | { kind: 'modify'; key: string; value: string | number | boolean }
     | { kind: 'reset'; key: string }
@@ -79,7 +79,7 @@ export function diffSettings(
   }
 }
 
-export interface ClauseComparison {
+interface ClauseComparison {
   oldValue: string
   newValue: string
 }

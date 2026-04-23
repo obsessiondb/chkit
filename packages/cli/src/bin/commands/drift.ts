@@ -16,7 +16,7 @@ import { emitJson } from '../json-output.js'
 import { readSnapshot } from '../migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions, type TableScope } from '../table-scope.js'
 
-export interface DriftPayload {
+interface DriftPayload {
   scope?: TableScope
   snapshotFile: string
   expectedCount: number

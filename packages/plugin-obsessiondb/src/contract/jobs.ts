@@ -5,11 +5,11 @@
 import { oc } from '@orpc/contract'
 import { z } from 'zod'
 
-export const jobStatusSchema = z.enum(['pending', 'running', 'completed', 'failed', 'cancelled'])
+const jobStatusSchema = z.enum(['pending', 'running', 'completed', 'failed', 'cancelled'])
 
-export const taskStatusSchema = z.enum(['pending', 'running', 'done', 'failed'])
+const taskStatusSchema = z.enum(['pending', 'running', 'done', 'failed'])
 
-export const jobTaskSchema = z.object({
+const jobTaskSchema = z.object({
   id: z.string(),
   taskIndex: z.number().int(),
   status: taskStatusSchema,
@@ -24,7 +24,7 @@ export const jobTaskSchema = z.object({
   finishedAt: z.string().datetime().nullable(),
 })
 
-export const jobSummarySchema = z.object({
+const jobSummarySchema = z.object({
   id: z.string(),
   serviceId: z.string(),
   type: z.string(),
@@ -38,7 +38,7 @@ export const jobSummarySchema = z.object({
   updatedAt: z.string().datetime(),
 })
 
-export const jobDetailSchema = jobSummarySchema.extend({
+const jobDetailSchema = jobSummarySchema.extend({
   workflowId: z.string().nullable(),
   metadata: z.record(z.unknown()).nullable(),
   tasks: z.array(jobTaskSchema),

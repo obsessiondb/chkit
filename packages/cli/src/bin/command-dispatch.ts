@@ -10,7 +10,7 @@ import type { PluginRuntime } from './plugin-runtime.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 
-export function stripGlobalFlags(argv: string[]): {
+function stripGlobalFlags(argv: string[]): {
   jsonMode: boolean
   tableSelector: string | undefined
   rest: string[]

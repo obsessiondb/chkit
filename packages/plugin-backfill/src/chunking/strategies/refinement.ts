@@ -55,7 +55,7 @@ export async function refinePartitionSlices(
   }
 }
 
-export function buildPartitionDiagnostics(
+function buildPartitionDiagnostics(
   partition: Partition,
   slices: PartitionSlice[],
   usedDistributionFallback: boolean,

@@ -112,30 +112,24 @@ export const RunSchema = z.object({
   pollIntervalMs: z.number().nonnegative().default(5000),
   stateDir: z.string().min(1).optional(),
 })
-export type RunOptions = z.infer<typeof RunSchema>
+type RunOptions = z.infer<typeof RunSchema>
 
 export const ResumeSchema = RunSchema.extend({
   replayFailed: z.boolean().default(false),
 })
-export type ResumeOptions = z.infer<typeof ResumeSchema>
+type ResumeOptions = z.infer<typeof ResumeSchema>
 
-export const StatusSchema = z.object({
+const StatusSchema = z.object({
   planId: z.string(),
   stateDir: z.string().min(1).optional(),
 })
-export type StatusOptions = z.infer<typeof StatusSchema>
-
-export const CancelSchema = StatusSchema
-export type CancelOptions = StatusOptions
-
-export const DoctorSchema = StatusSchema
-export type DoctorOptions = StatusOptions
+type StatusOptions = z.infer<typeof StatusSchema>
 
 export const CheckSchema = z.object({
   stateDir: z.string().min(1).optional(),
   failCheckOnRequiredPendingBackfill: z.boolean().default(true),
 })
-export type CheckOptions = z.infer<typeof CheckSchema>
+type CheckOptions = z.infer<typeof CheckSchema>
 
 // ───── CLI flag definitions ─────
 

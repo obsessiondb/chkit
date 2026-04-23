@@ -20,7 +20,7 @@ interface PluginCommand {
   run: (context: PluginCommandContext) => Promise<number>
 }
 
-export const LOGIN_COMMAND: PluginCommand = {
+const LOGIN_COMMAND: PluginCommand = {
   name: 'login',
   description: 'Authenticate with ObsessionDB',
   flags: [
@@ -36,7 +36,7 @@ export const LOGIN_COMMAND: PluginCommand = {
   },
 }
 
-export const LOGOUT_COMMAND: PluginCommand = {
+const LOGOUT_COMMAND: PluginCommand = {
   name: 'logout',
   description: 'Remove stored ObsessionDB credentials',
   async run(context) {
@@ -44,7 +44,7 @@ export const LOGOUT_COMMAND: PluginCommand = {
   },
 }
 
-export const WHOAMI_COMMAND: PluginCommand = {
+const WHOAMI_COMMAND: PluginCommand = {
   name: 'whoami',
   description: 'Show current ObsessionDB user',
   async run(context) {

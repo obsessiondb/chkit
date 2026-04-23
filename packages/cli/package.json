@@ -39,11 +39,10 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@clickhouse/client": "^1.11.0",
+    "fast-glob": "^3.3.2",
     "@chkit/clickhouse": "workspace:*",
     "@chkit/codegen": "workspace:*",
     "@chkit/core": "workspace:*",
-    "@logtape/logtape": "^2.0.5",
-    "fast-glob": "^3.3.2"
+    "@logtape/logtape": "^2.0.5"
   }
 }

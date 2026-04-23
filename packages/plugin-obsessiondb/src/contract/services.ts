@@ -5,7 +5,7 @@
 import { oc } from '@orpc/contract'
 import { z } from 'zod'
 
-export const serviceStatusSchema = z.enum([
+const serviceStatusSchema = z.enum([
   'provisioning',
   'running',
   'scaling',

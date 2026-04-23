@@ -6,7 +6,7 @@ import type {
   SortKey,
 } from './types.js'
 
-export function encodeBoundary(
+function encodeBoundary(
   value: string | undefined,
   sortKey: SortKey | undefined,
 ): string | undefined {
@@ -17,7 +17,7 @@ export function encodeBoundary(
   return value
 }
 
-export function decodeBoundary(
+function decodeBoundary(
   value: string | undefined,
   sortKey: SortKey | undefined,
 ): string | undefined {
@@ -28,7 +28,7 @@ export function decodeBoundary(
   return value
 }
 
-export function encodeRangesForPlan(
+function encodeRangesForPlan(
   ranges: ChunkRange[],
   sortKeys: SortKey[],
 ): ChunkRange[] {
@@ -39,7 +39,7 @@ export function encodeRangesForPlan(
   }))
 }
 
-export function decodeRangesFromPlan(
+function decodeRangesFromPlan(
   ranges: ChunkRange[],
   sortKeys: SortKey[],
 ): ChunkRange[] {
@@ -72,7 +72,7 @@ function decodeFocusedValue(
   }
 }
 
-export function encodeChunkForPlan(chunk: Chunk, sortKeys: SortKey[]): Chunk {
+function encodeChunkForPlan(chunk: Chunk, sortKeys: SortKey[]): Chunk {
   return {
     ...chunk,
     ranges: encodeRangesForPlan(chunk.ranges, sortKeys),
@@ -83,7 +83,7 @@ export function encodeChunkForPlan(chunk: Chunk, sortKeys: SortKey[]): Chunk {
   }
 }
 
-export function decodeChunkFromPlan(chunk: Chunk, sortKeys: SortKey[]): Chunk {
+function decodeChunkFromPlan(chunk: Chunk, sortKeys: SortKey[]): Chunk {
   return {
     ...chunk,
     ranges: decodeRangesFromPlan(chunk.ranges, sortKeys),

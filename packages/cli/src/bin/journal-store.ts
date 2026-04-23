@@ -1,11 +1,10 @@
-import { createClickHouseExecutor, isUnknownDatabaseError, type ClickHouseExecutor } from '@chkit/clickhouse'
-import type { ChxConfig } from '@chkit/core'
+import { isUnknownDatabaseError, type ClickHouseExecutor } from '@chkit/clickhouse'
 
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
 import { CLI_VERSION } from './version.js'
 import { debug } from './debug.js'
 
-export interface JournalStore {
+interface JournalStore {
   readJournal(): Promise<MigrationJournal>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   readonly databaseMissing: boolean
@@ -151,11 +150,4 @@ SETTINGS index_granularity = 1`
       }
     },
   }
-}
-
-export function createJournalStoreFromConfig(
-  clickhouseConfig: NonNullable<ChxConfig['clickhouse']>
-): { journalStore: JournalStore; db: ClickHouseExecutor } {
-  const db = createClickHouseExecutor(clickhouseConfig)
-  return { journalStore: createJournalStore(db), db }
 }

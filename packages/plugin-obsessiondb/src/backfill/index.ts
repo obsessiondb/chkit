@@ -1,11 +1,5 @@
 export { handleBackfillCommand } from './handler.js'
 export { createJobsClient, type JobsClient } from './client.js'
-export {
-  jobsContract,
-  jobStatusSchema,
-  jobSummarySchema,
-  jobDetailSchema,
-} from '../contract/jobs.js'
 
 export const BACKFILL_EXTEND_COMMANDS = [
   {

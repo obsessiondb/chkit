@@ -18,13 +18,13 @@ export interface MigrationJournal {
   applied: MigrationJournalEntry[]
 }
 
-export interface ChecksumMismatch {
+interface ChecksumMismatch {
   name: string
   expected: string
   actual: string
 }
 
-export function parseJSONOrThrow<T>(raw: string, filePath: string, kind: string): T {
+function parseJSONOrThrow<T>(raw: string, filePath: string, kind: string): T {
   try {
     return JSON.parse(raw) as T
   } catch {

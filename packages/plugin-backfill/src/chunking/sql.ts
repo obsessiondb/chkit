@@ -9,11 +9,11 @@ import type {
 } from './types.js'
 
 
-export function quoteSqlString(value: string): string {
+function quoteSqlString(value: string): string {
   return `'${value.replaceAll('\\', '\\\\').replaceAll('\'', '\\\'')}'`
 }
 
-export function formatBound(value: string, sortKey: SortKey): string {
+function formatBound(value: string, sortKey: SortKey): string {
   if (sortKey.category === 'datetime') {
     return `parseDateTimeBestEffort(${quoteSqlString(value)})`
   }

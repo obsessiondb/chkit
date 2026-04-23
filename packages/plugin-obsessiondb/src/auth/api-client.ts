@@ -1,4 +1,4 @@
-export interface DeviceCodeResponse {
+interface DeviceCodeResponse {
   device_code: string
   user_code: string
   verification_uri: string
@@ -7,7 +7,7 @@ export interface DeviceCodeResponse {
   interval: number
 }
 
-export interface SessionResponse {
+interface SessionResponse {
   user: {
     id: string
     name: string
