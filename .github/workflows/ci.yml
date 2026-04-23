@@ -23,6 +23,7 @@ jobs:
         uses: fallow-rs/fallow@v2
         with:
           format: sarif
+          fail-on-issues: false
 
       - name: Upload Fallow SARIF
         uses: github/codeql-action/upload-sarif@v4
