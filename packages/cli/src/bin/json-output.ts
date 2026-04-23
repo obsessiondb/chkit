@@ -1,4 +1,4 @@
-export type Command =
+type Command =
   | 'generate'
   | 'migrate'
   | 'status'
@@ -18,7 +18,7 @@ export function printOutput(value: unknown, jsonMode: boolean): void {
   }
 }
 
-export function jsonPayload<T extends object>(command: Command, payload: T): T & {
+function jsonPayload<T extends object>(command: Command, payload: T): T & {
   command: Command
   schemaVersion: number
 } {

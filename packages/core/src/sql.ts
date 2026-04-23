@@ -101,7 +101,7 @@ function renderDependsOn(dependsOn: Array<{ database: string; name: string }>): 
  *                [DEPENDS ON <list>] [SETTINGS <kv>] [APPEND]
  * Note: EMPTY belongs after TO in CREATE, so it's NOT included here.
  */
-export function renderRefreshClause(refresh: MaterializedViewRefresh): string {
+function renderRefreshClause(refresh: MaterializedViewRefresh): string {
   const parts: string[] = []
   if (refresh.every) parts.push(`REFRESH EVERY ${refresh.every}`)
   else if (refresh.after) parts.push(`REFRESH AFTER ${refresh.after}`)

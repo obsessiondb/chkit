@@ -8,7 +8,7 @@ import {
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './drift-diff.js'
 
-export type TableDriftReasonCode =
+type TableDriftReasonCode =
   | 'missing_column'
   | 'extra_column'
   | 'changed_column'
@@ -22,10 +22,10 @@ export type TableDriftReasonCode =
   | 'unique_key_mismatch'
   | 'projection_mismatch'
 
-export type ObjectDriftReasonCode = 'missing_object' | 'extra_object' | 'kind_mismatch'
-export type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
+type ObjectDriftReasonCode = 'missing_object' | 'extra_object' | 'kind_mismatch'
+type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
-export interface SchemaObjectShape {
+interface SchemaObjectShape {
   kind: 'table' | 'view' | 'materialized_view'
   database: string
   name: string
@@ -38,7 +38,7 @@ export interface ObjectDriftDetail {
   actualKind?: SchemaObjectShape['kind']
 }
 
-export interface ActualTableShape {
+interface ActualTableShape {
   columns: ColumnDefinition[]
   settings: Record<string, string>
   indexes: SkipIndexDefinition[]
@@ -68,7 +68,7 @@ export interface TableDriftDetail {
   projectionDiffs: string[]
 }
 
-export interface DriftReasonSummary {
+interface DriftReasonSummary {
   counts: Partial<Record<DriftReasonCode, number>>
   total: number
   object: number

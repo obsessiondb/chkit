@@ -9,7 +9,7 @@ export type AgentKind = 'claude' | 'cursor' | 'copilot' | 'windsurf' | 'roo' | '
 
 interface AgentInfo { name: string; skillsDir: string }
 
-export const AGENT_REGISTRY: Record<Exclude<AgentKind, 'unknown'>, AgentInfo> = {
+const AGENT_REGISTRY: Record<Exclude<AgentKind, 'unknown'>, AgentInfo> = {
   claude:   { name: 'Claude Code', skillsDir: '.claude/skills' },
   cursor:   { name: 'Cursor',      skillsDir: '.agents/skills' },
   copilot:  { name: 'Copilot',     skillsDir: '.agents/skills' },
@@ -33,7 +33,7 @@ const AGENT_MARKERS: { path: string; agent: AgentKind }[] = [
   { path: '.trae', agent: 'trae' },
 ]
 
-export interface AgentRootResult { root: string; agent: AgentKind }
+interface AgentRootResult { root: string; agent: AgentKind }
 
 /**
  * Walk up from `cwd` to find the best directory for installing agent skills.

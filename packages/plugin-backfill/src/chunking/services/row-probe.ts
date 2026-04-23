@@ -53,32 +53,6 @@ export async function countRowsExact(
   return Number(rows[0]?.cnt ?? 0)
 }
 
-export async function countRows(
-  context: QueryContext,
-  partitionId: string,
-  ranges: ChunkRange[],
-  sortKeys: SortKey[],
-): Promise<number> {
-  const filter: EstimateFilter = {
-    partitionId,
-    ranges,
-    exactDimensionIndex: undefined,
-    exactValue: undefined,
-  }
-  return countRowsExact(context, filter, sortKeys)
-}
-
-export async function countPartitionRows(
-  context: QueryContext,
-  partitionId: string,
-): Promise<number> {
-  const rows = await context.query<{ cnt: string }>(
-    `SELECT count() AS cnt FROM ${context.database}.${context.table} WHERE _partition_id = '${partitionId}'`,
-    context.querySettings,
-  )
-  return Number(rows[0]?.cnt ?? 0)
-}
-
 export async function getSortKeyRange(
   context: QueryContext,
   partitionId: string,

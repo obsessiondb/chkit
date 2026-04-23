@@ -29,7 +29,7 @@ function rawCase(input: string): string {
   return sanitized.length > 0 ? sanitized : 'item'
 }
 
-export function isValidIdentifier(input: string): boolean {
+function isValidIdentifier(input: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(input)
 }
 

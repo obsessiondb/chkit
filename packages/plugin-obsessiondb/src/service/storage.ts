@@ -1,9 +1,9 @@
-import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { SelectedService } from './types.js'
 
-export function getServicePath(configPath: string): string {
+function getServicePath(configPath: string): string {
   const configDir = resolve(configPath, '..')
   return join(configDir, '.chkit', 'obsessiondb.json')
 }
@@ -32,12 +32,4 @@ export async function saveSelectedService(configPath: string, service: SelectedS
   const filePath = getServicePath(configPath)
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, JSON.stringify(service, null, 2) + '\n')
-}
-
-export async function clearSelectedService(configPath: string): Promise<void> {
-  try {
-    await unlink(getServicePath(configPath))
-  } catch {
-    // Already gone — no-op
-  }
 }
