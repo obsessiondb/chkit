@@ -19,6 +19,16 @@ jobs:
       - name: Verify lockfile unchanged
         run: git diff --exit-code bun.lock
 
+      - name: Fallow analysis
+        uses: fallow-rs/fallow@v2
+        with:
+          format: sarif
+
+      - name: Upload Fallow SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: fallow-results.sarif
+
       - name: Verify
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}

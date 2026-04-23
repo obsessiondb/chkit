@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/plugin-schema.json",
+  "name": "chkit-conventions",
+  "detection": { "type": "fileExists", "pattern": "bun.lock" },
+  "entryPointRole": "test",
+  "entryPoints": [
+    "packages/**/*.test.ts",
+    "packages/**/*.spec.ts",
+    "packages/**/*.e2e.test.ts"
+  ],
+  "alwaysUsed": [
+    "apps/docs/functions/**/*.ts",
+    "apps/docs/src/styles/custom.css",
+    "packages/cli/src/e2e-testkit.ts"
+  ],
+  "configPatterns": [
+    "apps/docs/astro.config.mjs",
+    "apps/docs/wrangler.jsonc",
+    "biome.json",
+    "turbo.json"
+  ],
+  "toolingDependencies": ["sharp", "wrangler"]
+}
