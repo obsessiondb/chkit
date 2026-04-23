@@ -23,7 +23,7 @@ export type PluginConfig = z.input<typeof PluginConfigSchema>
 
 // ───── Codegen command schema ─────
 
-export const CodegenSchema = z.object({
+const CodegenSchema = z.object({
   outFile: z.string().min(1).default('./src/generated/chkit-types.ts'),
   emitZod: z.boolean().default(false),
   tableNameStyle: z.enum(['pascal', 'camel', 'raw']).default('pascal'),
@@ -36,7 +36,7 @@ export const CodegenSchema = z.object({
   emitMigrations: z.boolean().default(false),
   migrationsOutFile: z.string().min(1).default('./src/generated/chkit-migrations.ts'),
 })
-export type CodegenOptions = z.infer<typeof CodegenSchema>
+type CodegenOptions = z.infer<typeof CodegenSchema>
 
 // ───── CLI flag definitions ─────
 

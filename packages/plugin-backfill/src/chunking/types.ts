@@ -2,7 +2,7 @@ export type RowProbeStrategy = 'explain-estimate' | 'count'
 
 export type SortKeyCategory = 'numeric' | 'datetime' | 'string'
 
-export type SortKeyBoundaryEncoding = 'literal' | 'hex-latin1'
+type SortKeyBoundaryEncoding = 'literal' | 'hex-latin1'
 
 export type EstimateConfidence = 'high' | 'low' | 'exact'
 
@@ -47,7 +47,7 @@ export interface FocusedValue {
   value: string
 }
 
-export interface ChunkAnalysis {
+interface ChunkAnalysis {
   focusedValue?: FocusedValue
   lineage: ChunkDerivationStep[]
 }
@@ -87,7 +87,7 @@ export interface TableProfile {
   sortKeys: SortKey[]
 }
 
-export interface ChunkPlanStats {
+interface ChunkPlanStats {
   totalPartitions: number
   oversizedPartitions: number
   focusedChunks: number
@@ -152,10 +152,6 @@ export interface PartitionSlice {
 export interface PartitionBuildResult {
   slices: PartitionSlice[]
   diagnostics: PartitionDiagnostics
-}
-
-export interface PlanChunkOptions {
-  requireIdempotencyToken: boolean
 }
 
 export interface GenerateChunkPlanInput {

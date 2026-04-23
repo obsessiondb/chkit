@@ -47,7 +47,7 @@ export async function splitSliceWithTemporalBuckets(
   return buildTemporalSlices(partition, slice, dimensionIndex, hourBuckets, context.targetChunkBytes)
 }
 
-export function getPartitionEndExclusive(partition: Partition): string {
+function getPartitionEndExclusive(partition: Partition): string {
   return new Date(parsePlannerDateTime(partition.maxTime) + 1000).toISOString()
 }
 

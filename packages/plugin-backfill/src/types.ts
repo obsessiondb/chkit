@@ -8,7 +8,6 @@ import type { PluginConfig } from './options.js'
 
 /** @deprecated Use {@link PluginConfig} instead. */
 export type BackfillPluginOptions = PluginConfig
-export type { PluginConfig }
 
 export interface BackfillEnvironment {
   fingerprint: string
@@ -18,20 +17,7 @@ export interface BackfillEnvironment {
 
 export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
-export type {
-  Chunk,
-  ChunkDerivationStep,
-  ChunkPlan,
-  ChunkRange,
-  EstimateConfidence,
-  EstimateReason,
-  FocusedValue,
-  Partition,
-  PartitionDiagnostics,
-  SortKey,
-} from './chunking/types.js'
-
-export interface BackfillExecutionPlan {
+interface BackfillExecutionPlan {
   mode: 'copy' | 'mv_replay'
   sourceTarget: string
   mvAsQuery?: string
@@ -96,7 +82,7 @@ export interface BackfillStatusSummary {
   lastError?: string
 }
 
-export interface BackfillPluginCheckContext {
+interface BackfillPluginCheckContext {
   command: 'check'
   config: ResolvedChxConfig
   configPath: string
@@ -151,7 +137,7 @@ export interface BackfillDoctorReport {
   failedChunkIds: string[]
 }
 
-export interface BackfillPluginCommandContext {
+interface BackfillPluginCommandContext {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
