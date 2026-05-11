@@ -54,10 +54,11 @@ export async function loadConfig(
   return { config, path: configPath }
 }
 
-export async function writeIfMissing(filePath: string, content: string): Promise<void> {
-  if (existsSync(filePath)) return
+export async function writeIfMissing(filePath: string, content: string): Promise<boolean> {
+  if (existsSync(filePath)) return false
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, content, 'utf8')
+  return true
 }
 
 export function resolveDirs(config: ResolvedChxConfig): { outDir: string; migrationsDir: string; metaDir: string } {
