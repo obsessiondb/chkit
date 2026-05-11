@@ -19,4 +19,15 @@ export async function cmdInit(): Promise<void> {
 
   if (wroteConfig) console.log(`Created ${relative(cwd, configPath)}`)
   if (wroteSchema) console.log(`Created ${relative(cwd, schemaPath)}`)
+
+  if (wroteConfig || wroteSchema) {
+    console.log('')
+    console.log('Next steps:')
+    console.log('  1. Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB if needed).')
+    console.log('  2. Edit src/db/schema/example.ts to match your data.')
+    console.log('  3. Run: bunx chkit generate --name init')
+    console.log('  4. Run: bunx chkit migrate --apply')
+    console.log('')
+    console.log('Docs: https://chkit.obsessiondb.com/getting-started/')
+  }
 }
