@@ -108,6 +108,7 @@ See the [configuration docs](https://chkit.obsessiondb.com/configuration/overvie
 | [`@chkit/plugin-pull`](packages/plugin-pull) | Pull live schema into local files |
 | [`@chkit/plugin-codegen`](packages/plugin-codegen) | Codegen plugin for the CLI |
 | [`@chkit/plugin-backfill`](packages/plugin-backfill) | Backfill plugin for data migrations |
+| [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB integration: auto-rewrite `Shared` engines for ClickHouse targets |
 
 ## Documentation
 

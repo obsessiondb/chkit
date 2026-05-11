@@ -21,6 +21,7 @@ This is a monorepo managed with Bun workspaces and Turborepo.
 | `packages/plugin-codegen` | `@chkit/plugin-codegen` | Plugin: TypeScript type + Zod schema generation |
 | `packages/plugin-pull` | `@chkit/plugin-pull` | Plugin: introspect live ClickHouse into schema files |
 | `packages/plugin-backfill` | `@chkit/plugin-backfill` | Plugin: time-windowed data backfill with checkpoints |
+| `packages/plugin-obsessiondb` | `@chkit/plugin-obsessiondb` | Plugin: ObsessionDB integration; auto-rewrites `Shared` engines for non-ObsessionDB targets |
 
 ### Documentation
 
