@@ -6,25 +6,47 @@ description: Install chkit and run the first migration flow.
 ## Prerequisites
 
 - Bun `1.3.5+`
-- A ClickHouse endpoint
+- A ClickHouse endpoint (local Docker, [ClickHouse Cloud](https://clickhouse.com/cloud), or [ObsessionDB](https://obsessiondb.com))
 
 ## Install
 
+Add chkit and the core package to your project:
+
 ```bash
-bun install
-bun run build
-bun run chkit --help
+bun add -d chkit @chkit/core
+```
+
+Verify the binary:
+
+```bash
+bunx chkit --help
 ```
 
 ## Quick Start
 
+Scaffold config and an example schema:
+
 ```bash
-bun run chkit init
-bun run chkit generate --name init
-bun run chkit migrate
-bun run chkit migrate --apply
-bun run chkit status
-bun run chkit check
+bunx chkit init
+```
+
+Set your ClickHouse connection (the scaffolded `clickhouse.config.ts` reads these from the environment):
+
+```bash
+export CLICKHOUSE_URL=http://localhost:8123
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_PASSWORD=
+export CLICKHOUSE_DB=default
+```
+
+Generate, preview, and apply your first migration:
+
+```bash
+bunx chkit generate --name init
+bunx chkit migrate                # preview pending migrations
+bunx chkit migrate --apply        # apply them
+bunx chkit status
+bunx chkit check
 ```
 
 ## AI Agent Skill
