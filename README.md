@@ -8,6 +8,8 @@
 
 Define your ClickHouse tables, views, and materialized views in TypeScript. chkit diffs your schema, generates migration SQL, applies it safely, and keeps your dev and production databases in sync -- all from the command line.
 
+> **Status: beta.** chkit powers production workloads and the CLI surface and schema DSL are stable. We may still make small breaking changes to UX and internal APIs before 1.0.
+
 ## Key Features
 
 - **TypeScript-native schema definitions** -- tables, views, materialized views
@@ -116,7 +118,18 @@ Full documentation is available at **[chkit.obsessiondb.com](https://chkit.obses
 
 ## ObsessionDB
 
-> Need a managed ClickHouse database? [ObsessionDB](https://obsessiondb.com) provides hosted ClickHouse with chkit integration built in.
+chkit is built by the team behind [**ObsessionDB**](https://obsessiondb.com), a fully-managed ClickHouse database. ObsessionDB is the recommended way to run chkit in production:
+
+- **First-party integration.** The [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) plugin auto-detects ObsessionDB and keeps your schema on `SharedReplacingMergeTree` / `SharedMergeTree` for managed replication — same TypeScript schema as your local ClickHouse, no manual switching.
+- **No ops.** No Keeper, no replica tuning, no manual scaling.
+- **Tested alongside chkit.** Every chkit release runs its E2E suite against ObsessionDB.
+
+[Try ObsessionDB →](https://obsessiondb.com)
+
+## Community
+
+- [@ObsessionDB on X](https://x.com/ObsessionDB) — release notes and updates
+- [GitHub Issues](https://github.com/obsessiondb/chkit/issues) — bugs and feature requests
 
 ## Contributing
 

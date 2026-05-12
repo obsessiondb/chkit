@@ -4,16 +4,17 @@ description: Run a single set of schema files across both ObsessionDB and regula
 ---
 
 The `@chkit/plugin-obsessiondb` plugin lets you keep one set of schema files
-that target both [ObsessionDB](https://obsessiondb.com) (and ClickHouse Cloud)
-and standard ClickHouse instances (e.g. local Docker, self-hosted staging).
+that target both [ObsessionDB](https://obsessiondb.com) and standard ClickHouse
+instances (e.g. local Docker, self-hosted staging).
 
 ## Why
 
-ObsessionDB and ClickHouse Cloud use `Shared` engine variants
-(`SharedMergeTree`, `SharedReplacingMergeTree`, `SharedAggregatingMergeTree`).
-These engines do not exist in regular ClickHouse. If you define schemas with
-`Shared` engines but apply them against a standard ClickHouse instance,
-migrations will fail.
+ObsessionDB uses `Shared` engine variants
+(`SharedMergeTree`, `SharedReplacingMergeTree`, `SharedAggregatingMergeTree`)
+to deliver managed replication without operator intervention. These engines
+do not exist in regular ClickHouse. If you define schemas with `Shared`
+engines but apply them against a standard ClickHouse instance, migrations
+will fail.
 
 This plugin intercepts schema definitions before diff/planning and strips the
 `Shared` prefix when the target is not ObsessionDB.

@@ -55,7 +55,7 @@ bun run lint         # lint all packages
 
 ### E2E Tests
 
-E2E tests run against a live ClickHouse Cloud instance. They require these environment variables (hard-fail, never skip):
+E2E tests run against a live ObsessionDB instance. They require these environment variables (hard-fail, never skip):
 
 - `CLICKHOUSE_HOST` or `CLICKHOUSE_URL` — ClickHouse endpoint
 - `CLICKHOUSE_PASSWORD` — authentication
@@ -66,7 +66,7 @@ Shared ClickHouse test utilities (env, polling, naming) live in `packages/clickh
 Key conventions:
 
 - **Hard-fail on missing env** — never `test.skip()` or silently pass when credentials are absent.
-- **State-based polling** — use `waitForTable()`, `waitForView()`, `waitForColumn()` instead of blind retry loops. ClickHouse Cloud DDL is eventually consistent.
+- **State-based polling** — use `waitForTable()`, `waitForView()`, `waitForColumn()` instead of blind retry loops. ObsessionDB DDL is eventually consistent.
 - **Unique naming** — every test run uses `createPrefix()` / `createJournalTableName()` with timestamps and random suffixes to avoid collisions.
 - **Structured diagnostics** — use `formatTestDiagnostic()` for CLI failure messages.
 

@@ -712,7 +712,7 @@ export default schema(target, rmv)
           throw new Error(formatTestDiagnostic('first migrate --execute failed', firstExecute))
         }
 
-        // Wait for table to be visible before proceeding (ClickHouse Cloud DDL is eventually consistent)
+        // Wait for table to be visible before proceeding (managed ClickHouse DDL is eventually consistent)
         await waitForTable(executor, database, usersTable)
 
         await writeFile(

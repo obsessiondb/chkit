@@ -222,9 +222,9 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                     const result = await db.query(sql, settings)
                     return result as T[]
                   },
-                  // ObsessionDB (ClickHouse Cloud) enables parallel replicas by default,
-                  // which inflates aggregate results (count, GROUP BY). Disable for planning
-                  // queries until ObsessionDB handles it at the profile level.
+                  // ObsessionDB enables parallel replicas by default, which inflates
+                  // aggregate results (count, GROUP BY). Disable for planning queries
+                  // until ObsessionDB handles it at the profile level.
                   querySettings: { enable_parallel_replicas: 0 },
                 })
 
