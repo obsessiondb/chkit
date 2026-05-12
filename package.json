@@ -49,8 +49,5 @@
     "turbo": "^2.8.21",
     "typescript": "^5.8.0",
     "zod": "3.25.76"
-  },
-  "dependencies": {
-    "wrangler": "^4.65.0"
   }
 }

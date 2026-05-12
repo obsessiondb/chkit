@@ -46,6 +46,14 @@ Output:
 ```
 Created clickhouse.config.ts
 Created src/db/schema/example.ts
+
+Next steps:
+  1. Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB if needed).
+  2. Edit src/db/schema/example.ts to match your data.
+  3. Run: bunx chkit generate --name init
+  4. Run: bunx chkit migrate --apply
+
+Docs: https://chkit.obsessiondb.com/getting-started/
 ```
 
 **Run on an existing project (no changes):**
