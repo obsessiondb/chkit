@@ -13,7 +13,7 @@
 - cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - b0f200d: Add support for per-column compression codecs.
 
@@ -69,7 +69,7 @@
   Highlights:
 
   - `chkit generate` emits `ALTER TABLE ... MODIFY REFRESH` for schedule-only changes and `DROP ... SYNC` + `CREATE` for structural changes (added/removed refresh, toggled APPEND).
-  - `chkit pull` parses the REFRESH clause from `system.tables.create_table_query` and ignores the `DEFINER` / `SQL SECURITY` clauses that ClickHouse Cloud auto-injects.
+  - `chkit pull` parses the REFRESH clause from `system.tables.create_table_query` and ignores the `DEFINER` / `SQL SECURITY` clauses that managed ClickHouse environments auto-inject.
   - Validation catches: missing/both `every`/`after`, invalid interval formats, non-APPEND RMV pointing at a replicated (`SharedMergeTree` / `Replicated*`) target (ClickHouse rejects this), and `DEPENDS ON` paired with `REFRESH AFTER`.
 
   See the [Refreshable materialized views docs](https://chkit.obsessiondb.com/schema/refreshable-views/) for the full reference.
@@ -134,7 +134,7 @@
 - cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -153,7 +153,7 @@
 - cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -171,7 +171,7 @@
 - cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -188,7 +188,7 @@
 - cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -204,7 +204,7 @@
 - cc1125e: Fix parameterized skip index type rendering. ClickHouse requires `set` indexes to have a size argument (e.g., `set(0)` for unlimited). Add optional `typeArgs` field to `SkipIndexDefinition` to support parameterized index types (`set`, `bloom_filter`, `tokenbf_v1`, `ngrambf_v1`) and parse type arguments from introspected schemas.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -219,7 +219,7 @@
 - a94a2a1: Fix migration ordering so tables are created before views and materialized views that depend on them.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -233,7 +233,7 @@
 - a94a2a1: Fix migration ordering so tables are created before views and materialized views that depend on them.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- bc0c6b1: Fix materialized view drop operations on ClickHouse Cloud by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
+- bc0c6b1: Fix materialized view drop operations on managed ClickHouse environments (e.g. ObsessionDB) by using `DROP TABLE ... SYNC` instead of `DROP VIEW IF EXISTS`. This ensures metadata removal is fully propagated before subsequent column drop operations execute, preventing "column is referenced by materialized view" errors.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.

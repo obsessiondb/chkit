@@ -273,7 +273,12 @@ function wrapConnectionError(error: unknown, url: string): never {
     const code = (error as NodeJS.ErrnoException).code ?? ''
     const label = NETWORK_ERROR_LABELS[code]
     if (label) {
-      throw new Error(`Could not connect to ClickHouse at ${url} (${label})`)
+      const isLocalhostDefault = /^https?:\/\/(localhost|127\.0\.0\.1):8123\/?$/.test(url)
+      const envUnset = !process.env.CLICKHOUSE_URL
+      const hint = isLocalhostDefault && envUnset
+        ? '\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance.'
+        : ''
+      throw new Error(`Could not connect to ClickHouse at ${url} (${label})${hint}`)
     }
   }
   throw error

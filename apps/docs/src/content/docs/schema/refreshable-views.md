@@ -104,7 +104,7 @@ Omitting `APPEND` in `MODIFY REFRESH` for an existing APPEND MV is interpreted a
 
 ### Rule 3 — Non-APPEND RMV + replicated target is rejected
 
-On ClickHouse Cloud and any `SharedMergeTree` / `Replicated*` target, a non-APPEND RMV is refused outright with: *"This combination doesn't work: refreshable materialized view, no APPEND, non-replicated database, replicated table. Each refresh would replace the replicated table locally, but other replicas wouldn't see it. Refusing to create."*
+On any `SharedMergeTree` / `Replicated*` target (e.g. [ObsessionDB](https://obsessiondb.com)), a non-APPEND RMV is refused outright with: *"This combination doesn't work: refreshable materialized view, no APPEND, non-replicated database, replicated table. Each refresh would replace the replicated table locally, but other replicas wouldn't see it. Refusing to create."*
 
 chkit validates this at `generate` / `check` time whenever the target table is defined in the same schema. Validation code: `refresh_append_required_for_replicated_target`. Fix: set `refresh.append = true`, or target a non-replicated table.
 

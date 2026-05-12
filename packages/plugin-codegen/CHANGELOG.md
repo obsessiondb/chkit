@@ -12,7 +12,7 @@
 - 2eaaa5a: Generate row types as type aliases instead of interfaces to satisfy TypeScript's Record<string, unknown> assignability requirement. Fixes TypeScript error TS2322 when passing typed row arrays to ingest functions.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- b7f396a: Use ReplacingMergeTree(applied_at) instead of MergeTree() for the \_chkit_migrations journal table. This ensures the FINAL keyword works correctly on ClickHouse Cloud, where SharedMergeTree does not support FINAL but SharedReplacingMergeTree does.
+- b7f396a: Use ReplacingMergeTree(applied_at) instead of MergeTree() for the \_chkit_migrations journal table. This ensures the FINAL keyword works correctly on managed ClickHouse environments (e.g. ObsessionDB), where SharedMergeTree does not support FINAL but SharedReplacingMergeTree does.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.
@@ -47,7 +47,7 @@
 - 2eaaa5a: Generate row types as type aliases instead of interfaces to satisfy TypeScript's Record<string, unknown> assignability requirement. Fixes TypeScript error TS2322 when passing typed row arrays to ingest functions.
 - f719c50: Fix workspace:\* dependencies in published packages. Restores manual workspace version resolution before publish due to a bun publish bug (oven-sh/bun#24687) where workspace:\* references are not resolved in the published tarball.
 - a94a2a1: Move flag parsing and shared types to @chkit/core, split plugin-codegen into focused modules, and resolve lint warnings.
-- b7f396a: Use ReplacingMergeTree(applied_at) instead of MergeTree() for the \_chkit_migrations journal table. This ensures the FINAL keyword works correctly on ClickHouse Cloud, where SharedMergeTree does not support FINAL but SharedReplacingMergeTree does.
+- b7f396a: Use ReplacingMergeTree(applied_at) instead of MergeTree() for the \_chkit_migrations journal table. This ensures the FINAL keyword works correctly on managed ClickHouse environments (e.g. ObsessionDB), where SharedMergeTree does not support FINAL but SharedReplacingMergeTree does.
 - 9a54433: Add CODE_OF_CONDUCT.md and SECURITY.md governance documents, .env.example for development setup, and update package.json metadata for all packages.
 - a3a09cf: Rename plugin-typegen to plugin-codegen and add ingestion functions.
 - d983fdf: Rename internals and CLI binary from chkit to chkit.

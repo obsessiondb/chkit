@@ -48,7 +48,7 @@ async function waitForParts(
       // Sync replica state for the target table first, then check system.parts
       await db.query(`SELECT 1 FROM ${database}.${table} LIMIT 1 SETTINGS select_sequential_consistency = 1`)
     } catch {
-      // Table may not be visible yet on ClickHouse Cloud (DDL propagation)
+      // Table may not be visible yet on managed ClickHouse (DDL propagation)
       await new Promise((r) => setTimeout(r, 500))
       continue
     }
