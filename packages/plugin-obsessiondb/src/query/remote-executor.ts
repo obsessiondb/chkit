@@ -36,7 +36,7 @@ export function createRemoteExecutor(deps: {
       return res.data as T[]
     },
 
-    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }) {
+    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[]; compressed?: boolean }) {
       if (params.values.length === 0) return
       const columns = Object.keys(params.values[0]!)
       const rows = params.values
