@@ -36,10 +36,16 @@ export interface QueryStatus {
 
 export type { ClickHouseSettings }
 
+export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
+  table: string
+  values: T[]
+  compressed?: boolean
+}
+
 export interface ClickHouseExecutor {
   command(sql: string): Promise<void>
   query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
-  insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void>
+  insert<T extends Record<string, unknown>>(params: ClickHouseInsertParams<T>): Promise<void>
   listSchemaObjects(): Promise<SchemaObjectRef[]>
   listTableDetails(databases: string[]): Promise<IntrospectedTable[]>
 
@@ -111,6 +117,12 @@ export interface IntrospectedTable {
 
 type ClickHouseClient = ReturnType<typeof createClient>
 type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
+type ClickHouseClientOptions = {
+  compression?: {
+    request?: boolean
+    response?: boolean
+  }
+}
 
 export {
   parseEngineFromCreateTableQuery,
@@ -356,6 +368,7 @@ const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 export function createStatelessClickHouseClient(
   config: ClickHouseConfig,
   clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
+  options: ClickHouseClientOptions = {},
 ): ClickHouseClient {
   return createClient({
     url: config.url,
@@ -364,6 +377,7 @@ export function createStatelessClickHouseClient(
     database: config.database,
     application: CHKIT_APPLICATION_ID,
     clickhouse_settings: clickhouseSettings,
+    ...(options.compression ? { compression: options.compression } : {}),
   })
 }
 
@@ -377,6 +391,7 @@ export function createSessionClickHouseClient(
   config: ClickHouseConfig,
   clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
   sessionId = crypto.randomUUID(),
+  options: ClickHouseClientOptions = {},
 ): ClickHouseClient {
   return createClient({
     url: config.url,
@@ -386,13 +401,19 @@ export function createSessionClickHouseClient(
     session_id: sessionId,
     application: CHKIT_APPLICATION_ID,
     clickhouse_settings: clickhouseSettings,
+    ...(options.compression ? { compression: options.compression } : {}),
   })
 }
 
-function createExecutorWithClient(config: ClickHouseConfig, client: ClickHouseClient): ClickHouseExecutor {
+export function createExecutorWithClient(
+  config: ClickHouseConfig,
+  client: ClickHouseClient,
+  options: { createCompressedClient?: () => ClickHouseClient } = {},
+): ClickHouseExecutor {
   const profiler = getLogger(['chkit', 'profiling'])
 
   const fireAndForgetClient = createStatelessClickHouseClient(config, { wait_end_of_query: 0 })
+  let compressedClient: ClickHouseClient | undefined
 
   return {
     async command(sql: string): Promise<void> {
@@ -428,9 +449,20 @@ function createExecutorWithClient(config: ClickHouseConfig, client: ClickHouseCl
         wrapConnectionError(error, config.url)
       }
     },
-    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void> {
+    async insert<T extends Record<string, unknown>>(params: ClickHouseInsertParams<T>): Promise<void> {
       try {
-        const result = await client.insert({
+        let insertClient = client
+        if (params.compressed === true) {
+          if (!compressedClient) {
+            compressedClient = options.createCompressedClient?.() ?? createStatelessClickHouseClient(
+              config,
+              DEFAULT_CLICKHOUSE_SETTINGS,
+              { compression: { request: true } },
+            )
+          }
+          insertClient = compressedClient
+        }
+        const result = await insertClient.insert({
           table: params.table,
           values: params.values,
           format: 'JSONEachRow',
@@ -522,7 +554,7 @@ SETTINGS skip_unavailable_shards = 1`,
       }
     },
     async close(): Promise<void> {
-      await Promise.all([client.close(), fireAndForgetClient.close()])
+      await Promise.all([client.close(), fireAndForgetClient.close(), compressedClient?.close()])
     },
     async listSchemaObjects(): Promise<SchemaObjectRef[]> {
       const rows = await this.query<SystemTableRow>(
@@ -574,9 +606,31 @@ WHERE database IN (${quotedDatabases})`
 export function createClickHouseExecutor(config: ClickHouseConfig): ClickHouseExecutor {
   // Default executor is session-bound so DDL-heavy workflows run through a
   // single ClickHouse HTTP session. Do not issue concurrent queries through it.
-  return createExecutorWithClient(config, createSessionClickHouseClient(config))
+  const sessionId = crypto.randomUUID()
+  return createExecutorWithClient(
+    config,
+    createSessionClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, sessionId),
+    {
+      createCompressedClient: () => createSessionClickHouseClient(
+        config,
+        DEFAULT_CLICKHOUSE_SETTINGS,
+        sessionId,
+        { compression: { request: true } },
+      ),
+    },
+  )
 }
 
 export function createStatelessClickHouseExecutor(config: ClickHouseConfig): ClickHouseExecutor {
-  return createExecutorWithClient(config, createStatelessClickHouseClient(config))
+  return createExecutorWithClient(
+    config,
+    createStatelessClickHouseClient(config),
+    {
+      createCompressedClient: () => createStatelessClickHouseClient(
+        config,
+        DEFAULT_CLICKHOUSE_SETTINGS,
+        { compression: { request: true } },
+      ),
+    },
+  )
 }

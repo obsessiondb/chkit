@@ -43,6 +43,8 @@ bunx chkit codegen
 
 Codegen also runs automatically after `chkit generate` when `runOnGenerate` is enabled (default).
 
+When `emitIngest` is enabled, generated ingest helpers gzip-compress request bodies by default. Pass `{ compressed: false }` as the third argument to disable compression for a specific insert.
+
 ## Documentation
 
 See the [chkit documentation](https://chkit.obsessiondb.com).
