@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   createClickHouseExecutor,
+  createExecutorWithClient,
   createSessionClickHouseClient,
   createStatelessClickHouseExecutor,
   createStatelessClickHouseClient,
@@ -15,6 +16,34 @@ import {
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
 } from './index'
+
+type InsertCall = {
+  client: string
+  table: string
+  values: Array<Record<string, unknown>>
+}
+
+function createMockClient(name: string, calls: InsertCall[]) {
+  return {
+    async command() {
+      return { query_id: `${name}-command` }
+    },
+    async query() {
+      return {
+        query_id: `${name}-query`,
+        response_headers: {},
+        async json() {
+          return []
+        },
+      }
+    },
+    async insert(params: { table: string; values: Array<Record<string, unknown>> }) {
+      calls.push({ client: name, table: params.table, values: params.values })
+      return { query_id: `${name}-insert` }
+    },
+    async close() {},
+  } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+}
 
 describe('@chkit/clickhouse smoke', () => {
   test('creates executor with command/query methods', () => {
@@ -51,6 +80,59 @@ describe('@chkit/clickhouse smoke', () => {
     expect(typeof session.query).toBe('function')
 
     await Promise.all([stateless.close(), session.close()])
+  })
+
+  test('uses compressed client for compressed inserts', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      createMockClient('plain', calls),
+      { createCompressedClient: () => createMockClient('compressed', calls) },
+    )
+
+    await executor.insert({ table: 'default.users', values: [{ id: 1 }], compressed: true })
+
+    expect(calls).toEqual([
+      { client: 'compressed', table: 'default.users', values: [{ id: 1 }] },
+    ])
+    await executor.close()
+  })
+
+  test('uses plain client when insert compression is false or omitted', async () => {
+    const calls: InsertCall[] = []
+    let compressedClientCreated = false
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      createMockClient('plain', calls),
+      {
+        createCompressedClient: () => {
+          compressedClientCreated = true
+          return createMockClient('compressed', calls)
+        },
+      },
+    )
+
+    await executor.insert({ table: 'default.users', values: [{ id: 1 }] })
+    await executor.insert({ table: 'default.users', values: [{ id: 2 }], compressed: false })
+
+    expect(compressedClientCreated).toBe(false)
+    expect(calls).toEqual([
+      { client: 'plain', table: 'default.users', values: [{ id: 1 }] },
+      { client: 'plain', table: 'default.users', values: [{ id: 2 }] },
+    ])
+    await executor.close()
   })
 
   test('infers schema kind from ClickHouse engine', () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 
@@ -807,6 +808,51 @@ describe('plugin runtime', () => {
       expect(payload.mode).toBe('write')
       expect(payload.outFile).toBe(outFile)
       expect(existsSync(outFile)).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chkit codegen writes executable compressed ingest helpers', async () => {
+    const fixture = await createFixture()
+    const outFile = join(fixture.dir, 'src/generated/chkit-types.ts')
+    const ingestOutFile = join(fixture.dir, 'src/generated/chkit-ingest.ts')
+    try {
+      await writeFile(
+        fixture.configPath,
+        `import { defineConfig } from '${CORE_ENTRY}'\nimport { codegen } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default defineConfig({\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [codegen({ outFile: './src/generated/chkit-types.ts', emitIngest: true, ingestOutFile: './src/generated/chkit-ingest.ts' })],\n})\n`,
+        'utf8'
+      )
+
+      const result = runCli(['codegen', '--config', fixture.configPath, '--json'])
+      expect(result.exitCode).toBe(0)
+      expect(existsSync(outFile)).toBe(true)
+      expect(existsSync(ingestOutFile)).toBe(true)
+
+      const generated = await import(pathToFileURL(ingestOutFile).href)
+      const insertCalls: Array<{
+        table: string
+        values: Array<Record<string, unknown>>
+        compressed?: boolean
+      }> = []
+      const ingestor = {
+        async insert(params: {
+          table: string
+          values: Array<Record<string, unknown>>
+          compressed?: boolean
+        }) {
+          insertCalls.push(params)
+        },
+      }
+      const rows = [{ id: '1', email: 'ada@example.com' }]
+
+      await generated.ingestAppUsers(ingestor, rows)
+      await generated.ingestAppUsers(ingestor, rows, { compressed: false })
+
+      expect(insertCalls).toEqual([
+        { table: 'app.users', values: rows, compressed: true },
+        { table: 'app.users', values: rows, compressed: false },
+      ])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

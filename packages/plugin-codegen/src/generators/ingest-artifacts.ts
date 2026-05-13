@@ -40,17 +40,18 @@ function renderIngestFunction(
     lines.push(`export async function ${funcName}(`)
     lines.push(`  ingestor: Ingestor,`)
     lines.push(`  rows: ${interfaceName}[],`)
-    lines.push(`  options?: { validate?: boolean }`)
+    lines.push(`  options?: IngestOptions`)
     lines.push(`): Promise<void> {`)
     lines.push(`  const data = options?.validate ? rows.map(row => ${interfaceName}Schema.parse(row)) : rows`)
-    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: data })`)
+    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: data, compressed: options?.compressed ?? true })`)
     lines.push(`}`)
   } else {
     lines.push(`export async function ${funcName}(`)
     lines.push(`  ingestor: Ingestor,`)
-    lines.push(`  rows: ${interfaceName}[]`)
+    lines.push(`  rows: ${interfaceName}[],`)
+    lines.push(`  options?: IngestOptions`)
     lines.push(`): Promise<void> {`)
-    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: rows })`)
+    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: rows, compressed: options?.compressed ?? true })`)
     lines.push(`}`)
   }
 
@@ -93,7 +94,14 @@ export function generateIngestArtifacts(
 
   lines.push('')
   lines.push('export interface Ingestor {')
-  lines.push('  insert(params: { table: string; values: Record<string, unknown>[] }): Promise<void>')
+  lines.push('  insert(params: { table: string; values: Record<string, unknown>[]; compressed?: boolean }): Promise<void>')
+  lines.push('}')
+  lines.push('')
+  lines.push('export interface IngestOptions {')
+  lines.push('  compressed?: boolean')
+  if (normalized.emitZod) {
+    lines.push('  validate?: boolean')
+  }
   lines.push('}')
 
   for (const entry of resolved) {
