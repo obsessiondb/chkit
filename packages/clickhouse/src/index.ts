@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import { createClient, type ClickHouseSettings } from '@clickhouse/client'
 import {
   normalizeSQLFragment,
@@ -18,6 +19,9 @@ import {
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
 } from './create-table-parser.js'
+
+const pkg = createRequire(import.meta.url)('../package.json') as { version: string }
+const CHKIT_APPLICATION_ID = `chkit/${pkg.version}`
 
 export interface QueryStatus {
   status: 'running' | 'finished' | 'failed' | 'unknown'
@@ -358,6 +362,7 @@ export function createStatelessClickHouseClient(
     username: config.username,
     password: config.password,
     database: config.database,
+    application: CHKIT_APPLICATION_ID,
     clickhouse_settings: clickhouseSettings,
   })
 }
@@ -379,6 +384,7 @@ export function createSessionClickHouseClient(
     password: config.password,
     database: config.database,
     session_id: sessionId,
+    application: CHKIT_APPLICATION_ID,
     clickhouse_settings: clickhouseSettings,
   })
 }
@@ -399,6 +405,7 @@ function createExecutorWithClient(config: ClickHouseConfig, client: ClickHouseCl
             url: config.url,
             username: config.username,
             password: config.password,
+            application: CHKIT_APPLICATION_ID,
             clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
           })
           try {
