@@ -98,7 +98,7 @@ export function createRemoteExecutor(deps: {
 								const val = row[col]
 								if (val === null || val === undefined) return 'NULL'
 								if (typeof val === 'number') return String(val)
-								return `'${String(val).replace(/'/g, "\\'")}'`
+								return `'${String(val).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
 							})
 							.join(', ')})`,
 				)
