@@ -9,6 +9,7 @@
  *      or detects already-bumped versions from a prior run
  *   4. Runs quality gates (typecheck, lint, test, build)
  *   5. Publishes all public workspace packages via `bun publish`
+ *      and syncs npm dist-tags with the documented install commands
  *   6. Commits version changes and pushes to origin/main
  *
  * Usage: bun run ./scripts/manual-release.ts [--dry-run]
@@ -47,9 +48,16 @@ type PackageJson = {
 	devDependencies?: Record<string, string>
 }
 
+type ReleasedPackage = {
+	name: string
+	version: string
+}
+
 const TMP_DIR = resolve('.tmp')
 const LOG_FILE = resolve(TMP_DIR, `release-${Date.now()}.log`)
 const STATUS_FILE = resolve(TMP_DIR, `release-status-${Date.now()}.json`)
+const PUBLISH_TAG = 'beta'
+const DOCUMENTED_INSTALL_TAG = 'latest'
 
 export async function main(): Promise<void> {
 	mkdirSync(TMP_DIR, { recursive: true })
@@ -309,6 +317,7 @@ function publishWorkspacePackages(otp: string): void {
 
 	let published = 0
 	let skipped = 0
+	const releasedPackages: ReleasedPackage[] = []
 
 	for (const dir of packageDirs) {
 		const pkgJsonPath = join(packagesDir, dir, 'package.json')
@@ -320,6 +329,7 @@ function publishWorkspacePackages(otp: string): void {
 		if (isVersionPublished(pkg.name, pkg.version)) {
 			logLine(`Skipping ${pkg.name}@${pkg.version} (already published)`)
 			skipped++
+			releasedPackages.push({ name: pkg.name, version: pkg.version })
 			continue
 		}
 
@@ -334,10 +344,11 @@ function publishWorkspacePackages(otp: string): void {
 			logLine(`Publishing ${pkg.name}@${pkg.version}...`)
 			runCommand(
 				'bun',
-				['publish', '--tag', 'beta', '--access', 'public', '--otp', otp],
+				['publish', '--tag', PUBLISH_TAG, '--access', 'public', '--otp', otp],
 				{ cwd: join(packagesDir, dir) },
 			)
 			published++
+			releasedPackages.push({ name: pkg.name, version: pkg.version })
 		} finally {
 			// Restore original package.json with workspace:* references
 			if (resolved) {
@@ -346,6 +357,8 @@ function publishWorkspacePackages(otp: string): void {
 		}
 	}
 
+	syncDocumentedInstallDistTags(releasedPackages, otp)
+
 	if (published === 0 && skipped > 0) {
 		fail(
 			`All ${skipped} package version(s) are already published on npm. Nothing to do.`,
@@ -353,6 +366,32 @@ function publishWorkspacePackages(otp: string): void {
 	}
 
 	logLine(`Published ${published} package(s), skipped ${skipped}.`)
+}
+
+/**
+ * The packages are still in beta, but the public docs use unqualified installs
+ * like `bunx chkit` and `bun add chkit @chkit/core`. Keep npm's `latest` tag
+ * aligned with the beta release so those commands do not resolve stale builds.
+ */
+function syncDocumentedInstallDistTags(
+	packages: ReleasedPackage[],
+	otp: string,
+): void {
+	if (packages.length === 0) return
+
+	for (const pkg of packages) {
+		logLine(
+			`Syncing ${DOCUMENTED_INSTALL_TAG} dist-tag for ${pkg.name}@${pkg.version}...`,
+		)
+		runCommand('npm', [
+			'dist-tag',
+			'add',
+			`${pkg.name}@${pkg.version}`,
+			DOCUMENTED_INSTALL_TAG,
+			'--otp',
+			otp,
+		])
+	}
 }
 
 /**
