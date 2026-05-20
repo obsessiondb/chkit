@@ -8,8 +8,6 @@ import type {
   SchemaDefinition,
 } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import type { PluginRuntime } from './runtime/plugin-runtime.js'
-import type { TableScope } from './runtime/table-scope.js'
 
 export {
   defineFlags,
@@ -21,6 +19,79 @@ export {
   type InferFlags,
   type ParsedFlags,
 } from '@chkit/core'
+
+export interface TableScope {
+  enabled: boolean
+  selector?: string
+  matchedTables: string[]
+  matchCount: number
+}
+
+export interface LoadedPlugin {
+  options: Record<string, unknown>
+  plugin: ChxPlugin
+}
+
+export interface PluginRuntime {
+  plugins: ReadonlyArray<LoadedPlugin>
+  getCommand(
+    pluginName: string,
+    commandName: string,
+  ): { command: ChxPluginCommand; plugin: LoadedPlugin } | null
+  resolveContext(
+    input: Omit<ChxGetContextInput, 'defaults'>,
+  ): Promise<PluginContext>
+  disposeContext(ctx: PluginContext): Promise<void>
+  runOnInit(context: Omit<ChxOnInitContext, 'options'>): Promise<void>
+  runOnComplete(
+    context: Omit<ChxOnCompleteContext, 'options' | 'exitCode'> & {
+      exitCode?: number
+    },
+  ): Promise<void>
+  runOnConfigLoaded(
+    context: Omit<ChxOnConfigLoadedContext, 'options' | 'tableScope'> & {
+      tableScope?: TableScope
+    },
+  ): Promise<void>
+  runOnSchemaLoaded(
+    context: ChxOnSchemaLoadedContext,
+  ): Promise<SchemaDefinition[]>
+  runOnPlanCreated(
+    context: Omit<ChxOnPlanCreatedContext, 'plan' | 'tableScope'> & {
+      tableScope?: TableScope
+    },
+    plan: MigrationPlan,
+  ): Promise<MigrationPlan>
+  runOnBeforeApply(context: ChxOnBeforeApplyContext): Promise<string[]>
+  runOnAfterApply(context: ChxOnAfterApplyContext): Promise<void>
+  runOnCheck(
+    context: Omit<ChxOnCheckContext, 'options' | 'tableScope'> & {
+      tableScope?: TableScope
+    },
+  ): Promise<ChxOnCheckResult[]>
+  runOnCheckReport(
+    results: ChxOnCheckResult[],
+    print: (line: string) => void,
+  ): Promise<void>
+  runOnBeforePluginCommand(
+    pluginName: string,
+    commandName: string,
+    context: Omit<
+      ChxOnBeforePluginCommandContext,
+      'targetPlugin' | 'command' | 'options'
+    >,
+  ): Promise<ChxOnBeforePluginCommandResult>
+  runPluginCommand(
+    pluginName: string,
+    commandName: string,
+    context: Omit<
+      ChxPluginCommandContext,
+      'pluginName' | 'options' | 'tableScope'
+    > & {
+      tableScope?: TableScope
+    },
+  ): Promise<number>
+}
 
 export interface PluginContext {
   executor: ClickHouseExecutor

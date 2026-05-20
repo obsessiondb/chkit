@@ -5,17 +5,14 @@ import type {
   TableDefinition,
 } from '@chkit/core'
 
+import type { TableScope } from '../plugins.js'
+
+export type { TableScope } from '../plugins.js'
+
 interface ParsedTableSelector {
   database?: string
   mode: 'exact' | 'prefix'
   value: string
-}
-
-export interface TableScope {
-  enabled: boolean
-  selector?: string
-  matchedTables: string[]
-  matchCount: number
 }
 
 interface TableScopeFilterResult {

@@ -6,13 +6,12 @@ import {
 	UnknownFlagError,
 } from '@chkit/core'
 
-import { typedFlags } from '../plugins.js'
+import { typedFlags, type PluginRuntime } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { resolveDirs } from './config.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
 import { printOutput } from './json-output.js'
-import type { PluginRuntime } from './plugin-runtime.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 
