@@ -108,6 +108,7 @@ export interface ChxOnInitContext {
   configPath: string
   isInteractive: boolean
   jsonMode: boolean
+  flags: ParsedFlags
   options: Record<string, unknown>
 }
 
