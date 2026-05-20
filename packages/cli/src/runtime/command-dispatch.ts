@@ -241,6 +241,28 @@ async function runPluginCommand(input: {
 	if (exitCode !== 0) process.exitCode = exitCode
 }
 
+function parseArgsForCoreCommand(input: {
+	commandName: string
+	argv: string[]
+	registry: CommandRegistry
+}): { flags: ParsedFlags; positionals: string[] } | null {
+	const argsAfterCommand = input.argv.slice(1)
+
+	if (input.commandName === 'plugin') {
+		// The `plugin` command forwards unparsed args to a target plugin command,
+		// so we can't use parseFlags here — only strip the known global flags
+		// and pass the rest through as positionals.
+		const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
+		const flags: ParsedFlags = {}
+		if (jsonMode) flags['--json'] = true
+		if (tableSelector) flags['--table'] = tableSelector
+		return { flags, positionals: rest }
+	}
+
+	const allFlags = input.registry.resolveFlags(input.commandName)
+	return parseCommandArgs(input.commandName, argsAfterCommand, allFlags)
+}
+
 async function runCoreOrBuiltinCommand(input: {
 	argv: string[]
 	commandName: string
@@ -250,47 +272,14 @@ async function runCoreOrBuiltinCommand(input: {
 	configPath: string
 	pluginRuntime: PluginRuntime
 }): Promise<void> {
-	if (input.commandName === 'plugin') {
-		const { jsonMode, tableSelector } = stripGlobalFlags(input.argv.slice(1))
-		const flags: ParsedFlags = {}
-		if (jsonMode) flags['--json'] = true
-		if (tableSelector) flags['--table'] = tableSelector
-
-		const dirs = resolveDirs(input.config)
-		if (!input.resolved.run)
-			throw new Error(`Command '${input.commandName}' has no run handler`)
-		const ctx = await input.pluginRuntime.resolveContext({
-			config: input.config,
-			configPath: input.configPath,
-			command: input.commandName,
-			flags,
-		})
-		try {
-			await input.resolved.run({
-				command: input.commandName,
-				flags,
-				positionals: [],
-				config: input.config,
-				configPath: input.configPath,
-				dirs,
-				pluginRuntime: input.pluginRuntime,
-				ctx,
-			})
-		} finally {
-			await input.pluginRuntime.disposeContext(ctx)
-		}
-		return
-	}
-
-	const allFlags = input.registry.resolveFlags(input.commandName)
-	const argsAfterCommand = input.argv.slice(1)
-	const parsed = parseCommandArgs(input.commandName, argsAfterCommand, allFlags)
+	const parsed = parseArgsForCoreCommand(input)
 	if (!parsed) return
 	const { flags, positionals } = parsed
 
-	const dirs = resolveDirs(input.config)
 	if (!input.resolved.run)
 		throw new Error(`Command '${input.commandName}' has no run handler`)
+
+	const dirs = resolveDirs(input.config)
 	const ctx = await input.pluginRuntime.resolveContext({
 		config: input.config,
 		configPath: input.configPath,

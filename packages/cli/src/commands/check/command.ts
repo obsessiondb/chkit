@@ -1,6 +1,5 @@
 import { mkdir } from 'node:fs/promises'
 
-import { summarizeDriftReasons } from '../drift/compare.js'
 import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
 import { debug } from '../../runtime/debug.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
@@ -9,19 +8,26 @@ import { createJournalStore } from '../../runtime/journal-store.js'
 import { findChecksumMismatches, listMigrations, readSnapshot } from '../../runtime/migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
 import { buildDriftPayload } from '../drift/payload.js'
+import {
+  emitCheckJson,
+  evaluateCheck,
+  renderCheckText,
+  resolvePolicy,
+  type CheckInputs,
+} from './output.js'
+
+const STRICT_FLAG = { name: '--strict', type: 'boolean', description: 'Enable all policy checks' } as const
 
 export const checkCommand: CommandDef = {
   name: 'check',
   description: 'Run policy checks for CI and release gates',
-  flags: [
-    { name: '--strict', type: 'boolean', description: 'Enable all policy checks' },
-  ],
+  flags: [STRICT_FLAG],
   run: cmdCheck,
 }
 
 async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
   const { flags, config, configPath, dirs, pluginRuntime, ctx } = runCtx
-  const f = typedFlags(flags, [...GLOBAL_FLAGS, { name: '--strict', type: 'boolean', description: 'Enable all policy checks' }] as const)
+  const f = typedFlags(flags, [...GLOBAL_FLAGS, STRICT_FLAG] as const)
   const strict = f['--strict'] === true
   const jsonMode = f['--json'] === true
   const tableSelector = f['--table']
@@ -36,15 +42,15 @@ async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
   const database = config.clickhouse?.database
 
   const journalStore = createJournalStore(db)
-
   const files = await listMigrations(migrationsDir)
   const journal = await journalStore.readJournal()
   const databaseMissing = journalStore.databaseMissing
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
-  const pending = files.filter((f) => !appliedNames.has(f))
+  const pending = files.filter((file) => !appliedNames.has(file))
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
+
   if (tableScope.enabled && tableScope.matchCount === 0) {
     const payload = {
       strict,
@@ -67,13 +73,9 @@ async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
     }
     return
   }
-  const drift = snapshot ? await buildDriftPayload(config, metaDir, snapshot, tableScope, db) : null
 
-  const policy = {
-    failOnPending: strict ? true : config.check?.failOnPending ?? true,
-    failOnChecksumMismatch: strict ? true : config.check?.failOnChecksumMismatch ?? true,
-    failOnDrift: strict ? true : config.check?.failOnDrift ?? true,
-  }
+  const drift = snapshot ? await buildDriftPayload(config, metaDir, snapshot, tableScope, db) : null
+  const policy = resolvePolicy(strict, config.check)
 
   await pluginRuntime.runOnConfigLoaded({
     command: 'check',
@@ -91,102 +93,33 @@ async function cmdCheck(runCtx: CommandRunContext): Promise<void> {
     flags,
   })
 
-  const failedChecks: string[] = []
-  if (policy.failOnPending && pending.length > 0) failedChecks.push('pending_migrations')
-  if (policy.failOnChecksumMismatch && checksumMismatches.length > 0) failedChecks.push('checksum_mismatch')
-  if (policy.failOnDrift && drift?.drifted) failedChecks.push('schema_drift')
-  for (const result of pluginResults) {
-    const hasErrorFinding = result.findings.some((finding) => finding.severity === 'error')
-    if (result.evaluated && !result.ok && hasErrorFinding) {
-      failedChecks.push(`plugin:${result.plugin}`)
-    }
-  }
-  debug('check', `results: pending=${pending.length}, checksumMismatches=${checksumMismatches.length}, drift=${drift?.drifted ?? 'n/a'}, pluginChecks=${pluginResults.length}, failedChecks=[${failedChecks.join(', ')}]`)
-  const ok = failedChecks.length === 0
-  const driftReasonSummary = drift
-    ? summarizeDriftReasons({
-        objectDrift: drift.objectDrift,
-        tableDrift: drift.tableDrift,
-      })
-    : { counts: {}, total: 0, object: 0, table: 0 }
-
-  const payload = {
+  const inputs: CheckInputs = {
     strict,
     policy,
-    ok,
-    failedChecks,
-    pendingCount: pending.length,
-    checksumMismatchCount: checksumMismatches.length,
-    drifted: drift?.drifted ?? false,
-    driftEvaluated: drift !== null,
-    driftReasonCounts: driftReasonSummary.counts,
-    driftReasonTotals: {
-      total: driftReasonSummary.total,
-      object: driftReasonSummary.object,
-      table: driftReasonSummary.table,
-    },
-    plugins: Object.fromEntries(
-      pluginResults.map((result) => [
-        result.plugin,
-        {
-          evaluated: result.evaluated,
-          ok: result.ok,
-          findingCodes: result.findings.map((finding) => finding.code),
-          ...(result.metadata ?? {}),
-        },
-      ])
-    ),
-    scope: tableScope,
-    ...(databaseMissing ? { databaseMissing: true, database } : {}),
+    pending,
+    checksumMismatches,
+    drift,
+    pluginResults,
+    tableScope,
+    databaseMissing,
+    database,
   }
+  const result = evaluateCheck(inputs)
+
+  debug(
+    'check',
+    `results: pending=${pending.length}, checksumMismatches=${checksumMismatches.length}, drift=${drift?.drifted ?? 'n/a'}, pluginChecks=${pluginResults.length}, failedChecks=[${result.failedChecks.join(', ')}]`,
+  )
 
   if (jsonMode) {
-    emitJson('check', payload)
-    if (!ok) process.exitCode = 1
+    emitCheckJson(inputs, result)
     return
   }
 
-  if (databaseMissing) {
-    console.log(`\u26A0 Database "${database}" does not exist on the target server.`)
-    console.log('  It will be created when you run: chkit migrate --apply\n')
-  }
-
-  console.log(`Check status: ${ok ? 'ok' : 'failed'}`)
-  console.log(
-    `Policy: pending=${policy.failOnPending ? 'on' : 'off'}, checksum=${policy.failOnChecksumMismatch ? 'on' : 'off'}, drift=${policy.failOnDrift ? 'on' : 'off'}`
-  )
-  console.log(`Pending migrations: ${pending.length}`)
-  console.log(`Checksum mismatches: ${checksumMismatches.length}`)
-  if (tableScope.enabled) {
-    console.log(`Table scope: ${tableScope.selector ?? ''} (${tableScope.matchCount} matched)`)
-    for (const table of tableScope.matchedTables) console.log(`- ${table}`)
-  }
-  if (drift === null) {
-    console.log('Schema drift: not evaluated (missing snapshot or clickhouse config)')
-  } else {
-    console.log(`Schema drift: ${drift.drifted ? 'yes' : 'no'}`)
-    const summary = summarizeDriftReasons({
-      objectDrift: drift.objectDrift,
-      tableDrift: drift.tableDrift,
-    })
-    console.log(
-      `Drift reasons: total=${summary.total}, object=${summary.object}, table=${summary.table}`
-    )
-  }
+  renderCheckText(inputs, result)
   if (pluginResults.length > 0) {
-    console.log('Plugin checks:')
-    for (const result of pluginResults) {
-      const findingCodes = result.findings.map((finding) => finding.code)
-      console.log(
-        `- ${result.plugin}: ${result.ok ? 'ok' : 'failed'}${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`
-      )
-    }
     await pluginRuntime.runOnCheckReport(pluginResults, (line) => {
       console.log(line)
     })
-  }
-  if (!ok) {
-    console.log(`Failed checks: ${failedChecks.join(', ')}`)
-    process.exitCode = 1
   }
 }

@@ -12,29 +12,13 @@ export const pluginCommand: CommandDef = {
   run: cmdPlugin,
 }
 
-const GLOBAL_STRING_FLAGS = new Set(['--config', '--table'])
-const GLOBAL_BOOLEAN_FLAGS = new Set(['--json', '-h', '--help'])
-
 async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
-  const { flags, config, configPath, pluginRuntime } = ctx
+  const { flags, positionals, config, configPath, pluginRuntime } = ctx
   const jsonMode = flags['--json'] === true
 
-  const argv = process.argv.slice(2)
-  const pluginIdx = argv.indexOf('plugin')
-  const afterPlugin = pluginIdx >= 0 ? argv.slice(pluginIdx + 1) : []
-  const filtered: string[] = []
-  for (let i = 0; i < afterPlugin.length; i++) {
-    const token = afterPlugin[i] as string
-    if (GLOBAL_BOOLEAN_FLAGS.has(token)) continue
-    if (GLOBAL_STRING_FLAGS.has(token)) {
-      i++
-      continue
-    }
-    filtered.push(token)
-  }
-  const pluginName = filtered[0]
-  const commandName = filtered[1]
-  const commandArgs = filtered.slice(2)
+  const pluginName = positionals[0]
+  const commandName = positionals[1]
+  const commandArgs = positionals.slice(2)
 
   if (pluginRuntime.plugins.length === 0) {
     if (jsonMode) {

@@ -1,29 +1,31 @@
-import { mkdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir } from 'node:fs/promises'
 import process from 'node:process'
-import { createInterface } from 'node:readline/promises'
 
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
-import { waitForDDLPropagation } from '@chkit/clickhouse'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
 import {
-  checksumSQL,
   findChecksumMismatches,
   listMigrations,
   readSnapshot,
   type MigrationJournalEntry,
 } from '../../runtime/migration-store.js'
 import {
-  collectDestructiveOperationMarkers,
-  extractExecutableStatements,
-  extractMigrationOperationSummaries,
-  migrationContainsDangerOperation,
-  type DestructiveOperationMarker,
-} from '../../runtime/safety-markers.js'
-import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
+  resolveTableScope,
+  tableKeysFromDefinitions,
+} from '../../runtime/table-scope.js'
 import { debug } from '../../runtime/debug.js'
+
+import { applyMigration } from './apply.js'
+import { scanDestructive } from './destructive.js'
+import {
+  confirmApply,
+  confirmDestructiveExecution,
+  isBackgroundOrCI,
+  printDestructiveOperationDetails,
+} from './prompts.js'
+import { filterPendingByScope } from './scope.js'
 
 const MIGRATE_FLAGS = defineFlags([
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
@@ -36,63 +38,6 @@ export const migrateCommand: CommandDef = {
   description: 'Review or execute pending migrations',
   flags: MIGRATE_FLAGS,
   run: cmdMigrate,
-}
-
-function isBackgroundOrCI(): boolean {
-  return process.env.CI === '1' || process.env.CI === 'true' || !process.stdin.isTTY || !process.stdout.isTTY
-}
-
-function printDestructiveOperationDetails(markers: DestructiveOperationMarker[]): void {
-  console.log('Destructive operations detected:')
-  for (const [index, marker] of markers.entries()) {
-    console.log(`${index + 1}. ${marker.migration}`)
-    console.log(`   operation: ${marker.type}`)
-    console.log(`   key: ${marker.key}`)
-    console.log(`   warning: ${marker.warningCode}`)
-    console.log(`   reason: ${marker.reason}`)
-    console.log(`   impact: ${marker.impact}`)
-    console.log(`   recommendation: ${marker.recommendation}`)
-  }
-}
-
-async function confirmDestructiveExecution(markers: DestructiveOperationMarker[]): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout })
-  try {
-    printDestructiveOperationDetails(markers)
-    console.log('')
-    console.log('Type "yes" to continue. Any other input cancels.')
-    const response = await rl.question('Apply destructive operations? [no/yes]: ')
-    return response.trim().toLowerCase() === 'yes'
-  } finally {
-    rl.close()
-  }
-}
-
-async function filterPendingByScope(
-  migrationsDir: string,
-  pending: string[],
-  selectedTables: ReadonlySet<string>
-): Promise<string[]> {
-  const selectedDatabases = new Set([...selectedTables].map((table) => table.split('.')[0] ?? ''))
-
-  const inScope: string[] = []
-  for (const file of pending) {
-    const sql = await readFile(join(migrationsDir, file), 'utf8')
-    const operations = extractMigrationOperationSummaries(sql)
-    const matches = operations.some((operation) => {
-      const tableKey = tableKeyFromOperationKey(operation.key)
-      if (tableKey) return selectedTables.has(tableKey)
-
-      const database = databaseKeyFromOperationKey(operation.key)
-      if (database) return selectedDatabases.has(database)
-
-      return false
-    })
-
-    if (matches) inScope.push(file)
-  }
-
-  return inScope
 }
 
 async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
@@ -110,10 +55,10 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
   const db = ctx.executor
-
   const journalStore = createJournalStore(db)
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
+  const mode = executeRequested ? 'execute' : 'plan'
 
   await pluginRuntime.runOnConfigLoaded({
     command: 'migrate',
@@ -127,17 +72,15 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
   const files = await listMigrations(migrationsDir)
   const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
-  const pendingAll = files.filter((f) => !appliedNames.has(f))
+  const pendingAll = files.filter((file) => !appliedNames.has(file))
   debug('migrate', `migrations: total=${files.length}, applied=${journal.applied.length}, pending=${pendingAll.length}`)
+
   const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
   if (checksumMismatches.length > 0) {
     debug('migrate', `checksum mismatches: ${checksumMismatches.map((m) => m.name).join(', ')}`)
-  }
-
-  if (checksumMismatches.length > 0) {
     if (jsonMode) {
       emitJson('migrate', {
-        mode: executeRequested ? 'execute' : 'plan',
+        mode,
         scope: tableScope,
         error: 'Checksum mismatch detected on applied migrations',
         checksumMismatches,
@@ -146,16 +89,14 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
       return
     }
     throw new Error(
-      `Checksum mismatch detected on applied migrations: ${checksumMismatches
-        .map((item) => item.name)
-        .join(', ')}`
+      `Checksum mismatch detected on applied migrations: ${checksumMismatches.map((item) => item.name).join(', ')}`,
     )
   }
 
   if (tableScope.enabled && tableScope.matchCount === 0) {
     if (jsonMode) {
       emitJson('migrate', {
-        mode: executeRequested ? 'execute' : 'plan',
+        mode,
         scope: tableScope,
         pending: [],
         applied: [],
@@ -173,26 +114,15 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
 
   if (pending.length === 0) {
     if (jsonMode) {
-      emitJson('migrate', {
-        mode: executeRequested ? 'execute' : 'plan',
-        scope: tableScope,
-        pending: [],
-        applied: [],
-      })
+      emitJson('migrate', { mode, scope: tableScope, pending: [], applied: [] })
     } else {
       console.log('No pending migrations.')
     }
     return
   }
 
-  const planned = {
-    mode: executeRequested ? 'execute' : 'plan',
-    scope: tableScope,
-    pending,
-  }
-
   if (jsonMode && !executeRequested) {
-    emitJson('migrate', planned)
+    emitJson('migrate', { mode, scope: tableScope, pending })
     return
   }
 
@@ -205,8 +135,7 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
     for (const file of pending) console.log(`- ${file}`)
   }
 
-  let shouldExecute = executeRequested
-  if (!shouldExecute) {
+  if (!executeRequested) {
     if (isBackgroundOrCI() || jsonMode) {
       if (!jsonMode) {
         console.log('\nPlan only. Re-run with --apply to apply and journal these migrations.')
@@ -214,34 +143,16 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
       return
     }
 
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    try {
-      console.log('')
-      console.log('Type "yes" to continue. Any other input cancels.')
-      const response = await rl.question('Apply pending migrations now? [no/yes]: ')
-      shouldExecute = response.trim().toLowerCase() === 'yes'
-    } finally {
-      rl.close()
-    }
-
-    if (!shouldExecute) {
+    const confirmed = await confirmApply()
+    if (!confirmed) {
       console.log('Migration apply cancelled by user.')
       return
     }
   }
 
-  const destructiveMigrations: string[] = []
-  const destructiveOperations: DestructiveOperationMarker[] = []
-  for (const file of pending) {
-    const sql = await readFile(join(migrationsDir, file), 'utf8')
-    if (migrationContainsDangerOperation(sql)) {
-      destructiveMigrations.push(file)
-      destructiveOperations.push(...collectDestructiveOperationMarkers(file, sql))
-    }
-  }
-
+  const destructive = await scanDestructive(migrationsDir, pending)
   let destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
-  if (destructiveMigrations.length > 0 && !destructiveAllowed) {
+  if (destructive.migrations.length > 0 && !destructiveAllowed) {
     const error =
       'Blocked destructive migration execution. Re-run with --allow-destructive or set safety.allowDestructive=true after review.'
     if (jsonMode) {
@@ -249,89 +160,54 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
         mode: 'execute',
         scope: tableScope,
         error,
-        destructiveMigrations,
-        destructiveOperations,
+        destructiveMigrations: destructive.migrations,
+        destructiveOperations: destructive.operations,
       })
       process.exitCode = 3
       return
     }
 
     if (isBackgroundOrCI()) {
-      printDestructiveOperationDetails(destructiveOperations)
+      printDestructiveOperationDetails(destructive.operations)
       throw new Error(
-        `${error}\nDestructive migrations: ${destructiveMigrations.join(', ')}\n` +
-          'Non-interactive run detected. Pass --allow-destructive to proceed.'
+        `${error}\nDestructive migrations: ${destructive.migrations.join(', ')}\n` +
+          'Non-interactive run detected. Pass --allow-destructive to proceed.',
       )
     }
 
-    const confirmed = await confirmDestructiveExecution(destructiveOperations)
+    const confirmed = await confirmDestructiveExecution(destructive.operations)
     if (!confirmed) {
       throw new Error(
-        `Destructive migration cancelled by user.\nDestructive migrations: ${destructiveMigrations.join(', ')}`
+        `Destructive migration cancelled by user.\nDestructive migrations: ${destructive.migrations.join(', ')}`,
       )
     }
     destructiveAllowed = true
   }
 
-  if (destructiveMigrations.length > 0 && !destructiveAllowed) {
+  if (destructive.migrations.length > 0 && !destructiveAllowed) {
     throw new Error('Blocked destructive migration execution.')
   }
 
   const appliedNow: MigrationJournalEntry[] = []
-
   for (const file of pending) {
-    debug('migrate', `applying ${file}`)
-    const fullPath = join(migrationsDir, file)
-    const sql = await readFile(fullPath, 'utf8')
-    const parsedStatements = extractExecutableStatements(sql)
-    const operationSummaries = extractMigrationOperationSummaries(sql)
-    debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
-    const statements = await pluginRuntime.runOnBeforeApply({
-      command: 'migrate',
+    const entry = await applyMigration({
+      db,
+      journalStore,
+      pluginRuntime,
       config,
       tableScope,
       flags,
-      migration: file,
-      sql,
-      statements: parsedStatements,
+      migrationsDir,
+      file,
     })
-    for (let i = 0; i < statements.length; i++) {
-      const statement = statements[i] as string
-      await db.command(statement)
-      const operation = operationSummaries[i]
-      if (operation) {
-        await waitForDDLPropagation(db, operation.type, operation.key)
-      }
-    }
-
-    const entry: MigrationJournalEntry = {
-      name: file,
-      appliedAt: new Date().toISOString().replace('Z', ''),
-      checksum: checksumSQL(sql),
-    }
     appliedNow.push(entry)
-    await journalStore.appendEntry(entry)
-    await pluginRuntime.runOnAfterApply({
-      command: 'migrate',
-      config,
-      tableScope,
-      flags,
-      migration: file,
-      statements,
-      appliedAt: entry.appliedAt,
-    })
-
     if (!jsonMode) console.log(`Applied: ${file}`)
   }
 
   if (jsonMode) {
-    emitJson('migrate', {
-      mode: 'execute',
-      scope: tableScope,
-      applied: appliedNow,
-    })
+    emitJson('migrate', { mode: 'execute', scope: tableScope, applied: appliedNow })
     return
   }
 
-  console.log(`\nMigrations recorded in ClickHouse _chkit_migrations table.`)
+  console.log('\nMigrations recorded in ClickHouse _chkit_migrations table.')
 }
