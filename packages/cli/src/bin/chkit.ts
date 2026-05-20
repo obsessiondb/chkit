@@ -26,6 +26,16 @@ const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   pull: 'Pull',
 }
 
+const CORE_COMMANDS = [
+  generateCommand,
+  migrateCommand,
+  statusCommand,
+  driftCommand,
+  checkCommand,
+  queryCommand,
+  pluginCommand,
+]
+
 function extractConfigPath(argv: string[]): string | undefined {
   const idx = argv.indexOf('--config')
   if (idx === -1) return undefined
@@ -88,7 +98,7 @@ async function main(): Promise<void> {
       const { config, path: configPath } = await loadConfig(configPathArg)
       const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
       const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
+        coreCommands: CORE_COMMANDS,
         globalFlags: GLOBAL_FLAGS,
         pluginExtensions: collectExtensions(pluginRuntime),
         pluginCommands: collectPluginCommands(pluginRuntime),
@@ -96,7 +106,7 @@ async function main(): Promise<void> {
       console.log(formatGlobalHelp(registry, CLI_VERSION))
     } catch {
       const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
+        coreCommands: CORE_COMMANDS,
         globalFlags: GLOBAL_FLAGS,
         pluginExtensions: [],
         pluginCommands: [],
@@ -126,7 +136,7 @@ async function main(): Promise<void> {
   })
 
   const registry = createCommandRegistry({
-    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
+    coreCommands: CORE_COMMANDS,
     globalFlags: GLOBAL_FLAGS,
     pluginExtensions: collectExtensions(pluginRuntime),
     pluginCommands: collectPluginCommands(pluginRuntime),

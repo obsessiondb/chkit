@@ -4,12 +4,10 @@ import { ChxValidationError, planDiff } from '@chkit/core'
 
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
 import { GLOBAL_FLAGS } from '../global-flags.js'
-import {
-  CLI_VERSION,
-  emitJson,
-  loadSchemaDefinitions,
-  readSnapshot,
-} from '../lib.js'
+import { emitJson } from '../json-output.js'
+import { readSnapshot } from '../migration-store.js'
+import { loadSchemaDefinitions } from '../schema-loader.js'
+import { CLI_VERSION } from '../version.js'
 import {
   buildScopedSnapshotDefinitions,
   filterPlanByTableScope,

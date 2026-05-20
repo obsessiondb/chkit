@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { extractExecutableStatements } from './safety-markers.js'
+import { extractExecutableStatements } from '../../bin/safety-markers.js'
 
 describe('extractExecutableStatements', () => {
   test('splits simple statement batches', () => {

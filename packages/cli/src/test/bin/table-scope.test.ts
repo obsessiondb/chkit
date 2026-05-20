@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { filterPlanByTableScope, parseTableSelector, resolveTableScope } from './table-scope.js'
+import { filterPlanByTableScope, parseTableSelector, resolveTableScope } from '../../bin/table-scope.js'
 
 describe('table scope selector', () => {
   test('parses exact selector and prefix selector', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatQueryJson, formatRows } from './query.js'
+import { formatQueryJson, formatRows } from '../../../bin/commands/query.js'
 
 describe('query output formatting', () => {
 	test('shows at most 25 rows by default while reporting total rows', () => {

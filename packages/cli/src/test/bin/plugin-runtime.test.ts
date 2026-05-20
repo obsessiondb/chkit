@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ResolvedChxConfig } from '@chkit/core'
-import type { ChxPlugin } from '../plugins.js'
-import { loadPluginRuntime } from './plugin-runtime.js'
+import type { ChxPlugin } from '../../plugins.js'
+import { loadPluginRuntime } from '../../bin/plugin-runtime.js'
 
 function makeConfig(plugins: ChxPlugin[]): ResolvedChxConfig {
   return {

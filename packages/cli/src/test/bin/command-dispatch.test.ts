@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { FlagDef } from '@chkit/core'
-import { parseCommandArgs } from './command-dispatch.js'
-import { GLOBAL_FLAGS } from './global-flags.js'
+import { parseCommandArgs } from '../../bin/command-dispatch.js'
+import { GLOBAL_FLAGS } from '../../bin/global-flags.js'
 
 const SERVICE_FLAG: FlagDef = {
 	name: '--service',
