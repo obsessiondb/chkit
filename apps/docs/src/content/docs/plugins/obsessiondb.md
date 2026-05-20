@@ -43,7 +43,32 @@ export default defineConfig({
 })
 ```
 
-The plugin hooks into `generate`, `migrate`, `status`, `drift`, and `check`.
+The plugin hooks into `generate`, `migrate`, `status`, `drift`, `check`, and `query`.
+
+## Service selection
+
+Authenticate and pick the ObsessionDB service this project should route through:
+
+```bash
+chkit obsessiondb login
+chkit obsessiondb select-service
+```
+
+The selection is stored in `.chkit/obsessiondb.json` next to your config file and used as the default target for every command after that.
+
+### Per-command service override
+
+Once authenticated, any command that hits ClickHouse accepts `--service <name>` to target a different service for one invocation without changing the saved selection. The flag takes the service **name** as shown in `chkit obsessiondb select-service`.
+
+```bash
+# Run an ad-hoc query against a different service
+chkit query "SELECT count() FROM users" --service customer-b
+
+# Apply migrations against a one-off service
+chkit migrate --apply --service staging
+```
+
+`--service` is available on `generate`, `migrate`, `status`, `drift`, `check`, and `query`. The lookup fails fast with the list of available services if the name does not match.
 
 ## How it works
 

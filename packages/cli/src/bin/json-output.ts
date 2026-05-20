@@ -5,6 +5,7 @@ type Command =
   | 'drift'
   | 'check'
   | 'plugin'
+  | 'query'
 
 const JSON_CONTRACT_VERSION = 1
 

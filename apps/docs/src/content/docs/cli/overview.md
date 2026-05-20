@@ -17,6 +17,7 @@ The `chkit` CLI manages ClickHouse schemas, migrations, drift detection, and CI 
 | [`chkit status`](/cli/status/) | Show migration status (total, applied, pending, checksum mismatches) |
 | [`chkit drift`](/cli/drift/) | Compare snapshot against live ClickHouse and report differences |
 | [`chkit check`](/cli/check/) | Run policy checks for CI gates (pending, checksums, drift, plugins) |
+| [`chkit query`](/cli/query/) | Run an ad-hoc SQL query against the configured target |
 | [`chkit pull`](/cli/pull/) | Introspect live ClickHouse and generate a TypeScript schema file |
 | [`chkit codegen`](/cli/codegen/) | Generate TypeScript types from schema definitions |
 | [`chkit plugin`](/cli/plugin/) | List or run plugin commands |
