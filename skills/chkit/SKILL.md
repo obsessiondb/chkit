@@ -185,6 +185,16 @@ chkit check --json       # Machine-readable output
 
 Evaluates: pending migrations, checksum mismatches, schema drift, plugin checks. Exit code 1 on failure.
 
+### query — Run SQL against the configured target
+
+```sh
+chkit query "SELECT count() FROM users"
+chkit query "SELECT count() FROM users" --json
+chkit query "SELECT count() FROM users" --service customer-b  # ObsessionDB plugin
+```
+
+Uses the active executor: direct `clickhouse` config by default, or the ObsessionDB plugin service when loaded.
+
 ## Rename Workflow
 
 To rename a table or column without drop+recreate:
@@ -229,6 +239,7 @@ export default defineConfig({
 | `@chkit/plugin-codegen` | `bun add -d @chkit/plugin-codegen` | `chkit codegen` | Generate TypeScript types + Zod schemas |
 | `@chkit/plugin-pull` | `bun add -d @chkit/plugin-pull` | `chkit pull` | Introspect live ClickHouse into schema files |
 | `@chkit/plugin-backfill` | `bun add -d @chkit/plugin-backfill` | `chkit backfill` | Time-windowed data backfill with checkpoints |
+| `@chkit/plugin-obsessiondb` | `bun add -d @chkit/plugin-obsessiondb` | `chkit query --service <name>` | Route commands through an ObsessionDB service |
 
 ## Common Workflows
 
