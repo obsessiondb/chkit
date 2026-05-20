@@ -2,29 +2,39 @@
 import process from 'node:process'
 import type { ParsedFlags } from '@chkit/core'
 
-import { createCommandRegistry } from './command-registry.js'
-import { parseCommandArgs, runResolvedCommand } from './command-dispatch.js'
-import { generateCommand } from './commands/generate.js'
-import { migrateCommand } from './commands/migrate.js'
-import { statusCommand } from './commands/status.js'
-import { driftCommand } from './commands/drift.js'
-import { checkCommand } from './commands/check.js'
-import { pluginCommand } from './commands/plugin.js'
-import { queryCommand } from './commands/query.js'
-import { cmdInit } from './commands/init.js'
-import { loadConfig } from './config.js'
-import { GLOBAL_FLAGS } from './global-flags.js'
-import { formatGlobalHelp, formatCommandHelp } from './help.js'
-import { loadPluginRuntime } from './plugin-runtime.js'
-import { getInternalPlugins } from './internal-plugins/index.js'
-import { CLI_VERSION } from './version.js'
-import { debug } from './debug.js'
-import { configureCliLogging } from './logging.js'
+import { checkCommand } from '../commands/check/command.js'
+import { driftCommand } from '../commands/drift/command.js'
+import { generateCommand } from '../commands/generate/command.js'
+import { cmdInit } from '../commands/init.js'
+import { migrateCommand } from '../commands/migrate/command.js'
+import { pluginCommand } from '../commands/plugin.js'
+import { queryCommand } from '../commands/query.js'
+import { statusCommand } from '../commands/status.js'
+import { getInternalPlugins } from '../internal-plugins/index.js'
+import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatch.js'
+import { createCommandRegistry } from '../runtime/command-registry.js'
+import { loadConfig } from '../runtime/config.js'
+import { debug } from '../runtime/debug.js'
+import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
+import { configureCliLogging } from '../runtime/logging.js'
+import { loadPluginRuntime } from '../runtime/plugin-runtime/index.js'
+import { CLI_VERSION } from '../runtime/version.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
   pull: 'Pull',
 }
+
+const CORE_COMMANDS = [
+  generateCommand,
+  migrateCommand,
+  statusCommand,
+  driftCommand,
+  checkCommand,
+  queryCommand,
+  pluginCommand,
+]
 
 function extractConfigPath(argv: string[]): string | undefined {
   const idx = argv.indexOf('--config')
@@ -35,7 +45,6 @@ function extractConfigPath(argv: string[]): string | undefined {
 function formatFatalError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
   if (error.message) return error.message
-  // AggregateError (e.g. ECONNREFUSED) has an empty message but useful sub-errors
   if ('errors' in error && Array.isArray((error as AggregateError).errors)) {
     const sub = (error as AggregateError).errors
     const first = sub[0]
@@ -47,16 +56,14 @@ function formatFatalError(error: unknown): string {
   return String(error) || 'Unknown error'
 }
 
+function resolveExitCode(): number {
+  if (typeof process.exitCode === 'number') return process.exitCode
+  return process.exitCode ? Number(process.exitCode) : 0
+}
+
 function exitIfNeeded(): void {
-  const code =
-    typeof process.exitCode === 'number'
-      ? process.exitCode
-      : process.exitCode
-        ? Number(process.exitCode)
-        : 0
-  if (Number.isFinite(code) && code > 0) {
-    process.exit(code)
-  }
+  const code = resolveExitCode()
+  if (Number.isFinite(code) && code > 0) process.exit(code)
 }
 
 function collectExtensions(runtime: Awaited<ReturnType<typeof loadPluginRuntime>>) {
@@ -75,7 +82,7 @@ function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRunt
   })
 }
 
-async function main(): Promise<void> {
+async function run(): Promise<void> {
   configureCliLogging()
 
   const argv = process.argv.slice(2)
@@ -83,26 +90,7 @@ async function main(): Promise<void> {
   debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
 
   if (!commandName || commandName === '-h' || commandName === '--help') {
-    const configPathArg = extractConfigPath(argv)
-    try {
-      const { config, path: configPath } = await loadConfig(configPathArg)
-      const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
-      const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
-        globalFlags: GLOBAL_FLAGS,
-        pluginExtensions: collectExtensions(pluginRuntime),
-        pluginCommands: collectPluginCommands(pluginRuntime),
-      })
-      console.log(formatGlobalHelp(registry, CLI_VERSION))
-    } catch {
-      const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
-        globalFlags: GLOBAL_FLAGS,
-        pluginExtensions: [],
-        pluginCommands: [],
-      })
-      console.log(formatGlobalHelp(registry, CLI_VERSION))
-    }
+    await printGlobalHelp(argv)
     return
   }
 
@@ -126,7 +114,7 @@ async function main(): Promise<void> {
   })
 
   const registry = createCommandRegistry({
-    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
+    coreCommands: CORE_COMMANDS,
     globalFlags: GLOBAL_FLAGS,
     pluginExtensions: collectExtensions(pluginRuntime),
     pluginCommands: collectPluginCommands(pluginRuntime),
@@ -147,63 +135,101 @@ async function main(): Promise<void> {
     jsonMode: argv.includes('--json'),
     flags: initFlags,
   }
-  await pluginRuntime.runOnInit(initCtx)
-  _onComplete = (exitCode: number) => pluginRuntime.runOnComplete({ ...initCtx, exitCode })
-  debug('cli', `command "${commandName}" resolved: ${resolved ? (resolved.isPlugin ? 'plugin' : 'core') : 'not found'}`)
 
-  if (!resolved) {
-    const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
-    if (wellKnown) {
-      console.error(`${wellKnown} plugin is not configured. Add it to config.plugins first.`)
+  await pluginRuntime.runOnInit(initCtx)
+  let completed = false
+  const complete = async (exitCode: number): Promise<void> => {
+    if (completed) return
+    completed = true
+    await pluginRuntime.runOnComplete({ ...initCtx, exitCode })
+  }
+
+  debug(
+    'cli',
+    `command "${commandName}" resolved: ${resolved ? (resolved.isPlugin ? 'plugin' : 'core') : 'not found'}`,
+  )
+
+  try {
+    if (!resolved) {
+      const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
+      if (wellKnown) {
+        console.error(`${wellKnown} plugin is not configured. Add it to config.plugins first.`)
+        process.exitCode = 1
+        return
+      }
+      console.error(`Unknown command: ${commandName}`)
+      console.log('')
+      console.log(formatGlobalHelp(registry, CLI_VERSION))
       process.exitCode = 1
       return
     }
-    console.error(`Unknown command: ${commandName}`)
-    console.log('')
-    console.log(formatGlobalHelp(registry, CLI_VERSION))
-    process.exitCode = 1
-    return
-  }
 
-  if (argv.includes('--help') || argv.includes('-h')) {
-    console.log(formatCommandHelp(resolved, registry.globalFlags))
-    return
-  }
-
-  await runResolvedCommand({
-    argv,
-    commandName,
-    resolved,
-    registry,
-    config,
-    configPath,
-    pluginRuntime,
-    onAmbiguousPluginSubcommand() {
+    if (argv.includes('--help') || argv.includes('-h')) {
       console.log(formatCommandHelp(resolved, registry.globalFlags))
-    },
-  })
-}
+      return
+    }
 
-let _onComplete: ((exitCode: number) => Promise<void>) | undefined
-
-function resolveExitCode(): number {
-  if (typeof process.exitCode === 'number') return process.exitCode
-  return process.exitCode ? Number(process.exitCode) : 0
-}
-
-main()
-  .then(async () => {
-    const code = resolveExitCode()
-    await _onComplete?.(code)
-    exitIfNeeded()
-  })
-  .catch(async (error) => {
+    await runResolvedCommand({
+      argv,
+      commandName,
+      resolved,
+      registry,
+      config,
+      configPath,
+      pluginRuntime,
+      onAmbiguousPluginSubcommand() {
+        console.log(formatCommandHelp(resolved, registry.globalFlags))
+      },
+    })
+  } catch (error) {
     try {
-      await _onComplete?.(1)
+      await complete(1)
     } catch {
       // onComplete errors must not mask the original error
     }
-    debug('cli', 'fatal error', error instanceof Error ? { message: error.message, stack: error.stack, ...(('code' in error) ? { code: (error as NodeJS.ErrnoException).code } : {}) } : error)
+    throw error
+  }
+
+  await complete(resolveExitCode())
+}
+
+async function printGlobalHelp(argv: string[]): Promise<void> {
+  const configPathArg = extractConfigPath(argv)
+  let registry: ReturnType<typeof createCommandRegistry>
+  try {
+    const { config, path: configPath } = await loadConfig(configPathArg)
+    const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
+    registry = createCommandRegistry({
+      coreCommands: CORE_COMMANDS,
+      globalFlags: GLOBAL_FLAGS,
+      pluginExtensions: collectExtensions(pluginRuntime),
+      pluginCommands: collectPluginCommands(pluginRuntime),
+    })
+  } catch {
+    registry = createCommandRegistry({
+      coreCommands: CORE_COMMANDS,
+      globalFlags: GLOBAL_FLAGS,
+      pluginExtensions: [],
+      pluginCommands: [],
+    })
+  }
+  console.log(formatGlobalHelp(registry, CLI_VERSION))
+}
+
+run()
+  .then(exitIfNeeded)
+  .catch((error) => {
+    debug(
+      'cli',
+      'fatal error',
+      error instanceof Error
+        ? {
+            message: error.message,
+            stack: error.stack,
+            ...('code' in error ? { code: (error as NodeJS.ErrnoException).code } : {}),
+          }
+        : error,
+    )
     console.error(formatFatalError(error))
     process.exit(1)
   })

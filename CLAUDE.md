@@ -61,7 +61,7 @@ E2E tests run against a live ObsessionDB instance. They require these environmen
 - `CLICKHOUSE_PASSWORD` — authentication
 - `CLICKHOUSE_DB` — target database (optional, defaults to `default`)
 
-Shared ClickHouse test utilities (env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/e2e-testkit.ts` which re-exports the shared ones.
+Shared ClickHouse test utilities (env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones.
 
 Key conventions:
 
