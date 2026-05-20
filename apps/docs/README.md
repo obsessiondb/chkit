@@ -1,6 +1,6 @@
-# CHX Public Docs
+# chkit Public Docs
 
-This folder contains the public documentation website for CHX, powered by Astro + Starlight.
+This folder contains the public documentation website for chkit, powered by Astro + Starlight.
 
 Public docs content lives in `src/content/docs/`.
 

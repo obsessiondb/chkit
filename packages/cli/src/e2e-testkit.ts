@@ -90,7 +90,7 @@ export async function runCliWithRetry(
 
 /**
  * Polls a CLI command until a predicate on the parsed JSON output passes.
- * Useful for waiting on ClickHouse Cloud replication lag after writes.
+ * Useful for waiting on managed-ClickHouse (e.g. ObsessionDB) replication lag after writes.
  */
 export async function waitForCliJson<T>(
   cwd: string,

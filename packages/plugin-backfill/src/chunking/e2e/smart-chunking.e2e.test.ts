@@ -28,7 +28,7 @@ beforeAll(() => {
   db = env.clickhouseDatabase
 
   // The planner runs parallel queries via pMap, which requires a sessionless
-  // client to avoid ClickHouse Cloud session locking errors.
+  // client to avoid ObsessionDB session locking errors.
   plannerExecutor = createStatelessLiveExecutor(env)
 
   plannerQuery = async <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>): Promise<T[]> => {

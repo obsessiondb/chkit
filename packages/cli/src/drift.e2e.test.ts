@@ -92,7 +92,7 @@ describe('@chkit/cli drift depth env e2e', () => {
           `ALTER TABLE ${quoteIdent(database)}.${quoteIdent(usersTable)} ADD COLUMN rogue String`
         )
 
-        // Wait for the column to propagate (ClickHouse Cloud DDL is eventually consistent)
+        // Wait for the column to propagate (managed ClickHouse DDL is eventually consistent)
         await waitForColumn(executor, database, usersTable, 'rogue')
 
         await executor.command(

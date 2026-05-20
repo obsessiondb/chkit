@@ -42,8 +42,9 @@ export function mapSystemTableRowToDefinition(
 }
 
 /**
- * Strips `DEFINER = ... SQL SECURITY ...` clauses that ClickHouse Cloud auto-injects
- * into MV DDL. These are orthogonal to schema semantics and absent from user input.
+ * Strips `DEFINER = ... SQL SECURITY ...` clauses that managed ClickHouse
+ * environments (e.g. ObsessionDB) auto-inject into MV DDL. These are orthogonal
+ * to schema semantics and absent from user input.
  */
 function stripDefinerClauses(query: string): string {
   return query
@@ -121,7 +122,7 @@ function parseDependsOn(segment: string): Array<{ database: string; name: string
  *   APPEND
  *   EMPTY
  *
- * Strips DEFINER / SQL SECURITY auto-injected by ClickHouse Cloud before parsing.
+ * Strips DEFINER / SQL SECURITY auto-injected by managed ClickHouse environments before parsing.
  */
 export function parseRefreshClause(
   query: string | undefined

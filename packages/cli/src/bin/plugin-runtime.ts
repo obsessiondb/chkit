@@ -154,7 +154,7 @@ function wrapExecutorWithDebug(executor: ClickHouseExecutor): ClickHouseExecutor
         throw error
       }
     },
-    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[] }): Promise<void> {
+    async insert<T extends Record<string, unknown>>(params: { table: string; values: T[]; compressed?: boolean }): Promise<void> {
       debug('clickhouse', `insert into ${params.table} — ${params.values.length} rows`)
       const start = performance.now()
       try {

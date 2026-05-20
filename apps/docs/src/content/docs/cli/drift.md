@@ -31,7 +31,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 ### Engine normalization
 
-When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on ClickHouse Cloud, where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
+When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
 ### Drift reason codes
 
