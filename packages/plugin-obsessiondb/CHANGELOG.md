@@ -1,5 +1,47 @@
 # @chkit/plugin-obsessiondb
 
+## 0.1.0-beta.22
+
+### Patch Changes
+
+- a94a2a1: Add @chkit/plugin-obsessiondb for ObsessionDB engine compatibility.
+- f4ff75d: Add `chkit query "<sql>"` command that runs an ad-hoc SQL query against the configured target (default ClickHouse, or the active plugin executor). When the ObsessionDB plugin is loaded, all ClickHouse-bound commands (`generate`, `migrate`, `status`, `drift`, `check`, `query`) accept `--service <name>` to override the selected service by name for that single invocation.
+- f1066a6: Add device-code authentication (login/logout/whoami) and remote backfill routing via ObsessionDB backend.
+- c8af201: Add query routing through ObsessionDB: core commands (migrate, status, drift, check) use a plugin-provided ClickHouse executor when authenticated with a selected service. Adds `getContext` plugin hook, per-project service binding during login, `select-service` command, and remote executor that proxies queries through the ObsessionDB API.
+- a52a2b2: Strip `storage_policy` setting from tables during local migrations (for non-ObsessionDB targets). Improves local development experience by removing cloud-only settings automatically.
+- 45ff0fe: Add `user = currentUser()` filter to all system.processes and system.query_log queries to satisfy ClickHouse row-level security policies.
+- Updated dependencies [c63c74f]
+- Updated dependencies [ba60638]
+- Updated dependencies [6348ef2]
+- Updated dependencies [cb09aaa]
+- Updated dependencies [0f5f4c6]
+- Updated dependencies [aecb106]
+- Updated dependencies [c396fb5]
+- Updated dependencies [ffdcdb9]
+- Updated dependencies [1a5caa3]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [638f75f]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [cc1125e]
+- Updated dependencies [1f8ad1b]
+- Updated dependencies [f719c50]
+- Updated dependencies [949a20c]
+- Updated dependencies [a94a2a1]
+- Updated dependencies [3ab6919]
+- Updated dependencies [bc0c6b1]
+- Updated dependencies [9a54433]
+- Updated dependencies [b0f200d]
+- Updated dependencies [8112b46]
+- Updated dependencies [a77c5b2]
+- Updated dependencies [a3a09cf]
+- Updated dependencies [d983fdf]
+- Updated dependencies [b0f200d]
+- Updated dependencies [50a34db]
+- Updated dependencies [45ff0fe]
+- Updated dependencies [a52a2b2]
+  - @chkit/core@0.1.0-beta.22
+  - @chkit/clickhouse@0.1.0-beta.22
+
 ## 0.1.0-beta.21
 
 ### Patch Changes
