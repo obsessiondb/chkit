@@ -22,7 +22,7 @@ export {
   waitForColumn,
 } from '@chkit/clickhouse/e2e-testkit'
 
-const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
+const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')
 export const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 export const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
