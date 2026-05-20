@@ -1,4 +1,4 @@
-import { parseFlags, UnknownFlagError, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
+import { parseFlags, UnknownFlagError, MissingFlagValueError, type FlagDef, type ParsedFlags } from '@chkit/core'
 
 import { typedFlags } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
@@ -9,6 +9,27 @@ import { printOutput } from './json-output.js'
 import type { PluginRuntime } from './plugin-runtime.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
+
+function extractPositionals(argv: string[], flagDefs: readonly FlagDef[]): string[] {
+  const byName = new Map<string, FlagDef>()
+  for (const def of flagDefs) byName.set(def.name, def)
+
+  const positionals: string[] = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === undefined) continue
+    if (!token.startsWith('--')) {
+      positionals.push(token)
+      continue
+    }
+    const def = byName.get(token)
+    if (def && def.type !== 'boolean') {
+      // Consume the value following a string/string[] flag
+      i += 1
+    }
+  }
+  return positionals
+}
 
 function stripGlobalFlags(argv: string[]): {
   jsonMode: boolean
@@ -165,6 +186,7 @@ async function runCoreOrBuiltinCommand(input: {
       await input.resolved.run({
         command: input.commandName,
         flags,
+        positionals: [],
         config: input.config,
         configPath: input.configPath,
         dirs,
@@ -178,8 +200,10 @@ async function runCoreOrBuiltinCommand(input: {
   }
 
   const allFlags = input.registry.resolveFlags(input.commandName)
-  const flags = parseFlagsOrReport(input.argv.slice(1), allFlags)
+  const argsAfterCommand = input.argv.slice(1)
+  const flags = parseFlagsOrReport(argsAfterCommand, allFlags)
   if (!flags) return
+  const positionals = extractPositionals(argsAfterCommand, allFlags)
 
   const dirs = resolveDirs(input.config)
   if (!input.resolved.run) throw new Error(`Command '${input.commandName}' has no run handler`)
@@ -193,6 +217,7 @@ async function runCoreOrBuiltinCommand(input: {
     await input.resolved.run({
       command: input.commandName,
       flags,
+      positionals,
       config: input.config,
       configPath: input.configPath,
       dirs,

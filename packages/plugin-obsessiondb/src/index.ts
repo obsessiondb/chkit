@@ -7,8 +7,10 @@ import type {
 import { AUTH_COMMANDS, loadCredentials, resolveBaseUrl } from './auth/index.js'
 import { BACKFILL_EXTEND_COMMANDS, handleBackfillCommand } from './backfill/index.js'
 import { createRemoteExecutor } from './query/remote-executor.js'
+import { listServices } from './service/api.js'
 import { SELECT_SERVICE_COMMAND } from './service/commands.js'
 import { loadSelectedService } from './service/storage.js'
+import type { SelectedService } from './service/types.js'
 
 export { loadCredentials, resolveBaseUrl, type Credentials } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
@@ -174,15 +176,43 @@ function createObsessionDBPlugin(_options: ObsessionDBPluginOptions): ObsessionD
           },
         ],
       },
+      {
+        command: ['generate', 'migrate', 'status', 'drift', 'check', 'query'],
+        flags: [
+          {
+            name: '--service',
+            type: 'string',
+            description: 'Override the selected ObsessionDB service by name for this command',
+          },
+        ],
+      },
       ...BACKFILL_EXTEND_COMMANDS,
     ],
     hooks: {
-      async getContext({ configPath }) {
+      async getContext({ configPath, flags }) {
         const creds = await loadCredentials()
         if (!creds) return
-        const service = await loadSelectedService(configPath)
-        if (!service) return
         const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
+
+        const serviceOverride = flags['--service']
+        const overrideName = typeof serviceOverride === 'string' ? serviceOverride.trim() : ''
+
+        let service: SelectedService | null
+        if (overrideName.length > 0) {
+          const services = await listServices(effectiveCreds)
+          const match = services.find((s) => s.name === overrideName)
+          if (!match) {
+            const available = services.map((s) => s.name).join(', ') || '<none>'
+            throw new Error(
+              `obsessiondb: service "${overrideName}" not found. Available services: ${available}`,
+            )
+          }
+          service = { service_id: match.id, service_name: match.name }
+        } else {
+          service = await loadSelectedService(configPath)
+        }
+        if (!service) return
+
         return {
           executor: createRemoteExecutor({
             credentials: effectiveCreds,

@@ -9,6 +9,7 @@ import { statusCommand } from './commands/status.js'
 import { driftCommand } from './commands/drift.js'
 import { checkCommand } from './commands/check.js'
 import { pluginCommand } from './commands/plugin.js'
+import { queryCommand } from './commands/query.js'
 import { cmdInit } from './commands/init.js'
 import { loadConfig } from './config.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
@@ -86,7 +87,7 @@ async function main(): Promise<void> {
       const { config, path: configPath } = await loadConfig(configPathArg)
       const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
       const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
         globalFlags: GLOBAL_FLAGS,
         pluginExtensions: collectExtensions(pluginRuntime),
         pluginCommands: collectPluginCommands(pluginRuntime),
@@ -94,7 +95,7 @@ async function main(): Promise<void> {
       console.log(formatGlobalHelp(registry, CLI_VERSION))
     } catch {
       const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
         globalFlags: GLOBAL_FLAGS,
         pluginExtensions: [],
         pluginCommands: [],
@@ -133,7 +134,7 @@ async function main(): Promise<void> {
   _onComplete = (exitCode: number) => pluginRuntime.runOnComplete({ ...initCtx, exitCode })
 
   const registry = createCommandRegistry({
-    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
     globalFlags: GLOBAL_FLAGS,
     pluginExtensions: collectExtensions(pluginRuntime),
     pluginCommands: collectPluginCommands(pluginRuntime),
