@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 
-import type { ChxOnCompleteContext, ChxOnInitContext } from '../../../plugins.js'
-import { createSkillHintPlugin, findAgentRoot, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type AgentKind, type SkillHintDeps, type SkillHintState } from '../../../bin/internal-plugins/skill-hint.js'
+import type { ChxOnCompleteContext, ChxOnInitContext } from '../../plugins.js'
+import { createSkillHintPlugin, findAgentRoot, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type AgentKind, type SkillHintDeps, type SkillHintState } from '../../internal-plugins/skill-hint.js'
 
 function initCtx(overrides?: Partial<ChxOnInitContext>): ChxOnInitContext {
   return { command: 'status', isInteractive: true, jsonMode: false, options: {}, ...overrides }

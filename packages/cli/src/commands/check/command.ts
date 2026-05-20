@@ -1,14 +1,14 @@
 import { mkdir } from 'node:fs/promises'
 
-import { summarizeDriftReasons } from '../../drift.js'
+import { summarizeDriftReasons } from '../drift/compare.js'
 import { typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
-import { debug } from '../debug.js'
-import { GLOBAL_FLAGS } from '../global-flags.js'
-import { emitJson } from '../json-output.js'
-import { createJournalStore } from '../journal-store.js'
-import { findChecksumMismatches, listMigrations, readSnapshot } from '../migration-store.js'
-import { resolveTableScope, tableKeysFromDefinitions } from '../table-scope.js'
-import { buildDriftPayload } from './drift.js'
+import { debug } from '../../runtime/debug.js'
+import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { emitJson } from '../../runtime/json-output.js'
+import { createJournalStore } from '../../runtime/journal-store.js'
+import { findChecksumMismatches, listMigrations, readSnapshot } from '../../runtime/migration-store.js'
+import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
+import { buildDriftPayload } from '../drift/payload.js'
 
 export const checkCommand: CommandDef = {
   name: 'check',

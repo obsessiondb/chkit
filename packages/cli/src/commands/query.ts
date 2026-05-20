@@ -1,5 +1,5 @@
 import type { ClickHouseJsonQueryResult } from '@chkit/clickhouse'
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
+import type { CommandDef, CommandRunContext } from '../plugins.js'
 
 const DEFAULT_SHOWN_ROW_LIMIT = 25
 

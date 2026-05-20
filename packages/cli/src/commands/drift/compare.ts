@@ -6,7 +6,7 @@ import {
   type SkipIndexDefinition,
   type TableDefinition,
 } from '@chkit/core'
-import { diffByName, diffNamedShapeMaps, diffSettings } from './drift-diff.js'
+import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
 type TableDriftReasonCode =
   | 'missing_column'

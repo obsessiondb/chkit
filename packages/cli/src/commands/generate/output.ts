@@ -1,8 +1,8 @@
 import type { MigrationPlan, SchemaDefinition } from '@chkit/core'
 
-import { emitJson } from '../../json-output.js'
-import { summarizePlan } from '../../migration-store.js'
-import type { TableScope } from '../../table-scope.js'
+import { emitJson } from '../../runtime/json-output.js'
+import { summarizePlan } from '../../runtime/migration-store.js'
+import type { TableScope } from '../../runtime/table-scope.js'
 
 interface GeneratePlanPayload {
   scope: TableScope

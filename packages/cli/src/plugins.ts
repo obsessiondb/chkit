@@ -8,8 +8,8 @@ import type {
   SchemaDefinition,
 } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import type { PluginRuntime } from './bin/plugin-runtime.js'
-import type { TableScope } from './bin/table-scope.js'
+import type { PluginRuntime } from './runtime/plugin-runtime.js'
+import type { TableScope } from './runtime/table-scope.js'
 
 export {
   defineFlags,

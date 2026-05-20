@@ -3,23 +3,23 @@ import process from 'node:process'
 import { ChxValidationError, planDiff } from '@chkit/core'
 
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
-import { GLOBAL_FLAGS } from '../global-flags.js'
-import { emitJson } from '../json-output.js'
-import { readSnapshot } from '../migration-store.js'
-import { loadSchemaDefinitions } from '../schema-loader.js'
-import { CLI_VERSION } from '../version.js'
+import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { emitJson } from '../../runtime/json-output.js'
+import { readSnapshot } from '../../runtime/migration-store.js'
+import { loadSchemaDefinitions } from '../../runtime/schema-loader.js'
+import { CLI_VERSION } from '../../runtime/version.js'
 import {
   buildScopedSnapshotDefinitions,
   filterPlanByTableScope,
   resolveTableScope,
   tableKeysFromDefinitions,
-} from '../table-scope.js'
+} from '../../runtime/table-scope.js'
 import {
   applyExplicitTableRenames,
   applySelectedRenameSuggestions,
   assertCliColumnMappingsResolvable,
   buildExplicitColumnRenameSuggestions,
-} from './generate/plan-pipeline.js'
+} from './plan-pipeline.js'
 import {
   assertCliTableMappingsResolvable,
   assertNoConflictingColumnMappings,
@@ -31,9 +31,9 @@ import {
   parseRenameTableMappings,
   remapOldDefinitionsForTableRenames,
   resolveActiveTableMappings,
-} from './generate/rename-mappings.js'
-import { emitGenerateApplyOutput, emitGeneratePlanOutput } from './generate/output.js'
-import { debug } from '../debug.js'
+} from './rename-mappings.js'
+import { emitGenerateApplyOutput, emitGeneratePlanOutput } from './output.js'
+import { debug } from '../../runtime/debug.js'
 
 const GENERATE_FLAGS = defineFlags([
   { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },

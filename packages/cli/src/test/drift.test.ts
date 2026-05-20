@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { table } from '@chkit/core'
 
-import { compareSchemaObjects, compareTableShape, summarizeDriftReasons } from '../drift'
+import { compareSchemaObjects, compareTableShape, summarizeDriftReasons } from '../commands/drift/compare.js'
 
 describe('@chkit/cli drift comparer', () => {
   test('emits missing_object reason code when expected object is absent', () => {

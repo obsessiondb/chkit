@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 
-import { definePlugin, type ChxPlugin } from '../../plugins.js'
+import { definePlugin, type ChxPlugin } from '../plugins.js'
 
 export type AgentKind = 'claude' | 'cursor' | 'copilot' | 'windsurf' | 'roo' | 'augment' | 'continue' | 'trae' | 'unknown'
 

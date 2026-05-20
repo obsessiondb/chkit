@@ -1,10 +1,10 @@
 import { mkdir } from 'node:fs/promises'
 
-import type { CommandDef, CommandRunContext } from '../../plugins.js'
-import { debug } from '../debug.js'
-import { emitJson } from '../json-output.js'
-import { createJournalStore } from '../journal-store.js'
-import { findChecksumMismatches, listMigrations } from '../migration-store.js'
+import type { CommandDef, CommandRunContext } from '../plugins.js'
+import { debug } from '../runtime/debug.js'
+import { emitJson } from '../runtime/json-output.js'
+import { createJournalStore } from '../runtime/journal-store.js'
+import { findChecksumMismatches, listMigrations } from '../runtime/migration-store.js'
 
 export const statusCommand: CommandDef = {
   name: 'status',

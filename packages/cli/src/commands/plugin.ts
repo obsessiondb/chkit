@@ -1,9 +1,9 @@
-import { typedFlags, type CommandDef, type CommandRunContext, type ParsedFlags } from '../../plugins.js'
-import { GLOBAL_FLAGS } from '../global-flags.js'
-import { emitJson, printOutput } from '../json-output.js'
+import { typedFlags, type CommandDef, type CommandRunContext, type ParsedFlags } from '../plugins.js'
+import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { emitJson, printOutput } from '../runtime/json-output.js'
 import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
-import { resolveTableScope, tableKeysFromDefinitions } from '../table-scope.js'
-import { loadSchemaDefinitions } from '../schema-loader.js'
+import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
+import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
 export const pluginCommand: CommandDef = {
   name: 'plugin',

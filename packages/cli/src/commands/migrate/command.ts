@@ -5,25 +5,25 @@ import { createInterface } from 'node:readline/promises'
 
 import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
 import { waitForDDLPropagation } from '@chkit/clickhouse'
-import { GLOBAL_FLAGS } from '../global-flags.js'
-import { emitJson } from '../json-output.js'
-import { createJournalStore } from '../journal-store.js'
+import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { emitJson } from '../../runtime/json-output.js'
+import { createJournalStore } from '../../runtime/journal-store.js'
 import {
   checksumSQL,
   findChecksumMismatches,
   listMigrations,
   readSnapshot,
   type MigrationJournalEntry,
-} from '../migration-store.js'
+} from '../../runtime/migration-store.js'
 import {
   collectDestructiveOperationMarkers,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
   migrationContainsDangerOperation,
   type DestructiveOperationMarker,
-} from '../safety-markers.js'
-import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../table-scope.js'
-import { debug } from '../debug.js'
+} from '../../runtime/safety-markers.js'
+import { databaseKeyFromOperationKey, resolveTableScope, tableKeyFromOperationKey, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
+import { debug } from '../../runtime/debug.js'
 
 const MIGRATE_FLAGS = defineFlags([
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },

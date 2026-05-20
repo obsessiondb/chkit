@@ -1,6 +1,6 @@
 import { relative, resolve } from 'node:path'
 
-import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../config.js'
+import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 
 export async function cmdInit(): Promise<void> {
   const cwd = process.cwd()
