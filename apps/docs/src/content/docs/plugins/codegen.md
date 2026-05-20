@@ -9,7 +9,7 @@ This document covers practical usage of the optional `codegen` plugin.
 
 - Generates deterministic TypeScript row types from chkit schema definitions.
 - Optionally generates Zod schemas from the same definitions.
-- Optionally generates typed ingestion functions for inserting rows into ClickHouse tables.
+- Optionally generates typed ingestion functions for inserting rows into ClickHouse tables. Generated ingest helpers gzip-compress request bodies by default and can opt out per call.
 - Optionally generates a self-contained runtime migration module with all migration SQL inlined, for environments without filesystem access (e.g., Cloudflare Workers).
 
 ## How it fits your workflow
@@ -99,6 +99,26 @@ Useful flags:
 - `--migrations-out-file <path>`
 - `--bigint-mode <string|bigint>`
 - `--include-views`
+
+## Generated ingest helpers
+
+When `emitIngest` is enabled, generated ingest helpers accept runtime options. Request-body compression is enabled by default for these helpers:
+
+```ts
+await ingestDefaultUsers(db, rows)
+```
+
+Disable compression for a specific call when needed:
+
+```ts
+await ingestDefaultUsers(db, rows, { compressed: false })
+```
+
+When `emitZod` is enabled, the same options object also controls validation:
+
+```ts
+await ingestDefaultUsers(db, rows, { validate: true })
+```
 
 ## CI / check integration
 

@@ -39,6 +39,8 @@ This command delegates to the codegen plugin's `codegen` command. The codegen pl
 If the codegen plugin is not configured, the command fails with:
 _"Codegen plugin is not configured. Add a plugin with manifest.name "codegen" to config.plugins."_
 
+Generated ingest helpers gzip-compress request bodies by default. Pass `{ compressed: false }` as the third argument to opt out for a specific call.
+
 ### Check mode
 
 With `--check`, the command validates that generated artifacts are current without writing files. This is useful in CI to detect stale types. Failure codes include:

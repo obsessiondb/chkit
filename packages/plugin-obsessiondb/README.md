@@ -14,7 +14,7 @@ Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This plugin 
 
 ## Why
 
-ObsessionDB and ClickHouse Cloud use `Shared` engine variants (e.g. `SharedReplacingMergeTree`, `SharedMergeTree`). These engines don't exist in regular ClickHouse. If you define schemas with `Shared` engines but target a standard ClickHouse instance, migrations will fail.
+ObsessionDB uses `Shared` engine variants (e.g. `SharedReplacingMergeTree`, `SharedMergeTree`) to deliver managed replication without operator intervention. These engines don't exist in regular ClickHouse. If you define schemas with `Shared` engines but target a standard ClickHouse instance, migrations will fail.
 
 This plugin intercepts schema definitions before the diff/planning pipeline and strips the `Shared` prefix when needed, so you can use a single set of schema files across both ObsessionDB and regular ClickHouse.
 

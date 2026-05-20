@@ -73,4 +73,4 @@ See the [chkit documentation](https://chkit.obsessiondb.com).
 
 ---
 
-Sponsored by [ObsessionDB](https://obsessiondb.com)
+Built and maintained by the team behind [**ObsessionDB**](https://obsessiondb.com) — fully-managed ClickHouse with a first-party chkit integration ([`@chkit/plugin-obsessiondb`](https://www.npmjs.com/package/@chkit/plugin-obsessiondb)).

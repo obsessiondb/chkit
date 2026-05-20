@@ -126,7 +126,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
           `CREATE MATERIALIZED VIEW ${quoteIdent(targetDatabase)}.${quoteIdent(eventsMaterializedView)} TO ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRollupTable)} AS SELECT id, count() AS c FROM ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} GROUP BY id`
         )
         // Refreshable MV — must use APPEND on replicated (SharedMergeTree) targets,
-        // per the ClickHouse Cloud constraint verified on customer-benchmark.
+        // per the ObsessionDB constraint verified on customer-benchmark.
         await executor.command(
           `CREATE MATERIALIZED VIEW ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRefreshableView)} REFRESH EVERY 1 HOUR APPEND TO ${quoteIdent(targetDatabase)}.${quoteIdent(eventsRollupTable)} AS SELECT id, count() AS c FROM ${quoteIdent(targetDatabase)}.${quoteIdent(eventsTable)} GROUP BY id`
         )
