@@ -15,3 +15,8 @@ coverage
 .claude/settings.local.json
 # Local research, ticket exports, and other working notes — never committed.
 thoughts/
+CLAUDE.local.md
+
+.fallow
+
+clickhouse.config.ts
