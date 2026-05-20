@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 import process from 'node:process'
+import type { ParsedFlags } from '@chkit/core'
 
 import { createCommandRegistry } from './command-registry.js'
-import { runResolvedCommand } from './command-dispatch.js'
+import { parseCommandArgs, runResolvedCommand } from './command-dispatch.js'
 import { generateCommand } from './commands/generate.js'
 import { migrateCommand } from './commands/migrate.js'
 import { statusCommand } from './commands/status.js'
 import { driftCommand } from './commands/drift.js'
 import { checkCommand } from './commands/check.js'
 import { pluginCommand } from './commands/plugin.js'
+import { queryCommand } from './commands/query.js'
 import { cmdInit } from './commands/init.js'
 import { loadConfig } from './config.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
@@ -86,7 +88,7 @@ async function main(): Promise<void> {
       const { config, path: configPath } = await loadConfig(configPathArg)
       const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
       const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
         globalFlags: GLOBAL_FLAGS,
         pluginExtensions: collectExtensions(pluginRuntime),
         pluginCommands: collectPluginCommands(pluginRuntime),
@@ -94,7 +96,7 @@ async function main(): Promise<void> {
       console.log(formatGlobalHelp(registry, CLI_VERSION))
     } catch {
       const registry = createCommandRegistry({
-        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+        coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
         globalFlags: GLOBAL_FLAGS,
         pluginExtensions: [],
         pluginCommands: [],
@@ -123,23 +125,30 @@ async function main(): Promise<void> {
     internalPlugins: getInternalPlugins(),
   })
 
-  const initCtx = {
-    command: commandName,
-    configPath,
-    isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
-    jsonMode: argv.includes('--json'),
-  }
-  await pluginRuntime.runOnInit(initCtx)
-  _onComplete = (exitCode: number) => pluginRuntime.runOnComplete({ ...initCtx, exitCode })
-
   const registry = createCommandRegistry({
-    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, pluginCommand],
+    coreCommands: [generateCommand, migrateCommand, statusCommand, driftCommand, checkCommand, queryCommand, pluginCommand],
     globalFlags: GLOBAL_FLAGS,
     pluginExtensions: collectExtensions(pluginRuntime),
     pluginCommands: collectPluginCommands(pluginRuntime),
   })
 
   const resolved = registry.get(commandName)
+  let initFlags: ParsedFlags = {}
+  if (resolved && !resolved.isPlugin && commandName !== 'plugin' && !argv.includes('--help') && !argv.includes('-h')) {
+    const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
+    if (!parsed) return
+    initFlags = parsed.flags
+  }
+
+  const initCtx = {
+    command: commandName,
+    configPath,
+    isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
+    jsonMode: argv.includes('--json'),
+    flags: initFlags,
+  }
+  await pluginRuntime.runOnInit(initCtx)
+  _onComplete = (exitCode: number) => pluginRuntime.runOnComplete({ ...initCtx, exitCode })
   debug('cli', `command "${commandName}" resolved: ${resolved ? (resolved.isPlugin ? 'plugin' : 'core') : 'not found'}`)
 
   if (!resolved) {

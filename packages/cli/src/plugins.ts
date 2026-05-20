@@ -46,6 +46,7 @@ export interface CommandDef {
 export interface CommandRunContext {
   command: string
   flags: ParsedFlags
+  positionals: string[]
   config: ResolvedChxConfig
   configPath: string
   dirs: { outDir: string; migrationsDir: string; metaDir: string }
@@ -107,6 +108,7 @@ export interface ChxOnInitContext {
   configPath: string
   isInteractive: boolean
   jsonMode: boolean
+  flags: ParsedFlags
   options: Record<string, unknown>
 }
 
