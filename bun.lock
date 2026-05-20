@@ -20,7 +20,7 @@
     },
     "apps/docs": {
       "name": "@chkit/docs",
-      "version": "0.0.2-beta.10",
+      "version": "0.0.2-beta.11",
       "dependencies": {
         "@astrojs/starlight": "^0.37.6",
         "astro": "^5.6.1",
@@ -32,7 +32,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -43,10 +43,13 @@
         "@logtape/logtape": "^2.0.5",
         "fast-glob": "^3.3.2",
       },
+      "optionalDependencies": {
+        "@chkit/plugin-obsessiondb": "workspace:*",
+      },
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
@@ -56,14 +59,14 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
@@ -73,7 +76,7 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -84,7 +87,7 @@
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "zod": "^4.3.6",
@@ -92,7 +95,7 @@
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -103,7 +106,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.0-beta.21",
+      "version": "0.1.0-beta.22",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",

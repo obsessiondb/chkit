@@ -26,6 +26,16 @@ const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   pull: 'Pull',
 }
 
+const PROJECT_ONLY_COMMANDS = new Set([
+  'generate',
+  'migrate',
+  'status',
+  'drift',
+  'check',
+  'codegen',
+  'pull',
+])
+
 const CORE_COMMANDS = [
   generateCommand,
   migrateCommand,
@@ -40,6 +50,11 @@ function extractConfigPath(argv: string[]): string | undefined {
   const idx = argv.indexOf('--config')
   if (idx === -1) return undefined
   return argv[idx + 1]
+}
+
+function allowsConfiglessObsessionDBBootstrap(commandName: string | undefined, argv: string[]): boolean {
+  if (commandName === 'obsessiondb') return true
+  return commandName === 'plugin' && argv[1] === 'obsessiondb'
 }
 
 function formatFatalError(error: unknown): string {
@@ -105,7 +120,20 @@ async function run(): Promise<void> {
   }
 
   const configPathArg = extractConfigPath(argv)
-  const { config, path: configPath } = await loadConfig(configPathArg)
+  const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, {}, {
+    command: commandName,
+    allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
+  })
+
+  if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
+    console.error(
+      `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
+        `You are running chkit from a user profile (no local config found).`,
+    )
+    process.exitCode = 1
+    return
+  }
+
   const pluginRuntime = await loadPluginRuntime({
     config,
     configPath,
