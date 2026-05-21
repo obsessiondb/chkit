@@ -12,6 +12,7 @@ import {
 	rewriteSharedEngines,
 	stripSharedPrefix,
 } from './index'
+import { saveServiceAlias } from './service/storage'
 
 function makeConfig(url?: string): ResolvedChxConfig {
 	return {
@@ -448,8 +449,10 @@ describe('obsessiondb onInit', () => {
 describe('obsessiondb getContext', () => {
 	let tempDir: string
 	let originalXdg: string | undefined
+	const originalFetch = globalThis.fetch
 
 	afterEach(async () => {
+		globalThis.fetch = originalFetch
 		if (originalXdg !== undefined) {
 			process.env.XDG_CONFIG_HOME = originalXdg
 		} else {
@@ -482,7 +485,61 @@ describe('obsessiondb getContext', () => {
 				flags: {},
 				defaults: {},
 			}),
-		).rejects.toThrow(/select-service/)
+		).rejects.toThrow(/service select/)
+	})
+
+	test('resolves --service through a saved alias', async () => {
+		await setupAuth()
+		const configPath = join(tempDir, 'project', 'clickhouse.config.ts')
+		await saveServiceAlias(configPath, 'prod', {
+			service_id: 'svc-prod',
+			service_name: 'production',
+		})
+
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						json: {
+							organizations: [
+								{
+									id: 'org-1',
+									name: 'Org',
+									slug: 'org',
+									services: [
+										{
+											id: 'svc-other',
+											name: 'other',
+											status: 'running',
+											tier: 1,
+											nodes: 1,
+											connectionUrl: null,
+											connectionUsername: null,
+											desiredStatus: 'running',
+											desiredTier: 1,
+											desiredNodes: 1,
+											createdAt: '2026-03-29T00:00:00Z',
+											managed: true,
+										},
+									],
+								},
+							],
+						},
+					}),
+					{ status: 200, headers: { 'content-type': 'application/json' } },
+				),
+		) as typeof fetch
+
+		const plugin = obsessiondb().plugin
+		const context = await plugin.hooks.getContext({
+			config: makeConfig(),
+			configPath,
+			command: 'query',
+			flags: { '--service': 'prod' },
+			defaults: {},
+		})
+
+		expect(context).toBeDefined()
 	})
 })
 
