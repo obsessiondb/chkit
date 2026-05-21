@@ -109,15 +109,7 @@ describe('pluginNameOf', () => {
     expect(pluginNameOf({ plugin: { manifest: { name: 'codegen' } } })).toBe('codegen')
   })
 
-  test('reads explicit name from legacy registration', () => {
-    expect(pluginNameOf({ resolve: './foo.js', name: 'mine' })).toBe('mine')
-  })
-
-  test('falls back to basename for legacy registration', () => {
-    expect(pluginNameOf({ resolve: '/abs/pkg/dist/index.js' })).toBe('index')
-  })
-
-  test('returns basename for string registration', () => {
-    expect(pluginNameOf('./plugins/my-plugin.js')).toBe('my-plugin')
+  test('returns undefined when neither name nor manifest is present', () => {
+    expect(pluginNameOf({ plugin: {} })).toBeUndefined()
   })
 })

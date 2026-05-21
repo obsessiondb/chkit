@@ -26,7 +26,8 @@ import {
 
 export const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
 
-export type ConfigSource = 'project' | 'profile' | 'synthesized'
+export type ConfigSource = 'project' | 'profile'
+export type ProfileOrigin = 'file' | 'credentials' | 'synthetic'
 
 export interface LoadedConfig {
   config: ResolvedChxConfig
@@ -41,7 +42,8 @@ interface RawConfig {
 }
 
 interface ProfileLayer extends RawConfig {
-  source: 'profile' | 'synthesized'
+  source: 'profile'
+  origin: ProfileOrigin
 }
 
 function isConfigFunction(candidate: ChxConfigInput): candidate is ChxConfigFn {
@@ -129,18 +131,18 @@ async function readProfileLayer(
   if (existsSync(profilePath)) {
     debug('config', `found profile config at ${profilePath}`)
     const { raw } = await readRawConfig(profilePath, env)
-    return { raw, path: profilePath, source: 'profile' }
+    return { raw, path: profilePath, source: 'profile', origin: 'file' }
   }
 
   const credentialsPath = resolve(userDir, USER_CREDENTIALS_FILE)
   if (existsSync(credentialsPath)) {
     debug('config', `synthesizing profile layer from credentials at ${credentialsPath}`)
-    return synthesizedProfileLayer()
+    return synthesizedProfileLayer('credentials')
   }
 
   if (allowSynthesized) {
     debug('config', 'synthesizing profile layer without existing credentials')
-    return synthesizedProfileLayer()
+    return synthesizedProfileLayer('synthetic')
   }
 
   return null
@@ -182,12 +184,12 @@ async function loadObsessionDBRegistration(): Promise<ChxPluginRegistration> {
   }
 }
 
-async function synthesizedProfileLayer(): Promise<ProfileLayer> {
+async function synthesizedProfileLayer(origin: 'credentials' | 'synthetic'): Promise<ProfileLayer> {
   const raw: ChxUserConfig = {
     schema: [],
     plugins: [await loadObsessionDBRegistration()],
   }
-  return { raw, path: SYNTHESIZED_CONFIG_PATH, source: 'synthesized' }
+  return { raw, path: SYNTHESIZED_CONFIG_PATH, source: 'profile', origin }
 }
 
 export async function writeIfMissing(filePath: string, content: string): Promise<boolean> {

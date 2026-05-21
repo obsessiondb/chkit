@@ -70,13 +70,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'plan-augment', apiVersion: 1 },\n  hooks: {\n    onPlanCreated({ plan }) {\n      return {\n        ...plan,\n        operations: [\n          ...plan.operations,\n          {\n            type: 'create_database',\n            key: 'database:plugin_db',\n            risk: 'safe',\n            sql: 'CREATE DATABASE IF NOT EXISTS plugin_db;',\n          },\n        ],\n        riskSummary: {\n          safe: plan.riskSummary.safe + 1,\n          caution: plan.riskSummary.caution,\n          danger: plan.riskSummary.danger,\n        },\n      }\n    },\n  },\n})\n`,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'plan-augment', apiVersion: 1 },\n  hooks: {\n    onPlanCreated({ plan }) {\n      return {\n        ...plan,\n        operations: [\n          ...plan.operations,\n          {\n            type: 'create_database',\n            key: 'database:plugin_db',\n            risk: 'safe',\n            sql: 'CREATE DATABASE IF NOT EXISTS plugin_db;',\n          },\n        ],\n        riskSummary: {\n          safe: plan.riskSummary.safe + 1,\n          caution: plan.riskSummary.caution,\n          danger: plan.riskSummary.danger,\n        },\n      }\n    },\n  },\n})\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './plan-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -98,13 +98,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'echoer', apiVersion: 1 },\n  commands: [\n    {\n      name: 'echo',\n      description: 'Echo args for tests',\n      run({ args, jsonMode, print }) {\n        if (jsonMode) {\n          print({ ok: true, args })\n          return\n        }\n        print(args.join(','))\n      },\n    },\n  ],\n})\n`,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'echoer', apiVersion: 1 },\n  commands: [\n    {\n      name: 'echo',\n      description: 'Echo args for tests',\n      run({ args, jsonMode, print }) {\n        if (jsonMode) {\n          print({ ok: true, args })\n          return\n        }\n        print(args.join(','))\n      },\n    },\n  ],\n})\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './commands-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -134,19 +134,19 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         targetPath,
-        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      run({ print }) {\n        print({ source: 'original' })\n        return 0\n      },\n    },\n  ],\n})\n`,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      run({ print }) {\n        print({ source: 'original' })\n        return 0\n      },\n    },\n  ],\n})\n`,
         'utf8'
       )
 
       await writeFile(
         interceptorPath,
-        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'interceptor', apiVersion: 1 },\n  hooks: {\n    onBeforePluginCommand(context) {\n      if (context.targetPlugin === 'target' && context.command === 'greet') {\n        context.print({ source: 'intercepted', target: context.targetPlugin })\n        return { handled: true, exitCode: 0 }\n      }\n      return { handled: false }\n    },\n  },\n})\n`,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'interceptor', apiVersion: 1 },\n  hooks: {\n    onBeforePluginCommand(context) {\n      if (context.targetPlugin === 'target' && context.command === 'greet') {\n        context.print({ source: 'intercepted', target: context.targetPlugin })\n        return { handled: true, exitCode: 0 }\n      }\n      return { handled: false }\n    },\n  },\n})\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { resolve: './target-plugin.ts' },\n    { resolve: './interceptor-plugin.ts' },\n  ],\n}\n`,
+        `import { plugin as target } from '${targetPath}'\nimport { plugin as interceptor } from '${interceptorPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { plugin: target },\n    { plugin: interceptor },\n  ],\n}\n`,
         'utf8'
       )
 
@@ -174,19 +174,19 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         targetPath,
-        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      run({ print }) {\n        print({ source: 'original' })\n        return 0\n      },\n    },\n  ],\n})\n`,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      run({ print }) {\n        print({ source: 'original' })\n        return 0\n      },\n    },\n  ],\n})\n`,
         'utf8'
       )
 
       await writeFile(
         interceptorPath,
-        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport default definePlugin({\n  manifest: { name: 'interceptor', apiVersion: 1 },\n  hooks: {\n    onBeforePluginCommand() {\n      return { handled: false }\n    },\n  },\n})\n`,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'interceptor', apiVersion: 1 },\n  hooks: {\n    onBeforePluginCommand() {\n      return { handled: false }\n    },\n  },\n})\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { resolve: './target-plugin.ts' },\n    { resolve: './interceptor-plugin.ts' },\n  ],\n}\n`,
+        `import { plugin as target } from '${targetPath}'\nimport { plugin as interceptor } from '${interceptorPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { plugin: target },\n    { plugin: interceptor },\n  ],\n}\n`,
         'utf8'
       )
 
@@ -214,13 +214,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createPullPlugin } from '${PULL_PLUGIN_ENTRY}'\n\nexport default createPullPlugin({\n  outFile: '${outFile}',\n  databases: ['app'],\n  introspect: async () => [\n    {\n      database: 'app',\n      name: 'users',\n      engine: 'MergeTree()',\n      primaryKey: '(id)',\n      orderBy: '(id)',\n      columns: [\n        { name: 'id', type: 'UInt64' },\n        { name: 'email', type: 'String' },\n      ],\n      settings: {},\n      indexes: [],\n      projections: [],\n    },\n  ],\n})\n`,
+        `import { pull } from '${PULL_PLUGIN_ENTRY}'\n\nexport const registration = pull({\n  outFile: '${outFile}',\n  databases: ['app'],\n  introspect: async () => [\n    {\n      database: 'app',\n      name: 'users',\n      engine: 'MergeTree()',\n      primaryKey: '(id)',\n      orderBy: '(id)',\n      columns: [\n        { name: 'id', type: 'UInt64' },\n        { name: 'email', type: 'String' },\n      ],\n      settings: {},\n      indexes: [],\n      projections: [],\n    },\n  ],\n})\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
+        `import { registration } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [registration],\n}\n`,
         'utf8'
       )
 
@@ -260,13 +260,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createPullPlugin } from '${PULL_PLUGIN_ENTRY}'\n\nexport default createPullPlugin({\n  outFile: '${outFile}',\n  databases: ['app'],\n  introspect: async () => [\n    {\n      database: 'app',\n      name: 'events',\n      engine: 'MergeTree()',\n      primaryKey: '(id)',\n      orderBy: '(id)',\n      columns: [\n        { name: 'id', type: 'UInt64' },\n      ],\n      settings: {},\n      indexes: [],\n      projections: [],\n    },\n  ],\n})\n`,
+        `import { pull } from '${PULL_PLUGIN_ENTRY}'\n\nexport const registration = pull({\n  outFile: '${outFile}',\n  databases: ['app'],\n  introspect: async () => [\n    {\n      database: 'app',\n      name: 'events',\n      engine: 'MergeTree()',\n      primaryKey: '(id)',\n      orderBy: '(id)',\n      columns: [\n        { name: 'id', type: 'UInt64' },\n      ],\n      settings: {},\n      indexes: [],\n      projections: [],\n    },\n  ],\n})\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [{ resolve: './pull-plugin.ts' }],\n}\n`,
+        `import { registration } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [registration],\n}\n`,
         'utf8'
       )
 
@@ -297,13 +297,13 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`,
           'utf8'
         )
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
           'utf8'
         )
 
@@ -356,13 +356,13 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`,
           'utf8'
         )
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
           'utf8'
         )
 
@@ -447,13 +447,13 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`,
           'utf8'
         )
 
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
           'utf8'
         )
 
@@ -520,13 +520,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -544,13 +544,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin({ chunkHours: 2 })\n`,
+        `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin({ chunkHours: 2 })\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -577,12 +577,12 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`,
           'utf8'
         )
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
           'utf8'
         )
 
@@ -639,12 +639,12 @@ describe('plugin runtime', () => {
       try {
         await writeFile(
           pluginPath,
-          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport default createBackfillPlugin()\n`,
+          `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`,
           'utf8'
         )
         await writeFile(
           fixture.configPath,
-          `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ resolve: './backfill-plugin.ts' }],\n}\n`,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
           'utf8'
         )
 
@@ -758,13 +758,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport const plugin = createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -865,13 +865,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport const plugin = createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -890,13 +890,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport const plugin = createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts', options: { runOnGenerate: false } }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin, options: { runOnGenerate: false } }],\n}\n`,
         'utf8'
       )
 
@@ -914,13 +914,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport const plugin = createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -943,13 +943,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport const plugin = createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 
@@ -991,17 +991,10 @@ describe('plugin runtime', () => {
 
   test('codegen returns exit code 2 for invalid plugin options', async () => {
     const fixture = await createFixture()
-    const pluginPath = join(fixture.dir, 'codegen-plugin.ts')
     try {
       await writeFile(
-        pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
-        'utf8'
-      )
-
-      await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts', options: { bigintMode: 'nope' } }],\n}\n`,
+        `import { codegen } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [codegen({ bigintMode: 'nope' })],\n}\n`,
         'utf8'
       )
 
@@ -1021,13 +1014,13 @@ describe('plugin runtime', () => {
     try {
       await writeFile(
         pluginPath,
-        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default createCodegenPlugin()\n`,
+        `import { createCodegenPlugin } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport const plugin = createCodegenPlugin()\n`,
         'utf8'
       )
 
       await writeFile(
         fixture.configPath,
-        `export default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ resolve: './codegen-plugin.ts' }],\n}\n`,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
         'utf8'
       )
 

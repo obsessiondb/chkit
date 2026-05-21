@@ -6,17 +6,26 @@ import { buildChunkExecutionSql } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
 import {
+  CheckSchema,
   PLAN_FLAGS,
+  PLAN_FLAG_MAP,
   PLAN_ID_FLAGS,
-  RESUME_FLAGS,
-  RUN_FLAGS,
+  PLAN_ID_FLAG_MAP,
+  PlanSchema,
   PluginConfigSchema,
-  resolveCheckOptions,
-  resolvePlanOptions,
-  resolveResumeOptions,
-  resolveRunOptions,
-  resolveStatusOptions,
+  RESUME_FLAGS,
+  RESUME_FLAG_MAP,
+  ResumeSchema,
+  RUN_FLAGS,
+  RUN_FLAG_MAP,
+  RunSchema,
+  StatusSchema,
+  type CheckOptions,
+  type PlanOptions,
   type PluginConfig,
+  type ResumeOptions,
+  type RunOptions,
+  type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
 import { buildBackfillPlan } from './planner.js'
@@ -181,19 +190,20 @@ async function runBackfill(input: {
   }
 }
 
-export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin {
-  const config = PluginConfigSchema.parse(options)
-
+export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugin {
   return {
     manifest: {
       name: 'backfill',
       apiVersion: 1,
     },
+    optionsSchema: PluginConfigSchema,
     commands: [
       {
         name: 'plan',
         description: 'Build a deterministic backfill plan and persist immutable plan state',
         flags: PLAN_FLAGS,
+        optionsSchema: PlanSchema,
+        flagMapping: PLAN_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
             command: 'plan',
@@ -202,7 +212,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             print: context.print,
             configErrorClass: BackfillConfigError,
             fn: async () => {
-              const opts = resolvePlanOptions(config, context.options, context.flags)
+              const opts = context.options as PlanOptions
 
               if (!context.config.clickhouse) {
                 throw new BackfillConfigError(
@@ -254,6 +264,8 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         name: 'run',
         description: 'Execute a planned backfill with async query submission and polling',
         flags: RUN_FLAGS,
+        optionsSchema: RunSchema,
+        flagMapping: RUN_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
             command: 'run',
@@ -262,7 +274,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             print: context.print,
             configErrorClass: BackfillConfigError,
             fn: async () => {
-              const opts = resolveRunOptions(config, context.options, context.flags)
+              const opts = context.options as RunOptions
 
               if (!context.config.clickhouse) {
                 throw new BackfillConfigError(
@@ -289,6 +301,8 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         name: 'resume',
         description: 'Resume a backfill run from last checkpoint',
         flags: RESUME_FLAGS,
+        optionsSchema: ResumeSchema,
+        flagMapping: RESUME_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
             command: 'resume',
@@ -297,7 +311,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             print: context.print,
             configErrorClass: BackfillConfigError,
             fn: async () => {
-              const opts = resolveResumeOptions(config, context.options, context.flags)
+              const opts = context.options as ResumeOptions
 
               if (!context.config.clickhouse) {
                 throw new BackfillConfigError(
@@ -348,6 +362,8 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         name: 'status',
         description: 'Show checkpoint and chunk progress for a backfill run',
         flags: PLAN_ID_FLAGS,
+        optionsSchema: StatusSchema,
+        flagMapping: PLAN_ID_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
             command: 'status',
@@ -356,7 +372,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             print: context.print,
             configErrorClass: BackfillConfigError,
             fn: async () => {
-              const opts = resolveStatusOptions(config, context.options, context.flags)
+              const opts = context.options as StatusOptions
               const summary = await getBackfillStatus({
                 planId: opts.planId,
                 config: context.config,
@@ -384,6 +400,8 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         name: 'cancel',
         description: 'Cancel an in-progress backfill run and prevent further chunk execution',
         flags: PLAN_ID_FLAGS,
+        optionsSchema: StatusSchema,
+        flagMapping: PLAN_ID_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
             command: 'cancel',
@@ -392,7 +410,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             print: context.print,
             configErrorClass: BackfillConfigError,
             fn: async () => {
-              const opts = resolveStatusOptions(config, context.options, context.flags)
+              const opts = context.options as StatusOptions
               const summary = await cancelBackfillRun({
                 planId: opts.planId,
                 config: context.config,
@@ -415,6 +433,8 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         name: 'doctor',
         description: 'Provide actionable remediation steps for failed or pending backfill runs',
         flags: PLAN_ID_FLAGS,
+        optionsSchema: StatusSchema,
+        flagMapping: PLAN_ID_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
             command: 'doctor',
@@ -423,7 +443,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             print: context.print,
             configErrorClass: BackfillConfigError,
             fn: async () => {
-              const opts = resolveStatusOptions(config, context.options, context.flags)
+              const opts = context.options as StatusOptions
               const report = await getBackfillDoctorReport({
                 planId: opts.planId,
                 config: context.config,
@@ -447,11 +467,11 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       },
     ],
     hooks: {
-      onConfigLoaded({ options: runtimeOptions }) {
-        resolveCheckOptions(config, runtimeOptions)
+      onConfigLoaded() {
+        // Plugin-level options validated softly at load time via PluginConfigSchema.
       },
-      async onCheck({ config: appConfig, configPath, options: runtimeOptions }) {
-        const opts = resolveCheckOptions(config, runtimeOptions)
+      async onCheck({ config: appConfig, configPath, options }) {
+        const opts = CheckSchema.parse(options)
         return evaluateBackfillCheck({
           configPath,
           config: appConfig,

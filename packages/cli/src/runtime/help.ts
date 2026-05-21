@@ -12,8 +12,8 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
 
   lines.push(`  ${'init'.padEnd(14)} Scaffold a new project with config and example schema`)
 
-  const coreCommands = registry.commands.filter((c) => !c.isPlugin)
-  const pluginCommands = registry.commands.filter((c) => c.isPlugin)
+  const coreCommands = registry.commands.filter((c) => c.pluginName === 'core')
+  const pluginCommands = registry.commands.filter((c) => c.pluginName !== 'core')
 
   for (const cmd of coreCommands) {
     lines.push(`  ${cmd.name.padEnd(14)} ${cmd.description}`)

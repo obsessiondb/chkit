@@ -81,19 +81,18 @@ export interface SafeParseable<T> {
 }
 
 /**
- * Three-layer option resolution: pluginConfig → runtimeOptions → CLI flags.
+ * Two-layer option resolution: registration options → CLI flags.
  * Merges sources, validates through a schema, and throws ErrorClass on failure.
  */
 export function resolveOptions<T>(
   schema: SafeParseable<T>,
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
+  options: Record<string, unknown>,
   flags: ParsedFlags,
   flagMapping: FlagMapping,
   ErrorClass: new (message: string) => Error = Error
 ): T {
   const cliOverrides = mapFlags(flags, flagMapping)
-  const merged = { ...pluginConfig, ...runtimeOptions, ...cliOverrides }
+  const merged = { ...options, ...cliOverrides }
   const result = schema.safeParse(merged)
   if (!result.success) {
     const issue = result.error.issues[0]

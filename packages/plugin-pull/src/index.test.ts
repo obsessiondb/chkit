@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { __testUtils, createPullPlugin, renderSchemaFile } from './index.js'
+import { __testUtils, createPullPlugin, PullSchema, renderSchemaFile } from './index.js'
 
 describe('@chkit/plugin-pull renderSchemaFile', () => {
   test('renders deterministic table definitions', () => {
@@ -176,7 +176,8 @@ describe('@chkit/plugin-pull schema command', () => {
       args: [],
       flags: { '--dryrun': true },
       jsonMode: true,
-      options: {},
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
       configPath: '/tmp/clickhouse.config.ts',
       config: {
         schema: ['./schema.ts'],
@@ -257,7 +258,8 @@ describe('@chkit/plugin-pull schema command', () => {
       args: [],
       flags: { '--dryrun': true },
       jsonMode: true,
-      options: {},
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
       configPath: '/tmp/clickhouse.config.ts',
       config: {
         schema: ['./schema.ts'],
@@ -320,11 +322,13 @@ describe('@chkit/plugin-pull schema command', () => {
 
     const run = async (flags: Record<string, string | string[] | boolean | undefined> = {}): Promise<{ code: undefined | number; output: unknown[] }> => {
       const output: unknown[] = []
+      const overwrite = flags['--force'] === true || flags['--overwrite'] === true
       const code = await command.run({
         args: [],
         flags,
         jsonMode: true,
-        options: {},
+        options: PullSchema.parse({ databases: ['app'], outFile, overwrite }),
+        rawOptions: { databases: ['app'], outFile },
         configPath: '/tmp/clickhouse.config.ts',
         config: {
           schema: ['./schema.ts'],

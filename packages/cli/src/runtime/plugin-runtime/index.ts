@@ -1,7 +1,5 @@
-import { resolve } from 'node:path'
-
 import { createClickHouseExecutor } from '@chkit/clickhouse'
-import type { ResolvedChxConfig } from '@chkit/core'
+import { resolveOptions, type ResolvedChxConfig } from '@chkit/core'
 
 import type {
   ChxPlugin,
@@ -13,7 +11,6 @@ import { debug } from '../debug.js'
 import { formatPluginError } from './errors.js'
 import { wrapExecutorWithDebug } from './executor-debug.js'
 import {
-  importPluginModule,
   normalizePluginRegistration,
   validatePlugin,
 } from './loader.js'
@@ -32,6 +29,18 @@ import {
   runOnSchemaLoaded,
 } from './hooks.js'
 
+function resolvePluginOptions(
+  plugin: ChxPlugin,
+  options: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!plugin.optionsSchema) return options
+  const result = plugin.optionsSchema.safeParse(options)
+  // Soft-validate at load time: command-level optionsSchema catches strict errors at dispatch.
+  // This lets hooks see filled-in defaults when valid, and raw values otherwise.
+  if (!result.success) return options
+  return result.data
+}
+
 export async function loadPluginRuntime(input: {
   config: ResolvedChxConfig
   configPath: string
@@ -41,22 +50,13 @@ export async function loadPluginRuntime(input: {
   const registrations = input.config.plugins ?? []
   const loaded: LoadedPlugin[] = []
   const byName = new Map<string, LoadedPlugin>()
-  const configDir = resolve(input.configPath, '..')
 
   for (const registration of registrations) {
     const normalized = normalizePluginRegistration(registration)
     if (!normalized.enabled) continue
 
-    const plugin =
-      normalized.kind === 'inline'
-        ? normalized.inlinePlugin
-        : await importPluginModule(resolve(configDir, normalized.resolvePath))
-    if (!plugin) continue
-
-    const sourceLabel =
-      normalized.kind === 'inline'
-        ? `inline registration${normalized.nameHint ? ` (${normalized.nameHint})` : ''}`
-        : resolve(configDir, normalized.resolvePath)
+    const plugin = normalized.plugin
+    const sourceLabel = `inline registration${normalized.nameHint ? ` (${normalized.nameHint})` : ''}`
     validatePlugin(input.cliVersion, plugin, sourceLabel)
 
     if (normalized.nameHint && normalized.nameHint !== plugin.manifest.name) {
@@ -79,19 +79,21 @@ export async function loadPluginRuntime(input: {
       },
     )
 
-    const item: LoadedPlugin = { plugin, options: normalized.options }
+    const resolved = resolvePluginOptions(plugin, normalized.options)
+    const item: LoadedPlugin = { plugin, options: resolved, rawOptions: normalized.options }
     loaded.push(item)
     byName.set(plugin.manifest.name, item)
   }
 
   for (const plugin of input.internalPlugins ?? []) {
     if (byName.has(plugin.manifest.name)) continue
-    const item: LoadedPlugin = { plugin, options: {} }
+    const resolved = resolvePluginOptions(plugin, {})
+    const item: LoadedPlugin = { plugin, options: resolved, rawOptions: {} }
     loaded.push(item)
     byName.set(plugin.manifest.name, item)
   }
 
-  return {
+  const runtimeSelf: PluginRuntime = {
     plugins: loaded,
     async resolveContext(input) {
       const hasClickhouseConfig = !!input.config.clickhouse
@@ -184,12 +186,41 @@ export async function loadPluginRuntime(input: {
       )
       if (beforeResult.handled) return beforeResult.exitCode
 
+      let resolvedOptions: Record<string, unknown> = item.options
+      if (command.optionsSchema) {
+        try {
+          resolvedOptions = resolveOptions(
+            command.optionsSchema,
+            item.options,
+            context.flags,
+            command.flagMapping ?? {},
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (context.jsonMode) {
+            context.print({ ok: false, command: commandName, error: message })
+          } else {
+            context.print(`${commandName} failed: ${message}`)
+          }
+          return 2
+        }
+      }
+
+      const pluginContext = await runtimeSelf.resolveContext({
+        config: context.config,
+        configPath: context.configPath,
+        command: commandName,
+        flags: context.flags,
+      })
       try {
         const code = await command.run({
           ...context,
           pluginName,
-          options: item.options,
+          options: resolvedOptions,
+          rawOptions: item.rawOptions,
           tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
+          pluginRuntime: runtimeSelf,
+          pluginContext,
         })
         return typeof code === 'number' ? code : 0
       } catch (error) {
@@ -198,7 +229,10 @@ export async function loadPluginRuntime(input: {
           `command:${commandName}`,
           error,
         )
+      } finally {
+        await runtimeSelf.disposeContext(pluginContext)
       }
     },
   }
+  return runtimeSelf
 }

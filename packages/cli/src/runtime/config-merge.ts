@@ -1,5 +1,3 @@
-import { basename } from 'node:path'
-
 import type {
   ChxPluginRegistration,
   ChxUserClickHouseConfig,
@@ -10,31 +8,15 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function stripExt(name: string): string {
-  return name.replace(/\.[^./\\]+$/, '')
-}
-
 export function pluginNameOf(reg: ChxPluginRegistration): string | undefined {
-  if (typeof reg === 'string') {
-    const last = basename(reg)
-    return last ? stripExt(last) : undefined
-  }
   if (!isObject(reg)) return undefined
-  if ('plugin' in reg) {
-    if (typeof reg.name === 'string' && reg.name.length > 0) return reg.name
-    const plugin = (reg as { plugin?: unknown }).plugin
-    if (isObject(plugin)) {
-      const manifest = (plugin as { manifest?: unknown }).manifest
-      if (isObject(manifest) && typeof manifest.name === 'string' && manifest.name.length > 0) {
-        return manifest.name
-      }
-    }
-    return undefined
-  }
   if (typeof reg.name === 'string' && reg.name.length > 0) return reg.name
-  if (typeof reg.resolve === 'string' && reg.resolve.length > 0) {
-    const last = basename(reg.resolve)
-    return last ? stripExt(last) : undefined
+  const plugin = (reg as { plugin?: unknown }).plugin
+  if (isObject(plugin)) {
+    const manifest = (plugin as { manifest?: unknown }).manifest
+    if (isObject(manifest) && typeof manifest.name === 'string' && manifest.name.length > 0) {
+      return manifest.name
+    }
   }
   return undefined
 }

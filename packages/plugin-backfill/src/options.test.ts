@@ -102,10 +102,9 @@ describe('ResumeSchema', () => {
 })
 
 describe('resolveOptions', () => {
-  test('CLI flags override plugin config and runtime options', () => {
+  test('CLI flags override registration options', () => {
     const opts = resolveOptions(
       PlanSchema,
-      { maxChunkBytes: 5 * 1024 ** 3 },
       { maxChunkBytes: 8 * 1024 ** 3 },
       { '--target': 'app.events', '--max-chunk-bytes': '20G' },
       {
@@ -121,10 +120,9 @@ describe('resolveOptions', () => {
     expect(opts.maxChunkBytes).toBe(20 * 1024 ** 3)
   })
 
-  test('runtime options override plugin config', () => {
+  test('registration options apply when no CLI override', () => {
     const opts = resolveOptions(
       RunSchema,
-      { concurrency: 2 },
       { concurrency: 5 },
       { '--plan-id': 'abc123def456789a' },
       { '--plan-id': { key: 'planId', coerce: (v: string) => v } }
@@ -137,7 +135,6 @@ describe('resolveOptions', () => {
     const opts = resolveOptions(
       RunSchema,
       {},
-      {},
       { '--plan-id': 'abc123def456789a' },
       { '--plan-id': { key: 'planId', coerce: (v: string) => v } }
     )
@@ -149,7 +146,7 @@ describe('resolveOptions', () => {
 
   test('throws on invalid options', () => {
     expect(() =>
-      resolveOptions(PlanSchema, {}, {}, {}, {})
+      resolveOptions(PlanSchema, {}, {}, {})
     ).toThrow()
   })
 })

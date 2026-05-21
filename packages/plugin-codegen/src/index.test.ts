@@ -8,6 +8,7 @@ import { resolveConfig, schema, table } from '@chkit/core'
 
 import {
   createCodegenPlugin,
+  CodegenSchema,
   generateTypeArtifacts,
   generateIngestArtifacts,
   mapColumnType,
@@ -519,16 +520,17 @@ describe('@chkit/plugin-codegen check hook', () => {
         'utf8'
       )
 
-      const plugin = createCodegenPlugin({ outFile: './generated/chkit-types.ts' })
+      const plugin = createCodegenPlugin()
       const onCheck = plugin.hooks?.onCheck
       expect(onCheck).toBeTruthy()
+      const resolvedOptions = CodegenSchema.parse({ outFile: './generated/chkit-types.ts' })
 
       const first = await onCheck?.({
         command: 'check',
         config: resolveConfig({ schema: schemaPath }),
         configPath,
         jsonMode: true,
-        options: {},
+        options: resolvedOptions,
       })
       expect(first?.ok).toBe(false)
       expect(first?.findings[0]?.code).toBe('codegen_missing_output')
@@ -539,7 +541,8 @@ describe('@chkit/plugin-codegen check hook', () => {
         args: [],
         flags: {},
         jsonMode: true,
-        options: {},
+        options: resolvedOptions,
+        rawOptions: { outFile: './generated/chkit-types.ts' },
         config: resolveConfig({ schema: schemaPath }),
         configPath,
         print() {},
@@ -551,7 +554,7 @@ describe('@chkit/plugin-codegen check hook', () => {
         config: resolveConfig({ schema: schemaPath }),
         configPath,
         jsonMode: true,
-        options: {},
+        options: resolvedOptions,
       })
       expect(second?.ok).toBe(true)
       expect(second?.findings).toEqual([])

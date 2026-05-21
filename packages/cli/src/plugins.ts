@@ -1,10 +1,10 @@
 import type {
-  ChxInlinePluginRegistration,
-  ChxPluginRegistration,
   FlagDef,
+  FlagMapping,
   MigrationPlan,
   ParsedFlags,
   ResolvedChxConfig,
+  SafeParseable,
   SchemaDefinition,
 } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
@@ -16,8 +16,10 @@ export {
   MissingFlagValueError,
   UnknownFlagError,
   type FlagDef,
+  type FlagMapping,
   type InferFlags,
   type ParsedFlags,
+  type SafeParseable,
 } from '@chkit/core'
 
 export interface TableScope {
@@ -29,6 +31,7 @@ export interface TableScope {
 
 export interface LoadedPlugin {
   options: Record<string, unknown>
+  rawOptions: Record<string, unknown>
   plugin: ChxPlugin
 }
 
@@ -86,7 +89,7 @@ export interface PluginRuntime {
     commandName: string,
     context: Omit<
       ChxPluginCommandContext,
-      'pluginName' | 'options' | 'tableScope'
+      'pluginName' | 'options' | 'rawOptions' | 'tableScope' | 'pluginRuntime' | 'pluginContext'
     > & {
       tableScope?: TableScope
     },
@@ -105,24 +108,6 @@ export interface ChxGetContextInput {
   command: string
   flags: ParsedFlags
   defaults: PluginContext
-}
-
-export interface CommandDef {
-  name: string
-  description: string
-  flags: readonly FlagDef[]
-  run: (ctx: CommandRunContext) => Promise<void>
-}
-
-export interface CommandRunContext {
-  command: string
-  flags: ParsedFlags
-  positionals: string[]
-  config: ResolvedChxConfig
-  configPath: string
-  dirs: { outDir: string; migrationsDir: string; metaDir: string }
-  pluginRuntime: PluginRuntime
-  ctx: PluginContext
 }
 
 export interface CommandExtension {
@@ -230,23 +215,30 @@ export type ChxOnBeforePluginCommandResult =
   | { handled: true; exitCode: number }
   | { handled: false }
 
-export interface ChxPluginCommandContext {
+export interface ChxPluginCommandContext<TOptions = Record<string, unknown>> {
   pluginName: string
   config: ResolvedChxConfig
   configPath: string
   jsonMode: boolean
   args: string[]
   flags: ParsedFlags
-  options: Record<string, unknown>
+  options: TOptions
+  rawOptions: Record<string, unknown>
   tableScope: TableScope
   print: (value: unknown) => void
+  pluginRuntime: PluginRuntime
+  pluginContext: PluginContext
 }
 
-export interface ChxPluginCommand {
+export interface ChxPluginCommand<TOptions = Record<string, unknown>> {
   name: string
   description?: string
   flags?: readonly FlagDef[]
-  run: (context: ChxPluginCommandContext) => undefined | number | Promise<undefined | number>
+  optionsSchema?: SafeParseable<TOptions>
+  flagMapping?: FlagMapping
+  run: (
+    context: ChxPluginCommandContext<TOptions>,
+  ) => undefined | number | Promise<undefined | number>
 }
 
 export interface ChxPluginHooks {
@@ -281,6 +273,7 @@ export interface ChxPluginHooks {
 
 export interface ChxPlugin {
   manifest: ChxPluginManifest
+  optionsSchema?: SafeParseable<Record<string, unknown>>
   hooks?: ChxPluginHooks
   commands?: ChxPluginCommand[]
   extendCommands?: CommandExtension[]
@@ -288,18 +281,4 @@ export interface ChxPlugin {
 
 export function definePlugin(plugin: ChxPlugin): ChxPlugin {
   return plugin
-}
-
-export function definePluginConfig<TOptions extends object = Record<string, unknown>>(
-  registration: Omit<ChxInlinePluginRegistration<ChxPlugin, TOptions>, 'plugin'> & {
-    plugin: ChxPlugin
-  }
-): ChxInlinePluginRegistration<ChxPlugin, TOptions> {
-  return registration
-}
-
-export function isInlinePluginRegistration(
-  registration: ChxPluginRegistration
-): registration is ChxInlinePluginRegistration<ChxPlugin> {
-  return typeof registration === 'object' && registration !== null && 'plugin' in registration
 }

@@ -96,7 +96,7 @@ describe('loadConfig fallback', () => {
       { cwd: sandbox.cwd, userConfigDir: sandbox.userConfigDir },
     )
 
-    expect(result.source).toBe('synthesized')
+    expect(result.source).toBe('profile')
     expect(result.path).toBe('<default:obsessiondb>')
     expect(result.config.plugins).toHaveLength(1)
     expect(result.config.schema).toEqual([])
@@ -138,7 +138,7 @@ describe('loadConfig fallback', () => {
       },
     )
 
-    expect(result.source).toBe('synthesized')
+    expect(result.source).toBe('profile')
     expect(result.path).toBe('<default:obsessiondb>')
     expect(result.config.plugins).toHaveLength(1)
     expect(result.config.schema).toEqual([])

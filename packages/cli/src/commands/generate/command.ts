@@ -1,8 +1,8 @@
 import { generateArtifacts } from '@chkit/codegen'
-import process from 'node:process'
 import { ChxValidationError, planDiff } from '@chkit/core'
 
-import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
+import { resolveDirs } from '../../runtime/config.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
@@ -43,15 +43,16 @@ const GENERATE_FLAGS = defineFlags([
   { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
 ] as const)
 
-export const generateCommand: CommandDef = {
+export const generateCommand: ChxPluginCommand = {
   name: 'generate',
   description: 'Generate migration artifacts from schema definitions',
   flags: GENERATE_FLAGS,
   run: cmdGenerate,
 }
 
-async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
-  const { flags, config, configPath, dirs, pluginRuntime } = ctx
+async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandContext): Promise<undefined | number> {
+  const { flags, config, configPath, pluginRuntime } = ctx
+  const dirs = resolveDirs(config)
   const f = typedFlags(flags, [...GLOBAL_FLAGS, ...GENERATE_FLAGS] as const)
   const migrationName = f['--name']
   const migrationId = f['--migration-id']
@@ -107,7 +108,7 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
     } else {
       console.log(`No tables matched selector "${resolvedScope.selector ?? ''}". No changes planned.`)
     }
-    return
+    return 0
   }
 
   assertNoConflictingTableMappings(tableMappings)
@@ -132,8 +133,7 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
           error: 'validation_failed',
           issues: error.issues,
         })
-        process.exitCode = 1
-        return
+        return 1
       }
 
       const details = error.issues.map((issue) => `- [${issue.code}] ${issue.message}`).join('\n')
@@ -164,7 +164,7 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
 
   if (planMode) {
     emitGeneratePlanOutput(plan, jsonMode, resolvedScope)
-    return
+    return 0
   }
 
   const artifactDefinitions = resolvedScope.enabled
@@ -206,4 +206,5 @@ async function cmdGenerate(ctx: CommandRunContext): Promise<void> {
   }
 
   emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope)
+  return 0
 }

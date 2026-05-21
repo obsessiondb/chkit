@@ -184,13 +184,6 @@ export interface ChxResolvedClickHouseConfig {
   secure: boolean
 }
 
-export interface ChxLegacyPluginRegistration {
-  resolve: string
-  name?: string
-  enabled?: boolean
-  options?: Record<string, unknown>
-}
-
 export interface ChxInlinePluginRegistration<
   TPlugin = unknown,
   TOptions extends object = Record<string, unknown>,
@@ -201,10 +194,7 @@ export interface ChxInlinePluginRegistration<
   options?: TOptions
 }
 
-export type ChxPluginRegistration =
-  | string
-  | ChxLegacyPluginRegistration
-  | ChxInlinePluginRegistration
+export type ChxPluginRegistration = ChxInlinePluginRegistration
 
 export interface ChxUserConfig {
   schema: string | string[]
