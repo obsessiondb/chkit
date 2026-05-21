@@ -54,6 +54,7 @@
     "open-source-audit",
     "per-column-codec",
     "plugin-command-hook",
+    "profile-config-fallback",
     "query-progress-metrics",
     "refreshable-materialized-views",
     "rename-plugin-codegen",
