@@ -1,5 +1,5 @@
 ---
-"chkit": minor
+"chkit": patch
 "@chkit/plugin-obsessiondb": patch
 ---
 
