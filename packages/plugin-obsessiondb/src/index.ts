@@ -83,6 +83,7 @@ interface ObsessionDBPlugin {
 		onSchemaLoaded(context: {
 			config: ResolvedChxConfig
 			flags: Record<string, string | string[] | boolean | undefined>
+			jsonMode?: boolean
 			definitions: SchemaDefinition[]
 		}): SchemaDefinition[] | undefined
 		onBeforePluginCommand(
@@ -294,12 +295,12 @@ function createObsessionDBPlugin(
 				if (!shouldStrip) return
 
 				const rewritten = rewriteSharedEngines(context.definitions)
-				if (rewritten.count > 0) {
+				if (!context.jsonMode && rewritten.count > 0) {
 					console.log(
 						`obsessiondb: Rewrote ${rewritten.count} Shared engine(s) to standard ClickHouse equivalents.`,
 					)
 				}
-				if (rewritten.strippedSettings.length > 0) {
+				if (!context.jsonMode && rewritten.strippedSettings.length > 0) {
 					const unique = [...new Set(rewritten.strippedSettings)]
 					console.log(
 						`obsessiondb: Stripped cloud-only setting(s): ${unique.join(', ')}`,

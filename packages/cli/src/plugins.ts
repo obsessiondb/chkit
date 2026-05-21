@@ -140,6 +140,7 @@ export interface ChxOnConfigLoadedContext extends ChxPluginHookContextBase {
 }
 
 export interface ChxOnSchemaLoadedContext extends ChxPluginHookContextBase {
+  jsonMode?: boolean
   definitions: SchemaDefinition[]
 }
 
@@ -244,7 +245,7 @@ export interface ChxPluginCommand<TOptions = Record<string, unknown>> {
 export interface ChxPluginHooks {
   getContext?: (
     input: ChxGetContextInput
-  ) => PluginContext | Partial<PluginContext> | void | Promise<PluginContext | Partial<PluginContext> | void>
+  ) => PluginContext | Partial<PluginContext> | undefined | Promise<PluginContext | Partial<PluginContext> | undefined>
   onInit?: (context: ChxOnInitContext) => void | Promise<void>
   onComplete?: (context: ChxOnCompleteContext) => void | Promise<void>
   onBeforePluginCommand?: (

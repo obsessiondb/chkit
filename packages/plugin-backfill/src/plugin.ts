@@ -1,5 +1,5 @@
 import { createClickHouseExecutor } from '@chkit/clickhouse'
-import { wrapPluginRun } from '@chkit/core'
+import { wrapPluginRun, type SafeParseable } from '@chkit/core'
 
 import { executeBackfill, type BackfillProgress } from './async-backfill.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
@@ -20,7 +20,6 @@ import {
   RUN_FLAG_MAP,
   RunSchema,
   StatusSchema,
-  type CheckOptions,
   type PlanOptions,
   type PluginConfig,
   type ResumeOptions,
@@ -190,19 +189,40 @@ async function runBackfill(input: {
   }
 }
 
-export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugin {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function withFactoryDefaults<T>(
+  schema: SafeParseable<T>,
+  defaults: Record<string, unknown>,
+): SafeParseable<T> {
+  return {
+    safeParse(data) {
+      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
+    },
+  }
+}
+
+export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin {
+  const factoryOptions = options as Record<string, unknown>
+  const planOptionsSchema = withFactoryDefaults(PlanSchema, factoryOptions)
+  const runOptionsSchema = withFactoryDefaults(RunSchema, factoryOptions)
+  const resumeOptionsSchema = withFactoryDefaults(ResumeSchema, factoryOptions)
+  const statusOptionsSchema = withFactoryDefaults(StatusSchema, factoryOptions)
+
   return {
     manifest: {
       name: 'backfill',
       apiVersion: 1,
     },
-    optionsSchema: PluginConfigSchema,
+    optionsSchema: withFactoryDefaults(PluginConfigSchema, factoryOptions),
     commands: [
       {
         name: 'plan',
         description: 'Build a deterministic backfill plan and persist immutable plan state',
         flags: PLAN_FLAGS,
-        optionsSchema: PlanSchema,
+        optionsSchema: planOptionsSchema,
         flagMapping: PLAN_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
@@ -264,7 +284,7 @@ export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugi
         name: 'run',
         description: 'Execute a planned backfill with async query submission and polling',
         flags: RUN_FLAGS,
-        optionsSchema: RunSchema,
+        optionsSchema: runOptionsSchema,
         flagMapping: RUN_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
@@ -301,7 +321,7 @@ export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugi
         name: 'resume',
         description: 'Resume a backfill run from last checkpoint',
         flags: RESUME_FLAGS,
-        optionsSchema: ResumeSchema,
+        optionsSchema: resumeOptionsSchema,
         flagMapping: RESUME_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
@@ -362,7 +382,7 @@ export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugi
         name: 'status',
         description: 'Show checkpoint and chunk progress for a backfill run',
         flags: PLAN_ID_FLAGS,
-        optionsSchema: StatusSchema,
+        optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
@@ -400,7 +420,7 @@ export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugi
         name: 'cancel',
         description: 'Cancel an in-progress backfill run and prevent further chunk execution',
         flags: PLAN_ID_FLAGS,
-        optionsSchema: StatusSchema,
+        optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({
@@ -433,7 +453,7 @@ export function createBackfillPlugin(_options: PluginConfig = {}): BackfillPlugi
         name: 'doctor',
         description: 'Provide actionable remediation steps for failed or pending backfill runs',
         flags: PLAN_ID_FLAGS,
-        optionsSchema: StatusSchema,
+        optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
         run: async (context) =>
           wrapPluginRun({

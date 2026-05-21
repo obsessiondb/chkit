@@ -11,8 +11,9 @@ export async function selectServiceInteractive(
     return null
   }
 
-  if (services.length === 1) {
-    const service = services[0]!
+  const [onlyService] = services
+  if (services.length === 1 && onlyService) {
+    const service = onlyService
     print(`Auto-selected service: ${service.name} (${service.status})`)
     return service
   }
@@ -26,11 +27,12 @@ export async function selectServiceInteractive(
   try {
     const answer = await rl.question(`\nSelect service [1-${services.length}]: `)
     const index = parseInt(answer.trim(), 10) - 1
-    if (isNaN(index) || index < 0 || index >= services.length) {
+    const service = services[index]
+    if (Number.isNaN(index) || !service) {
       print('Invalid selection.')
       return null
     }
-    return services[index]!
+    return service
   } finally {
     rl.close()
   }

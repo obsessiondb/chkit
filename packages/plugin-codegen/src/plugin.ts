@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import { wrapPluginRun } from '@chkit/core'
+import { wrapPluginRun, type SafeParseable } from '@chkit/core'
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import type {
@@ -102,19 +102,37 @@ function mergeCheckResults(results: CodegenPluginCheckResult[]): CodegenPluginCh
   }
 }
 
-export function createCodegenPlugin(_options: CodegenPluginOptions = {}): CodegenPlugin {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function withFactoryDefaults<T>(
+  schema: SafeParseable<T>,
+  defaults: Record<string, unknown>,
+): SafeParseable<T> {
+  return {
+    safeParse(data) {
+      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
+    },
+  }
+}
+
+export function createCodegenPlugin(options: CodegenPluginOptions = {}): CodegenPlugin {
+  const factoryOptions = options as Record<string, unknown>
+  const optionsSchema = withFactoryDefaults(CodegenSchema, factoryOptions)
+
   return {
     manifest: {
       name: 'codegen',
       apiVersion: 1,
     },
-    optionsSchema: CodegenSchema,
+    optionsSchema,
     commands: [
       {
         name: 'codegen',
         description: 'Generate TypeScript artifacts from chkit schema definitions',
         flags: CODEGEN_FLAGS,
-        optionsSchema: CodegenSchema,
+        optionsSchema,
         flagMapping: CODEGEN_FLAG_MAP,
         async run({ flags, jsonMode, print, options: effectiveOptions, config, configPath }): Promise<undefined | number> {
           return wrapPluginRun({

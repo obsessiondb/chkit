@@ -50,5 +50,5 @@ export async function loadSelectedService(configPath: string): Promise<SelectedS
 export async function saveSelectedService(configPath: string, service: SelectedService): Promise<void> {
   const filePath = getServicePath(configPath)
   await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, JSON.stringify(service, null, 2) + '\n')
+  await writeFile(filePath, `${JSON.stringify(service, null, 2)}\n`)
 }

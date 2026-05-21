@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { FlagDef } from '@chkit/core'
-import { parseCommandArgs } from '../../runtime/command-dispatch.js'
+import type { FlagDef, ResolvedChxConfig } from '@chkit/core'
+import type { PluginRuntime } from '../../plugins.js'
+import { parseCommandArgs, runResolvedCommand } from '../../runtime/command-dispatch.js'
+import type { CommandRegistry, RegisteredCommand } from '../../runtime/command-registry.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 
 const SERVICE_FLAG: FlagDef = {
@@ -44,5 +46,94 @@ describe('parseCommandArgs', () => {
 		expect(parsed?.flags['--json']).toBe(true)
 		expect(parsed?.flags['--service']).toBe('prod')
 		expect(parsed?.positionals).toEqual(['SELECT 1'])
+	})
+})
+
+const TEST_CONFIG: ResolvedChxConfig = {
+	schema: [],
+	outDir: '.chkit',
+	migrationsDir: 'migrations',
+	metaDir: '.chkit/meta',
+	plugins: [],
+	check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+	safety: { allowDestructive: false },
+}
+
+function makeRegistry(): CommandRegistry {
+	return {
+		commands: [],
+		globalFlags: GLOBAL_FLAGS,
+		get: () => undefined,
+		resolveFlags: () => [...GLOBAL_FLAGS],
+	}
+}
+
+function makeResolved(pluginName: string): RegisteredCommand {
+	return {
+		name: pluginName,
+		description: '',
+		flags: [],
+		pluginFlags: [],
+		pluginName,
+	}
+}
+
+function makeRuntime(): { runtime: PluginRuntime; configLoadedCalls: () => number } {
+	let configLoadedCalls = 0
+	const runtime: PluginRuntime = {
+		plugins: [],
+		getCommand: () => null,
+		resolveContext: async () => {
+			throw new Error('not used')
+		},
+		disposeContext: async () => {},
+		runOnInit: async () => {},
+		runOnComplete: async () => {},
+		runOnConfigLoaded: async () => {
+			configLoadedCalls += 1
+		},
+		runOnSchemaLoaded: async (context) => context.definitions,
+		runOnPlanCreated: async (_context, plan) => plan,
+		runOnBeforeApply: async (context) => context.statements,
+		runOnAfterApply: async () => {},
+		runOnCheck: async () => [],
+		runOnCheckReport: async () => {},
+		runOnBeforePluginCommand: async () => ({ handled: false }),
+		runPluginCommand: async () => 0,
+	}
+	return { runtime, configLoadedCalls: () => configLoadedCalls }
+}
+
+describe('runResolvedCommand', () => {
+	test('does not run onConfigLoaded for the internal core command wrapper', async () => {
+		const { runtime, configLoadedCalls } = makeRuntime()
+
+		await runResolvedCommand({
+			argv: ['generate'],
+			commandName: 'generate',
+			resolved: makeResolved('core'),
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(configLoadedCalls()).toBe(0)
+	})
+
+	test('still runs onConfigLoaded once for top-level plugin commands', async () => {
+		const { runtime, configLoadedCalls } = makeRuntime()
+
+		await runResolvedCommand({
+			argv: ['codegen'],
+			commandName: 'codegen',
+			resolved: makeResolved('codegen'),
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(configLoadedCalls()).toBe(1)
 	})
 })

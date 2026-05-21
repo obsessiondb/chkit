@@ -76,6 +76,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     config,
     tableScope: resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions)),
     flags,
+    jsonMode,
     definitions,
   })
 

@@ -51,6 +51,21 @@ describe('@chkit/plugin-codegen options', () => {
     expect(registration.options?.emitZod).toBe(true)
     expect(registration.plugin.manifest.name).toBe('codegen')
   })
+
+  test('createCodegenPlugin carries factory options into runtime schemas', () => {
+    const plugin = createCodegenPlugin({ outFile: './types.ts', emitZod: true })
+    const command = plugin.commands[0]
+
+    const pluginResult = plugin.optionsSchema?.safeParse({})
+    const commandResult = command?.optionsSchema?.safeParse({})
+
+    expect(pluginResult?.success).toBe(true)
+    expect(commandResult?.success).toBe(true)
+    if (!pluginResult?.success || !commandResult?.success) return
+    expect(pluginResult.data.outFile).toBe('./types.ts')
+    expect(commandResult.data.outFile).toBe('./types.ts')
+    expect(commandResult.data.emitZod).toBe(true)
+  })
 })
 
 describe('@chkit/plugin-codegen mapping', () => {

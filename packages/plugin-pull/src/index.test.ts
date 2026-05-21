@@ -5,6 +5,28 @@ import { tmpdir } from 'node:os'
 
 import { __testUtils, createPullPlugin, PullSchema, renderSchemaFile } from './index.js'
 
+describe('@chkit/plugin-pull options', () => {
+  test('createPullPlugin carries factory options into runtime schemas', () => {
+    const plugin = createPullPlugin({
+      outFile: './schema.ts',
+      databases: ['app'],
+      overwrite: true,
+      introspect: async () => [],
+    })
+    const command = plugin.commands[0]
+
+    const pluginResult = plugin.optionsSchema?.safeParse({})
+    const commandResult = command?.optionsSchema?.safeParse({})
+
+    expect(pluginResult?.success).toBe(true)
+    expect(commandResult?.success).toBe(true)
+    if (!pluginResult?.success || !commandResult?.success) return
+    expect(pluginResult.data.outFile).toBe('./schema.ts')
+    expect(commandResult.data.databases).toEqual(['app'])
+    expect(commandResult.data.overwrite).toBe(true)
+  })
+})
+
 describe('@chkit/plugin-pull renderSchemaFile', () => {
   test('renders deterministic table definitions', () => {
     const content = renderSchemaFile([

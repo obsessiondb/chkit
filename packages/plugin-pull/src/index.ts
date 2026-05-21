@@ -131,21 +131,43 @@ interface PullSchemaResult {
   content: string
 }
 
+function stringArrayFlag(value: string | string[] | boolean | undefined): string[] | undefined {
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string') return [value]
+  return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function withFactoryDefaults<T>(
+  schema: SafeParseable<T>,
+  defaults: Record<string, unknown>,
+): SafeParseable<T> {
+  return {
+    safeParse(data) {
+      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
+    },
+  }
+}
+
 export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
-  const introspector = options.introspect
+  const { introspect: introspector, ...factoryOptions } = options
+  const optionsSchema = withFactoryDefaults(PullSchema, factoryOptions)
 
   return {
     manifest: {
       name: 'pull',
       apiVersion: 1,
     },
-    optionsSchema: PullSchema,
+    optionsSchema,
     commands: [
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
         flags: PULL_SCHEMA_FLAGS,
-        optionsSchema: PullSchema,
+        optionsSchema,
         flagMapping: PULL_FLAG_MAP,
         async run({ flags, jsonMode, print, options: opts, config }) {
           return wrapPluginRun({
@@ -155,17 +177,31 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
             print,
             configErrorClass: PullConfigError,
             fn: async () => {
+              const flagOptions = {
+                ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
+                ...(flags['--force'] === true || flags['--overwrite'] === true
+                  ? { overwrite: true }
+                  : {}),
+                ...(stringArrayFlag(flags['--database'])
+                  ? { databases: stringArrayFlag(flags['--database']) }
+                  : {}),
+              }
+              const effectiveOptions = PullSchema.parse({
+                ...factoryOptions,
+                ...(isRecord(opts) ? opts : {}),
+                ...flagOptions,
+              })
               const dryrun = flags['--dryrun'] === true
               const pulled = await pullSchema({
                 config,
-                options: { ...opts, introspect: introspector },
+                options: { ...effectiveOptions, introspect: introspector },
               })
 
               if (!dryrun) {
                 await writeSchemaFile({
                   outFile: pulled.outFile,
                   content: pulled.content,
-                  overwrite: opts.overwrite,
+                  overwrite: effectiveOptions.overwrite,
                 })
               }
 

@@ -101,8 +101,8 @@ export async function loadPluginRuntime(input: {
         'context',
         `resolving executor — clickhouse config: ${hasClickhouseConfig ? 'yes' : 'no'}`,
       )
-      const rawExecutor = hasClickhouseConfig
-        ? createClickHouseExecutor(input.config.clickhouse!)
+      const rawExecutor = input.config.clickhouse
+        ? createClickHouseExecutor(input.config.clickhouse)
         : NULL_EXECUTOR
       const defaults: PluginContext = {
         executor: wrapExecutorWithDebug(rawExecutor),

@@ -232,27 +232,29 @@ export async function runResolvedCommand(input: {
 		tableSelector: gf['--table'],
 	})
 
-	try {
-		await input.pluginRuntime.runOnConfigLoaded({
-			command: input.commandName,
-			config: input.config,
-			configPath: input.configPath,
-			tableScope,
-			flags,
-		})
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error)
-		if (jsonMode) {
-			console.log(JSON.stringify({ ok: false, error: message }))
-		} else {
-			console.error(message)
-		}
-		process.exitCode = 2
-		return
-	}
-
 	const pluginName = input.resolved.pluginName ?? input.commandName
 	const pluginCommandName = subcommandName ?? input.commandName
+
+	if (pluginName !== 'core') {
+		try {
+			await input.pluginRuntime.runOnConfigLoaded({
+				command: input.commandName,
+				config: input.config,
+				configPath: input.configPath,
+				tableScope,
+				flags,
+			})
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			if (jsonMode) {
+				console.log(JSON.stringify({ ok: false, error: message }))
+			} else {
+				console.error(message)
+			}
+			process.exitCode = 2
+			return
+		}
+	}
 
 	const exitCode = await input.pluginRuntime.runPluginCommand(
 		pluginName,

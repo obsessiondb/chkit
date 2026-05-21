@@ -45,8 +45,7 @@ function validateColumnCodec(
   }
   let generalCount = 0
   let generalIndex = -1
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i]!
+  for (const [i, step] of steps.entries()) {
     if (isRawCodec(step)) continue
     if (isGeneralCodec(step)) {
       generalCount += 1
