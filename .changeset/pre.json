@@ -50,6 +50,7 @@
     "mv-drop-sync",
     "obsessiondb-auth-backfill",
     "obsessiondb-query-routing",
+    "obsessiondb-service-aliases",
     "obsessiondb-strip-storage-policy",
     "open-source-audit",
     "per-column-codec",
