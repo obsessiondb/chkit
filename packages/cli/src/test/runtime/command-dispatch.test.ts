@@ -191,4 +191,67 @@ describe('runResolvedCommand', () => {
 			args: ['service', 'alias', 'set', 'prod', 'production'],
 		})
 	})
+
+	test('does not match plugin subcommands from later positional args', async () => {
+		const { runtime } = makeRuntime()
+		let received:
+			| { pluginName: string; commandName: string; args: readonly string[] }
+			| undefined
+		runtime.runPluginCommand = async (pluginName, commandName, context) => {
+			received = { pluginName, commandName, args: context.args }
+			return 0
+		}
+
+		await runResolvedCommand({
+			argv: [
+				'obsessiondb',
+				'service',
+				'alias',
+				'set',
+				'login',
+				'production',
+			],
+			commandName: 'obsessiondb',
+			resolved: {
+				name: 'obsessiondb',
+				description: '',
+				flags: [],
+				pluginFlags: [],
+				pluginName: 'obsessiondb',
+				subcommands: [
+					{
+						name: 'login',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+					{
+						name: 'logout',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+					{
+						name: 'service',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+				],
+			},
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(received).toEqual({
+			pluginName: 'obsessiondb',
+			commandName: 'service',
+			args: ['service', 'alias', 'set', 'login', 'production'],
+		})
+	})
 })

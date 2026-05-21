@@ -160,7 +160,7 @@ describe('@chkit/cli obsessiondb service e2e', () => {
 				'service',
 				'alias',
 				'set',
-				'prod',
+				'login',
 				'production',
 				'--config',
 				fixture.configPath,
@@ -168,7 +168,7 @@ describe('@chkit/cli obsessiondb service e2e', () => {
 			env,
 		)
 		expect(setAlias.exitCode).toBe(0)
-		expect(setAlias.stdout).toContain('Service alias saved: prod -> production')
+		expect(setAlias.stdout).toContain('Service alias saved: login -> production')
 
 		const aliasList = await runCliAsync(
 			[
@@ -183,12 +183,12 @@ describe('@chkit/cli obsessiondb service e2e', () => {
 		)
 		expect(aliasList.exitCode).toBe(0)
 		expect(aliasList.stdout).toContain('Service aliases:')
-		expect(aliasList.stdout).toContain('  prod -> production')
+		expect(aliasList.stdout).toContain('  login -> production')
 
 		const stored = JSON.parse(await readFile(servicePath, 'utf8')) as {
 			aliases?: Record<string, { service_id?: string; service_name?: string }>
 		}
-		expect(stored.aliases?.prod).toEqual({
+		expect(stored.aliases?.login).toEqual({
 			service_id: 'svc-prod',
 			service_name: 'production',
 		})

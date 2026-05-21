@@ -183,8 +183,13 @@ export async function runResolvedCommand(input: {
 	let subcommandName: string | undefined
 
 	if (input.resolved.subcommands) {
+		const commandPositionals = extractPositionals(argsAfterCommand, [
+			...input.registry.globalFlags,
+			...input.resolved.flags,
+		])
+		const commandToken = commandPositionals[0]
 		const matchedSub = input.resolved.subcommands.find((s) =>
-			argsAfterCommand.includes(s.name),
+			s.name === commandToken,
 		)
 		if (matchedSub) {
 			subcommandName = matchedSub.name
