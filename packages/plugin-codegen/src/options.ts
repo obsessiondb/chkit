@@ -1,11 +1,9 @@
 import { z } from 'zod'
-import { defineFlags, resolveOptions, type FlagMapping } from '@chkit/core'
-
-import { CodegenConfigError } from './errors.js'
+import { defineFlags, type FlagMapping } from '@chkit/core'
 
 // ───── Plugin config schema (what codegen({...}) accepts) ─────
 
-export const PluginConfigSchema = z.object({
+const PluginConfigSchema = z.object({
   outFile: z.string().min(1).optional(),
   emitZod: z.boolean().optional(),
   tableNameStyle: z.enum(['pascal', 'camel', 'raw']).optional(),
@@ -23,7 +21,7 @@ export type PluginConfig = z.input<typeof PluginConfigSchema>
 
 // ───── Codegen command schema ─────
 
-const CodegenSchema = z.object({
+export const CodegenSchema = z.object({
   outFile: z.string().min(1).default('./src/generated/chkit-types.ts'),
   emitZod: z.boolean().default(false),
   tableNameStyle: z.enum(['pascal', 'camel', 'raw']).default('pascal'),
@@ -36,7 +34,7 @@ const CodegenSchema = z.object({
   emitMigrations: z.boolean().default(false),
   migrationsOutFile: z.string().min(1).default('./src/generated/chkit-migrations.ts'),
 })
-type CodegenOptions = z.infer<typeof CodegenSchema>
+export type CodegenOptions = z.infer<typeof CodegenSchema>
 
 // ───── CLI flag definitions ─────
 
@@ -54,7 +52,7 @@ export const CODEGEN_FLAGS = defineFlags([
 
 // ───── Flag mapping ─────
 
-const CODEGEN_FLAG_MAP: FlagMapping = {
+export const CODEGEN_FLAG_MAP: FlagMapping = {
   '--out-file': { key: 'outFile' },
   '--emit-zod': { key: 'emitZod' },
   '--emit-ingest': { key: 'emitIngest' },
@@ -65,24 +63,7 @@ const CODEGEN_FLAG_MAP: FlagMapping = {
   '--migrations-out-file': { key: 'migrationsOutFile' },
 }
 
-// ───── Resolvers ─────
-
-export function resolveCodegenOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>
-): CodegenOptions {
-  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, flags, CODEGEN_FLAG_MAP, CodegenConfigError)
-}
-
 /** Fill defaults for partial options. Used by generators. */
 export function normalizeCodegenOptions(options: PluginConfig = {}): CodegenOptions {
   return CodegenSchema.parse(options)
-}
-
-export function isRunOnGenerateEnabled(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>
-): boolean {
-  return resolveOptions(CodegenSchema, pluginConfig, runtimeOptions, {}, {}, CodegenConfigError).runOnGenerate
 }

@@ -44,5 +44,8 @@
     "@chkit/codegen": "workspace:*",
     "@chkit/core": "workspace:*",
     "@logtape/logtape": "^2.0.5"
+  },
+  "optionalDependencies": {
+    "@chkit/plugin-obsessiondb": "workspace:*"
   }
 }

@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
-import process from 'node:process'
 
-import { defineFlags, typedFlags, type CommandDef, type CommandRunContext } from '../../plugins.js'
+import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
+import { resolveDirs } from '../../runtime/config.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
@@ -33,28 +33,30 @@ const MIGRATE_FLAGS = defineFlags([
   { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
 ] as const)
 
-export const migrateCommand: CommandDef = {
+export const migrateCommand: ChxPluginCommand = {
   name: 'migrate',
   description: 'Review or execute pending migrations',
   flags: MIGRATE_FLAGS,
   run: cmdMigrate,
 }
 
-async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
-  const { flags, config, configPath, dirs, pluginRuntime, ctx } = runCtx
+async function cmdMigrate(
+  runCtx: import('../../plugins.js').ChxPluginCommandContext,
+): Promise<undefined | number> {
+  const { flags, config, configPath, pluginRuntime, pluginContext } = runCtx
   const f = typedFlags(flags, [...GLOBAL_FLAGS, ...MIGRATE_FLAGS] as const)
   const executeRequested = f['--apply'] === true || f['--execute'] === true
   const allowDestructive = f['--allow-destructive'] === true
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
 
-  const { migrationsDir, metaDir } = dirs
+  const { migrationsDir, metaDir } = resolveDirs(config)
   debug('migrate', `flags: execute=${executeRequested}, allowDestructive=${allowDestructive}, json=${jsonMode}`)
 
-  if (!ctx.hasExecutor) {
+  if (!pluginContext.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
-  const db = ctx.executor
+  const db = pluginContext.executor
   const journalStore = createJournalStore(db)
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
@@ -85,8 +87,7 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
         error: 'Checksum mismatch detected on applied migrations',
         checksumMismatches,
       })
-      process.exitCode = 1
-      return
+      return 1
     }
     throw new Error(
       `Checksum mismatch detected on applied migrations: ${checksumMismatches.map((item) => item.name).join(', ')}`,
@@ -105,7 +106,7 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
     } else {
       console.log(`No tables matched selector "${tableScope.selector ?? ''}". No migrations selected.`)
     }
-    return
+    return 0
   }
 
   const pending = tableScope.enabled
@@ -118,12 +119,12 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
     } else {
       console.log('No pending migrations.')
     }
-    return
+    return 0
   }
 
   if (jsonMode && !executeRequested) {
     emitJson('migrate', { mode, scope: tableScope, pending })
-    return
+    return 0
   }
 
   if (!jsonMode) {
@@ -140,13 +141,13 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
       if (!jsonMode) {
         console.log('\nPlan only. Re-run with --apply to apply and journal these migrations.')
       }
-      return
+      return 0
     }
 
     const confirmed = await confirmApply()
     if (!confirmed) {
       console.log('Migration apply cancelled by user.')
-      return
+      return 0
     }
   }
 
@@ -163,8 +164,7 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
         destructiveMigrations: destructive.migrations,
         destructiveOperations: destructive.operations,
       })
-      process.exitCode = 3
-      return
+      return 3
     }
 
     if (isBackgroundOrCI()) {
@@ -206,8 +206,9 @@ async function cmdMigrate(runCtx: CommandRunContext): Promise<void> {
 
   if (jsonMode) {
     emitJson('migrate', { mode: 'execute', scope: tableScope, applied: appliedNow })
-    return
+    return 0
   }
 
   console.log('\nMigrations recorded in ClickHouse _chkit_migrations table.')
+  return 0
 }

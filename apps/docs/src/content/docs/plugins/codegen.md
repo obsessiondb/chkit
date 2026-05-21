@@ -57,8 +57,6 @@ export default defineConfig({
 })
 ```
 
-Legacy path-based registration via `{ resolve: './plugins/codegen.ts', options: {...} }` remains supported.
-
 ## Options
 
 - `outFile` (default: `./src/generated/chkit-types.ts`)

@@ -2,19 +2,13 @@
 import process from 'node:process'
 import type { ParsedFlags } from '@chkit/core'
 
-import { checkCommand } from '../commands/check/command.js'
-import { driftCommand } from '../commands/drift/command.js'
-import { generateCommand } from '../commands/generate/command.js'
 import { cmdInit } from '../commands/init.js'
-import { migrateCommand } from '../commands/migrate/command.js'
-import { pluginCommand } from '../commands/plugin.js'
-import { queryCommand } from '../commands/query.js'
-import { statusCommand } from '../commands/status.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { loadConfig } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
+import { extractConfigPath } from '../runtime/extract-config-path.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
 import { configureCliLogging } from '../runtime/logging.js'
@@ -26,20 +20,37 @@ const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   pull: 'Pull',
 }
 
-const CORE_COMMANDS = [
-  generateCommand,
-  migrateCommand,
-  statusCommand,
-  driftCommand,
-  checkCommand,
-  queryCommand,
-  pluginCommand,
-]
+const PROJECT_ONLY_COMMANDS = new Set([
+  'generate',
+  'migrate',
+  'status',
+  'drift',
+  'check',
+  'codegen',
+  'pull',
+])
 
-function extractConfigPath(argv: string[]): string | undefined {
-  const idx = argv.indexOf('--config')
-  if (idx === -1) return undefined
-  return argv[idx + 1]
+function firstPluginPositional(argv: string[]): string | undefined {
+  const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(
+    GLOBAL_FLAGS.map((flag) => [flag.name, flag]),
+  )
+  for (let i = 1; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (!token) continue
+    const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
+    const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+    const flag = globalFlags.get(name)
+    if (flag) {
+      if (flag.type !== 'boolean' && eqIdx === -1) i += 1
+      continue
+    }
+    return token
+  }
+}
+
+function allowsConfiglessObsessionDBBootstrap(commandName: string | undefined, argv: string[]): boolean {
+  if (commandName === 'obsessiondb') return true
+  return commandName === 'plugin' && firstPluginPositional(argv) === 'obsessiondb'
 }
 
 function formatFatalError(error: unknown): string {
@@ -105,7 +116,21 @@ async function run(): Promise<void> {
   }
 
   const configPathArg = extractConfigPath(argv)
-  const { config, path: configPath } = await loadConfig(configPathArg)
+  const env = { command: commandName, mode: process.env.NODE_ENV }
+  const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
+    command: commandName,
+    allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
+  })
+
+  if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
+    console.error(
+      `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
+        `You are running chkit from a user profile (no local config found).`,
+    )
+    process.exitCode = 1
+    return
+  }
+
   const pluginRuntime = await loadPluginRuntime({
     config,
     configPath,
@@ -114,7 +139,6 @@ async function run(): Promise<void> {
   })
 
   const registry = createCommandRegistry({
-    coreCommands: CORE_COMMANDS,
     globalFlags: GLOBAL_FLAGS,
     pluginExtensions: collectExtensions(pluginRuntime),
     pluginCommands: collectPluginCommands(pluginRuntime),
@@ -122,7 +146,13 @@ async function run(): Promise<void> {
 
   const resolved = registry.get(commandName)
   let initFlags: ParsedFlags = {}
-  if (resolved && !resolved.isPlugin && commandName !== 'plugin' && !argv.includes('--help') && !argv.includes('-h')) {
+  if (
+    resolved &&
+    !resolved.subcommands &&
+    commandName !== 'plugin' &&
+    !argv.includes('--help') &&
+    !argv.includes('-h')
+  ) {
     const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
     if (!parsed) return
     initFlags = parsed.flags
@@ -146,7 +176,7 @@ async function run(): Promise<void> {
 
   debug(
     'cli',
-    `command "${commandName}" resolved: ${resolved ? (resolved.isPlugin ? 'plugin' : 'core') : 'not found'}`,
+    `command "${commandName}" resolved: ${resolved ? `plugin (${resolved.pluginName ?? '?'})` : 'not found'}`,
   )
 
   try {
@@ -198,19 +228,27 @@ async function printGlobalHelp(argv: string[]): Promise<void> {
   let registry: ReturnType<typeof createCommandRegistry>
   try {
     const { config, path: configPath } = await loadConfig(configPathArg)
-    const pluginRuntime = await loadPluginRuntime({ config, configPath, cliVersion: CLI_VERSION })
+    const pluginRuntime = await loadPluginRuntime({
+      config,
+      configPath,
+      cliVersion: CLI_VERSION,
+      internalPlugins: getInternalPlugins(),
+    })
     registry = createCommandRegistry({
-      coreCommands: CORE_COMMANDS,
       globalFlags: GLOBAL_FLAGS,
       pluginExtensions: collectExtensions(pluginRuntime),
       pluginCommands: collectPluginCommands(pluginRuntime),
     })
   } catch {
+    const internal = getInternalPlugins()
     registry = createCommandRegistry({
-      coreCommands: CORE_COMMANDS,
       globalFlags: GLOBAL_FLAGS,
       pluginExtensions: [],
-      pluginCommands: [],
+      pluginCommands: internal.flatMap((plugin) => {
+        const commands = plugin.commands
+        if (!commands || commands.length === 0) return []
+        return [{ pluginName: plugin.manifest.name, commands, manifestName: plugin.manifest.name }]
+      }),
     })
   }
   console.log(formatGlobalHelp(registry, CLI_VERSION))

@@ -83,6 +83,7 @@ interface ObsessionDBPlugin {
 		onSchemaLoaded(context: {
 			config: ResolvedChxConfig
 			flags: Record<string, string | string[] | boolean | undefined>
+			jsonMode?: boolean
 			definitions: SchemaDefinition[]
 		}): SchemaDefinition[] | undefined
 		onBeforePluginCommand(
@@ -216,7 +217,7 @@ function createObsessionDBPlugin(
 			...BACKFILL_EXTEND_COMMANDS,
 		],
 		hooks: {
-			async getContext({ configPath, flags }) {
+			async getContext({ config, configPath, command, flags }) {
 				const creds = await loadCredentials()
 				if (!creds) return
 				const effectiveCreds = {
@@ -242,7 +243,14 @@ function createObsessionDBPlugin(
 				} else {
 					service = await loadSelectedService(configPath)
 				}
-				if (!service) return
+				if (!service) {
+					if (command === 'query' && !config.clickhouse) {
+						throw new Error(
+							'authenticated but no ObsessionDB service is selected. Run `chkit obsessiondb select-service` or pass `--service <name>`.',
+						)
+					}
+					return
+				}
 
 				return {
 					executor: createRemoteExecutor({
@@ -274,9 +282,11 @@ function createObsessionDBPlugin(
 				}
 				if (service) {
 					console.log(`obsessiondb: using service "${service.service_name}"\n`)
+				} else if (context.command === 'query') {
+					return
 				} else {
 					console.log(
-						'obsessiondb: authenticated but no service selected (run `chkit obsessiondb select-service`)',
+						'obsessiondb: authenticated but no service selected (run `chkit obsessiondb select-service` or pass `--service <name>`)',
 					)
 				}
 			},
@@ -285,12 +295,12 @@ function createObsessionDBPlugin(
 				if (!shouldStrip) return
 
 				const rewritten = rewriteSharedEngines(context.definitions)
-				if (rewritten.count > 0) {
+				if (!context.jsonMode && rewritten.count > 0) {
 					console.log(
 						`obsessiondb: Rewrote ${rewritten.count} Shared engine(s) to standard ClickHouse equivalents.`,
 					)
 				}
-				if (rewritten.strippedSettings.length > 0) {
+				if (!context.jsonMode && rewritten.strippedSettings.length > 0) {
 					const unique = [...new Set(rewritten.strippedSettings)]
 					console.log(
 						`obsessiondb: Stripped cloud-only setting(s): ${unique.join(', ')}`,

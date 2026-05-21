@@ -16,6 +16,8 @@ Apply these patterns when:
 ## Function Order (High-level to details)
 
 ```ts
+// Good — main entry near the top, details below
+
 // 1. Constants, types, schemas
 const CONFIG = { ... } as const
 type Options = { ... }
@@ -33,6 +35,24 @@ async function processData() { ... }
 // 4. Utilities
 function formatDate(date: Date) { ... }
 ```
+
+```ts
+// Bad — bottom-up ordering: utilities first, main entry buried at the bottom.
+// Compiles fine because of JS hoisting, but readers have to scroll past
+// internals before reaching the entry point. This is the most common
+// violation — it's the default ordering in a lot of JS/TS code, but it
+// inverts the reading order we want.
+
+function formatDate(date: Date) { ... }            // utility
+async function initialize() { ... }                // supporting
+async function processData() { ... }               // supporting
+export async function runTask() {                  // main, but readers hit it LAST
+  await initialize()
+  await processData()
+}
+```
+
+When reviewing a file: locate the main exported entry first. If it isn't near the top (after types/constants), the file is inverted — reorder it.
 
 ## Avoid Bloat Proxy Functions
 
