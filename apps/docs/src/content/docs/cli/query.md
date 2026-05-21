@@ -20,7 +20,7 @@ The SQL must be a single positional argument. Wrap it in quotes if it contains s
 No command-specific flags. See [global flags](/cli/overview/#global-flags).
 
 When the [ObsessionDB plugin](/plugins/obsessiondb/) is loaded, `chkit query`
-also accepts `--service <name>` to route the query to a specific service for
+also accepts `--service <name-or-alias>` to route the query to a specific service for
 this invocation (see [Per-command service override](/plugins/obsessiondb/#per-command-service-override)).
 
 ## Behavior
@@ -46,7 +46,7 @@ count()
 (1 row)
 ```
 
-Override the ObsessionDB service for a single query:
+Override the ObsessionDB service for a single query by service name or saved alias:
 
 ```sh
 chkit query "SELECT count() FROM users" --service customer-b

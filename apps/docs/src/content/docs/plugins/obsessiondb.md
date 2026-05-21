@@ -51,14 +51,15 @@ Authenticate and pick the ObsessionDB service this project should route through:
 
 ```bash
 chkit obsessiondb login
-chkit obsessiondb select-service
+chkit obsessiondb service list
+chkit obsessiondb service select
 ```
 
 The selection is stored in `.chkit/obsessiondb.json` next to your config file and used as the default target for every command after that.
 
 ### Per-command service override
 
-Once authenticated, any command that hits ClickHouse accepts `--service <name>` to target a different service for one invocation without changing the saved selection. The flag takes the service **name** as shown in `chkit obsessiondb select-service`.
+Once authenticated, any command that hits ClickHouse accepts `--service <name-or-alias>` to target a different service for one invocation without changing the saved selection. The flag takes the service **name** as shown in `chkit obsessiondb service list`, or a saved alias.
 
 ```bash
 # Run an ad-hoc query against a different service
@@ -68,7 +69,23 @@ chkit query "SELECT count() FROM users" --service customer-b
 chkit migrate --apply --service staging
 ```
 
-`--service` is available on `generate`, `migrate`, `status`, `drift`, `check`, and `query`. The lookup fails fast with the list of available services if the name does not match.
+`--service` is available on `generate`, `migrate`, `status`, `drift`, `check`, and `query`. The lookup tries service names first, then saved aliases, and fails fast with the list of available services and aliases if nothing matches.
+
+### Service aliases
+
+Aliases are stored with the ObsessionDB service selection: project aliases live in `.chkit/obsessiondb.json` next to your config, while profile-mode aliases live in `~/.config/chkit/obsessiondb.json`.
+
+```bash
+# Define a short alias for a service name
+chkit obsessiondb service alias set prod customer-production
+
+# Use the alias in a query
+chkit query "SELECT count() FROM users" --service prod
+
+# List or remove aliases
+chkit obsessiondb service alias list
+chkit obsessiondb service alias remove prod
+```
 
 ## How it works
 

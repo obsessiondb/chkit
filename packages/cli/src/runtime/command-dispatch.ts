@@ -6,7 +6,7 @@ import {
 	UnknownFlagError,
 } from '@chkit/core'
 
-import { typedFlags, type PluginRuntime } from '../plugins.js'
+import { type PluginRuntime, typedFlags } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
@@ -183,8 +183,13 @@ export async function runResolvedCommand(input: {
 	let subcommandName: string | undefined
 
 	if (input.resolved.subcommands) {
+		const commandPositionals = extractPositionals(argsAfterCommand, [
+			...input.registry.globalFlags,
+			...input.resolved.flags,
+		])
+		const commandToken = commandPositionals[0]
 		const matchedSub = input.resolved.subcommands.find((s) =>
-			argsAfterCommand.includes(s.name),
+			s.name === commandToken,
 		)
 		if (matchedSub) {
 			subcommandName = matchedSub.name
@@ -212,9 +217,16 @@ export async function runResolvedCommand(input: {
 		flags = parsed
 		positionals = rest
 	} else {
-		const allFlags = input.registry.resolveFlags(input.commandName, subcommandName)
+		const allFlags = input.registry.resolveFlags(
+			input.commandName,
+			subcommandName,
+		)
 		if (isQuery) {
-			const parsed = parseCommandArgs(input.commandName, argsAfterCommand, allFlags)
+			const parsed = parseCommandArgs(
+				input.commandName,
+				argsAfterCommand,
+				allFlags,
+			)
 			if (!parsed) return
 			flags = parsed.flags
 			positionals = parsed.positionals
@@ -222,6 +234,7 @@ export async function runResolvedCommand(input: {
 			const parsedFlags = parseFlagsOrReport(argsAfterCommand, allFlags)
 			if (!parsedFlags) return
 			flags = parsedFlags
+			positionals = extractPositionals(argsAfterCommand, allFlags)
 		}
 	}
 

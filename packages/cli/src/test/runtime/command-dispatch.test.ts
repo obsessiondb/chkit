@@ -2,8 +2,14 @@ import { describe, expect, test } from 'bun:test'
 
 import type { FlagDef, ResolvedChxConfig } from '@chkit/core'
 import type { PluginRuntime } from '../../plugins.js'
-import { parseCommandArgs, runResolvedCommand } from '../../runtime/command-dispatch.js'
-import type { CommandRegistry, RegisteredCommand } from '../../runtime/command-registry.js'
+import {
+	parseCommandArgs,
+	runResolvedCommand,
+} from '../../runtime/command-dispatch.js'
+import type {
+	CommandRegistry,
+	RegisteredCommand,
+} from '../../runtime/command-registry.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 
 const SERVICE_FLAG: FlagDef = {
@@ -55,7 +61,11 @@ const TEST_CONFIG: ResolvedChxConfig = {
 	migrationsDir: 'migrations',
 	metaDir: '.chkit/meta',
 	plugins: [],
-	check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+	check: {
+		failOnPending: true,
+		failOnChecksumMismatch: true,
+		failOnDrift: true,
+	},
 	safety: { allowDestructive: false },
 }
 
@@ -78,7 +88,10 @@ function makeResolved(pluginName: string): RegisteredCommand {
 	}
 }
 
-function makeRuntime(): { runtime: PluginRuntime; configLoadedCalls: () => number } {
+function makeRuntime(): {
+	runtime: PluginRuntime
+	configLoadedCalls: () => number
+} {
 	let configLoadedCalls = 0
 	const runtime: PluginRuntime = {
 		plugins: [],
@@ -135,5 +148,110 @@ describe('runResolvedCommand', () => {
 		})
 
 		expect(configLoadedCalls()).toBe(1)
+	})
+
+	test('passes positional args to plugin subcommands', async () => {
+		const { runtime } = makeRuntime()
+		let received:
+			| { pluginName: string; commandName: string; args: readonly string[] }
+			| undefined
+		runtime.runPluginCommand = async (pluginName, commandName, context) => {
+			received = { pluginName, commandName, args: context.args }
+			return 0
+		}
+
+		await runResolvedCommand({
+			argv: ['obsessiondb', 'service', 'alias', 'set', 'prod', 'production'],
+			commandName: 'obsessiondb',
+			resolved: {
+				name: 'obsessiondb',
+				description: '',
+				flags: [],
+				pluginFlags: [],
+				pluginName: 'obsessiondb',
+				subcommands: [
+					{
+						name: 'service',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+				],
+			},
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(received).toEqual({
+			pluginName: 'obsessiondb',
+			commandName: 'service',
+			args: ['service', 'alias', 'set', 'prod', 'production'],
+		})
+	})
+
+	test('does not match plugin subcommands from later positional args', async () => {
+		const { runtime } = makeRuntime()
+		let received:
+			| { pluginName: string; commandName: string; args: readonly string[] }
+			| undefined
+		runtime.runPluginCommand = async (pluginName, commandName, context) => {
+			received = { pluginName, commandName, args: context.args }
+			return 0
+		}
+
+		await runResolvedCommand({
+			argv: [
+				'obsessiondb',
+				'service',
+				'alias',
+				'set',
+				'login',
+				'production',
+			],
+			commandName: 'obsessiondb',
+			resolved: {
+				name: 'obsessiondb',
+				description: '',
+				flags: [],
+				pluginFlags: [],
+				pluginName: 'obsessiondb',
+				subcommands: [
+					{
+						name: 'login',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+					{
+						name: 'logout',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+					{
+						name: 'service',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'obsessiondb',
+					},
+				],
+			},
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(received).toEqual({
+			pluginName: 'obsessiondb',
+			commandName: 'service',
+			args: ['service', 'alias', 'set', 'login', 'production'],
+		})
 	})
 })
