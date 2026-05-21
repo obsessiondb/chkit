@@ -58,4 +58,13 @@ describe('getServicePath', () => {
     expect(path).toBe(join(sandbox.userConfigDir, 'obsessiondb.json'))
     sandbox.cleanup()
   })
+
+  test('resolves to user dir when config is the synthesized sentinel path', () => {
+    const sandbox = createSandbox()
+
+    const path = getServicePath('<default:obsessiondb>', sandbox.userConfigDir)
+
+    expect(path).toBe(join(sandbox.userConfigDir, 'obsessiondb.json'))
+    sandbox.cleanup()
+  })
 })

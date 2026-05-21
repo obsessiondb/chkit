@@ -15,6 +15,7 @@ import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatc
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { loadConfig } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
+import { extractConfigPath } from '../runtime/extract-config-path.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
 import { configureCliLogging } from '../runtime/logging.js'
@@ -46,15 +47,27 @@ const CORE_COMMANDS = [
   pluginCommand,
 ]
 
-function extractConfigPath(argv: string[]): string | undefined {
-  const idx = argv.indexOf('--config')
-  if (idx === -1) return undefined
-  return argv[idx + 1]
+function firstPluginPositional(argv: string[]): string | undefined {
+  const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(
+    GLOBAL_FLAGS.map((flag) => [flag.name, flag]),
+  )
+  for (let i = 1; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (!token) continue
+    const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
+    const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+    const flag = globalFlags.get(name)
+    if (flag) {
+      if (flag.type !== 'boolean' && eqIdx === -1) i += 1
+      continue
+    }
+    return token
+  }
 }
 
 function allowsConfiglessObsessionDBBootstrap(commandName: string | undefined, argv: string[]): boolean {
   if (commandName === 'obsessiondb') return true
-  return commandName === 'plugin' && argv[1] === 'obsessiondb'
+  return commandName === 'plugin' && firstPluginPositional(argv) === 'obsessiondb'
 }
 
 function formatFatalError(error: unknown): string {
@@ -120,7 +133,8 @@ async function run(): Promise<void> {
   }
 
   const configPathArg = extractConfigPath(argv)
-  const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, {}, {
+  const env = { command: commandName, mode: process.env.NODE_ENV }
+  const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
     command: commandName,
     allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
   })

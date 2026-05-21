@@ -10,7 +10,6 @@ export function getUserConfigDir(): string {
 
 export const USER_PROFILE_CONFIG_FILE = 'config.ts'
 export const USER_CREDENTIALS_FILE = 'credentials.json'
-export const SYNTHESIZED_CONFIG_FILENAME = 'clickhouse.config.ts'
 
 export function getUserProfileConfigPath(): string {
   return join(getUserConfigDir(), USER_PROFILE_CONFIG_FILE)
@@ -18,10 +17,6 @@ export function getUserProfileConfigPath(): string {
 
 export function getUserCredentialsPath(): string {
   return join(getUserConfigDir(), USER_CREDENTIALS_FILE)
-}
-
-export function getSynthesizedConfigPath(): string {
-  return join(getUserConfigDir(), SYNTHESIZED_CONFIG_FILENAME)
 }
 
 export function isUnderUserConfigDir(path: string): boolean {

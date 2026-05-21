@@ -6,18 +6,20 @@ import { pathToFileURL } from 'node:url'
 
 import {
   resolveConfig,
+  SYNTHESIZED_CONFIG_PATH,
   type ChxConfig,
   type ChxConfigEnv,
   type ChxConfigFn,
   type ChxConfigInput,
   type ChxPluginRegistration,
+  type ChxUserConfig,
   type ResolvedChxConfig,
 } from '@chkit/core'
 
+import { mergeUserConfig } from './config-merge.js'
 import { debug } from './debug.js'
 import {
   getUserConfigDir,
-  SYNTHESIZED_CONFIG_FILENAME,
   USER_CREDENTIALS_FILE,
   USER_PROFILE_CONFIG_FILE,
 } from './user-config.js'
@@ -30,6 +32,16 @@ export interface LoadedConfig {
   config: ResolvedChxConfig
   path: string
   source: ConfigSource
+  profileLayered: boolean
+}
+
+interface RawConfig {
+  raw: ChxUserConfig
+  path: string
+}
+
+interface ProfileLayer extends RawConfig {
+  source: 'profile' | 'synthesized'
 }
 
 function isConfigFunction(candidate: ChxConfigInput): candidate is ChxConfigFn {
@@ -49,36 +61,35 @@ export async function loadConfig(
   const cwd = options.cwd ?? process.cwd()
   const userDir = options.userConfigDir ?? getUserConfigDir()
 
+  const projectPath = configPathArg
+    ? resolve(cwd, configPathArg)
+    : resolve(cwd, DEFAULT_CONFIG_FILE)
+
   if (configPathArg) {
-    const explicitPath = resolve(cwd, configPathArg)
-    debug('config', `resolving explicit config at ${explicitPath}`)
-    if (!existsSync(explicitPath)) {
-      throw new Error(`Config not found at ${explicitPath}.`)
+    debug('config', `resolving explicit config at ${projectPath}`)
+    if (!existsSync(projectPath)) {
+      throw new Error(`Config not found at ${projectPath}.`)
     }
-    return loadFromFile(explicitPath, env, 'project')
+  } else {
+    debug('config', `looking for project config at ${projectPath}`)
   }
 
-  const projectPath = resolve(cwd, DEFAULT_CONFIG_FILE)
-  debug('config', `looking for project config at ${projectPath}`)
-  if (existsSync(projectPath)) {
-    return loadFromFile(projectPath, env, 'project')
+  const projectExists = existsSync(projectPath)
+
+  if (projectExists) {
+    const project = await readRawConfig(projectPath, env)
+    const layer = await readProfileLayer(userDir, env, options.allowSynthesizedProfileConfig)
+    if (layer) {
+      debug('config', `layering profile (${layer.source}, path=${layer.path}) under project`)
+      const merged = mergeUserConfig(layer.raw, project.raw)
+      return finalize(merged, project.path, 'project', true)
+    }
+    return finalize(project.raw, project.path, 'project', false)
   }
 
-  const profilePath = resolve(userDir, USER_PROFILE_CONFIG_FILE)
-  debug('config', `looking for user profile config at ${profilePath}`)
-  if (existsSync(profilePath)) {
-    return loadFromFile(profilePath, env, 'profile')
-  }
-
-  const credentialsPath = resolve(userDir, USER_CREDENTIALS_FILE)
-  if (existsSync(credentialsPath)) {
-    debug('config', `synthesizing query-only config from credentials at ${credentialsPath}`)
-    return synthesizeProfileConfig(userDir)
-  }
-
-  if (options.allowSynthesizedProfileConfig) {
-    debug('config', 'synthesizing profile config without existing credentials')
-    return synthesizeProfileConfig(userDir)
+  const layer = await readProfileLayer(userDir, env, options.allowSynthesizedProfileConfig)
+  if (layer) {
+    return finalize(layer.raw, layer.path, layer.source, false)
   }
 
   if (options.command === 'query') {
@@ -94,11 +105,7 @@ export async function loadConfig(
   )
 }
 
-async function loadFromFile(
-  configPath: string,
-  env: ChxConfigEnv,
-  source: ConfigSource,
-): Promise<LoadedConfig> {
+async function readRawConfig(configPath: string, env: ChxConfigEnv): Promise<RawConfig> {
   const mod = await import(pathToFileURL(configPath).href)
   const candidate = (mod.default ?? mod.config) as ChxConfigInput | undefined
   if (!candidate) {
@@ -108,11 +115,45 @@ async function loadFromFile(
   }
 
   const isFn = isConfigFunction(candidate)
-  debug('config', `config export is ${isFn ? 'function' : 'object'}`)
-  const userConfig = isFn ? await candidate(env) : (candidate as ChxConfig)
-  const config = resolveConfig(userConfig)
+  debug('config', `config export is ${isFn ? 'function' : 'object'} (path=${configPath})`)
+  const raw = isFn ? await candidate(env) : (candidate as ChxConfig)
+  return { raw, path: configPath }
+}
 
-  debug('config', `loaded (source=${source})`, {
+async function readProfileLayer(
+  userDir: string,
+  env: ChxConfigEnv,
+  allowSynthesized: boolean | undefined,
+): Promise<ProfileLayer | null> {
+  const profilePath = resolve(userDir, USER_PROFILE_CONFIG_FILE)
+  if (existsSync(profilePath)) {
+    debug('config', `found profile config at ${profilePath}`)
+    const { raw } = await readRawConfig(profilePath, env)
+    return { raw, path: profilePath, source: 'profile' }
+  }
+
+  const credentialsPath = resolve(userDir, USER_CREDENTIALS_FILE)
+  if (existsSync(credentialsPath)) {
+    debug('config', `synthesizing profile layer from credentials at ${credentialsPath}`)
+    return synthesizedProfileLayer()
+  }
+
+  if (allowSynthesized) {
+    debug('config', 'synthesizing profile layer without existing credentials')
+    return synthesizedProfileLayer()
+  }
+
+  return null
+}
+
+function finalize(
+  raw: ChxUserConfig,
+  path: string,
+  source: ConfigSource,
+  profileLayered: boolean,
+): LoadedConfig {
+  const config = resolveConfig(raw)
+  debug('config', `loaded (source=${source}, profileLayered=${profileLayered})`, {
     schema: config.schema,
     outDir: config.outDir,
     migrationsDir: config.migrationsDir,
@@ -121,8 +162,7 @@ async function loadFromFile(
       : 'not configured',
     plugins: (config.plugins ?? []).length,
   })
-
-  return { config, path: configPath, source }
+  return { config, path, source, profileLayered }
 }
 
 async function loadObsessionDBRegistration(): Promise<ChxPluginRegistration> {
@@ -142,14 +182,12 @@ async function loadObsessionDBRegistration(): Promise<ChxPluginRegistration> {
   }
 }
 
-async function synthesizeProfileConfig(userDir: string): Promise<LoadedConfig> {
-  const path = resolve(userDir, SYNTHESIZED_CONFIG_FILENAME)
-  const config = resolveConfig({
+async function synthesizedProfileLayer(): Promise<ProfileLayer> {
+  const raw: ChxUserConfig = {
     schema: [],
     plugins: [await loadObsessionDBRegistration()],
-  })
-  debug('config', `synthesized profile config at virtual path ${path}`)
-  return { config, path, source: 'synthesized' }
+  }
+  return { raw, path: SYNTHESIZED_CONFIG_PATH, source: 'synthesized' }
 }
 
 export async function writeIfMissing(filePath: string, content: string): Promise<boolean> {

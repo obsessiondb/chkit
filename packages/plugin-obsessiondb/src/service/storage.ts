@@ -3,6 +3,8 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 
+import { isSynthesizedConfigPath } from '@chkit/core'
+
 import type { SelectedService } from './types.js'
 
 export function getUserConfigDir(): string {
@@ -18,7 +20,7 @@ function isUnderUserConfigDir(path: string, userDir: string): boolean {
 }
 
 export function getServicePath(configPath: string, userDir: string = getUserConfigDir()): string {
-  if (isUnderUserConfigDir(configPath, userDir)) {
+  if (isSynthesizedConfigPath(configPath) || isUnderUserConfigDir(configPath, userDir)) {
     return join(userDir, 'obsessiondb.json')
   }
   const configDir = resolve(configPath, '..')

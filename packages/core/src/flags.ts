@@ -121,45 +121,62 @@ export function parseFlags<const T extends readonly FlagDef[]>(argv: string[], f
 
   const flags: ParsedFlags = {}
 
+  const addArrayValue = (key: string, raw: string): void => {
+    const values = raw.split(',').map((v) => v.trim()).filter((v) => v.length > 0)
+    const existing = flags[key]
+    if (Array.isArray(existing)) {
+      existing.push(...values)
+    } else {
+      flags[key] = values
+    }
+  }
+
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
     if (!token || !token.startsWith('--')) continue
 
-    if (negationMap.has(token)) {
-      const originalName = negationMap.get(token) as string
+    const eqIdx = token.indexOf('=')
+    const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+    const inlineValue = eqIdx === -1 ? undefined : token.slice(eqIdx + 1)
+
+    if (eqIdx === -1 && negationMap.has(name)) {
+      const originalName = negationMap.get(name) as string
       flags[originalName] = false
       continue
     }
 
-    const def = lookup.get(token)
+    const def = lookup.get(name)
     if (!def) {
-      throw new UnknownFlagError(token)
+      throw new UnknownFlagError(name)
     }
 
     if (def.type === 'boolean') {
+      if (inlineValue !== undefined) {
+        throw new UnknownFlagError(token)
+      }
       flags[def.name] = true
       continue
     }
 
-    const nextToken = argv[i + 1]
-    if (nextToken === undefined || nextToken.startsWith('--')) {
-      throw new MissingFlagValueError(def.name)
+    let value: string
+    if (inlineValue !== undefined) {
+      value = inlineValue
+    } else {
+      const nextToken = argv[i + 1]
+      if (nextToken === undefined || nextToken.startsWith('--')) {
+        throw new MissingFlagValueError(def.name)
+      }
+      value = nextToken
+      i += 1
     }
-    i += 1
 
     if (def.type === 'string') {
-      flags[def.name] = nextToken
+      flags[def.name] = value
       continue
     }
 
     if (def.type === 'string[]') {
-      const values = nextToken.split(',').map((v) => v.trim()).filter((v) => v.length > 0)
-      const existing = flags[def.name]
-      if (Array.isArray(existing)) {
-        existing.push(...values)
-      } else {
-        flags[def.name] = values
-      }
+      addArrayValue(def.name, value)
     }
   }
 

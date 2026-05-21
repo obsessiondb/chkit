@@ -30,9 +30,11 @@ function extractPositionals(
 			positionals.push(token)
 			continue
 		}
-		const def = byName.get(token)
-		if (def && def.type !== 'boolean') {
-			// Consume the value following a string/string[] flag
+		const eqIdx = token.indexOf('=')
+		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+		const def = byName.get(name)
+		if (def && def.type !== 'boolean' && eqIdx === -1) {
+			// Consume the value following a string/string[] flag in space form
 			i += 1
 		}
 	}
@@ -59,14 +61,16 @@ function splitQueryArgs(
 			break
 		}
 
-		const def = byName.get(token)
+		const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
+		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+		const def = byName.get(name)
 		if (!def) {
 			positionals.push(token)
 			continue
 		}
 
 		flagArgs.push(token)
-		if (def.type !== 'boolean') {
+		if (def.type !== 'boolean' && eqIdx === -1) {
 			const next = argv[i + 1]
 			if (next !== undefined) {
 				flagArgs.push(next)
@@ -114,9 +118,16 @@ function stripGlobalFlags(argv: string[]): {
 			i++
 			continue
 		}
+		if (token.startsWith('--config=')) {
+			continue
+		}
 		if (token === '--table' && i + 1 < argv.length) {
 			tableSelector = argv[i + 1]
 			i++
+			continue
+		}
+		if (token.startsWith('--table=')) {
+			tableSelector = token.slice('--table='.length)
 			continue
 		}
 		rest.push(token)
