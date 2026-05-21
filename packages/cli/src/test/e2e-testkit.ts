@@ -9,12 +9,10 @@ import { join, resolve } from 'node:path'
 
 // Re-export all shared utilities so CLI tests only need one import
 export {
-  type LiveEnv,
   getRequiredEnv,
   createLiveExecutor,
   createStatelessLiveExecutor,
   quoteIdent,
-  createRunTag,
   createPrefix,
   createJournalTableName,
   waitForTable,
@@ -23,7 +21,7 @@ export {
 } from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')
-export const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
+const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 export const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
 // ---------------------------------------------------------------------------

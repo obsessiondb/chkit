@@ -1,47 +1,46 @@
 import type { ClickHouseJsonQueryResult } from '@chkit/clickhouse'
-import type { CommandDef, CommandRunContext } from '../plugins.js'
+import type { ChxPluginCommand } from '../plugins.js'
 
 const DEFAULT_SHOWN_ROW_LIMIT = 25
 
-export const queryCommand: CommandDef = {
+export const queryCommand: ChxPluginCommand = {
 	name: 'query',
 	description: 'Run a SQL query against the configured target',
 	flags: [],
-	run: cmdQuery,
-}
+	async run(context): Promise<undefined | number> {
+		const { flags, args, pluginContext } = context
+		const jsonMode = flags['--json'] === true
 
-async function cmdQuery(runCtx: CommandRunContext): Promise<void> {
-	const { flags, positionals, ctx } = runCtx
-	const jsonMode = flags['--json'] === true
+		const sql = args[0]
+		if (!sql || sql.trim().length === 0) {
+			throw new Error(
+				'query requires a SQL string as the first positional argument (e.g. `chkit query "SELECT 1"`)',
+			)
+		}
+		if (args.length > 1) {
+			throw new Error(
+				'query accepts a single SQL string. Wrap it in quotes if it contains spaces.',
+			)
+		}
 
-	const sql = positionals[0]
-	if (!sql || sql.trim().length === 0) {
-		throw new Error(
-			'query requires a SQL string as the first positional argument (e.g. `chkit query "SELECT 1"`)',
-		)
-	}
-	if (positionals.length > 1) {
-		throw new Error(
-			'query accepts a single SQL string. Wrap it in quotes if it contains spaces.',
-		)
-	}
+		if (!pluginContext.hasExecutor) {
+			throw new Error(
+				'No target configured. Provide clickhouse settings in your config or install a plugin (e.g. obsessiondb) that supplies one.',
+			)
+		}
 
-	if (!ctx.hasExecutor) {
-		throw new Error(
-			'No target configured. Provide clickhouse settings in your config or install a plugin (e.g. obsessiondb) that supplies one.',
-		)
-	}
+		if (jsonMode) {
+			const payload = pluginContext.executor.queryJson
+				? await pluginContext.executor.queryJson(sql)
+				: rowsToJsonResult(await pluginContext.executor.query<Record<string, unknown>>(sql))
+			printQueryJson(payload)
+			return 0
+		}
 
-	if (jsonMode) {
-		const payload = ctx.executor.queryJson
-			? await ctx.executor.queryJson(sql)
-			: rowsToJsonResult(await ctx.executor.query<Record<string, unknown>>(sql))
-		printQueryJson(payload)
-		return
-	}
-
-	const rows = await ctx.executor.query<Record<string, unknown>>(sql)
-	printRows(rows)
+		const rows = await pluginContext.executor.query<Record<string, unknown>>(sql)
+		printRows(rows)
+		return 0
+	},
 }
 
 function printQueryJson(payload: ClickHouseJsonQueryResult): void {

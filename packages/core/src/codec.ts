@@ -113,8 +113,7 @@ function splitTopLevelCommas(input: string): string[] {
   const out: string[] = []
   let depth = 0
   let current = ''
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i]!
+  for (const ch of input) {
     if (ch === '(') depth += 1
     else if (ch === ')') depth = Math.max(0, depth - 1)
     if (ch === ',' && depth === 0) {

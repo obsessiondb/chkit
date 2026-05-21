@@ -42,18 +42,13 @@ Some plugins have top-level CLI shortcuts:
 
 ### Plugin registration
 
-Plugins are registered in the `plugins` array of `clickhouse.config.ts`. Two registration styles are supported:
+Plugins are registered inline in the `plugins` array of `clickhouse.config.ts`:
 
-1. **Typed inline** — import and call the plugin function directly:
-   ```ts
-   import { codegen } from '@chkit/plugin-codegen'
-   plugins: [codegen({ outFile: './types.ts' })]
-   ```
+```ts
+import { codegen } from '@chkit/plugin-codegen'
 
-2. **Legacy path-based** — specify a file path to resolve:
-   ```ts
-   plugins: [{ resolve: './plugins/my-plugin.ts', options: {} }]
-   ```
+plugins: [codegen({ outFile: './types.ts' })]
+```
 
 ### Plugin lifecycle hooks
 

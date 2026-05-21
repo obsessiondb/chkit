@@ -225,8 +225,8 @@ function parseIndexType(value: string): ParsedIndexShape {
 		case 'minmax':
 			return { type: 'minmax' }
 		case 'bloom_filter':
-			return args.length > 0
-				? { type: 'bloom_filter', falsePositiveRate: args[0]! }
+			return args[0] !== undefined
+				? { type: 'bloom_filter', falsePositiveRate: args[0] }
 				: { type: 'bloom_filter' }
 		case 'tokenbf_v1':
 			return {
@@ -602,8 +602,8 @@ export function createExecutorWithClient(
 					written_bytes: string
 					elapsed: string
 				}>()
-				if (runningRows.length > 0) {
-					const proc = runningRows[0]!
+				const [proc] = runningRows
+				if (proc) {
 					return {
 						status: 'running',
 						readRows: Number(proc.read_rows),
@@ -641,7 +641,10 @@ SETTINGS skip_unavailable_shards = 1`,
 					return { status: 'unknown' }
 				}
 
-				const row = logRows[0]!
+				const [row] = logRows
+				if (!row) {
+					return { status: 'unknown' }
+				}
 				if (row.type === 'QueryFinish') {
 					return {
 						status: 'finished',

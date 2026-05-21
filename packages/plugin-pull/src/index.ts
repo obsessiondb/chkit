@@ -13,8 +13,8 @@ import {
   defineFlags,
   type FlagMapping,
   normalizeEngine,
-  resolveOptions,
   type ResolvedChxConfig,
+  type SafeParseable,
   type SchemaDefinition,
   splitTopLevelComma,
   type TableDefinition,
@@ -31,17 +31,9 @@ import {
   type SystemTableRow,
 } from './view-parser.js'
 
-// ───── Plugin config schema (what pull({...}) accepts) ─────
-
-const PluginConfigSchema = z.object({
-  outFile: z.string().min(1).optional(),
-  databases: z.array(z.string()).optional(),
-  overwrite: z.boolean().optional(),
-})
-
 // ───── Pull command schema ─────
 
-const PullSchema = z.object({
+export const PullSchema = z.object({
   outFile: z.string().min(1).default('./src/db/schema/pulled.ts'),
   databases: z.array(z.string()).default([]).transform((arr) =>
     [...new Set(arr.map((s) => s.trim()).filter((s) => s.length > 0))].sort()
@@ -63,7 +55,8 @@ export interface PullPluginCommandContext {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
-  options: Record<string, unknown>
+  options: PullOptions
+  rawOptions: Record<string, unknown>
   config: ResolvedChxConfig
   configPath: string
   print: (value: unknown) => void
@@ -75,6 +68,7 @@ export interface PullPlugin {
     apiVersion: 1
     version?: string
   }
+  optionsSchema?: SafeParseable<PullOptions>
   commands: Array<{
     name: 'schema'
     description: string
@@ -85,6 +79,8 @@ export interface PullPlugin {
       placeholder?: string
       negation?: boolean
     }>
+    optionsSchema?: SafeParseable<PullOptions>
+    flagMapping?: FlagMapping
     run: (context: PullPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
 }
@@ -115,21 +111,13 @@ const PULL_FLAG_MAP: FlagMapping = {
   '--database': { key: 'databases' },
 }
 
-// ───── Resolver ─────
+// ───── Errors ─────
 
 class PullConfigError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'PullConfigError'
   }
-}
-
-function resolvePullOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>
-): PullOptions {
-  return resolveOptions(PullSchema, pluginConfig, runtimeOptions, flags, PULL_FLAG_MAP, PullConfigError)
 }
 
 // ───── Plugin ─────
@@ -143,21 +131,45 @@ interface PullSchemaResult {
   content: string
 }
 
+function stringArrayFlag(value: string | string[] | boolean | undefined): string[] | undefined {
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string') return [value]
+  return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function withFactoryDefaults<T>(
+  schema: SafeParseable<T>,
+  defaults: Record<string, unknown>,
+): SafeParseable<T> {
+  return {
+    safeParse(data) {
+      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
+    },
+  }
+}
+
 export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
-  const pluginConfig = PluginConfigSchema.parse(options)
-  const introspector = options.introspect
+  const { introspect: introspector, ...factoryOptions } = options
+  const optionsSchema = withFactoryDefaults(PullSchema, factoryOptions)
 
   return {
     manifest: {
       name: 'pull',
       apiVersion: 1,
     },
+    optionsSchema,
     commands: [
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
         flags: PULL_SCHEMA_FLAGS,
-        async run({ flags, jsonMode, print, options: runtimeOptions, config }) {
+        optionsSchema,
+        flagMapping: PULL_FLAG_MAP,
+        async run({ flags, jsonMode, print, options: opts, config }) {
           return wrapPluginRun({
             command: 'schema',
             label: 'Pull schema',
@@ -165,18 +177,31 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
             print,
             configErrorClass: PullConfigError,
             fn: async () => {
-              const opts = resolvePullOptions(pluginConfig, runtimeOptions, flags)
+              const flagOptions = {
+                ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
+                ...(flags['--force'] === true || flags['--overwrite'] === true
+                  ? { overwrite: true }
+                  : {}),
+                ...(stringArrayFlag(flags['--database'])
+                  ? { databases: stringArrayFlag(flags['--database']) }
+                  : {}),
+              }
+              const effectiveOptions = PullSchema.parse({
+                ...factoryOptions,
+                ...(isRecord(opts) ? opts : {}),
+                ...flagOptions,
+              })
               const dryrun = flags['--dryrun'] === true
               const pulled = await pullSchema({
                 config,
-                options: { ...opts, introspect: introspector },
+                options: { ...effectiveOptions, introspect: introspector },
               })
 
               if (!dryrun) {
                 await writeSchemaFile({
                   outFile: pulled.outFile,
                   content: pulled.content,
-                  overwrite: opts.overwrite,
+                  overwrite: effectiveOptions.overwrite,
                 })
               }
 

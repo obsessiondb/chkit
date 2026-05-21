@@ -89,7 +89,9 @@ export function createRemoteExecutor(deps: {
 			compressed?: boolean
 		}) {
 			if (params.values.length === 0) return
-			const columns = Object.keys(params.values[0]!)
+			const [firstValue] = params.values
+			if (!firstValue) return
+			const columns = Object.keys(firstValue)
 			const rows = params.values
 				.map(
 					(row) =>
@@ -145,8 +147,8 @@ ORDER BY event_time DESC
 LIMIT 1`,
 			)
 
-			if (log.length === 0) return { status: 'unknown' as const }
-			const row = log[0]!
+			const [row] = log
+			if (!row) return { status: 'unknown' as const }
 
 			if (row.type === 'QueryFinish') {
 				return {

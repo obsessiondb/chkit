@@ -76,6 +76,25 @@ describe('parseFlags', () => {
     expect(result['--name']).toBe('second')
   })
 
+  it('parses --name=value equals form for string flags', () => {
+    const result = parseFlags(['--name=my-migration'], defs)
+    expect(result['--name']).toBe('my-migration')
+  })
+
+  it('accepts empty value for --name= form', () => {
+    const result = parseFlags(['--name='], defs)
+    expect(result['--name']).toBe('')
+  })
+
+  it('parses --name=value for string[] flags', () => {
+    const result = parseFlags(['--database=db1,db2'], defs)
+    expect(result['--database']).toEqual(['db1', 'db2'])
+  })
+
+  it('rejects equals form on boolean flags', () => {
+    expect(() => parseFlags(['--json=true'], defs)).toThrow(UnknownFlagError)
+  })
+
   it('infers typed record from defineFlags', () => {
     const typedDefs = defineFlags([
       { name: '--out', type: 'string', description: 'Output' },

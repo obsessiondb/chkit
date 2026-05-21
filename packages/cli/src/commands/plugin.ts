@@ -1,24 +1,24 @@
-import { typedFlags, type CommandDef, type CommandRunContext, type ParsedFlags } from '../plugins.js'
+import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
 import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
-export const pluginCommand: CommandDef = {
+export const pluginCommand: ChxPluginCommand = {
   name: 'plugin',
   description: 'List plugins and run plugin namespace commands',
   flags: [],
   run: cmdPlugin,
 }
 
-async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
-  const { flags, positionals, config, configPath, pluginRuntime } = ctx
+async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): Promise<undefined | number> {
+  const { flags, args, config, configPath, pluginRuntime } = ctx
   const jsonMode = flags['--json'] === true
 
-  const pluginName = positionals[0]
-  const commandName = positionals[1]
-  const commandArgs = positionals.slice(2)
+  const pluginName = args[0]
+  const commandName = args[1]
+  const commandArgs = args.slice(2)
 
   if (pluginRuntime.plugins.length === 0) {
     if (jsonMode) {
@@ -26,8 +26,7 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
         error: 'No plugins configured. Add entries to config.plugins first.',
         plugins: [],
       })
-      process.exitCode = 1
-      return
+      return 1
     }
     throw new Error('No plugins configured. Add entries to config.plugins first.')
   }
@@ -46,7 +45,7 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
 
     if (jsonMode) {
       emitJson('plugin', payload)
-      return
+      return 0
     }
 
     console.log('Configured plugins:')
@@ -60,7 +59,7 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
         console.log(`  - ${command.name}${command.description ? `: ${command.description}` : ''}`)
       }
     }
-    return
+    return 0
   }
 
   const selectedPlugin = pluginRuntime.plugins.find(
@@ -85,19 +84,19 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
 
     if (jsonMode) {
       emitJson('plugin', payload)
-      return
+      return 0
     }
 
     if (commands.length === 0) {
       console.log(`Plugin "${selectedPlugin.plugin.manifest.name}" has no registered commands.`)
-      return
+      return 0
     }
 
     console.log(`Plugin commands for "${selectedPlugin.plugin.manifest.name}":`)
     for (const command of commands) {
       console.log(`- ${command.name}${command.description ? `: ${command.description}` : ''}`)
     }
-    return
+    return 0
   }
 
   const gf = typedFlags(flags, GLOBAL_FLAGS)
@@ -124,8 +123,7 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
         } else {
           console.error(error.message)
         }
-        process.exitCode = 1
-        return
+        return 1
       }
       throw error
     }
@@ -143,5 +141,5 @@ async function cmdPlugin(ctx: CommandRunContext): Promise<void> {
     },
   })
 
-  if (exitCode !== 0) process.exitCode = exitCode
+  return exitCode
 }

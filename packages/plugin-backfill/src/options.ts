@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { defineFlags, resolveOptions, type FlagMapping } from '@chkit/core'
+import { defineFlags, type FlagMapping } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
 
@@ -112,24 +112,23 @@ export const RunSchema = z.object({
   pollIntervalMs: z.number().nonnegative().default(5000),
   stateDir: z.string().min(1).optional(),
 })
-type RunOptions = z.infer<typeof RunSchema>
+export type RunOptions = z.infer<typeof RunSchema>
 
 export const ResumeSchema = RunSchema.extend({
   replayFailed: z.boolean().default(false),
 })
-type ResumeOptions = z.infer<typeof ResumeSchema>
+export type ResumeOptions = z.infer<typeof ResumeSchema>
 
-const StatusSchema = z.object({
+export const StatusSchema = z.object({
   planId: z.string(),
   stateDir: z.string().min(1).optional(),
 })
-type StatusOptions = z.infer<typeof StatusSchema>
+export type StatusOptions = z.infer<typeof StatusSchema>
 
 export const CheckSchema = z.object({
   stateDir: z.string().min(1).optional(),
   failCheckOnRequiredPendingBackfill: z.boolean().default(true),
 })
-type CheckOptions = z.infer<typeof CheckSchema>
 
 // ───── CLI flag definitions ─────
 
@@ -161,7 +160,7 @@ export const PLAN_ID_FLAGS = defineFlags([
 
 // ───── Flag mappings ─────
 
-const PLAN_FLAG_MAP: FlagMapping = {
+export const PLAN_FLAG_MAP: FlagMapping = {
   '--target': { key: 'target', coerce: normalizeTarget },
   '--from': { key: 'from', coerce: (v) => normalizeTimestamp(v, '--from') },
   '--to': { key: 'to', coerce: (v) => normalizeTimestamp(v, '--to') },
@@ -176,14 +175,14 @@ function coercePositiveInt(v: string, flag: string): number {
   return n
 }
 
-const RUN_FLAG_MAP: FlagMapping = {
+export const RUN_FLAG_MAP: FlagMapping = {
   '--plan-id': { key: 'planId', coerce: normalizePlanId },
   '--force-environment': { key: 'forceEnvironment' },
   '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
   '--poll-interval': { key: 'pollIntervalMs', coerce: (v) => coercePositiveInt(v, '--poll-interval') },
 }
 
-const RESUME_FLAG_MAP: FlagMapping = {
+export const RESUME_FLAG_MAP: FlagMapping = {
   '--plan-id': { key: 'planId', coerce: normalizePlanId },
   '--force-environment': { key: 'forceEnvironment' },
   '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
@@ -191,47 +190,6 @@ const RESUME_FLAG_MAP: FlagMapping = {
   '--replay-failed': { key: 'replayFailed' },
 }
 
-const PLAN_ID_FLAG_MAP: FlagMapping = {
+export const PLAN_ID_FLAG_MAP: FlagMapping = {
   '--plan-id': { key: 'planId', coerce: normalizePlanId },
-}
-
-// ───── Per-command resolvers ─────
-
-export function resolvePlanOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>
-): PlanOptions {
-  return resolveOptions(PlanSchema, pluginConfig, runtimeOptions, flags, PLAN_FLAG_MAP, BackfillConfigError)
-}
-
-export function resolveRunOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>
-): RunOptions {
-  return resolveOptions(RunSchema, pluginConfig, runtimeOptions, flags, RUN_FLAG_MAP, BackfillConfigError)
-}
-
-export function resolveResumeOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>
-): ResumeOptions {
-  return resolveOptions(ResumeSchema, pluginConfig, runtimeOptions, flags, RESUME_FLAG_MAP, BackfillConfigError)
-}
-
-export function resolveStatusOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>,
-  flags: Record<string, string | string[] | boolean | undefined>
-): StatusOptions {
-  return resolveOptions(StatusSchema, pluginConfig, runtimeOptions, flags, PLAN_ID_FLAG_MAP, BackfillConfigError)
-}
-
-export function resolveCheckOptions(
-  pluginConfig: Record<string, unknown>,
-  runtimeOptions: Record<string, unknown>
-): CheckOptions {
-  return resolveOptions(CheckSchema, pluginConfig, runtimeOptions, {}, {}, BackfillConfigError)
 }

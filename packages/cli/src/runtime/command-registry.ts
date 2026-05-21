@@ -1,14 +1,12 @@
-import type { ChxPluginCommand, CommandDef, CommandExtension, FlagDef } from '../plugins.js'
+import type { ChxPluginCommand, CommandExtension, FlagDef } from '../plugins.js'
 
 export interface RegisteredCommand {
   name: string
   description: string
   flags: readonly FlagDef[]
   pluginFlags: Array<{ pluginName: string; flags: readonly FlagDef[] }>
-  isPlugin: boolean
   pluginName?: string
   subcommands?: RegisteredCommand[]
-  run: CommandDef['run'] | null
 }
 
 export interface CommandRegistry {
@@ -18,8 +16,9 @@ export interface CommandRegistry {
   resolveFlags(name: string, subcommand?: string): FlagDef[]
 }
 
+const FLATTEN_PLUGIN_NAMES = new Set(['core'])
+
 export function createCommandRegistry(input: {
-  coreCommands: CommandDef[]
   globalFlags: readonly FlagDef[]
   pluginExtensions: Array<{ pluginName: string; extensions: CommandExtension[] }>
   pluginCommands: Array<{ pluginName: string; commands: ChxPluginCommand[]; manifestName: string }>
@@ -27,17 +26,45 @@ export function createCommandRegistry(input: {
   const commands: RegisteredCommand[] = []
   const byName = new Map<string, RegisteredCommand>()
 
-  for (const cmd of input.coreCommands) {
-    const registered: RegisteredCommand = {
+  for (const { pluginName, commands: pluginCmds, manifestName } of input.pluginCommands) {
+    if (pluginCmds.length === 0) continue
+
+    const flatten =
+      FLATTEN_PLUGIN_NAMES.has(manifestName) ||
+      (pluginCmds.length === 1 && pluginCmds[0]?.name === manifestName)
+
+    if (flatten) {
+      for (const cmd of pluginCmds) {
+        const registered: RegisteredCommand = {
+          name: cmd.name,
+          description: cmd.description ?? '',
+          flags: cmd.flags ?? [],
+          pluginFlags: [],
+          pluginName,
+        }
+        commands.push(registered)
+        byName.set(cmd.name, registered)
+      }
+      continue
+    }
+
+    const subcommands: RegisteredCommand[] = pluginCmds.map((cmd) => ({
       name: cmd.name,
-      description: cmd.description,
-      flags: cmd.flags,
+      description: cmd.description ?? '',
+      flags: cmd.flags ?? [],
       pluginFlags: [],
-      isPlugin: false,
-      run: cmd.run,
+      pluginName,
+    }))
+    const registered: RegisteredCommand = {
+      name: pluginName,
+      description: `Plugin: ${pluginName}`,
+      flags: [],
+      pluginFlags: [],
+      pluginName,
+      subcommands,
     }
     commands.push(registered)
-    byName.set(cmd.name, registered)
+    byName.set(pluginName, registered)
   }
 
   for (const { pluginName, extensions } of input.pluginExtensions) {
@@ -49,45 +76,6 @@ export function createCommandRegistry(input: {
           cmd.pluginFlags.push({ pluginName, flags: ext.flags })
         }
       }
-    }
-  }
-
-  for (const { pluginName, commands: pluginCmds, manifestName } of input.pluginCommands) {
-    if (pluginCmds.length === 1 && pluginCmds[0]?.name === manifestName) {
-      const cmd = pluginCmds[0]
-      const registered: RegisteredCommand = {
-        name: manifestName,
-        description: cmd.description ?? '',
-        flags: cmd.flags ?? [],
-        pluginFlags: [],
-        isPlugin: true,
-        pluginName,
-        run: null,
-      }
-      commands.push(registered)
-      byName.set(manifestName, registered)
-    } else if (pluginCmds.length > 0) {
-      const subcommands: RegisteredCommand[] = pluginCmds.map((cmd) => ({
-        name: cmd.name,
-        description: cmd.description ?? '',
-        flags: cmd.flags ?? [],
-        pluginFlags: [],
-        isPlugin: true,
-        pluginName,
-        run: null,
-      }))
-      const registered: RegisteredCommand = {
-        name: pluginName,
-        description: `Plugin: ${pluginName}`,
-        flags: [],
-        pluginFlags: [],
-        isPlugin: true,
-        pluginName,
-        subcommands,
-        run: null,
-      }
-      commands.push(registered)
-      byName.set(pluginName, registered)
     }
   }
 

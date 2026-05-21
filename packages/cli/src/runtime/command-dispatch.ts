@@ -8,7 +8,6 @@ import {
 
 import { typedFlags, type PluginRuntime } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
-import { resolveDirs } from './config.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
 import { printOutput } from './json-output.js'
@@ -30,9 +29,10 @@ function extractPositionals(
 			positionals.push(token)
 			continue
 		}
-		const def = byName.get(token)
-		if (def && def.type !== 'boolean') {
-			// Consume the value following a string/string[] flag
+		const eqIdx = token.indexOf('=')
+		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+		const def = byName.get(name)
+		if (def && def.type !== 'boolean' && eqIdx === -1) {
 			i += 1
 		}
 	}
@@ -59,14 +59,16 @@ function splitQueryArgs(
 			break
 		}
 
-		const def = byName.get(token)
+		const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
+		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+		const def = byName.get(name)
 		if (!def) {
 			positionals.push(token)
 			continue
 		}
 
 		flagArgs.push(token)
-		if (def.type !== 'boolean') {
+		if (def.type !== 'boolean' && eqIdx === -1) {
 			const next = argv[i + 1]
 			if (next !== undefined) {
 				flagArgs.push(next)
@@ -114,9 +116,16 @@ function stripGlobalFlags(argv: string[]): {
 			i++
 			continue
 		}
+		if (token.startsWith('--config=')) {
+			continue
+		}
 		if (token === '--table' && i + 1 < argv.length) {
 			tableSelector = argv[i + 1]
 			i++
+			continue
+		}
+		if (token.startsWith('--table=')) {
+			tableSelector = token.slice('--table='.length)
 			continue
 		}
 		rest.push(token)
@@ -159,7 +168,7 @@ async function resolvePluginTableScope(input: {
 	}
 }
 
-async function runPluginCommand(input: {
+export async function runResolvedCommand(input: {
 	argv: string[]
 	commandName: string
 	resolved: RegisteredCommand
@@ -169,6 +178,7 @@ async function runPluginCommand(input: {
 	pluginRuntime: PluginRuntime
 	onAmbiguousPluginSubcommand?: () => void
 }): Promise<void> {
+	debug('dispatch', `routing to plugin command "${input.commandName}"`)
 	const argsAfterCommand = input.argv.slice(1)
 	let subcommandName: string | undefined
 
@@ -186,12 +196,34 @@ async function runPluginCommand(input: {
 		}
 	}
 
-	const allPluginFlags = input.registry.resolveFlags(
-		input.commandName,
-		subcommandName,
-	)
-	const flags = parseFlagsOrReport(argsAfterCommand, allPluginFlags)
-	if (!flags) return
+	const isPluginCommandForwarder = input.commandName === 'plugin'
+	const isQuery = input.commandName === 'query'
+
+	let flags: ParsedFlags
+	let positionals: string[] = []
+
+	if (isPluginCommandForwarder) {
+		// The plugin command forwards unparsed args to a target plugin command,
+		// so we only strip known global flags and pass the rest through.
+		const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
+		const parsed: ParsedFlags = {}
+		if (jsonMode) parsed['--json'] = true
+		if (tableSelector) parsed['--table'] = tableSelector
+		flags = parsed
+		positionals = rest
+	} else {
+		const allFlags = input.registry.resolveFlags(input.commandName, subcommandName)
+		if (isQuery) {
+			const parsed = parseCommandArgs(input.commandName, argsAfterCommand, allFlags)
+			if (!parsed) return
+			flags = parsed.flags
+			positionals = parsed.positionals
+		} else {
+			const parsedFlags = parseFlagsOrReport(argsAfterCommand, allFlags)
+			if (!parsedFlags) return
+			flags = parsedFlags
+		}
+	}
 
 	const gf = typedFlags(flags, GLOBAL_FLAGS)
 	const jsonMode = gf['--json'] === true
@@ -200,27 +232,29 @@ async function runPluginCommand(input: {
 		tableSelector: gf['--table'],
 	})
 
-	try {
-		await input.pluginRuntime.runOnConfigLoaded({
-			command: input.commandName,
-			config: input.config,
-			configPath: input.configPath,
-			tableScope,
-			flags,
-		})
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error)
-		if (jsonMode) {
-			console.log(JSON.stringify({ ok: false, error: message }))
-		} else {
-			console.error(message)
-		}
-		process.exitCode = 2
-		return
-	}
-
 	const pluginName = input.resolved.pluginName ?? input.commandName
 	const pluginCommandName = subcommandName ?? input.commandName
+
+	if (pluginName !== 'core') {
+		try {
+			await input.pluginRuntime.runOnConfigLoaded({
+				command: input.commandName,
+				config: input.config,
+				configPath: input.configPath,
+				tableScope,
+				flags,
+			})
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			if (jsonMode) {
+				console.log(JSON.stringify({ ok: false, error: message }))
+			} else {
+				console.error(message)
+			}
+			process.exitCode = 2
+			return
+		}
+	}
 
 	const exitCode = await input.pluginRuntime.runPluginCommand(
 		pluginName,
@@ -230,7 +264,7 @@ async function runPluginCommand(input: {
 			configPath: input.configPath,
 			jsonMode,
 			tableScope,
-			args: [],
+			args: positionals,
 			flags,
 			print(value) {
 				printOutput(value, jsonMode)
@@ -239,84 +273,4 @@ async function runPluginCommand(input: {
 	)
 
 	if (exitCode !== 0) process.exitCode = exitCode
-}
-
-function parseArgsForCoreCommand(input: {
-	commandName: string
-	argv: string[]
-	registry: CommandRegistry
-}): { flags: ParsedFlags; positionals: string[] } | null {
-	const argsAfterCommand = input.argv.slice(1)
-
-	if (input.commandName === 'plugin') {
-		// The `plugin` command forwards unparsed args to a target plugin command,
-		// so we can't use parseFlags here — only strip the known global flags
-		// and pass the rest through as positionals.
-		const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
-		const flags: ParsedFlags = {}
-		if (jsonMode) flags['--json'] = true
-		if (tableSelector) flags['--table'] = tableSelector
-		return { flags, positionals: rest }
-	}
-
-	const allFlags = input.registry.resolveFlags(input.commandName)
-	return parseCommandArgs(input.commandName, argsAfterCommand, allFlags)
-}
-
-async function runCoreOrBuiltinCommand(input: {
-	argv: string[]
-	commandName: string
-	resolved: RegisteredCommand
-	registry: CommandRegistry
-	config: Parameters<PluginRuntime['runOnConfigLoaded']>[0]['config']
-	configPath: string
-	pluginRuntime: PluginRuntime
-}): Promise<void> {
-	const parsed = parseArgsForCoreCommand(input)
-	if (!parsed) return
-	const { flags, positionals } = parsed
-
-	if (!input.resolved.run)
-		throw new Error(`Command '${input.commandName}' has no run handler`)
-
-	const dirs = resolveDirs(input.config)
-	const ctx = await input.pluginRuntime.resolveContext({
-		config: input.config,
-		configPath: input.configPath,
-		command: input.commandName,
-		flags,
-	})
-	try {
-		await input.resolved.run({
-			command: input.commandName,
-			flags,
-			positionals,
-			config: input.config,
-			configPath: input.configPath,
-			dirs,
-			pluginRuntime: input.pluginRuntime,
-			ctx,
-		})
-	} finally {
-		await input.pluginRuntime.disposeContext(ctx)
-	}
-}
-
-export async function runResolvedCommand(input: {
-	argv: string[]
-	commandName: string
-	resolved: RegisteredCommand
-	registry: CommandRegistry
-	config: Parameters<PluginRuntime['runOnConfigLoaded']>[0]['config']
-	configPath: string
-	pluginRuntime: PluginRuntime
-	onAmbiguousPluginSubcommand?: () => void
-}): Promise<void> {
-	if (input.resolved.isPlugin && !input.resolved.run) {
-		debug('dispatch', `routing to plugin command "${input.commandName}"`)
-		await runPluginCommand(input)
-		return
-	}
-	debug('dispatch', `routing to core command "${input.commandName}"`)
-	await runCoreOrBuiltinCommand(input)
 }

@@ -31,6 +31,28 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     expect(registration.options?.maxParallelChunks).toBe(4)
   })
 
+  test('createBackfillPlugin carries factory options into runtime schemas', () => {
+    const plugin = createBackfillPlugin({
+      maxParallelChunks: 4,
+      stateDir: './state',
+    })
+    const plan = plugin.commands.find((command) => command.name === 'plan')
+    const run = plugin.commands.find((command) => command.name === 'run')
+
+    const pluginResult = plugin.optionsSchema?.safeParse({})
+    const planResult = plan?.optionsSchema?.safeParse({ target: 'app.events' })
+    const runResult = run?.optionsSchema?.safeParse({ planId: '0123456789abcdef' })
+
+    expect(pluginResult?.success).toBe(true)
+    expect(planResult?.success).toBe(true)
+    expect(runResult?.success).toBe(true)
+    if (!pluginResult?.success || !planResult?.success || !runResult?.success) return
+    expect(pluginResult.data.maxParallelChunks).toBe(4)
+    expect(planResult.data.maxParallelChunks).toBe(4)
+    expect(planResult.data.stateDir).toBe('./state')
+    expect(runResult.data.stateDir).toBe('./state')
+  })
+
   test('keeps internals off the package root and exposes them via sdk', () => {
     expect(root).not.toHaveProperty('analyzeAndChunk')
     expect(root).not.toHaveProperty('executeBackfill')

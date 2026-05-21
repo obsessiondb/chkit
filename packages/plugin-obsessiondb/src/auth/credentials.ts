@@ -37,7 +37,7 @@ export async function saveCredentials(creds: Credentials): Promise<void> {
   const filePath = getCredentialsPath()
   const dir = dirname(filePath)
   await mkdir(dir, { recursive: true, mode: 0o700 })
-  await writeFile(filePath, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 })
+  await writeFile(filePath, `${JSON.stringify(creds, null, 2)}\n`, { mode: 0o600 })
   // Ensure permissions even if file existed
   await chmod(filePath, 0o600)
 }

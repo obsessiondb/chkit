@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import { wrapPluginRun } from '@chkit/core'
+import { wrapPluginRun, type SafeParseable } from '@chkit/core'
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import type {
@@ -13,7 +13,7 @@ import type {
   GenerateMigrationArtifactsOutput,
 } from './types.js'
 import { CodegenConfigError } from './errors.js'
-import { CODEGEN_FLAGS, PluginConfigSchema, resolveCodegenOptions } from './options.js'
+import { CODEGEN_FLAGS, CODEGEN_FLAG_MAP, CodegenSchema } from './options.js'
 import { generateTypeArtifacts } from './generators/type-artifacts.js'
 import { generateIngestArtifacts } from './generators/ingest-artifacts.js'
 import { generateMigrationArtifacts } from './generators/migration-artifacts.js'
@@ -102,27 +102,39 @@ function mergeCheckResults(results: CodegenPluginCheckResult[]): CodegenPluginCh
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function withFactoryDefaults<T>(
+  schema: SafeParseable<T>,
+  defaults: Record<string, unknown>,
+): SafeParseable<T> {
+  return {
+    safeParse(data) {
+      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
+    },
+  }
+}
+
 export function createCodegenPlugin(options: CodegenPluginOptions = {}): CodegenPlugin {
-  const pluginConfig = PluginConfigSchema.parse(options)
+  const factoryOptions = options as Record<string, unknown>
+  const optionsSchema = withFactoryDefaults(CodegenSchema, factoryOptions)
 
   return {
     manifest: {
       name: 'codegen',
       apiVersion: 1,
     },
+    optionsSchema,
     commands: [
       {
         name: 'codegen',
         description: 'Generate TypeScript artifacts from chkit schema definitions',
         flags: CODEGEN_FLAGS,
-        async run({
-          flags,
-          jsonMode,
-          print,
-          options: runtimeOptions,
-          config,
-          configPath,
-        }): Promise<undefined | number> {
+        optionsSchema,
+        flagMapping: CODEGEN_FLAG_MAP,
+        async run({ flags, jsonMode, print, options: effectiveOptions, config, configPath }): Promise<undefined | number> {
           return wrapPluginRun({
             command: 'codegen',
             label: 'Codegen',
@@ -130,7 +142,6 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
             print,
             configErrorClass: CodegenConfigError,
             fn: async () => {
-              const effectiveOptions = resolveCodegenOptions(pluginConfig, runtimeOptions, flags)
               const checkMode = flags['--check'] === true
               const configDir = resolve(configPath, '..')
               const outFile = resolve(configDir, effectiveOptions.outFile)
@@ -249,11 +260,10 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
       },
     ],
     hooks: {
-      onConfigLoaded({ options: runtimeOptions }) {
-        resolveCodegenOptions(pluginConfig, runtimeOptions, {})
+      onConfigLoaded() {
+        // Validation happens at command dispatch via command.optionsSchema.
       },
-      async onCheck({ config: appConfig, configPath, options: runtimeOptions }) {
-        const effectiveOptions = resolveCodegenOptions(pluginConfig, runtimeOptions, {})
+      async onCheck({ config: appConfig, configPath, options: effectiveOptions }) {
         const configDir = resolve(configPath, '..')
         const outFile = resolve(configDir, effectiveOptions.outFile)
         const definitions = await loadSchemaDefinitions(appConfig.schema, { cwd: configDir })
@@ -324,7 +334,7 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
 
 export function codegen(options: CodegenPluginOptions = {}): CodegenPluginRegistration {
   return {
-    plugin: createCodegenPlugin(),
+    plugin: createCodegenPlugin(options),
     name: 'codegen',
     enabled: true,
     options,

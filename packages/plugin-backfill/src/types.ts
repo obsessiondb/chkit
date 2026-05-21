@@ -1,4 +1,9 @@
-import type { ChxInlinePluginRegistration, ResolvedChxConfig } from '@chkit/core'
+import type {
+  ChxInlinePluginRegistration,
+  FlagMapping,
+  ResolvedChxConfig,
+  SafeParseable,
+} from '@chkit/core'
 
 import type { BackfillProgress } from './async-backfill.js'
 import type {
@@ -137,11 +142,12 @@ export interface BackfillDoctorReport {
   failedChunkIds: string[]
 }
 
-interface BackfillPluginCommandContext {
+interface BackfillPluginCommandContext<TOptions = Record<string, unknown>> {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
-  options: Record<string, unknown>
+  options: TOptions
+  rawOptions: Record<string, unknown>
   config: ResolvedChxConfig
   configPath: string
   print: (value: unknown) => void
@@ -153,6 +159,7 @@ export interface BackfillPlugin {
     apiVersion: 1
     version?: string
   }
+  optionsSchema?: SafeParseable<Record<string, unknown>>
   commands: Array<{
     name: 'plan' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
     description: string
@@ -163,6 +170,8 @@ export interface BackfillPlugin {
       placeholder?: string
       negation?: boolean
     }>
+    optionsSchema?: SafeParseable<Record<string, unknown>>
+    flagMapping?: FlagMapping
     run: (context: BackfillPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
   hooks?: {

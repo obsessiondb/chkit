@@ -445,6 +445,47 @@ describe('obsessiondb onInit', () => {
 	})
 })
 
+describe('obsessiondb getContext', () => {
+	let tempDir: string
+	let originalXdg: string | undefined
+
+	afterEach(async () => {
+		if (originalXdg !== undefined) {
+			process.env.XDG_CONFIG_HOME = originalXdg
+		} else {
+			delete process.env.XDG_CONFIG_HOME
+		}
+		if (tempDir) {
+			await rm(tempDir, { recursive: true, force: true })
+		}
+	})
+
+	async function setupAuth() {
+		tempDir = await mkdtemp(join(tmpdir(), 'chkit-obd-'))
+		originalXdg = process.env.XDG_CONFIG_HOME
+		process.env.XDG_CONFIG_HOME = tempDir
+		await saveCredentials({
+			access_token: 'test-tok',
+			base_url: 'https://api.test.com',
+		})
+	}
+
+	test('query reports an actionable error when authenticated without selected service', async () => {
+		await setupAuth()
+
+		const plugin = obsessiondb().plugin
+		await expect(
+			plugin.hooks.getContext({
+				config: makeConfig(),
+				configPath: join(tempDir, 'chkit', 'clickhouse.config.ts'),
+				command: 'query',
+				flags: {},
+				defaults: {},
+			}),
+		).rejects.toThrow(/select-service/)
+	})
+})
+
 describe('onBeforePluginCommand — backfill interception', () => {
 	let tempDir: string
 	let originalXdg: string | undefined

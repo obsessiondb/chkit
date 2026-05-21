@@ -1,5 +1,6 @@
 export * from './flags.js'
 export * from './model.js'
+export { SYNTHESIZED_CONFIG_PATH, isSynthesizedConfigPath } from './config-path.js'
 export {
   canonicalizeDefinition,
   canonicalizeDefinitions,

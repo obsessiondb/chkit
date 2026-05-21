@@ -100,8 +100,8 @@ describe('parseCodec', () => {
 
   test('raw fallback round-trips through renderCodec', () => {
     const parsed = parseCodec('CODEC(SomeNewCodec(42))')
-    expect(parsed).toBeDefined()
-    expect(renderCodec(parsed!)).toBe('CODEC(SomeNewCodec(42))')
+    if (!parsed) throw new Error('expected parsed codec')
+    expect(renderCodec(parsed)).toBe('CODEC(SomeNewCodec(42))')
   })
 
   test('falls back to raw when known codec has unexpected extra args', () => {

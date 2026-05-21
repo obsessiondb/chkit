@@ -27,6 +27,10 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
 
   if (!REMOTE_SUBCOMMANDS.has(context.command)) return { handled: false }
 
+  // A local backfill plugin status/cancel command uses --plan-id. Do not let the
+  // remote ObsessionDB hook shadow project-local backfill state commands.
+  if (typeof context.flags['--plan-id'] === 'string') return { handled: false }
+
   const creds = await loadCredentials()
   if (!creds) {
     context.print('Not logged in. Run `chkit obsessiondb login` to authenticate.')

@@ -239,6 +239,7 @@ function renderCodecStepSource(step: ColumnCodec): string {
 
 function renderCodecSource(spec: ColumnCodecSpec): string {
   const steps = Array.isArray(spec) ? spec : [spec]
-  if (steps.length === 1) return renderCodecStepSource(steps[0]!)
+  const [first] = steps
+  if (steps.length === 1 && first) return renderCodecStepSource(first)
   return `[${steps.map(renderCodecStepSource).join(', ')}]`
 }

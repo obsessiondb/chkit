@@ -1,14 +1,16 @@
 import type {
   ChxInlinePluginRegistration,
   FlagDef,
+  FlagMapping,
   MaterializedViewDefinition,
   ParsedFlags,
   ResolvedChxConfig,
+  SafeParseable,
   TableDefinition,
   ViewDefinition,
 } from '@chkit/core'
 
-import type { PluginConfig } from './options.js'
+import type { CodegenOptions, PluginConfig } from './options.js'
 
 export type CodegenPluginOptions = PluginConfig
 
@@ -16,7 +18,8 @@ export interface CodegenPluginCommandContext {
   args: string[]
   flags: ParsedFlags
   jsonMode: boolean
-  options: Record<string, unknown>
+  options: CodegenOptions
+  rawOptions: Record<string, unknown>
   config: ResolvedChxConfig
   configPath: string
   print: (value: unknown) => void
@@ -28,14 +31,17 @@ export interface CodegenPlugin {
     apiVersion: 1
     version?: string
   }
+  optionsSchema?: SafeParseable<CodegenOptions>
   commands: Array<{
     name: 'codegen'
     description: string
     flags?: readonly FlagDef[]
+    optionsSchema?: SafeParseable<CodegenOptions>
+    flagMapping?: FlagMapping
     run: (context: CodegenPluginCommandContext) => undefined | number | Promise<undefined | number>
   }>
   hooks?: {
-    onConfigLoaded?: (context: { command: string; configPath: string; options: Record<string, unknown> }) => void
+    onConfigLoaded?: (context: { command: string; configPath: string; options: CodegenOptions }) => void
     onCheck?: (
       context: CodegenPluginCheckContext
     ) => CodegenPluginCheckResult | undefined | Promise<CodegenPluginCheckResult | undefined>
@@ -107,7 +113,7 @@ export interface CodegenPluginCheckContext {
   config: ResolvedChxConfig
   configPath: string
   jsonMode: boolean
-  options: Record<string, unknown>
+  options: CodegenOptions
 }
 
 export type CodegenPluginRegistration = ChxInlinePluginRegistration<CodegenPlugin, CodegenPluginOptions>

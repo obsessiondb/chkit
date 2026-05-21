@@ -8,6 +8,7 @@ import { resolveConfig, schema, table } from '@chkit/core'
 
 import {
   createCodegenPlugin,
+  CodegenSchema,
   generateTypeArtifacts,
   generateIngestArtifacts,
   mapColumnType,
@@ -49,6 +50,21 @@ describe('@chkit/plugin-codegen options', () => {
     expect(registration.enabled).toBe(true)
     expect(registration.options?.emitZod).toBe(true)
     expect(registration.plugin.manifest.name).toBe('codegen')
+  })
+
+  test('createCodegenPlugin carries factory options into runtime schemas', () => {
+    const plugin = createCodegenPlugin({ outFile: './types.ts', emitZod: true })
+    const command = plugin.commands[0]
+
+    const pluginResult = plugin.optionsSchema?.safeParse({})
+    const commandResult = command?.optionsSchema?.safeParse({})
+
+    expect(pluginResult?.success).toBe(true)
+    expect(commandResult?.success).toBe(true)
+    if (!pluginResult?.success || !commandResult?.success) return
+    expect(pluginResult.data.outFile).toBe('./types.ts')
+    expect(commandResult.data.outFile).toBe('./types.ts')
+    expect(commandResult.data.emitZod).toBe(true)
   })
 })
 
@@ -519,16 +535,17 @@ describe('@chkit/plugin-codegen check hook', () => {
         'utf8'
       )
 
-      const plugin = createCodegenPlugin({ outFile: './generated/chkit-types.ts' })
+      const plugin = createCodegenPlugin()
       const onCheck = plugin.hooks?.onCheck
       expect(onCheck).toBeTruthy()
+      const resolvedOptions = CodegenSchema.parse({ outFile: './generated/chkit-types.ts' })
 
       const first = await onCheck?.({
         command: 'check',
         config: resolveConfig({ schema: schemaPath }),
         configPath,
         jsonMode: true,
-        options: {},
+        options: resolvedOptions,
       })
       expect(first?.ok).toBe(false)
       expect(first?.findings[0]?.code).toBe('codegen_missing_output')
@@ -539,7 +556,8 @@ describe('@chkit/plugin-codegen check hook', () => {
         args: [],
         flags: {},
         jsonMode: true,
-        options: {},
+        options: resolvedOptions,
+        rawOptions: { outFile: './generated/chkit-types.ts' },
         config: resolveConfig({ schema: schemaPath }),
         configPath,
         print() {},
@@ -551,7 +569,7 @@ describe('@chkit/plugin-codegen check hook', () => {
         config: resolveConfig({ schema: schemaPath }),
         configPath,
         jsonMode: true,
-        options: {},
+        options: resolvedOptions,
       })
       expect(second?.ok).toBe(true)
       expect(second?.findings).toEqual([])
