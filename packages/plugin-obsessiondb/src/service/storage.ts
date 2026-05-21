@@ -7,7 +7,7 @@ import { isSynthesizedConfigPath } from '@chkit/core'
 
 import type { SelectedService } from './types.js'
 
-export function getUserConfigDir(): string {
+function getUserConfigDir(): string {
   const xdgConfig = process.env.XDG_CONFIG_HOME
   const configDir = xdgConfig && xdgConfig.length > 0 ? xdgConfig : join(homedir(), '.config')
   return join(configDir, 'chkit')

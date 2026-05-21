@@ -27,7 +27,7 @@ import {
 export const DEFAULT_CONFIG_FILE = 'clickhouse.config.ts'
 
 export type ConfigSource = 'project' | 'profile'
-export type ProfileOrigin = 'file' | 'credentials' | 'synthetic'
+type ProfileOrigin = 'file' | 'credentials' | 'synthetic'
 
 export interface LoadedConfig {
   config: ResolvedChxConfig

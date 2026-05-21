@@ -7,7 +7,6 @@
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@changesets/cli": "^2.29.8",
-        "@chkit/plugin-backfill": "workspace:*",
         "@chkit/plugin-obsessiondb": "workspace:*",
         "@orpc/client": "1.13.4",
         "@orpc/contract": "1.13.4",

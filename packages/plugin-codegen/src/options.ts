@@ -3,7 +3,7 @@ import { defineFlags, type FlagMapping } from '@chkit/core'
 
 // ───── Plugin config schema (what codegen({...}) accepts) ─────
 
-export const PluginConfigSchema = z.object({
+const PluginConfigSchema = z.object({
   outFile: z.string().min(1).optional(),
   emitZod: z.boolean().optional(),
   tableNameStyle: z.enum(['pascal', 'camel', 'raw']).optional(),

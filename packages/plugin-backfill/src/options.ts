@@ -129,7 +129,6 @@ export const CheckSchema = z.object({
   stateDir: z.string().min(1).optional(),
   failCheckOnRequiredPendingBackfill: z.boolean().default(true),
 })
-export type CheckOptions = z.infer<typeof CheckSchema>
 
 // ───── CLI flag definitions ─────
 
