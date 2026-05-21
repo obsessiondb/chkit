@@ -1,6 +1,8 @@
 import type { FlagDef } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 
+const DOCS_URL = 'https://chkit.obsessiondb.com/'
+
 export function formatGlobalHelp(registry: CommandRegistry, version: string): string {
   const lines: string[] = []
   lines.push(`chkit v${version} - ClickHouse toolkit`)
@@ -41,6 +43,8 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
   }
   lines.push(formatFlagLine({ name: '-h, --help', type: 'boolean', description: 'Show help' }))
   lines.push(formatFlagLine({ name: '-v, --version', type: 'boolean', description: 'Show version' }))
+
+  appendDocsHelp(lines)
 
   return lines.join('\n')
 }
@@ -83,7 +87,16 @@ export function formatCommandHelp(command: RegisteredCommand, globalFlags: reado
     lines.push(formatFlagLine(flag))
   }
 
+  appendDocsHelp(lines)
+
   return lines.join('\n')
+}
+
+function appendDocsHelp(lines: string[]): void {
+  lines.push('')
+  lines.push('Documentation:')
+  lines.push(`  Full documentation: ${DOCS_URL}`)
+  lines.push('  Agent-readable markdown: fetch any docs page with Accept: text/markdown')
 }
 
 function formatFlagLine(flag: FlagDef & { name?: string }): string {
