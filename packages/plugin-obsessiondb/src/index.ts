@@ -11,8 +11,8 @@ import {
 } from './backfill/index.js'
 import { createRemoteExecutor } from './query/remote-executor.js'
 import { listServices } from './service/api.js'
-import { SELECT_SERVICE_COMMAND } from './service/commands.js'
-import { loadSelectedService } from './service/storage.js'
+import { SERVICE_COMMAND } from './service/commands.js'
+import { loadSelectedService, loadServiceAliases } from './service/storage.js'
 import type { SelectedService } from './service/types.js'
 
 export {
@@ -21,8 +21,13 @@ export {
 	resolveBaseUrl,
 } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
-export { loadSelectedService } from './service/storage.js'
-export type { SelectedService } from './service/types.js'
+export {
+	loadSelectedService,
+	loadServiceAliases,
+	removeServiceAlias,
+	saveServiceAlias,
+} from './service/storage.js'
+export type { SelectedService, ServiceAliases } from './service/types.js'
 
 export type ObsessionDBPluginOptions = Record<string, never>
 
@@ -127,6 +132,29 @@ export function stripSharedPrefix(engine: string): string {
 	return engine.replace(/^Shared/, '')
 }
 
+async function resolveServiceOverride(input: {
+	configPath: string
+	credentials: NonNullable<Awaited<ReturnType<typeof loadCredentials>>>
+	name: string
+}): Promise<SelectedService> {
+	const services = await listServices(input.credentials)
+	const service = services.find((candidate) => candidate.name === input.name)
+	if (service) {
+		return { service_id: service.id, service_name: service.name }
+	}
+
+	const aliases = await loadServiceAliases(input.configPath)
+	const alias = aliases[input.name]
+	if (alias) return alias
+
+	const availableServices =
+		services.map((candidate) => candidate.name).join(', ') || '<none>'
+	const availableAliases = Object.keys(aliases).sort().join(', ') || '<none>'
+	throw new Error(
+		`obsessiondb: service "${input.name}" not found. Available services: ${availableServices}. Available aliases: ${availableAliases}`,
+	)
+}
+
 function stripCloudSettings(
 	settings: Record<string, string | number | boolean> | undefined,
 ): {
@@ -183,10 +211,7 @@ function createObsessionDBPlugin(
 ): ObsessionDBPlugin {
 	return {
 		manifest: { name: 'obsessiondb', apiVersion: 1 },
-		commands: [
-			...AUTH_COMMANDS,
-			SELECT_SERVICE_COMMAND,
-		] as unknown as PluginCommand[],
+		commands: [...AUTH_COMMANDS, SERVICE_COMMAND] as unknown as PluginCommand[],
 		extendCommands: [
 			{
 				command: ['generate', 'migrate', 'status', 'drift', 'check'],
@@ -231,22 +256,18 @@ function createObsessionDBPlugin(
 
 				let service: SelectedService | null
 				if (overrideName.length > 0) {
-					const services = await listServices(effectiveCreds)
-					const match = services.find((s) => s.name === overrideName)
-					if (!match) {
-						const available = services.map((s) => s.name).join(', ') || '<none>'
-						throw new Error(
-							`obsessiondb: service "${overrideName}" not found. Available services: ${available}`,
-						)
-					}
-					service = { service_id: match.id, service_name: match.name }
+					service = await resolveServiceOverride({
+						configPath,
+						credentials: effectiveCreds,
+						name: overrideName,
+					})
 				} else {
 					service = await loadSelectedService(configPath)
 				}
 				if (!service) {
 					if (command === 'query' && !config.clickhouse) {
 						throw new Error(
-							'authenticated but no ObsessionDB service is selected. Run `chkit obsessiondb select-service` or pass `--service <name>`.',
+							'authenticated but no ObsessionDB service is selected. Run `chkit obsessiondb service select` or pass `--service <name>`.',
 						)
 					}
 					return
@@ -261,6 +282,7 @@ function createObsessionDBPlugin(
 			},
 			async onInit(context) {
 				if (context.jsonMode) return
+				if (context.command === 'obsessiondb') return
 				const creds = await loadCredentials()
 				if (!creds) return
 				const effectiveCreds = {
@@ -273,10 +295,15 @@ function createObsessionDBPlugin(
 
 				let service: SelectedService | null
 				if (overrideName.length > 0) {
-					const services = await listServices(effectiveCreds)
-					const match = services.find((s) => s.name === overrideName)
-					if (!match) return
-					service = { service_id: match.id, service_name: match.name }
+					try {
+						service = await resolveServiceOverride({
+							configPath: context.configPath,
+							credentials: effectiveCreds,
+							name: overrideName,
+						})
+					} catch {
+						return
+					}
 				} else {
 					service = await loadSelectedService(context.configPath)
 				}
@@ -286,7 +313,7 @@ function createObsessionDBPlugin(
 					return
 				} else {
 					console.log(
-						'obsessiondb: authenticated but no service selected (run `chkit obsessiondb select-service` or pass `--service <name>`)',
+						'obsessiondb: authenticated but no service selected (run `chkit obsessiondb service select` or pass `--service <name>`)',
 					)
 				}
 			},
