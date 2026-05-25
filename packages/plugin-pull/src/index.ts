@@ -120,6 +120,21 @@ class PullConfigError extends Error {
   }
 }
 
+const OBSESSIONDB_METADATA_TABLE_NAMES = new Set([
+  'metadata_folder',
+  'metadata_table_folder',
+  'metadata_table_tag',
+])
+
+function isObsessionDbMetadataObject(object: IntrospectedObject): boolean {
+  const kind = (object as { kind?: string }).kind ?? 'table'
+  return kind === 'table' && OBSESSIONDB_METADATA_TABLE_NAMES.has(object.name)
+}
+
+function isPullableObject(object: IntrospectedObject): boolean {
+  return !isObsessionDbMetadataObject(object)
+}
+
 // ───── Plugin ─────
 
 interface PullSchemaResult {
@@ -274,10 +289,10 @@ async function pullSchema(input: {
     }
   }
 
-  const introspected = await introspector({
+  const introspected = (await introspector({
     config: input.config.clickhouse,
     databases: selectedDatabases,
-  })
+  })).filter(isPullableObject)
 
   const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
   const content = renderSchemaFile(definitions)
