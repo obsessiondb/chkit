@@ -1,9 +1,13 @@
 ---
-title: Getting Started
-description: Install chkit and run the first migration flow.
+title: Add to an existing project
+description: Install chkit into an existing TypeScript project and run the first migration flow.
+sidebar:
+  order: 2
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Install chkit alongside your existing application code and use `chkit init` to drop a minimal config and starter schema into the current directory.
 
 ## Prerequisites
 
@@ -14,22 +18,22 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 <Tabs syncKey="package-manager">
   <TabItem label="bun">
-    ```bash
+    ```sh
     bun add -d chkit @chkit/core
     ```
   </TabItem>
   <TabItem label="npm">
-    ```bash
+    ```sh
     npm install -D chkit @chkit/core
     ```
   </TabItem>
   <TabItem label="pnpm">
-    ```bash
+    ```sh
     pnpm add -D chkit @chkit/core
     ```
   </TabItem>
   <TabItem label="yarn">
-    ```bash
+    ```sh
     yarn add -D chkit @chkit/core
     ```
   </TabItem>
@@ -39,7 +43,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 <Tabs syncKey="package-manager">
   <TabItem label="bun">
-    ```bash
+    ```sh
     bunx chkit init
     bunx chkit generate --name init
     bunx chkit migrate --apply
@@ -48,7 +52,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
     ```
   </TabItem>
   <TabItem label="npm">
-    ```bash
+    ```sh
     npx chkit init
     npx chkit generate --name init
     npx chkit migrate --apply
@@ -57,7 +61,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
     ```
   </TabItem>
   <TabItem label="pnpm">
-    ```bash
+    ```sh
     pnpm dlx chkit init
     pnpm dlx chkit generate --name init
     pnpm dlx chkit migrate --apply
@@ -66,7 +70,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
     ```
   </TabItem>
   <TabItem label="yarn">
-    ```bash
+    ```sh
     yarn dlx chkit init
     yarn dlx chkit generate --name init
     yarn dlx chkit migrate --apply
@@ -82,7 +86,7 @@ chkit ships an agent skill so AI coding assistants (Claude Code, Cursor, GitHub 
 
 On the first interactive run, chkit detects your agent and prompts to install the skill. To install it manually at any time:
 
-```bash
+```sh
 npx skills add obsessiondb/chkit
 ```
 
@@ -93,3 +97,4 @@ The skill is installed into your project's agent directory (e.g. `.claude/skills
 - Continue to [CLI Overview](/cli/overview/)
 - Continue to [Config Overview](/configuration/overview/)
 - Continue to [Schema DSL Reference](/schema/dsl-reference/)
+- [Start with an example](/getting-started/with-an-example/)

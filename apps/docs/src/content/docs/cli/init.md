@@ -53,7 +53,7 @@ Next steps:
   3. Run: bunx chkit generate --name init
   4. Run: bunx chkit migrate --apply
 
-Docs: https://chkit.obsessiondb.com/getting-started/
+Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/
 ```
 
 **Run on an existing project (no changes):**
