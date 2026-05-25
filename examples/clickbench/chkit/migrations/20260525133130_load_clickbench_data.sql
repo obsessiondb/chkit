@@ -7,7 +7,7 @@
 -- risk-summary: safe=0, caution=2, danger=0
 
 -- operation: truncate_table key=table:default.hits risk=caution
-TRUNCATE TABLE default.hits;
+TRUNCATE TABLE default.hits SETTINGS max_table_size_to_drop = 0, max_partition_size_to_drop = 0;
 
 -- operation: load_table_data key=table:default.hits risk=caution
 INSERT INTO default.hits
