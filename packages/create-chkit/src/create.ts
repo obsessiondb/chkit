@@ -34,9 +34,9 @@ export async function runCreate(options: CreateOptions): Promise<void> {
   const { source } = await downloadExample(options.example, targetDir)
   downloadSpinner.stop(`Downloaded ${pc.dim(source)}`)
 
-  await transformPackageJsonFile(targetDir, { projectName: basename(projectName) })
-
   const packageManager = await resolvePackageManager(options.packageManager)
+  await transformPackageJsonFile(targetDir, { projectName: basename(projectName), packageManager })
+
   if (!options.skipInstall) {
     const installSpinner = spinner()
     installSpinner.start(`Installing dependencies with ${pc.cyan(packageManager)}`)

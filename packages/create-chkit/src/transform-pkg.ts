@@ -5,6 +5,7 @@ export type PackageJson = {
   name?: string
   version?: string
   private?: boolean
+  packageManager?: string
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
   peerDependencies?: Record<string, string>
@@ -15,12 +16,14 @@ export type PackageJson = {
 export type TransformOptions = {
   projectName: string
   chkitDepVersion?: string
+  packageManager?: string
 }
 
 const CHKIT_DEP_GROUPS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const
 
 export function transformPackageJson(pkg: PackageJson, options: TransformOptions): PackageJson {
   const next: PackageJson = { ...pkg, name: options.projectName }
+  alignPackageManager(next, options.packageManager)
   const version = options.chkitDepVersion ?? 'latest'
   for (const group of CHKIT_DEP_GROUPS) {
     const current = next[group]
@@ -44,6 +47,13 @@ function repinChkitDeps(deps: Record<string, string>, version: string): Record<s
     next[name] = isChkitPackage(name) ? version : current
   }
   return next
+}
+
+function alignPackageManager(pkg: PackageJson, packageManager: string | undefined): void {
+  if (!packageManager || !pkg.packageManager) return
+  const declared = pkg.packageManager.split('@')[0]
+  if (declared === packageManager) return
+  delete pkg.packageManager
 }
 
 function isChkitPackage(name: string): boolean {

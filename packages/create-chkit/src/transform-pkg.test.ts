@@ -57,6 +57,22 @@ describe('transformPackageJson', () => {
     expect(result.optionalDependencies).toEqual({ '@chkit/plugin-obsessiondb': 'latest' })
   })
 
+  test('removes a mismatched template package manager', () => {
+    const result = transformPackageJson(
+      { name: 'pkg', packageManager: 'bun@1.3.5' },
+      { projectName: 'my-app', packageManager: 'pnpm' },
+    )
+    expect(result.packageManager).toBeUndefined()
+  })
+
+  test('preserves a matching template package manager', () => {
+    const result = transformPackageJson(
+      { name: 'pkg', packageManager: 'bun@1.3.5' },
+      { projectName: 'my-app', packageManager: 'bun' },
+    )
+    expect(result.packageManager).toBe('bun@1.3.5')
+  })
+
   test('preserves unrelated fields', () => {
     const result = transformPackageJson(
       {
