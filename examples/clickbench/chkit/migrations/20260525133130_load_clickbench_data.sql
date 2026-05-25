@@ -15,4 +15,5 @@ SELECT *
 FROM url(
   'https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_{0..99}.parquet',
   'Parquet'
-);
+)
+SETTINGS max_execution_time = 0;

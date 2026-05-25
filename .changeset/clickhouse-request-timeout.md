@@ -3,4 +3,4 @@
 "chkit": patch
 ---
 
-Bump the default `request_timeout` on the internal `@clickhouse/client` from the library default (30s) to 2 minutes. Longer-running DDL and INSERTs (for example the ClickBench dataset load) were hitting a 30s socket timeout that killed the migrate in-flight; 2 minutes is a saner default for the kinds of statements chkit migrations issue. Stateless, session, and DDL-fallback clients all share the new default.
+Disable the `@clickhouse/client` `request_timeout` for the internal chkit clients (was the library default of 30s). The underlying timer is a socket inactivity timeout, and ClickHouse stays silent on the response stream during long INSERTs and DDL — so any finite value eventually kills legitimate work mid-flight (the ClickBench dataset load tripped at 30s). Setting `request_timeout: 0` leaves TCP keepalive to detect dead connections instead. Applies to the stateless, session, and DDL-fallback clients.
