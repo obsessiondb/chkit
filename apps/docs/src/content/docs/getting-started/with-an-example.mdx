@@ -7,7 +7,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-`create-chkit` scaffolds a working chkit project by downloading one of the curated examples from the chkit repository and wiring it up against your chosen package manager.
+`create-chkit` scaffolds a working chkit project by downloading a curated example from the chkit repository and wiring it up against your chosen package manager. Use this path when you want a known-good project as a starting point.
 
 ## Prerequisites
 
@@ -83,7 +83,7 @@ Pass a project directory and pick an example explicitly:
 
 More examples will land in the [`examples/` directory](https://github.com/obsessiondb/chkit/tree/main/examples) over time.
 
-## Next steps
+## Run your first migration
 
 Once the scaffold completes:
 
@@ -94,8 +94,8 @@ export CLICKHOUSE_URL=http://localhost:8123
 bun run migrate
 ```
 
-## Next
+## Where to next
 
-- Continue to [CLI Overview](/cli/overview/)
-- Continue to [Config Overview](/configuration/overview/)
-- [Add chkit to an existing project](/getting-started/add-to-existing-project/)
+- [CLI reference](/cli/overview/) — every command and flag
+- [Configuration](/configuration/overview/) — wire up `clickhouse.config.ts`
+- [Add chkit to an existing project](/getting-started/add-to-existing-project/) — the other path

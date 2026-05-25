@@ -20,6 +20,7 @@ export default defineConfig({
 				{
 					label: 'Getting Started',
 					items: [
+						{ label: 'Overview', slug: 'getting-started' },
 						{ label: 'Start with an example', slug: 'getting-started/with-an-example' },
 						{ label: 'Add to an existing project', slug: 'getting-started/add-to-existing-project' },
 					],
