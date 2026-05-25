@@ -416,6 +416,8 @@ const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 	send_progress_in_http_headers: 1,
 }
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
+
 export function createStatelessClickHouseClient(
 	config: ClickHouseConfig,
 	clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
@@ -427,6 +429,7 @@ export function createStatelessClickHouseClient(
 		password: config.password,
 		database: config.database,
 		application: CHKIT_APPLICATION_ID,
+		request_timeout: DEFAULT_REQUEST_TIMEOUT_MS,
 		clickhouse_settings: clickhouseSettings,
 		...(options.compression ? { compression: options.compression } : {}),
 	})
@@ -451,6 +454,7 @@ export function createSessionClickHouseClient(
 		database: config.database,
 		session_id: sessionId,
 		application: CHKIT_APPLICATION_ID,
+		request_timeout: DEFAULT_REQUEST_TIMEOUT_MS,
 		clickhouse_settings: clickhouseSettings,
 		...(options.compression ? { compression: options.compression } : {}),
 	})
@@ -483,6 +487,7 @@ export function createExecutorWithClient(
 						username: config.username,
 						password: config.password,
 						application: CHKIT_APPLICATION_ID,
+						request_timeout: DEFAULT_REQUEST_TIMEOUT_MS,
 						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
 					})
 					try {
