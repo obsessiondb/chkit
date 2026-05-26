@@ -26,5 +26,5 @@ FROM s3(
 )
 SETTINGS
   max_execution_time = 0,
-  max_download_threads = 32,
-  max_insert_threads = 16;
+  max_download_threads = 128,
+  max_insert_threads = 32;
