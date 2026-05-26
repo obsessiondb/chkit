@@ -1,5 +1,5 @@
 ---
-"create-chkit": minor
+"create-chkit": patch
 "chkit": patch
 ---
 

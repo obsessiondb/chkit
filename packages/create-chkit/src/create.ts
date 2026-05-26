@@ -1,5 +1,5 @@
-import { readdir, stat } from 'node:fs/promises'
-import { basename, isAbsolute, resolve } from 'node:path'
+import { readdir, rm, stat } from 'node:fs/promises'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { confirm, intro, log, outro, select, spinner, text } from '@clack/prompts'
 import pc from 'picocolors'
@@ -82,6 +82,13 @@ async function assertDirIsEmpty(targetDir: string): Promise<void> {
     log.warn('Aborted by user.')
     process.exit(0)
   }
+  await clearDirectoryContents(targetDir, entries)
+}
+
+async function clearDirectoryContents(targetDir: string, entries: string[]): Promise<void> {
+  await Promise.all(
+    entries.map((entry) => rm(join(targetDir, entry), { recursive: true, force: true })),
+  )
 }
 
 async function pathExists(path: string): Promise<boolean> {

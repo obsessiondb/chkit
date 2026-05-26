@@ -1,11 +1,16 @@
 import { downloadTemplate } from 'giget'
 
+import { CREATE_CHKIT_VERSION } from './version.js'
+
 const DEFAULT_REPO = 'obsessiondb/chkit'
-const DEFAULT_REF = 'main'
 
 export function resolveExampleSource(example: string): string {
   if (looksLikeUrl(example) || hasProviderPrefix(example)) return example
-  return `github:${DEFAULT_REPO}/examples/${example}#${DEFAULT_REF}`
+  return `github:${DEFAULT_REPO}/examples/${example}#${defaultRef()}`
+}
+
+function defaultRef(): string {
+  return `create-chkit@${CREATE_CHKIT_VERSION}`
 }
 
 export async function downloadExample(example: string, targetDir: string): Promise<{ source: string }> {

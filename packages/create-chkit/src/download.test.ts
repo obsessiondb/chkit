@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
 import { resolveExampleSource } from './download.js'
+import { CREATE_CHKIT_VERSION } from './version.js'
 
 describe('resolveExampleSource', () => {
-  test('expands bare example name to github obsessiondb/chkit subdirectory', () => {
-    expect(resolveExampleSource('clickbench')).toBe('github:obsessiondb/chkit/examples/clickbench#main')
+  test('pins bare example name to the create-chkit release tag for reproducibility', () => {
+    expect(resolveExampleSource('clickbench')).toBe(
+      `github:obsessiondb/chkit/examples/clickbench#create-chkit@${CREATE_CHKIT_VERSION}`,
+    )
   })
 
   test('passes through full https url', () => {
