@@ -21,3 +21,4 @@ CLAUDE.local.md
 .fallow
 
 clickhouse.config.ts
+!examples/**/clickhouse.config.ts

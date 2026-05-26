@@ -28,6 +28,6 @@ export async function cmdInit(): Promise<void> {
     console.log('  3. Run: bunx chkit generate --name init')
     console.log('  4. Run: bunx chkit migrate --apply')
     console.log('')
-    console.log('Docs: https://chkit.obsessiondb.com/getting-started/')
+    console.log('Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/')
   }
 }

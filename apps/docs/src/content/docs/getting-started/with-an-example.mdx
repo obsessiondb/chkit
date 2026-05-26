@@ -1,0 +1,101 @@
+---
+title: Start with an example
+description: Scaffold a working chkit project from a curated example with create-chkit.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+`create-chkit` scaffolds a working chkit project by downloading a curated example from the chkit repository and wiring it up against your chosen package manager. Use this path when you want a known-good project as a starting point.
+
+## Prerequisites
+
+- Node.js 20+ or Bun 1.3.5+
+- A ClickHouse endpoint (`CLICKHOUSE_URL`, optionally `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`)
+
+## Scaffold a project
+
+Run the package without arguments to be prompted for a project name and to scaffold the default `clickbench` example.
+
+<Tabs syncKey="package-manager">
+  <TabItem label="bun">
+    ```sh
+    bun create chkit@latest
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```sh
+    npm create chkit@latest
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm create chkit@latest
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn create chkit
+    ```
+  </TabItem>
+</Tabs>
+
+Pass a project directory and pick an example explicitly:
+
+<Tabs syncKey="package-manager">
+  <TabItem label="bun">
+    ```sh
+    bun create chkit@latest my-app --example clickbench
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```sh
+    npm create chkit@latest my-app -- --example clickbench
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm create chkit@latest my-app --example clickbench
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn create chkit my-app --example clickbench
+    ```
+  </TabItem>
+</Tabs>
+
+## Options
+
+| Flag | Description |
+| --- | --- |
+| `[project-directory]` | Target directory. Prompted if omitted. |
+| `-e, --example <name>` | Example name or full GitHub URL. Defaults to `clickbench`. |
+| `-m, --package-manager <pm>` | `npm`, `pnpm`, `yarn`, or `bun`. Auto-detected from the invoking package manager. |
+| `--skip-install` | Skip installing dependencies after scaffolding. |
+
+## Examples
+
+| Name | Description |
+| --- | --- |
+| `clickbench` | Full ClickBench schema and dataset load against ObsessionDB or ClickHouse. |
+
+More examples will land in the [`examples/` directory](https://github.com/obsessiondb/chkit/tree/main/examples) over time.
+
+## Run your first migration
+
+Once the scaffold completes:
+
+```sh
+cd my-app
+export CLICKHOUSE_URL=http://localhost:8123
+# export CLICKHOUSE_PASSWORD=...
+bun run migrate
+```
+
+## Where to next
+
+- [CLI reference](/cli/overview/) — every command and flag
+- [Configuration](/configuration/overview/) — wire up `clickhouse.config.ts`
+- [Add chkit to an existing project](/getting-started/add-to-existing-project/) — the other path
