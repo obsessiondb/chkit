@@ -1,0 +1,9 @@
+{
+  "default": "clickbench",
+  "examples": [
+    {
+      "name": "clickbench",
+      "description": "Full ClickBench schema and dataset load against ObsessionDB or ClickHouse."
+    }
+  ]
+}

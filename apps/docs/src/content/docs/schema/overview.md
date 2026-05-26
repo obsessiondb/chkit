@@ -1,6 +1,8 @@
 ---
 title: Schema Overview
 description: How chkit thinks about ClickHouse schema and where to learn each piece of the DSL.
+sidebar:
+  order: 1
 ---
 
 In chkit, your ClickHouse schema lives in TypeScript files. You declare tables, views, and materialized views as plain values using functions from `@chkit/core`, group them with `schema()`, and let chkit handle the rest — diffing them against the database, generating migration SQL, and applying it safely.

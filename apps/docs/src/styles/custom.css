@@ -211,6 +211,132 @@ pre {
 	border-radius: 10px;
 }
 
+/* ── PackagedCommand & Command components ───────── */
+
+.pkg-cmd {
+	background: #141414;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 10px;
+	overflow: hidden;
+	margin: 1rem 0;
+	position: relative;
+	font-family: var(--sl-font-mono);
+	font-size: 0.875rem;
+}
+
+.pkg-cmd-header {
+	display: flex;
+	align-items: stretch;
+	justify-content: space-between;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.015);
+}
+
+.pkg-cmd-tabs {
+	display: flex;
+	align-items: stretch;
+}
+
+.pkg-cmd-tab {
+	background: transparent;
+	border: 0;
+	color: var(--sl-color-gray-3);
+	cursor: pointer;
+	padding: 0.55rem 0.95rem;
+	font-family: var(--sl-font-mono);
+	font-size: 0.8125rem;
+	line-height: 1;
+	letter-spacing: 0;
+	position: relative;
+	transition: color 120ms ease;
+}
+
+.pkg-cmd-tab:hover {
+	color: var(--sl-color-gray-1);
+}
+
+.pkg-cmd-tab[aria-selected='true'] {
+	color: var(--sl-color-white);
+}
+
+.pkg-cmd-tab[aria-selected='true']::after {
+	content: '';
+	position: absolute;
+	left: 0.95rem;
+	right: 0.95rem;
+	bottom: -1px;
+	height: 1px;
+	background: var(--sl-color-white);
+}
+
+.pkg-cmd-copy {
+	background: transparent;
+	border: 0;
+	color: var(--sl-color-gray-3);
+	cursor: pointer;
+	padding: 0 0.85rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	transition: color 120ms ease;
+}
+
+.pkg-cmd-copy:hover {
+	color: var(--sl-color-white);
+}
+
+.pkg-cmd-copy.is-copied {
+	color: var(--sl-color-white);
+}
+
+.pkg-cmd-body {
+	padding: 0;
+}
+
+.pkg-cmd-pre {
+	background: transparent !important;
+	border: 0 !important;
+	border-radius: 0 !important;
+	margin: 0;
+	padding: 0.85rem 1rem;
+	overflow-x: auto;
+}
+
+.pkg-cmd-pre code {
+	background: transparent;
+	color: var(--sl-color-white);
+	font-family: var(--sl-font-mono);
+	font-size: 0.875rem;
+	line-height: 1.6;
+	white-space: pre;
+}
+
+.pkg-cmd-prompt {
+	color: var(--sl-color-gray-4);
+	user-select: none;
+	margin-right: 0.25rem;
+}
+
+/* Plain (no-tabs) variant — floating copy button in top-right */
+.pkg-cmd--plain .pkg-cmd-copy--floating {
+	position: absolute;
+	top: 0.35rem;
+	right: 0.35rem;
+	padding: 0.35rem;
+	border-radius: 6px;
+	opacity: 0;
+	transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.pkg-cmd--plain:hover .pkg-cmd-copy--floating,
+.pkg-cmd--plain:focus-within .pkg-cmd-copy--floating {
+	opacity: 1;
+}
+
+.pkg-cmd--plain .pkg-cmd-copy--floating:hover {
+	background: rgba(255, 255, 255, 0.06);
+}
+
 /* ── Link styling ─────────────────────────────────── */
 
 a:not([class]) {
