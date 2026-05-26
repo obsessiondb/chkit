@@ -183,6 +183,42 @@ chkit migrate --apply --table analytics.events
 }
 ```
 
+## Per-migration metadata
+
+Migration files can declare optional metadata in the leading comment header. `chkit migrate` reads these keys and uses them to inform the user before the migration runs.
+
+| Key | Effect |
+|-----|--------|
+| `log` | Printed to stdout immediately before the migration is applied. Use it to flag long-running or risky operations. |
+
+Example header:
+
+```sql
+-- chkit-migration-format: v1
+-- log: Loading the full ClickBench dataset (~100M rows). Expected duration: 3-5 minutes.
+-- generated-at: ...
+-- ...
+
+INSERT INTO default.hits SELECT * FROM s3(...);
+```
+
+When the migration is listed (plan mode and as part of `--apply`):
+
+```
+Pending migrations: 1
+- 20260525133130_load_clickbench_data.sql
+    Loading the full ClickBench dataset (~100M rows). Expected duration: 3-5 minutes.
+```
+
+In `--apply` mode the log line is also re-printed immediately before each migration is executed, so the message stays close to the related work in CI logs:
+
+```
+  Loading the full ClickBench dataset (~100M rows). Expected duration: 3-5 minutes.
+Applied: 20260525133130_load_clickbench_data.sql
+```
+
+Metadata keys are parsed from contiguous `-- key: value` comments at the top of the file (blank lines are tolerated) and stop at the first non-comment line. Unknown keys are ignored, so adding new keys in future releases is backwards-compatible.
+
 ## Related commands
 
 - [`chkit generate`](/cli/generate/) — produce migration files from schema changes

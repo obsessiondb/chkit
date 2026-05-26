@@ -1,4 +1,5 @@
 -- chkit-migration-format: v1
+-- log: Loading the full ClickBench dataset (~100M rows from S3). Expected duration: 3-5 minutes.
 -- generated-at: 2026-05-25T13:31:29.295Z
 -- cli-version: 0.1.0-beta.24
 -- definition-count: 1
