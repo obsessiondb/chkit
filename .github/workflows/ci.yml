@@ -20,12 +20,14 @@ jobs:
         run: git diff --exit-code bun.lock
 
       - name: Fallow analysis
+        if: github.event_name == 'pull_request'
         uses: fallow-rs/fallow@v2
         with:
           format: sarif
           fail-on-issues: false
 
       - name: Upload Fallow SARIF
+        if: github.event_name == 'pull_request'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: fallow-results.sarif
