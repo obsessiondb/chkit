@@ -50,6 +50,10 @@ export default defineConfig({
 					autogenerate: { directory: 'schema' },
 				},
 				{
+					label: 'ObsessionDB',
+					autogenerate: { directory: 'obsessiondb' },
+				},
+				{
 					label: 'Plugins',
 					autogenerate: { directory: 'plugins' },
 				},

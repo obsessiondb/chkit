@@ -48,3 +48,4 @@ chkit discovers schema files using the `schema` glob in your [configuration](/co
 - [Configuration Overview](/configuration/overview/) — where the `schema` glob is set.
 - [CLI: `chkit generate`](/cli/generate/) — how schema changes become migration SQL.
 - [CLI: `chkit pull`](/cli/pull/) — bootstrap schema files from an existing ClickHouse database.
+- [ObsessionDB: Engine Rewriting](/obsessiondb/engine-rewriting/) — how `Shared*` engines are stripped when the target isn't ObsessionDB.

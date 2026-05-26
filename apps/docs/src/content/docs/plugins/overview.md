@@ -29,7 +29,8 @@ You can author your own plugins; the existing official plugins are the reference
 
 ## Official plugins
 
+If you deploy to [ObsessionDB](https://obsessiondb.com), start at the dedicated [ObsessionDB section](/obsessiondb/overview/) — `@chkit/plugin-obsessiondb` is documented there as a first-class integration rather than as a plain plugin.
+
 - [`@chkit/plugin-codegen`](/plugins/codegen/) — TypeScript row types and optional Zod schemas, generated from your schema files.
 - [`@chkit/plugin-pull`](/plugins/pull/) — introspect a live ClickHouse database into local schema files. Useful for adopting chkit on an existing database.
 - [`@chkit/plugin-backfill`](/plugins/backfill/) — time-windowed data backfill with checkpoints, for materialized views and historical data loads.
-- [`@chkit/plugin-obsessiondb`](/plugins/obsessiondb/) — run a single set of schema files against both [ObsessionDB](https://obsessiondb.com) (with `Shared` engines) and regular ClickHouse. Recommended if you deploy to ObsessionDB.
