@@ -10,7 +10,8 @@
     "@chkit/plugin-backfill": "0.0.0",
     "@chkit/plugin-pull": "0.0.0",
     "@chkit/plugin-codegen": "0.0.0",
-    "@chkit/plugin-obsessiondb": "0.1.0-beta.7"
+    "@chkit/plugin-obsessiondb": "0.1.0-beta.7",
+    "create-chkit": "0.1.0-beta.24"
   },
   "changesets": [
     "add-debug-logging",

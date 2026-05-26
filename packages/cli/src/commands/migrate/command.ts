@@ -1,10 +1,12 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
+import { extractMigrationMetadata } from '../../runtime/migration-metadata.js'
 import {
   findChecksumMismatches,
   listMigrations,
@@ -133,7 +135,12 @@ async function cmdMigrate(
       for (const table of tableScope.matchedTables) console.log(`- ${table}`)
     }
     console.log(`Pending migrations: ${pending.length}`)
-    for (const file of pending) console.log(`- ${file}`)
+    for (const file of pending) {
+      console.log(`- ${file}`)
+      const sql = await readFile(join(migrationsDir, file), 'utf8')
+      const meta = extractMigrationMetadata(sql)
+      if (meta.log) console.log(`    ${meta.log}`)
+    }
   }
 
   if (!executeRequested) {
@@ -190,6 +197,11 @@ async function cmdMigrate(
 
   const appliedNow: MigrationJournalEntry[] = []
   for (const file of pending) {
+    if (!jsonMode) {
+      const sql = await readFile(join(migrationsDir, file), 'utf8')
+      const meta = extractMigrationMetadata(sql)
+      if (meta.log) console.log(`  ${meta.log}`)
+    }
     const entry = await applyMigration({
       db,
       journalStore,

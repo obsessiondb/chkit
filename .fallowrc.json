@@ -3,6 +3,7 @@
   "resolve": {
     "conditions": ["source", "bun"]
   },
+  "ignorePatterns": ["examples/**"],
   "duplicates": {
     "ignore": [
       "packages/**/*.test.ts",

@@ -1,0 +1,39 @@
+---
+title: Getting Started
+description: Get chkit running in your project — start from a curated example or add it to an existing repo.
+sidebar:
+  order: 0
+  label: Overview
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+chkit is a ClickHouse schema and migration toolkit for TypeScript projects. Pick the path that matches what you're working on.
+
+<CardGrid>
+  <LinkCard
+    title="Start with an example"
+    href="/getting-started/with-an-example/"
+    description="Scaffold a working chkit project from a curated example with create-chkit. Best for a first look or as a reference setup to copy from."
+  />
+  <LinkCard
+    title="Add to an existing project"
+    href="/getting-started/add-to-existing-project/"
+    description="Install chkit alongside your application code, generate your first migration, and apply it. Best if you already have a TypeScript project."
+  />
+</CardGrid>
+
+## Prerequisites
+
+Both paths need the same baseline:
+
+- Node.js 20+ or Bun 1.3.5+
+- A ClickHouse endpoint (`CLICKHOUSE_URL`, optionally `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`)
+
+## Where to next
+
+Once either path is working:
+
+- [CLI reference](/cli/overview/) — every command, flag, and expected output
+- [Configuration](/configuration/overview/) — wire up `clickhouse.config.ts`
+- [Schema DSL](/schema/dsl-reference/) — define tables, views, and materialized views
