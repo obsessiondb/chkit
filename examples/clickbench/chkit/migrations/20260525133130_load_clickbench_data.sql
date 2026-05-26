@@ -13,9 +13,17 @@ TRUNCATE TABLE default.hits SETTINGS max_table_size_to_drop = 0, max_partition_s
 -- INSERT. We use the s3() table function against the public dataset bucket
 -- (datasets.clickhouse.com is a CloudFront alias for clickhouse-public-datasets)
 -- because s3() does native partitioned-Parquet parallelism that url() does not.
--- max_download_threads parallelises the fetch across the 100 files;
--- max_insert_threads parallelises the write side; max_execution_time = 0 lifts
--- the server-side query timer.
+--
+-- Tuning (measured against an ObsessionDB customer-benchmark instance):
+--   * max_download_threads = 64, max_insert_threads = 16 lands at ~178s for
+--     the full 100M rows. Higher concurrency (e.g. 128/32) is ~10% faster but
+--     trips the server's OvercommitTracker under shared load.
+--   * max_memory_usage = 6.5 GiB is a hard ceiling on this query alone, well
+--     under the 7.2 GiB-ish OvercommitTracker threshold typical of managed
+--     ClickHouse deployments. If a smaller instance is used, lower this and
+--     drop concurrency to (32, 16) or (16, 8) accordingly.
+--   * max_execution_time = 0 lifts the server-side query timer (the load is
+--     intentionally long-running).
 
 -- operation: load_table_data key=table:default.hits risk=caution
 INSERT INTO default.hits
@@ -26,5 +34,6 @@ FROM s3(
 )
 SETTINGS
   max_execution_time = 0,
-  max_download_threads = 128,
-  max_insert_threads = 32;
+  max_memory_usage = 6500000000,
+  max_download_threads = 64,
+  max_insert_threads = 16;
