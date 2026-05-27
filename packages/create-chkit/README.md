@@ -25,7 +25,7 @@ bun create chkit@latest my-app --example clickbench
 | Flag | Description |
 | --- | --- |
 | `[project-directory]` | Target directory. Prompted if omitted. |
-| `-e, --example <name>` | Example to scaffold. Bare name (`clickbench`) or full GitHub URL. Defaults to `clickbench`. |
+| `-e, --example <name>` | Example to scaffold. Bare name (`clickbench`) or full GitHub URL. Prompted with the list of bundled examples if omitted. |
 | `-m, --package-manager <pm>` | `npm`, `pnpm`, `yarn`, or `bun`. Auto-detected from the invoking package manager. |
 | `--skip-install` | Skip installing dependencies after scaffolding. |
 | `-v, --version` | Print version. |

@@ -1,0 +1,187 @@
+---
+type PackageManager = 'bun' | 'npm' | 'pnpm' | 'yarn';
+
+interface Props {
+	install?: string;
+	exec?: string;
+	create?: string;
+	args?: string;
+	dev?: boolean;
+}
+
+const { install, exec, create, args, dev } = Astro.props;
+
+const pms: PackageManager[] = ['bun', 'npm', 'pnpm', 'yarn'];
+
+function buildInstall(pm: PackageManager, packages: string, isDev: boolean): string {
+	const devFlag = isDev ? (pm === 'bun' ? '-d ' : '-D ') : '';
+	const verb = pm === 'npm' ? 'install' : 'add';
+	return `${pm} ${verb} ${devFlag}${packages}`;
+}
+
+function buildExec(pm: PackageManager, command: string): string {
+	switch (pm) {
+		case 'bun':
+			return `bunx ${command}`;
+		case 'npm':
+			return `npx ${command}`;
+		case 'pnpm':
+			return `pnpm dlx ${command}`;
+		case 'yarn':
+			return `yarn dlx ${command}`;
+	}
+}
+
+function buildCreate(pm: PackageManager, pkg: string, rawArgs?: string): string {
+	const yarnPkg = pkg.replace(/@latest$/, '');
+	const target = pm === 'yarn' ? yarnPkg : pkg;
+
+	if (!rawArgs) {
+		return `${pm} create ${target}`;
+	}
+
+	if (pm !== 'npm') {
+		return `${pm} create ${target} ${rawArgs}`;
+	}
+
+	const parts = rawArgs.split(/\s+/);
+	const firstFlagIdx = parts.findIndex((p) => p.startsWith('-'));
+	if (firstFlagIdx === -1) {
+		return `npm create ${target} ${rawArgs}`;
+	}
+	const positional = parts.slice(0, firstFlagIdx).join(' ');
+	const flags = parts.slice(firstFlagIdx).join(' ');
+	return positional
+		? `npm create ${target} ${positional} -- ${flags}`
+		: `npm create ${target} -- ${flags}`;
+}
+
+function commandFor(pm: PackageManager): string {
+	if (install !== undefined) return buildInstall(pm, install, dev ?? false);
+	if (exec !== undefined) return buildExec(pm, exec);
+	if (create !== undefined) return buildCreate(pm, create, args);
+	throw new Error('PackagedCommand requires one of: install, exec, create');
+}
+
+const entries = pms.map((pm) => ({ pm, command: commandFor(pm) }));
+---
+
+<div class="pkg-cmd" data-pkg-cmd>
+	<div class="pkg-cmd-header" role="tablist">
+		<div class="pkg-cmd-tabs">
+			{
+				entries.map(({ pm }) => (
+					<button
+						type="button"
+						role="tab"
+						class="pkg-cmd-tab"
+						data-pm={pm}
+						aria-selected={pm === 'bun' ? 'true' : 'false'}
+					>
+						{pm}
+					</button>
+				))
+			}
+		</div>
+		<button type="button" class="pkg-cmd-copy" aria-label="Copy command">
+			<svg
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"
+			>
+				<rect x="9" y="9" width="13" height="13" rx="2"></rect>
+				<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+			</svg>
+		</button>
+	</div>
+	<div class="pkg-cmd-body">
+		{
+			entries.map(({ pm, command }) => (
+				<pre class="pkg-cmd-pre" data-pm-pane={pm} hidden={pm !== 'bun'}><code><span class="pkg-cmd-prompt">$</span> {command}</code></pre>
+			))
+		}
+	</div>
+</div>
+
+<script>
+	const STORAGE_KEY = 'chkit:pm';
+	const DEFAULT_PM = 'bun';
+
+	function getActivePm(): string {
+		try {
+			return localStorage.getItem(STORAGE_KEY) ?? DEFAULT_PM;
+		} catch {
+			return DEFAULT_PM;
+		}
+	}
+
+	function setActivePm(pm: string) {
+		try {
+			localStorage.setItem(STORAGE_KEY, pm);
+		} catch {
+			/* ignore */
+		}
+		applyPm(pm);
+	}
+
+	function applyPm(pm: string) {
+		document.querySelectorAll<HTMLElement>('[data-pkg-cmd]').forEach((group) => {
+			group.querySelectorAll<HTMLButtonElement>('.pkg-cmd-tab').forEach((tab) => {
+				tab.setAttribute('aria-selected', tab.dataset.pm === pm ? 'true' : 'false');
+			});
+			let matched = false;
+			group.querySelectorAll<HTMLElement>('[data-pm-pane]').forEach((pane) => {
+				const isMatch = pane.dataset.pmPane === pm;
+				pane.hidden = !isMatch;
+				if (isMatch) matched = true;
+			});
+			// Fallback: if selected PM doesn't exist on this instance, show the first pane.
+			if (!matched) {
+				const first = group.querySelector<HTMLElement>('[data-pm-pane]');
+				if (first) first.hidden = false;
+			}
+		});
+	}
+
+	function init() {
+		document.querySelectorAll<HTMLElement>('[data-pkg-cmd]').forEach((group) => {
+			group.querySelectorAll<HTMLButtonElement>('.pkg-cmd-tab').forEach((tab) => {
+				tab.addEventListener('click', () => {
+					const pm = tab.dataset.pm;
+					if (pm) setActivePm(pm);
+				});
+			});
+			group.querySelector<HTMLButtonElement>('.pkg-cmd-copy')?.addEventListener('click', (event) => {
+				const button = event.currentTarget as HTMLButtonElement;
+				const activePane = group.querySelector<HTMLElement>('[data-pm-pane]:not([hidden])');
+				const code = activePane?.querySelector('code')?.textContent?.trim();
+				if (!code) return;
+				const text = code.replace(/^\$\s*/, '');
+				void navigator.clipboard.writeText(text).then(() => {
+					button.classList.add('is-copied');
+					setTimeout(() => button.classList.remove('is-copied'), 1200);
+				});
+			});
+		});
+
+		window.addEventListener('storage', (event) => {
+			if (event.key === STORAGE_KEY && event.newValue) {
+				applyPm(event.newValue);
+			}
+		});
+
+		applyPm(getActivePm());
+	}
+
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', init);
+	} else {
+		init();
+	}
+</script>

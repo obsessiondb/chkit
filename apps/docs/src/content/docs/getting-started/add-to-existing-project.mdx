@@ -5,7 +5,8 @@ sidebar:
   order: 2
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import PackagedCommand from '../../../components/PackagedCommand.astro';
+import Command from '../../../components/Command.astro';
 
 Install chkit alongside your existing application code, drop a minimal config and starter schema into the current directory, and produce your first migration. Use this path when you already have a TypeScript project that talks to ClickHouse.
 
@@ -18,55 +19,13 @@ Install chkit alongside your existing application code, drop a minimal config an
 
 Add `chkit` and `@chkit/core` as dev dependencies:
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bun add -d chkit @chkit/core
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npm install -D chkit @chkit/core
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm add -D chkit @chkit/core
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn add -D chkit @chkit/core
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand install="chkit @chkit/core" dev />
 
 ## 2. Initialize the config
 
 `chkit init` writes `clickhouse.config.ts` (config with sensible defaults) and `src/db/schema/example.ts` (a starter `MergeTree` table). It's idempotent — running it on an existing project leaves both files untouched.
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bunx chkit init
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npx chkit init
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm dlx chkit init
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn dlx chkit init
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand exec="chkit init" />
 
 Edit `src/db/schema/example.ts` to match the table you actually want before moving on.
 
@@ -74,86 +33,20 @@ Edit `src/db/schema/example.ts` to match the table you actually want before movi
 
 `chkit generate` diffs your schema definitions against the previous snapshot and writes migration SQL into `chkit/migrations/`. Pass `--name` to label the migration file.
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bunx chkit generate --name init
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npx chkit generate --name init
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm dlx chkit generate --name init
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn dlx chkit generate --name init
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand exec="chkit generate --name init" />
 
 ## 4. Apply the migration
 
 `chkit migrate --apply` runs unapplied migrations against the ClickHouse endpoint from your environment. Make sure `CLICKHOUSE_URL` (and any auth env vars) are set before running this.
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bunx chkit migrate --apply
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npx chkit migrate --apply
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm dlx chkit migrate --apply
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn dlx chkit migrate --apply
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand exec="chkit migrate --apply" />
 
 ## 5. Verify
 
 `chkit status` shows which migrations have been applied. `chkit check` confirms the live schema matches your TypeScript definitions.
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bunx chkit status
-    bunx chkit check
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npx chkit status
-    npx chkit check
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm dlx chkit status
-    pnpm dlx chkit check
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn dlx chkit status
-    yarn dlx chkit check
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand exec="chkit status" />
+<PackagedCommand exec="chkit check" />
 
 ## AI agent skill
 
@@ -161,9 +54,7 @@ chkit ships an agent skill so AI coding assistants (Claude Code, Cursor, GitHub 
 
 On the first interactive run, chkit detects your agent and prompts to install the skill. To install it manually at any time:
 
-```sh
-npx skills add obsessiondb/chkit
-```
+<PackagedCommand exec="skills add obsessiondb/chkit" />
 
 The skill is installed into your project's agent directory (e.g. `.claude/skills/chkit/`, `.cursor/skills/chkit/`).
 

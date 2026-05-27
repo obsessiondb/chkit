@@ -35,6 +35,12 @@ This is a monorepo managed with Bun workspaces and Turborepo.
 - Internal packages (`@chkit/clickhouse`, `@chkit/codegen`) are not meant to be installed directly by users.
 - Plugins extend the CLI and are registered in `clickhouse.config.ts` via the `plugins` array.
 
+## Examples
+
+The `examples/` directory holds curated starter projects scaffolded by `create-chkit` (`bun create chkit@latest`). The list shown in the interactive prompt is sourced from `examples/manifest.json`, which is bundled into the `create-chkit` package at build time.
+
+**When you add a new example under `examples/<name>/`, you MUST also add an entry to `examples/manifest.json`.** The `verify` job runs `scripts/check-examples-manifest.ts` (via `create-chkit`'s build step), which fails CI if any directory under `examples/` is missing from the manifest, any manifest entry has no matching directory, or the `default` field doesn't match a listed entry.
+
 ## CLI Commands
 
 `init`, `generate`, `migrate`, `status`, `drift`, `check`, `codegen`, `pull`, `plugin`

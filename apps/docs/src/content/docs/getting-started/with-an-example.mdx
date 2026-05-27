@@ -5,7 +5,8 @@ sidebar:
   order: 1
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import PackagedCommand from '../../../components/PackagedCommand.astro';
+import Command from '../../../components/Command.astro';
 
 `create-chkit` scaffolds a working chkit project by downloading a curated example from the chkit repository and wiring it up against your chosen package manager. Use this path when you want a known-good project as a starting point.
 
@@ -16,62 +17,20 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## Scaffold a project
 
-Run the package without arguments to be prompted for a project name and to scaffold the default `clickbench` example.
+Run the package without arguments to be prompted for a project name and to pick from the list of bundled examples.
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bun create chkit@latest
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npm create chkit@latest
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm create chkit@latest
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn create chkit
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand create="chkit@latest" />
 
 Pass a project directory and pick an example explicitly:
 
-<Tabs syncKey="package-manager">
-  <TabItem label="bun">
-    ```sh
-    bun create chkit@latest my-app --example clickbench
-    ```
-  </TabItem>
-  <TabItem label="npm">
-    ```sh
-    npm create chkit@latest my-app -- --example clickbench
-    ```
-  </TabItem>
-  <TabItem label="pnpm">
-    ```sh
-    pnpm create chkit@latest my-app --example clickbench
-    ```
-  </TabItem>
-  <TabItem label="yarn">
-    ```sh
-    yarn create chkit my-app --example clickbench
-    ```
-  </TabItem>
-</Tabs>
+<PackagedCommand create="chkit@latest" args="my-chkit-app --example clickbench" />
 
 ## Options
 
 | Flag | Description |
 | --- | --- |
 | `[project-directory]` | Target directory. Prompted if omitted. |
-| `-e, --example <name>` | Example name or full GitHub URL. Defaults to `clickbench`. |
+| `-e, --example <name>` | Example name or full GitHub URL. Prompted with the list of bundled examples if omitted. |
 | `-m, --package-manager <pm>` | `npm`, `pnpm`, `yarn`, or `bun`. Auto-detected from the invoking package manager. |
 | `--skip-install` | Skip installing dependencies after scaffolding. |
 
@@ -88,7 +47,7 @@ More examples will land in the [`examples/` directory](https://github.com/obsess
 Once the scaffold completes:
 
 ```sh
-cd my-app
+cd my-chkit-app
 export CLICKHOUSE_URL=http://localhost:8123
 # export CLICKHOUSE_PASSWORD=...
 bun run migrate

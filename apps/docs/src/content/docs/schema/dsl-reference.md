@@ -1,6 +1,8 @@
 ---
 title: Schema DSL Reference
 description: Complete reference for chkit schema definition functions, column types, and table options.
+sidebar:
+  order: 3
 ---
 
 Schema files are TypeScript files that export definitions using functions from `@chkit/core`. All exported definitions are collected when chkit loads schema files matched by the `schema` glob in your [configuration](/configuration/overview/).

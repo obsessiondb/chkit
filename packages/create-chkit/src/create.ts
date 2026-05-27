@@ -5,6 +5,7 @@ import { confirm, intro, log, outro, select, spinner, text } from '@clack/prompt
 import pc from 'picocolors'
 
 import { downloadExample } from './download.js'
+import { DEFAULT_EXAMPLE, EXAMPLES } from './examples.js'
 import {
   type PackageManager,
   detectPackageManager,
@@ -17,7 +18,7 @@ import { CREATE_CHKIT_VERSION } from './version.js'
 
 export type CreateOptions = {
   projectDirectory: string | undefined
-  example: string
+  example: string | undefined
   packageManager: string | undefined
   skipInstall: boolean
 }
@@ -29,9 +30,11 @@ export async function runCreate(options: CreateOptions): Promise<void> {
   const targetDir = resolve(process.cwd(), projectName)
   await assertDirIsEmpty(targetDir)
 
+  const example = await resolveExample(options.example)
+
   const downloadSpinner = spinner()
-  downloadSpinner.start(`Downloading ${pc.cyan(options.example)} example`)
-  const { source } = await downloadExample(options.example, targetDir)
+  downloadSpinner.start(`Downloading ${pc.cyan(example)} example`)
+  const { source } = await downloadExample(example, targetDir)
   downloadSpinner.stop(`Downloaded ${pc.dim(source)}`)
 
   const packageManager = await resolvePackageManager(options.packageManager)
@@ -48,6 +51,20 @@ export async function runCreate(options: CreateOptions): Promise<void> {
 
   printNextSteps({ projectName, packageManager, didInstall: !options.skipInstall })
   outro(pc.green('Done.'))
+}
+
+async function resolveExample(explicit: string | undefined): Promise<string> {
+  if (explicit && explicit.trim().length > 0) return explicit.trim()
+  const chosen = await select({
+    message: 'Which example do you want to scaffold?',
+    initialValue: DEFAULT_EXAMPLE,
+    options: EXAMPLES.map((entry) => ({
+      value: entry.name,
+      label: entry.name,
+      hint: entry.description,
+    })),
+  })
+  return unwrap(chosen) as string
 }
 
 async function resolveProjectName(initial: string | undefined): Promise<string> {
