@@ -1,6 +1,8 @@
 ---
 title: Schema Overview
 description: How chkit thinks about ClickHouse schema and where to learn each piece of the DSL.
+sidebar:
+  order: 1
 ---
 
 In chkit, your ClickHouse schema lives in TypeScript files. You declare tables, views, and materialized views as plain values using functions from `@chkit/core`, group them with `schema()`, and let chkit handle the rest — diffing them against the database, generating migration SQL, and applying it safely.
@@ -46,3 +48,4 @@ chkit discovers schema files using the `schema` glob in your [configuration](/co
 - [Configuration Overview](/configuration/overview/) — where the `schema` glob is set.
 - [CLI: `chkit generate`](/cli/generate/) — how schema changes become migration SQL.
 - [CLI: `chkit pull`](/cli/pull/) — bootstrap schema files from an existing ClickHouse database.
+- [ObsessionDB: Engine Rewriting](/obsessiondb/engine-rewriting/) — how `Shared*` engines are stripped when the target isn't ObsessionDB.

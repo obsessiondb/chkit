@@ -1,7 +1,10 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import react from '@astrojs/react';
 import rawMarkdown from './src/integrations/raw-markdown';
+
+const isDev = process.argv.includes('dev');
 
 // https://astro.build/config
 export default defineConfig({
@@ -10,6 +13,11 @@ export default defineConfig({
 			title: 'chkit Docs',
 			description: 'Public documentation for chkit, the ClickHouse schema and migration CLI.',
 			customCss: ['./src/styles/custom.css'],
+			...(isDev && {
+				components: {
+					Footer: './src/components/Footer.astro',
+				},
+			}),
 			sidebar: [
 				{
 					label: 'Overview',
@@ -42,11 +50,16 @@ export default defineConfig({
 					autogenerate: { directory: 'schema' },
 				},
 				{
+					label: 'ObsessionDB',
+					autogenerate: { directory: 'obsessiondb' },
+				},
+				{
 					label: 'Plugins',
 					autogenerate: { directory: 'plugins' },
 				},
 			],
 		}),
+		...(isDev ? [react()] : []),
 		rawMarkdown(),
 	],
 });

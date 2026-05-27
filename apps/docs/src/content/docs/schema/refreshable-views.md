@@ -1,6 +1,8 @@
 ---
 title: Refreshable Materialized Views
 description: Schedule ClickHouse materialized views to refresh on a cron-like cadence, with APPEND mode, DEPENDS ON chains, and the three hard rules chkit enforces.
+sidebar:
+  order: 2
 ---
 
 ClickHouse [refreshable materialized views](https://clickhouse.com/docs/materialized-view/refreshable-materialized-view) (RMVs) periodically re-execute a SELECT on a schedule, rather than firing per-INSERT like regular incremental MVs. They've been production-ready since ClickHouse 24.10.
