@@ -11,9 +11,13 @@
 TRUNCATE TABLE default.hits SETTINGS max_table_size_to_drop = 0, max_partition_size_to_drop = 0;
 
 -- Load the full ClickBench dataset (100 Parquet files, ~100M rows) in a single
--- INSERT. We use the s3() table function against the public dataset bucket
--- (datasets.clickhouse.com is a CloudFront alias for clickhouse-public-datasets)
--- because s3() does native partitioned-Parquet parallelism that url() does not.
+-- INSERT. We use the s3() table function against the ObsessionDB-hosted mirror
+-- of the dataset (Hetzner Object Storage, FSN1 region) because s3() does
+-- native partitioned-Parquet parallelism that url() does not.
+--
+-- The executable TRUNCATE above clears the target before the first attempt.
+-- The `before-retry:` line below repeats that compensation before any retry
+-- where a prior async INSERT may have partially loaded rows.
 --
 -- Tuning (measured against an ObsessionDB customer-benchmark instance):
 --   * max_download_threads = 64, max_insert_threads = 16 lands at ~178s for
@@ -26,15 +30,16 @@ TRUNCATE TABLE default.hits SETTINGS max_table_size_to_drop = 0, max_partition_s
 --   * max_execution_time = 0 lifts the server-side query timer (the load is
 --     intentionally long-running).
 
--- operation: load_table_data key=table:default.hits risk=caution
+-- operation: load_table_data key=table:default.hits risk=caution mode=async
+-- before-retry: TRUNCATE TABLE default.hits SETTINGS max_table_size_to_drop = 0, max_partition_size_to_drop = 0;
 INSERT INTO default.hits
 SELECT *
 FROM s3(
-  'https://clickhouse-public-datasets.s3.amazonaws.com/hits_compatible/athena_partitioned/hits_{0..99}.parquet',
+  'https://fsn1.your-objectstorage.com/obsessiondb-datasets/clickbench/hits_{0..99}.parquet',
   'Parquet'
 )
 SETTINGS
   max_execution_time = 0,
   max_memory_usage = 6500000000,
-  max_download_threads = 64,
-  max_insert_threads = 16;
+  max_download_threads = 2,
+  max_insert_threads = 2;

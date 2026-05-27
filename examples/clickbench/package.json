@@ -9,8 +9,8 @@
     "check": "chkit check"
   },
   "devDependencies": {
-    "@chkit/core": "0.1.0-beta.24",
-    "@chkit/plugin-obsessiondb": "0.1.0-beta.24",
-    "chkit": "0.1.0-beta.24"
+    "@chkit/core": "0.1.0-beta.26",
+    "@chkit/plugin-obsessiondb": "0.1.0-beta.26",
+    "chkit": "0.1.0-beta.26"
   }
 }

@@ -35,6 +35,14 @@
         "wrangler": "^4.65.0",
       },
     },
+    "examples/clickbench": {
+      "name": "chkit-example-clickbench",
+      "devDependencies": {
+        "@chkit/core": "0.1.0-beta.26",
+        "@chkit/plugin-obsessiondb": "0.1.0-beta.26",
+        "chkit": "0.1.0-beta.26",
+      },
+    },
     "packages/cli": {
       "name": "chkit",
       "version": "0.1.0-beta.26",
@@ -66,7 +74,7 @@
       "name": "@chkit/codegen",
       "version": "0.1.0-beta.26",
       "dependencies": {
-        "@chkit/core": "workspace:*",
+        "@chkit/core": "0.1.0-beta.26",
       },
     },
     "packages/core": {
@@ -663,6 +671,8 @@
     "chardet": ["chardet@2.1.1", "", {}, "sha512-PsezH1rqdV9VvyNhxxOW32/d75r01NY7TQCmOqomRo15ZSOKbpTFVsfjghxo6JloQUCGnH4k1LGu0R4yCLlWQQ=="],
 
     "chkit": ["chkit@workspace:packages/cli"],
+
+    "chkit-example-clickbench": ["chkit-example-clickbench@workspace:examples/clickbench"],
 
     "chokidar": ["chokidar@5.0.0", "", { "dependencies": { "readdirp": "^5.0.0" } }, "sha512-TQMmc3w+5AxjpL8iIiwebF73dRDF4fBIieAqGn9RGCWaEVwQ6Fb2cGe31Yns0RRIzii5goJ1Y7xbMwo1TxMplw=="],
 
