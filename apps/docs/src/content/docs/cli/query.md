@@ -19,9 +19,9 @@ The SQL must be a single positional argument. Wrap it in quotes if it contains s
 
 No command-specific flags. See [global flags](/cli/overview/#global-flags).
 
-When the [ObsessionDB plugin](/plugins/obsessiondb/) is loaded, `chkit query`
+When the [ObsessionDB plugin](/obsessiondb/overview/) is loaded, `chkit query`
 also accepts `--service <name-or-alias>` to route the query to a specific service for
-this invocation (see [Per-command service override](/plugins/obsessiondb/#per-command-service-override)).
+this invocation (see [Per-command override](/obsessiondb/services/#per-command-override)).
 
 ## Behavior
 

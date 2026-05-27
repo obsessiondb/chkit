@@ -1,0 +1,8 @@
+---
+import Default from '@astrojs/starlight/components/Footer.astro';
+import AgentationDev from './AgentationDev';
+---
+
+<Default><slot /></Default>
+
+{import.meta.env.DEV && <AgentationDev client:only="react" />}

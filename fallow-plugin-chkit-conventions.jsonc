@@ -10,6 +10,7 @@
   ],
   "alwaysUsed": [
     "apps/docs/functions/**/*.ts",
+    "apps/docs/src/components/AgentationDev.tsx",
     "apps/docs/src/styles/custom.css",
     "packages/cli/src/e2e-testkit.ts"
   ],
