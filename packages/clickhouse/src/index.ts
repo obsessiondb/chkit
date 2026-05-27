@@ -584,12 +584,17 @@ export function createExecutorWithClient(
 					http_headers: { 'X-DDL': '1' },
 					...(settings ? { clickhouse_settings: settings } : {}),
 				})
-				const rows = await result.json<T>()
+				// Check headers before decoding the body. With
+				// send_progress_in_http_headers=1, ClickHouse can return HTTP 200
+				// then append a plain-text exception block after partial JSON
+				// rows — JSON parsing would throw before we ever read the
+				// exception-code header.
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
 					query_id: result.query_id,
 					sql,
 				})
+				const rows = await result.json<T>()
 				logProfiling(
 					profiler,
 					sql,
@@ -612,12 +617,12 @@ export function createExecutorWithClient(
 					http_headers: { 'X-DDL': '1' },
 					...(settings ? { clickhouse_settings: settings } : {}),
 				})
-				const payload = (await result.json<T>()) as ClickHouseJsonQueryResult<T>
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
 					query_id: result.query_id,
 					sql,
 				})
+				const payload = (await result.json<T>()) as ClickHouseJsonQueryResult<T>
 				logProfiling(
 					profiler,
 					sql,

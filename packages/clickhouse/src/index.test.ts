@@ -315,6 +315,54 @@ SETTINGS index_granularity = 8192;`
     await executor.close()
   })
 
+  test('executor.query checks exception headers before decoding the response body', async () => {
+    // With send_progress_in_http_headers=1, ClickHouse can return HTTP 200,
+    // set x-clickhouse-exception-code, then append a plain-text exception
+    // block to the body. If we decoded the body first, JSON parsing would
+    // throw before the header check ran and the streamed exception would be
+    // silently bypassed.
+    let jsonCalled = false
+    const failingJsonClient = {
+      async query() {
+        return {
+          query_id: 'q-1',
+          response_headers: {
+            'x-clickhouse-exception-code': '241',
+            'x-clickhouse-exception-tag': 'memlim',
+          },
+          async json() {
+            jsonCalled = true
+            throw new Error('invalid JSON: trailing exception block')
+          },
+        }
+      },
+      async command() {
+        return { query_id: 'c-1', response_headers: {} }
+      },
+      async insert() {
+        return { query_id: 'i-1', response_headers: {} }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      failingJsonClient,
+    )
+
+    await expect(executor.query('SELECT 1')).rejects.toBeInstanceOf(
+      ClickHouseStreamedException,
+    )
+    expect(jsonCalled).toBe(false)
+    await executor.close()
+  })
+
   test('executor.insert throws when streamed exception is reported via headers', async () => {
     const calls: InsertCall[] = []
     const executor = createExecutorWithClient(
