@@ -137,6 +137,7 @@ describe('applyAsyncStatement', () => {
     expect(submitCalls[0]?.queryId).toBe(queryId)
     expect(commandCalls).toEqual([]) // no before-retry on first attempt
     expect(statusCalls).toHaveLength(3)
+    expect(statusCalls.every((call) => call.afterTime === undefined)).toBe(true)
     // Two writes: started + completed.
     expect(writes).toHaveLength(2)
     expect(writes[0]?.operations[0]?.status).toBe('started')
@@ -256,6 +257,8 @@ describe('applyAsyncStatement', () => {
     expect(submitCalls).toHaveLength(1)
     expect(submitCalls[0]?.queryId).toBe(queryId)
     expect(statusCalls).toHaveLength(3)
+    expect(statusCalls[1]?.afterTime).toBe('2023-11-14T22:12:20.000')
+    expect(statusCalls[2]?.afterTime).toBe('2023-11-14T22:12:20.000')
     expect(lines.some((line) => line.includes('running before-retry SQL'))).toBe(true)
     expect(lines.some((line) => line.includes('Memory limit exceeded'))).toBe(true)
     // started (overwrite prior failed) + completed

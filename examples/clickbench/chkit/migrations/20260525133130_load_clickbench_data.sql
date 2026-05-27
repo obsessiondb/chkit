@@ -3,19 +3,21 @@
 -- generated-at: 2026-05-25T13:31:29.295Z
 -- cli-version: 0.1.0-beta.24
 -- definition-count: 1
--- operation-count: 1
+-- operation-count: 2
 -- rename-suggestion-count: 0
--- risk-summary: safe=0, caution=1, danger=0
+-- risk-summary: safe=0, caution=2, danger=0
+
+-- operation: truncate_table key=table:default.hits risk=caution
+TRUNCATE TABLE default.hits SETTINGS max_table_size_to_drop = 0, max_partition_size_to_drop = 0;
 
 -- Load the full ClickBench dataset (100 Parquet files, ~100M rows) in a single
 -- INSERT. We use the s3() table function against the ObsessionDB-hosted mirror
 -- of the dataset (Hetzner Object Storage, FSN1 region) because s3() does
 -- native partitioned-Parquet parallelism that url() does not.
 --
--- The `before-retry:` line below TRUNCATEs the target before any *retry* (not
--- the first attempt). If the prior INSERT died after partially loading rows,
--- chkit's retry path runs this compensation before resubmitting, so the table
--- ends up with exactly the dataset, not partial-prior + new rows.
+-- The executable TRUNCATE above clears the target before the first attempt.
+-- The `before-retry:` line below repeats that compensation before any retry
+-- where a prior async INSERT may have partially loaded rows.
 --
 -- Tuning (measured against an ObsessionDB customer-benchmark instance):
 --   * max_download_threads = 64, max_insert_threads = 16 lands at ~178s for

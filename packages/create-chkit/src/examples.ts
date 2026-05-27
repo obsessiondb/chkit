@@ -7,7 +7,7 @@ export type ExampleEntry = {
   description: string
 }
 
-export type ExamplesManifest = {
+type ExamplesManifest = {
   default: string
   examples: ExampleEntry[]
 }

@@ -114,7 +114,8 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     log(`  ${operationType}: submitting async (query_id=${queryId})`)
   }
 
-  const submitAfterTime = isoWithoutZone(new Date(now() - 1000))
+  const submitAfterTime =
+    priorOpState === undefined ? undefined : isoWithoutZone(new Date(now() - 60_000))
   const startedAt = isoWithoutZone(new Date(now()))
 
   // Persist the "started" intent BEFORE submitting, so a crash between here
@@ -172,7 +173,7 @@ interface PollUntilTerminalInput {
   operationType: string
   operationKey: string
   queryId: string
-  pollAfterTime: string
+  pollAfterTime: string | undefined
   log: (line: string) => void
   pollIntervalMs: number
   sleep: (ms: number) => Promise<void>
@@ -215,7 +216,10 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   try {
     for (;;) {
       await sleep(pollIntervalMs)
-      const status = await db.queryStatus(queryId, { afterTime: pollAfterTime })
+      const status = await db.queryStatus(
+        queryId,
+        pollAfterTime === undefined ? undefined : { afterTime: pollAfterTime },
+      )
       const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
       if (status.status === 'finished') {
