@@ -12,6 +12,7 @@ import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
 } from '../../runtime/safety-markers.js'
+import { applyAsyncStatement } from './async-apply.js'
 
 type JournalStore = ReturnType<typeof createJournalStore>
 
@@ -43,10 +44,28 @@ export async function applyMigration(input: {
     statements: parsedStatements,
   })
 
+  const migrationChecksum = checksumSQL(sql)
+
   for (let i = 0; i < statements.length; i++) {
     const statement = statements[i] as string
-    await db.command(statement)
     const operation = operationSummaries[i]
+    if (operation?.mode === 'async') {
+      await applyAsyncStatement({
+        db,
+        journalStore,
+        sql: statement,
+        migrationName: file,
+        migrationChecksum,
+        statementIndex: i,
+        operationType: operation.type,
+        operationKey: operation.key,
+        beforeRetry: operation.beforeRetry,
+        log: (line) => console.log(line),
+      })
+      // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
+      continue
+    }
+    await db.command(statement)
     if (operation) {
       await waitForDDLPropagation(db, operation.type, operation.key)
     }
@@ -55,7 +74,7 @@ export async function applyMigration(input: {
   const entry: MigrationJournalEntry = {
     name: file,
     appliedAt: new Date().toISOString().replace('Z', ''),
-    checksum: checksumSQL(sql),
+    checksum: migrationChecksum,
   }
   await journalStore.appendEntry(entry)
 
