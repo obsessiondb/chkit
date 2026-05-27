@@ -353,6 +353,64 @@ export function isUnknownDatabaseError(error: unknown): boolean {
 	return String(error.code) === '81'
 }
 
+/**
+ * Thrown when a ClickHouse query failed mid-flight after the server already
+ * committed an HTTP 200 response by emitting progress headers. In that
+ * scenario the error is reported via the `x-clickhouse-exception-code`
+ * response header rather than as an HTTP error — @clickhouse/client does not
+ * surface it as a thrown error, so we must detect it ourselves and throw.
+ */
+export class ClickHouseStreamedException extends Error {
+	readonly code: string
+	readonly exceptionTag: string | undefined
+	readonly query_id: string | undefined
+	constructor(input: {
+		code: string
+		exceptionTag: string | undefined
+		query_id: string | undefined
+		sql: string | undefined
+	}) {
+		const idPart = input.query_id ? ` (query_id ${input.query_id})` : ''
+		const tagPart = input.exceptionTag ? `, exception_tag ${input.exceptionTag}` : ''
+		const sqlPreview = input.sql
+			? `\n  SQL: ${input.sql.length > 200 ? `${input.sql.slice(0, 200)}…` : input.sql}`
+			: ''
+		super(
+			`ClickHouse query failed with exception code ${input.code}${tagPart}${idPart}.${sqlPreview}`,
+		)
+		this.name = 'ClickHouseStreamedException'
+		this.code = input.code
+		this.exceptionTag = input.exceptionTag
+		this.query_id = input.query_id
+	}
+}
+
+/**
+ * Throws if the response carries a non-zero `x-clickhouse-exception-code`
+ * header. This happens when ClickHouse sends progress headers (committing
+ * HTTP 200) and then the query errors out — the error is reported in
+ * headers, not by HTTP status, and @clickhouse/client does not raise it.
+ */
+export function assertStreamedQuerySucceeded(input: {
+	response_headers: Record<string, string | string[] | undefined> | undefined
+	query_id: string
+	sql: string | undefined
+}): void {
+	const headers = input.response_headers
+	if (!headers) return
+	const rawCode = headers['x-clickhouse-exception-code']
+	const code = Array.isArray(rawCode) ? rawCode[0] : rawCode
+	if (!code || code === '0') return
+	const rawTag = headers['x-clickhouse-exception-tag']
+	const tag = Array.isArray(rawTag) ? rawTag[0] : rawTag
+	throw new ClickHouseStreamedException({
+		code,
+		exceptionTag: tag,
+		query_id: input.query_id,
+		sql: input.sql,
+	})
+}
+
 export {
 	waitForColumn,
 	waitForDDLPropagation,
@@ -484,6 +542,11 @@ export function createExecutorWithClient(
 					query: sql,
 					http_headers: { 'X-DDL': '1' },
 				})
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql,
+				})
 				logProfiling(profiler, sql, result.query_id, result.summary)
 			} catch (error) {
 				if (isUnknownDatabaseError(error)) {
@@ -496,9 +559,14 @@ export function createExecutorWithClient(
 						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
 					})
 					try {
-						await fallback.command({
+						const fallbackResult = await fallback.command({
 							query: sql,
 							http_headers: { 'X-DDL': '1' },
+						})
+						assertStreamedQuerySucceeded({
+							response_headers: fallbackResult.response_headers,
+							query_id: fallbackResult.query_id,
+							sql,
 						})
 					} finally {
 						await fallback.close()
@@ -517,6 +585,11 @@ export function createExecutorWithClient(
 					...(settings ? { clickhouse_settings: settings } : {}),
 				})
 				const rows = await result.json<T>()
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql,
+				})
 				logProfiling(
 					profiler,
 					sql,
@@ -539,7 +612,12 @@ export function createExecutorWithClient(
 					http_headers: { 'X-DDL': '1' },
 					...(settings ? { clickhouse_settings: settings } : {}),
 				})
-        const payload = (await result.json<T>()) as ClickHouseJsonQueryResult<T>
+				const payload = (await result.json<T>()) as ClickHouseJsonQueryResult<T>
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql,
+				})
 				logProfiling(
 					profiler,
 					sql,
@@ -575,6 +653,11 @@ export function createExecutorWithClient(
 					table: params.table,
 					values: params.values,
 					format: 'JSONEachRow',
+				})
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql: `INSERT INTO ${params.table}`,
 				})
 				logProfiling(
 					profiler,

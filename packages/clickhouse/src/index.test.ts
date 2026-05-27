@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  assertStreamedQuerySucceeded,
+  ClickHouseStreamedException,
   createClickHouseExecutor,
   createExecutorWithClient,
   createSessionClickHouseClient,
@@ -23,15 +25,28 @@ type InsertCall = {
   values: Array<Record<string, unknown>>
 }
 
-function createMockClient(name: string, calls: InsertCall[]) {
+type MockClientOptions = {
+  commandHeaders?: Record<string, string>
+  queryHeaders?: Record<string, string>
+  insertHeaders?: Record<string, string>
+}
+
+function createMockClient(
+  name: string,
+  calls: InsertCall[],
+  opts: MockClientOptions = {},
+) {
   return {
     async command() {
-      return { query_id: `${name}-command` }
+      return {
+        query_id: `${name}-command`,
+        response_headers: opts.commandHeaders ?? {},
+      }
     },
     async query() {
       return {
         query_id: `${name}-query`,
-        response_headers: {},
+        response_headers: opts.queryHeaders ?? {},
         async json() {
           return []
         },
@@ -39,7 +54,10 @@ function createMockClient(name: string, calls: InsertCall[]) {
     },
     async insert(params: { table: string; values: Array<Record<string, unknown>> }) {
       calls.push({ client: name, table: params.table, values: params.values })
-      return { query_id: `${name}-insert` }
+      return {
+        query_id: `${name}-insert`,
+        response_headers: opts.insertHeaders ?? {},
+      }
     },
     async close() {},
   } as unknown as ReturnType<typeof createStatelessClickHouseClient>
@@ -185,6 +203,156 @@ SETTINGS index_granularity = 8192;`
       'CREATE TABLE app.events (id UInt64) ENGINE = MergeTree() ORDER BY id SETTINGS index_granularity = 8192;'
 
     expect(parseEngineFromCreateTableQuery(query)).toBe('MergeTree()')
+  })
+
+  test('assertStreamedQuerySucceeded throws on non-zero exception code header', () => {
+    const call = () =>
+      assertStreamedQuerySucceeded({
+        response_headers: {
+          'x-clickhouse-exception-code': '241',
+          'x-clickhouse-exception-tag': 'tagvalue',
+        },
+        query_id: 'qid-1',
+        sql: 'INSERT INTO t SELECT 1',
+      })
+
+    expect(call).toThrow(ClickHouseStreamedException)
+    expect(call).toThrow(/241/)
+    expect(call).toThrow(/qid-1/)
+    expect(call).toThrow(/tagvalue/)
+  })
+
+  test('assertStreamedQuerySucceeded carries structured fields', () => {
+    let caught: unknown
+    try {
+      assertStreamedQuerySucceeded({
+        response_headers: {
+          'x-clickhouse-exception-code': '241',
+          'x-clickhouse-exception-tag': 'tagvalue',
+        },
+        query_id: 'qid-1',
+        sql: 'INSERT INTO t SELECT 1',
+      })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(ClickHouseStreamedException)
+    const err = caught as ClickHouseStreamedException
+    expect(err.code).toBe('241')
+    expect(err.exceptionTag).toBe('tagvalue')
+    expect(err.query_id).toBe('qid-1')
+  })
+
+  test("assertStreamedQuerySucceeded does not throw when code is '0'", () => {
+    assertStreamedQuerySucceeded({
+      response_headers: { 'x-clickhouse-exception-code': '0' },
+      query_id: 'qid',
+      sql: undefined,
+    })
+  })
+
+  test('assertStreamedQuerySucceeded does not throw on missing header', () => {
+    assertStreamedQuerySucceeded({
+      response_headers: { 'content-type': 'text/plain' },
+      query_id: 'qid',
+      sql: undefined,
+    })
+  })
+
+  test('assertStreamedQuerySucceeded does not throw on undefined response_headers', () => {
+    assertStreamedQuerySucceeded({
+      response_headers: undefined,
+      query_id: 'qid',
+      sql: undefined,
+    })
+  })
+
+  test('executor.command throws when streamed exception is reported via headers', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      createMockClient('plain', calls, {
+        commandHeaders: {
+          'x-clickhouse-exception-code': '241',
+          'x-clickhouse-exception-tag': 'memlim',
+        },
+      }),
+    )
+
+    await expect(executor.command('INSERT INTO hits SELECT 1')).rejects.toBeInstanceOf(
+      ClickHouseStreamedException,
+    )
+    await expect(executor.command('INSERT INTO hits SELECT 1')).rejects.toThrow(/241/)
+    await executor.close()
+  })
+
+  test('executor.query throws when streamed exception is reported via headers', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      createMockClient('plain', calls, {
+        queryHeaders: {
+          'x-clickhouse-exception-code': '159',
+        },
+      }),
+    )
+
+    await expect(executor.query('SELECT 1')).rejects.toBeInstanceOf(
+      ClickHouseStreamedException,
+    )
+    await executor.close()
+  })
+
+  test('executor.insert throws when streamed exception is reported via headers', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      createMockClient('plain', calls, {
+        insertHeaders: {
+          'x-clickhouse-exception-code': '60',
+        },
+      }),
+    )
+
+    await expect(
+      executor.insert({ table: 'hits', values: [{ id: 1 }] }),
+    ).rejects.toBeInstanceOf(ClickHouseStreamedException)
+    await executor.close()
+  })
+
+  test('executor.command succeeds when response_headers carry no exception code', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        username: 'default',
+        password: '',
+        database: 'default',
+        secure: false,
+      },
+      createMockClient('plain', calls),
+    )
+
+    await executor.command('CREATE TABLE noop (x UInt64) ENGINE = Memory')
+    await executor.close()
   })
 
   test('parses projection definitions from create table query', () => {
