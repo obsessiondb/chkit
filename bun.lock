@@ -19,7 +19,7 @@
     },
     "apps/docs": {
       "name": "@chkit/docs",
-      "version": "0.0.2-beta.13",
+      "version": "0.0.2-beta.15",
       "dependencies": {
         "@astrojs/starlight": "^0.37.6",
         "astro": "^5.6.1",
@@ -29,9 +29,17 @@
         "wrangler": "^4.65.0",
       },
     },
+    "examples/clickbench": {
+      "name": "chkit-example-clickbench",
+      "devDependencies": {
+        "@chkit/core": "0.1.0-beta.26",
+        "@chkit/plugin-obsessiondb": "0.1.0-beta.26",
+        "chkit": "0.1.0-beta.26",
+      },
+    },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -48,7 +56,7 @@
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
@@ -58,14 +66,14 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
-        "@chkit/core": "workspace:*",
+        "@chkit/core": "0.1.0-beta.26",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
         "fast-glob": "^3.3.2",
       },
@@ -75,7 +83,7 @@
     },
     "packages/create-chkit": {
       "name": "create-chkit",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.25",
       "bin": {
         "create-chkit": "./dist/bin/create-chkit.js",
       },
@@ -91,7 +99,7 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -102,7 +110,7 @@
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "zod": "^4.3.6",
@@ -110,7 +118,7 @@
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -121,7 +129,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.0-beta.24",
+      "version": "0.1.0-beta.26",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -597,6 +605,8 @@
     "chardet": ["chardet@2.1.1", "", {}, "sha512-PsezH1rqdV9VvyNhxxOW32/d75r01NY7TQCmOqomRo15ZSOKbpTFVsfjghxo6JloQUCGnH4k1LGu0R4yCLlWQQ=="],
 
     "chkit": ["chkit@workspace:packages/cli"],
+
+    "chkit-example-clickbench": ["chkit-example-clickbench@workspace:examples/clickbench"],
 
     "chokidar": ["chokidar@5.0.0", "", { "dependencies": { "readdirp": "^5.0.0" } }, "sha512-TQMmc3w+5AxjpL8iIiwebF73dRDF4fBIieAqGn9RGCWaEVwQ6Fb2cGe31Yns0RRIzii5goJ1Y7xbMwo1TxMplw=="],
 

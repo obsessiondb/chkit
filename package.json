@@ -13,7 +13,8 @@
   "packageManager": "bun@1.3.5",
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "examples/clickbench"
   ],
   "scripts": {
     "build": "turbo run build",

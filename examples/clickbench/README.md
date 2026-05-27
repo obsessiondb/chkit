@@ -1,6 +1,6 @@
 # ClickBench CHKit example
 
-This example creates the ClickBench `hits` schema and loads the full public ClickBench dataset from `datasets.clickhouse.com`.
+This example creates the ClickBench `hits` schema and loads the full public ClickBench dataset from the ObsessionDB-hosted mirror at `fsn1.your-objectstorage.com/obsessiondb-datasets/clickbench/`.
 
 The data load migration truncates `default.hits` before inserting so an interrupted load can be retried by clearing the migration journal entry or using a fresh database. Run it against a disposable ClickHouse database.
 
@@ -25,6 +25,6 @@ bun run migrate -- --service <service-name-or-alias>
 ## Migrations
 
 - `20260525133129_create_clickbench_schema.sql` creates the ClickBench `hits` table.
-- `20260525133130_load_clickbench_data.sql` truncates `hits` and loads the full partitioned Parquet dataset from `https://datasets.clickhouse.com/hits_compatible/athena_partitioned/` via ClickHouse's `url()` table function.
+- `20260525133130_load_clickbench_data.sql` truncates `hits` and loads the full partitioned Parquet dataset from `https://fsn1.your-objectstorage.com/obsessiondb-datasets/clickbench/` via ClickHouse's `s3()` table function.
 
 The benchmark query set is intentionally not included yet; this example focuses on schema creation and dataset loading.
