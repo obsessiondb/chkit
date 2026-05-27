@@ -145,6 +145,41 @@ describe('applyAsyncStatement', () => {
     expect(lines.some((line) => line.includes('submitting async'))).toBe(true)
   })
 
+  test('refuses to resume in-progress async state when the migration checksum changed', async () => {
+    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([])
+    const { store, writes } = createFakeJournalStore(
+      freshStateWith({
+        operationIndex: 0,
+        operationKey: BASE_INPUT.operationKey,
+        operationType: BASE_INPUT.operationType,
+        queryId,
+        status: 'started',
+        startedAt: '2026-05-26 12:00:00.000',
+        finishedAt: null,
+        lastError: '',
+      }),
+    )
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        migrationChecksum: 'changed-checksum',
+        beforeRetry: 'TRUNCATE TABLE t',
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(/in-progress async journal state/)
+
+    expect(statusCalls).toEqual([])
+    expect(submitCalls).toEqual([])
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+  })
+
   test('completed-skip: prior operation marked completed → no submit, no command', async () => {
     const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
     const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([])

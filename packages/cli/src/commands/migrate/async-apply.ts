@@ -55,6 +55,15 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   )
 
   const initialMigrationState = await journalStore.readMigrationState(migrationName)
+  if (
+    initialMigrationState !== null &&
+    !initialMigrationState.migrationCompleted &&
+    initialMigrationState.checksum !== migrationChecksum
+  ) {
+    throw new Error(
+      `Migration ${migrationName} has in-progress async journal state for checksum ${initialMigrationState.checksum}, but the current file checksum is ${migrationChecksum}. Restore the original migration file or clear the in-progress journal state before retrying.`,
+    )
+  }
   const priorOpState = initialMigrationState?.operations.find(
     (op) => op.operationIndex === statementIndex,
   )
