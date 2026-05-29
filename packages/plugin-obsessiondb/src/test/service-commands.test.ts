@@ -52,6 +52,7 @@ describe('service alias command', () => {
 									services: [
 										{
 											id: 'svc-prod',
+											slug: 'production',
 											name: 'production',
 											status: 'running',
 											tier: 1,
@@ -84,7 +85,7 @@ describe('service alias command', () => {
 		expect(printed).toContain('Service alias saved: prod -> production')
 		expect(await loadServiceAliases(configPath)).toEqual({
 			prod: {
-				service_id: 'svc-prod',
+				service_slug: 'production',
 				service_name: 'production',
 			},
 		})

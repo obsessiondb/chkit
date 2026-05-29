@@ -60,21 +60,22 @@ async function dispatchCommand(
   flags: Record<string, string | string[] | boolean | undefined>,
 ): Promise<unknown> {
   const jobId = typeof flags['--job-id'] === 'string' ? flags['--job-id'] : undefined
-  const serviceId = typeof flags['--service-id'] === 'string' ? flags['--service-id'] : undefined
+  const serviceSlug =
+    typeof flags['--service-slug'] === 'string' ? flags['--service-slug'] : undefined
 
   switch (command) {
     case 'status': {
       if (jobId) return client.get({ jobId })
-      if (serviceId) return client.list({ serviceId })
-      throw new Error('Either --job-id or --service-id is required for remote status')
+      if (serviceSlug) return client.list({ serviceSlug })
+      throw new Error('Either --job-id or --service-slug is required for remote status')
     }
     case 'cancel': {
       if (!jobId) throw new Error('--job-id is required for remote cancel')
       return client.cancel({ jobId })
     }
     case 'list': {
-      if (!serviceId) throw new Error('--service-id is required for remote list')
-      return client.list({ serviceId })
+      if (!serviceSlug) throw new Error('--service-slug is required for remote list')
+      return client.list({ serviceSlug })
     }
     default:
       throw new Error(`Unsupported remote command: ${command}`)

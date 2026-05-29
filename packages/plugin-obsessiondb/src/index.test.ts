@@ -492,7 +492,7 @@ describe('obsessiondb getContext', () => {
 		await setupAuth()
 		const configPath = join(tempDir, 'project', 'clickhouse.config.ts')
 		await saveServiceAlias(configPath, 'prod', {
-			service_id: 'svc-prod',
+			service_slug: 'svc-prod',
 			service_name: 'production',
 		})
 

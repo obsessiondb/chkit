@@ -17,8 +17,20 @@ const serviceStatusSchema = z.enum([
   'error',
 ])
 
+const RESERVED_SLUGS = ['new', 'settings', 'select', 'members', 'profile'] as const
+
+export const serviceSlugSchema = z
+  .string()
+  .min(2)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/)
+  .refine((s) => !RESERVED_SLUGS.includes(s as (typeof RESERVED_SLUGS)[number]), {
+    message: 'Reserved slug',
+  })
+
 export const serviceSchema = z.object({
   id: z.string(),
+  slug: serviceSlugSchema,
   name: z.string(),
   status: serviceStatusSchema,
   tier: z.number().int(),
@@ -51,6 +63,6 @@ export const servicesContract = {
   ),
 
   get: oc
-    .input(z.object({ serviceId: z.string() }))
+    .input(z.object({ serviceSlug: serviceSlugSchema }))
     .output(serviceSchema),
 }

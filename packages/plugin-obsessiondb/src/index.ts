@@ -140,7 +140,7 @@ async function resolveServiceOverride(input: {
 	const services = await listServices(input.credentials)
 	const service = services.find((candidate) => candidate.name === input.name)
 	if (service) {
-		return { service_id: service.id, service_name: service.name }
+		return { service_slug: service.slug, service_name: service.name }
 	}
 
 	const aliases = await loadServiceAliases(input.configPath)
@@ -276,7 +276,7 @@ function createObsessionDBPlugin(
 				return {
 					executor: createRemoteExecutor({
 						credentials: effectiveCreds,
-						serviceId: service.service_id,
+						serviceSlug: service.service_slug,
 					}),
 				}
 			},
