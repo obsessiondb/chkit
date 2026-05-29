@@ -19,7 +19,7 @@ const serviceStatusSchema = z.enum([
 
 const RESERVED_SLUGS = ['new', 'settings', 'select', 'members', 'profile'] as const
 
-export const serviceSlugSchema = z
+const serviceSlugSchema = z
   .string()
   .min(2)
   .max(64)
