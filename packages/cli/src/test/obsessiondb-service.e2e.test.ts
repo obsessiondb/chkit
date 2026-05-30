@@ -41,10 +41,12 @@ async function runCliAsync(
 function service(overrides: {
 	id: string
 	name: string
+	slug?: string
 	status?: 'running' | 'stopped'
 }) {
 	return {
 		id: overrides.id,
+		slug: overrides.slug ?? overrides.name,
 		name: overrides.name,
 		status: overrides.status ?? 'running',
 		tier: 1,
@@ -186,10 +188,10 @@ describe('@chkit/cli obsessiondb service e2e', () => {
 		expect(aliasList.stdout).toContain('  login -> production')
 
 		const stored = JSON.parse(await readFile(servicePath, 'utf8')) as {
-			aliases?: Record<string, { service_id?: string; service_name?: string }>
+			aliases?: Record<string, { service_slug?: string; service_name?: string }>
 		}
 		expect(stored.aliases?.login).toEqual({
-			service_id: 'svc-prod',
+			service_slug: 'production',
 			service_name: 'production',
 		})
 		expect(requests.map((request) => request.path)).toEqual([

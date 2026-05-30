@@ -36,7 +36,7 @@ export function renderServiceOrganizations(
 		lines.push(`${organizationLabel(org)}:`)
 		for (const service of org.services) {
 			const suffix =
-				selected?.service_id === service.id ||
+				selected?.service_slug === service.slug ||
 				selected?.service_name === service.name
 					? ' [default]'
 					: ''

@@ -167,7 +167,7 @@ describe('handleBackfillCommand', () => {
 
     globalThis.fetch = mock(async () => orpcResponse(listResponse)) as typeof fetch
 
-    const { context, printed } = makeContext({ command: 'list', flags: { '--service-id': 'svc-1' } })
+    const { context, printed } = makeContext({ command: 'list', flags: { '--service-slug': 'svc-1' } })
     const result = await handleBackfillCommand(context)
 
     expect(result).toEqual({ handled: true, exitCode: 0 })

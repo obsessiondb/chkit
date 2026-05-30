@@ -49,15 +49,15 @@ export function normalizeQueryJsonResult<T extends Record<string, unknown>>(
 
 export function createRemoteExecutor(deps: {
 	credentials: Credentials
-	serviceId: string
+	serviceSlug: string
 }): ClickHouseExecutor {
-	const { credentials, serviceId } = deps
+	const { credentials, serviceSlug } = deps
 	const client = createApiClient(credentials)
 
 	const executor: ClickHouseExecutor = {
 		async command(sql) {
 			const res = await client.workbench.query.execute({
-				serviceId,
+				serviceSlug,
 				query: sql,
 			})
 			throwIfError(res)
@@ -65,7 +65,7 @@ export function createRemoteExecutor(deps: {
 
 		async query<T>(sql: string): Promise<T[]> {
 			const res = await client.workbench.query.execute({
-				serviceId,
+				serviceSlug,
 				query: sql,
 			})
 			throwIfError(res)
@@ -76,7 +76,7 @@ export function createRemoteExecutor(deps: {
 			sql: string,
 		): Promise<ClickHouseJsonQueryResult<T>> {
 			const res = await client.workbench.query.execute({
-				serviceId,
+				serviceSlug,
 				query: sql,
 			})
 			throwIfError(res)
@@ -112,7 +112,7 @@ export function createRemoteExecutor(deps: {
 
 		async submit(sql, queryId?) {
 			const res = await client.workbench.query.execute({
-				serviceId,
+				serviceSlug,
 				query: sql,
 				settings: queryId ? { query_id: queryId } : undefined,
 			})

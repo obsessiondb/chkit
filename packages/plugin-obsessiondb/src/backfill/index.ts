@@ -21,9 +21,9 @@ export const BACKFILL_EXTEND_COMMANDS = [
         description: 'Remote job ID for status/cancel',
       },
       {
-        name: '--service-id',
+        name: '--service-slug',
         type: 'string' as const,
-        description: 'ObsessionDB service ID for listing jobs',
+        description: 'ObsessionDB service slug for listing jobs',
       },
     ],
   },

@@ -14,10 +14,12 @@ let originalXdg: string | undefined
 function service(overrides: {
 	id: string
 	name: string
+	slug?: string
 	status?: 'running' | 'stopped'
 }) {
 	return {
 		id: overrides.id,
+		slug: overrides.slug ?? overrides.name,
 		name: overrides.name,
 		status: overrides.status ?? 'running',
 		tier: 1,
@@ -70,7 +72,7 @@ describe('service command', () => {
 	test('lists services grouped by organization and marks the default', async () => {
 		const configPath = await setupAuth()
 		await saveSelectedService(configPath, {
-			service_id: 'svc-prod',
+			service_slug: 'prod',
 			service_name: 'prod',
 		})
 		mockOrganizations([
@@ -135,7 +137,7 @@ describe('service command', () => {
 			'Service selected: Acme (acme) / prod',
 		])
 		expect(await loadSelectedService(configPath)).toEqual({
-			service_id: 'svc-prod',
+			service_slug: 'prod',
 			service_name: 'prod',
 		})
 	})
