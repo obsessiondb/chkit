@@ -41,7 +41,7 @@ async function promptServiceSelection(
 		const selected = await selectServiceInteractive(organizations, print)
 		if (selected) {
 			await saveSelectedService(configPath, {
-				service_id: selected.service.id,
+				service_slug: selected.service.slug,
 				service_name: selected.service.name,
 			})
 			print(`Service selected: ${serviceChoiceLabel(selected)}`)

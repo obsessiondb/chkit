@@ -52,7 +52,7 @@ async function runServiceSelect(
 	if (!selected) return 1
 
 	await saveSelectedService(context.configPath, {
-		service_id: selected.service.id,
+		service_slug: selected.service.slug,
 		service_name: selected.service.name,
 	})
 
@@ -226,7 +226,7 @@ async function runServiceAlias(context: PluginCommandContext): Promise<number> {
 		}
 
 		await saveServiceAlias(context.configPath, alias, {
-			service_id: service.id,
+			service_slug: service.slug,
 			service_name: service.name,
 		})
 		print(`Service alias saved: ${alias} -> ${service.name}`)

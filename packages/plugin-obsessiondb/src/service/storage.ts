@@ -8,7 +8,7 @@ import { isSynthesizedConfigPath } from '@chkit/core'
 import type { SelectedService, ServiceAliases } from './types.js'
 
 interface ServiceConfig {
-	service_id?: string
+	service_slug?: string
 	service_name?: string
 	aliases?: ServiceAliases
 }
@@ -44,13 +44,13 @@ function readSelectedService(parsed: unknown): SelectedService | null {
 	if (
 		typeof parsed === 'object' &&
 		parsed !== null &&
-		'service_id' in parsed &&
+		'service_slug' in parsed &&
 		'service_name' in parsed &&
-		typeof (parsed as SelectedService).service_id === 'string' &&
+		typeof (parsed as SelectedService).service_slug === 'string' &&
 		typeof (parsed as SelectedService).service_name === 'string'
 	) {
 		return {
-			service_id: (parsed as SelectedService).service_id,
+			service_slug: (parsed as SelectedService).service_slug,
 			service_name: (parsed as SelectedService).service_name,
 		}
 	}
@@ -107,13 +107,13 @@ export async function loadSelectedService(
 ): Promise<SelectedService | null> {
 	const config = await loadServiceConfig(configPath)
 	if (
-		typeof config.service_id !== 'string' ||
+		typeof config.service_slug !== 'string' ||
 		typeof config.service_name !== 'string'
 	) {
 		return null
 	}
 	return {
-		service_id: config.service_id,
+		service_slug: config.service_slug,
 		service_name: config.service_name,
 	}
 }
@@ -125,7 +125,7 @@ export async function saveSelectedService(
 	const existing = await loadServiceConfig(configPath)
 	await saveServiceConfig(configPath, {
 		...existing,
-		service_id: service.service_id,
+		service_slug: service.service_slug,
 		service_name: service.service_name,
 	})
 }

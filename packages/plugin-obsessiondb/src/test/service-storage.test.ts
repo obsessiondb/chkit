@@ -85,27 +85,27 @@ describe('service aliases', () => {
 		const configPath = join(sandbox.project, 'clickhouse.config.ts')
 		try {
 			await saveSelectedService(configPath, {
-				service_id: 'svc-prod',
+				service_slug: 'svc-prod',
 				service_name: 'production',
 			})
 			await saveServiceAlias(configPath, 'prod', {
-				service_id: 'svc-prod',
+				service_slug: 'svc-prod',
 				service_name: 'production',
 			})
 
 			const aliases = await loadServiceAliases(configPath)
 			expect(aliases.prod).toEqual({
-				service_id: 'svc-prod',
+				service_slug: 'svc-prod',
 				service_name: 'production',
 			})
 
 			const raw = JSON.parse(
 				await readFile(getServicePath(configPath), 'utf8'),
 			) as {
-				service_id: string
+				service_slug: string
 				aliases: Record<string, unknown>
 			}
-			expect(raw.service_id).toBe('svc-prod')
+			expect(raw.service_slug).toBe('svc-prod')
 			expect(raw.aliases.prod).toBeDefined()
 		} finally {
 			sandbox.cleanup()
@@ -117,17 +117,17 @@ describe('service aliases', () => {
 		const configPath = join(sandbox.project, 'clickhouse.config.ts')
 		try {
 			await saveServiceAlias(configPath, 'prod', {
-				service_id: 'svc-prod',
+				service_slug: 'svc-prod',
 				service_name: 'production',
 			})
 			await saveSelectedService(configPath, {
-				service_id: 'svc-staging',
+				service_slug: 'svc-staging',
 				service_name: 'staging',
 			})
 
 			const aliases = await loadServiceAliases(configPath)
 			expect(aliases.prod).toEqual({
-				service_id: 'svc-prod',
+				service_slug: 'svc-prod',
 				service_name: 'production',
 			})
 		} finally {

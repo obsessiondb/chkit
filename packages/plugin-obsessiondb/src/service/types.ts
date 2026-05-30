@@ -11,7 +11,7 @@ export interface ServiceOrganization {
 }
 
 export interface SelectedService {
-	service_id: string
+	service_slug: string
 	service_name: string
 }
 

@@ -5,9 +5,14 @@
 import { oc } from '@orpc/contract'
 import { z } from 'zod'
 
+const queryColumnMetaSchema = z.object({
+	name: z.string(),
+	type: z.string(),
+})
+
 const queryResultSchema = z.object({
-	data: z.array(z.record(z.unknown())),
-	meta: z.array(z.object({ name: z.string(), type: z.string() })),
+	data: z.array(z.array(z.string().nullable())),
+	meta: z.array(queryColumnMetaSchema),
 	rows: z.number().int(),
 	statistics: z
 		.object({
@@ -26,9 +31,11 @@ export const workbenchContract = {
 		execute: oc
 			.input(
 				z.object({
-					serviceId: z.string(),
+					serviceSlug: z.string(),
 					query: z.string().min(1),
-					settings: z.record(z.union([z.string(), z.number()])).optional(),
+					settings: z
+						.record(z.string(), z.union([z.string(), z.number()]))
+						.optional(),
 					database: z.string().optional(),
 				}),
 			)
