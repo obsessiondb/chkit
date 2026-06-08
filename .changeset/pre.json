@@ -41,6 +41,7 @@
     "detect-streamed-clickhouse-exceptions",
     "fix-docs-deploy",
     "fix-ingest-assignability",
+    "fix-internal-dep-resolution",
     "fix-migration-ordering",
     "fix-mv-backfill-select-column-order",
     "fix-set-index-type-args",
