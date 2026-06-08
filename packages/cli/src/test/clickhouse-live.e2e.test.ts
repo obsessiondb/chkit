@@ -680,9 +680,10 @@ export default schema(target, rmv)
     240_000
   )
 
-  // TODO: Stabilize this test — it's flaky in CI because `check` reports drift for
-  // extra objects in the shared database that belong to other test runs.
-  test.skipIf(new Date() < new Date('2026-06-01'))(
+  // TODO: Stabilize this test in CI by running it against an isolated database.
+  // The shared CI database can contain objects from other test runs, and an
+  // unscoped `check` correctly reports those as schema drift.
+  test.skipIf(process.env.CI === 'true')(
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
       const executor = createLiveExecutor(liveEnv)

@@ -8,9 +8,10 @@
  *   3. Applies pending changesets (version bump) if they exist,
  *      or detects already-bumped versions from a prior run
  *   4. Runs quality gates (typecheck, lint, test, build)
- *   5. Publishes all public workspace packages via `bun publish`
+ *   5. Runs release guards (internal workspace deps + packed tarballs)
+ *   6. Publishes all public workspace packages via `bun publish`
  *      and syncs npm dist-tags with the documented install commands
- *   6. Commits version changes and pushes to origin/main
+ *   7. Commits version changes and pushes to origin/main
  *
  * Usage: bun run ./scripts/manual-release.ts [--dry-run]
  */
@@ -25,6 +26,11 @@ import {
 import { join, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
+import {
+	buildWorkspaceVersions,
+	readWorkspacePackages,
+	resolveWorkspaceDeps,
+} from './workspace-deps'
 
 type ReleaseArgs = {
 	dryRun: boolean
@@ -88,11 +94,15 @@ export async function main(): Promise<void> {
 	// 4. Quality gates (typecheck, lint, test, build)
 	runQualityGates()
 
-	// 5. Publish
+	// 5. Release guards — fail before publishing if any internal dependency
+	// would ship stale (this is the chkit -> plugin-obsessiondb skew class).
+	runReleaseGuards()
+
+	// 6. Publish
 	const otp = await promptForOtp()
 	publishWorkspacePackages(otp)
 
-	// 6. Commit and push
+	// 7. Commit and push
 	commitAndPush()
 
 	logLine('Release complete.')
@@ -306,14 +316,7 @@ function publishWorkspacePackages(otp: string): void {
 	})
 
 	// Build a map of workspace package names to their current versions
-	const workspaceVersions = new Map<string, string>()
-	for (const dir of packageDirs) {
-		const pkgJsonPath = join(packagesDir, dir, 'package.json')
-		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
-		if (pkg.name && pkg.version) {
-			workspaceVersions.set(pkg.name, pkg.version)
-		}
-	}
+	const workspaceVersions = buildWorkspaceVersions(readWorkspacePackages())
 
 	let published = 0
 	let skipped = 0
@@ -394,39 +397,6 @@ function syncDocumentedInstallDistTags(
 	}
 }
 
-/**
- * Replaces `workspace:*` dependency specifiers with the actual version from
- * the workspace. Mutates the package object in place.
- * Returns true if any replacements were made.
- */
-function resolveWorkspaceDeps(
-	pkg: PackageJson,
-	workspaceVersions: Map<string, string>,
-): boolean {
-	let changed = false
-
-	for (const depField of ['dependencies', 'devDependencies'] as const) {
-		const deps = pkg[depField]
-		if (!deps) continue
-
-		for (const [name, specifier] of Object.entries(deps)) {
-			if (!specifier.startsWith('workspace:')) continue
-
-			const version = workspaceVersions.get(name)
-			if (!version) {
-				fail(
-					`Cannot resolve ${depField}["${name}"]: workspace:* used but no matching workspace package found.`,
-				)
-			}
-
-			deps[name] = version
-			changed = true
-		}
-	}
-
-	return changed
-}
-
 function isVersionPublished(name: string, version: string): boolean {
 	const result = spawnSync('npm', ['view', `${name}@${version}`, 'version'], {
 		encoding: 'utf8',
@@ -495,6 +465,22 @@ function ensureNpmAuth(): void {
 function runQualityGates(): void {
 	logLine('Running quality gates (typecheck, lint, test, build)...')
 	runCommand('bun', ['run', 'verify'])
+}
+
+/**
+ * Release guards that fail the publish before any package leaves the machine
+ * if an internal dependency would ship stale:
+ *   - check:workspace-deps validates the SOURCE (no exact pins on siblings)
+ *   - check:packed-deps validates the OUTPUT (packed tarballs resolve every
+ *     internal dependency to its current workspace version)
+ * Runs after the build so the tarballs reflect freshly built artifacts.
+ */
+function runReleaseGuards(): void {
+	logLine(
+		'Running release guards (internal workspace deps + packed tarballs)...',
+	)
+	runCommand('bun', ['run', 'check:workspace-deps'])
+	runCommand('bun', ['run', 'check:packed-deps'])
 }
 
 // ---------------------------------------------------------------------------

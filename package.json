@@ -35,6 +35,8 @@
     "version-packages": "changeset version",
     "release": "bun run ./scripts/manual-release.ts",
     "check:examples": "bun run scripts/check-examples-manifest.ts",
+    "check:workspace-deps": "bun run scripts/check-workspace-deps.ts",
+    "check:packed-deps": "bun run scripts/check-packed-deps.ts",
     "clean": "turbo run clean",
     "chkit": "bun run ./packages/cli/src/bin/chkit.ts",
     "deploy": "turbo run deploy"
