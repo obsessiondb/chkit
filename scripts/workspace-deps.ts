@@ -29,8 +29,6 @@ export const DEPENDENCY_FIELDS = [
 	'peerDependencies',
 ] as const
 
-export type DependencyField = (typeof DEPENDENCY_FIELDS)[number]
-
 export type PackageJson = {
 	name?: string
 	version?: string
