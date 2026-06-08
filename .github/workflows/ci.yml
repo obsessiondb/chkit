@@ -19,6 +19,9 @@ jobs:
       - name: Verify lockfile unchanged
         run: git diff --exit-code bun.lock
 
+      - name: Check internal workspace deps
+        run: bun run check:workspace-deps
+
       - name: Fallow analysis
         if: github.event_name == 'pull_request'
         uses: fallow-rs/fallow@v2
@@ -40,6 +43,9 @@ jobs:
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
           CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
         run: bunx turbo run typecheck lint test build
+
+      - name: Check packed tarball deps
+        run: bun run check:packed-deps
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
