@@ -680,19 +680,25 @@ export default schema(target, rmv)
     240_000
   )
 
-  // TODO: Stabilize this test in CI by running it against an isolated database.
-  // The shared CI database can contain objects from other test runs, and an
-  // unscoped `check` correctly reports those as schema drift.
-  test.skipIf(process.env.CI === 'true')(
+  // This test ends with an unscoped `check`, which evaluates drift across the
+  // whole target database. Run it against a throwaway database that holds only
+  // this test's objects so unrelated tables from concurrent/previous e2e runs
+  // in the shared CI database are not (correctly) reported as drift.
+  test(
     'runs non-danger additive migrate path and ends with successful check',
     async () => {
       const executor = createLiveExecutor(liveEnv)
-      const database = liveEnv.clickhouseDatabase
+      const database = `chkit_e2e_check_${Date.now()}_${Math.floor(Math.random() * 100000)}`
       const journalTable = createJournalTableName('check')
       const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
       const prefix = createPrefix('check')
       const usersTable = `${prefix}users`
       const usersView = `${prefix}users_view`
+
+      // The CLI connects with this database as its default, so it must exist
+      // before any command runs. CREATE DATABASE is visible immediately.
+      await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(database)}`)
+
       const fixture = await createFixture({
         database,
         usersTableName: usersTable,
@@ -772,9 +778,8 @@ export default schema(target, rmv)
         expect(checkPayload.drifted).toBe(false)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
-        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        // Dropping the throwaway database removes the table, view, and journal in one step.
+        await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
         await executor.close()
       }
     },
