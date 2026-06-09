@@ -166,14 +166,17 @@ export function collectDestructiveOperationMarkers(
 // contain destructive SQL with no marker — so we also scan the executable SQL
 // itself. Comments are stripped first, so a commented-out `-- DROP TABLE` is not
 // flagged, while a real statement is.
+// Each rule requires the statement keyword that follows the verb, so a SQL
+// function such as `truncate(x)` (a ClickHouse math function) is NOT mistaken
+// for a `TRUNCATE TABLE` statement.
 const DESTRUCTIVE_SQL_RULES: Array<{ type: string; re: RegExp }> = [
   { type: 'drop_database', re: /\bDROP\s+DATABASE\b/i },
   { type: 'drop_materialized_view', re: /\bDROP\s+MATERIALIZED\s+VIEW\b/i },
   { type: 'drop_view', re: /\bDROP\s+VIEW\b/i },
   { type: 'drop_table', re: /\bDROP\s+(?:TEMPORARY\s+)?TABLE\b/i },
   { type: 'alter_table_drop_column', re: /\bDROP\s+COLUMN\b/i },
-  { type: 'truncate_table', re: /\bTRUNCATE\b/i },
-  { type: 'detach', re: /\bDETACH\b/i },
+  { type: 'truncate_table', re: /\bTRUNCATE\s+(?:TABLE|DATABASE|ALL\s+TABLES)\b/i },
+  { type: 'detach', re: /\bDETACH\s+(?:TABLE|VIEW|DICTIONARY|DATABASE|PARTITION|PART)\b/i },
 ]
 
 function classifyDestructiveStatement(statement: string): string | null {

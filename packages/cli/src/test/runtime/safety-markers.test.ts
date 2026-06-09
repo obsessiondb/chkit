@@ -185,6 +185,12 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(migrationContainsDestructiveSql(sql)).toBe(false)
   })
 
+  test('does NOT flag the truncate() math function (only TRUNCATE TABLE/DATABASE statements)', () => {
+    expect(migrationContainsDestructiveSql('INSERT INTO default.t SELECT truncate(value) AS v FROM default.s;')).toBe(false)
+    expect(migrationContainsDestructiveSql('TRUNCATE TABLE default.events;')).toBe(true)
+    expect(migrationContainsDestructiveSql('TRUNCATE DATABASE analytics;')).toBe(true)
+  })
+
   test('synthesizes a danger marker (key + preview) for unmarked DROP COLUMN', () => {
     const sql = 'ALTER TABLE default.events DROP COLUMN email;'
     const markers = collectUnmarkedDestructiveStatements('20260101_handwritten.sql', sql)
