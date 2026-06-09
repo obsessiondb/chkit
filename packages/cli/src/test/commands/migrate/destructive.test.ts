@@ -49,4 +49,21 @@ describe('scanDestructive (#2)', () => {
     expect(scan.operations).toEqual([])
     rmSync(dir, { recursive: true, force: true })
   })
+
+  // A generated migration carries markers, but a destructive statement APPENDED
+  // by hand (no marker) is still caught — the planner-marked statements are
+  // trusted, the appended one is not.
+  test('flags an unmarked destructive statement appended to a generated migration', async () => {
+    const { dir, names } = withMigrations({
+      '004_appended.sql':
+        '-- operation: create_table key=table:default.events risk=safe\n' +
+        'CREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;\n' +
+        'DROP TABLE default.legacy_events;\n',
+    })
+    const scan = await scanDestructive(dir, names)
+    expect(scan.migrations).toEqual(['004_appended.sql'])
+    expect(scan.operations.map((o) => o.type)).toEqual(['drop_table'])
+    expect(scan.operations[0]?.key).toBe('default.legacy_events')
+    rmSync(dir, { recursive: true, force: true })
+  })
 })

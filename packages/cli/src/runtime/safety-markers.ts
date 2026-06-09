@@ -36,17 +36,6 @@ export function migrationContainsDangerOperation(sql: string): boolean {
   return extractDestructiveOperationSummaries(sql).length > 0
 }
 
-/**
- * Whether a migration carries any planner-emitted `-- operation:` marker. A
- * generated migration always does; a fully hand-written one does not. Used to
- * scope the raw destructive-SQL scan to hand-written migrations only, so the
- * planner's risk classification (e.g. a non-danger `DROP MATERIALIZED VIEW`
- * recreate) is not second-guessed.
- */
-export function migrationHasOperationMarkers(sql: string): boolean {
-  return extractMigrationOperationSummaries(sql).length > 0
-}
-
 function extractDestructiveOperationSummaries(sql: string): string[] {
   return sql
     .split('\n')
@@ -206,10 +195,24 @@ export interface ScannedDestructiveStatement {
   statement: string
 }
 
-/** Scan the executable SQL (comments stripped) for destructive statements. */
+/**
+ * Scan the executable SQL (comments stripped) for destructive statements that
+ * are NOT covered by a planner `-- operation:` marker.
+ *
+ * Generated migrations emit exactly one marker per statement, in order (the same
+ * 1:1 invariant apply.ts relies on), so a marker-covered statement is governed
+ * by the planner's risk classification and is trusted — e.g. a non-danger
+ * `DROP MATERIALIZED VIEW` recreate. Only marker-less positions are flagged: a
+ * fully hand-written migration (no markers) or a destructive statement
+ * hand-appended to a generated one.
+ */
 export function scanDestructiveSqlStatements(sql: string): ScannedDestructiveStatement[] {
+  const statements = extractExecutableStatements(sql)
+  const operations = extractMigrationOperationSummaries(sql)
   const found: ScannedDestructiveStatement[] = []
-  for (const statement of extractExecutableStatements(sql)) {
+  for (let i = 0; i < statements.length; i++) {
+    if (operations[i] !== undefined) continue
+    const statement = statements[i] ?? ''
     const type = classifyDestructiveStatement(statement)
     if (type) found.push({ type, statement: statement.trim() })
   }
