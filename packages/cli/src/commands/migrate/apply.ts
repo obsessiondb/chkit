@@ -146,13 +146,17 @@ export async function applyMigration(input: {
       )
       throw error
     }
-    if (operation) {
-      await waitForDDLPropagation(db, operation.type, operation.key)
-    }
+    // Mark completed as soon as the statement has executed — BEFORE waiting for
+    // DDL propagation. The statement already ran, so if the propagation wait
+    // later times out and throws, a re-run must skip this statement rather than
+    // replay it into an "already exists" error (the brick this fix prevents).
     const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
     await journalStore.writeMigrationState(
       upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
     )
+    if (operation) {
+      await waitForDDLPropagation(db, operation.type, operation.key)
+    }
   }
 
   const entry: MigrationJournalEntry = {

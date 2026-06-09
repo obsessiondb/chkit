@@ -96,4 +96,59 @@ describe('applyMigration sync resume (#6)', () => {
 
     rmSync(dir, { recursive: true, force: true })
   })
+
+  // A statement is marked completed BEFORE the DDL-propagation wait, so a
+  // propagation timeout can't cause the (already-executed) statement to be
+  // replayed into an "already exists" error on re-run.
+  test('marks a sync statement completed before waiting for DDL propagation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chkit-apply-order-'))
+    writeFileSync(
+      join(dir, 'm.sql'),
+      '-- operation: create_table key=table:default.t risk=safe\n' +
+        'CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n',
+    )
+
+    const events: string[] = []
+    const db = {
+      async command() {
+        events.push('command')
+      },
+      async query() {
+        // Used by waitForDDLPropagation → waitForTable; a non-empty row means
+        // the table is already visible, so the wait returns immediately.
+        events.push('propagation-query')
+        return [{ x: 1 }]
+      },
+    } as unknown as ClickHouseExecutor
+
+    let current: MigrationRowState | null = null
+    const store: JournalStore = {
+      databaseMissing: false,
+      async readJournal() {
+        return { version: 1, applied: [] }
+      },
+      async readMigrationState() {
+        return current
+      },
+      async writeMigrationState(state) {
+        current = state
+        if (state.operations.some((op) => op.status === 'completed')) events.push('completed-write')
+      },
+      async appendEntry() {},
+    }
+
+    await applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['command', 'completed-write', 'propagation-query'])
+  })
 })
