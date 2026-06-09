@@ -281,10 +281,13 @@ run()
     )
     const argv = process.argv.slice(2)
     const jsonMode = argv.includes('--json')
+    // In --json mode emit a machine-readable envelope to stdout (so a pipe to
+    // jq doesn't break on the first error) unless a command already wrote a
+    // structured JSON payload. The human-readable message always goes to
+    // stderr — stdout stays parseable, stderr stays diagnostic.
     if (jsonMode && !hasEmittedJson()) {
       emitJsonError(argv[0] ?? 'chkit', toJsonError(error))
-    } else {
-      console.error(formatFatalError(error))
     }
+    console.error(formatFatalError(error))
     process.exit(1)
   })
