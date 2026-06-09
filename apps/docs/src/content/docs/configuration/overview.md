@@ -10,11 +10,13 @@ description: "clickhouse.config.ts structure and defaults."
 - `schema`: glob path to [schema files](/schema/dsl-reference/)
 - `outDir`: root folder for generated artifacts
 - `migrationsDir`: SQL migration file folder
-- `metaDir`: state folder (`snapshot.json`, `journal.json`)
+- `metaDir`: state folder (`snapshot.json`)
 - `plugins`: plugin registrations
 - `clickhouse`: live connection options
 - `check`: CI gate behavior
 - `safety`: destructive migration safety behavior
+
+Migration state (the journal of applied migrations) is not stored in `metaDir`. It lives in the `_chkit_migrations` table in your configured `clickhouse.database`, so `status`, `migrate`, and `check` require a ClickHouse connection.
 
 ## Example
 
