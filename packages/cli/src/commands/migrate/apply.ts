@@ -6,15 +6,55 @@ import type { ResolvedChxConfig } from '@chkit/core'
 
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../plugins.js'
 import { debug } from '../../runtime/debug.js'
-import type { createJournalStore } from '../../runtime/journal-store.js'
+import type {
+  createJournalStore,
+  MigrationRowState,
+  OperationState,
+  OperationStatus,
+} from '../../runtime/journal-store.js'
 import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration-store.js'
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
 } from '../../runtime/safety-markers.js'
-import { applyAsyncStatement } from './async-apply.js'
+import {
+  applyAsyncStatement,
+  freshMigrationState,
+  isoWithoutZone,
+  upsertOperation,
+} from './async-apply.js'
 
 type JournalStore = ReturnType<typeof createJournalStore>
+
+function operationIsCompleted(state: MigrationRowState | null, index: number): boolean {
+  return (
+    state?.operations.some((op) => op.operationIndex === index && op.status === 'completed') ?? false
+  )
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function syncOperationState(
+  index: number,
+  operationType: string,
+  operationKey: string,
+  status: OperationStatus,
+  lastError = '',
+): OperationState {
+  const timestamp = isoWithoutZone(new Date())
+  return {
+    operationIndex: index,
+    operationKey,
+    operationType,
+    queryId: '',
+    status,
+    startedAt: timestamp,
+    finishedAt: status === 'started' ? null : timestamp,
+    lastError,
+  }
+}
 
 export async function applyMigration(input: {
   db: ClickHouseExecutor
@@ -46,6 +86,21 @@ export async function applyMigration(input: {
 
   const migrationChecksum = checksumSQL(sql)
 
+  // Resume support (#6): if a prior run left per-statement journal state for
+  // this migration, statements already marked completed are skipped instead of
+  // replayed — so a partial failure no longer bricks the migration on re-run
+  // with "column already exists". Guard against resuming across a file edit.
+  const initialState = await journalStore.readMigrationState(file)
+  if (
+    initialState !== null &&
+    !initialState.migrationCompleted &&
+    initialState.checksum !== migrationChecksum
+  ) {
+    throw new Error(
+      `Migration ${file} has in-progress journal state for checksum ${initialState.checksum}, but the current file checksum is ${migrationChecksum}. Restore the original migration file or clear the in-progress journal state before retrying.`,
+    )
+  }
+
   for (let i = 0; i < statements.length; i++) {
     const statement = statements[i] as string
     const operation = operationSummaries[i]
@@ -65,10 +120,39 @@ export async function applyMigration(input: {
       // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
       continue
     }
-    await db.command(statement)
+    // Sync DDL path with per-statement journaling + resume. Re-read state each
+    // iteration so async ops written above (or in a prior run) are preserved.
+    const stateBefore = await journalStore.readMigrationState(file)
+    if (operationIsCompleted(stateBefore, i)) {
+      debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
+      continue
+    }
+    const opType = operation?.type ?? 'sql_statement'
+    const opKey = operation?.key ?? `statement:${i}`
+    const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
+    await journalStore.writeMigrationState(
+      upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
+    )
+    try {
+      await db.command(statement)
+    } catch (error) {
+      const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
+      await journalStore.writeMigrationState(
+        upsertOperation(
+          stateOnError,
+          syncOperationState(i, opType, opKey, 'failed', errorMessage(error)),
+          Date.now,
+        ),
+      )
+      throw error
+    }
     if (operation) {
       await waitForDDLPropagation(db, operation.type, operation.key)
     }
+    const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
+    await journalStore.writeMigrationState(
+      upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
+    )
   }
 
   const entry: MigrationJournalEntry = {
