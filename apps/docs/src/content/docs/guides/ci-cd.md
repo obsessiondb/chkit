@@ -69,8 +69,9 @@ The `chkit check` command evaluates three policies:
 | `failOnPending` | `true` | Fail if unapplied migrations exist |
 | `failOnChecksumMismatch` | `true` | Fail if applied migration files were modified |
 | `failOnDrift` | `true` | Fail if live schema drifts from snapshot |
+| `failOnExtraObjects` | `false` | Fail if ClickHouse has objects not in your schema (off by default so chkit coexists with unmanaged tables on a shared database) |
 
-All three default to `true`, so checks are strict out of the box. Override them in `clickhouse.config.ts`:
+The first three default to `true`, so checks are strict out of the box. `failOnExtraObjects` defaults to `false` — enable it only when chkit owns the entire database. Override them in `clickhouse.config.ts`:
 
 ```ts
 export default defineConfig({

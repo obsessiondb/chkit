@@ -47,6 +47,7 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
       failOnPending: config.check?.failOnPending ?? true,
       failOnChecksumMismatch: config.check?.failOnChecksumMismatch ?? true,
       failOnDrift: config.check?.failOnDrift ?? true,
+      failOnExtraObjects: config.check?.failOnExtraObjects ?? false,
     },
     safety: {
       allowDestructive: config.safety?.allowDestructive ?? false,

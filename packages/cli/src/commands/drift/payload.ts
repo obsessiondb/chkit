@@ -27,6 +27,28 @@ export interface DriftPayload {
   tableDrift: TableDriftDetail[]
 }
 
+/**
+ * Decide whether a schema has drifted. Objects that exist in ClickHouse but are
+ * not in the schema (`extra_object` → `extraCount`) are NOT drift by default:
+ * on a shared database every unmanaged table would otherwise break the CI gate.
+ * Opt in with `check.failOnExtraObjects` to treat them as drift (e.g. when chkit
+ * owns the whole database).
+ */
+export function computeDrifted(input: {
+  missingCount: number
+  kindMismatchCount: number
+  tableDriftCount: number
+  extraCount: number
+  failOnExtraObjects: boolean
+}): boolean {
+  return (
+    input.missingCount > 0 ||
+    input.kindMismatchCount > 0 ||
+    input.tableDriftCount > 0 ||
+    (input.failOnExtraObjects && input.extraCount > 0)
+  )
+}
+
 export async function buildDriftPayload(
   config: ChxConfig,
   metaDir: string,
@@ -108,12 +130,13 @@ export async function buildDriftPayload(
 
   debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}`)
 
-  const drifted =
-    missing.length > 0 ||
-    extra.length > 0 ||
-    kindMismatches.length > 0 ||
-    objectDrift.length > 0 ||
-    tableDrift.length > 0
+  const drifted = computeDrifted({
+    missingCount: missing.length,
+    kindMismatchCount: kindMismatches.length,
+    tableDriftCount: tableDrift.length,
+    extraCount: extra.length,
+    failOnExtraObjects: config.check?.failOnExtraObjects === true,
+  })
   return {
     scope,
     snapshotFile: join(metaDir, 'snapshot.json'),
