@@ -36,6 +36,17 @@ export function migrationContainsDangerOperation(sql: string): boolean {
   return extractDestructiveOperationSummaries(sql).length > 0
 }
 
+/**
+ * Whether a migration carries any planner-emitted `-- operation:` marker. A
+ * generated migration always does; a fully hand-written one does not. Used to
+ * scope the raw destructive-SQL scan to hand-written migrations only, so the
+ * planner's risk classification (e.g. a non-danger `DROP MATERIALIZED VIEW`
+ * recreate) is not second-guessed.
+ */
+export function migrationHasOperationMarkers(sql: string): boolean {
+  return extractMigrationOperationSummaries(sql).length > 0
+}
+
 function extractDestructiveOperationSummaries(sql: string): string[] {
   return sql
     .split('\n')

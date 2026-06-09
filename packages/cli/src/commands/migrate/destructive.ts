@@ -6,6 +6,7 @@ import {
   collectUnmarkedDestructiveStatements,
   migrationContainsDangerOperation,
   migrationContainsDestructiveSql,
+  migrationHasOperationMarkers,
   type DestructiveOperationMarker,
 } from '../../runtime/safety-markers.js'
 
@@ -26,8 +27,10 @@ export async function scanDestructive(
       // Generated migration with planner risk markers (unchanged behavior).
       migrations.push(file)
       operations.push(...collectDestructiveOperationMarkers(file, sql))
-    } else if (migrationContainsDestructiveSql(sql)) {
-      // Hand-written/hand-edited migration: destructive SQL with no marker.
+    } else if (!migrationHasOperationMarkers(sql) && migrationContainsDestructiveSql(sql)) {
+      // Fully hand-written migration (no planner markers) containing destructive
+      // SQL. A generated migration always carries markers, so its planner risk
+      // classification is trusted and not re-scanned here.
       migrations.push(file)
       operations.push(...collectUnmarkedDestructiveStatements(file, sql))
     }
