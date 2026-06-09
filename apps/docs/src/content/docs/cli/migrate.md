@@ -69,7 +69,7 @@ Each applied migration is recorded in the `_chkit_migrations` journal table in C
 - `appliedAt` — ISO 8601 timestamp
 - `checksum` — SHA-256 hash of the file content
 
-The journal is written after each migration, not batched. The table name can be overridden with the `CHKIT_JOURNAL_TABLE` environment variable.
+The journal is written after each migration, not batched. The table is created in the database configured in `clickhouse.database` (it is not qualified with a database name, so on a shared/default-database setup it lives in `default._chkit_migrations`). The table name can be overridden with the `CHKIT_JOURNAL_TABLE` environment variable.
 
 ### Table scoping
 

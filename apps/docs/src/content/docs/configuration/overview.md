@@ -16,7 +16,7 @@ description: "clickhouse.config.ts structure and defaults."
 - `check`: CI gate behavior
 - `safety`: destructive migration safety behavior
 
-Migration state (the journal of applied migrations) is not stored in `metaDir`. It lives in the `_chkit_migrations` table in ClickHouse, so `status`, `migrate`, and `check` require a ClickHouse connection.
+Migration state (the journal of applied migrations) is not stored in `metaDir`. It lives in the `_chkit_migrations` table in your configured `clickhouse.database`, so `status`, `migrate`, and `check` require a ClickHouse connection.
 
 ## Example
 
