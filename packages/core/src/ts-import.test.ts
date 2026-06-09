@@ -1,16 +1,18 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
 import { importModuleFile } from './ts-import.js'
 
+const TS_FIXTURE = `export const value: number = 42\nexport default { name: 'sample' }\n`
+
 function makeFixtureDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'chkit-ts-import-'))
   // A type annotation ensures we exercise TypeScript-specific syntax, not just ESM.
-  writeFileSync(join(dir, 'sample.ts'), `export const value: number = 42\nexport default { name: 'sample' }\n`)
+  writeFileSync(join(dir, 'sample.ts'), TS_FIXTURE)
   writeFileSync(join(dir, 'sample.mjs'), `export const value = 7\nexport default { name: 'mjs' }\n`)
   return dir
 }
@@ -33,22 +35,33 @@ describe('importModuleFile', () => {
 
   // Regression guard for finding #1: plain Node cannot natively import a .ts file
   // (ERR_UNKNOWN_FILE_EXTENSION). importModuleFile must load it via jiti under Node.
-  test('loads a .ts module under plain Node', () => {
-    const dir = makeFixtureDir()
-    const tsImportSource = join(import.meta.dir, 'ts-import.ts')
+  //
+  // We transpile ts-import.ts to plain JS and run THAT under Node, rather than
+  // loading the .ts source through jiti — otherwise jiti's transform would also
+  // intercept importModuleFile's own dynamic import() and mask a native-import
+  // regression. The temp dir lives under the repo root so the compiled module's
+  // `import('jiti')` resolves against the workspace node_modules.
+  test('loads a .ts module under plain Node (compiled, no jiti wrapper)', () => {
+    const repoRoot = resolve(import.meta.dir, '../../..')
+    const dir = mkdtempSync(join(repoRoot, '.tmp-node-loader-'))
+    const sourceTs = readFileSync(join(import.meta.dir, 'ts-import.ts'), 'utf8')
+    const compiledJs = new Bun.Transpiler({ loader: 'ts' }).transformSync(sourceTs)
+    writeFileSync(join(dir, 'ts-import.mjs'), compiledJs)
+    writeFileSync(join(dir, 'sample.ts'), TS_FIXTURE)
+
     const script = [
-      `const { createJiti } = await import('jiti')`,
-      `const jiti = createJiti(import.meta.url)`,
-      `const mod = await jiti.import(${JSON.stringify(tsImportSource)})`,
-      `const out = await mod.importModuleFile(${JSON.stringify(join(dir, 'sample.ts'))})`,
+      `const mod = await import('./ts-import.mjs')`,
+      `const out = await mod.importModuleFile('./sample.ts')`,
       `process.stdout.write(JSON.stringify({ value: out.value, name: out.default.name }))`,
     ].join('\n')
     const result = spawnSync('node', ['--input-type=module', '-e', script], {
-      cwd: import.meta.dir,
+      cwd: dir,
       encoding: 'utf8',
     })
     rmSync(dir, { recursive: true, force: true })
+
     expect(result.status).toBe(0)
+    expect(result.stderr).not.toContain('ERR_UNKNOWN_FILE_EXTENSION')
     expect(JSON.parse(result.stdout)).toEqual({ value: 42, name: 'sample' })
   })
 })
