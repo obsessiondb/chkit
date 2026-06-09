@@ -11,6 +11,7 @@ import { debug } from '../runtime/debug.js'
 import { extractConfigPath } from '../runtime/extract-config-path.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
+import { emitJsonError, hasEmittedJson, type JsonError } from '../runtime/json-output.js'
 import { configureCliLogging } from '../runtime/logging.js'
 import { loadPluginRuntime } from '../runtime/plugin-runtime/index.js'
 import { CLI_VERSION } from '../runtime/version.js'
@@ -65,6 +66,16 @@ function formatFatalError(error: unknown): string {
     return (error as NodeJS.ErrnoException).code as string
   }
   return String(error) || 'Unknown error'
+}
+
+function toJsonError(error: unknown): JsonError {
+  const code =
+    error instanceof Error &&
+    'code' in error &&
+    typeof (error as NodeJS.ErrnoException).code === 'string'
+      ? ((error as NodeJS.ErrnoException).code as string)
+      : 'error'
+  return { code, message: formatFatalError(error) }
 }
 
 function resolveExitCode(): number {
@@ -268,6 +279,12 @@ run()
           }
         : error,
     )
-    console.error(formatFatalError(error))
+    const argv = process.argv.slice(2)
+    const jsonMode = argv.includes('--json')
+    if (jsonMode && !hasEmittedJson()) {
+      emitJsonError(argv[0] ?? 'chkit', toJsonError(error))
+    } else {
+      console.error(formatFatalError(error))
+    }
     process.exit(1)
   })
