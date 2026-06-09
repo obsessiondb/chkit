@@ -1,10 +1,10 @@
 import process from 'node:process'
-import { pathToFileURL } from 'node:url'
 
 import fg from 'fast-glob'
 
 import { canonicalizeDefinitions, collectDefinitionsFromModule } from './canonical.js'
 import type { SchemaDefinition } from './model.js'
+import { importModuleFile } from './ts-import.js'
 
 export interface SchemaLoaderOptions {
   cwd?: string
@@ -26,7 +26,7 @@ export async function loadSchemaDefinitions(
 
   const all: SchemaDefinition[] = []
   for (const file of files) {
-    const mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>
+    const mod = await importModuleFile(file)
     all.push(...collectDefinitionsFromModule(mod))
   }
 
