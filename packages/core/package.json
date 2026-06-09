@@ -47,7 +47,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "fast-glob": "^3.3.2"
+    "fast-glob": "^3.3.2",
+    "jiti": "^2.7.0"
   },
   "devDependencies": {
     "@clickhouse/client": "^1.11.0"
