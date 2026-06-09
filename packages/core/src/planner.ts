@@ -156,7 +156,10 @@ function isCodecRemoval(oldCol: ColumnDefinition, newCol: ColumnDefinition): boo
 }
 
 function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
-  return `ALTER TABLE ${table.database}.${table.name} RENAME COLUMN \`${from}\` TO \`${to}\`;`
+  // IF EXISTS makes the rename idempotent: once it has run (the `from` column is
+  // gone), a replay after a partial migration failure is a safe no-op rather
+  // than an "unknown identifier" brick. ClickHouse supports the clause.
+  return `ALTER TABLE ${table.database}.${table.name} RENAME COLUMN IF EXISTS \`${from}\` TO \`${to}\`;`
 }
 
 function inferColumnRenameSuggestions(
