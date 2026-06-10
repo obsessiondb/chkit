@@ -364,7 +364,7 @@ describe('@chkit/core planner v1', () => {
           'Dropped and added columns have an identical non-name definition (type, nullability, default, comment).',
         dropOperationKey: 'table:app.events:column:source',
         addOperationKey: 'table:app.events:column:origin',
-        confirmationSQL: 'ALTER TABLE app.events RENAME COLUMN `source` TO `origin`;',
+        confirmationSQL: 'ALTER TABLE app.events RENAME COLUMN IF EXISTS `source` TO `origin`;',
       },
     ])
   })
