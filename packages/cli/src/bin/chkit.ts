@@ -78,6 +78,29 @@ function toJsonError(error: unknown): JsonError {
   return { code, message: formatFatalError(error) }
 }
 
+/**
+ * Report a usage error from a non-throwing early-return path (unknown command,
+ * missing project config, plugin not configured). Mirrors the top-level catch:
+ * the human message always goes to stderr; in --json mode a parseable error
+ * envelope goes to stdout (instead of nothing — or, for unknown commands, help
+ * text that would break a `jq` consumer). Sets a failing exit code.
+ */
+function reportUsageError(input: {
+  command: string
+  code: string
+  message: string
+  jsonMode: boolean
+  onText?: () => void
+}): void {
+  console.error(input.message)
+  if (input.jsonMode) {
+    emitJsonError(input.command, { code: input.code, message: input.message })
+  } else {
+    input.onText?.()
+  }
+  process.exitCode = 1
+}
+
 function resolveExitCode(): number {
   if (typeof process.exitCode === 'number') return process.exitCode
   return process.exitCode ? Number(process.exitCode) : 0
@@ -134,11 +157,14 @@ async function run(): Promise<void> {
   })
 
   if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
-    console.error(
-      `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
+    reportUsageError({
+      command: commandName,
+      code: 'project_config_required',
+      message:
+        `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
         `You are running chkit from a user profile (no local config found).`,
-    )
-    process.exitCode = 1
+      jsonMode: argv.includes('--json'),
+    })
     return
   }
 
@@ -194,14 +220,24 @@ async function run(): Promise<void> {
     if (!resolved) {
       const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
       if (wellKnown) {
-        console.error(`${wellKnown} plugin is not configured. Add it to config.plugins first.`)
-        process.exitCode = 1
+        reportUsageError({
+          command: commandName,
+          code: 'plugin_not_configured',
+          message: `${wellKnown} plugin is not configured. Add it to config.plugins first.`,
+          jsonMode: argv.includes('--json'),
+        })
         return
       }
-      console.error(`Unknown command: ${commandName}`)
-      console.log('')
-      console.log(formatGlobalHelp(registry, CLI_VERSION))
-      process.exitCode = 1
+      reportUsageError({
+        command: commandName,
+        code: 'unknown_command',
+        message: `Unknown command: ${commandName}`,
+        jsonMode: argv.includes('--json'),
+        onText: () => {
+          console.log('')
+          console.log(formatGlobalHelp(registry, CLI_VERSION))
+        },
+      })
       return
     }
 
