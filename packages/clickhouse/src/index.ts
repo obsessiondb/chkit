@@ -327,8 +327,36 @@ const NETWORK_ERROR_LABELS: Record<string, string> = {
 	EHOSTUNREACH: 'host unreachable',
 }
 
-function wrapConnectionError(error: unknown, url: string): never {
-	if (error instanceof Error && 'code' in error) {
+/**
+ * ClickHouse reports a wrong/missing password with server-side error codes 194
+ * (REQUIRED_PASSWORD) or 516 (AUTHENTICATION_FAILED) and a multi-line message
+ * that includes Cloud reset URLs and on-disk users.d/ paths — noise that reads
+ * as a leaked internal error to someone who just fat-fingered a password.
+ */
+function isAuthError(error: Error): boolean {
+	const code = String((error as { code?: unknown }).code ?? '')
+	const type = String((error as { type?: unknown }).type ?? '')
+	if (code === '194' || code === '516') return true
+	if (type === 'REQUIRED_PASSWORD' || type === 'AUTHENTICATION_FAILED') return true
+	return /authentication failed/i.test(error.message)
+}
+
+/**
+ * Builds a clean, user-facing message for a connection-time error, or returns
+ * `undefined` when the error is not one we recognize (caller rethrows as-is).
+ * Pure so it can be unit-tested without catching thrown errors.
+ */
+export function formatConnectionError(
+	error: unknown,
+	url: string,
+	username?: string,
+): string | undefined {
+	if (!(error instanceof Error)) return undefined
+	if (isAuthError(error)) {
+		const who = username ? `user "${username}"` : 'the configured user'
+		return `Authentication failed for ${who} at ${url}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
+	}
+	if ('code' in error) {
 		const code = (error as NodeJS.ErrnoException).code ?? ''
 		const label = NETWORK_ERROR_LABELS[code]
 		if (label) {
@@ -339,11 +367,15 @@ function wrapConnectionError(error: unknown, url: string): never {
 				isLocalhostDefault && envUnset
 					? '\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance.'
 					: ''
-			throw new Error(
-				`Could not connect to ClickHouse at ${url} (${label})${hint}`,
-			)
+			return `Could not connect to ClickHouse at ${url} (${label})${hint}`
 		}
 	}
+	return undefined
+}
+
+export function wrapConnectionError(error: unknown, url: string, username?: string): never {
+	const message = formatConnectionError(error, url, username)
+	if (message !== undefined) throw new Error(message)
 	throw error
 }
 
@@ -573,7 +605,7 @@ export function createExecutorWithClient(
 					}
 					return
 				}
-				wrapConnectionError(error, config.url)
+				wrapConnectionError(error, config.url, config.username)
 			}
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
@@ -603,7 +635,7 @@ export function createExecutorWithClient(
 				)
 				return rows
 			} catch (error) {
-				wrapConnectionError(error, config.url)
+				wrapConnectionError(error, config.url, config.username)
 			}
 		},
 		async queryJson<T extends Record<string, unknown>>(
@@ -634,7 +666,7 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 				}
 			} catch (error) {
-				wrapConnectionError(error, config.url)
+				wrapConnectionError(error, config.url, config.username)
 			}
 		},
 		async insert<T extends Record<string, unknown>>(
@@ -671,7 +703,7 @@ export function createExecutorWithClient(
 					result.summary,
 				)
 			} catch (error) {
-				wrapConnectionError(error, config.url)
+				wrapConnectionError(error, config.url, config.username)
 			}
 		},
 		async submit(sql: string, queryId?: string): Promise<string> {
@@ -679,7 +711,7 @@ export function createExecutorWithClient(
 			try {
 				await fireAndForgetClient.command({ query: sql, query_id: id })
 			} catch (error) {
-				wrapConnectionError(error, config.url)
+				wrapConnectionError(error, config.url, config.username)
 			}
 			return id
 		},
@@ -758,7 +790,7 @@ SETTINGS skip_unavailable_shards = 1`,
 					error: row.exception,
 				}
 			} catch (error) {
-				wrapConnectionError(error, config.url)
+				wrapConnectionError(error, config.url, config.username)
 			}
 		},
 		async close(): Promise<void> {

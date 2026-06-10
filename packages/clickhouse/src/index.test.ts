@@ -8,6 +8,7 @@ import {
   createSessionClickHouseClient,
   createStatelessClickHouseExecutor,
   createStatelessClickHouseClient,
+  formatConnectionError,
   inferSchemaKindFromEngine,
   parseEngineFromCreateTableQuery,
   parseOrderByFromCreateTableQuery,
@@ -424,5 +425,48 @@ ORDER BY id;`
         query: 'SELECT id ORDER BY id LIMIT 10',
       },
     ])
+  })
+})
+
+describe('formatConnectionError', () => {
+  // The full server blurb chkit must NOT leak (Cloud reset URL + on-disk paths).
+  const rawAuthBlurb =
+    'default: Authentication failed: password is incorrect, or there is no user with such name\n\n' +
+    'If you use ClickHouse Cloud, the password can be reset at https://clickhouse.cloud/\n' +
+    'The password for default user is typically located at /etc/clickhouse-server/users.d/default-password.xml\n'
+
+  test('replaces a wrong-password error (code 194) with one clean line', () => {
+    const error = Object.assign(new Error(rawAuthBlurb), { code: '194', type: 'REQUIRED_PASSWORD' })
+    const message = formatConnectionError(error, 'https://db.example.com:443', 'default')
+    expect(message).toBe(
+      'Authentication failed for user "default" at https://db.example.com:443. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+    expect(message).not.toContain('clickhouse.cloud')
+    expect(message).not.toContain('/etc/clickhouse-server')
+  })
+
+  test('detects AUTHENTICATION_FAILED (code 516) by type', () => {
+    const error = Object.assign(new Error('Authentication failed'), { type: 'AUTHENTICATION_FAILED' })
+    expect(formatConnectionError(error, 'https://x', 'admin')).toBe(
+      'Authentication failed for user "admin" at https://x. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+  })
+
+  test('detects auth failure by message alone (no code/type)', () => {
+    const error = new Error('default: Authentication failed: password is incorrect')
+    expect(formatConnectionError(error, 'https://x')).toBe(
+      'Authentication failed for the configured user at https://x. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+  })
+
+  test('still formats network errors (regression: ECONNREFUSED path intact)', () => {
+    const error = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+    expect(formatConnectionError(error, 'https://x')).toBe(
+      'Could not connect to ClickHouse at https://x (connection refused)',
+    )
+  })
+
+  test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
+    expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
   })
 })
