@@ -77,6 +77,27 @@ describe('@chkit/core smoke', () => {
     expect(sql).toContain('UNIQUE KEY (`id`, `org_id`)')
   })
 
+  test('table with orderBy but no primaryKey does not crash; PK defaults to orderBy (#19)', () => {
+    // A user can omit primaryKey at runtime (JS, or a `.ts` config without
+    // strict types). ClickHouse derives the PK from ORDER BY, so this must
+    // canonicalize cleanly instead of crashing on `undefined.flatMap`.
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      orderBy: ['id'],
+      // primaryKey intentionally omitted
+    } as Parameters<typeof table>[0])
+
+    const [canonical] = canonicalizeDefinitions([events])
+    expect((canonical as { primaryKey: string[] }).primaryKey).toEqual(['id'])
+
+    const sql = toCreateSQL(canonical)
+    expect(sql).toContain('PRIMARY KEY (`id`)')
+    expect(sql).toContain('ORDER BY (`id`)')
+  })
+
   test('collects and de-duplicates definitions from module exports', () => {
     const users = table({
       database: 'app',

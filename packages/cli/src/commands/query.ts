@@ -30,17 +30,55 @@ export const queryCommand: ChxPluginCommand = {
 		}
 
 		if (jsonMode) {
-			const payload = pluginContext.executor.queryJson
-				? await pluginContext.executor.queryJson(sql)
-				: rowsToJsonResult(await pluginContext.executor.query<Record<string, unknown>>(sql))
-			printQueryJson(payload)
-			return 0
+			try {
+				const payload = pluginContext.executor.queryJson
+					? await pluginContext.executor.queryJson(sql)
+					: rowsToJsonResult(await pluginContext.executor.query<Record<string, unknown>>(sql))
+				printQueryJson(payload)
+				return 0
+			} catch (error) {
+				throw cleanQueryError(error)
+			}
 		}
 
-		const rows = await pluginContext.executor.query<Record<string, unknown>>(sql)
-		printRows(rows)
-		return 0
+		try {
+			const rows = await pluginContext.executor.query<Record<string, unknown>>(sql)
+			printRows(rows)
+			return 0
+		} catch (error) {
+			throw cleanQueryError(error)
+		}
 	},
+}
+
+const INJECTED_FORMAT_RE = /\s+FORMAT\s+JSON(?:EachRow)?\b/gi
+const EXPECTED_TOKEN_CAP = 8
+
+/**
+ * ClickHouse syntax errors echo back the query — including the `FORMAT JSON`
+ * clause chkit injects, which the user never typed — and can append a ~40-item
+ * "Expected one of" token dump. Strip the injected FORMAT clause and cap the
+ * token list so the message reflects the SQL the user actually wrote. Returns
+ * the original error untouched when there is nothing to clean (e.g. connection
+ * errors already formatted upstream).
+ */
+export function cleanQueryError(error: unknown): unknown {
+	if (!(error instanceof Error)) return error
+	const original = error.message
+	let message = original.replace(INJECTED_FORMAT_RE, '')
+	message = message.replace(/Expected one of: ([^.]*)\./, (_match, list: string) => {
+		const tokens = list
+			.split(',')
+			.map((token) => token.trim())
+			.filter((token) => token.length > 0)
+		if (tokens.length <= EXPECTED_TOKEN_CAP) return `Expected one of: ${tokens.join(', ')}.`
+		const shown = tokens.slice(0, EXPECTED_TOKEN_CAP).join(', ')
+		return `Expected one of: ${shown}, … (${tokens.length - EXPECTED_TOKEN_CAP} more).`
+	})
+	if (message === original) return error
+	const cleaned = new Error(message.trim())
+	cleaned.stack = error.stack
+	return cleaned
 }
 
 function printQueryJson(payload: ClickHouseJsonQueryResult): void {

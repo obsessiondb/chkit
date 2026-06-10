@@ -466,6 +466,22 @@ describe('formatConnectionError', () => {
     )
   })
 
+  test('detects a host typo from the message when .code is stripped (#11)', () => {
+    // Some @clickhouse/client / Node versions surface the failure only in the
+    // message with no .code, so the bare-code match misses it and the raw
+    // library string leaks.
+    const error = new Error('getaddrinfo ENOTFOUND db.exampl-typo.com. Was there a typo in the url or port?')
+    expect(formatConnectionError(error, 'https://db.exampl-typo.com:8443')).toBe(
+      'Could not connect to ClickHouse at https://db.exampl-typo.com:8443 (host not found)',
+    )
+  })
+
+  test('detects connection refused from the message alone (no .code)', () => {
+    expect(formatConnectionError(new Error('connect ECONNREFUSED 127.0.0.1:8443'), 'https://x')).toBe(
+      'Could not connect to ClickHouse at https://x (connection refused)',
+    )
+  })
+
   test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
     expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
   })

@@ -5,7 +5,7 @@ import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js
 import { resolveDirs } from '../../runtime/config.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
-import { createJournalStore } from '../../runtime/journal-store.js'
+import { createJournalStore, resolveJournalTableName } from '../../runtime/journal-store.js'
 import { extractMigrationMetadata } from '../../runtime/migration-metadata.js'
 import {
   findChecksumMismatches,
@@ -221,6 +221,6 @@ async function cmdMigrate(
     return 0
   }
 
-  console.log('\nMigrations recorded in ClickHouse _chkit_migrations table.')
+  console.log(`\nMigrations recorded in ClickHouse ${resolveJournalTableName()} table.`)
   return 0
 }

@@ -444,6 +444,45 @@ describe('obsessiondb onInit', () => {
 		expect(log.mock.calls.flat().join('\n')).toContain('using service "prod"')
 		log.mockRestore()
 	})
+
+	test('warns "no service selected" when authenticated with no service and no clickhouse target (#38)', async () => {
+		await setupAuth()
+
+		const log = spyOn(console, 'log').mockImplementation(() => {})
+		const plugin = obsessiondb().plugin
+		await plugin.hooks.onInit({
+			command: 'status',
+			configPath: join(tempDir, 'clickhouse.config.ts'),
+			isInteractive: false,
+			jsonMode: false,
+			flags: {},
+		})
+
+		expect(log.mock.calls.flat().join('\n')).toContain('authenticated but no service selected')
+		log.mockRestore()
+	})
+
+	test('suppresses the "no service selected" notice when a direct clickhouse target is configured (#38)', async () => {
+		await setupAuth()
+
+		const log = spyOn(console, 'log').mockImplementation(() => {})
+		const plugin = obsessiondb().plugin
+		await plugin.hooks.onInit({
+			command: 'status',
+			configPath: join(tempDir, 'clickhouse.config.ts'),
+			isInteractive: false,
+			jsonMode: false,
+			flags: {},
+			config: {
+				clickhouse: { url: 'https://x', username: 'u', password: 'p', database: 'd' },
+			} as never,
+		})
+
+		// ObsessionDB was layered in from a global login, not chosen for this
+		// project, so the reminder is noise for a user with their own target.
+		expect(log.mock.calls.flat().join('\n')).not.toContain('authenticated but no service selected')
+		log.mockRestore()
+	})
 })
 
 describe('obsessiondb getContext', () => {
