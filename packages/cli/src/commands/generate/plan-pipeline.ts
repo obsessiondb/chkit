@@ -84,7 +84,7 @@ export function applyExplicitTableRenames(
       type: 'alter_table_rename_table',
       key: `table:${mapping.newDatabase}.${mapping.newName}:rename_table`,
       risk: 'caution',
-      sql: `RENAME TABLE ${mapping.oldDatabase}.${mapping.oldName} TO ${mapping.newDatabase}.${mapping.newName};`,
+      sql: `RENAME TABLE IF EXISTS ${mapping.oldDatabase}.${mapping.oldName} TO ${mapping.newDatabase}.${mapping.newName};`,
     })
   }
 
@@ -129,7 +129,7 @@ export function buildExplicitColumnRenameSuggestions(
           : 'Explicitly confirmed by schema metadata (renamedFrom).',
       dropOperationKey,
       addOperationKey,
-      confirmationSQL: `ALTER TABLE ${mapping.database}.${mapping.table} RENAME COLUMN \`${mapping.from}\` TO \`${mapping.to}\`;`,
+      confirmationSQL: `ALTER TABLE ${mapping.database}.${mapping.table} RENAME COLUMN IF EXISTS \`${mapping.from}\` TO \`${mapping.to}\`;`,
     })
   }
 

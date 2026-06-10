@@ -104,11 +104,17 @@ describe('@chkit/cli migration scenario flows', () => {
       const plan = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
       expect(plan.exitCode).toBe(0)
       const payload = JSON.parse(plan.stdout) as {
-        operations: Array<{ type: string }>
+        operations: Array<{ type: string; sql: string }>
         renameSuggestions: Array<{ from: string; to: string }>
       }
-      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_table')).toBe(true)
-      expect(payload.operations.some((operation) => operation.type === 'alter_table_rename_column')).toBe(true)
+      const renameTable = payload.operations.find((op) => op.type === 'alter_table_rename_table')
+      const renameColumn = payload.operations.find((op) => op.type === 'alter_table_rename_column')
+      expect(renameTable).toBeTruthy()
+      expect(renameColumn).toBeTruthy()
+      // Renames are idempotent (IF EXISTS) so a replay after a partial failure
+      // is a safe no-op rather than an "unknown identifier" brick.
+      expect(renameTable?.sql).toContain('RENAME TABLE IF EXISTS')
+      expect(renameColumn?.sql).toContain('RENAME COLUMN IF EXISTS')
       expect(payload.renameSuggestions.some((s) => s.from === 'source' && s.to === 'event_source')).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
