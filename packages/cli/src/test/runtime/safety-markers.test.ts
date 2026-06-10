@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  migrationContainsDestructiveSql,
+  scanDestructiveSqlStatements,
 } from '../../runtime/safety-markers.js'
 
 describe('extractExecutableStatements', () => {
@@ -149,5 +152,54 @@ describe('extractExecutableStatements', () => {
     expect(extractExecutableStatements(sql)).toEqual([
       'ALTER TABLE app.events DROP COLUMN IF EXISTS old_col;',
     ])
+  })
+})
+
+describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () => {
+  const cases: Array<[string, string, string]> = [
+    ['drop table', 'DROP TABLE default.events;', 'drop_table'],
+    ['drop table if exists', 'DROP TABLE IF EXISTS default.events;', 'drop_table'],
+    ['alter drop column', 'ALTER TABLE default.events DROP COLUMN email;', 'alter_table_drop_column'],
+    ['truncate', 'TRUNCATE TABLE default.events;', 'truncate_table'],
+    ['drop view', 'DROP VIEW default.events_v;', 'drop_view'],
+    ['drop materialized view', 'DROP MATERIALIZED VIEW default.events_mv;', 'drop_materialized_view'],
+    ['detach', 'DETACH TABLE default.events;', 'detach'],
+    ['drop database', 'DROP DATABASE analytics;', 'drop_database'],
+  ]
+  for (const [label, sql, type] of cases) {
+    test(`flags ${label}`, () => {
+      const found = scanDestructiveSqlStatements(sql)
+      expect(found.map((f) => f.type)).toContain(type)
+      expect(migrationContainsDestructiveSql(sql)).toBe(true)
+    })
+  }
+
+  test('does NOT flag a commented-out destructive statement', () => {
+    const sql = `-- DROP TABLE default.events;\n-- operation: create_table key=default.events risk=safe\nCREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;`
+    expect(scanDestructiveSqlStatements(sql)).toEqual([])
+    expect(migrationContainsDestructiveSql(sql)).toBe(false)
+  })
+
+  test('does NOT flag a non-destructive migration', () => {
+    const sql = `CREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;\nINSERT INTO default.events SELECT * FROM s3('...');`
+    expect(migrationContainsDestructiveSql(sql)).toBe(false)
+  })
+
+  test('does NOT flag the truncate() math function (only TRUNCATE TABLE/DATABASE statements)', () => {
+    expect(migrationContainsDestructiveSql('INSERT INTO default.t SELECT truncate(value) AS v FROM default.s;')).toBe(false)
+    expect(migrationContainsDestructiveSql('TRUNCATE TABLE default.events;')).toBe(true)
+    expect(migrationContainsDestructiveSql('TRUNCATE DATABASE analytics;')).toBe(true)
+  })
+
+  test('synthesizes a danger marker (key + preview) for unmarked DROP COLUMN', () => {
+    const sql = 'ALTER TABLE default.events DROP COLUMN email;'
+    const markers = collectUnmarkedDestructiveStatements('20260101_handwritten.sql', sql)
+    expect(markers).toHaveLength(1)
+    const marker = markers[0]
+    expect(marker?.type).toBe('alter_table_drop_column')
+    expect(marker?.risk).toBe('danger')
+    expect(marker?.key).toBe('default.events')
+    expect(marker?.warningCode).toBe('drop_column_irreversible')
+    expect(marker?.summary).toContain('DROP COLUMN')
   })
 })

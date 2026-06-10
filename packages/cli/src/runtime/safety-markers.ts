@@ -160,3 +160,94 @@ export function collectDestructiveOperationMarkers(
     }
   })
 }
+
+// Defense-in-depth (#2): planner-emitted `-- operation: risk=danger` markers only
+// exist on generated migrations. A hand-written or hand-edited migration can
+// contain destructive SQL with no marker — so we also scan the executable SQL
+// itself. Comments are stripped first, so a commented-out `-- DROP TABLE` is not
+// flagged, while a real statement is.
+// Each rule requires the statement keyword that follows the verb, so a SQL
+// function such as `truncate(x)` (a ClickHouse math function) is NOT mistaken
+// for a `TRUNCATE TABLE` statement.
+const DESTRUCTIVE_SQL_RULES: Array<{ type: string; re: RegExp }> = [
+  { type: 'drop_database', re: /\bDROP\s+DATABASE\b/i },
+  { type: 'drop_materialized_view', re: /\bDROP\s+MATERIALIZED\s+VIEW\b/i },
+  { type: 'drop_view', re: /\bDROP\s+VIEW\b/i },
+  { type: 'drop_table', re: /\bDROP\s+(?:TEMPORARY\s+)?TABLE\b/i },
+  { type: 'alter_table_drop_column', re: /\bDROP\s+COLUMN\b/i },
+  { type: 'truncate_table', re: /\bTRUNCATE\s+(?:TABLE|DATABASE|ALL\s+TABLES)\b/i },
+  { type: 'detach', re: /\bDETACH\s+(?:TABLE|VIEW|DICTIONARY|DATABASE|PARTITION|PART)\b/i },
+]
+
+function classifyDestructiveStatement(statement: string): string | null {
+  for (const rule of DESTRUCTIVE_SQL_RULES) {
+    if (rule.re.test(statement)) return rule.type
+  }
+  return null
+}
+
+function extractObjectKey(statement: string): string {
+  const match = statement.match(
+    /\b(?:TABLE|VIEW|DATABASE)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?/i,
+  )
+  return match?.[1] ?? 'unknown'
+}
+
+export interface ScannedDestructiveStatement {
+  type: string
+  statement: string
+}
+
+/**
+ * Scan the executable SQL (comments stripped) for destructive statements that
+ * are NOT covered by a planner `-- operation:` marker.
+ *
+ * Generated migrations emit exactly one marker per statement, in order (the same
+ * 1:1 invariant apply.ts relies on), so a marker-covered statement is governed
+ * by the planner's risk classification and is trusted — e.g. a non-danger
+ * `DROP MATERIALIZED VIEW` recreate. Only marker-less positions are flagged: a
+ * fully hand-written migration (no markers) or a destructive statement
+ * hand-appended to a generated one.
+ */
+export function scanDestructiveSqlStatements(sql: string): ScannedDestructiveStatement[] {
+  const statements = extractExecutableStatements(sql)
+  const operations = extractMigrationOperationSummaries(sql)
+  const found: ScannedDestructiveStatement[] = []
+  for (let i = 0; i < statements.length; i++) {
+    if (operations[i] !== undefined) continue
+    const statement = statements[i] ?? ''
+    const type = classifyDestructiveStatement(statement)
+    if (type) found.push({ type, statement: statement.trim() })
+  }
+  return found
+}
+
+export function migrationContainsDestructiveSql(sql: string): boolean {
+  return scanDestructiveSqlStatements(sql).length > 0
+}
+
+/**
+ * Synthesize destructive-operation markers for migrations that contain
+ * destructive SQL but carry no `-- operation: risk=danger` marker (hand-written
+ * migrations). Used as a fallback so these still require --allow-destructive.
+ */
+export function collectUnmarkedDestructiveStatements(
+  migration: string,
+  sql: string
+): DestructiveOperationMarker[] {
+  return scanDestructiveSqlStatements(sql).map(({ type, statement }) => {
+    const detail = describeDestructiveOperation(type)
+    const preview = statement.length > 120 ? `${statement.slice(0, 117)}...` : statement
+    return {
+      migration,
+      type,
+      key: extractObjectKey(statement),
+      risk: 'danger',
+      warningCode: detail.warningCode,
+      reason: detail.reason,
+      impact: detail.impact,
+      recommendation: detail.recommendation,
+      summary: `unmarked destructive SQL: ${preview}`,
+    }
+  })
+}
