@@ -328,6 +328,31 @@ const NETWORK_ERROR_LABELS: Record<string, string> = {
 }
 
 /**
+ * Some @clickhouse/client and Node versions surface a network failure with the
+ * reason only in the message (the `.code` is stripped), so a bare match on
+ * `.code` misses them and the raw library string leaks. Recover the label from
+ * the message as a fallback — e.g. a typo'd host that yields a `getaddrinfo
+ * ENOTFOUND` / "Was there a typo" string.
+ */
+const NETWORK_MESSAGE_PATTERNS: Array<[RegExp, string]> = [
+	[/ENOTFOUND|getaddrinfo|EAI_AGAIN|Was there a typo/i, 'host not found'],
+	[/ECONNREFUSED/i, 'connection refused'],
+	[/ETIMEDOUT|timed out/i, 'connection timed out'],
+	[/ECONNRESET/i, 'connection reset'],
+	[/EHOSTUNREACH/i, 'host unreachable'],
+]
+
+function networkLabelFromError(error: Error): string | undefined {
+	const code =
+		'code' in error ? String((error as NodeJS.ErrnoException).code ?? '') : ''
+	if (code && NETWORK_ERROR_LABELS[code]) return NETWORK_ERROR_LABELS[code]
+	for (const [pattern, label] of NETWORK_MESSAGE_PATTERNS) {
+		if (pattern.test(error.message)) return label
+	}
+	return undefined
+}
+
+/**
  * ClickHouse reports a wrong/missing password with server-side error codes 194
  * (REQUIRED_PASSWORD) or 516 (AUTHENTICATION_FAILED) and a multi-line message
  * that includes Cloud reset URLs and on-disk users.d/ paths — noise that reads
@@ -356,19 +381,16 @@ export function formatConnectionError(
 		const who = username ? `user "${username}"` : 'the configured user'
 		return `Authentication failed for ${who} at ${url}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
 	}
-	if ('code' in error) {
-		const code = (error as NodeJS.ErrnoException).code ?? ''
-		const label = NETWORK_ERROR_LABELS[code]
-		if (label) {
-			const isLocalhostDefault =
-				/^https?:\/\/(localhost|127\.0\.0\.1):8123\/?$/.test(url)
-			const envUnset = !process.env.CLICKHOUSE_URL
-			const hint =
-				isLocalhostDefault && envUnset
-					? '\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance.'
-					: ''
-			return `Could not connect to ClickHouse at ${url} (${label})${hint}`
-		}
+	const label = networkLabelFromError(error)
+	if (label) {
+		const isLocalhostDefault =
+			/^https?:\/\/(localhost|127\.0\.0\.1):8123\/?$/.test(url)
+		const envUnset = !process.env.CLICKHOUSE_URL
+		const hint =
+			isLocalhostDefault && envUnset
+				? '\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance.'
+				: ''
+		return `Could not connect to ClickHouse at ${url} (${label})${hint}`
 	}
 	return undefined
 }
