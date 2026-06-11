@@ -1,6 +1,6 @@
 {
   "name": "@chkit/clickhouse",
-  "version": "0.1.0-beta.27",
+  "version": "0.1.0-beta.28",
   "description": "ClickHouse client wrapper for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -28,8 +28,9 @@
       "default": "./dist/index.js"
     },
     "./e2e-testkit": {
-      "bun": "./src/e2e-testkit.ts",
-      "default": "./src/e2e-testkit.ts"
+      "source": "./src/e2e-testkit.ts",
+      "types": "./dist/e2e-testkit.d.ts",
+      "default": "./dist/e2e-testkit.js"
     }
   },
   "files": [

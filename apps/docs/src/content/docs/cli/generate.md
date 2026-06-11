@@ -72,6 +72,8 @@ Validation errors are raised for conflicting, chained, or cyclic rename mappings
 
 With `--dryrun`, the command prints the migration plan (operations with risk levels and SQL) without writing any files. Useful for previewing changes before committing.
 
+Plans for objects in a database lead with a `create_database` operation (`CREATE DATABASE IF NOT EXISTS`, risk `safe`), so a single new table reports `operationCount: 2` — the `create_database` plus the `create_table`. The `CREATE DATABASE` is idempotent and a no-op if the database already exists.
+
 ### Codegen integration
 
 If the codegen plugin is configured with `runOnGenerate: true` (the default), `chkit generate` automatically runs codegen after writing migration artifacts. A codegen failure causes `generate` to fail.
@@ -130,8 +132,9 @@ chkit generate --rename-column analytics.events.old_name=new_name
   "scope": { "enabled": false },
   "mode": "plan",
   "operationCount": 2,
-  "riskSummary": { "safe": 1, "caution": 1, "danger": 0 },
+  "riskSummary": { "safe": 2, "caution": 0, "danger": 0 },
   "operations": [
+    { "type": "create_database", "key": "database:default", "risk": "safe", "sql": "CREATE DATABASE IF NOT EXISTS default;" },
     { "type": "create_table", "key": "default.users", "risk": "safe", "sql": "CREATE TABLE ..." }
   ],
   "renameSuggestions": []
@@ -145,11 +148,11 @@ chkit generate --rename-column analytics.events.old_name=new_name
   "command": "generate",
   "schemaVersion": 1,
   "scope": { "enabled": false },
-  "migrationFile": "./chkit/migrations/0001_add_users_table.sql",
+  "migrationFile": "./chkit/migrations/20260604104251_add_users_table.sql",
   "snapshotFile": "./chkit/meta/snapshot.json",
   "definitionCount": 3,
   "operationCount": 2,
-  "riskSummary": { "safe": 1, "caution": 1, "danger": 0 }
+  "riskSummary": { "safe": 2, "caution": 0, "danger": 0 }
 }
 ```
 

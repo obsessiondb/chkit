@@ -298,7 +298,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   }
 }
 
-function upsertOperation(
+export function upsertOperation(
   state: MigrationRowState,
   op: OperationState,
   now: () => number,
@@ -318,7 +318,7 @@ function upsertOperation(
   }
 }
 
-function freshMigrationState(
+export function freshMigrationState(
   migrationName: string,
   checksum: string,
 ): MigrationRowState {
@@ -373,7 +373,7 @@ function formatBytes(value: number | undefined): string {
   return `${value} B`
 }
 
-function isoWithoutZone(date: Date): string {
+export function isoWithoutZone(date: Date): string {
   return date.toISOString().replace('Z', '')
 }
 

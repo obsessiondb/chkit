@@ -1,6 +1,5 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "chkit",
@@ -19,7 +18,7 @@
     },
     "apps/docs": {
       "name": "@chkit/docs",
-      "version": "0.0.2-beta.15",
+      "version": "0.0.2-beta.17",
       "dependencies": {
         "@astrojs/starlight": "^0.37.6",
         "astro": "^5.6.1",
@@ -45,7 +44,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -62,7 +61,7 @@
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.11.0",
@@ -72,16 +71,17 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/core": "0.1.0-beta.26",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "fast-glob": "^3.3.2",
+        "jiti": "^2.7.0",
       },
       "devDependencies": {
         "@clickhouse/client": "^1.11.0",
@@ -89,7 +89,7 @@
     },
     "packages/create-chkit": {
       "name": "create-chkit",
-      "version": "0.1.0-beta.25",
+      "version": "0.1.0-beta.27",
       "bin": {
         "create-chkit": "./dist/bin/create-chkit.js",
       },
@@ -105,7 +105,7 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -116,7 +116,7 @@
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "zod": "^4.3.6",
@@ -124,7 +124,7 @@
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -135,7 +135,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.0-beta.26",
+      "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -935,6 +935,8 @@
     "is-wsl": ["is-wsl@3.1.1", "", { "dependencies": { "is-inside-container": "^1.0.0" } }, "sha512-e6rvdUCiQCAuumZslxRJWR/Doq4VpPR82kqclvcS0efgt430SlGIk05vdCN58+VrzgtIcfNODjozVielycD4Sw=="],
 
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
+
+    "jiti": ["jiti@2.7.0", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ=="],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 

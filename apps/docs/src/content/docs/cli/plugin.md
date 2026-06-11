@@ -2,7 +2,7 @@
 title: "chkit plugin"
 description: "List installed plugins or run plugin commands."
 sidebar:
-  order: 10
+  order: 11
 ---
 
 Lists registered plugins, lists a plugin's commands, or runs a specific plugin command.

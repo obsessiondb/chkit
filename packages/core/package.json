@@ -1,6 +1,6 @@
 {
   "name": "@chkit/core",
-  "version": "0.1.0-beta.27",
+  "version": "0.1.0-beta.28",
   "description": "Schema DSL, config, diff engine, and migration planner for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -47,7 +47,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "fast-glob": "^3.3.2"
+    "fast-glob": "^3.3.2",
+    "jiti": "^2.7.0"
   },
   "devDependencies": {
     "@clickhouse/client": "^1.11.0"

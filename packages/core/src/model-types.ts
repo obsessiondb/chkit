@@ -162,6 +162,13 @@ export interface ChxCheckConfig {
   failOnPending?: boolean
   failOnChecksumMismatch?: boolean
   failOnDrift?: boolean
+  /**
+   * Treat objects that exist in ClickHouse but are not in your schema
+   * (`extra_object`) as drift. Defaults to `false` so chkit coexists with
+   * unmanaged tables on a shared database — only opt in when chkit is expected
+   * to own the entire database.
+   */
+  failOnExtraObjects?: boolean
 }
 
 export interface ChxSafetyConfig {

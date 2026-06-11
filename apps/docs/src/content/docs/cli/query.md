@@ -2,7 +2,7 @@
 title: "chkit query"
 description: "Run a SQL query against the configured ClickHouse target."
 sidebar:
-  order: 9
+  order: 10
 ---
 
 Executes an ad-hoc SQL query against the configured target and prints the result.
@@ -67,16 +67,32 @@ chkit query "SELECT count() FROM users" --json
 
 ## JSON output
 
+`--json` prints the raw ClickHouse result envelope (the `JSON` format), not a chkit-specific wrapper:
+
 ```json
 {
-  "command": "query",
-  "schemaVersion": 1,
-  "rowCount": 1,
-  "rows": [
+  "meta": [
+    { "name": "count()", "type": "UInt64" }
+  ],
+  "data": [
     { "count()": "42" }
-  ]
+  ],
+  "rows": 1,
+  "statistics": {
+    "elapsed": 0.000773,
+    "rows_read": 1,
+    "bytes_read": 1
+  }
 }
 ```
+
+- `meta` — column names and ClickHouse types.
+- `data` — the result rows.
+- `rows` — the row **count** (a number), not the rows array.
+- `statistics` — server-side timing and read counters.
+- `query_id` — present when the executor reports it.
+
+There is no `rowCount`, `command`, or `schemaVersion` field; the row count lives in `rows`.
 
 ## Related commands
 

@@ -13,6 +13,15 @@ describe('@chkit/cli drift command e2e', () => {
       const result = runCli(['drift', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
       expect(result.stderr).toContain('clickhouse config is required for drift checks')
+      // #4: --json mode also emits a parseable error envelope to stdout.
+      const envelope = JSON.parse(result.stdout) as {
+        ok: boolean
+        command: string
+        error: { message: string }
+      }
+      expect(envelope.ok).toBe(false)
+      expect(envelope.command).toBe('drift')
+      expect(envelope.error.message).toContain('clickhouse config is required for drift checks')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

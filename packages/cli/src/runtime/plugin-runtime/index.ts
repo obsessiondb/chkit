@@ -88,7 +88,7 @@ export async function loadPluginRuntime(input: {
   for (const plugin of input.internalPlugins ?? []) {
     if (byName.has(plugin.manifest.name)) continue
     const resolved = resolvePluginOptions(plugin, {})
-    const item: LoadedPlugin = { plugin, options: resolved, rawOptions: {} }
+    const item: LoadedPlugin = { plugin, options: resolved, rawOptions: {}, internal: true }
     loaded.push(item)
     byName.set(plugin.manifest.name, item)
   }
@@ -224,6 +224,12 @@ export async function loadPluginRuntime(input: {
         })
         return typeof code === 'number' ? code : 0
       } catch (error) {
+        // Built-in plugins (core) own the user-facing commands; their errors
+        // should read as the command's own clean message, not as a leaked
+        // internal-plugin failure. Only wrap third-party plugin errors.
+        if (item.internal) {
+          throw error instanceof Error ? error : new Error(String(error))
+        }
         throw formatPluginError(
           item.plugin.manifest.name,
           `command:${commandName}`,

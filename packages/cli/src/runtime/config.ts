@@ -2,9 +2,9 @@ import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import process from 'node:process'
-import { pathToFileURL } from 'node:url'
 
 import {
+  importModuleFile,
   resolveConfig,
   SYNTHESIZED_CONFIG_PATH,
   type ChxConfig,
@@ -108,7 +108,12 @@ export async function loadConfig(
 }
 
 async function readRawConfig(configPath: string, env: ChxConfigEnv): Promise<RawConfig> {
-  const mod = await import(pathToFileURL(configPath).href)
+  let mod: Record<string, unknown>
+  try {
+    mod = await importModuleFile(configPath)
+  } catch (error) {
+    throw enrichConfigLoadError(error, configPath)
+  }
   const candidate = (mod.default ?? mod.config) as ChxConfigInput | undefined
   if (!candidate) {
     throw new Error(
@@ -120,6 +125,26 @@ async function readRawConfig(configPath: string, env: ChxConfigEnv): Promise<Raw
   debug('config', `config export is ${isFn ? 'function' : 'object'} (path=${configPath})`)
   const raw = isFn ? await candidate(env) : (candidate as ChxConfig)
   return { raw, path: configPath }
+}
+
+export function parseMissingModule(message: string): string | undefined {
+  const match =
+    message.match(/cannot find (?:module|package) ['"]([^'"]+)['"]/i) ??
+    message.match(/cannot resolve ['"]([^'"]+)['"]/i)
+  return match?.[1]
+}
+
+function enrichConfigLoadError(error: unknown, configPath: string): Error {
+  const message = error instanceof Error ? error.message : String(error)
+  const missing = parseMissingModule(message)
+  if (missing) {
+    return new Error(
+      `Config at ${configPath} could not load its dependencies: cannot find "${missing}".\n` +
+        `Install dependencies in this project first: bun install (or npm install / pnpm install).`,
+      { cause: error },
+    )
+  }
+  return error instanceof Error ? error : new Error(message)
 }
 
 async function readProfileLayer(
