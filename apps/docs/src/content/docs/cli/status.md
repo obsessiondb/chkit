@@ -60,7 +60,7 @@ chkit status --json
   "total": 5,
   "applied": 3,
   "pending": 2,
-  "pendingMigrations": ["0004_add_column.sql", "0005_create_index.sql"],
+  "pendingMigrations": ["20260604104251_add_column.sql", "20260604105133_create_index.sql"],
   "checksumMismatchCount": 0,
   "checksumMismatches": []
 }

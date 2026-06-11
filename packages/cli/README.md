@@ -19,8 +19,10 @@ Define your ClickHouse schema in TypeScript, generate migrations automatically, 
 ## Install
 
 ```bash
-bun add -d chkit
+bun add -d chkit @chkit/core
 ```
+
+`@chkit/core` provides the `table()` / schema DSL your `*.schema.ts` files import, so it is required alongside the CLI.
 
 ## Usage
 
