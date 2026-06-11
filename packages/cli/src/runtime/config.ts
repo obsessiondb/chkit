@@ -134,6 +134,27 @@ export function parseMissingModule(message: string): string | undefined {
   return match?.[1]
 }
 
+/**
+ * Transpile/build failures (e.g. a syntax error in clickhouse.config.ts) throw
+ * an AggregateError whose top-level message is only a summary like
+ * "2 errors building config.ts"; the actual diagnostics live in `.errors`.
+ * Surface them so the user can see what to fix (#21).
+ */
+export function collectAggregateErrorMessages(error: unknown): string[] {
+  if (!error || typeof error !== 'object') return []
+  const sub = (error as { errors?: unknown }).errors
+  if (!Array.isArray(sub)) return []
+  return sub
+    .map((entry) => {
+      if (entry instanceof Error) return entry.message
+      if (entry && typeof entry === 'object' && 'message' in entry) {
+        return String((entry as { message: unknown }).message)
+      }
+      return String(entry)
+    })
+    .filter((message) => message.trim().length > 0)
+}
+
 function enrichConfigLoadError(error: unknown, configPath: string): Error {
   const message = error instanceof Error ? error.message : String(error)
   const missing = parseMissingModule(message)
@@ -141,6 +162,14 @@ function enrichConfigLoadError(error: unknown, configPath: string): Error {
     return new Error(
       `Config at ${configPath} could not load its dependencies: cannot find "${missing}".\n` +
         `Install dependencies in this project first: bun install (or npm install / pnpm install).`,
+      { cause: error },
+    )
+  }
+  const subErrors = collectAggregateErrorMessages(error)
+  if (subErrors.length > 0) {
+    return new Error(
+      `Failed to build config ${configPath} (${subErrors.length} error${subErrors.length === 1 ? '' : 's'}):\n` +
+        subErrors.map((m) => `  - ${m}`).join('\n'),
       { cause: error },
     )
   }

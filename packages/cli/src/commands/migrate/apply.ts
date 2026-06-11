@@ -36,6 +36,34 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** One-line, length-capped preview of a SQL statement for error messages. */
+export function previewStatement(sql: string, max = 120): string {
+  const oneLine = sql.replace(/\s+/g, ' ').trim()
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
+}
+
+/**
+ * Wrap a statement-execution failure with the context a user needs to locate
+ * it (#10): the migration file, the failed statement's position, and a SQL
+ * preview — on top of the cleaned ClickHouse message. Without this, a rejected
+ * migration surfaces only the raw CH exception with no file or statement.
+ */
+export function statementError(input: {
+  file: string
+  index: number
+  total: number
+  statement: string
+  error: unknown
+}): Error {
+  const wrapped = new Error(
+    `Migration ${input.file} failed at statement ${input.index + 1} of ${input.total}:\n` +
+      `  ${previewStatement(input.statement)}\n` +
+      errorMessage(input.error),
+  )
+  if (input.error instanceof Error && input.error.stack) wrapped.stack = input.error.stack
+  return wrapped
+}
+
 function syncOperationState(
   index: number,
   operationType: string,
@@ -105,18 +133,22 @@ export async function applyMigration(input: {
     const statement = statements[i] as string
     const operation = operationSummaries[i]
     if (operation?.mode === 'async') {
-      await applyAsyncStatement({
-        db,
-        journalStore,
-        sql: statement,
-        migrationName: file,
-        migrationChecksum,
-        statementIndex: i,
-        operationType: operation.type,
-        operationKey: operation.key,
-        beforeRetry: operation.beforeRetry,
-        log: (line) => console.log(line),
-      })
+      try {
+        await applyAsyncStatement({
+          db,
+          journalStore,
+          sql: statement,
+          migrationName: file,
+          migrationChecksum,
+          statementIndex: i,
+          operationType: operation.type,
+          operationKey: operation.key,
+          beforeRetry: operation.beforeRetry,
+          log: (line) => console.log(line),
+        })
+      } catch (error) {
+        throw statementError({ file, index: i, total: statements.length, statement, error })
+      }
       // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
       continue
     }
@@ -144,7 +176,7 @@ export async function applyMigration(input: {
           Date.now,
         ),
       )
-      throw error
+      throw statementError({ file, index: i, total: statements.length, statement, error })
     }
     // Mark completed as soon as the statement has executed — BEFORE waiting for
     // DDL propagation. The statement already ran, so if the propagation wait
