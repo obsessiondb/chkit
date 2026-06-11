@@ -46,6 +46,11 @@ bunx chkit check
 
 All commands support `--json` for machine-readable output and `--config <path>` to specify a custom config file.
 
+## Requirements
+
+- **Node 20+** or **Bun** — chkit loads your TypeScript config and schema files on both runtimes.
+- **ClickHouse 24.x or newer** — chkit targets recent ClickHouse (self-hosted, ClickHouse Cloud, or ObsessionDB). Some schema features are version-gated; see [ClickHouse compatibility](https://chkit.obsessiondb.com/guides/clickhouse-compatibility/).
+
 ## Plugins
 
 | Plugin | Description |
