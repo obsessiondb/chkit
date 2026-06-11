@@ -60,6 +60,12 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     ? sortByName(def.projections).map(canonicalizeProjection)
     : undefined
 
+  const orderBy = normalizeKeyColumns(def.orderBy)
+  // ClickHouse derives the primary key from ORDER BY when PRIMARY KEY is
+  // omitted. Mirror that so a table with `orderBy` but no `primaryKey` is
+  // valid instead of crashing on `undefined.flatMap`.
+  const primaryKey = normalizeKeyColumns(def.primaryKey)
+
   return {
     ...def,
     database: def.database.trim(),
@@ -72,8 +78,8 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
       : undefined,
     engine: normalizeEngine(def.engine),
     columns: def.columns.map(canonicalizeColumn),
-    primaryKey: normalizeKeyColumns(def.primaryKey),
-    orderBy: normalizeKeyColumns(def.orderBy),
+    primaryKey: primaryKey.length > 0 ? primaryKey : orderBy,
+    orderBy,
     uniqueKey: def.uniqueKey ? normalizeKeyColumns(def.uniqueKey) : undefined,
     partitionBy: def.partitionBy ? normalizeSQLFragment(def.partitionBy) : undefined,
     ttl: def.ttl ? normalizeSQLFragment(def.ttl) : undefined,

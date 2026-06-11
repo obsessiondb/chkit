@@ -201,6 +201,7 @@ async function run(): Promise<void> {
     isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
     jsonMode: argv.includes('--json'),
     flags: initFlags,
+    config,
   }
 
   await pluginRuntime.runOnInit(initCtx)

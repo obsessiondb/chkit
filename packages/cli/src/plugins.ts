@@ -33,6 +33,13 @@ export interface LoadedPlugin {
   options: Record<string, unknown>
   rawOptions: Record<string, unknown>
   plugin: ChxPlugin
+  /**
+   * True for built-in plugins (e.g. `core`) loaded by the CLI itself rather
+   * than from the user's config. Their hook/command errors are surfaced raw,
+   * without the `Plugin "<name>" failed in ...` wrapper that only makes sense
+   * for third-party plugins the user explicitly registered.
+   */
+  internal?: boolean
 }
 
 export interface PluginRuntime {
@@ -166,6 +173,7 @@ export interface ChxOnInitContext {
   isInteractive: boolean
   jsonMode: boolean
   flags: ParsedFlags
+  config: ResolvedChxConfig
   options: Record<string, unknown>
 }
 

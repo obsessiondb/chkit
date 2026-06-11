@@ -84,6 +84,7 @@ interface ObsessionDBPlugin {
 			isInteractive: boolean
 			jsonMode: boolean
 			flags: Record<string, string | string[] | boolean | undefined>
+			config?: ResolvedChxConfig
 		}): Promise<void>
 		onSchemaLoaded(context: {
 			config: ResolvedChxConfig
@@ -309,7 +310,11 @@ function createObsessionDBPlugin(
 				}
 				if (service) {
 					console.log(`obsessiondb: using service "${service.service_name}"\n`)
-				} else if (context.command === 'query') {
+				} else if (context.command === 'query' || context.config?.clickhouse) {
+					// Suppress the "no service selected" reminder when the user has a
+					// direct `clickhouse` target configured: ObsessionDB was layered in
+					// from a global `chkit obsessiondb login` profile, not chosen for this
+					// project, so service selection is irrelevant and the notice is noise.
 					return
 				} else {
 					console.log(

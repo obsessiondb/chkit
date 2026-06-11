@@ -48,6 +48,6 @@ export function splitTopLevelComma(input: string): string[] {
   return out
 }
 
-export function normalizeKeyColumns(values: string[]): string[] {
-  return values.flatMap((value) => splitTopLevelComma(value.trim()))
+export function normalizeKeyColumns(values: string[] | undefined): string[] {
+  return (values ?? []).flatMap((value) => splitTopLevelComma(value.trim()))
 }

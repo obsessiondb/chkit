@@ -36,7 +36,7 @@ export interface JournalStore {
 
 const DEFAULT_JOURNAL_TABLE = '_chkit_migrations'
 
-function resolveJournalTableName(): string {
+export function resolveJournalTableName(): string {
   const candidate = process.env.CHKIT_JOURNAL_TABLE?.trim()
   if (!candidate) return DEFAULT_JOURNAL_TABLE
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate)) {
