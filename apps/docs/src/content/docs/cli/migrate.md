@@ -123,7 +123,7 @@ chkit migrate --apply --table analytics.events
   "schemaVersion": 1,
   "mode": "plan",
   "scope": { "enabled": false },
-  "pending": ["0004_add_column.sql", "0005_create_index.sql"]
+  "pending": ["20260604104251_add_column.sql", "20260604105133_create_index.sql"]
 }
 ```
 
@@ -136,7 +136,7 @@ chkit migrate --apply --table analytics.events
   "mode": "execute",
   "scope": { "enabled": false },
   "applied": [
-    { "name": "0004_add_column.sql", "appliedAt": "2025-06-15T10:30:00.000Z", "checksum": "a1b2c3..." }
+    { "name": "20260604104251_add_column.sql", "appliedAt": "2025-06-15T10:30:00.000Z", "checksum": "a1b2c3..." }
   ]
 }
 ```
@@ -151,7 +151,7 @@ chkit migrate --apply --table analytics.events
   "scope": { "enabled": false },
   "error": "Checksum mismatch detected on applied migrations",
   "checksumMismatches": [
-    { "name": "0002_init.sql", "expected": "abc123...", "actual": "def456..." }
+    { "name": "20260604090000_init.sql", "expected": "abc123...", "actual": "def456..." }
   ]
 }
 ```
@@ -165,10 +165,10 @@ chkit migrate --apply --table analytics.events
   "mode": "execute",
   "scope": { "enabled": false },
   "error": "Blocked destructive migration execution. Re-run with --allow-destructive or set safety.allowDestructive=true after review.",
-  "destructiveMigrations": ["0005_drop_old_table.sql"],
+  "destructiveMigrations": ["20260605112000_drop_old_table.sql"],
   "destructiveOperations": [
     {
-      "migration": "0005_drop_old_table.sql",
+      "migration": "20260605112000_drop_old_table.sql",
       "type": "drop_table",
       "key": "default.old_table",
       "risk": "danger",
