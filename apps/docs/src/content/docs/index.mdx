@@ -2,8 +2,14 @@
 title: chkit Documentation
 description: Public docs for chkit, a ClickHouse schema and migration CLI for TypeScript projects.
 template: splash
+prev: false
+next: false
 hero:
-  tagline: Run schema changes with confidence.
+  title: Run schema changes with confidence.
+  tagline: ClickHouse schema management and migrations, in TypeScript.
+  image:
+    alt: A worker assembling scaffolding
+    file: ../../assets/chkit-scaffold.png
   actions:
     - text: Getting Started
       link: /getting-started/
@@ -11,16 +17,47 @@ hero:
     - text: CLI Overview
       link: /cli/overview/
       icon: right-arrow
+    - text: Configuration
+      link: /configuration/overview/
+      icon: right-arrow
+    - text: Schema Reference
+      link: /schema/dsl-reference/
+      icon: right-arrow
 ---
 
-import { LinkCard, CardGrid } from '@astrojs/starlight/components';
-
-## What you will find here
-
-<CardGrid stagger>
-	<LinkCard title="Quick Start" href="/getting-started/with-an-example/" description="Scaffold a working chkit project from an example in one command." />
-	<LinkCard title="CLI Reference" href="/cli/overview/" description="Learn each command, expected output, and operational behavior." />
-	<LinkCard title="Config Guide" href="/configuration/overview/" description="Use clickhouse.config.ts to wire schema, migration paths, and safety settings." />
-	<LinkCard title="Schema Reference" href="/schema/dsl-reference/" description="Define tables, views, and materialized views with the TypeScript DSL." />
-	<LinkCard title="CI/CD Integration" href="/guides/ci-cd/" description="Run schema validation and migration deployment in CI pipelines." />
-</CardGrid>
+<section class="chk-compat not-content">
+	<p class="chk-compat-label">Compatible with</p>
+	<ul class="chk-compat-grid">
+		<li class="chk-compat-item chk-compat-item--primary">
+			<a href="https://obsessiondb.com" target="_blank" rel="noopener noreferrer">
+				<img class="chk-compat-logo chk-logo--dark" src="/logos/obsessiondb-dark.svg" alt="" />
+				<img class="chk-compat-logo chk-logo--light" src="/logos/obsessiondb-light.svg" alt="" />
+				ObsessionDB
+			</a>
+		</li>
+		<li class="chk-compat-item">
+			<a href="https://clickhouse.com/cloud" target="_blank" rel="noopener noreferrer">
+				<img class="chk-compat-logo" src="/logos/clickhouse.svg" alt="" />
+				ClickHouse Cloud
+			</a>
+		</li>
+		<li class="chk-compat-item">
+			<a href="https://altinity.com" target="_blank" rel="noopener noreferrer">
+				<img class="chk-compat-logo" src="/logos/altinity.svg" alt="" />
+				Altinity
+			</a>
+		</li>
+		<li class="chk-compat-item">
+			<a href="https://clickhouse.com/docs/en/install" target="_blank" rel="noopener noreferrer">
+				<img class="chk-compat-logo" src="/logos/clickhouse.svg" alt="" />
+				Self-hosted ClickHouse
+			</a>
+		</li>
+		<li class="chk-compat-item chk-compat-item--muted">
+			<span>
+				<img class="chk-compat-logo" src="/logos/clickhouse.svg" alt="" />
+				…and any other ClickHouse
+			</span>
+		</li>
+	</ul>
+</section>
