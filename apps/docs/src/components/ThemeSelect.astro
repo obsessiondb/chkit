@@ -1,0 +1,49 @@
+---
+/**
+ * Override of Starlight's ThemeSelect.
+ * Replaces the dark / light / auto <select> dropdown with a single icon
+ * button that flips straight between dark and light. The sun/moon icons
+ * are swapped via CSS based on :root[data-theme] (see custom.css).
+ */
+import { Icon } from '@astrojs/starlight/components';
+---
+
+<starlight-theme-toggle>
+	<button type="button" class="chk-theme-toggle" aria-label="Toggle dark mode">
+		<Icon name="sun" class="chk-theme-sun" />
+		<Icon name="moon" class="chk-theme-moon" />
+	</button>
+</starlight-theme-toggle>
+
+<script>
+	type Theme = 'dark' | 'light';
+
+	const storageKey = 'starlight-theme';
+
+	const getPreferredColorScheme = (): Theme =>
+		matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+
+	const loadTheme = (): Theme => {
+		const stored = typeof localStorage !== 'undefined' && localStorage.getItem(storageKey);
+		return stored === 'light' || stored === 'dark' ? stored : getPreferredColorScheme();
+	};
+
+	function applyTheme(theme: Theme): void {
+		document.documentElement.dataset.theme = theme;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(storageKey, theme);
+	}
+
+	class StarlightThemeToggle extends HTMLElement {
+		constructor() {
+			super();
+			applyTheme(loadTheme());
+			this.querySelector('button')?.addEventListener('click', () => {
+				const next: Theme =
+					document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+				applyTheme(next);
+			});
+		}
+	}
+
+	customElements.define('starlight-theme-toggle', StarlightThemeToggle);
+</script>
