@@ -13,18 +13,15 @@ export default defineConfig({
 			title: 'chkit Docs',
 			description: 'Public documentation for chkit, the ClickHouse schema and migration CLI.',
 			customCss: ['./src/styles/custom.css'],
-			...(isDev && {
-				components: {
-					Footer: './src/components/Footer.astro',
-				},
-			}),
+			components: {
+				Header: './src/components/Header.astro',
+				Hero: './src/components/Hero.astro',
+				Footer: './src/components/Footer.astro',
+				SiteTitle: './src/components/SiteTitle.astro',
+				SocialIcons: './src/components/SocialIcons.astro',
+				ThemeSelect: './src/components/ThemeSelect.astro',
+			},
 			sidebar: [
-				{
-					label: 'Overview',
-					items: [
-						{ label: 'Introduction', slug: 'index' },
-					],
-				},
 				{
 					label: 'Getting Started',
 					items: [

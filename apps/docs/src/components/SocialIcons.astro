@@ -1,0 +1,65 @@
+---
+/**
+ * Override of Starlight's SocialIcons.
+ * Renders any configured social links, then a GitHub "stars" badge.
+ * The star count is filled client-side from the GitHub API and
+ * degrades gracefully to a "Star" label if the request fails.
+ */
+import config from 'virtual:starlight/user-config';
+import { Icon } from '@astrojs/starlight/components';
+
+const links = config.social || [];
+const repo = 'obsessiondb/chkit';
+---
+
+{
+	links.map(({ label, href, icon }) => (
+		<a href={href} rel="me" class="sl-flex social-link">
+			<span class="sr-only">{label}</span>
+			<Icon name={icon} />
+		</a>
+	))
+}
+
+<a class="chk-gh-stars" href={`https://github.com/${repo}`} target="_blank" rel="noopener noreferrer">
+	<svg class="chk-gh-mark" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+		<path
+			d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+		/>
+	</svg>
+	<svg class="chk-gh-star-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+		<path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27Z" />
+	</svg>
+	<span data-gh-stars>Star</span>
+</a>
+
+<script is:inline define:vars={{ repo }}>
+	(async () => {
+		const el = document.querySelector('[data-gh-stars]');
+		if (!el) return;
+		try {
+			const res = await fetch(`https://api.github.com/repos/${repo}`);
+			if (!res.ok) return;
+			const data = await res.json();
+			const n = data.stargazers_count;
+			if (typeof n === 'number') {
+				el.textContent = n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+			}
+		} catch {
+			/* keep the "Star" fallback */
+		}
+	})();
+</script>
+
+<style>
+	@layer starlight.core {
+		.social-link {
+			color: var(--sl-color-text-accent);
+			padding: 0.5em;
+			margin: -0.5em;
+		}
+		.social-link:hover {
+			opacity: 0.66;
+		}
+	}
+</style>
