@@ -1,0 +1,50 @@
+---
+/**
+ * Override of Starlight's SiteTitle.
+ * Renders the brand wordmark "chkit" (dropping the "Docs" suffix from the
+ * configured site title) in the Goldman display face. Styling — font and
+ * neutral (non-accent) colour — lives in custom.css (.chk-wordmark).
+ */
+const { siteTitleHref, entry } = Astro.locals.starlightRoute;
+const isSplash = entry.data.template === 'splash';
+---
+
+<a href={siteTitleHref} class="site-title sl-flex chk-wordmark">
+	<span translate="no">ch-kit</span>
+	{!isSplash && <span class="chk-wordmark-badge">Docs</span>}
+</a>
+
+<nav class="chk-topnav" aria-label="Primary">
+	<a href="/">Home</a>
+	<a href="/getting-started/">Documentation</a>
+</nav>
+
+{
+	/* Splash pages have no Starlight sidebar/hamburger, so the collapsed nav
+	   above has no mobile affordance. Provide one (no-JS <details> menu).
+	   Doc pages keep Starlight's own menu button. */
+	isSplash && (
+		<details class="chk-navmenu">
+			<summary aria-label="Menu">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<path d="M3 6h18M3 12h18M3 18h18" stroke-linecap="round" />
+				</svg>
+			</summary>
+			<nav class="chk-navmenu-list" aria-label="Primary">
+				<a href="/">Home</a>
+				<a href="/getting-started/">Documentation</a>
+			</nav>
+		</details>
+	)
+}
+
+<style>
+	@layer starlight.core {
+		.site-title {
+			align-items: center;
+			white-space: nowrap;
+			text-decoration: none;
+			min-width: 0;
+		}
+	}
+</style>

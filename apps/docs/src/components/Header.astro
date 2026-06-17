@@ -1,0 +1,52 @@
+---
+/**
+ * Override of Starlight's Header.
+ * Renders the default nav, then an ob-db-style breadcrumb subheader that
+ * spans the full width below the nav, above all three content columns.
+ * It is `position: fixed` (see .chk-subheader) so it escapes the nav box;
+ * the columns are offset downward by --chk-subheader-h in custom.css.
+ */
+import Default from '@astrojs/starlight/components/Header.astro';
+
+const { sidebar, entry } = Astro.locals.starlightRoute;
+const title = entry.data.title;
+const isSplash = entry.data.template === 'splash';
+
+type SidebarItem =
+	| { type: 'link'; label: string; isCurrent: boolean }
+	| { type: 'group'; label: string; entries: SidebarItem[] };
+
+function findGroupTrail(entries: SidebarItem[], trail: string[]): string[] | null {
+	for (const item of entries) {
+		if (item.type === 'group') {
+			const found = findGroupTrail(item.entries, [...trail, item.label]);
+			if (found) return found;
+		} else if (item.isCurrent) {
+			return trail;
+		}
+	}
+	return null;
+}
+
+const groups = isSplash ? [] : findGroupTrail(sidebar as SidebarItem[], []) ?? [];
+---
+
+<Default><slot /></Default>
+
+{
+	!isSplash && (
+		<div class="chk-subheader not-content">
+			<nav class="chk-breadcrumb" aria-label="Breadcrumb">
+				<a href="/">Docs</a>
+				{groups.map((g) => (
+					<>
+						<span class="chk-crumb-sep" aria-hidden="true">›</span>
+						<span>{g}</span>
+					</>
+				))}
+				<span class="chk-crumb-sep" aria-hidden="true">›</span>
+				<span class="chk-crumb-current">{title}</span>
+			</nav>
+		</div>
+	)
+}
