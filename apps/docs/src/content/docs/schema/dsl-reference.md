@@ -425,3 +425,7 @@ When a property changes, chkit determines whether the table can be altered in pl
 **Alterable** (ALTER in place): columns, indexes, projections, settings, TTL, comment
 
 Views and materialized views always use drop + recreate.
+
+:::danger
+Changing a structural property on an existing table generates a `DROP TABLE` followed by `CREATE TABLE` — **all rows are permanently deleted and the table is recreated empty**. The data is not copied over. The drop is classified `risk=danger` (blocked without `--allow-destructive`) and `chkit migrate` flags it with the distinct `table_recreate_data_loss` warning. To preserve data, migrate by hand instead: create a new table with the desired structure, `INSERT INTO new SELECT ... FROM old`, then swap names and drop the old table.
+:::

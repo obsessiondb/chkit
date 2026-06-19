@@ -53,6 +53,7 @@ Each destructive operation includes a warning code, reason, impact description, 
 | Warning code | Operation |
 |-------------|-----------|
 | `drop_table_data_loss` | `DROP TABLE` |
+| `table_recreate_data_loss` | `DROP TABLE` + `CREATE TABLE` recreate from a structural change (`engine` / `orderBy` / `primaryKey` / `partitionBy` / `uniqueKey`) — all rows lost, table recreated empty |
 | `drop_column_irreversible` | `DROP COLUMN` |
 | `drop_view_dependency_break` | `DROP VIEW` / `DROP MATERIALIZED VIEW` |
 | `destructive_operation_review_required` | Other destructive operations |
