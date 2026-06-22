@@ -27,16 +27,21 @@ export const statusCommand: ChxPluginCommand = {
     const files = await listMigrations(migrationsDir)
     const journal = await journalStore.readJournal()
     const appliedNames = new Set(journal.applied.map((entry) => entry.name))
+    // Scope "Applied" to migrations that exist in this project's migrations dir
+    // (#31). The journal table can be shared across tenants/services on
+    // ObsessionDB, so journal.applied.length counts other projects' rows too and
+    // can exceed this project's total. The intersection is always <= total.
+    const applied = files.filter((f) => appliedNames.has(f))
     const pending = files.filter((f) => !appliedNames.has(f))
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
 
-    debug('status', `files=${files.length}, applied=${journal.applied.length}, pending=${pending.length}, checksumMismatches=${checksumMismatches.length}`)
+    debug('status', `files=${files.length}, applied=${applied.length}, pending=${pending.length}, checksumMismatches=${checksumMismatches.length}`)
 
     const databaseMissing = journalStore.databaseMissing
     const payload = {
       migrationsDir,
       total: files.length,
-      applied: journal.applied.length,
+      applied: applied.length,
       pending: pending.length,
       pendingMigrations: pending,
       checksumMismatchCount: checksumMismatches.length,
@@ -56,7 +61,7 @@ export const statusCommand: ChxPluginCommand = {
 
     console.log(`Migrations directory: ${migrationsDir}`)
     console.log(`Total migrations:     ${files.length}`)
-    console.log(`Applied:              ${journal.applied.length}`)
+    console.log(`Applied:              ${applied.length}`)
     console.log(`Pending:              ${pending.length}`)
 
     if (pending.length > 0) {
