@@ -13,6 +13,13 @@
  * (check-workspace-deps) proves the inputs are right; this proves the packed
  * OUTPUT is right, exercising the real pack path.
  *
+ * It also asserts that no `source` export condition (`./src/*.ts`, load-bearing
+ * for in-repo typecheck against unbuilt siblings) is actually shipped in the
+ * tarball. The `source` condition stays in the published package.json — Node,
+ * Bun, and tsc all ignore it and fall through to `types`/`default` (dist) — but
+ * the file it points at must never ship, or a bundler that honors `source`
+ * would load untranspiled TypeScript. This is the guard for that invariant.
+ *
  * Run after `build`, before publish.
  *
  * Follow-up (out of scope here, needs a live service + credentials): an
@@ -27,6 +34,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
 	buildWorkspaceVersions,
+	type ExportsField,
 	isWorkspaceSpecifier,
 	type PackageJson,
 	readWorkspacePackages,
@@ -46,13 +54,17 @@ function main(): void {
 		if (wsPkg.pkg.private) continue
 		checked++
 
-		const manifest = packAndReadManifest(wsPkg, workspaceVersions)
+		const { manifest, entries } = packAndReadManifest(wsPkg, workspaceVersions)
 
 		for (const issue of findStaleInternalDeps(
 			manifest,
 			internalNames,
 			workspaceVersions,
 		)) {
+			failures.push(`${wsPkg.pkg.name}: ${issue}`)
+		}
+
+		for (const issue of findShippedSourceExports(manifest, entries)) {
 			failures.push(`${wsPkg.pkg.name}: ${issue}`)
 		}
 	}
@@ -79,9 +91,16 @@ function main(): void {
 	)
 }
 
+/** A packed tarball: its published package.json plus the files it ships. */
+interface PackedTarball {
+	manifest: PackageJson
+	/** Paths relative to the package root, e.g. `dist/index.js`, `package.json`. */
+	entries: string[]
+}
+
 /**
  * Packs a package exactly as the release script publishes it and returns the
- * package.json inside the tarball.
+ * package.json inside the tarball along with the list of shipped files.
  *
  * Mirrors scripts/manual-release.ts: resolve every `workspace:` specifier to
  * the current workspace version on disk, pack, then restore the original
@@ -93,7 +112,7 @@ function main(): void {
 function packAndReadManifest(
 	wsPkg: WorkspacePackage,
 	workspaceVersions: Map<string, string>,
-): PackageJson {
+): PackedTarball {
 	const originalContent = readFileSync(wsPkg.pkgJsonPath, 'utf8')
 	const resolved = resolveWorkspaceDeps(wsPkg.pkg, workspaceVersions)
 
@@ -112,8 +131,8 @@ function packAndReadManifest(
 	}
 }
 
-/** Packs the package as-is on disk and returns the tarball's package.json. */
-function packAndExtract(wsPkg: WorkspacePackage): PackageJson {
+/** Packs the package as-is on disk and returns its manifest and file list. */
+function packAndExtract(wsPkg: WorkspacePackage): PackedTarball {
 	const outDir = mkdtempSync(join(tmpdir(), 'chkit-pack-'))
 
 	const packed = spawnSync(
@@ -132,6 +151,15 @@ function packAndExtract(wsPkg: WorkspacePackage): PackageJson {
 		throw new Error(`No tarball produced for ${wsPkg.pkg.name} in ${outDir}`)
 	}
 
+	const listed = spawnSync('tar', ['-tzf', join(outDir, tarball)], {
+		encoding: 'utf8',
+	})
+	if (listed.status !== 0) {
+		throw new Error(
+			`Failed to list ${tarball} for ${wsPkg.pkg.name}:\n${listed.stderr}`,
+		)
+	}
+
 	const extracted = spawnSync(
 		'tar',
 		['-xzf', join(outDir, tarball), '-C', outDir],
@@ -146,9 +174,18 @@ function packAndExtract(wsPkg: WorkspacePackage): PackageJson {
 	}
 
 	// npm tarballs always nest sources under a top-level `package/` directory.
-	return JSON.parse(
+	const entries = listed.stdout
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.map((line) => line.replace(/^package\//, ''))
+		.filter((line) => line.length > 0 && !line.endsWith('/'))
+
+	const manifest = JSON.parse(
 		readFileSync(join(outDir, 'package', 'package.json'), 'utf8'),
 	) as PackageJson
+
+	return { manifest, entries }
 }
 
 function findStaleInternalDeps(
@@ -182,6 +219,47 @@ function findStaleInternalDeps(
 					`${field}["${name}"] = "${specifier}" but current workspace version is "${expected}"`,
 				)
 			}
+		}
+	}
+
+	return issues
+}
+
+/** Collects every `source` condition target declared anywhere in `exports`. */
+function collectSourceTargets(node: ExportsField | undefined): string[] {
+	if (!node || typeof node === 'string') return []
+
+	const targets: string[] = []
+	for (const [key, value] of Object.entries(node)) {
+		if (key === 'source' && typeof value === 'string') {
+			targets.push(value)
+		} else {
+			targets.push(...collectSourceTargets(value))
+		}
+	}
+	return targets
+}
+
+/**
+ * Asserts no `source` export target (`./src/*.ts`) is actually shipped in the
+ * tarball. The condition itself stays in package.json — consumers ignore it —
+ * but the file it points at must not ship, or a bundler honoring `source` would
+ * load untranspiled TypeScript instead of the built `dist` output.
+ */
+function findShippedSourceExports(
+	manifest: PackageJson,
+	entries: string[],
+): string[] {
+	const shipped = new Set(entries)
+	const issues: string[] = []
+
+	for (const target of collectSourceTargets(manifest.exports)) {
+		const normalized = target.replace(/^\.\//, '')
+		if (shipped.has(normalized)) {
+			issues.push(
+				`exports "source" target "${target}" is shipped in the tarball; ` +
+					'it must be excluded so consumers never resolve untranspiled source',
+			)
 		}
 	}
 

@@ -29,6 +29,9 @@ export const DEPENDENCY_FIELDS = [
 	'peerDependencies',
 ] as const
 
+/** A package.json `exports` subtree: a target string or nested conditions. */
+export type ExportsField = string | { [key: string]: ExportsField }
+
 export type PackageJson = {
 	name?: string
 	version?: string
@@ -37,6 +40,7 @@ export type PackageJson = {
 	devDependencies?: Record<string, string>
 	optionalDependencies?: Record<string, string>
 	peerDependencies?: Record<string, string>
+	exports?: ExportsField
 }
 
 export type WorkspacePackage = {

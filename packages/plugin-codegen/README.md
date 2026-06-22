@@ -7,8 +7,12 @@ Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This plugin 
 ## Install
 
 ```bash
-bun add -d @chkit/plugin-codegen
+bun add -d @chkit/plugin-codegen zod
 ```
+
+`zod` is a peer dependency (`^4.0.0`): the plugin uses it at runtime, and any
+generated Zod schemas (`emitZod: true`) import `zod` from your project. Install
+the same `zod` your project already uses to avoid duplicate copies.
 
 ## Usage
 

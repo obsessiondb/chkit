@@ -74,6 +74,27 @@ npx skills add obsessiondb/chkit
 
 See the [chkit documentation](https://chkit.obsessiondb.com).
 
+## Versioning & releases
+
+chkit is **pre-1.0**. While the version is `0.x`, the public API is still
+stabilizing and **any release may contain breaking changes** — this is the
+standard [SemVer](https://semver.org/#spec-item-4) `0.x` contract. Pin an exact
+version (or a tight range) if you need reproducible installs.
+
+- **`latest` tracks the current beta line.** Until 1.0 ships, installing
+  `chkit` with no tag (`bun add -d chkit`) gives you the latest `0.1.0-beta.x`
+  build. This is intentional for the pre-1.0 period.
+- **All publishable packages release in lockstep.** `chkit`, `create-chkit`,
+  and every `@chkit/*` package share a single version, so a given chkit version
+  always lines up with matching plugin and core versions — there is no
+  cross-package version skew.
+- **Public vs. internal surface.** The supported public API is the `chkit` CLI,
+  `@chkit/core`, and the `@chkit/plugin-*` packages. `@chkit/clickhouse` and
+  `@chkit/codegen` are internal and not meant to be installed directly.
+- **At 1.0** chkit will commit to real SemVer (breaking changes only in major
+  bumps) and a deprecation policy. Until then, treat minor/patch bumps as
+  potentially breaking.
+
 ## License
 
 [MIT](../../LICENSE)

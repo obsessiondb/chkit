@@ -31,6 +31,14 @@ The plugin is designed so your existing chkit workflow can stay the same.
 
 In `clickhouse.config.ts`, register `codegen(...)` from `@chkit/plugin-codegen`.
 
+:::note
+`zod` is a peer dependency (`^4.0.0`). Install it alongside the plugin — generated Zod schemas (`emitZod: true`) import `zod` from your project, so they resolve against your own copy rather than a bundled one.
+
+```sh
+bun add -d @chkit/plugin-codegen zod
+```
+:::
+
 Recommended typed setup:
 
 ```ts
