@@ -119,7 +119,12 @@
       "version": "0.1.0-beta.28",
       "dependencies": {
         "@chkit/core": "workspace:*",
+      },
+      "devDependencies": {
         "zod": "^4.3.6",
+      },
+      "peerDependencies": {
+        "zod": "^4.0.0",
       },
     },
     "packages/plugin-obsessiondb": {
@@ -130,7 +135,7 @@
         "@chkit/core": "workspace:*",
         "@orpc/client": "1.13.4",
         "@orpc/contract": "1.13.4",
-        "zod": "3.25.76",
+        "zod": "^4.3.6",
       },
     },
     "packages/plugin-pull": {
@@ -1467,6 +1472,8 @@
     "@chkit/plugin-backfill/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-codegen/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-obsessiondb/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-pull/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
