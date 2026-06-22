@@ -75,6 +75,8 @@ The journal is written after each migration, not batched. The table is created i
 
 The `--table` flag filters pending migrations to those containing operations targeting the matched tables. Migration SQL files are parsed for `-- operation:` comment markers to determine which tables they affect.
 
+A hand-written migration with no `-- operation:` markers has no determinable target tables. Rather than silently skip it (which would leave pending work unapplied while appearing successful), `--table` **includes** such migrations and prints a warning listing them. In `--json` mode they are reported in an `undeterminedMigrations` array. If you do not want a hand-written migration applied under a scoped run, add an `-- operation: <type> key=table:<db>.<table> risk=<risk>` marker so its scope can be determined.
+
 ### Plugin hooks
 
 The `onBeforeApply` plugin hook runs before each migration is executed and can transform the SQL statements. The `onAfterApply` hook runs after successful execution.
