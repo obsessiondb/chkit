@@ -111,9 +111,17 @@ async function cmdMigrate(
     return 0
   }
 
-  const pending = tableScope.enabled
-    ? await filterPendingByScope(migrationsDir, pendingAll, new Set(tableScope.matchedTables))
-    : pendingAll
+  let pending = pendingAll
+  let undeterminedScope: string[] = []
+  if (tableScope.enabled) {
+    const scoped = await filterPendingByScope(
+      migrationsDir,
+      pendingAll,
+      new Set(tableScope.matchedTables),
+    )
+    pending = scoped.inScope
+    undeterminedScope = scoped.undetermined
+  }
 
   if (pending.length === 0) {
     if (jsonMode) {
@@ -125,7 +133,12 @@ async function cmdMigrate(
   }
 
   if (jsonMode && !executeRequested) {
-    emitJson('migrate', { mode, scope: tableScope, pending })
+    emitJson('migrate', {
+      mode,
+      scope: tableScope,
+      pending,
+      ...(undeterminedScope.length > 0 ? { undeterminedMigrations: undeterminedScope } : {}),
+    })
     return 0
   }
 
@@ -133,6 +146,13 @@ async function cmdMigrate(
     if (tableScope.enabled) {
       console.log(`Table scope: ${tableScope.selector ?? ''} (${tableScope.matchCount} matched)`)
       for (const table of tableScope.matchedTables) console.log(`- ${table}`)
+    }
+    if (undeterminedScope.length > 0) {
+      console.log(
+        `⚠ ${undeterminedScope.length} pending migration(s) have no table markers; ` +
+          "including them because their target tables can't be determined under --table:",
+      )
+      for (const file of undeterminedScope) console.log(`  - ${file}`)
     }
     console.log(`Pending migrations: ${pending.length}`)
     for (const file of pending) {
@@ -217,7 +237,12 @@ async function cmdMigrate(
   }
 
   if (jsonMode) {
-    emitJson('migrate', { mode: 'execute', scope: tableScope, applied: appliedNow })
+    emitJson('migrate', {
+      mode: 'execute',
+      scope: tableScope,
+      applied: appliedNow,
+      ...(undeterminedScope.length > 0 ? { undeterminedMigrations: undeterminedScope } : {}),
+    })
     return 0
   }
 
