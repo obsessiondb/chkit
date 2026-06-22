@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  collectDestructiveOperationMarkers,
   collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
@@ -201,5 +202,49 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(marker?.key).toBe('default.events')
     expect(marker?.warningCode).toBe('drop_column_irreversible')
     expect(marker?.summary).toContain('DROP COLUMN')
+  })
+})
+
+describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () => {
+  test('a drop+create of the same table gets the distinct recreate warning', () => {
+    // What the planner emits for an engine/ORDER BY/PRIMARY KEY/PARTITION BY/
+    // UNIQUE KEY change: drop_table then create_table for the SAME key.
+    const sql = [
+      '-- operation: drop_table key=table:default.events risk=danger',
+      'DROP TABLE IF EXISTS default.events;',
+      '-- operation: create_table key=table:default.events risk=safe',
+      'CREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    ].join('\n')
+
+    const markers = collectDestructiveOperationMarkers('20260101_recreate.sql', sql)
+    expect(markers).toHaveLength(1)
+    const marker = markers[0]
+    expect(marker?.type).toBe('drop_table')
+    expect(marker?.warningCode).toBe('table_recreate_data_loss')
+    expect(marker?.impact).toContain('ALL ROWS')
+  })
+
+  test('a plain drop (no matching create) keeps the generic drop warning', () => {
+    const sql = [
+      '-- operation: drop_table key=table:default.old_events risk=danger',
+      'DROP TABLE IF EXISTS default.old_events;',
+    ].join('\n')
+
+    const markers = collectDestructiveOperationMarkers('20260101_drop.sql', sql)
+    expect(markers).toHaveLength(1)
+    expect(markers[0]?.warningCode).toBe('drop_table_data_loss')
+  })
+
+  test('dropping one table while creating a different one is not a recreate', () => {
+    const sql = [
+      '-- operation: drop_table key=table:default.old_events risk=danger',
+      'DROP TABLE IF EXISTS default.old_events;',
+      '-- operation: create_table key=table:default.new_events risk=safe',
+      'CREATE TABLE default.new_events (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    ].join('\n')
+
+    const markers = collectDestructiveOperationMarkers('20260101_swap.sql', sql)
+    expect(markers).toHaveLength(1)
+    expect(markers[0]?.warningCode).toBe('drop_table_data_loss')
   })
 })

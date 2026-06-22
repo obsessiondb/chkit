@@ -98,12 +98,26 @@ export function extractMigrationOperationSummaries(sql: string): MigrationOperat
   return summaries
 }
 
-function describeDestructiveOperation(type: string): {
+function describeDestructiveOperation(
+  type: string,
+  opts: { recreate?: boolean } = {}
+): {
   warningCode: string
   reason: string
   impact: string
   recommendation: string
 } {
+  if (type === 'drop_table' && opts.recreate) {
+    return {
+      warningCode: 'table_recreate_data_loss',
+      reason:
+        'A change to engine, ORDER BY, PRIMARY KEY, PARTITION BY, or UNIQUE KEY can only be applied by dropping and recreating this table.',
+      impact:
+        'ALL ROWS are permanently deleted — the table is recreated empty and existing data is NOT copied over.',
+      recommendation:
+        'Back up the data first, or migrate via a temporary table (rename, INSERT ... SELECT, then drop) before approving.',
+    }
+  }
   if (type === 'drop_table') {
     return {
       warningCode: 'drop_table_data_loss',
@@ -141,12 +155,22 @@ export function collectDestructiveOperationMarkers(
   migration: string,
   sql: string
 ): DestructiveOperationMarker[] {
+  // A table recreate emits a drop_table + create_table for the SAME key in the
+  // same migration (an engine/ORDER BY/PRIMARY KEY/PARTITION BY/UNIQUE KEY
+  // change). Flag those drops with a louder, distinct warning than a plain drop
+  // so the user knows all rows are lost and the table is recreated empty (#23).
+  const createdTableKeys = new Set(
+    extractMigrationOperationSummaries(sql)
+      .filter((op) => op.type === 'create_table')
+      .map((op) => op.key)
+  )
   return extractDestructiveOperationSummaries(sql).map((summary) => {
     const parsed = parseOperationLine(summary, null)
     const type = parsed?.type ?? 'unknown'
     const key = parsed?.key ?? 'unknown'
     const risk = parsed?.risk ?? 'danger'
-    const detail = describeDestructiveOperation(type)
+    const recreate = type === 'drop_table' && createdTableKeys.has(key)
+    const detail = describeDestructiveOperation(type, { recreate })
     return {
       migration,
       type,
