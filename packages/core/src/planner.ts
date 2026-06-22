@@ -431,6 +431,49 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   }
 }
 
+/**
+ * Creation depth of each refreshable materialized view, derived from its
+ * `refresh.dependsOn` edges (#41). A view declared `DEPENDS ON other_mv` must
+ * be created AFTER `other_mv` exists, so ordering create operations by
+ * ascending depth puts every dependency before the views that depend on it.
+ * Names alone are unsafe: a dependent MV whose name sorts first would otherwise
+ * be created first and fail.
+ */
+function materializedViewCreationDepth(
+  definitions: SchemaDefinition[],
+  byKey: Map<string, SchemaDefinition>
+): Map<string, number> {
+  const depth = new Map<string, number>()
+  const visiting = new Set<string>()
+
+  const compute = (key: string): number => {
+    const cached = depth.get(key)
+    if (cached !== undefined) return cached
+    // A dependency cycle has no valid creation order; stop recursing and let
+    // the alphabetical tiebreak apply rather than looping forever.
+    if (visiting.has(key)) return 0
+    const def = byKey.get(key)
+    if (!def || def.kind !== 'materialized_view') {
+      depth.set(key, 0)
+      return 0
+    }
+    visiting.add(key)
+    let result = 0
+    for (const dep of def.refresh?.dependsOn ?? []) {
+      const depKey = `materialized_view:${dep.database}.${dep.name}`
+      if (byKey.has(depKey)) result = Math.max(result, 1 + compute(depKey))
+    }
+    visiting.delete(key)
+    depth.set(key, result)
+    return result
+  }
+
+  for (const def of definitions) {
+    if (def.kind === 'materialized_view') compute(definitionKey(def))
+  }
+  return depth
+}
+
 export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
   const oldCanonical = canonicalizeDefinitions(oldDefinitions)
   const newCanonical = canonicalizeDefinitions(newDefinitions)
@@ -494,6 +537,7 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
+  const mvCreationDepth = materializedViewCreationDepth(newCanonical, newMap)
   operations.sort((a, b) => {
     const rank = (op: MigrationOperation): number => {
       if (op.type.startsWith('drop_')) return 0
@@ -506,6 +550,12 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     }
     const rankOrder = rank(a) - rank(b)
     if (rankOrder !== 0) return rankOrder
+    // Within materialized-view creates, order a DEPENDS ON target before the
+    // view that depends on it (#41), then fall back to a stable name order.
+    if (a.type === 'create_materialized_view' && b.type === 'create_materialized_view') {
+      const depthOrder = (mvCreationDepth.get(a.key) ?? 0) - (mvCreationDepth.get(b.key) ?? 0)
+      if (depthOrder !== 0) return depthOrder
+    }
     return a.key.localeCompare(b.key)
   })
 
