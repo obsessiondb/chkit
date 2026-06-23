@@ -165,7 +165,7 @@ function insertImport(source: string, importLine: string): string {
  * menu walks a human through these; without a TTY we hand the caller every path as explicit
  * commands so they can finish without reverse-engineering the CLI.
  *
- * TODO(next-PR): structured --json `next`/`needs` envelope so callers can chain without parsing prose (NUM-7392).
+ * TODO: structured --json `next`/`needs` envelope so callers can chain without parsing prose.
  */
 export function connectRunbookLines(): string[] {
   return [

@@ -99,7 +99,7 @@ describe('createJournalStore', () => {
   })
 
   test('readMigrationState parses the ObsessionDB remote-executor shape (operations JSON string, bool as string)', async () => {
-    // Regression (NUM-7391): the ObsessionDB workbench API returns every cell as
+    // Regression: the ObsessionDB workbench API returns every cell as
     // a string. `operations` (selected via toJSONString) arrives as a JSON string,
     // and `migration_completed` arrives as "true"/"false". Naive `(row.operations
     // ?? []).map` threw, and `Boolean("false")` is `true` — both must be parsed.

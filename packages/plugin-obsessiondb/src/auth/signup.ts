@@ -33,7 +33,7 @@ export interface SignupOptions {
  *    lives server-side keyed by email, so nothing has to persist on the client between runs.
  *  - Scripted/test: pass `--email` and `--code` together; the code's presence skips the re-send.
  *
- * TODO(next-PR): structured --json `next`/`needs` envelope so callers can chain without parsing prose (NUM-7392).
+ * TODO: structured --json `next`/`needs` envelope so callers can chain without parsing prose.
  */
 export async function runSignup(
   baseUrl: string,
