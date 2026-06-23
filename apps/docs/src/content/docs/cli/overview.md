@@ -40,6 +40,8 @@ These flags are available on every command that loads a config file:
 |------|------|---------|-------------|
 | `--config <path>` | string | `clickhouse.config.ts` | Path to the chkit config file |
 | `--json` | boolean | `false` | Emit machine-readable JSON output |
-| `--table <selector>` | string | — | Limit command scope to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`) |
+| `--table <selector>` | string | — | Limit command scope to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`). Honored only by `generate`, `migrate`, `drift`, and `check` (see note below) |
 | `--help` | boolean | — | Show help text |
 | `--version` | boolean | — | Print CLI version |
+
+`--table` is parsed by every command but only changes behavior for `generate`, `migrate`, `drift`, and `check`. Other commands (such as `status`, `codegen`, and `pull`) accept the flag but ignore it and operate on the full set, so `chkit status --table app.users` still reports unscoped totals.
