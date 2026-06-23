@@ -1,5 +1,5 @@
 ---
-"@chkit/clickhouse": minor
+"@chkit/clickhouse": patch
 ---
 
 Silence the built-in @clickhouse/client logger so a wrong password (or any connection error) no
