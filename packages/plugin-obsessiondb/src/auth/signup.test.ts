@@ -25,6 +25,14 @@ describe('slugifyOrgName', () => {
   test('produces distinct slugs across calls', () => {
     expect(slugifyOrgName('marc')).not.toBe(slugifyOrgName('marc'))
   })
+
+  test('collapses separator runs and strips leading/trailing dashes', () => {
+    expect(slugifyOrgName('--a..b--')).toMatch(/^a-b-[a-z0-9]{1,6}$/)
+  })
+
+  test('handles a long run of separators without leaving dashes', () => {
+    expect(slugifyOrgName(`${'-'.repeat(50)}x`)).toMatch(/^x-[a-z0-9]{1,6}$/)
+  })
 })
 
 describe('signupEmailRunbook', () => {

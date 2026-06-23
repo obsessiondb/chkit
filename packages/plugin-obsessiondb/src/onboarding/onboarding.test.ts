@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { connectRunbookLines, ensureObsessiondbPluginInSource } from './index'
+import { connectRunbookLines, ensureObsessiondbPluginInSource, runOnboarding } from './index'
 
 const INIT_CONFIG = `import { defineConfig } from '@chkit/core'
 
@@ -41,6 +41,16 @@ export default defineConfig({ plugins: [obsessiondb()] })
 
     expect(changed).toBe(false)
     expect(source).toBe(noPlugins)
+  })
+})
+
+describe('runOnboarding', () => {
+  // bun:test runs without a TTY, so an explicit `--connect claim` with no email can't finish
+  // signup. It must throw (non-zero exit) rather than fall through to next-steps with status 0.
+  test('throws on an explicit claim that cannot finish signup non-interactively', async () => {
+    await expect(
+      runOnboarding({ configPath: '/chkit-nonexistent/clickhouse.config.ts', connect: 'claim' }),
+    ).rejects.toThrow(/Signup did not complete/)
   })
 })
 

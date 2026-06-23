@@ -166,7 +166,9 @@ export function slugifyOrgName(name: string): string {
     name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
+      // The line above already collapsed every run to a single '-', so a leading/trailing dash is
+      // never doubled. Matching one char (not `-+`) avoids the polynomial-backtracking pattern.
+      .replace(/^-|-$/g, '')
       .slice(0, 32) || 'playground'
   const suffix = Math.random().toString(36).slice(2, 8)
   return `${base}-${suffix}`

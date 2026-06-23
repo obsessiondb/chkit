@@ -68,23 +68,30 @@ export async function runOnboarding(options: OnboardingOptions): Promise<void> {
     code: options.code,
     orgName: options.orgName,
   })
+  // A non-zero code is a hard failure (e.g. no email in a non-interactive run). runSignup has
+  // already printed the runbook; throw so an explicit `--connect claim` caller sees a non-zero exit
+  // instead of silently falling through to "next steps" with status 0.
   if (signupCode !== 0) {
-    log.warn('Signup did not complete. Run `chkit obsessiondb signup` to finish, then `chkit obsessiondb service claim`.')
-    return
+    throw new Error(
+      'Signup did not complete. Run `chkit obsessiondb signup` to finish, then `chkit obsessiondb service claim`.',
+    )
   }
 
   const creds = await loadCredentials()
-  if (!creds) {
-    log.warn('Could not load credentials after signup. Run `chkit obsessiondb service claim` to continue.')
-    return
-  }
+  // signup returned 0 but nothing was persisted: this is the two-step pause — the code was sent and
+  // runSignup printed the verify command. Not a failure; exit 0 so the caller can finish step 2.
+  if (!creds) return
 
   const claimCode = await runClaim(
     { ...creds, base_url: resolveBaseUrl(creds.base_url) },
     options.configPath,
     print,
   )
-  if (claimCode === 0) printNextSteps()
+  // runClaim prints its own diagnostics on failure; surface a non-zero exit for explicit callers.
+  if (claimCode !== 0) {
+    throw new Error('Could not claim a free instance. Run `chkit obsessiondb service claim` to retry.')
+  }
+  printNextSteps()
 }
 
 async function resolveChoice(options: OnboardingOptions): Promise<ConnectChoice> {

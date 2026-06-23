@@ -58,20 +58,24 @@ async function maybeRunOnboarding(configPath: string, options: InitOptions): Pro
   const interactive = process.stdin.isTTY === true
   if (options.yes || (!interactive && !explicit)) return false
 
+  // The plugin is an optional dependency: a missing import degrades to static next-steps. But a
+  // failure *inside* onboarding (bad OTP, failed claim) is a real error — only the import is
+  // guarded so onboarding failures propagate and automation sees a non-zero exit, not a false pass.
+  let runOnboarding: typeof import('@chkit/plugin-obsessiondb').runOnboarding
   try {
-    const { runOnboarding } = await import('@chkit/plugin-obsessiondb')
-    await runOnboarding({
-      configPath,
-      connect: options.connect,
-      email: options.email,
-      code: options.code,
-      orgName: options.orgName,
-    })
-    return true
+    ;({ runOnboarding } = await import('@chkit/plugin-obsessiondb'))
   } catch {
-    // Plugin not installed, or onboarding failed — fall back to printed next steps.
     return false
   }
+
+  await runOnboarding({
+    configPath,
+    connect: options.connect,
+    email: options.email,
+    code: options.code,
+    orgName: options.orgName,
+  })
+  return true
 }
 
 function parseInitOptions(argv: string[]): InitOptions {
