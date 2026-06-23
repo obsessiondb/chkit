@@ -1,7 +1,7 @@
 ---
-"@chkit/plugin-obsessiondb": minor
-"create-chkit": minor
-"chkit": minor
+"@chkit/plugin-obsessiondb": patch
+"create-chkit": patch
+"chkit": patch
 ---
 
 Add ObsessionDB onboarding to `chkit init` and `create-chkit`: a 3-way "how do you want to connect?" prompt covering an existing ClickHouse instance, an existing ObsessionDB account, and claiming a free ObsessionDB dev instance. Adds passwordless CLI signup (`chkit obsessiondb signup`, email + one-time code) with automatic personal-org creation, and `chkit obsessiondb service claim` to claim and provision a free instance, then write a ready-to-use connection.
