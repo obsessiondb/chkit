@@ -26,7 +26,7 @@ No command-specific flags. See [global flags](/cli/overview/#global-flags).
 - **Pending** migrations (on disk but not yet applied)
 - **Checksum mismatches** (applied migrations whose SHA-256 checksum no longer matches the file on disk)
 
-This command is read-only, but it requires a ClickHouse connection to read the journal table. It fails if no `clickhouse` connection is configured.
+`chkit status` requires a ClickHouse connection and fails if no `clickhouse` connection is configured. It does not change your schema or migration history, but it is **not a pure read**: before reading the journal it ensures the `_chkit_migrations` table exists and has the current columns, issuing idempotent `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements. The connecting user therefore needs privileges to create and alter the journal table, not just `SELECT` — provision credentials accordingly rather than a read-only user.
 
 ## Examples
 
