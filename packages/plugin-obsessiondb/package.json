@@ -43,6 +43,7 @@
   "dependencies": {
     "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*",
+    "@clack/prompts": "^1.4.0",
     "@orpc/client": "1.13.4",
     "@orpc/contract": "1.13.4",
     "zod": "^4.3.6"

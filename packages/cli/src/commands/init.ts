@@ -1,11 +1,23 @@
+import process from 'node:process'
 import { relative, resolve } from 'node:path'
 
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 
-export async function cmdInit(): Promise<void> {
+type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
+
+interface InitOptions {
+  connect?: ConnectChoice
+  email?: string
+  code?: string
+  orgName?: string
+  yes: boolean
+}
+
+export async function cmdInit(argv: string[] = []): Promise<void> {
   const cwd = process.cwd()
   const configPath = resolve(cwd, DEFAULT_CONFIG_FILE)
   const schemaPath = resolve(cwd, 'src/db/schema/example.ts')
+  const options = parseInitOptions(argv)
 
   const wroteConfig = await writeIfMissing(
     configPath,
@@ -20,6 +32,10 @@ export async function cmdInit(): Promise<void> {
   if (wroteConfig) console.log(`Created ${relative(cwd, configPath)}`)
   if (wroteSchema) console.log(`Created ${relative(cwd, schemaPath)}`)
 
+  // Interactive onboarding only when attached to a TTY (or explicitly requested via flags),
+  // and not opted out with --yes. Keeps `chkit init` a silent file-writer for CI/scripts.
+  if (await maybeRunOnboarding(configPath, options)) return
+
   if (wroteConfig || wroteSchema) {
     console.log('')
     console.log('Next steps:')
@@ -30,4 +46,53 @@ export async function cmdInit(): Promise<void> {
     console.log('')
     console.log('Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/')
   }
+}
+
+/**
+ * Runs the shared ObsessionDB onboarding flow when appropriate. Returns true if it ran
+ * (so the caller skips the static next-steps). The plugin is an optional dependency, so a
+ * failed import degrades silently to the non-interactive path.
+ */
+async function maybeRunOnboarding(configPath: string, options: InitOptions): Promise<boolean> {
+  const explicit = options.connect !== undefined || options.email !== undefined
+  const interactive = process.stdin.isTTY === true
+  if (options.yes || (!interactive && !explicit)) return false
+
+  // The plugin is an optional dependency: a missing import degrades to static next-steps. But a
+  // failure *inside* onboarding (bad OTP, failed claim) is a real error — only the import is
+  // guarded so onboarding failures propagate and automation sees a non-zero exit, not a false pass.
+  let runOnboarding: typeof import('@chkit/plugin-obsessiondb').runOnboarding
+  try {
+    ;({ runOnboarding } = await import('@chkit/plugin-obsessiondb'))
+  } catch {
+    return false
+  }
+
+  await runOnboarding({
+    configPath,
+    connect: options.connect,
+    email: options.email,
+    code: options.code,
+    orgName: options.orgName,
+  })
+  return true
+}
+
+function parseInitOptions(argv: string[]): InitOptions {
+  const options: InitOptions = { yes: false }
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (!token) continue
+    const eq = token.indexOf('=')
+    const name = eq === -1 ? token : token.slice(0, eq)
+    const inlineValue = eq === -1 ? undefined : token.slice(eq + 1)
+    const value = (): string | undefined => inlineValue ?? argv[++i]
+
+    if (name === '--yes' || name === '-y') options.yes = true
+    else if (name === '--connect') options.connect = value() as ConnectChoice | undefined
+    else if (name === '--email') options.email = value()
+    else if (name === '--code') options.code = value()
+    else if (name === '--org-name') options.orgName = value()
+  }
+  return options
 }

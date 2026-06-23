@@ -1,5 +1,14 @@
 import { resolveBaseUrl } from './credentials.js'
 import { runLogin, runLogout, runWhoami } from './login.js'
+import { runSignup } from './signup.js'
+
+function optionalStringFlag(
+  flags: Record<string, string | string[] | boolean | undefined>,
+  name: string,
+): string | undefined {
+  const value = flags[name]
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
 
 function resolveBaseUrlFromFlags(flags: Record<string, string | string[] | boolean | undefined>): string {
   const flagValue = flags['--api-url']
@@ -44,6 +53,27 @@ const LOGOUT_COMMAND: PluginCommand = {
   },
 }
 
+const SIGNUP_COMMAND: PluginCommand = {
+  name: 'signup',
+  description: 'Sign up or log in with a one-time email code (passwordless)',
+  flags: [
+    { name: '--api-url', type: 'string', description: 'ObsessionDB API base URL' },
+    { name: '--email', type: 'string', description: 'Email to sign up/log in with (skips the prompt)' },
+    { name: '--code', type: 'string', description: 'One-time code (skips the prompt; for scripts/tests)' },
+    { name: '--org-name', type: 'string', description: 'Override the auto-created organization name' },
+    { name: '--request-only', type: 'boolean', description: 'Only send the code and print the follow-up command (step 1 of 2)' },
+  ],
+  async run(context) {
+    const baseUrl = resolveBaseUrlFromFlags(context.flags)
+    return runSignup(baseUrl, (msg) => context.print(msg), {
+      email: optionalStringFlag(context.flags, '--email'),
+      code: optionalStringFlag(context.flags, '--code'),
+      orgName: optionalStringFlag(context.flags, '--org-name'),
+      requestOnly: context.flags['--request-only'] === true,
+    })
+  },
+}
+
 const WHOAMI_COMMAND: PluginCommand = {
   name: 'whoami',
   description: 'Show current ObsessionDB user',
@@ -52,4 +82,9 @@ const WHOAMI_COMMAND: PluginCommand = {
   },
 }
 
-export const AUTH_COMMANDS: PluginCommand[] = [LOGIN_COMMAND, LOGOUT_COMMAND, WHOAMI_COMMAND]
+export const AUTH_COMMANDS: PluginCommand[] = [
+  LOGIN_COMMAND,
+  SIGNUP_COMMAND,
+  LOGOUT_COMMAND,
+  WHOAMI_COMMAND,
+]

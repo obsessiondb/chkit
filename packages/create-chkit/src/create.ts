@@ -2,6 +2,7 @@ import { readdir, rm, stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
 import { confirm, intro, log, outro, select, spinner, text } from '@clack/prompts'
+import { type ConnectChoice, runOnboarding } from '@chkit/plugin-obsessiondb'
 import pc from 'picocolors'
 
 import { downloadExample } from './download.js'
@@ -21,6 +22,11 @@ export type CreateOptions = {
   example: string | undefined
   packageManager: string | undefined
   skipInstall: boolean
+  skipOnboarding: boolean
+  connect: ConnectChoice | undefined
+  email: string | undefined
+  code: string | undefined
+  orgName: string | undefined
 }
 
 export async function runCreate(options: CreateOptions): Promise<void> {
@@ -50,6 +56,17 @@ export async function runCreate(options: CreateOptions): Promise<void> {
   }
 
   printNextSteps({ projectName, packageManager, didInstall: !options.skipInstall })
+
+  if (!options.skipOnboarding) {
+    await runOnboarding({
+      configPath: join(targetDir, 'clickhouse.config.ts'),
+      connect: options.connect,
+      email: options.email,
+      code: options.code,
+      orgName: options.orgName,
+    })
+  }
+
   outro(pc.green('Done.'))
 }
 

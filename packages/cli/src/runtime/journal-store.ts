@@ -52,10 +52,13 @@ interface MigrationRow extends Record<string, unknown> {
   applied_at: string
   checksum: string
   chkit_version: string
-  migration_completed?: boolean | number
-  // ClickHouse JSONEachRow returns named-tuple columns as objects keyed by the
-  // tuple field names, not as positional arrays.
-  operations?: OperationTupleRow[]
+  migration_completed?: boolean | number | string
+  // Read via `toJSONString(operations)`, so every executor returns this as a
+  // JSON-encoded string. The native client otherwise returns named-tuple columns
+  // as objects and the ObsessionDB workbench API returns every cell as a string —
+  // serializing to JSON in SQL makes the read identical across both. `parseOperations`
+  // still tolerates an already-decoded array for mocks/back-compat.
+  operations?: string | OperationTupleRow[]
 }
 
 interface OperationTupleRow {
@@ -112,6 +115,30 @@ function operationFromTuple(row: OperationTupleRow): OperationState {
     finishedAt: row.finished_at,
     lastError: row.last_error,
   }
+}
+
+// The native ClickHouse client returns a JS boolean; the ObsessionDB workbench
+// API returns every cell as a string ("true"/"false"). Compare explicitly —
+// `Boolean("false")` is `true`, which would silently corrupt the read.
+function parseBool(value: unknown): boolean {
+  return value === true || value === 1 || value === '1' || value === 'true'
+}
+
+// `operations` is selected via `toJSONString(...)`, so it arrives as a JSON
+// string from every executor. Tolerate an already-decoded array too (mocks /
+// any future typed executor) and degrade to [] on anything unparseable.
+function parseOperations(value: unknown): OperationState[] {
+  if (value == null || value === '') return []
+  let decoded: unknown = value
+  if (typeof value === 'string') {
+    try {
+      decoded = JSON.parse(value)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(decoded)) return []
+  return decoded.map((row) => operationFromTuple(row as OperationTupleRow))
 }
 
 export function createJournalStore(db: ClickHouseExecutor): JournalStore {
@@ -225,7 +252,7 @@ SETTINGS index_granularity = 1`
       if (_databaseMissing) return null
       await trySyncReplica()
       const rows = await db.query<MigrationRow>(
-        `SELECT name, applied_at, checksum, chkit_version, migration_completed, operations FROM ${journalTable} FINAL WHERE name = '${escapeSqlString(migrationName)}' LIMIT 1 SETTINGS select_sequential_consistency = 1`,
+        `SELECT name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations FROM ${journalTable} FINAL WHERE name = '${escapeSqlString(migrationName)}' LIMIT 1 SETTINGS select_sequential_consistency = 1`,
       )
       const row = rows[0]
       if (!row) return null
@@ -234,8 +261,8 @@ SETTINGS index_granularity = 1`
         appliedAt: row.applied_at,
         checksum: row.checksum,
         chkitVersion: row.chkit_version,
-        migrationCompleted: Boolean(row.migration_completed),
-        operations: (row.operations ?? []).map(operationFromTuple),
+        migrationCompleted: parseBool(row.migration_completed),
+        operations: parseOperations(row.operations),
       }
     },
 

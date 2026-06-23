@@ -25,10 +25,10 @@ chkit obsessiondb service select
 
 The selection is persisted to `.chkit/obsessiondb.json` next to your config file. Every `chkit` command after that uses it unless you override (see below).
 
-Credentials and selection live in two locations:
+Credentials and service selection live in separate files:
 
-- **Project** — `.chkit/obsessiondb.json` (next to `clickhouse.config.ts`). Selected service and project-scoped aliases.
-- **Profile** — `~/.config/chkit/obsessiondb.json`. Credentials and profile-scoped aliases shared across projects.
+- **Credentials** — `~/.config/chkit/credentials.json`. The access token and API base URL, written by `login`/`signup` and shared across all projects.
+- **Service selection and aliases** — `obsessiondb.json`. Stored per project at `.chkit/obsessiondb.json` (next to `clickhouse.config.ts`), or at `~/.config/chkit/obsessiondb.json` when running without a project config.
 
 ## Per-command override
 
