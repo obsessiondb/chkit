@@ -13,6 +13,28 @@ interface SessionResponse {
     name: string
     email: string
   }
+  session?: {
+    activeOrganizationId?: string | null
+  }
+}
+
+interface VerifiedUser {
+  id: string
+  email: string
+  name?: string
+}
+
+export interface OtpVerifyResult {
+  token: string
+  user: VerifiedUser
+}
+
+/** Thrown when the send-OTP endpoint is rate-limited (HTTP 429). */
+export class OtpRateLimitError extends Error {
+  constructor() {
+    super('Too many code requests. Please wait a minute and try again.')
+    this.name = 'OtpRateLimitError'
+  }
 }
 
 const CLIENT_ID = 'chkit-cli'
@@ -104,4 +126,90 @@ export async function getSession(baseUrl: string, token: string): Promise<Sessio
     throw new Error(`Failed to get session: ${res.status} ${text}`)
   }
   return (await res.json()) as SessionResponse
+}
+
+/**
+ * Passwordless signup/login — step 1: request a one-time code by email.
+ * `type: "sign-in"` covers both new and existing users (unknown emails create a verified user).
+ */
+export async function sendVerificationOtp(baseUrl: string, email: string): Promise<void> {
+  const res = await fetch(`${baseUrl}/api/auth/email-otp/send-verification-otp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': userAgent(),
+    },
+    body: JSON.stringify({ email, type: 'sign-in' }),
+  })
+  if (res.status === 429) throw new OtpRateLimitError()
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to send verification code: ${res.status} ${text}`)
+  }
+}
+
+/**
+ * Passwordless signup/login — step 2: verify the code.
+ * The bearer credential is returned in the `set-auth-token` response header (not the JSON body).
+ */
+export async function verifyOtp(baseUrl: string, email: string, otp: string): Promise<OtpVerifyResult> {
+  const res = await fetch(`${baseUrl}/api/auth/sign-in/email-otp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': userAgent(),
+    },
+    body: JSON.stringify({ email, otp }),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to verify code: ${res.status} ${text}`)
+  }
+  const token = res.headers.get('set-auth-token')
+  if (!token) {
+    throw new Error('Verification succeeded but no auth token was returned by the server.')
+  }
+  const body = (await res.json()) as { user: VerifiedUser }
+  return { token, user: body.user }
+}
+
+export async function createOrganization(
+  baseUrl: string,
+  token: string,
+  input: { name: string; slug: string },
+): Promise<{ id: string }> {
+  const res = await fetch(`${baseUrl}/api/auth/organization/create`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': userAgent(),
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to create organization: ${res.status} ${text}`)
+  }
+  return (await res.json()) as { id: string }
+}
+
+export async function setActiveOrganization(
+  baseUrl: string,
+  token: string,
+  organizationId: string,
+): Promise<void> {
+  const res = await fetch(`${baseUrl}/api/auth/organization/set-active`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': userAgent(),
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ organizationId }),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to set active organization: ${res.status} ${text}`)
+  }
 }

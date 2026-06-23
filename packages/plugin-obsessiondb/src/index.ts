@@ -22,6 +22,11 @@ export {
 } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
 export {
+	type ConnectChoice,
+	type OnboardingOptions,
+	runOnboarding,
+} from './onboarding/index.js'
+export {
 	loadSelectedService,
 	loadServiceAliases,
 	removeServiceAlias,
