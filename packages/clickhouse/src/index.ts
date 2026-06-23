@@ -7,7 +7,7 @@ import {
 	parseCodec,
 	type SkipIndexDefinition,
 } from '@chkit/core'
-import { type ClickHouseSettings, createClient } from '@clickhouse/client'
+import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
 import {
 	parseEngineFromCreateTableQuery,
@@ -528,6 +528,13 @@ const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 	send_progress_in_http_headers: 1,
 }
 
+// chkit emits its own clean, one-line connection errors (see wrapConnectionError).
+// The built-in @clickhouse/client DefaultLogger defaults to WARN since v1.18, which
+// logs the full raw server remediation blurb to stderr on any connection ERROR and
+// would otherwise leak it past our clean message. Owning the level (OFF) silences it
+// independent of the resolved client version, since the client does `level ?? DEFAULT`.
+const SILENT_CLIENT_LOG = { level: ClickHouseLogLevel.OFF }
+
 // @clickhouse/client uses socket.setTimeout under the hood, which is an
 // inactivity timeout. For long-running INSERTs (e.g. INSERT ... SELECT FROM
 // url() in the ClickBench load) ClickHouse stays silent until the operation
@@ -548,6 +555,7 @@ export function createStatelessClickHouseClient(
 		application: CHKIT_APPLICATION_ID,
 		request_timeout: NO_REQUEST_TIMEOUT,
 		clickhouse_settings: clickhouseSettings,
+		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
 	})
 }
@@ -573,6 +581,7 @@ export function createSessionClickHouseClient(
 		application: CHKIT_APPLICATION_ID,
 		request_timeout: NO_REQUEST_TIMEOUT,
 		clickhouse_settings: clickhouseSettings,
+		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
 	})
 }
@@ -611,6 +620,7 @@ export function createExecutorWithClient(
 						application: CHKIT_APPLICATION_ID,
 						request_timeout: NO_REQUEST_TIMEOUT,
 						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
+						log: SILENT_CLIENT_LOG,
 					})
 					try {
 						const fallbackResult = await fallback.command({
