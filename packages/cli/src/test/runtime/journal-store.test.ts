@@ -98,6 +98,46 @@ describe('createJournalStore', () => {
     expect(op?.lastError).toBe('')
   })
 
+  test('readMigrationState parses the ObsessionDB remote-executor shape (operations JSON string, bool as string)', async () => {
+    // Regression (NUM-7391): the ObsessionDB workbench API returns every cell as
+    // a string. `operations` (selected via toJSONString) arrives as a JSON string,
+    // and `migration_completed` arrives as "true"/"false". Naive `(row.operations
+    // ?? []).map` threw, and `Boolean("false")` is `true` — both must be parsed.
+    const { db } = createScriptedExecutor(
+      new Map<string | RegExp, unknown[]>([
+        [/SELECT name FROM .* LIMIT 0/, []],
+        [
+          /FROM .* FINAL WHERE name = /,
+          [
+            {
+              name: 'm.sql',
+              applied_at: '2026-05-26 12:00:00.000',
+              checksum: 'deadbeef',
+              chkit_version: '0.1.0-test',
+              migration_completed: 'false',
+              operations:
+                '[{"operation_index":0,"operation_key":"table:default.hits","operation_type":"load_table_data","query_id":"q1","status":"started","started_at":"2026-05-26 12:00:00.000","finished_at":null,"last_error":""}]',
+            },
+          ],
+        ],
+      ]),
+    )
+
+    const store = createJournalStore(db)
+    const state = await store.readMigrationState('m.sql')
+
+    expect(state).not.toBeNull()
+    expect(state?.migrationCompleted).toBe(false)
+    expect(state?.operations).toHaveLength(1)
+    const op = state?.operations[0]
+    expect(op?.operationIndex).toBe(0)
+    expect(Number.isNaN(op?.operationIndex)).toBe(false)
+    expect(op?.operationKey).toBe('table:default.hits')
+    expect(op?.status).toBe('started')
+    expect(op?.finishedAt).toBeNull()
+    expect(op?.lastError).toBe('')
+  })
+
   test('readMigrationState handles operations column missing entirely (legacy row pre-ALTER)', async () => {
     const { db } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
