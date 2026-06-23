@@ -37,7 +37,9 @@ Policies can be disabled in config. The `--strict` flag forces all three on rega
 
 ### Drift evaluation
 
-Drift is only evaluated when both a `snapshot.json` and a `clickhouse` config block are present. If either is missing, drift is skipped (not treated as a failure).
+`clickhouse` config is required for `chkit check` because migration journal state is stored in ClickHouse. If it is missing, the command fails.
+
+Drift itself is evaluated only when `snapshot.json` exists. If snapshot is missing, drift is skipped (`driftEvaluated: false`) but pending/checksum/plugin checks still run.
 
 ### Plugin check integration
 

@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-Reports the current migration state by comparing migration files on disk against the journal. Does not connect to ClickHouse.
+Reports the current migration state by comparing migration files on disk against the applied migration journal stored in ClickHouse.
 
 ## Synopsis
 
@@ -19,14 +19,14 @@ No command-specific flags. See [global flags](/cli/overview/#global-flags).
 
 ## Behavior
 
-`chkit status` reads the migrations directory and `journal.json` to compute:
+`chkit status` reads the migrations directory and the `_chkit_migrations` table in ClickHouse to compute:
 
 - **Total** migration files (`.sql` files in `migrationsDir`, sorted alphabetically)
-- **Applied** migrations (entries recorded in the journal)
+- **Applied** migrations (entries recorded in `_chkit_migrations`)
 - **Pending** migrations (on disk but not yet applied)
 - **Checksum mismatches** (applied migrations whose SHA-256 checksum no longer matches the file on disk)
 
-This command is read-only and does not require a ClickHouse connection.
+This command is read-only, but it requires a `clickhouse` config block because the migration journal is stored in ClickHouse.
 
 ## Examples
 
@@ -35,8 +35,10 @@ chkit status
 ```
 
 ```
-Migrations: 5 total, 3 applied, 2 pending
-Checksum mismatches: 0
+Migrations directory: /absolute/path/to/chkit/migrations
+Total migrations:     5
+Applied:              3
+Pending:              2
 ```
 
 ```sh
@@ -47,7 +49,8 @@ chkit status --json
 
 | Code | Meaning |
 |------|---------|
-| 0 | Always succeeds |
+| 0 | Success |
+| 1 | Command failed (for example missing `clickhouse` config or connection error) |
 
 ## JSON output
 

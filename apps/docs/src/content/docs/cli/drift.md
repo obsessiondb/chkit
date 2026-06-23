@@ -84,7 +84,8 @@ chkit drift --json
 
 | Code | Meaning |
 |------|---------|
-| 0 | Always succeeds (drift is reported, not enforced) |
+| 0 | Command completed successfully (drift may be true or false) |
+| 1 | Command failed (for example snapshot missing or missing/invalid `clickhouse` config) |
 
 Use [`chkit check`](/cli/check/) with `failOnDrift` to enforce drift-free state in CI.
 

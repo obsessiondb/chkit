@@ -63,13 +63,14 @@ Before applying, the CLI verifies SHA-256 checksums of all previously-applied mi
 
 ### Journal
 
-Each applied migration is recorded in `journal.json` (in `metaDir`) with:
+Each applied migration is recorded in the ClickHouse `_chkit_migrations` table with:
 
 - `name` — the migration filename
-- `appliedAt` — ISO 8601 timestamp
+- `applied_at` — timestamp stored in UTC (`DateTime64(3, 'UTC')`)
 - `checksum` — SHA-256 hash of the file content
+- `chkit_version` — CLI version that applied the migration
 
-The journal is written after each migration, not batched.
+Rows are inserted after each migration, not batched.
 
 ### Table scoping
 
@@ -136,9 +137,8 @@ chkit migrate --apply --table analytics.events
   "mode": "execute",
   "scope": { "enabled": false },
   "applied": [
-    { "name": "0004_add_column.sql", "appliedAt": "2025-06-15T10:30:00.000Z", "checksum": "a1b2c3..." }
-  ],
-  "journalFile": "./chkit/meta/journal.json"
+    { "name": "0004_add_column.sql", "appliedAt": "2025-06-15T10:30:00.000", "checksum": "a1b2c3..." }
+  ]
 }
 ```
 

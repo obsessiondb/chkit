@@ -11,20 +11,19 @@ description: Install chkit and run the first migration flow.
 ## Install
 
 ```bash
-bun install
-bun run build
-bun run chkit --help
+bun add -d chkit @chkit/core
+bunx chkit --help
 ```
 
 ## Quick Start
 
 ```bash
-bun run chkit init
-bun run chkit generate --name init
-bun run chkit migrate
-bun run chkit migrate --apply
-bun run chkit status
-bun run chkit check
+bunx chkit init
+bunx chkit generate --name init
+bunx chkit migrate
+bunx chkit migrate --apply
+bunx chkit status
+bunx chkit check
 ```
 
 ## AI Agent Skill

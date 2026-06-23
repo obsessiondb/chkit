@@ -47,7 +47,7 @@ When non-interactive, `chkit migrate` without `--apply` prints the migration pla
 Your `clickhouse.config.ts` can export a function that receives a `ChxConfigEnv` object with `command` and `mode` fields. Use this to vary config per environment:
 
 ```ts
-import { defineConfig } from 'chkit'
+import { defineConfig } from '@chkit/core'
 
 export default defineConfig((env) => ({
   schema: './schema/**/*.ts',
