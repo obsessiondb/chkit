@@ -40,5 +40,14 @@ These flags are available on every command that loads a config file:
 |------|------|---------|-------------|
 | `--config <path>` | string | `clickhouse.config.ts` | Path to the chkit config file |
 | `--json` | boolean | `false` | Emit machine-readable JSON output |
+| `--table <selector>` | string | — | Narrow some commands to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`). Effect varies per command — see note below |
 | `--help` | boolean | — | Show help text |
 | `--version` | boolean | — | Print CLI version |
+
+`--table` is accepted by every command, but it is **not a universal, whole-command filter** — treat it as a scoping hint, not a guarantee:
+
+- `generate`, `migrate`, and `drift` use it to narrow the schema/migration operations they plan or evaluate.
+- `check` applies it only to its drift and plugin checks; the pending-migration and checksum checks still run across **all** tables, so `chkit check --table app.users` can still fail on an unrelated pending migration.
+- `status`, `codegen`, and `pull` accept the flag but ignore it, so `chkit status --table app.users` still reports unscoped totals.
+
+When you need a result strictly limited to specific tables, check the individual command's page for its exact scoping behavior.
