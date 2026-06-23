@@ -36,3 +36,9 @@ export default defineConfig({
   },
 })
 ```
+
+## User profile config fallback
+
+Project-scoped commands (`generate`, `migrate`, `status`, `drift`, `check`, `codegen`, `pull`) always require a project config in the working directory.
+
+[`chkit query`](/cli/query/) is the exception: when no project config is found, chkit falls back to a user-profile config at `~/.config/chkit/config.ts` (honoring `XDG_CONFIG_HOME`). This lets ad-hoc queries run from any directory. If ObsessionDB credentials are present (`~/.config/chkit/credentials.json`), chkit synthesizes a minimal query-only config automatically, so `chkit query` works after `chkit obsessiondb login` without a local config file at all.

@@ -48,6 +48,8 @@ Migration files containing `risk=danger` operations (such as `DROP TABLE` or `DR
 - **Non-interactive / CI mode**: `--allow-destructive` must be passed, or `safety.allowDestructive` must be `true` in config. Otherwise the command exits with code 3.
 - **JSON mode**: exits with code 3 and includes details about blocked operations
 
+Destructive statements are detected two ways. Planner-emitted migrations carry a `-- operation:` marker per statement, which sets the risk classification directly. In addition, chkit scans the executable SQL itself for hand-written destructive statements (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DROP VIEW` / `DROP MATERIALIZED VIEW`, `DETACH`, `DROP DATABASE`) that carry no marker — whether a whole migration was hand-written or a statement was appended to a generated one. Such statements previously applied silently in CI; they now require `--allow-destructive` (or `safety.allowDestructive`) like any other destructive operation. Commented-out statements are ignored (comments are stripped before scanning), and planner-marked non-danger statements keep their existing classification, so a generated materialized-view recreate is not blocked.
+
 Each destructive operation includes a warning code, reason, impact description, and recommendation:
 
 | Warning code | Operation |
@@ -82,6 +84,29 @@ A hand-written migration with no `-- operation:` markers has no determinable tar
 ### Plugin hooks
 
 The `onBeforeApply` plugin hook runs before each migration is executed and can transform the SQL statements. The `onAfterApply` hook runs after successful execution.
+
+### Async operations (`mode=async`)
+
+Long-running data operations — large `INSERT ... SELECT` loads, backfills — can be marked async so chkit submits the query without blocking on its HTTP response and polls server-side for progress. Add `mode=async` to the statement's `-- operation:` marker:
+
+```sql
+-- operation: load_table_data key=table:default.hits risk=caution mode=async
+INSERT INTO default.hits SELECT * FROM s3(...);
+```
+
+When `chkit migrate --apply` encounters an async operation it:
+
+1. Computes a deterministic `query_id` from `sha256(migration_filename + ':' + statement_index)`.
+2. Checks `system.processes` / `system.query_log` for any prior attempt with that id.
+3. Submits the query without blocking on the HTTP response, polling every 5 seconds and printing a one-line progress update (`written=N.NM rows (N.N GiB), elapsed Ns`).
+4. Records the journal entry on success, or throws the server's exception on failure.
+
+This unblocks two scenarios the synchronous path cannot handle:
+
+- **Long loads through a proxy or load balancer with an HTTP request-duration ceiling** — the deterministic id lets a re-run attach to the still-running query on the server instead of cancelling and restarting it.
+- **Transient client-side errors during a multi-minute load** — re-running `chkit migrate` resumes the in-flight query rather than starting over.
+
+The annotation is opt-in and forward-compatible: statements without `mode=async` use the synchronous path, and an unknown mode value falls back to sync. Pair it with the [`-- log:` metadata header](#per-migration-metadata) to print context before the load begins.
 
 ## Examples
 
