@@ -1,5 +1,6 @@
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { listServiceOrganizations, listServices } from './api.js'
+import { runClaim } from './claim.js'
 import {
 	renderServiceOrganizations,
 	selectServiceInteractive,
@@ -68,6 +69,7 @@ function printServiceUsage(print: (msg: string) => void): void {
 	print('Usage:')
 	print('  chkit obsessiondb service list')
 	print('  chkit obsessiondb service select')
+	print('  chkit obsessiondb service claim')
 	print('  chkit obsessiondb service alias list')
 	print('  chkit obsessiondb service alias set <alias> <service-name>')
 	print('  chkit obsessiondb service alias remove <alias>')
@@ -106,6 +108,12 @@ export const SERVICE_COMMAND: PluginCommand = {
 
 		if (action === 'select') {
 			return runServiceSelect(context)
+		}
+
+		if (action === 'claim') {
+			const effectiveCreds = await loadEffectiveCredentials(print)
+			if (!effectiveCreds) return 1
+			return runClaim(effectiveCreds, context.configPath, print)
 		}
 
 		if (action === 'alias') {

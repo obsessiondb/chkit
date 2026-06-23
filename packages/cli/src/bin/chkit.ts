@@ -145,7 +145,7 @@ async function run(): Promise<void> {
   }
 
   if (commandName === 'init') {
-    await cmdInit()
+    await cmdInit(argv.slice(1))
     return
   }
 
