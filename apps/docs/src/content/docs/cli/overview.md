@@ -40,5 +40,6 @@ These flags are available on every command that loads a config file:
 |------|------|---------|-------------|
 | `--config <path>` | string | `clickhouse.config.ts` | Path to the chkit config file |
 | `--json` | boolean | `false` | Emit machine-readable JSON output |
+| `--table <selector>` | string | — | Limit command scope to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`) |
 | `--help` | boolean | — | Show help text |
 | `--version` | boolean | — | Print CLI version |
