@@ -2,6 +2,7 @@ import process from 'node:process'
 import { relative, resolve } from 'node:path'
 
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
+import { ensureProjectDependencies } from '../runtime/deps.js'
 
 type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
 
@@ -31,6 +32,11 @@ export async function cmdInit(argv: string[] = []): Promise<void> {
 
   if (wroteConfig) console.log(`Created ${relative(cwd, configPath)}`)
   if (wroteSchema) console.log(`Created ${relative(cwd, schemaPath)}`)
+
+  // Install chkit + plugins when the project has none, so the scaffolded config resolves its imports
+  // and a follow-up `generate` doesn't dead-end. Runs before onboarding so the claim flow (which
+  // dynamically imports the plugin and edits the config) operates on an already-runnable project.
+  await ensureProjectDependencies(cwd, (msg) => console.log(msg))
 
   // Interactive onboarding only when attached to a TTY (or explicitly requested via flags),
   // and not opted out with --yes. Keeps `chkit init` a silent file-writer for CI/scripts.
