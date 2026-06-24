@@ -114,8 +114,8 @@ export async function runLogin(
 }
 
 export async function runLogout(print: (msg: string) => void): Promise<number> {
-	await clearCredentials()
-	print('Logged out.')
+	const had = await clearCredentials()
+	print(had ? 'Logged out.' : 'No active session.')
 	return 0
 }
 
