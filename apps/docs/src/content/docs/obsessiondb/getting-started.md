@@ -150,6 +150,29 @@ chkit obsessiondb signup --email you@example.com --code 123456
 chkit obsessiondb service claim
 ```
 
+### Structured JSON for agents
+
+Pass `--json` to `signup` and `service claim` to get a machine-readable envelope instead of prose, so an agent or script can chain the flow without parsing text. Each call emits a single object with the current `status` and a `next` hint carrying the exact command to run next (`next` is `null` at a terminal state):
+
+```sh
+chkit obsessiondb signup --email you@example.com --json
+```
+
+```json
+{
+  "command": "obsessiondb signup",
+  "schemaVersion": 1,
+  "status": "otp_sent",
+  "email": "you@example.com",
+  "next": {
+    "needs": "code",
+    "command": "chkit obsessiondb signup --email you@example.com --code <CODE>"
+  }
+}
+```
+
+`signup` moves through `no_email → otp_sent → verified`, and `service claim` reports `claimed`, `provisioning`, or `already_claimed`. Failures (no capacity, rate-limited, not logged in) emit a stable error envelope — `{ "ok": false, "error": { "code", "message" } }`. In `--json` mode nothing else is written to stdout, so the output is always safe to pipe to `jq`.
+
 ### Exit codes
 
 When an explicit connect path is requested but can't complete — for example `--connect claim` with no email, or a wrong code — `chkit init` and `create-chkit` exit non-zero instead of falling through to "next steps" with a success status, so scripts can detect the failure.
