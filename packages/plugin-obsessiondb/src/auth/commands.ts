@@ -19,6 +19,7 @@ function resolveBaseUrlFromFlags(flags: Record<string, string | string[] | boole
 interface PluginCommandContext {
   configPath: string
   flags: Record<string, string | string[] | boolean | undefined>
+  jsonMode?: boolean
   print: (value: unknown) => void
 }
 
@@ -65,11 +66,12 @@ const SIGNUP_COMMAND: PluginCommand = {
   ],
   async run(context) {
     const baseUrl = resolveBaseUrlFromFlags(context.flags)
-    return runSignup(baseUrl, (msg) => context.print(msg), {
+    return runSignup(baseUrl, context.print, {
       email: optionalStringFlag(context.flags, '--email'),
       code: optionalStringFlag(context.flags, '--code'),
       orgName: optionalStringFlag(context.flags, '--org-name'),
       requestOnly: context.flags['--request-only'] === true,
+      jsonMode: context.jsonMode === true,
     })
   },
 }

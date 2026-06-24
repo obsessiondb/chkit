@@ -28,7 +28,7 @@ export interface OnboardingOptions {
  * Never throws for the "configure later" path; degrades to next-steps when non-interactive.
  */
 export async function runOnboarding(options: OnboardingOptions): Promise<void> {
-  const print = (msg: string) => log.message(msg)
+  const print = (value: unknown) => log.message(typeof value === 'string' ? value : JSON.stringify(value))
 
   // Non-interactive with no explicit choice: we can't show the menu, so instead of silently
   // deferring, hand the caller the full runbook for every connect path before next steps.
@@ -165,7 +165,12 @@ function insertImport(source: string, importLine: string): string {
  * menu walks a human through these; without a TTY we hand the caller every path as explicit
  * commands so they can finish without reverse-engineering the CLI.
  *
- * TODO: structured --json `next`/`needs` envelope so callers can chain without parsing prose.
+ * NUM-7392 added the structured `--json` `next` envelope to the linear, chainable flow
+ * (`signup` → `service claim`; see json-envelope.ts). This connect menu intentionally keeps its
+ * prose runbook: it's a 3-way choice (not a single `next`), it has no `--json` plumbing here
+ * (`init` doesn't thread `jsonMode` into onboarding), and it emits via clack's `log.message`
+ * rather than clean stdout — so a JSON envelope would cost disproportionate plumbing for no real
+ * chaining benefit. The per-command JSON envelopes above are what programmatic callers consume.
  */
 export function connectRunbookLines(): string[] {
   return [
