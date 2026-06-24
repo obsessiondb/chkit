@@ -2,6 +2,15 @@ import process from 'node:process'
 import { cancel, isCancel, text } from '@clack/prompts'
 
 import {
+  CLAIM_COMMAND,
+  errorEnvelope,
+  noEmailEnvelope,
+  otpSentEnvelope,
+  SIGNUP_EMAIL_COMMAND,
+  verifiedEnvelope,
+  verifyCodeCommand,
+} from '../json-envelope.js'
+import {
   createOrganization,
   getSession,
   OtpRateLimitError,
@@ -20,6 +29,8 @@ export interface SignupOptions {
   orgName?: string
   /** Only send the OTP and print the follow-up command, then stop (step 1 of the 2-step flow). */
   requestOnly?: boolean
+  /** Emit a structured `--json` envelope at each state instead of the prose runbook. */
+  jsonMode?: boolean
 }
 
 /**
@@ -33,14 +44,16 @@ export interface SignupOptions {
  *    lives server-side keyed by email, so nothing has to persist on the client between runs.
  *  - Scripted/test: pass `--email` and `--code` together; the code's presence skips the re-send.
  *
- * TODO: structured --json `next`/`needs` envelope so callers can chain without parsing prose.
+ * With `jsonMode`, each terminal/pause state emits a structured `{ status, next }` envelope
+ * (see json-envelope.ts) instead of prose, so a `--json` pipe stays valid.
  */
 export async function runSignup(
   baseUrl: string,
-  print: (msg: string) => void,
+  print: (value: unknown) => void,
   options: SignupOptions = {},
 ): Promise<number> {
-  const email = options.email ?? (await promptEmail(print))
+  const jsonMode = options.jsonMode === true
+  const email = options.email ?? (await promptEmail(print, jsonMode))
   if (email === null) return 1
 
   // A supplied code means this is the verify step of a prior request — re-sending would
@@ -50,22 +63,24 @@ export async function runSignup(
       await sendVerificationOtp(baseUrl, email)
     } catch (error) {
       if (error instanceof OtpRateLimitError) {
-        print(error.message)
+        if (jsonMode) print(errorEnvelope('obsessiondb signup', 'otp_rate_limited', error.message))
+        else print(error.message)
         return 1
       }
       throw error
     }
-    print(`We sent a 6-digit code to ${email}.`)
+    if (!jsonMode) print(`We sent a 6-digit code to ${email}.`)
 
     // No way to prompt for the code in this process (explicit --request-only, or no TTY).
     // Hand the caller the exact follow-up command and stop — the send already succeeded.
     if (options.requestOnly || !process.stdin.isTTY) {
-      print(verifyStepHint(email).join('\n'))
+      if (jsonMode) print(otpSentEnvelope(email))
+      else print(verifyStepHint(email).join('\n'))
       return 0
     }
   }
 
-  const code = options.code ?? (await promptCode(print))
+  const code = options.code ?? (await promptCode(print, jsonMode))
   if (code === null) return 1
 
   const { token, user } = await verifyOtp(baseUrl, email, code)
@@ -75,7 +90,9 @@ export async function runSignup(
     email,
     orgName: options.orgName,
   })
-  if (created) {
+  if (jsonMode) {
+    print(verifiedEnvelope(email))
+  } else if (created) {
     print(`Created organization "${created}".`)
     print(`Signed in as ${user.email}.`)
   } else {
@@ -108,23 +125,24 @@ async function ensureActiveOrganization(
 export function signupEmailRunbook(): string[] {
   return [
     'No email provided. In non-interactive environments, sign up in two steps:',
-    '  1. chkit obsessiondb signup --email <you@example.com>          # sends a 6-digit code',
-    '  2. chkit obsessiondb signup --email <you@example.com> --code <CODE>   # verifies and signs in',
-    'Then claim a service: chkit obsessiondb service claim',
+    `  1. ${SIGNUP_EMAIL_COMMAND}          # sends a 6-digit code`,
+    `  2. ${verifyCodeCommand('<you@example.com>')}   # verifies and signs in`,
+    `Then claim a service: ${CLAIM_COMMAND}`,
   ]
 }
 
 /** Follow-up commands shown after a code has been sent to `email` (the verify step). */
 export function verifyStepHint(email: string): string[] {
-  return [
-    `Next: chkit obsessiondb signup --email ${email} --code <CODE>`,
-    'Then: chkit obsessiondb service claim',
-  ]
+  return [`Next: ${verifyCodeCommand(email)}`, `Then: ${CLAIM_COMMAND}`]
 }
 
-async function promptEmail(print: (msg: string) => void): Promise<string | null> {
+async function promptEmail(
+  print: (value: unknown) => void,
+  jsonMode: boolean,
+): Promise<string | null> {
   if (!process.stdin.isTTY) {
-    print(signupEmailRunbook().join('\n'))
+    if (jsonMode) print(noEmailEnvelope())
+    else print(signupEmailRunbook().join('\n'))
     return null
   }
   const value = await text({
@@ -138,9 +156,16 @@ async function promptEmail(print: (msg: string) => void): Promise<string | null>
   return value.trim()
 }
 
-async function promptCode(print: (msg: string) => void): Promise<string | null> {
+async function promptCode(
+  print: (value: unknown) => void,
+  jsonMode: boolean,
+): Promise<string | null> {
   if (!process.stdin.isTTY) {
-    print('No code provided. Re-run with --code <code> in non-interactive environments.')
+    if (jsonMode) {
+      print(errorEnvelope('obsessiondb signup', 'code_required', 'No code provided. Re-run with --code <code>.'))
+    } else {
+      print('No code provided. Re-run with --code <code> in non-interactive environments.')
+    }
     return null
   }
   const value = await text({

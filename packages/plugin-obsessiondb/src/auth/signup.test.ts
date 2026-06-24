@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
-import { deriveOrgName, signupEmailRunbook, slugifyOrgName, verifyStepHint } from './signup'
+import { noEmailEnvelope } from '../json-envelope'
+import { deriveOrgName, runSignup, signupEmailRunbook, slugifyOrgName, verifyStepHint } from './signup'
 
 describe('deriveOrgName', () => {
   test('uses the lowercased email local-part', () => {
@@ -61,5 +62,34 @@ describe('verifyStepHint', () => {
     const text = verifyStepHint('me@x.com').join('\n')
     expect(text).toContain('chkit obsessiondb signup --email me@x.com --code <CODE>')
     expect(text).toContain('chkit obsessiondb service claim')
+  })
+})
+
+// The no-email, non-interactive branch returns before any network call, so it is the one
+// runSignup state we can exercise without a live API. Force non-TTY to make the path deterministic.
+describe('runSignup with no email (non-interactive)', () => {
+  const originalIsTTY = process.stdin.isTTY
+
+  afterEach(() => {
+    process.stdin.isTTY = originalIsTTY
+  })
+
+  test('jsonMode emits a single no_email envelope and exits non-zero', async () => {
+    process.stdin.isTTY = false
+    const emitted: unknown[] = []
+    const code = await runSignup('https://api.test.com', (v) => emitted.push(v), { jsonMode: true })
+
+    expect(code).toBe(1)
+    expect(emitted).toEqual([noEmailEnvelope()])
+  })
+
+  test('prose mode prints the two-step runbook and exits non-zero', async () => {
+    process.stdin.isTTY = false
+    const emitted: unknown[] = []
+    const code = await runSignup('https://api.test.com', (v) => emitted.push(v))
+
+    expect(code).toBe(1)
+    expect(emitted).toHaveLength(1)
+    expect(String(emitted[0])).toContain('chkit obsessiondb signup --email <you@example.com>')
   })
 })

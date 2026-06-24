@@ -1,4 +1,5 @@
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
+import { errorEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
 import { runClaim } from './claim.js'
 import {
@@ -18,6 +19,7 @@ interface PluginCommandContext {
 	configPath: string
 	args: string[]
 	flags: Record<string, string | string[] | boolean | undefined>
+	jsonMode?: boolean
 	print: (value: unknown) => void
 }
 
@@ -111,9 +113,20 @@ export const SERVICE_COMMAND: PluginCommand = {
 		}
 
 		if (action === 'claim') {
-			const effectiveCreds = await loadEffectiveCredentials(print)
-			if (!effectiveCreds) return 1
-			return runClaim(effectiveCreds, context.configPath, print)
+			// Inline the credential check (rather than loadEffectiveCredentials) so a `--json` run
+			// emits a single error envelope instead of stringified prose on the not-logged-in path.
+			const creds = await loadCredentials()
+			if (!creds) {
+				const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+				if (context.jsonMode) {
+					context.print(errorEnvelope('obsessiondb service claim', 'not_logged_in', message))
+				} else {
+					print(message)
+				}
+				return 1
+			}
+			const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
+			return runClaim(effectiveCreds, context.configPath, context.print, context.jsonMode === true)
 		}
 
 		if (action === 'alias') {
