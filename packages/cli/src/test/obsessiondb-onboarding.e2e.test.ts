@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,9 +7,6 @@ import { createFixture, WORKSPACE_ROOT } from './testkit.test'
 
 const OBSDB_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-obsessiondb/src/index.ts')
 const CLI_BIN_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
-
-let tempDir: string | undefined
-let server: ReturnType<typeof Bun.serve> | undefined
 
 async function runCliAsync(
   args: string[],
@@ -91,116 +88,125 @@ function startMockServer(counts: { sendOtp: number } = { sendOtp: 0 }): ReturnTy
 }
 
 describe('@chkit/cli obsessiondb onboarding e2e', () => {
-  afterEach(async () => {
-    server?.stop()
-    server = undefined
-    if (tempDir) {
+  test('signs up, auto-creates an org, claims an instance, and selects it', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
+    const fixture = await createFixture()
+    const server = startMockServer()
+    try {
+      const apiUrl = `http://127.0.0.1:${server.port}`
+      const xdgConfigHome = join(tempDir, 'xdg')
+      const env = { XDG_CONFIG_HOME: xdgConfigHome }
+
+      await writeFile(
+        fixture.configPath,
+        `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
+        'utf8',
+      )
+
+      const signup = await runCliAsync(
+        [
+          'obsessiondb',
+          'signup',
+          '--api-url',
+          apiUrl,
+          '--email',
+          'playground@example.com',
+          '--code',
+          '123456',
+          '--config',
+          fixture.configPath,
+        ],
+        env,
+      )
+      expect(signup.exitCode).toBe(0)
+      expect(signup.stdout).toContain('Created organization "playground"')
+
+      const credentials = JSON.parse(
+        await readFile(join(xdgConfigHome, 'chkit', 'credentials.json'), 'utf8'),
+      ) as { access_token: string; base_url: string }
+      expect(credentials.access_token).toBe('test-token')
+      expect(credentials.base_url).toBe(apiUrl)
+
+      const claim = await runCliAsync(
+        ['obsessiondb', 'service', 'claim', '--config', fixture.configPath],
+        env,
+      )
+      expect(claim.exitCode).toBe(0)
+      expect(claim.stdout).toContain('Instance ready: free-abc')
+
+      const selected = JSON.parse(
+        await readFile(join(fixture.dir, '.chkit', 'obsessiondb.json'), 'utf8'),
+      ) as { service_slug?: string }
+      expect(selected.service_slug).toBe('free-abc')
+    } finally {
+      server.stop()
       await rm(tempDir, { recursive: true, force: true })
-      tempDir = undefined
+      await rm(fixture.dir, { recursive: true, force: true })
     }
   })
 
-  test('signs up, auto-creates an org, claims an instance, and selects it', async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
-    server = startMockServer()
-    const apiUrl = `http://127.0.0.1:${server.port}`
-    const fixture = await createFixture()
-    const xdgConfigHome = join(tempDir, 'xdg')
-    const env = { XDG_CONFIG_HOME: xdgConfigHome }
-
-    await writeFile(
-      fixture.configPath,
-      `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
-      'utf8',
-    )
-
-    const signup = await runCliAsync(
-      [
-        'obsessiondb',
-        'signup',
-        '--api-url',
-        apiUrl,
-        '--email',
-        'playground@example.com',
-        '--code',
-        '123456',
-        '--config',
-        fixture.configPath,
-      ],
-      env,
-    )
-    expect(signup.exitCode).toBe(0)
-    expect(signup.stdout).toContain('Created organization "playground"')
-
-    const credentials = JSON.parse(
-      await readFile(join(xdgConfigHome, 'chkit', 'credentials.json'), 'utf8'),
-    ) as { access_token: string; base_url: string }
-    expect(credentials.access_token).toBe('test-token')
-    expect(credentials.base_url).toBe(apiUrl)
-
-    const claim = await runCliAsync(
-      ['obsessiondb', 'service', 'claim', '--config', fixture.configPath],
-      env,
-    )
-    expect(claim.exitCode).toBe(0)
-    expect(claim.stdout).toContain('Instance ready: free-abc')
-
-    const selected = JSON.parse(
-      await readFile(join(fixture.dir, '.chkit', 'obsessiondb.json'), 'utf8'),
-    ) as { service_slug?: string }
-    expect(selected.service_slug).toBe('free-abc')
-  })
-
   test('two-step signup: --request-only sends the code once, --code verifies without re-sending', async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
-    const counts = { sendOtp: 0 }
-    server = startMockServer(counts)
-    const apiUrl = `http://127.0.0.1:${server.port}`
+    const tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
     const fixture = await createFixture()
-    const env = { XDG_CONFIG_HOME: join(tempDir, 'xdg') }
+    const counts = { sendOtp: 0 }
+    const server = startMockServer(counts)
+    try {
+      const apiUrl = `http://127.0.0.1:${server.port}`
+      const env = { XDG_CONFIG_HOME: join(tempDir, 'xdg') }
 
-    await writeFile(
-      fixture.configPath,
-      `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
-      'utf8',
-    )
+      await writeFile(
+        fixture.configPath,
+        `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
+        'utf8',
+      )
 
-    const base = ['obsessiondb', 'signup', '--api-url', apiUrl, '--email', 'playground@example.com', '--config', fixture.configPath]
+      const base = ['obsessiondb', 'signup', '--api-url', apiUrl, '--email', 'playground@example.com', '--config', fixture.configPath]
 
-    // Step 1: request the code. Sends exactly one OTP and prints the verify command.
-    const request = await runCliAsync([...base, '--request-only'], env)
-    expect(request.exitCode).toBe(0)
-    expect(request.stdout).toContain('We sent a 6-digit code to playground@example.com')
-    expect(request.stdout).toContain('chkit obsessiondb signup --email playground@example.com --code <CODE>')
-    expect(counts.sendOtp).toBe(1)
+      // Step 1: request the code. Sends exactly one OTP and prints the verify command.
+      const request = await runCliAsync([...base, '--request-only'], env)
+      expect(request.exitCode).toBe(0)
+      expect(request.stdout).toContain('We sent a 6-digit code to playground@example.com')
+      expect(request.stdout).toContain('chkit obsessiondb signup --email playground@example.com --code <CODE>')
+      expect(counts.sendOtp).toBe(1)
 
-    // Step 2: verify with the code. Must NOT re-send the OTP (would invalidate the code).
-    const verify = await runCliAsync([...base, '--code', '123456'], env)
-    expect(verify.exitCode).toBe(0)
-    expect(verify.stdout).toContain('Created organization "playground"')
-    expect(counts.sendOtp).toBe(1)
+      // Step 2: verify with the code. Must NOT re-send the OTP (would invalidate the code).
+      const verify = await runCliAsync([...base, '--code', '123456'], env)
+      expect(verify.exitCode).toBe(0)
+      expect(verify.stdout).toContain('Created organization "playground"')
+      expect(counts.sendOtp).toBe(1)
+    } finally {
+      server.stop()
+      await rm(tempDir, { recursive: true, force: true })
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
   })
 
   test('signup without an email in a non-interactive run prints the two-step runbook and fails', async () => {
-    tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
-    server = startMockServer()
-    const apiUrl = `http://127.0.0.1:${server.port}`
+    const tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
     const fixture = await createFixture()
-    const env = { XDG_CONFIG_HOME: join(tempDir, 'xdg') }
+    const server = startMockServer()
+    try {
+      const apiUrl = `http://127.0.0.1:${server.port}`
+      const env = { XDG_CONFIG_HOME: join(tempDir, 'xdg') }
 
-    await writeFile(
-      fixture.configPath,
-      `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
-      'utf8',
-    )
+      await writeFile(
+        fixture.configPath,
+        `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
+        'utf8',
+      )
 
-    const result = await runCliAsync(
-      ['obsessiondb', 'signup', '--api-url', apiUrl, '--config', fixture.configPath],
-      env,
-    )
+      const result = await runCliAsync(
+        ['obsessiondb', 'signup', '--api-url', apiUrl, '--config', fixture.configPath],
+        env,
+      )
 
-    expect(result.exitCode).toBe(1)
-    expect(result.stdout).toContain('chkit obsessiondb signup --email <you@example.com>')
-    expect(result.stdout).toContain('--code <CODE>')
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toContain('chkit obsessiondb signup --email <you@example.com>')
+      expect(result.stdout).toContain('--code <CODE>')
+    } finally {
+      server.stop()
+      await rm(tempDir, { recursive: true, force: true })
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
   })
 })
