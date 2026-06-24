@@ -10,6 +10,14 @@ import type {
 } from '../../runtime/journal-store.js'
 
 const POLL_INTERVAL_MS = 5_000
+// A poll request can fail transiently (gateway 504/524, network blip) while the
+// server-side async query keeps running. Tolerate a bounded number of these so a
+// momentary timeout doesn't abort a long-running load; only give up after the budget.
+const MAX_TRANSIENT_POLL_ERRORS = 20
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 export interface AsyncApplyInput {
   db: ClickHouseExecutor
@@ -222,13 +230,33 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         })
 
   const pollStartedAt = now()
+  let transientPollErrors = 0
   try {
     for (;;) {
       await sleep(pollIntervalMs)
-      const status = await db.queryStatus(
-        queryId,
-        pollAfterTime === undefined ? undefined : { afterTime: pollAfterTime },
-      )
+      let status: QueryStatus
+      try {
+        status = await db.queryStatus(
+          queryId,
+          pollAfterTime === undefined ? undefined : { afterTime: pollAfterTime },
+        )
+        transientPollErrors = 0
+      } catch (pollError) {
+        // The poll request itself failed (e.g. HTTP 524 gateway timeout). The async
+        // query is very likely still running server-side, so don't abort the migration —
+        // keep polling up to a bounded budget. A re-run re-attaches via the deterministic id.
+        transientPollErrors += 1
+        const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
+        if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
+          throw new Error(
+            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+          )
+        }
+        log(
+          `  ${operationType}: poll request failed (${describeError(pollError)}) — load may still be running, retrying (elapsed ${failedElapsed}s)`,
+        )
+        continue
+      }
       const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
       if (status.status === 'finished') {
