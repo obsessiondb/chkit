@@ -26,7 +26,7 @@ export interface OnboardingOptions {
 }
 
 /** Map a package manager to its `dlx`-style runner word for one-off `chkit` invocations. */
-export function runnerFor(packageManager?: OnboardingOptions['packageManager']): string {
+function runnerFor(packageManager?: OnboardingOptions['packageManager']): string {
   switch (packageManager) {
     case 'bun':
       return 'bunx'
