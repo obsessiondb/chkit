@@ -160,6 +160,47 @@ Column-level comment rendered in SQL.
 
 Previous column name for rename tracking. See [Rename support](#rename-support).
 
+### `codec` (ColumnCodecSpec, optional)
+
+Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is an object with a `kind`, or an **array** forming a chain (zero or more preprocessors followed by exactly one general codec).
+
+```ts
+columns: [
+  { name: 'ts', type: 'DateTime64(3)', codec: { kind: 'Delta', size: 4 } },
+  { name: 'amount', type: 'Float64', codec: { kind: 'ZSTD', level: 3 } },
+  // chain: preprocessor then general codec
+  { name: 'seq', type: 'UInt64', codec: [{ kind: 'DoubleDelta' }, { kind: 'LZ4HC', level: 9 }] },
+]
+```
+
+**General codecs** (the compressor; at most one, and it must come last in a chain):
+
+| `kind` | Args | Renders |
+|--------|------|---------|
+| `NONE`, `LZ4`, `T64`, `GCD`, `ALP` | — | `CODEC(LZ4)` |
+| `LZ4HC` | `level?: number` | `CODEC(LZ4HC(9))` |
+| `ZSTD` | `level?: number` | `CODEC(ZSTD(3))` |
+
+**Preprocessing codecs** (placed before the general codec):
+
+| `kind` | Args | Renders |
+|--------|------|---------|
+| `Delta`, `DoubleDelta`, `Gorilla` | `size?: 1 \| 2 \| 4 \| 8` (bytes, defaults to 1) | `CODEC(Delta(4))` |
+| `FPC` | `level: number`, `floatSize: 4 \| 8` | `CODEC(FPC(...))` |
+
+**Raw escape hatch** — for codecs not yet typed (new ClickHouse versions, unusual arg shapes), pass the inner expression through verbatim:
+
+```ts
+{ name: 'blob', type: 'String', codec: { kind: 'raw', expression: 'T64, LZ4' } }
+// → CODEC(T64, LZ4)
+```
+
+:::caution
+Use the typed `{ kind: 'ZSTD', level: 3 }` shape — an unrecognized shape such as `codec: { general: 'ZSTD' }` is **not** a valid `ColumnCodecSpec` and renders an empty `CODEC()`, silently shipping a column with no codec.
+:::
+
+Codec chains are validated (see [Validation rules](#validation-rules)): a chain must be non-empty, contain at most one general codec, and end with the general codec.
+
 ## Skip indexes
 
 Each entry in the `indexes` array is a `SkipIndexDefinition`. The shared base fields are:
@@ -371,6 +412,9 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Duplicate projection names** -- repeated projection name within a table
 - **Primary key references missing column** -- `primaryKey` includes a column not in `columns`
 - **Order by references missing column** -- `orderBy` includes a column not in `columns`
+- **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
+- **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
+- **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)
 
 ## Structural vs. alterable properties
 
@@ -381,3 +425,7 @@ When a property changes, chkit determines whether the table can be altered in pl
 **Alterable** (ALTER in place): columns, indexes, projections, settings, TTL, comment
 
 Views and materialized views always use drop + recreate.
+
+:::danger
+Changing a structural property on an existing table generates a `DROP TABLE` followed by `CREATE TABLE` — **all rows are permanently deleted and the table is recreated empty**. The data is not copied over. The drop is classified `risk=danger` (blocked without `--allow-destructive`) and `chkit migrate` flags it with the distinct `table_recreate_data_loss` warning. To preserve data, migrate by hand instead: create a new table with the desired structure, `INSERT INTO new SELECT ... FROM old`, then swap names and drop the old table.
+:::

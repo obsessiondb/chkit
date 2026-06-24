@@ -23,7 +23,9 @@ export default defineConfig({
 
 ## How plugins hook in
 
-Plugins implement a small set of lifecycle hooks — for example, transforming schema definitions before diff, registering new CLI commands, or running code after a migration applies. The [CLI: `chkit plugin`](/cli/plugin/) command lists plugins active in your config.
+Plugins implement a small set of lifecycle hooks — for example, transforming schema definitions before diff, registering new CLI commands, running setup on startup (`onInit`) or teardown on exit (`onComplete`), and transforming SQL before a migration applies (`onBeforeApply`). The [CLI: `chkit plugin`](/cli/plugin/) command lists plugins active in your config.
+
+Using a plugin doesn't require knowing these hooks — each official plugin's page covers everything needed to configure it. The hooks matter only when authoring a plugin.
 
 You can author your own plugins; the existing official plugins are the reference. See [Contributing](https://github.com/obsessiondb/chkit/blob/main/CONTRIBUTING.md#plugins) for the entry point.
 

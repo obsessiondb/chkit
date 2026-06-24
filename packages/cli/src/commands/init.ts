@@ -1,11 +1,24 @@
+import process from 'node:process'
 import { relative, resolve } from 'node:path'
 
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
+import { ensureProjectDependencies } from '../runtime/deps.js'
 
-export async function cmdInit(): Promise<void> {
+type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
+
+interface InitOptions {
+  connect?: ConnectChoice
+  email?: string
+  code?: string
+  orgName?: string
+  yes: boolean
+}
+
+export async function cmdInit(argv: string[] = []): Promise<void> {
   const cwd = process.cwd()
   const configPath = resolve(cwd, DEFAULT_CONFIG_FILE)
   const schemaPath = resolve(cwd, 'src/db/schema/example.ts')
+  const options = parseInitOptions(argv)
 
   const wroteConfig = await writeIfMissing(
     configPath,
@@ -20,14 +33,90 @@ export async function cmdInit(): Promise<void> {
   if (wroteConfig) console.log(`Created ${relative(cwd, configPath)}`)
   if (wroteSchema) console.log(`Created ${relative(cwd, schemaPath)}`)
 
+  // Install chkit + plugins when the project has none, so the scaffolded config resolves its imports
+  // and a follow-up `generate` doesn't dead-end. Runs before onboarding so the claim flow (which
+  // dynamically imports the plugin and edits the config) operates on an already-runnable project.
+  await ensureProjectDependencies(cwd, (msg) => console.log(msg))
+
+  // Interactive onboarding only when attached to a TTY (or explicitly requested via flags),
+  // and not opted out with --yes. Keeps `chkit init` a silent file-writer for CI/scripts.
+  if (await maybeRunOnboarding(configPath, options)) return
+
   if (wroteConfig || wroteSchema) {
     console.log('')
     console.log('Next steps:')
     console.log('  1. Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB if needed).')
     console.log('  2. Edit src/db/schema/example.ts to match your data.')
-    console.log('  3. Run: bunx chkit generate --name init')
-    console.log('  4. Run: bunx chkit migrate --apply')
+    console.log('  3. Run: npx chkit generate --name init')
+    console.log('  4. Run: npx chkit migrate --apply')
     console.log('')
     console.log('Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/')
   }
+}
+
+/**
+ * Runs the shared ObsessionDB onboarding flow when appropriate. Returns true if it ran
+ * (so the caller skips the static next-steps). The plugin is an optional dependency, so a
+ * failed import degrades silently to the non-interactive path.
+ */
+async function maybeRunOnboarding(configPath: string, options: InitOptions): Promise<boolean> {
+  // `--yes` keeps init a silent file-writer for CI/scripts. Otherwise we always hand off to
+  // onboarding (when the plugin is present): it self-gates on TTY — showing the connect prompt
+  // interactively and printing the non-interactive runbook otherwise — so `chkit init` and
+  // `create-chkit` behave consistently instead of init silently skipping the runbook.
+  if (options.yes) return false
+
+  // The plugin is an optional dependency: when genuinely absent we degrade to static next-steps.
+  // But a load failure of an *installed* plugin (or a real error inside onboarding) must surface,
+  // not silently pass — so we only swallow a not-found of the plugin package itself.
+  const mod = await tryImportObsessiondb()
+  if (!mod) return false
+
+  await mod.runOnboarding({
+    configPath,
+    connect: options.connect,
+    email: options.email,
+    code: options.code,
+    orgName: options.orgName,
+  })
+  return true
+}
+
+async function tryImportObsessiondb(): Promise<
+  typeof import('@chkit/plugin-obsessiondb') | null
+> {
+  try {
+    return await import('@chkit/plugin-obsessiondb')
+  } catch (error) {
+    if (isPluginNotInstalled(error)) return null
+    throw error
+  }
+}
+
+function isPluginNotInstalled(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') &&
+    message.includes('@chkit/plugin-obsessiondb')
+  )
+}
+
+function parseInitOptions(argv: string[]): InitOptions {
+  const options: InitOptions = { yes: false }
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (!token) continue
+    const eq = token.indexOf('=')
+    const name = eq === -1 ? token : token.slice(0, eq)
+    const inlineValue = eq === -1 ? undefined : token.slice(eq + 1)
+    const value = (): string | undefined => inlineValue ?? argv[++i]
+
+    if (name === '--yes' || name === '-y') options.yes = true
+    else if (name === '--connect') options.connect = value() as ConnectChoice | undefined
+    else if (name === '--email') options.email = value()
+    else if (name === '--code') options.code = value()
+    else if (name === '--org-name') options.orgName = value()
+  }
+  return options
 }
