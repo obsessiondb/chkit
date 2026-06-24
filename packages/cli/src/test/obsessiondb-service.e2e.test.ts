@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -15,9 +15,6 @@ interface RpcRequest {
 	path: string
 	body: string
 }
-
-let tempDir: string | undefined
-let server: ReturnType<typeof Bun.serve> | undefined
 
 async function runCliAsync(
 	args: string[],
@@ -62,7 +59,7 @@ function service(overrides: {
 }
 
 async function setupObsessiondbCli() {
-	tempDir = await mkdtemp(join(tmpdir(), 'chkit-obsessiondb-cli-'))
+	const tempDir = await mkdtemp(join(tmpdir(), 'chkit-obsessiondb-cli-'))
 	const fixture = await createFixture()
 	const xdgConfigHome = join(tempDir, 'xdg')
 	const chkitConfigDir = join(xdgConfigHome, 'chkit')
@@ -70,7 +67,7 @@ async function setupObsessiondbCli() {
 	const profileConfigPath = join(chkitConfigDir, 'config.ts')
 	const requests: RpcRequest[] = []
 
-	server = Bun.serve({
+	const server = Bun.serve({
 		port: 0,
 		async fetch(req) {
 			const url = new URL(req.url)
@@ -130,73 +127,73 @@ async function setupObsessiondbCli() {
 		requests,
 		env: { XDG_CONFIG_HOME: xdgConfigHome },
 		servicePath: join(fixture.dir, '.chkit', 'obsessiondb.json'),
+		server,
+		tempDir,
 	}
 }
 
 describe('@chkit/cli obsessiondb service e2e', () => {
-	afterEach(async () => {
-		server?.stop()
-		server = undefined
-		if (tempDir) {
-			await rm(tempDir, { recursive: true, force: true })
-			tempDir = undefined
-		}
-	})
-
 	test('runs service list and service alias commands through the CLI', async () => {
-		const { fixture, requests, env, servicePath } = await setupObsessiondbCli()
+		const { fixture, requests, env, servicePath, server, tempDir } =
+			await setupObsessiondbCli()
 
-		const list = await runCliAsync(
-			['obsessiondb', 'service', 'list', '--config', fixture.configPath],
-			env,
-		)
-		expect(list.exitCode).toBe(0)
-		expect(list.stdout).toContain('Services:')
-		expect(list.stdout).toContain('Acme (acme):')
-		expect(list.stdout).toContain('  - production (running)')
-		expect(list.stdout).toContain('  - staging (stopped)')
+		try {
+			const list = await runCliAsync(
+				['obsessiondb', 'service', 'list', '--config', fixture.configPath],
+				env,
+			)
+			expect(list.exitCode).toBe(0)
+			expect(list.stdout).toContain('Services:')
+			expect(list.stdout).toContain('Acme (acme):')
+			expect(list.stdout).toContain('  - production (running)')
+			expect(list.stdout).toContain('  - staging (stopped)')
 
-		const setAlias = await runCliAsync(
-			[
-				'obsessiondb',
-				'service',
-				'alias',
-				'set',
-				'login',
-				'production',
-				'--config',
-				fixture.configPath,
-			],
-			env,
-		)
-		expect(setAlias.exitCode).toBe(0)
-		expect(setAlias.stdout).toContain('Service alias saved: login -> production')
+			const setAlias = await runCliAsync(
+				[
+					'obsessiondb',
+					'service',
+					'alias',
+					'set',
+					'login',
+					'production',
+					'--config',
+					fixture.configPath,
+				],
+				env,
+			)
+			expect(setAlias.exitCode).toBe(0)
+			expect(setAlias.stdout).toContain('Service alias saved: login -> production')
 
-		const aliasList = await runCliAsync(
-			[
-				'obsessiondb',
-				'service',
-				'alias',
-				'list',
-				'--config',
-				fixture.configPath,
-			],
-			env,
-		)
-		expect(aliasList.exitCode).toBe(0)
-		expect(aliasList.stdout).toContain('Service aliases:')
-		expect(aliasList.stdout).toContain('  login -> production')
+			const aliasList = await runCliAsync(
+				[
+					'obsessiondb',
+					'service',
+					'alias',
+					'list',
+					'--config',
+					fixture.configPath,
+				],
+				env,
+			)
+			expect(aliasList.exitCode).toBe(0)
+			expect(aliasList.stdout).toContain('Service aliases:')
+			expect(aliasList.stdout).toContain('  login -> production')
 
-		const stored = JSON.parse(await readFile(servicePath, 'utf8')) as {
-			aliases?: Record<string, { service_slug?: string; service_name?: string }>
+			const stored = JSON.parse(await readFile(servicePath, 'utf8')) as {
+				aliases?: Record<string, { service_slug?: string; service_name?: string }>
+			}
+			expect(stored.aliases?.login).toEqual({
+				service_slug: 'production',
+				service_name: 'production',
+			})
+			expect(requests.map((request) => request.path)).toEqual([
+				'/rpc/services/listAll',
+				'/rpc/services/listAll',
+			])
+		} finally {
+			server.stop()
+			await rm(tempDir, { recursive: true, force: true })
+			await rm(fixture.dir, { recursive: true, force: true })
 		}
-		expect(stored.aliases?.login).toEqual({
-			service_slug: 'production',
-			service_name: 'production',
-		})
-		expect(requests.map((request) => request.path)).toEqual([
-			'/rpc/services/listAll',
-			'/rpc/services/listAll',
-		])
 	})
 })
