@@ -10,6 +10,18 @@ describe('deriveOrgName', () => {
   test('falls back to playground for an empty local-part', () => {
     expect(deriveOrgName('@co.com')).toBe('playground')
   })
+
+  test('strips the +subaddress from a plus-addressed email', () => {
+    expect(deriveOrgName('marc+clisignup@numia.xyz')).toBe('marc')
+  })
+
+  test('keeps dots in a dotted local-part', () => {
+    expect(deriveOrgName('marc.hoeffl@numia.xyz')).toBe('marc.hoeffl')
+  })
+
+  test('falls back to playground for an all-symbol local-part', () => {
+    expect(deriveOrgName('+++@x.com')).toBe('playground')
+  })
 })
 
 describe('slugifyOrgName', () => {

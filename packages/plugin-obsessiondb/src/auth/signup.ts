@@ -156,8 +156,11 @@ async function promptCode(print: (msg: string) => void): Promise<string | null> 
 
 /** Derive a personal org name from the email local-part; fallback to `playground`. */
 export function deriveOrgName(email: string): string {
-  const localPart = email.split('@')[0]?.trim().toLowerCase() ?? ''
-  return localPart.length > 0 ? localPart : 'playground'
+  // Drop the +subaddress (everything from the first '+' to the '@') and any non-display chars so a
+  // plus-addressed email like `marc+clisignup@…` yields `marc`, not `marc+clisignup`.
+  const localPart = email.split('@')[0]?.split('+')[0] ?? ''
+  const cleaned = localPart.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '')
+  return cleaned.length > 0 ? cleaned : 'playground'
 }
 
 /** Build a unique-ish org slug from a name (random suffix avoids collisions across machines). */
