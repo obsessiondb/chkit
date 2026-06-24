@@ -10,9 +10,11 @@ import {
   otpSentEnvelope,
   provisioningEnvelope,
   SERVICE_SELECT_COMMAND,
+  serviceListEnvelope,
   SIGNUP_EMAIL_COMMAND,
   verifiedEnvelope,
   verifyCodeCommand,
+  whoamiEnvelope,
 } from './json-envelope'
 
 describe('signup envelopes', () => {
@@ -90,5 +92,30 @@ describe('errorEnvelope', () => {
 describe('command strings', () => {
   test('verifyCodeCommand embeds the email so the caller can paste the code', () => {
     expect(verifyCodeCommand('a@b.com')).toBe('chkit obsessiondb signup --email a@b.com --code <CODE>')
+  })
+})
+
+describe('whoami / service list envelopes', () => {
+  test('whoamiEnvelope reports a logged-in status (terminal, no next)', () => {
+    expect(whoamiEnvelope({ email: 'me@x.com', name: 'Me' })).toEqual({
+      command: 'obsessiondb whoami',
+      schemaVersion: JSON_CONTRACT_VERSION,
+      status: 'logged_in',
+      email: 'me@x.com',
+      next: null,
+    })
+  })
+
+  test('serviceListEnvelope is a single object with a services array', () => {
+    expect(
+      serviceListEnvelope([
+        { organization: 'Numia', slug: 'svc-1', name: 'dev-1', selected: true },
+      ]),
+    ).toEqual({
+      command: 'obsessiondb service list',
+      schemaVersion: JSON_CONTRACT_VERSION,
+      status: 'ok',
+      services: [{ organization: 'Numia', slug: 'svc-1', name: 'dev-1', selected: true }],
+    })
   })
 })
