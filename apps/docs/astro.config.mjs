@@ -35,10 +35,6 @@ export default defineConfig({
 					autogenerate: { directory: 'tutorials' },
 				},
 				{
-					label: 'CLI Reference',
-					autogenerate: { directory: 'cli' },
-				},
-				{
 					label: 'Configuration',
 					autogenerate: { directory: 'configuration' },
 				},
@@ -57,6 +53,10 @@ export default defineConfig({
 				{
 					label: 'Plugins',
 					autogenerate: { directory: 'plugins' },
+				},
+				{
+					label: 'CLI Reference',
+					autogenerate: { directory: 'cli' },
 				},
 			],
 		}),
