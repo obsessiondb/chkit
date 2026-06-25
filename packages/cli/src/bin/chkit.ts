@@ -3,6 +3,7 @@ import process from 'node:process'
 import type { ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
+import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
@@ -145,7 +146,14 @@ async function run(): Promise<void> {
   }
 
   if (commandName === 'init') {
-    await cmdInit()
+    await cmdInit(argv.slice(1))
+    return
+  }
+
+  // `skills` proxies to the external `skills` CLI and needs no project config, so handle it
+  // before config loading (like `init`).
+  if (commandName === 'skills') {
+    process.exitCode = await cmdSkills(argv.slice(1))
     return
   }
 

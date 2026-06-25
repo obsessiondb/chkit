@@ -710,3 +710,32 @@ describe('onBeforePluginCommand — backfill interception', () => {
 		expect(result.handled).toBe(false)
 	})
 })
+
+describe('command extensions register against the right command keys', () => {
+	const extensions = obsessiondb().plugin.extendCommands
+	const targetsOf = (flagName: string): string[] => {
+		const ext = extensions.find((e) => e.flags.some((f) => f.name === flagName))
+		return ext ? (Array.isArray(ext.command) ? ext.command : [ext.command]) : []
+	}
+
+	test('every extension targets a top-level command name (no two-word subcommand targets)', () => {
+		// The registry keys plugin extensions by top-level command name
+		// (byName.get(target)); a two-word target like "backfill run" never matches,
+		// so the flag would silently never register and the CLI rejects it as unknown.
+		const allTargets = extensions.flatMap((e) =>
+			Array.isArray(e.command) ? e.command : [e.command],
+		)
+		expect(allTargets.length).toBeGreaterThan(0)
+		for (const target of allTargets) {
+			expect(target).not.toContain(' ')
+		}
+	})
+
+	test('--service override is offered on pull', () => {
+		expect(targetsOf('--service')).toContain('pull')
+	})
+
+	test('--local is registered against the backfill command', () => {
+		expect(targetsOf('--local')).toContain('backfill')
+	})
+})

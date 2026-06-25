@@ -1,5 +1,7 @@
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
+import { errorEnvelope, serviceListEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
+import { runClaim } from './claim.js'
 import {
 	renderServiceOrganizations,
 	selectServiceInteractive,
@@ -17,6 +19,7 @@ interface PluginCommandContext {
 	configPath: string
 	args: string[]
 	flags: Record<string, string | string[] | boolean | undefined>
+	jsonMode?: boolean
 	print: (value: unknown) => void
 }
 
@@ -68,6 +71,7 @@ function printServiceUsage(print: (msg: string) => void): void {
 	print('Usage:')
 	print('  chkit obsessiondb service list')
 	print('  chkit obsessiondb service select')
+	print('  chkit obsessiondb service claim')
 	print('  chkit obsessiondb service alias list')
 	print('  chkit obsessiondb service alias set <alias> <service-name>')
 	print('  chkit obsessiondb service alias remove <alias>')
@@ -91,13 +95,38 @@ export const SERVICE_COMMAND: PluginCommand = {
 		}
 
 		if (action === 'list' || action === 'ls') {
-			const effectiveCreds = await loadEffectiveCredentials(print)
-			if (!effectiveCreds) return 1
+			// Inline the credential check so a `--json` run emits one error envelope
+			// (not a stringified line) on the not-logged-in path.
+			const creds = await loadCredentials()
+			if (!creds) {
+				const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+				context.print(
+					context.jsonMode
+						? errorEnvelope('obsessiondb service list', 'not_logged_in', message)
+						: message,
+				)
+				return 1
+			}
+			const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
 
 			const [organizations, selected] = await Promise.all([
 				listServiceOrganizations(effectiveCreds),
 				loadSelectedService(context.configPath),
 			])
+			if (context.jsonMode) {
+				const services = organizations.flatMap((org) =>
+					org.services.map((service) => ({
+						organization: org.name,
+						slug: service.slug,
+						name: service.name,
+						selected:
+							selected?.service_slug === service.slug ||
+							selected?.service_name === service.name,
+					})),
+				)
+				context.print(serviceListEnvelope(services))
+				return 0
+			}
 			for (const line of renderServiceOrganizations(organizations, selected)) {
 				print(line)
 			}
@@ -106,6 +135,23 @@ export const SERVICE_COMMAND: PluginCommand = {
 
 		if (action === 'select') {
 			return runServiceSelect(context)
+		}
+
+		if (action === 'claim') {
+			// Inline the credential check (rather than loadEffectiveCredentials) so a `--json` run
+			// emits a single error envelope instead of stringified prose on the not-logged-in path.
+			const creds = await loadCredentials()
+			if (!creds) {
+				const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+				if (context.jsonMode) {
+					context.print(errorEnvelope('obsessiondb service claim', 'not_logged_in', message))
+				} else {
+					print(message)
+				}
+				return 1
+			}
+			const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
+			return runClaim(effectiveCreds, context.configPath, context.print, context.jsonMode === true)
 		}
 
 		if (action === 'alias') {

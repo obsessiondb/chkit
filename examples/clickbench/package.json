@@ -2,15 +2,15 @@
   "name": "chkit-example-clickbench",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.3.5",
+  "packageManager": "bun@1.3.13",
   "scripts": {
     "migrate": "chkit migrate --apply",
     "status": "chkit status",
     "check": "chkit check"
   },
   "devDependencies": {
-    "@chkit/core": "0.1.0-beta.28",
-    "@chkit/plugin-obsessiondb": "0.1.0-beta.28",
-    "chkit": "0.1.0-beta.28"
+    "@chkit/core": "0.1.0-beta.29",
+    "@chkit/plugin-obsessiondb": "0.1.0-beta.29",
+    "chkit": "0.1.0-beta.29"
   }
 }

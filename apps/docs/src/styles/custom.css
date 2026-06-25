@@ -1283,6 +1283,14 @@ kbd {
 .chk-gh-star-icon {
 	color: var(--accent);
 }
+/* In the mobile burger menu the badge renders inside `.sidebar-content`, whose
+   `.sidebar-content a { display: block }` rule (higher specificity than the bare
+   `.chk-gh-stars` selector) would override the flex layout — collapsing the pill
+   to a block and top-aligning its icons against the border. Re-assert the flex
+   layout with enough specificity to win. */
+.sidebar-content .chk-gh-stars {
+	display: inline-flex;
+}
 
 /* ════════════════════════════════════════════════════
    Site footer (brand + link columns)

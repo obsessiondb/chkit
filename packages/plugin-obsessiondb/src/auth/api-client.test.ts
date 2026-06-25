@@ -1,6 +1,15 @@
 import { describe, expect, test, afterEach, mock } from 'bun:test'
 
-import { pollDeviceToken, requestDeviceCode, getSession } from './api-client'
+import {
+  createOrganization,
+  getSession,
+  OtpRateLimitError,
+  pollDeviceToken,
+  requestDeviceCode,
+  sendVerificationOtp,
+  setActiveOrganization,
+  verifyOtp,
+} from './api-client'
 
 const BASE_URL = 'https://console-api.example.com'
 
@@ -113,5 +122,83 @@ describe('getSession', () => {
     ) as typeof fetch
 
     await expect(getSession(BASE_URL, 'bad-token')).rejects.toThrow('Failed to get session: 401')
+  })
+})
+
+describe('sendVerificationOtp', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test('posts email + sign-in type', async () => {
+    let captured: RequestInit | undefined
+    globalThis.fetch = mock(async (_url: string, init: RequestInit) => {
+      captured = init
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+    await sendVerificationOtp(BASE_URL, 'new@example.com')
+
+    expect(JSON.parse(String(captured?.body))).toEqual({ email: 'new@example.com', type: 'sign-in' })
+  })
+
+  test('throws OtpRateLimitError on 429', async () => {
+    globalThis.fetch = mock(async () => new Response('Too Many Requests', { status: 429 })) as typeof fetch
+
+    await expect(sendVerificationOtp(BASE_URL, 'new@example.com')).rejects.toBeInstanceOf(OtpRateLimitError)
+  })
+})
+
+describe('verifyOtp', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test('reads the bearer token from the set-auth-token header', async () => {
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ user: { id: 'u1', email: 'new@example.com' } }), {
+        status: 200,
+        headers: { 'set-auth-token': 'bearer-xyz' },
+      })
+    ) as typeof fetch
+
+    const result = await verifyOtp(BASE_URL, 'new@example.com', '123456')
+
+    expect(result.token).toBe('bearer-xyz')
+    expect(result.user.email).toBe('new@example.com')
+  })
+
+  test('throws when no token header is returned', async () => {
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ user: { id: 'u1', email: 'new@example.com' } }), { status: 200 })
+    ) as typeof fetch
+
+    await expect(verifyOtp(BASE_URL, 'new@example.com', '123456')).rejects.toThrow('no auth token')
+  })
+})
+
+describe('createOrganization / setActiveOrganization', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test('createOrganization returns the new id', async () => {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({ id: 'org-1' }), { status: 200 })) as typeof fetch
+
+    const result = await createOrganization(BASE_URL, 'tok', { name: 'marc', slug: 'marc-ab12cd' })
+
+    expect(result.id).toBe('org-1')
+  })
+
+  test('setActiveOrganization resolves on 200', async () => {
+    globalThis.fetch = mock(async () => new Response('{}', { status: 200 })) as typeof fetch
+
+    await expect(setActiveOrganization(BASE_URL, 'tok', 'org-1')).resolves.toBeUndefined()
   })
 })

@@ -1,6 +1,8 @@
 ---
 title: Pull Plugin
 description: Introspect live ClickHouse tables, views, and materialized views and generate chkit schema files.
+sidebar:
+  order: 3
 ---
 
 This document covers practical usage of the optional `pull` plugin.

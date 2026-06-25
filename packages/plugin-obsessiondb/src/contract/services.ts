@@ -1,6 +1,10 @@
 /**
  * Copied from @obsessiondb/contract-console — will be replaced
  * by a direct dependency once the contract package is published.
+ *
+ * Source: obdb-platform packages/contract-console/src/contracts/services.ts
+ * Commit: 0b98b51 (2026-06-23)
+ * Subset lifted: list, listAll, get, instanceClaimStatus, claimInstance, revealCredentials.
  */
 import { oc } from '@orpc/contract'
 import { z } from 'zod'
@@ -65,4 +69,25 @@ export const servicesContract = {
   get: oc
     .input(z.object({ serviceSlug: serviceSlugSchema }))
     .output(serviceSchema),
+
+  instanceClaimStatus: oc.input(z.object({})).output(
+    z.discriminatedUnion('eligible', [
+      z.object({ eligible: z.literal(true) }),
+      z.object({ eligible: z.literal(false), claimedOrganizationName: z.string() }),
+    ]),
+  ),
+
+  claimInstance: oc
+    .input(z.object({ organizationId: z.string().optional() }))
+    .output(
+      z.discriminatedUnion('outcome', [
+        z.object({ outcome: z.literal('claimed'), id: z.string(), slug: serviceSlugSchema }),
+        z.object({ outcome: z.literal('none_available') }),
+        z.object({ outcome: z.literal('already_claimed'), claimedOrganizationName: z.string() }),
+      ]),
+    ),
+
+  revealCredentials: oc
+    .input(z.object({ serviceSlug: serviceSlugSchema }))
+    .output(z.object({ password: z.string() })),
 }

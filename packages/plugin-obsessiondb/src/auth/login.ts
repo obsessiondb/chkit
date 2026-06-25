@@ -6,6 +6,7 @@ import {
 	serviceChoiceLabel,
 } from '../service/select.js'
 import { loadSelectedService, saveSelectedService } from '../service/storage.js'
+import { errorEnvelope, whoamiEnvelope } from '../json-envelope.js'
 import { getSession, pollDeviceToken, requestDeviceCode } from './api-client.js'
 import {
 	clearCredentials,
@@ -113,25 +114,43 @@ export async function runLogin(
 }
 
 export async function runLogout(print: (msg: string) => void): Promise<number> {
-	await clearCredentials()
-	print('Logged out.')
+	const had = await clearCredentials()
+	print(had ? 'Logged out.' : 'No active session.')
 	return 0
 }
 
-export async function runWhoami(print: (msg: string) => void): Promise<number> {
+export async function runWhoami(
+	print: (value: unknown) => void,
+	jsonMode = false,
+): Promise<number> {
 	const creds = await loadCredentials()
 	if (!creds) {
-		print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
+		const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+		print(
+			jsonMode
+				? errorEnvelope('obsessiondb whoami', 'not_logged_in', message)
+				: message,
+		)
 		return 1
 	}
 
 	try {
 		const session = await getSession(creds.base_url, creds.access_token)
-		print(`Logged in as ${session.user.email} (${session.user.name})`)
+		print(
+			jsonMode
+				? whoamiEnvelope({ email: session.user.email, name: session.user.name })
+				: `Logged in as ${session.user.email} (${session.user.name})`,
+		)
 		return 0
 	} catch {
 		await clearCredentials()
-		print('Session expired. Run `chkit obsessiondb login` to re-authenticate.')
+		const message =
+			'Session expired. Run `chkit obsessiondb login` to re-authenticate.'
+		print(
+			jsonMode
+				? errorEnvelope('obsessiondb whoami', 'session_expired', message)
+				: message,
+		)
 		return 1
 	}
 }

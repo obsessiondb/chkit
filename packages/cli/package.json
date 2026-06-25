@@ -1,6 +1,6 @@
 {
   "name": "chkit",
-  "version": "0.1.0-beta.28",
+  "version": "0.1.0-beta.29",
   "description": "ClickHouse schema and migration CLI for TypeScript projects",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -35,7 +35,7 @@
     "dev": "bun run src/bin/chkit.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun test src --concurrent --timeout 15000",
+    "test": "bun test src --concurrent --parallel --timeout 15000",
     "clean": "rm -rf dist"
   },
   "dependencies": {

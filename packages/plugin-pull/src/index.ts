@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import { z } from 'zod'
 import {
+  type ClickHouseExecutor,
   createClickHouseExecutor,
   type IntrospectedTable,
 } from '@chkit/clickhouse'
@@ -60,6 +61,8 @@ export interface PullPluginCommandContext {
   config: ResolvedChxConfig
   configPath: string
   print: (value: unknown) => void
+  /** Executor resolved by the host (e.g. the ObsessionDB remote executor when a service is selected). */
+  pluginContext?: { executor: ClickHouseExecutor; hasExecutor: boolean }
 }
 
 export interface PullPlugin {
@@ -169,7 +172,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
         flags: PULL_SCHEMA_FLAGS,
         optionsSchema,
         flagMapping: PULL_FLAG_MAP,
-        async run({ flags, jsonMode, print, options: opts, config }) {
+        async run({ flags, jsonMode, print, options: opts, config, pluginContext }) {
           return wrapPluginRun({
             command: 'schema',
             label: 'Pull schema',
@@ -194,6 +197,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               const dryrun = flags['--dryrun'] === true
               const pulled = await pullSchema({
                 config,
+                executor: pluginContext?.hasExecutor ? pluginContext.executor : null,
                 options: { ...effectiveOptions, introspect: introspector },
               })
 
@@ -254,30 +258,45 @@ export function pull(options: PullPluginOptions = {}): PullPluginRegistration {
 
 async function pullSchema(input: {
   config: ResolvedChxConfig
+  executor?: ClickHouseExecutor | null
   options: PullOptions & { introspect?: PullIntrospector }
 }): Promise<PullSchemaResult> {
-  if (!input.config.clickhouse) {
-    throw new PullConfigError('clickhouse config is required for pull plugin')
+  const customIntrospector = input.options.introspect
+
+  // Prefer the host-provided executor — e.g. the ObsessionDB remote executor when a service is
+  // selected — so pull introspects through whatever target the rest of the CLI targets, not just a
+  // direct ClickHouse URL. Fall back to building one from the clickhouse config block.
+  const db: ClickHouseExecutor | null =
+    input.executor ??
+    (input.config.clickhouse ? createClickHouseExecutor(input.config.clickhouse) : null)
+
+  // A custom introspector opens its own raw-ClickHouse connection and needs the config block.
+  if (customIntrospector && !input.config.clickhouse) {
+    throw new PullConfigError('clickhouse config is required for a custom pull introspector')
+  }
+  if (!customIntrospector && !db) {
+    throw new PullConfigError(
+      'pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service (chkit obsessiondb service select)'
+    )
   }
 
   const outFile = resolve(process.cwd(), input.options.outFile)
-  const introspector = input.options.introspect ?? defaultIntrospector
-  const usesDefaultIntrospector = introspector === defaultIntrospector
   let objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }> = []
   let selectedDatabases = input.options.databases
 
-  if (usesDefaultIntrospector || selectedDatabases.length === 0) {
-    const db = createClickHouseExecutor(input.config.clickhouse)
+  if (db && (!customIntrospector || selectedDatabases.length === 0)) {
     objects = await db.listSchemaObjects()
     if (selectedDatabases.length === 0) {
       selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
     }
   }
 
-  const introspected = await introspector({
-    config: input.config.clickhouse,
-    databases: selectedDatabases,
-  })
+  const introspected = customIntrospector
+    ? await customIntrospector({
+        config: input.config.clickhouse as NonNullable<ResolvedChxConfig['clickhouse']>,
+        databases: selectedDatabases,
+      })
+    : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
 
   const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
   const content = renderSchemaFile(definitions)
@@ -294,13 +313,12 @@ async function pullSchema(input: {
   }
 }
 
-async function defaultIntrospector(input: {
-  config: NonNullable<ResolvedChxConfig['clickhouse']>
+async function introspectWithExecutor(
+  db: ClickHouseExecutor,
   databases: string[]
-}): Promise<IntrospectedObject[]> {
-  const db = createClickHouseExecutor(input.config)
-  const tables = await db.listTableDetails(input.databases)
-  const nonTableRows = await listNonTableRows(db, input.databases)
+): Promise<IntrospectedObject[]> {
+  const tables = await db.listTableDetails(databases)
+  const nonTableRows = await listNonTableRows(db, databases)
   const nonTableObjects = nonTableRows
     .map(mapSystemTableRowToDefinition)
     .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)

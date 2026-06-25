@@ -1,4 +1,5 @@
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
+import { loadSelectedService } from '../service/storage.js'
 import { createJobsClient, isSessionExpiredError, type JobsClient } from './client.js'
 
 interface BeforePluginCommandContext {
@@ -19,11 +20,21 @@ type HandlerResult =
 
 const REMOTE_SUBCOMMANDS = new Set(['status', 'cancel', 'list'])
 
+// Backfill execution commands run the chunked query loop. Against ObsessionDB these
+// must submit jobs to the backend rather than open a direct ClickHouse connection,
+// which is not implemented yet — so we refuse them instead of silently falling back
+// to a direct connection that bypasses ObsessionDB.
+const EXECUTION_SUBCOMMANDS = new Set(['plan', 'run', 'resume'])
+
 export async function handleBackfillCommand(context: BeforePluginCommandContext): Promise<HandlerResult> {
   if (context.targetPlugin !== 'backfill') return { handled: false }
 
-  // --local flag bypasses remote execution
+  // --local flag bypasses remote routing and runs against the direct ClickHouse connection.
   if (context.flags['--local'] === true) return { handled: false }
+
+  if (EXECUTION_SUBCOMMANDS.has(context.command)) {
+    return guardRemoteExecution(context)
+  }
 
   if (!REMOTE_SUBCOMMANDS.has(context.command)) return { handled: false }
 
@@ -52,6 +63,33 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
     }
     throw error
   }
+}
+
+// A backfill execution command targets ObsessionDB when the user is authenticated and a
+// service is selected (the same condition under which getContext hands out the remote
+// executor). In that case remote execution is not implemented yet, so refuse with a clear
+// message rather than opening a direct ClickHouse connection that bypasses ObsessionDB.
+async function guardRemoteExecution(
+  context: BeforePluginCommandContext,
+): Promise<HandlerResult> {
+  const creds = await loadCredentials()
+  if (!creds) return { handled: false }
+
+  const serviceOverride =
+    typeof context.flags['--service'] === 'string' ? context.flags['--service'].trim() : ''
+  const hasService =
+    serviceOverride.length > 0 || (await loadSelectedService(context.configPath)) !== null
+  if (!hasService) return { handled: false }
+
+  const message =
+    `Backfill ${context.command} against ObsessionDB is not supported yet — it will submit jobs to the ObsessionDB backend, which is not implemented. ` +
+    'Re-run with --local to execute against a direct ClickHouse connection, or unselect the service with `chkit obsessiondb service select`.'
+  if (context.jsonMode) {
+    context.print({ ok: false, command: `backfill ${context.command}`, error: message })
+  } else {
+    context.print(message)
+  }
+  return { handled: true, exitCode: 1 }
 }
 
 async function dispatchCommand(

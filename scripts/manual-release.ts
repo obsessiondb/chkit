@@ -4,16 +4,26 @@
  *
  * Handles the full release lifecycle:
  *   1. Prerequisite checks (tools, branch, npm auth)
- *   2. Enters beta prerelease mode if needed
+ *   2. Prerelease mode:
+ *        - default:   enters beta prerelease mode if needed
+ *        - --stable:  exits prerelease mode so versions graduate to GA
  *   3. Applies pending changesets (version bump) if they exist,
  *      or detects already-bumped versions from a prior run
  *   4. Runs quality gates (typecheck, lint, test, build)
  *   5. Runs release guards (internal workspace deps + packed tarballs)
- *   6. Publishes all public workspace packages via `bun publish`
- *      and syncs npm dist-tags with the documented install commands
+ *   6. Publishes all public workspace packages via `bun publish`:
+ *        - default:   publishes under the `beta` tag, then syncs the
+ *                     `latest` dist-tag to match the documented installs
+ *        - --stable:  publishes directly under the `latest` tag
  *   7. Commits version changes and pushes to origin/main
  *
- * Usage: bun run ./scripts/manual-release.ts [--dry-run]
+ * Usage: bun run ./scripts/manual-release.ts [--dry-run] [--stable]
+ *
+ * --stable graduates the current beta line to a GA release (e.g. the
+ * 0.1.0-beta.N line becomes 0.1.0). It exits changesets pre mode, so the
+ * accumulated changesets collapse into a single non-prerelease bump computed
+ * from the pre-entry baseline. A safety check refuses to publish if the
+ * resulting versions still carry a prerelease suffix.
  */
 import { spawnSync } from 'node:child_process'
 import {
@@ -34,6 +44,7 @@ import {
 
 type ReleaseArgs = {
 	dryRun: boolean
+	stable: boolean
 }
 
 type CommandResult = {
@@ -76,19 +87,34 @@ export async function main(): Promise<void> {
 	ensureOnMainBranch()
 	ensureNpmAuth()
 
-	// 2. Enter beta prerelease mode if not already active
-	ensureBetaPrereleaseMode()
+	// 2. Prerelease mode: enter beta (default) or exit to graduate to GA (--stable)
+	if (args.stable) {
+		exitPrereleaseModeForStable(args.dryRun)
+	} else {
+		ensureBetaPrereleaseMode()
+	}
 
 	// 3. Apply pending changesets (auto-recovers from prior failed releases)
-	const hadPendingChangesets = applyPendingChangesets(args.dryRun)
+	const hadPendingChangesets = applyPendingChangesets(args.dryRun, args.stable)
 
 	if (args.dryRun) {
 		logLine('Dry-run complete. No publish performed.')
 		return
 	}
 
-	if (!hadPendingChangesets) {
+	// In beta mode the changeset files are the source of truth. In stable mode,
+	// `changeset version` deletes them once consumed, so a recovery re-run can
+	// legitimately have no pending changesets — the publish step (which skips
+	// already-published versions) becomes the source of truth instead.
+	if (!hadPendingChangesets && !args.stable) {
 		fail('Nothing to release: no pending changeset files found in .changeset/.')
+	}
+
+	// Safety net: never publish a prerelease version under the stable `latest`
+	// tag. If the versions still carry a `-beta.N` suffix here, the pre-mode
+	// exit did not take effect (or there was nothing to graduate).
+	if (args.stable) {
+		assertStableVersionsForPublish()
 	}
 
 	// 4. Quality gates (typecheck, lint, test, build)
@@ -100,7 +126,7 @@ export async function main(): Promise<void> {
 
 	// 6. Publish
 	const otp = await promptForOtp()
-	publishWorkspacePackages(otp)
+	publishWorkspacePackages(otp, args.stable)
 
 	// 7. Commit and push
 	commitAndPush()
@@ -121,7 +147,7 @@ export async function main(): Promise<void> {
  * In that case, the consumed entries are cleared from pre.json so
  * `changeset version` re-processes them and bumps to the next beta.
  */
-function applyPendingChangesets(dryRun: boolean): boolean {
+function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 	const result = collectChangesetValidation()
 
 	if (result.files.length === 0) {
@@ -135,7 +161,14 @@ function applyPendingChangesets(dryRun: boolean): boolean {
 		)
 	}
 
-	resetConsumedChangesets(result.files)
+	// The consumed-changeset reset is a beta-recovery mechanism: in pre mode the
+	// .md files stay on disk and `changeset version` skips ones already recorded
+	// in pre.json. Stable mode exits pre mode, where `changeset version`
+	// consolidates and deletes every changeset itself, so the reset must be
+	// skipped — mutating pre.json here would interfere with that consolidation.
+	if (!stable) {
+		resetConsumedChangesets(result.files)
+	}
 
 	logLine(
 		`Found ${result.files.length} pending changeset(s). Bumping versions...`,
@@ -288,6 +321,51 @@ function ensureBetaPrereleaseMode(): void {
 	}
 }
 
+/**
+ * Graduates the current beta line to a GA release by leaving changesets pre
+ * mode. `changeset pre exit` flips pre.json to `mode: "exit"`; the subsequent
+ * `changeset version` then collapses every accumulated changeset into a single
+ * non-prerelease bump computed from the pre-entry baseline (e.g. the
+ * 0.1.0-beta.N line becomes 0.1.0) and removes the consumed changeset files.
+ *
+ * Idempotent: a no-op if already exited, and a clear failure if the repo was
+ * never in pre mode (there is nothing to graduate).
+ */
+function exitPrereleaseModeForStable(dryRun: boolean): void {
+	const preState = getPreState()
+
+	if (preState === null) {
+		// A successful exit + `changeset version` removes pre.json. Reaching here
+		// usually means a prior stable run already graduated the versions and only
+		// the publish/push failed — continue and let the version safety check and
+		// the already-published skip logic handle recovery.
+		logLine(
+			'Not in prerelease mode (.changeset/pre.json missing). Assuming ' +
+				'versions were graduated in a prior run; continuing recovery.',
+		)
+		return
+	}
+
+	if (preState.mode === 'exit') {
+		logLine('Prerelease mode already exited. Continuing with stable release.')
+		return
+	}
+
+	if (preState.mode !== 'pre') {
+		fail(
+			`Unsupported prerelease mode value in .changeset/pre.json: ${preState.mode}`,
+		)
+	}
+
+	if (dryRun) {
+		logLine('[dry-run] Would exit beta prerelease mode (changeset pre exit).')
+		return
+	}
+
+	logLine('Exiting beta prerelease mode to graduate to a stable release...')
+	runCommand('bun', ['run', 'changeset', '--', 'pre', 'exit'])
+}
+
 function getPreState(): { mode?: string; tag?: string } | null {
 	const preFile = resolve('.changeset/pre.json')
 
@@ -303,7 +381,11 @@ function getPreState(): { mode?: string; tag?: string } | null {
 // Publishing
 // ---------------------------------------------------------------------------
 
-function publishWorkspacePackages(otp: string): void {
+function publishWorkspacePackages(otp: string, stable: boolean): void {
+	// Beta releases publish under `beta` and then sync `latest` so the
+	// documented unqualified installs resolve the freshest build. Stable
+	// releases publish directly under `latest`, so no separate sync is needed.
+	const publishTag = stable ? DOCUMENTED_INSTALL_TAG : PUBLISH_TAG
 	const packagesDir = resolve('packages')
 	const packageDirs = readdirSync(packagesDir).filter((name) => {
 		const pkgJsonPath = join(packagesDir, name, 'package.json')
@@ -344,10 +426,10 @@ function publishWorkspacePackages(otp: string): void {
 		}
 
 		try {
-			logLine(`Publishing ${pkg.name}@${pkg.version}...`)
+			logLine(`Publishing ${pkg.name}@${pkg.version} (tag: ${publishTag})...`)
 			runCommand(
 				'bun',
-				['publish', '--tag', PUBLISH_TAG, '--access', 'public', '--otp', otp],
+				['publish', '--tag', publishTag, '--access', 'public', '--otp', otp],
 				{ cwd: join(packagesDir, dir) },
 			)
 			published++
@@ -360,7 +442,11 @@ function publishWorkspacePackages(otp: string): void {
 		}
 	}
 
-	syncDocumentedInstallDistTags(releasedPackages, otp)
+	// Stable releases publish straight to `latest`, so no dist-tag realignment
+	// is required. Beta releases need it to keep the documented installs fresh.
+	if (!stable) {
+		syncDocumentedInstallDistTags(releasedPackages, otp)
+	}
 
 	if (published === 0 && skipped > 0) {
 		fail(
@@ -397,6 +483,29 @@ function syncDocumentedInstallDistTags(
 	}
 }
 
+/**
+ * Guards the stable publish: after `changeset version` runs in exit mode, every
+ * publishable workspace package must carry a non-prerelease version. A lingering
+ * `-beta.N` suffix means the pre-mode exit did not take effect, and we must not
+ * push a prerelease build to the `latest` tag.
+ */
+function assertStableVersionsForPublish(): void {
+	const prerelease = readWorkspacePackages()
+		.map(({ pkg }) => pkg)
+		.filter((pkg) => !pkg.private && pkg.name && pkg.version)
+		.filter((pkg) => pkg.version?.includes('-'))
+		.map((pkg) => `${pkg.name}@${pkg.version}`)
+
+	if (prerelease.length > 0) {
+		fail(
+			'Stable release aborted: the following versions still carry a ' +
+				`prerelease suffix:\n${prerelease.join('\n')}\n` +
+				'Exiting changesets pre mode did not graduate them. Check ' +
+				'.changeset/pre.json and that pending changesets exist.',
+		)
+	}
+}
+
 function isVersionPublished(name: string, version: string): boolean {
 	const result = spawnSync('npm', ['view', `${name}@${version}`, 'version'], {
 		encoding: 'utf8',
@@ -430,6 +539,7 @@ function commitAndPush(): void {
 
 function parseArgs(argv: string[]): ReleaseArgs {
 	let dryRun = false
+	let stable = false
 
 	for (const arg of argv) {
 		if (arg === '--dry-run') {
@@ -437,10 +547,15 @@ function parseArgs(argv: string[]): ReleaseArgs {
 			continue
 		}
 
-		fail(`Unknown argument: ${arg}. Supported args: --dry-run`)
+		if (arg === '--stable') {
+			stable = true
+			continue
+		}
+
+		fail(`Unknown argument: ${arg}. Supported args: --dry-run, --stable`)
 	}
 
-	return { dryRun }
+	return { dryRun, stable }
 }
 
 function ensureRequiredTools(): void {
