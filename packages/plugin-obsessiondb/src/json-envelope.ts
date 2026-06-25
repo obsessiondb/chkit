@@ -91,6 +91,42 @@ export function errorEnvelope(command: string, code: string, message: string): E
   return { command, schemaVersion: JSON_CONTRACT_VERSION, ok: false, error: { code, message } }
 }
 
+/** `whoami` for an authenticated session: terminal, no next action. */
+export function whoamiEnvelope(user: { email: string; name?: string }): NextEnvelope {
+  return {
+    command: 'obsessiondb whoami',
+    schemaVersion: JSON_CONTRACT_VERSION,
+    status: 'logged_in',
+    email: user.email,
+    next: null,
+  }
+}
+
+/** A single ObsessionDB service in a `service list` envelope. */
+export interface ServiceListEntry {
+  organization: string
+  slug: string
+  name: string
+  selected: boolean
+}
+
+/** Structured `service list` output for `--json` consumers (one object, not per-line strings). */
+export interface ServiceListEnvelope {
+  command: string
+  schemaVersion: number
+  status: 'ok'
+  services: ServiceListEntry[]
+}
+
+export function serviceListEnvelope(services: ServiceListEntry[]): ServiceListEnvelope {
+  return {
+    command: 'obsessiondb service list',
+    schemaVersion: JSON_CONTRACT_VERSION,
+    status: 'ok',
+    services,
+  }
+}
+
 function envelope(
   command: string,
   status: string,

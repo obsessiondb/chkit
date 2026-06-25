@@ -235,7 +235,7 @@ function createObsessionDBPlugin(
 				],
 			},
 			{
-				command: ['generate', 'migrate', 'status', 'drift', 'check', 'query'],
+				command: ['generate', 'migrate', 'status', 'drift', 'check', 'query', 'pull'],
 				flags: [
 					{
 						name: '--service',

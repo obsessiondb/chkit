@@ -19,8 +19,24 @@ export interface OnboardingOptions {
   email?: string
   code?: string
   orgName?: string
+  /** Package manager whose runner word is used in the printed "Next steps". Defaults to npx. */
+  packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun'
   /** Skip onboarding entirely; just print next steps. */
   skip?: boolean
+}
+
+/** Map a package manager to its `dlx`-style runner word for one-off `chkit` invocations. */
+function runnerFor(packageManager?: OnboardingOptions['packageManager']): string {
+  switch (packageManager) {
+    case 'bun':
+      return 'bunx'
+    case 'pnpm':
+      return 'pnpm dlx'
+    case 'yarn':
+      return 'yarn dlx'
+    default:
+      return 'npx'
+  }
 }
 
 /**
@@ -29,18 +45,19 @@ export interface OnboardingOptions {
  */
 export async function runOnboarding(options: OnboardingOptions): Promise<void> {
   const print = (value: unknown) => log.message(typeof value === 'string' ? value : JSON.stringify(value))
+  const exec = runnerFor(options.packageManager)
 
   // Non-interactive with no explicit choice: we can't show the menu, so instead of silently
   // deferring, hand the caller the full runbook for every connect path before next steps.
   if (!options.skip && options.connect === undefined && !process.stdin.isTTY) {
     printConnectRunbook()
-    printNextSteps()
+    printNextSteps(exec)
     return
   }
 
   const choice = await resolveChoice(options)
   if (choice === 'later') {
-    printNextSteps()
+    printNextSteps(exec)
     return
   }
 
@@ -52,13 +69,13 @@ export async function runOnboarding(options: OnboardingOptions): Promise<void> {
 
   if (choice === 'clickhouse') {
     log.info('Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB) for your instance.')
-    printNextSteps()
+    printNextSteps(exec)
     return
   }
 
   if (choice === 'account') {
     await runLogin(baseUrl, options.configPath, print)
-    printNextSteps()
+    printNextSteps(exec)
     return
   }
 
@@ -91,7 +108,7 @@ export async function runOnboarding(options: OnboardingOptions): Promise<void> {
   if (claimCode !== 0) {
     throw new Error('Could not claim a free instance. Run `chkit obsessiondb service claim` to retry.')
   }
-  printNextSteps()
+  printNextSteps(exec)
 }
 
 async function resolveChoice(options: OnboardingOptions): Promise<ConnectChoice> {
@@ -193,14 +210,14 @@ function printConnectRunbook(): void {
   log.message(connectRunbookLines().join('\n'))
 }
 
-function printNextSteps(): void {
+function printNextSteps(exec: string): void {
   log.message(
     [
       'Next steps:',
       '  1. Edit your schema under src/db/schema/.',
-      '  2. Run: bunx chkit generate --name init',
-      '  3. Run: bunx chkit migrate --apply',
-      '  4. Run: bunx chkit status',
+      `  2. Run: ${exec} chkit generate --name init`,
+      `  3. Run: ${exec} chkit migrate --apply`,
+      `  4. Run: ${exec} chkit status`,
     ].join('\n'),
   )
 }

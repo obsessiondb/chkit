@@ -42,11 +42,14 @@ export async function saveCredentials(creds: Credentials): Promise<void> {
   await chmod(filePath, 0o600)
 }
 
-export async function clearCredentials(): Promise<void> {
+/** Remove stored credentials. Returns true if a credentials file existed and was removed. */
+export async function clearCredentials(): Promise<boolean> {
   try {
     await unlink(getCredentialsPath())
+    return true
   } catch {
     // Already gone — no-op
+    return false
   }
 }
 

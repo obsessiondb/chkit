@@ -19,7 +19,14 @@ export function hasEmittedJson(): boolean {
 export function printOutput(value: unknown, jsonMode: boolean): void {
   if (jsonMode) {
     jsonEmitted = true
-    console.log(JSON.stringify(value, null, 2))
+    // Catch-all: never emit a bare JSON string. A command that prints a plain
+    // string under `--json` (e.g. a status line) is wrapped in a minimal object
+    // so the output is always a parseable object for `jq` consumers.
+    const payload =
+      typeof value === 'string'
+        ? { schemaVersion: JSON_CONTRACT_VERSION, message: value }
+        : value
+    console.log(JSON.stringify(payload, null, 2))
     return
   }
   if (typeof value === 'string') {

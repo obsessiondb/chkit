@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module'
+
 interface DeviceCodeResponse {
   device_code: string
   user_code: string
@@ -39,9 +41,11 @@ export class OtpRateLimitError extends Error {
 
 const CLIENT_ID = 'chkit-cli'
 
+const pkg = createRequire(import.meta.url)('../../package.json') as { version: string }
+
 function userAgent(): string {
-  // Avoid importing package.json — use a hardcoded prefix; version is non-critical here
-  return 'chkit-cli'
+  // Versioned identity, consistent with the oRPC client and the direct-ClickHouse executor.
+  return `chkit/${pkg.version}`
 }
 
 export async function requestDeviceCode(baseUrl: string): Promise<DeviceCodeResponse> {

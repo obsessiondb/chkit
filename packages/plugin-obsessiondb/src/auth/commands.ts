@@ -80,7 +80,7 @@ const WHOAMI_COMMAND: PluginCommand = {
   name: 'whoami',
   description: 'Show current ObsessionDB user',
   async run(context) {
-    return runWhoami((msg) => context.print(msg))
+    return runWhoami((value) => context.print(value), context.jsonMode === true)
   },
 }
 
