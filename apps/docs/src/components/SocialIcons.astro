@@ -8,7 +8,10 @@
 import config from 'virtual:starlight/user-config';
 import { Icon } from '@astrojs/starlight/components';
 
-const links = config.social || [];
+// Drop the RSS feed link from the header — the blog sidebar already links
+// the feed, and we don't want it duplicated up here (starlight-blog pushes
+// an `icon: 'rss'` entry into `social` when `site` is set).
+const links = (config.social || []).filter((s) => s.icon !== 'rss');
 const repo = 'obsessiondb/chkit';
 ---
 
