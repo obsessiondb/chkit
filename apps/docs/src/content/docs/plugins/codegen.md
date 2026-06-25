@@ -1,6 +1,8 @@
 ---
 title: Codegen Plugin
 description: Generate TypeScript row types, optional Zod schemas, ingestion functions, and runtime migration modules from chkit schema definitions.
+sidebar:
+  order: 2
 ---
 
 This document covers practical usage of the optional `codegen` plugin.

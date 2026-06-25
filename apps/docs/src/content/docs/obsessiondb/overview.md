@@ -13,7 +13,7 @@ chkit ships a dedicated integration with [ObsessionDB](https://obsessiondb.com),
 - **One schema, two targets** — write `Shared*` engines once and run them against ObsessionDB as-is, or against regular ClickHouse with the `Shared` prefix stripped automatically.
 - **Service selection** — list services across your organizations, pick a default per project, and override per command without touching config.
 - **Remote query execution** — once a service is selected, `chkit query` and other SQL-emitting commands route through the ObsessionDB API instead of a local ClickHouse connection.
-- **Remote backfills** — `chkit backfill` can submit jobs to ObsessionDB rather than streaming chunks from your machine.
+- **Remote backfills** — `chkit plugin backfill` can submit jobs to ObsessionDB rather than streaming chunks from your machine.
 
 ## Install
 

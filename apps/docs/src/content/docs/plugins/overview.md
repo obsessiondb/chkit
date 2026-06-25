@@ -1,6 +1,8 @@
 ---
 title: Plugins Overview
 description: How chkit plugins work and which official plugins are available.
+sidebar:
+  order: 1
 ---
 
 Plugins extend chkit with capabilities that don't belong in the core CLI — code generation, schema introspection, data backfill, ObsessionDB integration, and anything else you want to bolt on. They're regular npm packages that you register in `clickhouse.config.ts`:

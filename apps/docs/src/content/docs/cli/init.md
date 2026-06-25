@@ -1,68 +1,91 @@
 ---
 title: "chkit init"
-description: "Scaffold a new chkit project with config and example schema files."
+description: "Scaffold a chkit project — config, example schema, dependencies, and an optional database connection."
 sidebar:
   order: 2
 ---
 
-Creates a `clickhouse.config.ts` configuration file and an example schema file in your project. If either file already exists, it is left untouched.
+Scaffolds a chkit project in the current directory: writes a `clickhouse.config.ts` and an example schema file, installs dependencies if the project has none, and — on an interactive run — offers to connect a database.
 
 ## Synopsis
 
 ```
-chkit init
+chkit init [flags]
 ```
 
 ## Flags
 
-No command-specific flags. See [global flags](/cli/overview/#global-flags).
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--connect <choice>` | string | — | Preselect a connection path: `claim`, `account`, `clickhouse`, or `later`. Skips the interactive prompt. |
+| `--email <email>` | string | — | Email for the ObsessionDB `claim` / `account` paths (implies an interactive connect step). |
+| `--code <code>` | string | — | One-time email code, to verify a signup without re-prompting. |
+| `--org-name <name>` | string | — | Override the auto-created ObsessionDB organization name. |
+| `--yes`, `-y` | boolean | `false` | Skip the connect prompt and just write files — keeps `init` a silent scaffolder for scripts. |
+
+See [global flags](/cli/overview/#global-flags).
 
 ## Behavior
 
-`chkit init` writes two files relative to the current working directory:
+`chkit init` runs three steps in order. Each is idempotent, so re-running on an existing project is safe.
 
-1. **`clickhouse.config.ts`** — project configuration with sensible defaults:
-   - `schema: './src/db/schema/**/*.ts'`
-   - `outDir: './chkit'`
-   - `migrationsDir: './chkit/migrations'`
-   - `metaDir: './chkit/meta'`
-   - `plugins: []`
-   - `clickhouse` block reading from environment variables (`CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_DB`)
+### 1. Scaffold files
 
-2. **`src/db/schema/example.ts`** — a sample table definition using `MergeTree` engine with columns `id` (UInt64), `source` (String), and `ingested_at` (DateTime64(3)).
+Writes two files relative to the current working directory, leaving any that already exist untouched:
 
-The command is idempotent — running it again on an existing project does nothing.
+1. **`clickhouse.config.ts`** — project config with sensible defaults: `schema: './src/db/schema/**/*.ts'`, `outDir: './chkit'`, `migrationsDir: './chkit/migrations'`, `metaDir: './chkit/meta'`, an empty `plugins` array, and a `clickhouse` block reading from `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, and `CLICKHOUSE_DB`.
+2. **`src/db/schema/example.ts`** — a starter `MergeTree` table named `events` with columns `id` (`UInt64`), `source` (`String`), and `ingested_at` (`DateTime64(3)`).
+
+### 2. Install dependencies
+
+If `@chkit/core` does not already resolve from the project, `init` makes the project runnable: it writes a minimal `package.json` when none exists, then installs `chkit`, `@chkit/core`, and `@chkit/plugin-obsessiondb` as dev dependencies using the detected package manager (`npm`, `pnpm`, `yarn`, or `bun`; defaults to `bun`). This is why `init` works in a brand-new empty folder, not just an existing project. A failed install never aborts `init` — it prints the manual install command and continues.
+
+### 3. Connect a database
+
+On a TTY — or when `--connect` / `--email` is passed — `init` runs the ObsessionDB onboarding prompt:
+
+```
+Claim a free ObsessionDB dev instance   email code, ready in seconds
+I already have an ObsessionDB account    log in and pick a service
+I already have a ClickHouse instance     connect with env vars
+Configure later
+```
+
+Claiming or logging in registers the `@chkit/plugin-obsessiondb` plugin in your config and writes the selected service to `.chkit/obsessiondb.json`. See [Getting Started with ObsessionDB](/obsessiondb/getting-started/) for each path in detail, including the non-interactive and agent-friendly (`--json`) variants.
+
+Pass `--yes` to skip this step and just write files. In a non-interactive environment (no TTY) without connect flags, `init` skips onboarding entirely — it writes files and prints static next steps (set `CLICKHOUSE_URL`, edit the schema, then `generate` and `migrate`). When an explicit connect path is requested but cannot complete — for example `--connect claim` with no email, or a wrong code — `init` exits non-zero so scripts can detect the failure.
 
 ## Examples
 
-**Initialize a new project:**
+**Scaffold and connect interactively:**
 
 ```sh
 chkit init
 ```
 
-Output:
-
-```
-Created clickhouse.config.ts
-Created src/db/schema/example.ts
-
-Next steps:
-  1. Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB if needed).
-  2. Edit src/db/schema/example.ts to match your data.
-  3. Run: bunx chkit generate --name init
-  4. Run: bunx chkit migrate --apply
-
-Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/
-```
-
-**Run on an existing project (no changes):**
+**Scaffold only, no prompt (CI / scripts):**
 
 ```sh
-chkit init
-# No output — both files already exist
+chkit init --yes
 ```
+
+**Preselect the claim path (still prompts for the emailed code):**
+
+```sh
+chkit init --connect claim --email you@example.com
+```
+
+For a fully scripted claim with no prompts, use the two-step OTP flow in [Getting Started with ObsessionDB](/obsessiondb/getting-started/#non-interactive-setup).
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| non-zero | An explicitly requested connect path could not complete |
 
 ## Related commands
 
+- [Getting Started: add to an existing project](/getting-started/add-to-existing-project/) — the guided first-run flow
+- [Getting Started with ObsessionDB](/obsessiondb/getting-started/) — every connect path in detail
 - [`chkit generate`](/cli/generate/) — generate migrations from your schema after init
