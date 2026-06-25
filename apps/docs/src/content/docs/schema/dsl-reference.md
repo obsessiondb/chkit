@@ -132,7 +132,7 @@ Primitive types recognized by the DSL type system: `String`, `UInt8`, `UInt16`, 
 
 #### SQL-standard aliases
 
-The type string is passed through to ClickHouse verbatim — chkit does not rewrite it. ClickHouse accepts standard SQL type aliases and normalizes them to its native types when the table is created, so these are all valid `type` values:
+chkit passes the `type` string through to ClickHouse verbatim — it does not rewrite it. ClickHouse itself accepts standard SQL type aliases and stores them as its native types, so a table declared with aliases like `BIGINT` or `TEXT` is created successfully:
 
 | SQL alias | ClickHouse native type |
 |-----------|------------------------|
@@ -145,10 +145,10 @@ The type string is passed through to ClickHouse verbatim — chkit does not rewr
 | `TEXT` / `VARCHAR` / `CHAR` | `String` |
 | `TIMESTAMP` | `DateTime` |
 
-The generated `CREATE TABLE` keeps the alias verbatim; `DESCRIBE` then reports the native type after ClickHouse normalizes it. See the ClickHouse [data types reference](https://clickhouse.com/docs/sql-reference/data-types) for the complete alias list.
+See the ClickHouse [data types reference](https://clickhouse.com/docs/sql-reference/data-types) for the complete alias list.
 
 :::caution
-The [codegen plugin](/plugins/codegen/) maps **native** ClickHouse type names (see [Type system reference](#type-system-reference)). If you use codegen, prefer the native form (`Int64` over `BIGINT`) — an alias it doesn't recognize raises `codegen_unsupported_type`, or emits `unknown` when `failOnUnsupportedType` is `false`.
+**Prefer the native type.** chkit compares column types literally. A column declared as `BIGINT` is created as `Int64`, but [`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) then compare your declared `BIGINT` against the live `Int64` and report a permanent `changed_column` drift — failing `chkit check --strict` on every run. The [codegen plugin](/plugins/codegen/) likewise recognizes only native names (see [Type system reference](#type-system-reference)) — an alias raises `codegen_unsupported_type`, or emits `unknown` when `failOnUnsupportedType` is `false`. Use the native ClickHouse type (`Int64`, not `BIGINT`) unless you have a specific reason not to.
 :::
 
 ### `nullable` (boolean, optional)

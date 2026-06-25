@@ -53,7 +53,7 @@ Configure later
 
 Claiming or logging in registers the `@chkit/plugin-obsessiondb` plugin in your config and writes the selected service to `.chkit/obsessiondb.json`. See [Getting Started with ObsessionDB](/obsessiondb/getting-started/) for each path in detail, including the non-interactive and agent-friendly (`--json`) variants.
 
-Pass `--yes` to skip this step and just write files. In a non-interactive environment (no TTY) without connect flags, `init` writes files, prints the runnable commands for each connect path, and exits. When an explicit connect path is requested but cannot complete — for example `--connect claim` with no email, or a wrong code — `init` exits non-zero so scripts can detect the failure.
+Pass `--yes` to skip this step and just write files. In a non-interactive environment (no TTY) without connect flags, `init` skips onboarding entirely — it writes files and prints static next steps (set `CLICKHOUSE_URL`, edit the schema, then `generate` and `migrate`). When an explicit connect path is requested but cannot complete — for example `--connect claim` with no email, or a wrong code — `init` exits non-zero so scripts can detect the failure.
 
 ## Examples
 
@@ -69,11 +69,13 @@ chkit init
 chkit init --yes
 ```
 
-**Claim a free ObsessionDB instance non-interactively:**
+**Preselect the claim path (still prompts for the emailed code):**
 
 ```sh
 chkit init --connect claim --email you@example.com
 ```
+
+For a fully scripted claim with no prompts, use the two-step OTP flow in [Getting Started with ObsessionDB](/obsessiondb/getting-started/#non-interactive-setup).
 
 ## Exit codes
 
