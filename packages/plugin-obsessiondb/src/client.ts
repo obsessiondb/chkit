@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import { createORPCClient } from '@orpc/client'
 import { RPCLink } from '@orpc/client/fetch'
 import type { ContractRouterClient } from '@orpc/contract'
@@ -11,6 +12,15 @@ const contract = {
   workbench: workbenchContract,
 }
 
+const pkg = createRequire(import.meta.url)('../package.json') as { version: string }
+
+/**
+ * Identifies CLI traffic to the ObsessionDB API. The API forwards this header to
+ * ClickHouse so chkit queries are attributable in `system.query_log.http_user_agent`.
+ * Versioned to match the direct-ClickHouse executor, which reports `chkit/<version>`.
+ */
+const USER_AGENT = `chkit/${pkg.version}`
+
 export type ApiClient = ContractRouterClient<typeof contract>
 
 export function createApiClient(creds: Credentials): ApiClient {
@@ -18,7 +28,7 @@ export function createApiClient(creds: Credentials): ApiClient {
     url: `${creds.base_url}/rpc`,
     headers: () => ({
       Authorization: `Bearer ${creds.access_token}`,
-      'User-Agent': 'chkit-cli',
+      'User-Agent': USER_AGENT,
     }),
     fetch: async (input, init) => {
       const res = await globalThis.fetch(input, init)
