@@ -29,6 +29,14 @@ function findGroupTrail(entries: SidebarItem[], trail: string[]): string[] | nul
 }
 
 const groups = isSplash ? [] : findGroupTrail(sidebar as SidebarItem[], []) ?? [];
+
+// Root crumb: "Blog" on blog routes, "Docs" elsewhere.
+const path = Astro.url.pathname.replace(/\/$/, '');
+const isBlog = path === '/blog' || path.startsWith('/blog/');
+const rootLabel = isBlog ? 'Blog' : 'Docs';
+const rootHref = isBlog ? '/blog/' : '/';
+// Skip the root crumb on a section's own index so it doesn't read "Blog › Blog".
+const isRootIndex = groups.length === 0 && title === rootLabel;
 ---
 
 <Default><slot /></Default>
@@ -37,14 +45,18 @@ const groups = isSplash ? [] : findGroupTrail(sidebar as SidebarItem[], []) ?? [
 	!isSplash && (
 		<div class="chk-subheader not-content">
 			<nav class="chk-breadcrumb" aria-label="Breadcrumb">
-				<a href="/">Docs</a>
+				{!isRootIndex && (
+					<>
+						<a href={rootHref}>{rootLabel}</a>
+						<span class="chk-crumb-sep" aria-hidden="true">›</span>
+					</>
+				)}
 				{groups.map((g) => (
 					<>
-						<span class="chk-crumb-sep" aria-hidden="true">›</span>
 						<span>{g}</span>
+						<span class="chk-crumb-sep" aria-hidden="true">›</span>
 					</>
 				))}
-				<span class="chk-crumb-sep" aria-hidden="true">›</span>
 				<span class="chk-crumb-current">{title}</span>
 			</nav>
 		</div>
