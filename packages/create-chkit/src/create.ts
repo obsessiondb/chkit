@@ -55,11 +55,14 @@ export async function runCreate(options: CreateOptions): Promise<void> {
     log.info(`Skipped install. Run ${pc.cyan(`${packageManager} install`)} when ready.`)
   }
 
-  printNextSteps({ projectName, packageManager, didInstall: !options.skipInstall })
-
-  if (!options.skipOnboarding) {
+  // Onboarding prints its own "Next steps" (package-manager-aware), so only print ours when
+  // onboarding is skipped — otherwise the block would appear twice.
+  if (options.skipOnboarding) {
+    printNextSteps({ projectName, packageManager, didInstall: !options.skipInstall })
+  } else {
     await runOnboarding({
       configPath: join(targetDir, 'clickhouse.config.ts'),
+      packageManager,
       connect: options.connect,
       email: options.email,
       code: options.code,

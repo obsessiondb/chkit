@@ -13,6 +13,7 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
   lines.push('Commands:')
 
   lines.push(`  ${'init'.padEnd(14)} Scaffold a new project with config and example schema`)
+  lines.push(`  ${'skills'.padEnd(14)} Manage agent skills (proxies to the \`skills\` CLI)`)
 
   const coreCommands = registry.commands.filter((c) => c.pluginName === 'core')
   const pluginCommands = registry.commands.filter((c) => c.pluginName !== 'core')

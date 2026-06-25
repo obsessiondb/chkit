@@ -47,8 +47,8 @@ export async function cmdInit(argv: string[] = []): Promise<void> {
     console.log('Next steps:')
     console.log('  1. Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB if needed).')
     console.log('  2. Edit src/db/schema/example.ts to match your data.')
-    console.log('  3. Run: bunx chkit generate --name init')
-    console.log('  4. Run: bunx chkit migrate --apply')
+    console.log('  3. Run: npx chkit generate --name init')
+    console.log('  4. Run: npx chkit migrate --apply')
     console.log('')
     console.log('Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/')
   }
@@ -60,21 +60,19 @@ export async function cmdInit(argv: string[] = []): Promise<void> {
  * failed import degrades silently to the non-interactive path.
  */
 async function maybeRunOnboarding(configPath: string, options: InitOptions): Promise<boolean> {
-  const explicit = options.connect !== undefined || options.email !== undefined
-  const interactive = process.stdin.isTTY === true
-  if (options.yes || (!interactive && !explicit)) return false
+  // `--yes` keeps init a silent file-writer for CI/scripts. Otherwise we always hand off to
+  // onboarding (when the plugin is present): it self-gates on TTY — showing the connect prompt
+  // interactively and printing the non-interactive runbook otherwise — so `chkit init` and
+  // `create-chkit` behave consistently instead of init silently skipping the runbook.
+  if (options.yes) return false
 
-  // The plugin is an optional dependency: a missing import degrades to static next-steps. But a
-  // failure *inside* onboarding (bad OTP, failed claim) is a real error — only the import is
-  // guarded so onboarding failures propagate and automation sees a non-zero exit, not a false pass.
-  let runOnboarding: typeof import('@chkit/plugin-obsessiondb').runOnboarding
-  try {
-    ;({ runOnboarding } = await import('@chkit/plugin-obsessiondb'))
-  } catch {
-    return false
-  }
+  // The plugin is an optional dependency: when genuinely absent we degrade to static next-steps.
+  // But a load failure of an *installed* plugin (or a real error inside onboarding) must surface,
+  // not silently pass — so we only swallow a not-found of the plugin package itself.
+  const mod = await tryImportObsessiondb()
+  if (!mod) return false
 
-  await runOnboarding({
+  await mod.runOnboarding({
     configPath,
     connect: options.connect,
     email: options.email,
@@ -82,6 +80,26 @@ async function maybeRunOnboarding(configPath: string, options: InitOptions): Pro
     orgName: options.orgName,
   })
   return true
+}
+
+async function tryImportObsessiondb(): Promise<
+  typeof import('@chkit/plugin-obsessiondb') | null
+> {
+  try {
+    return await import('@chkit/plugin-obsessiondb')
+  } catch (error) {
+    if (isPluginNotInstalled(error)) return null
+    throw error
+  }
+}
+
+function isPluginNotInstalled(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code
+  const message = error instanceof Error ? error.message : String(error)
+  return (
+    (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') &&
+    message.includes('@chkit/plugin-obsessiondb')
+  )
 }
 
 function parseInitOptions(argv: string[]): InitOptions {
