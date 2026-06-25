@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-obsessiondb",
-  "version": "0.1.0-beta.28",
+  "version": "0.1.0-beta.29",
   "description": "ObsessionDB managed ClickHouse integration plugin for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -43,6 +43,7 @@
   "dependencies": {
     "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*",
+    "@clack/prompts": "^1.4.0",
     "@orpc/client": "1.13.4",
     "@orpc/contract": "1.13.4",
     "zod": "^4.3.6"
