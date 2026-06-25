@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { saveCredentials } from '../auth/credentials'
+import { saveSelectedService } from '../service/storage'
 import { handleBackfillCommand } from './handler'
 
 function makeContext(overrides: Partial<Parameters<typeof handleBackfillCommand>[0]> = {}) {
@@ -175,11 +176,73 @@ describe('handleBackfillCommand', () => {
     expect((printed[0] as { jobs: unknown[] }).jobs).toHaveLength(1)
   })
 
-  test('returns handled: false for non-remote commands like run', async () => {
+  test('runs execution commands locally when authenticated but no service is selected', async () => {
     await setupAuth()
 
     const { context } = makeContext({ command: 'run' })
     const result = await handleBackfillCommand(context)
     expect(result).toEqual({ handled: false })
+  })
+
+  test('runs execution commands locally when not authenticated', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'chkit-bf-'))
+    originalXdg = process.env.XDG_CONFIG_HOME
+    process.env.XDG_CONFIG_HOME = tempDir
+    // No credentials saved
+
+    const { context } = makeContext({ command: 'plan' })
+    const result = await handleBackfillCommand(context)
+    expect(result).toEqual({ handled: false })
+  })
+
+  for (const command of ['plan', 'run', 'resume']) {
+    test(`refuses ${command} when targeting ObsessionDB (service selected)`, async () => {
+      await setupAuth()
+      const configPath = join(tempDir, 'clickhouse.config.ts')
+      await saveSelectedService(configPath, {
+        service_slug: 'svc-1',
+        service_name: 'My Service',
+      })
+
+      const { context, printed } = makeContext({ command, configPath, flags: {} })
+      const result = await handleBackfillCommand(context)
+
+      expect(result).toEqual({ handled: true, exitCode: 1 })
+      expect(printed[0]).toContain('not supported yet')
+      expect(printed[0]).toContain('--local')
+    })
+  }
+
+  test('--local lets execution commands run locally even with a service selected', async () => {
+    await setupAuth()
+    const configPath = join(tempDir, 'clickhouse.config.ts')
+    await saveSelectedService(configPath, {
+      service_slug: 'svc-1',
+      service_name: 'My Service',
+    })
+
+    const { context } = makeContext({ command: 'run', configPath, flags: { '--local': true } })
+    const result = await handleBackfillCommand(context)
+    expect(result).toEqual({ handled: false })
+  })
+
+  test('emits a structured error in json mode', async () => {
+    await setupAuth()
+    const configPath = join(tempDir, 'clickhouse.config.ts')
+    await saveSelectedService(configPath, {
+      service_slug: 'svc-1',
+      service_name: 'My Service',
+    })
+
+    const { context, printed } = makeContext({
+      command: 'plan',
+      configPath,
+      flags: {},
+      jsonMode: true,
+    })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 1 })
+    expect(printed[0]).toMatchObject({ ok: false, command: 'backfill plan' })
   })
 })
