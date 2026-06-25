@@ -29,6 +29,10 @@ Add `chkit` and `@chkit/core` as dev dependencies:
 
 Edit `src/db/schema/example.ts` to match the table you actually want before moving on.
 
+:::note
+On an interactive run, `chkit init` also offers to connect a database — including claiming a **free ObsessionDB dev instance** with a one-time email code, no local ClickHouse required. This guide wires up a connection with environment variables instead (the steps below); pass `--yes` to skip the prompt. See [Getting Started with ObsessionDB](/obsessiondb/getting-started/) for the connect paths, or the [first-schema tutorial](/tutorials/first-schema/) for an end-to-end walkthrough using the free instance.
+:::
+
 ## 3. Generate the initial migration
 
 `chkit generate` diffs your schema definitions against the previous snapshot and writes migration SQL into `chkit/migrations/`. Pass `--name` to label the migration file.
