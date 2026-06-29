@@ -1,0 +1,139 @@
+<!doctype html>
+<!--
+  README hero source for chkit. Edit copy/layout here, then regenerate the PNG:
+    bunx playwright   # (chromium)  - or use the marketing_visuals generator
+  Render this file from the assets/ dir at 1200x630 (deviceScaleFactor 2) -> hero.png.
+  Font paths are repo-relative to apps/docs/public/fonts.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  /* ── chkit "Tungsten / V5" fonts ─────────────────── */
+  @font-face { font-family:'Geist'; src:url('../apps/docs/public/fonts/Geist-Variable.woff2') format('woff2'); font-weight:100 900; }
+  @font-face { font-family:'Geist Mono'; src:url('../apps/docs/public/fonts/GeistMono-Variable.woff2') format('woff2'); font-weight:100 900; }
+  @font-face { font-family:'Inter'; src:url('../apps/docs/public/fonts/Inter-Variable-Latin.woff2') format('woff2'); font-weight:100 900; }
+  @font-face { font-family:'Goldman'; src:url('../apps/docs/public/fonts/Goldman-Latin-400.woff2') format('woff2'); font-weight:400; }
+  @font-face { font-family:'Goldman'; src:url('../apps/docs/public/fonts/Goldman-Latin-700.woff2') format('woff2'); font-weight:700; }
+
+  :root{
+    --bg:#0a0a0a; --bg-2:#0d0d0d;
+    --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12);
+    --ink:#f3f1ed; --ink-2:#a3a09a; --ink-3:#8a8780;
+    --accent:#fea16e; --accent-dim:rgba(254,161,110,.16);
+    --snippet-bg:#000;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{
+    width:1200px; height:630px;
+    background:var(--bg);
+    font-family:'Inter',sans-serif;
+    color:var(--ink);
+    position:relative; overflow:hidden;
+  }
+  /* faint blueprint grid + corner vignette */
+  .grid{position:absolute;inset:0;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:48px 48px; opacity:.5;
+    -webkit-mask-image:radial-gradient(120% 100% at 80% 0%, #000 0%, rgba(0,0,0,.15) 70%, transparent 100%);
+            mask-image:radial-gradient(120% 100% at 80% 0%, #000 0%, rgba(0,0,0,.15) 70%, transparent 100%);
+  }
+  .glow{position:absolute;width:520px;height:520px;left:-140px;top:-160px;
+    background:radial-gradient(circle, var(--accent-dim) 0%, transparent 62%);
+    filter:blur(8px);}
+
+  .wrap{position:relative;height:100%;display:flex;align-items:center;gap:48px;
+    padding:64px 64px;}
+
+  /* ── Left column ───────────────────────────────── */
+  .left{width:480px;flex:none;}
+  .brand{display:flex;align-items:center;margin-bottom:30px;}
+  .wordmark{font-family:'Goldman',sans-serif;font-weight:700;font-size:34px;letter-spacing:.01em;color:#fff;}
+
+  .eyebrow{font-family:'Geist Mono',monospace;font-size:12.5px;font-weight:500;
+    letter-spacing:.22em;text-transform:uppercase;color:var(--accent);margin-bottom:18px;}
+  h1{font-family:'Geist',sans-serif;font-weight:600;font-size:43px;line-height:1.08;
+    letter-spacing:-.018em;
+    background:linear-gradient(170deg,#fff 0%,#e8e8e8 42%,#cfccc6 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;}
+  h1 .em{color:var(--accent);-webkit-text-fill-color:var(--accent);}
+  .sub{font-size:16px;line-height:1.5;color:var(--ink-2);margin-top:16px;max-width:430px;}
+
+  .feats{margin-top:34px;display:flex;flex-direction:column;gap:16px;}
+  .feat{display:flex;align-items:center;gap:13px;font-size:15.5px;line-height:1;}
+  .dot{width:6px;height:6px;flex:none;background:var(--accent);transform:rotate(45deg);}
+  .feat b{font-family:'Geist',sans-serif;font-weight:600;color:var(--ink);}
+  .feat .ac{font-family:'Geist Mono',monospace;font-weight:600;font-size:14px;letter-spacing:.01em;}
+  .feat em{font-style:normal;color:var(--ink-3);margin-left:9px;}
+  .feat em::before{content:"— ";color:var(--ink-3);}
+
+  .langs{margin-top:32px;display:flex;gap:10px;align-items:center;}
+  .chip{font-family:'Geist Mono',monospace;font-size:12px;letter-spacing:.03em;
+    padding:6px 12px;border:1px solid var(--line-2);color:var(--ink-2);
+    display:inline-flex;align-items:center;gap:8px;}
+  .chip.soon{color:var(--ink-3);border-color:var(--line);}
+  .chip .tag{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);}
+
+  /* ── Right column: terminal ────────────────────── */
+  .term{flex:1;align-self:center;background:var(--snippet-bg);
+    border:1px solid var(--line-2);
+    box-shadow:0 30px 80px -20px rgba(0,0,0,.8), 0 0 0 1px rgba(255,255,255,.02);
+    display:flex;flex-direction:column;}
+  .tbar{display:flex;align-items:center;gap:9px;padding:13px 16px;
+    border-bottom:1px solid var(--line);background:linear-gradient(180deg,rgba(20,20,20,.98),rgba(13,13,13,.98));}
+  .tdot{width:11px;height:11px;border-radius:50%;background:rgba(255,255,255,.14);}
+  .ttitle{margin-left:8px;font-family:'Geist Mono',monospace;font-size:12.5px;
+    color:var(--ink-3);letter-spacing:.04em;}
+  .tbody{padding:22px 22px 24px;font-family:'Geist Mono',monospace;font-size:14.5px;
+    line-height:1.95;}
+  .cmd{color:var(--ink);} .cmd .p{color:var(--accent);font-weight:600;margin-right:8px;}
+  .cmd .flag{color:var(--ink-3);}
+  .out{color:var(--ink-2);padding-left:0;}
+  .out .ok{color:var(--accent);font-weight:700;margin-right:8px;}
+  .out .mut{color:var(--ink-3);}
+  .gap{height:9px;}
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="glow"></div>
+  <div class="wrap">
+    <div class="left">
+      <div class="brand">
+        <div class="wordmark">ch-kit</div>
+      </div>
+      <div class="eyebrow">ClickHouse · Typed · CLI</div>
+      <h1>ClickHouse schema<br>&amp; migrations,<br><span class="em">as code.</span></h1>
+      <p class="sub">Define your tables once. chkit diffs them, generates migration SQL, and keeps every database in sync.</p>
+      <div class="feats">
+        <div class="feat"><span class="dot"></span><b>Schema as code</b><em>tables, views, matviews</em></div>
+        <div class="feat"><span class="dot"></span><b>Diff-based migrations</b><em>preview &amp; apply safely</em></div>
+        <div class="feat"><span class="dot"></span><b><span class="ac">CI</span> drift gate</b><em>fail the build on drift</em></div>
+      </div>
+      <div class="langs">
+        <span class="chip">TypeScript</span>
+        <span class="chip soon">Python <span class="tag">soon</span></span>
+      </div>
+    </div>
+
+    <div class="term">
+      <div class="tbar">
+        <span class="tdot"></span><span class="tdot"></span><span class="tdot"></span>
+        <span class="ttitle">chkit — ~/app</span>
+      </div>
+      <div class="tbody">
+        <div class="cmd"><span class="p">$</span>chkit generate <span class="flag">--name init</span></div>
+        <div class="out"><span class="ok">✓</span>events <span class="mut">· new table</span></div>
+        <div class="out"><span class="ok">✓</span>wrote <span class="mut">migrations/0001_init.sql</span></div>
+        <div class="gap"></div>
+        <div class="cmd"><span class="p">$</span>chkit migrate <span class="flag">--apply</span></div>
+        <div class="out"><span class="ok">✓</span>0001_init.sql applied</div>
+        <div class="out"><span class="ok">✓</span>database in sync</div>
+        <div class="gap"></div>
+        <div class="cmd"><span class="p">$</span>chkit check</div>
+        <div class="out"><span class="ok">✓</span>no pending migrations <span class="mut">· no drift</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
