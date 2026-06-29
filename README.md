@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/hero.png" alt="chkit — ClickHouse schema and migrations, as code" width="100%">
+</p>
+
 # chkit
 
 **ClickHouse schema and migration CLI for TypeScript projects.**
