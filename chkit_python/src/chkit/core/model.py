@@ -403,6 +403,7 @@ class ChxResolvedConfig(_StrictModel):
     check: ChxResolvedCheckConfig
     safety: ChxResolvedSafetyConfig
     clickhouse: ChxResolvedClickHouseConfig | None = None
+    plugins: list[Any] = Field(default_factory=list)
 
 
 class SnapshotV1(_StrictModel):
@@ -752,6 +753,7 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
         check=resolved_check,
         safety=resolved_safety,
         clickhouse=resolved_clickhouse,
+        plugins=list(config.plugins) if config.plugins is not None else [],
     )
 
 

@@ -15,6 +15,10 @@ from chkit.core.codec import (
     parse_codec,
     render_codec,
 )
+from chkit.core.config_path import (
+    SYNTHESIZED_CONFIG_PATH,
+    is_synthesized_config_path,
+)
 from chkit.core.flags import (
     FlagDef,
     MissingFlagValueError,
@@ -23,6 +27,7 @@ from chkit.core.flags import (
     define_flags,
     parse_flags,
 )
+from chkit.core.key_clause import normalize_key_columns, split_top_level_comma
 from chkit.core.model import (
     ChxResolvedClickHouseConfig,
     ChxResolvedConfig,
@@ -62,11 +67,25 @@ from chkit.core.model import (
     view,
 )
 from chkit.core.planner import plan_diff
+from chkit.core.plugin_error import wrap_plugin_run
+from chkit.core.schema_loader import (
+    NO_MATCH_MESSAGE,
+    SchemaLoaderError,
+    load_schema_definitions,
+)
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
+from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.sql_splitter import (
+    extract_executable_statements,
+    split_sql_statements,
+)
+from chkit.core.ts_import import ModuleLoadError, import_module_file
 from chkit.core.validate import assert_valid_definitions, validate_definitions
 
 __all__ = [
+    "NO_MATCH_MESSAGE",
+    "SYNTHESIZED_CONFIG_PATH",
     "ChxResolvedClickHouseConfig",
     "ChxResolvedConfig",
     "ChxUserClickHouseConfig",
@@ -83,6 +102,7 @@ __all__ = [
     "MigrationOperationType",
     "MigrationPlan",
     "MissingFlagValueError",
+    "ModuleLoadError",
     "ParsedFlags",
     "PreprocessingColumnCodec",
     "PrimitiveColumnType",
@@ -90,6 +110,7 @@ __all__ = [
     "RawColumnCodec",
     "RiskLevel",
     "SchemaDefinition",
+    "SchemaLoaderError",
     "SkipIndexDefinition",
     "Snapshot",
     "SnapshotV1",
@@ -110,19 +131,29 @@ __all__ = [
     "define_config",
     "define_flags",
     "definition_key",
+    "extract_executable_statements",
+    "import_module_file",
     "is_general_codec",
     "is_preprocessor_codec",
     "is_raw_codec",
     "is_schema_definition",
+    "is_synthesized_config_path",
+    "load_schema_definitions",
     "materialized_view",
+    "normalize_engine",
+    "normalize_key_columns",
+    "normalize_sql_fragment",
     "parse_codec",
     "parse_flags",
     "plan_diff",
     "render_codec",
     "resolve_config",
     "schema",
+    "split_sql_statements",
+    "split_top_level_comma",
     "table",
     "to_create_sql",
     "validate_definitions",
     "view",
+    "wrap_plugin_run",
 ]

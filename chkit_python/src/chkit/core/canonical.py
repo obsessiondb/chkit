@@ -94,6 +94,13 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
             name=definition.renamed_from.name.strip(),
         )
 
+    normalized_order_by = normalize_key_columns(definition.order_by)
+    normalized_primary_key = normalize_key_columns(definition.primary_key)
+    # TS canonical.ts: when primary_key is empty, fall back to order_by.
+    # Without this, a snapshot written by TS (where omitted PK == order_by)
+    # would never match a Python snapshot (where omitted PK == []).
+    if not normalized_primary_key:
+        normalized_primary_key = list(normalized_order_by)
     return definition.model_copy(
         update={
             "database": definition.database.strip(),
@@ -101,8 +108,8 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
             "renamed_from": renamed_from,
             "engine": normalize_engine(definition.engine),
             "columns": [_canonicalize_column(c) for c in definition.columns],
-            "primary_key": normalize_key_columns(definition.primary_key),
-            "order_by": normalize_key_columns(definition.order_by),
+            "primary_key": normalized_primary_key,
+            "order_by": normalized_order_by,
             "unique_key": normalize_key_columns(definition.unique_key)
             if definition.unique_key is not None
             else None,
@@ -181,7 +188,14 @@ def _canonicalize_refresh(
     if randomize is not None:
         payload["randomize"] = randomize
     if depends_on is not None and len(depends_on) > 0:
-        payload["depends_on"] = [d.model_dump() for d in depends_on]
+        # Use the camelCase alias key for the canonical dict so callers that
+        # compare the raw dict to a TS-emitted snapshot see matching keys.
+        # ``model_validate`` accepts both forms thanks to
+        # ``populate_by_name=True``; ``by_alias=True`` on the inner dump
+        # future-proofs us if TableRef ever grows an alias.
+        payload["dependsOn"] = [
+            d.model_dump(by_alias=True) for d in depends_on
+        ]
     if settings is not None and len(settings) > 0:
         payload["settings"] = settings
     if refresh.append:
