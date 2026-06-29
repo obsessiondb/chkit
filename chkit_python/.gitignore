@@ -13,5 +13,5 @@ venv/
 .env
 .coverage
 htmlcov/
-.venv-dev
+.venv-dev/
 **/__pycache__/**
