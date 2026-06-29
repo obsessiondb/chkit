@@ -21,10 +21,14 @@ ALTERs" path that the TS code takes when async tracking is disabled.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
+import time
 from pathlib import Path
-from typing import Final
+from typing import Any, Final, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from chkit.cli.migration_store import (
     ChecksumMismatch,
@@ -34,6 +38,39 @@ from chkit.cli.migration_store import (
     now_iso,
 )
 from chkit.clickhouse.client import ClickHouseClient
+
+OperationStatus = Literal["started", "completed", "failed"]
+
+_INSERT_RACE_MAX_ATTEMPTS = 5
+_INSERT_RACE_BASE_DELAY_MS = 150
+
+
+class OperationState(BaseModel):
+    """Per-statement state recorded in the journal's ``operations`` tuple column."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    operation_index: int = Field(..., alias="operationIndex")
+    operation_key: str = Field(..., alias="operationKey")
+    operation_type: str = Field(..., alias="operationType")
+    query_id: str = Field(..., alias="queryId")
+    status: OperationStatus
+    started_at: str = Field(..., alias="startedAt")
+    finished_at: str | None = Field(..., alias="finishedAt")
+    last_error: str = Field(..., alias="lastError")
+
+
+class MigrationRowState(BaseModel):
+    """Full row state for one migration in the ``_chkit_migrations`` table."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    name: str
+    applied_at: str = Field(..., alias="appliedAt")
+    checksum: str
+    chkit_version: str = Field(..., alias="chkitVersion")
+    migration_completed: bool = Field(..., alias="migrationCompleted")
+    operations: list[OperationState]
 
 _DEFAULT_JOURNAL_TABLE: Final[str] = "_chkit_migrations"
 _JOURNAL_TABLE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -71,6 +108,77 @@ def resolve_journal_table_name() -> str:
 
 def _escape_sql_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _parse_bool(value: Any) -> bool:
+    """Normalize a ClickHouse Bool / 0|1 / "true"|"false" / true|false to Python bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    if isinstance(value, str):
+        return value.lower() in {"1", "true"}
+    return False
+
+
+def _parse_operations(value: Any) -> list[OperationState]:
+    """Decode the ``toJSONString(operations)`` cell into OperationState objects."""
+    if value is None or value == "":
+        return []
+    decoded: Any = value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(decoded, list):
+        return []
+    out: list[OperationState] = []
+    for raw in decoded:
+        if not isinstance(raw, dict):
+            continue
+        out.append(
+            OperationState(
+                operation_index=int(raw.get("operation_index", 0)),
+                operation_key=str(raw.get("operation_key", "")),
+                operation_type=str(raw.get("operation_type", "")),
+                query_id=str(raw.get("query_id", "")),
+                status=str(raw.get("status", "started")),  # type: ignore[arg-type]
+                started_at=str(raw.get("started_at", "")),
+                finished_at=(
+                    None
+                    if raw.get("finished_at") is None
+                    else str(raw["finished_at"])
+                ),
+                last_error=str(raw.get("last_error", "")),
+            )
+        )
+    return out
+
+
+def _operation_to_tuple_literal(op: OperationState) -> str:
+    parts = [
+        str(op.operation_index),
+        f"'{_escape_sql_string(op.operation_key)}'",
+        f"'{_escape_sql_string(op.operation_type)}'",
+        f"'{_escape_sql_string(op.query_id)}'",
+        f"'{_escape_sql_string(op.status)}'",
+        f"'{_escape_sql_string(op.started_at)}'",
+        "NULL" if op.finished_at is None else f"'{_escape_sql_string(op.finished_at)}'",
+        f"'{_escape_sql_string(op.last_error)}'",
+    ]
+    return f"({','.join(parts)})"
+
+
+def _operations_array_literal(operations: list[OperationState]) -> str:
+    if not operations:
+        return "[]"
+    return f"[{','.join(_operation_to_tuple_literal(op) for op in operations)}]"
+
+
+def _is_retryable_insert_race(error: BaseException) -> bool:
+    message = str(error)
+    return "INSERT race condition" in message or "Please retry the INSERT" in message
 
 
 def _is_unknown_database_error(error: BaseException) -> bool:
@@ -157,14 +265,30 @@ class JournalStore:
         with contextlib.suppress(Exception):
             self._client.execute(f"SYSTEM SYNC REPLICA {self._table}")
 
-    def read_journal(self) -> MigrationJournal:
+    def read_journal(
+        self, *, project_files: list[str] | None = None
+    ) -> MigrationJournal:
+        """Return applied entries. When ``project_files`` is set, scopes the WHERE.
+
+        Multiple chkit projects can share one ``_chkit_migrations`` table on a
+        managed ObsessionDB tenant. Without scoping, every project sees every
+        project's rows — which surfaced as the stale "Applied: 2 / Pending: 0"
+        bug. Pass the list of filenames in the project's migrations dir to
+        filter the query to just this project.
+        """
         self._ensure_table()
         if self._database_missing:
             return MigrationJournal()
         self._try_sync_replica()
+        where = "migration_completed = true"
+        if project_files:
+            quoted = ", ".join(
+                f"'{_escape_sql_string(name)}'" for name in project_files
+            )
+            where = f"{where} AND name IN ({quoted})"
         result = self._client.query(
             f"SELECT name, applied_at, checksum FROM {self._table} FINAL "
-            f"WHERE migration_completed = true ORDER BY name "
+            f"WHERE {where} ORDER BY name "
             f"SETTINGS select_sequential_consistency = 1"
         )
         applied = [
@@ -178,6 +302,46 @@ class JournalStore:
         return MigrationJournal(applied=applied)
 
     def append_entry(self, entry: MigrationJournalEntry, *, chkit_version: str) -> None:
+        """Flip migration_completed=true; preserve any existing operations[]."""
+        existing = self.read_migration_state(entry.name)
+        self.write_migration_state(
+            MigrationRowState(
+                name=entry.name,
+                applied_at=entry.applied_at,
+                checksum=entry.checksum,
+                chkit_version=chkit_version,
+                migration_completed=True,
+                operations=existing.operations if existing is not None else [],
+            )
+        )
+
+    def read_migration_state(self, migration_name: str) -> MigrationRowState | None:
+        """Return the latest row for ``migration_name`` (including in-progress)."""
+        self._ensure_table()
+        if self._database_missing:
+            return None
+        self._try_sync_replica()
+        result = self._client.query(
+            f"SELECT name, applied_at, checksum, chkit_version, "
+            f"migration_completed, toJSONString(operations) AS operations "
+            f"FROM {self._table} FINAL "
+            f"WHERE name = '{_escape_sql_string(migration_name)}' "
+            f"LIMIT 1 SETTINGS select_sequential_consistency = 1"
+        )
+        if not result.rows:
+            return None
+        row = result.rows[0]
+        return MigrationRowState(
+            name=str(row["name"]),
+            applied_at=str(row["applied_at"]),
+            checksum=str(row["checksum"]),
+            chkit_version=str(row["chkit_version"]),
+            migration_completed=_parse_bool(row.get("migration_completed")),
+            operations=_parse_operations(row.get("operations")),
+        )
+
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        """Upsert one migration row with INSERT race retry (5 x backoff)."""
         if self._database_missing:
             self._database_missing = False
             self._bootstrapped = False
@@ -186,14 +350,25 @@ class JournalStore:
             f"INSERT INTO {self._table} "
             f"(name, applied_at, checksum, chkit_version, "
             f"migration_completed, operations) VALUES ("
-            f"'{_escape_sql_string(entry.name)}', "
-            f"'{_escape_sql_string(entry.applied_at)}', "
-            f"'{_escape_sql_string(entry.checksum)}', "
-            f"'{_escape_sql_string(chkit_version)}', "
-            f"true, []"
+            f"'{_escape_sql_string(state.name)}', "
+            f"'{_escape_sql_string(state.applied_at)}', "
+            f"'{_escape_sql_string(state.checksum)}', "
+            f"'{_escape_sql_string(state.chkit_version)}', "
+            f"{'true' if state.migration_completed else 'false'}, "
+            f"{_operations_array_literal(state.operations)}"
             f")"
         )
-        self._client.execute(sql)
+        for attempt in range(1, _INSERT_RACE_MAX_ATTEMPTS + 1):
+            try:
+                self._client.execute(sql)
+                break
+            except Exception as exc:
+                if (
+                    not _is_retryable_insert_race(exc)
+                    or attempt == _INSERT_RACE_MAX_ATTEMPTS
+                ):
+                    raise
+                time.sleep(attempt * _INSERT_RACE_BASE_DELAY_MS / 1000)
         self._try_sync_replica()
 
 

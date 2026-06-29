@@ -5,7 +5,17 @@ from __future__ import annotations
 import typer
 
 from chkit import __version__
-from chkit.cli.commands import check, drift, generate, init, migrate, status
+from chkit.cli.commands import (
+    check,
+    drift,
+    generate,
+    init,
+    migrate,
+    plugin,
+    pull,
+    query,
+    status,
+)
 
 app = typer.Typer(
     name="chkit",
@@ -19,6 +29,9 @@ app.command("migrate", help="Apply pending migrations to the target database.")(
 app.command("status", help="Show migration status and pending operations.")(status.run)
 app.command("check", help="Run pre-flight checks (drift, checksums, pending).")(check.run)
 app.command("drift", help="Compare the live database against the schema snapshot.")(drift.run)
+app.command("query", help="Run a SQL string against the configured ClickHouse target.")(query.run)
+app.command("pull", help="Introspect live ClickHouse and emit a Python schema file.")(pull.run)
+app.command("plugin", help="List configured plugins or dispatch a plugin command.")(plugin.run)
 
 
 @app.callback(invoke_without_command=True)
