@@ -30,8 +30,16 @@ from chkit_plugin_obsessiondb.jobs_api import (
     jobs_get,
     jobs_list,
 )
+from chkit_plugin_obsessiondb.storage import load_selected_service
 
 _REMOTE_SUBCOMMANDS = frozenset({"status", "cancel", "list"})
+
+# Backfill execution commands run the chunked query loop. Against ObsessionDB
+# these would need to submit jobs to the backend (not yet implemented), so
+# when authed + a service is selected we refuse them instead of silently
+# falling through to the local Phase-2 stub or to a direct ClickHouse
+# connection that bypasses ObsessionDB entirely.
+_EXECUTION_SUBCOMMANDS = frozenset({"plan", "run", "resume"})
 
 
 def _str_flag(flags: dict[str, Any], name: str) -> str | None:
@@ -76,6 +84,47 @@ def _dispatch(
     raise RuntimeError(msg)
 
 
+def _guard_remote_execution(
+    context: ChxOnBeforePluginCommandContext,
+) -> ChxOnBeforePluginCommandResult:
+    """Refuse backfill plan/run/resume when authed + a service is selected.
+
+    Mirrors TS ``guardRemoteExecution``: the user explicitly opted into
+    ObsessionDB routing (logged in AND a service selected, or --service flag
+    set), but the remote backfill execution path isn't implemented yet. Rather
+    than silently falling through to the local Phase-2 stub (or — worse — a
+    direct ClickHouse connection that bypasses ObsessionDB), refuse with a
+    clear message that nudges the user toward --local.
+    """
+    creds = load_credentials()
+    if creds is None:
+        return ChxOnBeforePluginCommandUnhandled()
+    service_override = _str_flag(context.flags, "--service")
+    has_service = service_override is not None or (
+        load_selected_service(context.config_path) is not None
+    )
+    if not has_service:
+        return ChxOnBeforePluginCommandUnhandled()
+    message = (
+        f"Backfill {context.command} against ObsessionDB is not supported yet — "
+        "it would submit jobs to the ObsessionDB backend, which is not "
+        "implemented. Re-run with --local to execute against a direct "
+        "ClickHouse connection, or unselect the service with "
+        "`chkit plugin obsessiondb service select`."
+    )
+    if context.json_mode:
+        context.print(
+            {
+                "ok": False,
+                "command": f"backfill {context.command}",
+                "error": message,
+            }
+        )
+    else:
+        context.print(message)
+    return ChxOnBeforePluginCommandHandled(exit_code=1)
+
+
 def handle_backfill_command(  # noqa: PLR0911
     context: ChxOnBeforePluginCommandContext,
 ) -> ChxOnBeforePluginCommandResult:
@@ -84,6 +133,11 @@ def handle_backfill_command(  # noqa: PLR0911
         return ChxOnBeforePluginCommandUnhandled()
     if context.flags.get("--local") is True:
         return ChxOnBeforePluginCommandUnhandled()
+    # Execution subcommands are guarded BEFORE the remote-routing check:
+    # they're not remote-routable (no job to query/cancel yet), but we still
+    # want to short-circuit when ObsessionDB is the intended target.
+    if context.command in _EXECUTION_SUBCOMMANDS:
+        return _guard_remote_execution(context)
     if context.command not in _REMOTE_SUBCOMMANDS:
         return ChxOnBeforePluginCommandUnhandled()
     # A local plan-id status / cancel must not be shadowed by remote.
