@@ -59,7 +59,7 @@ async function cmdMigrate(
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
   const db = pluginContext.executor
-  const journalStore = createJournalStore(db)
+  const journalStore = createJournalStore(db, config.clickhouse?.cluster)
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
   const mode = executeRequested ? 'execute' : 'plan'

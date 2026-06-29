@@ -1,0 +1,13 @@
+<clickhouse>
+    <!-- Per-node macros. {shard} is the same on both replicas (1 shard);
+         {replica} is unique per node; {cluster} is exposed so the
+         `ON CLUSTER '{cluster}'` macro form can also be exercised. -->
+    <macros>
+        <cluster>test_cluster</cluster>
+        <shard>01</shard>
+        <replica>ch1</replica>
+    </macros>
+
+    <!-- How other replicas reach this node to fetch parts (replication). -->
+    <interserver_http_host>ch1</interserver_http_host>
+</clickhouse>

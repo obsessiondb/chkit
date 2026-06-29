@@ -1,4 +1,5 @@
 import { isUnknownDatabaseError, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { onClusterClause } from '@chkit/core'
 
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
 import { CLI_VERSION } from './version.js'
@@ -141,17 +142,25 @@ function parseOperations(value: unknown): OperationState[] {
   return decoded.map((row) => operationFromTuple(row as OperationTupleRow))
 }
 
-export function createJournalStore(db: ClickHouseExecutor): JournalStore {
+export function createJournalStore(db: ClickHouseExecutor, cluster?: string): JournalStore {
   const journalTable = resolveJournalTableName()
-  debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}`)
-  const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable} (
+  debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
+  // In cluster mode the journal must be consistent across every node, so it uses
+  // a replicated engine with a no-`{shard}` Keeper path (one cluster-wide group)
+  // created `ON CLUSTER`. The read path already uses SYNC REPLICA + FINAL +
+  // sequential consistency. Single-node/Cloud keeps the plain engine unchanged.
+  const onCluster = onClusterClause(cluster)
+  const journalEngine = cluster
+    ? "ReplicatedReplacingMergeTree('/clickhouse/tables/{database}/{table}', '{replica}', applied_at)"
+    : 'ReplacingMergeTree(applied_at)'
+  const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable}${onCluster} (
     name String,
     applied_at DateTime64(3, 'UTC'),
     checksum String,
     chkit_version String,
     migration_completed Bool DEFAULT true,
     operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []
-) ENGINE = ReplacingMergeTree(applied_at)
+) ENGINE = ${journalEngine}
 ORDER BY (name)
 SETTINGS index_granularity = 1`
 
@@ -205,10 +214,10 @@ SETTINGS index_granularity = 1`
     // of the new chkit. ALTER ADD COLUMN IF NOT EXISTS is a metadata op,
     // no data rewrite.
     await db.command(
-      `ALTER TABLE ${journalTable} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
+      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
     )
     await db.command(
-      `ALTER TABLE ${journalTable} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
+      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
     )
   }
 
