@@ -992,3 +992,115 @@ Remaining sub-10 scores reflect *accepted divergences* (async-apply sync
 model, codegen bigint default, create-chkit N/A, conftest localhost
 convention) and *thin-test-only gaps* that are no longer actionable
 because the functional surface is correct.
+
+---
+
+## Main sync 2026-06-29
+
+A `git pull` from main brought in 11 new commits. 8 are pure docs /
+release tooling. The remaining 3 commits touch code; this section
+records what was ported, what was already done, and what was decided
+N/A.
+
+### #M1 User-Agent — versioned `chkit/<version>` — PORTED
+
+- **TS:** `packages/plugin-obsessiondb/src/auth/api-client.ts` +
+  `client.ts` both replaced the bare `'chkit-cli'` string with
+  `chkit/${pkg.version}` (read via `createRequire(import.meta.url)`).
+  The ObsessionDB API forwards this header to ClickHouse so chkit
+  traffic is attributable in `system.query_log.http_user_agent`.
+- **Python:** added new module
+  [`_version.py`](src/chkit_plugin_obsessiondb/_version.py) (single
+  source of truth — avoids the circular import with `__init__.py`
+  that re-exports `api_client` symbols). Updated
+  [`api_client.py`](src/chkit_plugin_obsessiondb/api_client.py)
+  `USER_AGENT = f"chkit/{_version.__version__}"`. jobs_api +
+  workbench_api inherit via `service_api._rpc_post`, which already
+  sets the header from the constant.
+- Tests: `test_M1_*` (3 tests — constant shape + observed on
+  `get_session` HTTP call + observed on RPC POST).
+
+### #M2 Backfill remote-execution guard — PORTED (safety fix)
+
+- **TS:** new `guardRemoteExecution` in
+  `packages/plugin-obsessiondb/src/backfill/handler.ts`. When the user
+  runs `chkit plugin backfill {plan,run,resume}` AND is authenticated
+  AND has a selected service (or `--service` flag), refuse with a
+  message nudging them toward `--local` — because remote backfill
+  execution isn't implemented yet. Without the guard, the command
+  silently falls through to the local plugin's Phase-2 stub (or, in TS,
+  to a direct ClickHouse connection that bypasses ObsessionDB —
+  exfiltrating queries to whatever `CLICKHOUSE_URL` is set, not the
+  intended cloud).
+- **Python:** added `_guard_remote_execution` in
+  [`backfill_handler.py`](src/chkit_plugin_obsessiondb/backfill_handler.py).
+  Branches BEFORE the existing remote-subcommand check: if the command
+  is in `{plan, run, resume}`, run the guard; otherwise defer to the
+  existing status/cancel/list routing or fall through to Unhandled.
+  Honors `--local` (existing early return). Emits an `{ok: false,
+  command, error}` envelope under `json_mode`, plain text otherwise.
+- Tests: `test_M2_*` (7 tests — no-creds defer, authed-but-no-service
+  defer, refuses-plan, refuses-run with `--service` flag, JSON
+  envelope, `--local` bypass, doctor-not-guarded).
+
+### #M3 `whoami --json` envelope + json_envelope helper module — PORTED
+
+- **TS:** added `packages/plugin-obsessiondb/src/json-envelope.ts`
+  module exporting `whoamiEnvelope`, `serviceListEnvelope`,
+  `errorEnvelope`, etc. Refactored `auth/login.ts:runWhoami` to use
+  the typed helpers and emit `{command, schemaVersion: 1, status:
+  'logged_in', email, next: null}` instead of an ad-hoc dict.
+- **Python:** added new module
+  [`json_envelope.py`](src/chkit_plugin_obsessiondb/json_envelope.py)
+  mirroring the TS module — `JSON_CONTRACT_VERSION = 1`,
+  `whoami_envelope`, `error_envelope`, `service_list_envelope`, plus
+  TypedDicts for static-type guarantees. Refactored
+  `auth_login.run_whoami` to use the helpers. The whoami JSON shape
+  now matches TS exactly: `{command, schemaVersion, status:
+  'logged_in', email, next: null}`. Bonus: `service_commands._service_list`
+  was migrated to the same helpers — the audit-fix-#9 envelope used a
+  non-TS-aligned `{status: 'error', errorCode, message}` shape; it now
+  uses `error_envelope` which produces `{ok: false, error: {code,
+  message}}`, matching TS.
+- All three helpers re-exported from `chkit_plugin_obsessiondb` root.
+- Tests: `test_M3_*` (4 tests — `error_envelope` shape,
+  `whoami_envelope` shape, name field intentionally not surfaced,
+  `service_list_envelope` shape). Updated 2 existing tests to assert
+  the new shapes (`test_whoami_json_mode_returns_envelope` +
+  `test_finding_9_service_list_json_envelope_shape`).
+
+### Items already in Python (no port needed)
+
+- `init.ts` simplified flow → Python `init.py` was already simpler
+  (gates only on `--yes`).
+- `clearCredentials()` returns boolean → Python already returns bool.
+- `runLogout` "No active session" message → already in Python.
+- `onboarding.packageManager` parameter → already in Python with the
+  Python ecosystem managers (uvx, pipx, poetry, rye), Round-1 audit
+  fix #13.
+- `service list --json` envelope → already in Python from Round-1
+  audit fix #9; this turn migrated it to the shared helper for
+  consistency.
+- `migrate/async-apply.ts MAX_TRANSIENT_POLL_ERRORS = 20` retry budget
+  → already in Python's `migrate_async_apply.py`.
+- `runtime/json-output.ts` catch-all string wrap → already in Python's
+  `cli/json_output.py:print_output`.
+
+### Decided N/A (Python convention difference)
+
+- `cli/commands/skills.ts` (`chkit skills` proxy to `npx skills`) —
+  no Python ecosystem analogue (already in DRIFT > `cmd-skills`).
+- `create-chkit/src/create.ts skipOnboarding` reordering — `create-chkit`
+  is N/A per Python convention (already in DRIFT > `create-chkit`).
+- `plugin-pull/src/index.ts pluginContext.executor` handoff — Python
+  uses the `on_pull_introspect` hook model instead, which is the same
+  feature with a different shape.
+
+### Combined post-main-sync scores
+
+| Section | Score |
+|---------|------:|
+| Round-1 average | 9.6 |
+| Round-2 average | 9.7 |
+| Main-sync (#M1-M3) | 10/10 |
+| **Overall combined** | **~9.8** |
