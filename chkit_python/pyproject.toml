@@ -16,6 +16,7 @@ dependencies = [
     "typer>=0.15,<1",
     "clickhouse-connect>=0.8,<1",
     "rich>=13.9,<14",
+    "httpx>=0.27,<1",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,7 @@ dev = [
     "ruff>=0.8",
     "pytest>=8.3",
     "pytest-cov>=6.0",
+    "pytest-httpx>=0.30",
 ]
 publish = [
     "build>=1.2",
@@ -40,7 +42,7 @@ Repository = "https://github.com/obsessiondb/chkit"
 Issues = "https://github.com/obsessiondb/chkit/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/chkit"]
+packages = ["src/chkit", "src/chkit_plugin_obsessiondb"]
 
 [tool.mypy]
 python_version = "3.11"

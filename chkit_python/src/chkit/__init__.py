@@ -1,6 +1,7 @@
 """chkit — ClickHouse schema and migration toolkit."""
 
 from chkit.core import (
+    SYNTHESIZED_CONFIG_PATH,
     ChxResolvedClickHouseConfig,
     ChxResolvedConfig,
     ChxUserClickHouseConfig,
@@ -11,14 +12,20 @@ from chkit.core import (
     MaterializedViewRefresh,
     MigrationOperation,
     MigrationPlan,
+    ModuleLoadError,
     ProjectionDefinition,
     SchemaDefinition,
+    SchemaLoaderError,
     TableDefinition,
     TableRef,
     ValidationIssue,
     ViewDefinition,
     canonicalize_definitions,
+    codec_raw,
     define_config,
+    import_module_file,
+    is_synthesized_config_path,
+    load_schema_definitions,
     materialized_view,
     plan_diff,
     resolve_config,
@@ -27,11 +34,20 @@ from chkit.core import (
     to_create_sql,
     validate_definitions,
     view,
+    wrap_plugin_run,
+)
+from chkit.core.model import (
+    SkipIndexBloomFilter,
+    SkipIndexMinmax,
+    SkipIndexNgramBF,
+    SkipIndexSet,
+    SkipIndexTokenBF,
 )
 
 __version__ = "0.1.4"
 
 __all__ = [
+    "SYNTHESIZED_CONFIG_PATH",
     "ChxResolvedClickHouseConfig",
     "ChxResolvedConfig",
     "ChxUserClickHouseConfig",
@@ -42,15 +58,26 @@ __all__ = [
     "MaterializedViewRefresh",
     "MigrationOperation",
     "MigrationPlan",
+    "ModuleLoadError",
     "ProjectionDefinition",
     "SchemaDefinition",
+    "SchemaLoaderError",
+    "SkipIndexBloomFilter",
+    "SkipIndexMinmax",
+    "SkipIndexNgramBF",
+    "SkipIndexSet",
+    "SkipIndexTokenBF",
     "TableDefinition",
     "TableRef",
     "ValidationIssue",
     "ViewDefinition",
     "__version__",
     "canonicalize_definitions",
+    "codec_raw",
     "define_config",
+    "import_module_file",
+    "is_synthesized_config_path",
+    "load_schema_definitions",
     "materialized_view",
     "plan_diff",
     "resolve_config",
@@ -59,4 +86,5 @@ __all__ = [
     "to_create_sql",
     "validate_definitions",
     "view",
+    "wrap_plugin_run",
 ]
