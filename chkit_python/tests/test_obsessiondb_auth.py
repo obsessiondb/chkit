@@ -198,6 +198,9 @@ def test_whoami_returns_user_when_logged_in(
 def test_whoami_json_mode_returns_envelope(
     isolated_home: Path, httpx_mock: HTTPXMock
 ) -> None:
+    """The whoami JSON envelope matches TS shape:
+    {command, schemaVersion, status: 'logged_in', email, next: null}.
+    """
     save_credentials(Credentials(access_token="tok", base_url=BASE))
     httpx_mock.add_response(
         url=f"{BASE}/api/auth/get-session",
@@ -207,8 +210,11 @@ def test_whoami_json_mode_returns_envelope(
     run_whoami(msgs.append, json_mode=True)
     [envelope] = msgs
     assert isinstance(envelope, dict)
-    assert envelope["ok"] is True
-    assert envelope["user"]["email"] == "a@b.com"
+    assert envelope["command"] == "obsessiondb whoami"
+    assert envelope["schemaVersion"] == 1
+    assert envelope["status"] == "logged_in"
+    assert envelope["email"] == "a@b.com"
+    assert envelope["next"] is None
 
 
 def test_whoami_returns_error_when_no_creds(isolated_home: Path) -> None:

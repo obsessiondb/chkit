@@ -505,6 +505,8 @@ def test_finding_9_service_list_json_envelope_shape(
     assert len(captured) == 1
     payload = captured[0]
     assert isinstance(payload, dict)
-    assert payload["status"] == "error"
-    assert payload["errorCode"] == "not_logged_in"
+    # Now uses the shared error_envelope helper (matches TS errorEnvelope).
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "not_logged_in"
+    assert payload["schemaVersion"] == 1
     assert payload["command"] == "obsessiondb service list"

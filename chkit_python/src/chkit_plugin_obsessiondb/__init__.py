@@ -22,6 +22,7 @@ must remain importable as the top-level name
 
 from __future__ import annotations
 
+from chkit_plugin_obsessiondb._version import __version__
 from chkit_plugin_obsessiondb.api_client import (
     DeviceCodeResponse,
     OtpRateLimitError,
@@ -68,6 +69,16 @@ from chkit_plugin_obsessiondb.jobs_api import (
     jobs_cancel,
     jobs_get,
     jobs_list,
+)
+from chkit_plugin_obsessiondb.json_envelope import (
+    JSON_CONTRACT_VERSION,
+    ErrorEnvelope,
+    ServiceListEntry,
+    ServiceListEnvelope,
+    WhoamiEnvelope,
+    error_envelope,
+    service_list_envelope,
+    whoami_envelope,
 )
 from chkit_plugin_obsessiondb.onboarding import (
     ConnectChoice,
@@ -122,15 +133,15 @@ from chkit_plugin_obsessiondb.workbench_api import (
     workbench_query_execute,
 )
 
-__version__ = "0.1.0"
-
 __all__ = [
+    "JSON_CONTRACT_VERSION",
     "ClaimInstanceClaimed",
     "ClaimInstanceResult",
     "ConnectChoice",
     "Credentials",
     "DeviceCodeResponse",
     "EnsurePluginResult",
+    "ErrorEnvelope",
     "InstanceClaimStatus",
     "Job",
     "ObsessionDBPluginOptions",
@@ -142,10 +153,13 @@ __all__ = [
     "Service",
     "ServiceAliases",
     "ServiceChoice",
+    "ServiceListEntry",
+    "ServiceListEnvelope",
     "ServiceOrganization",
     "SessionExpiredError",
     "SessionResponse",
     "SignupOptions",
+    "WhoamiEnvelope",
     "WorkbenchColumn",
     "WorkbenchExecuteResult",
     "__version__",
@@ -157,6 +171,7 @@ __all__ = [
     "create_remote_executor",
     "derive_org_name",
     "ensure_obsessiondb_plugin_in_source",
+    "error_envelope",
     "get_credentials_path",
     "get_service",
     "get_session",
@@ -193,10 +208,12 @@ __all__ = [
     "select_service_interactive",
     "send_verification_otp",
     "service_choice_label",
+    "service_list_envelope",
     "set_active_organization",
     "slugify_org_name",
     "strip_cloud_settings",
     "strip_shared_prefix",
     "verify_otp",
+    "whoami_envelope",
     "workbench_query_execute",
 ]

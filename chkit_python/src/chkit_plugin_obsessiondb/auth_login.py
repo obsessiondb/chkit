@@ -22,6 +22,10 @@ from chkit_plugin_obsessiondb.credentials import (
     load_credentials,
     save_credentials,
 )
+from chkit_plugin_obsessiondb.json_envelope import (
+    error_envelope,
+    whoami_envelope,
+)
 
 
 def _open_browser(url: str) -> None:
@@ -88,20 +92,20 @@ def run_whoami(
     *,
     json_mode: bool = False,
 ) -> int:
-    """Print the current user or a friendly error envelope."""
+    """Print the current user or a friendly error envelope.
+
+    JSON envelopes mirror TS ``json-envelope.ts``:
+    - logged-in:    ``{command, schemaVersion, status: 'logged_in', email, next: null}``
+    - not_logged_in / session_expired: ``error_envelope`` shape.
+    """
     creds = load_credentials()
     if creds is None:
         message = "Not logged in. Run `chkit obsessiondb login` to authenticate."
-        if json_mode:
-            print_fn(
-                {
-                    "command": "obsessiondb whoami",
-                    "ok": False,
-                    "error": {"code": "not_logged_in", "message": message},
-                }
-            )
-        else:
-            print_fn(message)
+        print_fn(
+            error_envelope("obsessiondb whoami", "not_logged_in", message)
+            if json_mode
+            else message
+        )
         return 1
 
     try:
@@ -109,28 +113,16 @@ def run_whoami(
     except Exception:
         clear_credentials()
         message = "Session expired. Run `chkit obsessiondb login` to re-authenticate."
-        if json_mode:
-            print_fn(
-                {
-                    "command": "obsessiondb whoami",
-                    "ok": False,
-                    "error": {"code": "session_expired", "message": message},
-                }
-            )
-        else:
-            print_fn(message)
+        print_fn(
+            error_envelope("obsessiondb whoami", "session_expired", message)
+            if json_mode
+            else message
+        )
         return 1
 
     if json_mode:
         print_fn(
-            {
-                "command": "obsessiondb whoami",
-                "ok": True,
-                "user": {
-                    "email": session.user.email,
-                    "name": session.user.name,
-                },
-            }
+            whoami_envelope(email=session.user.email, name=session.user.name)
         )
     else:
         print_fn(f"Logged in as {session.user.email} ({session.user.name})")

@@ -25,6 +25,11 @@ from chkit_plugin_obsessiondb.credentials import (
     load_credentials,
     resolve_base_url,
 )
+from chkit_plugin_obsessiondb.json_envelope import (
+    ServiceListEntry,
+    error_envelope,
+    service_list_envelope,
+)
 from chkit_plugin_obsessiondb.service_api import (
     list_service_organizations,
 )
@@ -81,13 +86,7 @@ def _service_list(ctx: ChxPluginCommandContext) -> int:
         message = "Not logged in. Run `chkit obsessiondb login` to authenticate."
         if ctx.json_mode:
             ctx.print(
-                {
-                    "command": "obsessiondb service list",
-                    "schemaVersion": 1,
-                    "status": "error",
-                    "errorCode": "not_logged_in",
-                    "message": message,
-                }
+                error_envelope("obsessiondb service list", "not_logged_in", message)
             )
         else:
             ctx.print(message)
@@ -100,7 +99,7 @@ def _service_list(ctx: ChxPluginCommandContext) -> int:
     organizations = list_service_organizations(creds)
     selected = load_selected_service(ctx.config_path)
     if ctx.json_mode:
-        services_payload = [
+        services_payload: list[ServiceListEntry] = [
             {
                 "organization": org.name,
                 "slug": service.slug,
@@ -116,14 +115,7 @@ def _service_list(ctx: ChxPluginCommandContext) -> int:
             for org in organizations
             for service in org.services
         ]
-        ctx.print(
-            {
-                "command": "obsessiondb service list",
-                "schemaVersion": 1,
-                "status": "ok",
-                "services": services_payload,
-            }
-        )
+        ctx.print(service_list_envelope(services_payload))
         return 0
     for line in render_service_organizations(organizations, selected):
         ctx.print(line)
