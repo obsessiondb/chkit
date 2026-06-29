@@ -26,8 +26,14 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from chkit_plugin_obsessiondb import _version
+
 CLIENT_ID = "chkit-cli"
-USER_AGENT = "chkit-cli"
+# Versioned User-Agent matches the TS oRPC client + direct-ClickHouse executor
+# (`chkit/<version>`). The ObsessionDB API forwards this header to ClickHouse
+# so chkit traffic is attributable in system.query_log.http_user_agent. The
+# version lives in _version.py to avoid a circular import with __init__.py.
+USER_AGENT = f"chkit/{_version.__version__}"
 HTTP_TIMEOUT_SECONDS = 30.0
 HTTP_429_RATE_LIMITED = 429
 
