@@ -1,9 +1,18 @@
 ---
 title: Backfill Plugin
 description: Plan, execute, and monitor time-windowed backfill operations with async query submission, concurrent execution, and checkpointed progress.
+sidebar:
+  order: 4
+  badge:
+    text: Alpha
+    variant: caution
 ---
 
 This document covers practical usage of the optional `backfill` plugin.
+
+:::caution[Alpha]
+The `backfill` plugin is in alpha. Its API, configuration, and CLI flags may change between releases.
+:::
 
 ## What it does
 

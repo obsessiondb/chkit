@@ -1,9 +1,13 @@
 export { handleBackfillCommand } from './handler.js'
 export { createJobsClient, type JobsClient } from './client.js'
 
+// Flags are registered against the top-level `backfill` command, not against
+// `backfill <sub>` names: the command registry keys plugin extensions by the
+// plugin command name (`byName.get('backfill')`), so two-word subcommand targets
+// never match and the flags would silently never register.
 export const BACKFILL_EXTEND_COMMANDS = [
   {
-    command: ['backfill plan', 'backfill run', 'backfill resume', 'backfill status', 'backfill cancel', 'backfill doctor'],
+    command: ['backfill'],
     flags: [
       {
         name: '--local',
@@ -13,7 +17,7 @@ export const BACKFILL_EXTEND_COMMANDS = [
     ],
   },
   {
-    command: ['backfill status', 'backfill cancel', 'backfill list'],
+    command: ['backfill'],
     flags: [
       {
         name: '--job-id',

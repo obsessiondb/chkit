@@ -1209,9 +1209,11 @@ button[data-open-modal] > kbd kbd {
 	}
 }
 
-/* The landing has no sidebar/hamburger; show the search trigger only on
-   non-landing (doc) pages. */
-:root:not([data-has-sidebar]) site-search {
+/* Show the search trigger only on documentation pages — hide it on the
+   landing (no sidebar) and on all blog pages (listing + posts). */
+:root:not([data-has-sidebar]) site-search,
+:root:has(.posts) site-search,
+:root:has(.post-footer) site-search {
 	display: none;
 }
 
@@ -1280,6 +1282,14 @@ kbd {
 }
 .chk-gh-star-icon {
 	color: var(--accent);
+}
+/* In the mobile burger menu the badge renders inside `.sidebar-content`, whose
+   `.sidebar-content a { display: block }` rule (higher specificity than the bare
+   `.chk-gh-stars` selector) would override the flex layout — collapsing the pill
+   to a block and top-aligning its icons against the border. Re-assert the flex
+   layout with enough specificity to win. */
+.sidebar-content .chk-gh-stars {
+	display: inline-flex;
 }
 
 /* ════════════════════════════════════════════════════
@@ -1382,6 +1392,134 @@ kbd {
 .chk-footer-soon {
 	font-size: 0.875rem;
 	color: var(--txt-muted);
+}
+
+/* ════════════════════════════════════════════════════
+   Blog listing — card grid (ObsessionDB-style)
+   Restyles starlight-blog's .posts / .preview markup from a vertical
+   list into a bordered card grid. `!important` overrides the plugin's
+   scoped component styles. The first post is featured full-width.
+   ════════════════════════════════════════════════════ */
+
+.posts {
+	display: grid !important;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 1.25rem !important;
+}
+
+.posts > .preview:first-child {
+	grid-column: 1 / -1;
+}
+
+.preview {
+	gap: 1rem !important;
+	height: 100%;
+	padding: 1.5rem;
+	border: 1px solid var(--line);
+	background: var(--bg);
+	transition: border-color 0.15s, background 0.15s;
+}
+
+.preview:hover {
+	border-color: var(--accent);
+	background: var(--surface-3);
+}
+
+.preview > header {
+	display: flex;
+	flex-direction: column;
+	gap: 0.6rem;
+}
+
+.preview h2 {
+	margin-bottom: 0 !important;
+	font-size: 1.2rem;
+	letter-spacing: -0.02em;
+}
+
+.posts > .preview:first-child h2 {
+	font-size: 1.6rem;
+}
+
+.preview h2 a {
+	color: var(--txt-strong);
+}
+
+.preview h2 a:hover {
+	color: var(--accent);
+}
+
+/* Date / author / reading-time row — small mono caps. */
+.preview .metadata {
+	font-family: var(--sl-font-mono);
+	font-size: 0.6875rem;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--txt-muted);
+}
+
+/* Smaller author name (the plugin sizes it at --sl-text-base / 600). */
+.metadata .author .name {
+	font-size: 0.8125rem;
+	font-weight: 500;
+}
+
+/* Excerpt grows so the tag footers align across a row. */
+.preview > .sl-markdown-content {
+	flex: 1;
+	font-size: 0.9rem;
+	line-height: 1.55;
+	color: var(--txt-soft);
+}
+
+.preview > footer {
+	margin-top: auto;
+}
+
+@media (max-width: 50em) {
+	.posts {
+		grid-template-columns: 1fr;
+	}
+
+	.posts > .preview:first-child h2 {
+		font-size: 1.3rem;
+	}
+}
+
+/* starlight-blog resets .main-frame's top padding to just the nav height
+   (it assumes no breadcrumb bar), which tucks the listing under our fixed
+   subheader. Restore the full nav + subheader offset on listing pages.
+   `:root:has()` outranks the plugin's `[data-has-toc] .main-frame` rule. */
+:root:has(.posts) .main-frame {
+	padding-top: calc(var(--sl-nav-height) + var(--sl-mobile-toc-height, 0px) + var(--chk-subheader-h));
+}
+
+/* The plugin hides the page-title panel; bring it back so listing pages keep
+   their "Blog" (or tag/author) heading above the posts. */
+:root:has(.posts) .content-panel:first-of-type {
+	display: block;
+}
+
+:root:has(.posts) .content-panel:first-of-type h1 {
+	font-size: 2.5rem;
+	letter-spacing: -0.03em;
+}
+
+/* Per-page chrome (desktop): listing pages (have `.posts`) drop the right
+   "On this page" column; post pages (have `.post-footer`) drop the left nav
+   rail and pull the content back to the shell gutter for a focused read. */
+@media (min-width: 50em) {
+	:root:has(.posts) .right-sidebar {
+		display: none;
+	}
+
+	:root:has(.post-footer) .sidebar-pane {
+		display: none;
+	}
+
+	:root:has(.post-footer) .main-frame {
+		--sl-content-inline-start: var(--chk-gutter);
+	}
 }
 
 /* ════════════════════════════════════════════════════

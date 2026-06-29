@@ -45,7 +45,7 @@ const users = table({
     { name: 'id', type: 'UInt64' },
     { name: 'email', type: 'String' },
   ],
-  engine: 'MergeTree()',
+  engine: 'MergeTree',
   primaryKey: ['id'],
   orderBy: ['id'],
 })
@@ -67,7 +67,7 @@ const events = table({
     { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
     { name: 'status', type: 'String', default: 'pending', comment: 'Event processing status' },
   ],
-  engine: 'MergeTree()',
+  engine: 'MergeTree',
   primaryKey: ['id'],
   orderBy: ['org_id', 'received_at', 'id'],
   partitionBy: 'toYYYYMM(received_at)',
@@ -90,7 +90,7 @@ const events = table({
 | `database` | `string` | ClickHouse database name |
 | `name` | `string` | Table name |
 | `columns` | `ColumnDefinition[]` | Column definitions (see [Columns](#columns)) |
-| `engine` | `string` | Engine clause, e.g. `'MergeTree()'`, `'ReplacingMergeTree(ver)'` |
+| `engine` | `string` | Engine clause, e.g. `'MergeTree'`, `'ReplacingMergeTree(ver)'` |
 | `primaryKey` | `string[]` | Primary key columns |
 | `orderBy` | `string[]` | ORDER BY columns |
 
@@ -109,7 +109,7 @@ const events = table({
 | `plugins` | `TablePlugins` | Per-table plugin configuration (see [Plugin configuration](#plugin-configuration)) |
 
 :::note
-The `engine` field accepts any string. Common engines include `MergeTree()`, `ReplacingMergeTree()`, `SummingMergeTree()`, `AggregatingMergeTree()`, and `CollapsingMergeTree(sign)`.
+The `engine` field accepts any string. Common engines include `MergeTree`, `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, and `CollapsingMergeTree(sign)`. Empty parentheses are optional for parameterless engines (`'MergeTree'` and `'MergeTree()'` are equivalent), and chkit normalizes them when comparing schemas.
 :::
 
 :::note
@@ -129,6 +129,27 @@ Column name.
 Any ClickHouse type string. Parameterized types like `DateTime64(3)`, `Decimal(18, 4)`, `Enum8('a' = 1, 'b' = 2)`, and `FixedString(32)` are supported.
 
 Primitive types recognized by the DSL type system: `String`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`, `UInt256`, `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, `Int256`, `Float32`, `Float64`, `Bool`, `Boolean`, `Date`, `DateTime`, `DateTime64`.
+
+#### SQL-standard aliases
+
+chkit passes the `type` string through to ClickHouse verbatim — it does not rewrite it. ClickHouse itself accepts standard SQL type aliases and stores them as its native types, so a table declared with aliases like `BIGINT` or `TEXT` is created successfully:
+
+| SQL alias | ClickHouse native type |
+|-----------|------------------------|
+| `TINYINT` | `Int8` |
+| `SMALLINT` | `Int16` |
+| `INTEGER` / `INT` | `Int32` |
+| `BIGINT` | `Int64` |
+| `FLOAT` / `REAL` | `Float32` |
+| `DOUBLE` | `Float64` |
+| `TEXT` / `VARCHAR` / `CHAR` | `String` |
+| `TIMESTAMP` | `DateTime` |
+
+See the ClickHouse [data types reference](https://clickhouse.com/docs/sql-reference/data-types) for the complete alias list.
+
+:::caution
+**Prefer the native type.** chkit compares column types literally. A column declared as `BIGINT` is created as `Int64`, but [`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) then compare your declared `BIGINT` against the live `Int64` and report a permanent `changed_column` drift — failing `chkit check --strict` on every run. The [codegen plugin](/plugins/codegen/) likewise recognizes only native names (see [Type system reference](#type-system-reference)) — an alias raises `codegen_unsupported_type`, or emits `unknown` when `failOnUnsupportedType` is `false`. Use the native ClickHouse type (`Int64`, not `BIGINT`) unless you have a specific reason not to.
+:::
 
 ### `nullable` (boolean, optional)
 
