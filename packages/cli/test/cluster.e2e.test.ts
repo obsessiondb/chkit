@@ -156,8 +156,49 @@ describe('chkit cluster mode (ON CLUSTER) e2e', () => {
     await waitForColumn(node1, DATABASE, tableName, 'label')
     await waitForColumn(node2, DATABASE, tableName, 'label')
 
+    // RENAME fans out, with ON CLUSTER at the END of the statement (ClickHouse
+    // places it after the `name TO new_name` list, not after the source name).
+    const renamedTable = `${tableName}_renamed`
+    await writeFile(schemaPath, renderSchema(renamedTable, true), 'utf8')
+    const generateRename = runCli(
+      dir,
+      ['generate', '--config', configPath, '--name', 'rename', '--rename-table', `${DATABASE}.${tableName}=${DATABASE}.${renamedTable}`, '--json'],
+      cliEnv,
+    )
+    expect(generateRename.exitCode, formatTestDiagnostic('generate rename', generateRename)).toBe(0)
+    const renameSql = await latestMigrationSql(migrationsDir)
+    expect(renameSql).toContain(
+      `RENAME TABLE IF EXISTS ${DATABASE}.${tableName} TO ${DATABASE}.${renamedTable} ON CLUSTER '${CLUSTER}';`,
+    )
+    const migrateRename = runCli(dir, ['migrate', '--config', configPath, '--execute', '--json'], cliEnv)
+    expect(migrateRename.exitCode, formatTestDiagnostic('migrate rename', migrateRename)).toBe(0)
+    await waitForTable(node1, DATABASE, renamedTable)
+    await waitForTable(node2, DATABASE, renamedTable)
+
     // cleanup (also exercises DROP ... ON CLUSTER).
-    await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.${tableName} ON CLUSTER '${CLUSTER}' SYNC`)
+    await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.${renamedTable} ON CLUSTER '${CLUSTER}' SYNC`)
+    await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
+  }, 60_000)
+
+  test('rejects a pre-existing non-replicated journal when cluster mode is on', async () => {
+    const journalTable = createJournalTableName('cluster_p2')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const tableName = `${createPrefix('cluster_p2')}events`
+    const { dir, configPath } = await scaffold(tableName)
+
+    // Simulate a project that ran chkit single-node before enabling cluster mode:
+    // a plain (non-replicated) journal already exists.
+    await node1.command(
+      `CREATE TABLE ${DATABASE}.\`${journalTable}\` (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
+    )
+
+    const generate = runCli(dir, ['generate', '--config', configPath, '--name', 'init', '--json'], cliEnv)
+    expect(generate.exitCode, formatTestDiagnostic('generate', generate)).toBe(0)
+
+    const status = runCli(dir, ['status', '--config', configPath], cliEnv)
+    expect(status.exitCode).not.toBe(0)
+    expect(`${status.stdout}${status.stderr}`).toContain('non-replicated engine')
+
     await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
   }, 60_000)
 })

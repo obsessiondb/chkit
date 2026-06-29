@@ -57,7 +57,7 @@ describe('applyOnClusterToPlan', () => {
       "CREATE DATABASE IF NOT EXISTS db ON CLUSTER 'c';",
       "ALTER TABLE db.t ON CLUSTER 'c' ADD COLUMN IF NOT EXISTS `c` String;",
       "ALTER TABLE db.t ON CLUSTER 'c' RENAME COLUMN IF EXISTS `a` TO `b`;",
-      "RENAME TABLE IF EXISTS db.a ON CLUSTER 'c' TO db.b;",
+      "RENAME TABLE IF EXISTS db.a TO db.b ON CLUSTER 'c';",
       "DROP TABLE IF EXISTS db.t ON CLUSTER 'c';",
       "DROP TABLE IF EXISTS db.mv ON CLUSTER 'c' SYNC;",
       "DROP VIEW IF EXISTS db.v ON CLUSTER 'c';",

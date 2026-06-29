@@ -1,8 +1,8 @@
 import type { MigrationPlan } from './model-types.js'
 
-// DDL statement prefixes chkit emits in a migration plan. `ON CLUSTER` goes
-// immediately after the object reference that follows the prefix. This is the
-// complete set the planner + plan-pipeline produce; anything else is left
+// DDL statement prefixes where `ON CLUSTER` goes immediately after the object
+// reference that follows the prefix. This is the set the planner + plan-pipeline
+// produce, minus RENAME (handled separately below); anything else is left
 // untouched (e.g. plugin-emitted SQL).
 const ON_CLUSTER_ANCHORS = [
   'CREATE TABLE IF NOT EXISTS',
@@ -12,7 +12,6 @@ const ON_CLUSTER_ANCHORS = [
   'ALTER TABLE',
   'DROP TABLE IF EXISTS',
   'DROP VIEW IF EXISTS',
-  'RENAME TABLE IF EXISTS',
 ] as const
 
 /**
@@ -25,6 +24,11 @@ export function onClusterClause(cluster: string | undefined): string {
 }
 
 function injectOnClusterClause(sql: string, clause: string): string {
+  // RENAME TABLE is the exception: ClickHouse places `ON CLUSTER` after the full
+  // `name TO new_name` list (at the very end), not after the source name.
+  if (sql.startsWith('RENAME TABLE ')) {
+    return sql.endsWith(';') ? `${sql.slice(0, -1)}${clause};` : `${sql}${clause}`
+  }
   for (const anchor of ON_CLUSTER_ANCHORS) {
     if (!sql.startsWith(`${anchor} `)) continue
     const rest = sql.slice(anchor.length + 1)
