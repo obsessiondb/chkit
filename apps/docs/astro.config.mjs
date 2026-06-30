@@ -50,13 +50,10 @@ export default defineConfig({
 			},
 			sidebar: [
 				{
-					label: 'For AI Agents',
-					link: '/ai-agents/',
-				},
-				{
 					label: 'Getting Started',
 					items: [
 						{ label: 'Overview', slug: 'getting-started' },
+						{ label: 'For AI Agents', slug: 'ai-agents' },
 						{ label: 'Start with an example', slug: 'getting-started/with-an-example' },
 						{ label: 'Add to an existing project', slug: 'getting-started/add-to-existing-project' },
 					],
