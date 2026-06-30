@@ -208,7 +208,7 @@ describe('handleBackfillCommand', () => {
       const result = await handleBackfillCommand(context)
 
       expect(result).toEqual({ handled: true, exitCode: 1 })
-      expect(printed[0]).toContain('not supported yet')
+      expect(printed[0]).toContain('backfill submit')
       expect(printed[0]).toContain('--local')
     })
   }
@@ -244,5 +244,24 @@ describe('handleBackfillCommand', () => {
 
     expect(result).toEqual({ handled: true, exitCode: 1 })
     expect(printed[0]).toMatchObject({ ok: false, command: 'backfill plan' })
+  })
+
+  test('defers submit to the local command when authenticated but no service is selected', async () => {
+    await setupAuth()
+
+    const { context } = makeContext({ command: 'submit', flags: { '--target': 'app.events' } })
+    const result = await handleBackfillCommand(context)
+    expect(result).toEqual({ handled: false })
+  })
+
+  test('defers submit to the local command when not authenticated', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'chkit-bf-'))
+    originalXdg = process.env.XDG_CONFIG_HOME
+    process.env.XDG_CONFIG_HOME = tempDir
+    // No credentials saved
+
+    const { context } = makeContext({ command: 'submit', flags: { '--target': 'app.events' } })
+    const result = await handleBackfillCommand(context)
+    expect(result).toEqual({ handled: false })
   })
 })

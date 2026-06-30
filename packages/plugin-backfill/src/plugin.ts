@@ -20,6 +20,9 @@ import {
   RUN_FLAG_MAP,
   RunSchema,
   StatusSchema,
+  SUBMIT_FLAGS,
+  SUBMIT_FLAG_MAP,
+  SubmitSchema,
   type PlanOptions,
   type PluginConfig,
   type ResumeOptions,
@@ -207,6 +210,7 @@ function withFactoryDefaults<T>(
 export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin {
   const factoryOptions = options as Record<string, unknown>
   const planOptionsSchema = withFactoryDefaults(PlanSchema, factoryOptions)
+  const submitOptionsSchema = withFactoryDefaults(SubmitSchema, factoryOptions)
   const runOptionsSchema = withFactoryDefaults(RunSchema, factoryOptions)
   const resumeOptionsSchema = withFactoryDefaults(ResumeSchema, factoryOptions)
   const statusOptionsSchema = withFactoryDefaults(StatusSchema, factoryOptions)
@@ -277,6 +281,32 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               } finally {
                 await db.close()
               }
+            },
+          }),
+      },
+      {
+        name: 'submit',
+        description: 'Submit a backfill plan to a managed job backend (e.g. ObsessionDB) instead of running it locally',
+        flags: SUBMIT_FLAGS,
+        optionsSchema: submitOptionsSchema,
+        flagMapping: SUBMIT_FLAG_MAP,
+        run: async (context) =>
+          wrapPluginRun({
+            command: 'submit',
+            label: 'Backfill submit',
+            jsonMode: context.jsonMode,
+            print: context.print,
+            configErrorClass: BackfillConfigError,
+            fn: async () => {
+              // Reaching this handler means no managed backend intercepted the
+              // command. The ObsessionDB plugin handles `submit` via its
+              // onBeforePluginCommand hook when a service is selected; without
+              // one there is nowhere to submit to.
+              throw new BackfillConfigError(
+                'backfill submit requires a managed job backend. Log in and select an ObsessionDB service ' +
+                  '(`chkit obsessiondb login`, then `chkit obsessiondb service select`), ' +
+                  'or use `chkit backfill run --local` to execute the backfill against a direct connection.',
+              )
             },
           }),
       },

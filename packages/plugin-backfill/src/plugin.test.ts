@@ -20,6 +20,7 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     expect(plugin.manifest.apiVersion).toBe(1)
     expect(plugin.commands.map((command) => command.name)).toEqual([
       'plan',
+      'submit',
       'run',
       'resume',
       'status',

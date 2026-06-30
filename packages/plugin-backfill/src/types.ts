@@ -161,7 +161,7 @@ export interface BackfillPlugin {
   }
   optionsSchema?: SafeParseable<Record<string, unknown>>
   commands: Array<{
-    name: 'plan' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
+    name: 'plan' | 'submit' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
     description: string
     flags?: ReadonlyArray<{
       name: string
