@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://chkit.obsessiondb.com/sitemap-index.xml
