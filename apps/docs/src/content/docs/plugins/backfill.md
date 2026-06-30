@@ -175,6 +175,19 @@ Build a deterministic backfill plan and persist immutable plan state.
 | `--force-large-window` | No | Allow windows exceeding `limits.maxWindowHours` |
 | `--force` | No | Delete existing plan and regenerate from scratch |
 
+### `chkit plugin backfill submit`
+
+Build the plan with the same chunking algorithm as `run`, then submit it to a managed job backend instead of executing it locally. Requires an authenticated [ObsessionDB](/plugins/overview/) session with a selected service (`chkit obsessiondb login`, then `chkit obsessiondb service select`); without one, the command explains how to set it up or fall back to `run --local`. On success it prints the job ID and a console link to track progress — the backend runs the chunks, so no local polling is needed.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--target <db.table>` | Yes | Target table in `database.table` format |
+| `--from <timestamp>` | No | Window start (ISO timestamp; defaults to the table's earliest partition) |
+| `--to <timestamp>` | No | Window end (ISO timestamp; defaults to the table's latest partition) |
+| `--max-chunk-bytes <size>` | No | Max bytes per chunk (e.g. `10G`, `500M`) |
+| `--title <title>` | No | Human-readable job title shown in the console |
+| `--concurrency <n>` | No | Max concurrent tasks the backend runs (1–48) |
+
 ### `chkit plugin backfill run`
 
 Execute a planned backfill by submitting chunks as async queries to ClickHouse with concurrent execution and progress polling.
