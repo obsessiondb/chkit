@@ -3,14 +3,16 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightBlog from 'starlight-blog';
 import react from '@astrojs/react';
+import sitemap from '@astrojs/sitemap';
 import rawMarkdown from './src/integrations/raw-markdown';
 
 const isDev = process.argv.includes('dev');
 
 // https://astro.build/config
 export default defineConfig({
-	// Canonical site URL — enables the sitemap, canonical links, and the
-	// blog's RSS feed (starlight-blog only emits /blog/rss.xml when `site` is set).
+	// Canonical site URL — required for the @astrojs/sitemap integration,
+	// canonical links, and the blog's RSS feed (starlight-blog only emits
+	// /blog/rss.xml when `site` is set).
 	site: 'https://chkit.obsessiondb.com',
 	integrations: [
 		starlight({
@@ -84,6 +86,7 @@ export default defineConfig({
 				},
 			],
 		}),
+		sitemap(),
 		...(isDev ? [react()] : []),
 		rawMarkdown(),
 	],
