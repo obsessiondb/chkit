@@ -1,12 +1,21 @@
 ---
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import Default from '@astrojs/starlight/components/Head.astro';
 
 // Advertise the raw-Markdown version of this page so agents and crawlers can
-// discover it from the HTML. The href mirrors how functions/_middleware.ts
-// resolves ".md" URLs: derive it from the pathname. The homepage has no
-// Markdown page, so point it at the llms.txt index instead.
-const path = Astro.url.pathname.replace(/\/$/, '');
-const mdHref = path === '' ? '/llms.txt' : `${path}.md`;
+// discover it from the HTML. The raw-markdown integration writes one .md per
+// source doc under src/content/docs, and the middleware resolves "<path>.md"
+// by URL pathname — so the href is derived from the pathname.
+//
+// Only emit a page-specific alternate when the source doc actually exists.
+// Generated routes carry a synthesized filePath that points at a missing
+// source (e.g. the starlight-blog index claims src/content/docs/blog.md), and
+// the homepage has no per-page .md — both fall back to the llms.txt index.
+const { entry } = Astro.locals.starlightRoute;
+const slug = Astro.url.pathname.replace(/\/$/, '').replace(/^\//, '');
+const sourceExists = !!entry?.filePath && existsSync(join(process.cwd(), entry.filePath));
+const mdHref = slug !== '' && sourceExists ? `/${slug}.md` : '/llms.txt';
 ---
 
 <Default />
