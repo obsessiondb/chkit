@@ -147,11 +147,15 @@ export function createJournalStore(db: ClickHouseExecutor, cluster?: string): Jo
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
   // In cluster mode the journal must be consistent across every node, so it uses
   // a replicated engine with a no-`{shard}` Keeper path (one cluster-wide group)
-  // created `ON CLUSTER`. The read path already uses SYNC REPLICA + FINAL +
+  // created `ON CLUSTER`. The replica id is `{shard}_{replica}` rather than bare
+  // `{replica}`: because the path omits `{shard}`, all nodes across all shards
+  // share it, so the replica name must be unique cluster-wide — and per-shard
+  // `{replica}` naming (the common multi-shard layout) would otherwise collide
+  // (REPLICA_ALREADY_EXISTS). The read path already uses SYNC REPLICA + FINAL +
   // sequential consistency. Single-node/Cloud keeps the plain engine unchanged.
   const onCluster = onClusterClause(cluster)
   const journalEngine = cluster
-    ? "ReplicatedReplacingMergeTree('/clickhouse/tables/{database}/{table}', '{replica}', applied_at)"
+    ? "ReplicatedReplacingMergeTree('/clickhouse/tables/{database}/{table}', '{shard}_{replica}', applied_at)"
     : 'ReplacingMergeTree(applied_at)'
   const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable}${onCluster} (
     name String,

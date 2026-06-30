@@ -55,8 +55,15 @@ clickhouse: {
 Cluster e2e tests are gated behind `CHKIT_CLUSTER_E2E=1` and hard-fail (never
 skip) if the cluster isn't reachable.
 
-## Scaling to multiple shards (later)
+## Multi-shard cluster
 
-To exercise the multi-shard journal edge case, add `ch3`/`ch4` with `shard=02`
-and a second `<shard>` block in `config.d/cluster.xml`. Keep the cluster name
-`test_cluster`. See `thoughts/cluster-support-design.md` §7.2 (Tier 2).
+A 2-shard × 2-replica variant lives in [`2shard/`](./2shard/) (cluster
+`test_cluster_2s`, ports 8133–8136). It uses per-shard replica naming, which is
+the layout that exercises the journal's cluster-wide-unique replica id
+(`{shard}_{replica}`). It coexists with this 1-shard cluster.
+
+```bash
+bun run cluster:2shard:up      # 4 ClickHouse nodes + Keeper
+bun run test:cluster:2shard    # multi-shard journal e2e
+bun run cluster:2shard:down
+```

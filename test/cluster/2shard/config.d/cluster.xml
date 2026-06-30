@@ -1,0 +1,34 @@
+<clickhouse>
+    <listen_host>0.0.0.0</listen_host>
+
+    <zookeeper>
+        <node>
+            <host>keeper</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+
+    <!-- 2 shards, 2 replicas each. -->
+    <remote_servers replace="true">
+        <test_cluster_2s>
+            <secret>chkit_cluster_secret</secret>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica><host>ch1</host><port>9000</port></replica>
+                <replica><host>ch2</host><port>9000</port></replica>
+            </shard>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica><host>ch3</host><port>9000</port></replica>
+                <replica><host>ch4</host><port>9000</port></replica>
+            </shard>
+        </test_cluster_2s>
+    </remote_servers>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+
+    <default_replica_path>/clickhouse/tables/{uuid}/{shard}</default_replica_path>
+    <default_replica_name>{replica}</default_replica_name>
+</clickhouse>
