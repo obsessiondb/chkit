@@ -1,6 +1,5 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "chkit",
@@ -137,6 +136,7 @@
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
+        "@chkit/plugin-backfill": "workspace:*",
         "@clack/prompts": "^1.4.0",
         "@orpc/client": "1.13.4",
         "@orpc/contract": "1.13.4",
