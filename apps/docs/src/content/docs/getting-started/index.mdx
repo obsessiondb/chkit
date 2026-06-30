@@ -7,8 +7,17 @@ sidebar:
 ---
 
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+import CopyPromptButton from '../../../components/CopyPromptButton.astro';
 
 chkit is a ClickHouse schema and migration toolkit for TypeScript projects. Pick the path that matches what you're working on.
+
+## Let an agent set it up
+
+If you work in an AI coding agent (Claude Code, Cursor, Codex, and others), let it do the setup. Copy this prompt and paste it into your agent — it fetches chkit's [agent instructions](/ai-agents/) and walks you through install, config, plugins, and your first migration.
+
+<CopyPromptButton prompt="Set up chkit (ClickHouse schema management) in this repo. First fetch https://chkit.obsessiondb.com/ai-agents.md and follow the instructions there: install the agent skill, scaffold the config, recommend any plugins this project needs, and walk me through the first migration. Don't apply anything to the database without confirming with me first." />
+
+Prefer to do it yourself? Pick a path below.
 
 <CardGrid>
   <LinkCard

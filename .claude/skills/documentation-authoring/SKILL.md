@@ -216,11 +216,11 @@ After every documentation change, always run this checklist:
 2. **Confirm build succeeds** without errors.
 
 3. **Check integration output** in the build log:
-   - Raw-markdown integration: `Copied N markdown files to _raw/`
-   - Sitemap generation: `Generated index.md with N pages`
+   - Raw-markdown integration: `Wrote N raw Markdown pages to _raw/`
+   - Index generation: `Generated _raw/index.md and llms.txt with N pages`
    - Verify N matches the expected file count after your change.
 
-4. **Review the sitemap** — Read `apps/docs/dist/_raw/index.md` and verify:
+4. **Review the sitemap** — Read `apps/docs/dist/_raw/index.md` (and `apps/docs/dist/llms.txt`) and verify:
    - New pages appear with correct title, description, and URL path.
    - Deleted pages no longer appear.
    - Modified titles/descriptions are reflected.
@@ -229,4 +229,10 @@ After every documentation change, always run this checklist:
 
 ## Agent discoverability
 
-The site supports `Accept: text/markdown` content negotiation. A build-time integration (`apps/docs/src/integrations/raw-markdown.ts`) copies every doc file into `dist/_raw/` and generates a sitemap at `dist/_raw/index.md`. The sitemap is auto-generated from frontmatter — there is no hand-maintained index file. This enables AI agents to discover and read documentation programmatically.
+A build-time integration (`apps/docs/src/integrations/raw-markdown.ts`) makes every doc page available to AI agents three ways, all auto-generated from frontmatter (no hand-maintained index):
+
+- **Clean `.md` URLs** — append `.md` to any page URL (e.g. `/ai-agents.md`, `/cli/migrate.md`) to get its raw Markdown directly, no headers needed. The Cloudflare Pages Function in `apps/docs/functions/_middleware.ts` rewrites these to the raw files under `dist/_raw/`.
+- **Content negotiation** — request any page URL with `Accept: text/markdown` to get the Markdown version of the same path.
+- **`/llms.txt`** — an [llms.txt](https://llmstxt.org/)-format index at the site root listing every page and linking to its `.md` URL. A full sitemap also lives at `/_raw/index.md`.
+
+When adding, removing, or renaming a page, all three update automatically on the next build — no manual edits required.
