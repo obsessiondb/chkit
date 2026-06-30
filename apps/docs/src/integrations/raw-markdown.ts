@@ -1,19 +1,22 @@
-import { cpSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, relative, dirname } from 'node:path';
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname, relative } from 'node:path';
 import type { AstroIntegration } from 'astro';
+
+const BASE_URL = 'https://chkit.obsessiondb.com';
+const SITE_TAGLINE = 'ClickHouse schema management and migration toolkit for TypeScript.';
 
 interface DocEntry {
 	slug: string;
 	title: string;
 	description: string;
+	source: string;
 }
 
 function stripQuotes(s: string): string {
 	return s.replace(/^["']|["']$/g, '');
 }
 
-function extractFrontmatter(filePath: string): { title: string; description: string } {
-	const content = readFileSync(filePath, 'utf-8');
+function extractFrontmatter(content: string): { title: string; description: string } {
 	const match = content.match(/^---\n([\s\S]*?)\n---/);
 	if (!match) return { title: '', description: '' };
 
@@ -21,6 +24,11 @@ function extractFrontmatter(filePath: string): { title: string; description: str
 	const title = stripQuotes(fm.match(/^title:\s*(.+)$/m)?.[1]?.trim() ?? '');
 	const description = stripQuotes(fm.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? '');
 	return { title, description };
+}
+
+// Strip extension and collapse "index" / "<dir>/index" into the directory slug.
+function toSlug(rel: string): string {
+	return rel.replace(/\.mdx?$/, '').replace(/(^|\/)index$/, '');
 }
 
 function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
@@ -32,17 +40,20 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 			if (statSync(fullPath).isDirectory()) {
 				walk(fullPath);
 			} else if (/\.mdx?$/.test(entry)) {
-				const rel = relative(srcDir, fullPath);
-				const dest = join(destDir, rel);
-				mkdirSync(dirname(dest), { recursive: true });
-				cpSync(fullPath, dest);
+				const source = readFileSync(fullPath, 'utf-8');
+				const slug = toSlug(relative(srcDir, fullPath));
+				const { title, description } = extractFrontmatter(source);
 
-				// Build slug: strip extension, "index" becomes ""
-				let slug = rel.replace(/\.mdx?$/, '');
-				if (slug === 'index') slug = '';
+				// Emit every page as raw Markdown at a clean, slug-based path
+				// (e.g. ai-agents.md, cli/migrate.md). The homepage (empty slug)
+				// is a marketing page, not useful as Markdown — skip it.
+				if (slug !== '') {
+					const dest = join(destDir, `${slug}.md`);
+					mkdirSync(dirname(dest), { recursive: true });
+					writeFileSync(dest, source);
+				}
 
-				const { title, description } = extractFrontmatter(fullPath);
-				entries.push({ slug, title, description });
+				entries.push({ slug, title, description, source });
 			}
 		}
 	}
@@ -51,31 +62,51 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 	return entries;
 }
 
-function generateIndex(entries: DocEntry[], baseUrl: string): string {
-	const lines: string[] = [
-		'# chkit Documentation',
-		'',
-		'ClickHouse schema management and migration toolkit for TypeScript.',
-		'',
-		'## Pages',
-		'',
-	];
-
-	// Sort: root pages first, then by slug alphabetically
-	const sorted = [...entries].sort((a, b) => {
+// Sort root pages first, then alphabetically by slug.
+function sortEntries(entries: DocEntry[]): DocEntry[] {
+	return [...entries].sort((a, b) => {
 		const aDepth = a.slug === '' ? -1 : a.slug.split('/').length;
 		const bDepth = b.slug === '' ? -1 : b.slug.split('/').length;
 		if (aDepth !== bDepth) return aDepth - bDepth;
 		return a.slug.localeCompare(b.slug);
 	});
+}
 
-	for (const entry of sorted) {
-		const path = entry.slug === '' ? '/' : `/${entry.slug}/`;
-		const url = `${baseUrl}${path}`;
+// Link to the raw Markdown URL of each page (.md), so an agent reading the
+// index can fetch each page's Markdown directly without HTML conversion.
+function mdUrl(slug: string): string {
+	return slug === '' ? `${BASE_URL}/` : `${BASE_URL}/${slug}.md`;
+}
+
+// Full sitemap served at /_raw/index.md (and /index.md via routing).
+function generateIndex(entries: DocEntry[]): string {
+	const lines = ['# chkit Documentation', '', SITE_TAGLINE, '', '## Pages', ''];
+	for (const entry of sortEntries(entries)) {
 		const desc = entry.description ? ` - ${entry.description}` : '';
-		lines.push(`- [${entry.title || path}](${url})${desc}`);
+		lines.push(`- [${entry.title || entry.slug || '/'}](${mdUrl(entry.slug)})${desc}`);
 	}
+	lines.push('');
+	return lines.join('\n');
+}
 
+// llms.txt — the agent entry point. https://llmstxt.org/ format: H1, a
+// blockquote summary, then a flat list of pages linking to their Markdown.
+function generateLlmsTxt(entries: DocEntry[]): string {
+	const lines = [
+		'# chkit',
+		'',
+		`> ${SITE_TAGLINE}`,
+		'',
+		'chkit defines ClickHouse schemas in TypeScript, diffs them into migration SQL, applies migrations, and verifies the live database stays in sync. Each link below points to the raw Markdown of that page.',
+		'',
+		'## Docs',
+		'',
+	];
+	for (const entry of sortEntries(entries)) {
+		if (entry.slug === '') continue;
+		const desc = entry.description ? `: ${entry.description}` : '';
+		lines.push(`- [${entry.title || entry.slug}](${mdUrl(entry.slug)})${desc}`);
+	}
 	lines.push('');
 	return lines.join('\n');
 }
@@ -86,18 +117,18 @@ export default function rawMarkdown(): AstroIntegration {
 		hooks: {
 			'astro:build:done': ({ dir, logger }) => {
 				const srcDir = new URL('../src/content/docs/', dir).pathname;
-				const destDir = new URL('_raw/', dir).pathname;
+				const distDir = new URL(dir).pathname;
+				const rawDir = join(distDir, '_raw');
 
-				const entries = collectMarkdownFiles(srcDir, destDir);
+				const entries = collectMarkdownFiles(srcDir, rawDir);
 
-				// Generate index.md as a full sitemap for agents
-				const baseUrl = 'https://chkit.obsessiondb.com';
-				const index = generateIndex(entries, baseUrl);
-				mkdirSync(destDir, { recursive: true });
-				writeFileSync(join(destDir, 'index.md'), index);
+				mkdirSync(rawDir, { recursive: true });
+				writeFileSync(join(rawDir, 'index.md'), generateIndex(entries));
+				writeFileSync(join(distDir, 'llms.txt'), generateLlmsTxt(entries));
 
-				logger.info(`Copied ${entries.length} markdown files to _raw/`);
-				logger.info(`Generated index.md with ${entries.length} pages`);
+				const pageCount = entries.filter((e) => e.slug !== '').length;
+				logger.info(`Wrote ${pageCount} raw Markdown pages to _raw/`);
+				logger.info(`Generated _raw/index.md and llms.txt with ${pageCount} pages`);
 			},
 		},
 	};

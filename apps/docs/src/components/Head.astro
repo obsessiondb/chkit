@@ -1,0 +1,13 @@
+---
+import Default from '@astrojs/starlight/components/Head.astro';
+
+// Advertise the raw-Markdown version of this page so agents and crawlers can
+// discover it from the HTML. The href mirrors how functions/_middleware.ts
+// resolves ".md" URLs: derive it from the pathname. The homepage has no
+// Markdown page, so point it at the llms.txt index instead.
+const path = Astro.url.pathname.replace(/\/$/, '');
+const mdHref = path === '' ? '/llms.txt' : `${path}.md`;
+---
+
+<Default />
+<link rel="alternate" type="text/markdown" href={mdHref} />

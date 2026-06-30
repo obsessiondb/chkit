@@ -38,6 +38,7 @@ export default defineConfig({
 				}),
 			],
 			components: {
+				Head: './src/components/Head.astro',
 				Header: './src/components/Header.astro',
 				Hero: './src/components/Hero.astro',
 				Footer: './src/components/Footer.astro',
@@ -46,6 +47,10 @@ export default defineConfig({
 				ThemeSelect: './src/components/ThemeSelect.astro',
 			},
 			sidebar: [
+				{
+					label: 'For AI Agents',
+					link: '/ai-agents/',
+				},
 				{
 					label: 'Getting Started',
 					items: [
