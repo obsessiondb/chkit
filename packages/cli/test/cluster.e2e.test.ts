@@ -37,54 +37,40 @@ function executorFor(url: string) {
   })
 }
 
-function renderSchema(tableName: string, withLabel: boolean): string {
-  const columns = [
-    "    { name: 'id', type: 'UInt64' }",
-    "    { name: 'ts', type: 'DateTime' }",
-    ...(withLabel ? ["    { name: 'label', type: 'String' }"] : []),
-  ].join(',\n')
-  return `import { schema, table } from '${CORE_ENTRY}'
-
-export default schema(
-  table({
-    database: '${DATABASE}',
-    name: '${tableName}',
-    engine: 'ReplicatedMergeTree',
-    columns: [
-${columns},
-    ],
-    primaryKey: ['id'],
-    orderBy: ['id'],
-  }),
-)
-`
-}
-
-async function scaffold(tableName: string): Promise<{ dir: string; configPath: string; schemaPath: string; migrationsDir: string }> {
-  const dir = await mkdtemp(join(tmpdir(), 'chkit-cluster-e2e-'))
-  const schemaPath = join(dir, 'schema.ts')
-  const configPath = join(dir, 'clickhouse.config.ts')
-  const migrationsDir = join(dir, 'chkit', 'migrations')
-  await writeFile(schemaPath, renderSchema(tableName, false), 'utf8')
-  await writeFile(
-    configPath,
-    `export default {
+function configFor(schemaPath: string, dir: string, url: string): string {
+  return `export default {
   schema: '${schemaPath}',
   outDir: '${join(dir, 'chkit')}',
-  migrationsDir: '${migrationsDir}',
+  migrationsDir: '${join(dir, 'chkit', 'migrations')}',
   metaDir: '${join(dir, 'chkit', 'meta')}',
   clickhouse: {
-    url: '${NODE1}',
+    url: '${url}',
     username: '${USER}',
     password: '${PASSWORD}',
     database: '${DATABASE}',
     cluster: '${CLUSTER}',
   },
 }
-`,
-    'utf8',
-  )
-  return { dir, configPath, schemaPath, migrationsDir }
+`
+}
+
+interface Project {
+  dir: string
+  schemaPath: string
+  configPath: string
+  config2Path: string
+  migrationsDir: string
+}
+
+async function scaffold(schema: string): Promise<Project> {
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-cluster-e2e-'))
+  const schemaPath = join(dir, 'schema.ts')
+  const configPath = join(dir, 'clickhouse.config.ts')
+  const config2Path = join(dir, 'clickhouse.node2.ts')
+  await writeFile(schemaPath, schema, 'utf8')
+  await writeFile(configPath, configFor(schemaPath, dir, NODE1), 'utf8')
+  await writeFile(config2Path, configFor(schemaPath, dir, NODE2), 'utf8')
+  return { dir, schemaPath, configPath, config2Path, migrationsDir: join(dir, 'chkit', 'migrations') }
 }
 
 async function latestMigrationSql(migrationsDir: string): Promise<string> {
@@ -94,36 +80,64 @@ async function latestMigrationSql(migrationsDir: string): Promise<string> {
   return readFile(join(migrationsDir, last as string), 'utf8')
 }
 
-describe('chkit cluster mode (ON CLUSTER) e2e', () => {
-  const node1 = executorFor(NODE1)
-  const node2 = executorFor(NODE2)
+const node1 = executorFor(NODE1)
+const node2 = executorFor(NODE2)
 
-  test('fans DDL across replicas, replicates the journal, and is idempotent', async () => {
+describe('chkit cluster mode (ON CLUSTER) e2e', () => {
+  test('creates every object type on both replicas, replicates the journal, idempotent + cross-endpoint', async () => {
     const prefix = createPrefix('cluster')
-    const tableName = `${prefix}events`
+    const events = `${prefix}events`
+    const sum = `${prefix}sum`
+    const vw = `${prefix}view`
+    const mv = `${prefix}mv`
     const journalTable = createJournalTableName('cluster')
     const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-    const { dir, configPath, schemaPath, migrationsDir } = await scaffold(tableName)
 
-    // generate: ON CLUSTER is baked into the migration file (CREATE TABLE + DB).
-    const generate = runCli(dir, ['generate', '--config', configPath, '--name', 'init', '--json'], cliEnv)
+    const schema = (withLabel: boolean) => `import { schema, table, view, materializedView } from '${CORE_ENTRY}'
+
+const events = table({
+  database: '${DATABASE}', name: '${events}', engine: 'ReplicatedMergeTree',
+  columns: [{ name: 'id', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }${withLabel ? ", { name: 'label', type: 'String' }" : ''}],
+  primaryKey: ['id'], orderBy: ['id'],
+})
+const sum = table({
+  database: '${DATABASE}', name: '${sum}', engine: 'ReplicatedMergeTree',
+  columns: [{ name: 'id', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }],
+  primaryKey: ['id'], orderBy: ['id'],
+})
+const vw = view({ database: '${DATABASE}', name: '${vw}', as: 'SELECT id FROM ${DATABASE}.${events}' })
+const mv = materializedView({
+  database: '${DATABASE}', name: '${mv}', to: { database: '${DATABASE}', name: '${sum}' },
+  as: 'SELECT id, ts FROM ${DATABASE}.${events}',
+})
+export default schema(events, sum, vw, mv)
+`
+
+    const project = await scaffold(schema(false))
+
+    // generate: ON CLUSTER baked into every CREATE.
+    const generate = runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'init', '--json'], cliEnv)
     expect(generate.exitCode, formatTestDiagnostic('generate', generate)).toBe(0)
-    const createSql = await latestMigrationSql(migrationsDir)
-    expect(createSql).toContain(`CREATE TABLE IF NOT EXISTS ${DATABASE}.${tableName} ON CLUSTER '${CLUSTER}'`)
-    expect(createSql).toContain(`ENGINE = ReplicatedMergeTree()`)
+    const sql = await latestMigrationSql(project.migrationsDir)
+    for (const fragment of [
+      `CREATE DATABASE IF NOT EXISTS ${DATABASE} ON CLUSTER '${CLUSTER}'`,
+      `CREATE TABLE IF NOT EXISTS ${DATABASE}.${events} ON CLUSTER '${CLUSTER}'`,
+      `CREATE TABLE IF NOT EXISTS ${DATABASE}.${sum} ON CLUSTER '${CLUSTER}'`,
+      `CREATE VIEW IF NOT EXISTS ${DATABASE}.${vw} ON CLUSTER '${CLUSTER}'`,
+      `CREATE MATERIALIZED VIEW IF NOT EXISTS ${DATABASE}.${mv} ON CLUSTER '${CLUSTER}'`,
+    ]) {
+      expect(sql).toContain(fragment)
+    }
 
-    // migrate: applies ON CLUSTER DDL.
-    const migrate = runCli(dir, ['migrate', '--config', configPath, '--execute', '--json'], cliEnv)
+    // migrate: every object lands on BOTH replicas.
+    const migrate = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--json'], cliEnv)
     expect(migrate.exitCode, formatTestDiagnostic('migrate', migrate)).toBe(0)
-    const applied = (JSON.parse(migrate.stdout) as { applied: Array<{ name: string }> }).applied
-    expect(applied.length).toBe(1)
-    const migrationName = applied[0]?.name as string
+    for (const name of [events, sum, vw, mv]) {
+      await waitForTable(node1, DATABASE, name)
+      await waitForTable(node2, DATABASE, name)
+    }
 
-    // table exists on BOTH replicas.
-    await waitForTable(node1, DATABASE, tableName)
-    await waitForTable(node2, DATABASE, tableName)
-
-    // journal is replicated on BOTH replicas.
+    // journal is a replicated engine on both nodes, with the row replicated.
     for (const node of [node1, node2]) {
       await waitForTable(node, DATABASE, journalTable)
       const rows = await node.query<{ engine: string }>(
@@ -132,59 +146,104 @@ describe('chkit cluster mode (ON CLUSTER) e2e', () => {
       expect(rows[0]?.engine).toBe('ReplicatedReplacingMergeTree')
     }
 
-    // the migration row written on node1 is visible on node2 (replicated journal).
-    await node2.command(`SYSTEM SYNC REPLICA ${DATABASE}.\`${journalTable}\``)
-    const journalRows = await node2.query<{ name: string }>(
-      `SELECT name FROM ${DATABASE}.\`${journalTable}\` FINAL WHERE migration_completed = true`,
-    )
-    expect(journalRows.map((r) => r.name)).toContain(migrationName)
+    // cross-endpoint: chkit run against node2 sees the replicated journal — nothing pending.
+    const planOnNode2 = runCli(project.dir, ['migrate', '--config', project.config2Path, '--json'], cliEnv)
+    expect(planOnNode2.exitCode, formatTestDiagnostic('plan on node2', planOnNode2)).toBe(0)
+    expect((JSON.parse(planOnNode2.stdout) as { pending: string[] }).pending).toEqual([])
 
     // idempotent: re-running migrate applies nothing.
-    const rerun = runCli(dir, ['migrate', '--config', configPath, '--execute', '--json'], cliEnv)
-    expect(rerun.exitCode, formatTestDiagnostic('migrate rerun', rerun)).toBe(0)
+    const rerun = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--json'], cliEnv)
+    expect(rerun.exitCode, formatTestDiagnostic('rerun', rerun)).toBe(0)
     expect((JSON.parse(rerun.stdout) as { applied: unknown[] }).applied.length).toBe(0)
 
-    // ALTER fans out too: add a column, generate + migrate, verify on BOTH replicas.
-    await writeFile(schemaPath, renderSchema(tableName, true), 'utf8')
-    const generateAlter = runCli(dir, ['generate', '--config', configPath, '--name', 'add_label', '--json'], cliEnv)
+    // ALTER fans out too.
+    await writeFile(project.schemaPath, schema(true), 'utf8')
+    const generateAlter = runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'add_label', '--json'], cliEnv)
     expect(generateAlter.exitCode, formatTestDiagnostic('generate alter', generateAlter)).toBe(0)
-    const alterSql = await latestMigrationSql(migrationsDir)
-    expect(alterSql).toContain(`ALTER TABLE ${DATABASE}.${tableName} ON CLUSTER '${CLUSTER}' ADD COLUMN IF NOT EXISTS \`label\``)
-
-    const migrateAlter = runCli(dir, ['migrate', '--config', configPath, '--execute', '--json'], cliEnv)
+    expect(await latestMigrationSql(project.migrationsDir)).toContain(
+      `ALTER TABLE ${DATABASE}.${events} ON CLUSTER '${CLUSTER}' ADD COLUMN IF NOT EXISTS \`label\``,
+    )
+    const migrateAlter = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--json'], cliEnv)
     expect(migrateAlter.exitCode, formatTestDiagnostic('migrate alter', migrateAlter)).toBe(0)
-    await waitForColumn(node1, DATABASE, tableName, 'label')
-    await waitForColumn(node2, DATABASE, tableName, 'label')
+    await waitForColumn(node1, DATABASE, events, 'label')
+    await waitForColumn(node2, DATABASE, events, 'label')
 
-    // RENAME fans out, with ON CLUSTER at the END of the statement (ClickHouse
-    // places it after the `name TO new_name` list, not after the source name).
-    const renamedTable = `${tableName}_renamed`
-    await writeFile(schemaPath, renderSchema(renamedTable, true), 'utf8')
-    const generateRename = runCli(
-      dir,
-      ['generate', '--config', configPath, '--name', 'rename', '--rename-table', `${DATABASE}.${tableName}=${DATABASE}.${renamedTable}`, '--json'],
+    for (const name of [mv, vw, sum, events, journalTable]) {
+      await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${name}\` ON CLUSTER '${CLUSTER}' SYNC`)
+    }
+  }, 90_000)
+
+  test('drop+recreate and rename fan out with correct ON CLUSTER placement', async () => {
+    const prefix = createPrefix('cluster_ddl')
+    const box = `${prefix}box`
+    const renamed = `${box}_renamed`
+    const journalTable = createJournalTableName('cluster_ddl')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+
+    const schema = (name: string, orderBy: string) => `import { schema, table } from '${CORE_ENTRY}'
+
+export default schema(table({
+  database: '${DATABASE}', name: '${name}', engine: 'ReplicatedMergeTree',
+  columns: [{ name: 'id', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }],
+  primaryKey: ['id'], orderBy: [${orderBy}],
+}))
+`
+    const project = await scaffold(schema(box, "'id'"))
+
+    runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'init', '--json'], cliEnv)
+    const created = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--json'], cliEnv)
+    expect(created.exitCode, formatTestDiagnostic('create', created)).toBe(0)
+    await waitForTable(node1, DATABASE, box)
+    await waitForTable(node2, DATABASE, box)
+
+    // drop+recreate (ORDER BY change): both DROP and CREATE carry ON CLUSTER, and
+    // the recreate is collision-free ({uuid} default_replica_path).
+    await writeFile(project.schemaPath, schema(box, "'id', 'ts'"), 'utf8')
+    const genRecreate = runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'reorder', '--json'], cliEnv)
+    expect(genRecreate.exitCode, formatTestDiagnostic('generate recreate', genRecreate)).toBe(0)
+    const recreateSql = await latestMigrationSql(project.migrationsDir)
+    expect(recreateSql).toContain(`DROP TABLE IF EXISTS ${DATABASE}.${box} ON CLUSTER '${CLUSTER}'`)
+    expect(recreateSql).toContain(`CREATE TABLE IF NOT EXISTS ${DATABASE}.${box} ON CLUSTER '${CLUSTER}'`)
+    const migRecreate = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--allow-destructive', '--json'], cliEnv)
+    expect(migRecreate.exitCode, formatTestDiagnostic('migrate recreate', migRecreate)).toBe(0)
+    for (const node of [node1, node2]) {
+      const rows = await node.query<{ sorting_key: string }>(
+        `SELECT sorting_key FROM system.tables WHERE database = '${DATABASE}' AND name = '${box}'`,
+      )
+      expect(rows[0]?.sorting_key).toBe('id, ts')
+    }
+
+    // rename: ON CLUSTER must sit at the END of the statement.
+    await writeFile(project.schemaPath, schema(renamed, "'id', 'ts'"), 'utf8')
+    const genRename = runCli(
+      project.dir,
+      ['generate', '--config', project.configPath, '--name', 'rename', '--rename-table', `${DATABASE}.${box}=${DATABASE}.${renamed}`, '--json'],
       cliEnv,
     )
-    expect(generateRename.exitCode, formatTestDiagnostic('generate rename', generateRename)).toBe(0)
-    const renameSql = await latestMigrationSql(migrationsDir)
-    expect(renameSql).toContain(
-      `RENAME TABLE IF EXISTS ${DATABASE}.${tableName} TO ${DATABASE}.${renamedTable} ON CLUSTER '${CLUSTER}';`,
+    expect(genRename.exitCode, formatTestDiagnostic('generate rename', genRename)).toBe(0)
+    expect(await latestMigrationSql(project.migrationsDir)).toContain(
+      `RENAME TABLE IF EXISTS ${DATABASE}.${box} TO ${DATABASE}.${renamed} ON CLUSTER '${CLUSTER}';`,
     )
-    const migrateRename = runCli(dir, ['migrate', '--config', configPath, '--execute', '--json'], cliEnv)
-    expect(migrateRename.exitCode, formatTestDiagnostic('migrate rename', migrateRename)).toBe(0)
-    await waitForTable(node1, DATABASE, renamedTable)
-    await waitForTable(node2, DATABASE, renamedTable)
+    const migRename = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--json'], cliEnv)
+    expect(migRename.exitCode, formatTestDiagnostic('migrate rename', migRename)).toBe(0)
+    await waitForTable(node1, DATABASE, renamed)
+    await waitForTable(node2, DATABASE, renamed)
 
-    // cleanup (also exercises DROP ... ON CLUSTER).
-    await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.${renamedTable} ON CLUSTER '${CLUSTER}' SYNC`)
+    await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.${renamed} ON CLUSTER '${CLUSTER}' SYNC`)
     await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
-  }, 60_000)
+  }, 90_000)
 
   test('rejects a pre-existing non-replicated journal when cluster mode is on', async () => {
     const journalTable = createJournalTableName('cluster_p2')
     const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-    const tableName = `${createPrefix('cluster_p2')}events`
-    const { dir, configPath } = await scaffold(tableName)
+    const box = `${createPrefix('cluster_p2')}box`
+    const project = await scaffold(`import { schema, table } from '${CORE_ENTRY}'
+
+export default schema(table({
+  database: '${DATABASE}', name: '${box}', engine: 'ReplicatedMergeTree',
+  columns: [{ name: 'id', type: 'UInt64' }], primaryKey: ['id'], orderBy: ['id'],
+}))
+`)
 
     // Simulate a project that ran chkit single-node before enabling cluster mode:
     // a plain (non-replicated) journal already exists.
@@ -192,10 +251,8 @@ describe('chkit cluster mode (ON CLUSTER) e2e', () => {
       `CREATE TABLE ${DATABASE}.\`${journalTable}\` (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
     )
 
-    const generate = runCli(dir, ['generate', '--config', configPath, '--name', 'init', '--json'], cliEnv)
-    expect(generate.exitCode, formatTestDiagnostic('generate', generate)).toBe(0)
-
-    const status = runCli(dir, ['status', '--config', configPath], cliEnv)
+    runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'init', '--json'], cliEnv)
+    const status = runCli(project.dir, ['status', '--config', project.configPath], cliEnv)
     expect(status.exitCode).not.toBe(0)
     expect(`${status.stdout}${status.stderr}`).toContain('non-replicated engine')
 
