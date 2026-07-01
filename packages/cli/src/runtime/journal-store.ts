@@ -171,27 +171,8 @@ SETTINGS index_granularity = 1`
   let bootstrapped = false
   let _databaseMissing = false
 
-  // Enabling cluster mode on a project that already has a single-node journal
-  // would otherwise leave migration history non-replicated (and the ON CLUSTER
-  // schema-upgrade ALTERs could fail on replicas that lack the table). Fail fast
-  // with actionable guidance instead of silently diverging.
-  async function assertClusterJournalReplicated(): Promise<void> {
-    const rows = await db.query<{ engine: string }>(
-      `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
-    )
-    const engine = rows[0]?.engine
-    if (engine && !engine.startsWith('Replicated') && !engine.startsWith('Shared')) {
-      throw new Error(
-        `Journal table "${journalTable}" already exists with a non-replicated engine (${engine}), but ` +
-          `clickhouse.cluster is set. A non-replicated journal is unsafe on a cluster. Drop it ` +
-          `(DROP TABLE ${journalTable} ON CLUSTER '${cluster}' SYNC) or set CHKIT_JOURNAL_TABLE to a new name, then re-run.`,
-      )
-    }
-  }
-
   async function ensureTable(): Promise<void> {
     if (bootstrapped) return
-    if (cluster) await assertClusterJournalReplicated()
     debug('journal', `probing journal table "${journalTable}"`)
     try {
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)

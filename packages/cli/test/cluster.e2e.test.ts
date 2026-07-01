@@ -232,30 +232,4 @@ export default schema(table({
     await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.${renamed} ON CLUSTER '${CLUSTER}' SYNC`)
     await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
   }, 90_000)
-
-  test('rejects a pre-existing non-replicated journal when cluster mode is on', async () => {
-    const journalTable = createJournalTableName('cluster_p2')
-    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-    const box = `${createPrefix('cluster_p2')}box`
-    const project = await scaffold(`import { schema, table } from '${CORE_ENTRY}'
-
-export default schema(table({
-  database: '${DATABASE}', name: '${box}', engine: 'ReplicatedMergeTree',
-  columns: [{ name: 'id', type: 'UInt64' }], primaryKey: ['id'], orderBy: ['id'],
-}))
-`)
-
-    // Simulate a project that ran chkit single-node before enabling cluster mode:
-    // a plain (non-replicated) journal already exists.
-    await node1.command(
-      `CREATE TABLE ${DATABASE}.\`${journalTable}\` (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
-    )
-
-    runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'init', '--json'], cliEnv)
-    const status = runCli(project.dir, ['status', '--config', project.configPath], cliEnv)
-    expect(status.exitCode).not.toBe(0)
-    expect(`${status.stdout}${status.stderr}`).toContain('non-replicated engine')
-
-    await node1.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
-  }, 60_000)
 })
