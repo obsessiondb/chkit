@@ -181,6 +181,14 @@ export interface ChxUserClickHouseConfig {
   password?: string
   database?: string
   secure?: boolean
+  /**
+   * Cluster name for self-managed multi-node clusters. When set, chkit emits
+   * `ON CLUSTER <name>` on generated DDL and stores its migration journal in a
+   * replicated engine. Leave unset for single-node, ClickHouse Cloud, or
+   * ObsessionDB (SharedMergeTree auto-replicates — `ON CLUSTER` is unnecessary).
+   * Accepts an identifier (e.g. `"my_cluster"`) or a macro (e.g. `"{cluster}"`).
+   */
+  cluster?: string
 }
 
 export interface ChxResolvedClickHouseConfig {
@@ -189,6 +197,7 @@ export interface ChxResolvedClickHouseConfig {
   password: string
   database: string
   secure: boolean
+  cluster?: string
 }
 
 export interface ChxInlinePluginRegistration<

@@ -1,5 +1,5 @@
 import { generateArtifacts } from '@chkit/codegen'
-import { ChxValidationError, planDiff } from '@chkit/core'
+import { applyOnClusterToPlan, ChxValidationError, planDiff } from '@chkit/core'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
@@ -162,6 +162,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
       renameMappings: activeTableMappings,
     }).plan
   }
+
+  // Cluster mode: stamp `ON CLUSTER <name>` onto every DDL statement as a final
+  // post-pass, after all plan transforms (renames, plugins, scope filtering).
+  plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
   if (planMode) {
     emitGeneratePlanOutput(plan, jsonMode, resolvedScope)

@@ -1,0 +1,43 @@
+<clickhouse>
+    <listen_host>0.0.0.0</listen_host>
+
+    <!-- Keeper connection (shared by both replicas) -->
+    <zookeeper>
+        <node>
+            <host>keeper</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+
+    <!-- Named cluster: 1 shard, 2 replicas. This is the name passed to
+         chkit as `clickhouse.cluster` and emitted as `ON CLUSTER test_cluster`.
+         <secret> lets the replicas trust each other for distributed queries
+         (clusterAllReplicas) without per-user passwords. -->
+    <remote_servers replace="true">
+        <test_cluster>
+            <secret>chkit_cluster_secret</secret>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>ch1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>ch2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster>
+    </remote_servers>
+
+    <!-- Distributed DDL queue lives in Keeper at this path -->
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+
+    <!-- {uuid}-based default replica path: empty-arg `ReplicatedMergeTree`
+         + ON CLUSTER becomes collision-free across drop/recreate, because
+         each table generation gets a fresh Keeper path. -->
+    <default_replica_path>/clickhouse/tables/{uuid}/{shard}</default_replica_path>
+    <default_replica_name>{replica}</default_replica_name>
+</clickhouse>

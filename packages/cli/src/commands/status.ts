@@ -21,7 +21,7 @@ export const statusCommand: ChxPluginCommand = {
     }
     const db = pluginContext.executor
     const database = config.clickhouse?.database
-    const journalStore = createJournalStore(db)
+    const journalStore = createJournalStore(db, config.clickhouse?.cluster)
 
     await mkdir(migrationsDir, { recursive: true })
     const files = await listMigrations(migrationsDir)
