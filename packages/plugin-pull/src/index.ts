@@ -11,6 +11,7 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  createPluginRunner,
   defineFlags,
   type FlagMapping,
   normalizeEngine,
@@ -19,7 +20,7 @@ import {
   type SchemaDefinition,
   splitTopLevelComma,
   type TableDefinition,
-  wrapPluginRun,
+  withFactoryDefaults,
 } from '@chkit/core'
 export { renderSchemaFile } from './render-schema.js'
 import { renderSchemaFile } from './render-schema.js'
@@ -144,16 +145,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function withFactoryDefaults<T>(
-  schema: SafeParseable<T>,
-  defaults: Record<string, unknown>,
-): SafeParseable<T> {
-  return {
-    safeParse(data) {
-      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
-    },
-  }
-}
+const runCommand = createPluginRunner<PullPluginCommandContext>({
+  configErrorClass: PullConfigError,
+})
 
 export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
   const { introspect: introspector, ...factoryOptions } = options
@@ -172,74 +166,69 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
         flags: PULL_SCHEMA_FLAGS,
         optionsSchema,
         flagMapping: PULL_FLAG_MAP,
-        async run({ flags, jsonMode, print, options: opts, config, pluginContext }) {
-          return wrapPluginRun({
-            command: 'schema',
-            label: 'Pull schema',
-            jsonMode,
-            print,
-            configErrorClass: PullConfigError,
-            fn: async () => {
-              const flagOptions = {
-                ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
-                ...(flags['--force'] === true || flags['--overwrite'] === true
-                  ? { overwrite: true }
-                  : {}),
-                ...(stringArrayFlag(flags['--database'])
-                  ? { databases: stringArrayFlag(flags['--database']) }
-                  : {}),
-              }
-              const effectiveOptions = PullSchema.parse({
-                ...factoryOptions,
-                ...(isRecord(opts) ? opts : {}),
-                ...flagOptions,
-              })
-              const dryrun = flags['--dryrun'] === true
-              const pulled = await pullSchema({
-                config,
-                executor: pluginContext?.hasExecutor ? pluginContext.executor : null,
-                options: { ...effectiveOptions, introspect: introspector },
-              })
+        run: runCommand({
+          command: 'schema',
+          label: 'Pull schema',
+          fn: async ({ flags, jsonMode, print, options: opts, config, pluginContext }) => {
+            const flagOptions = {
+              ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
+              ...(flags['--force'] === true || flags['--overwrite'] === true
+                ? { overwrite: true }
+                : {}),
+              ...(stringArrayFlag(flags['--database'])
+                ? { databases: stringArrayFlag(flags['--database']) }
+                : {}),
+            }
+            const effectiveOptions = PullSchema.parse({
+              ...factoryOptions,
+              ...(isRecord(opts) ? opts : {}),
+              ...flagOptions,
+            })
+            const dryrun = flags['--dryrun'] === true
+            const pulled = await pullSchema({
+              config,
+              executor: pluginContext?.hasExecutor ? pluginContext.executor : null,
+              options: { ...effectiveOptions, introspect: introspector },
+            })
 
-              if (!dryrun) {
-                await writeSchemaFile({
-                  outFile: pulled.outFile,
-                  content: pulled.content,
-                  overwrite: effectiveOptions.overwrite,
-                })
-              }
-
-              const payload = {
-                ok: true,
-                command: 'schema' as const,
+            if (!dryrun) {
+              await writeSchemaFile({
                 outFile: pulled.outFile,
-                definitionCount: pulled.definitionCount,
-                tableCount: pulled.tableCount,
-                databases: pulled.databases,
-                skippedObjects: pulled.skippedObjects,
-                dryrun,
-                ...(dryrun ? { content: pulled.content } : {}),
-              }
+                content: pulled.content,
+                overwrite: effectiveOptions.overwrite,
+              })
+            }
 
-              if (jsonMode) {
-                print(payload)
-                return 0
-              }
+            const payload = {
+              ok: true,
+              command: 'schema' as const,
+              outFile: pulled.outFile,
+              definitionCount: pulled.definitionCount,
+              tableCount: pulled.tableCount,
+              databases: pulled.databases,
+              skippedObjects: pulled.skippedObjects,
+              dryrun,
+              ...(dryrun ? { content: pulled.content } : {}),
+            }
 
-              if (dryrun) {
-                print(
-                  `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
-                )
-                print(pulled.content)
-              } else {
-                print(
-                  `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
-                )
-              }
+            if (jsonMode) {
+              print(payload)
               return 0
-            },
-          })
-        },
+            }
+
+            if (dryrun) {
+              print(
+                `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
+              )
+              print(pulled.content)
+            } else {
+              print(
+                `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
+              )
+            }
+            return 0
+          },
+        }),
       },
     ],
   }

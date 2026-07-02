@@ -142,7 +142,7 @@ export interface BackfillDoctorReport {
   failedChunkIds: string[]
 }
 
-interface BackfillPluginCommandContext<TOptions = Record<string, unknown>> {
+export interface BackfillPluginCommandContext<TOptions = Record<string, unknown>> {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean

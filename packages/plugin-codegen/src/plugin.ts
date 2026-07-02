@@ -1,12 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
-import { wrapPluginRun, type SafeParseable } from '@chkit/core'
+import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import type {
   CodegenPlugin,
   CodegenPluginCheckResult,
+  CodegenPluginCommandContext,
   CodegenPluginOptions,
   CodegenPluginRegistration,
   GenerateIngestArtifactsOutput,
@@ -102,20 +103,9 @@ function mergeCheckResults(results: CodegenPluginCheckResult[]): CodegenPluginCh
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function withFactoryDefaults<T>(
-  schema: SafeParseable<T>,
-  defaults: Record<string, unknown>,
-): SafeParseable<T> {
-  return {
-    safeParse(data) {
-      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
-    },
-  }
-}
+const runCommand = createPluginRunner<CodegenPluginCommandContext>({
+  configErrorClass: CodegenConfigError,
+})
 
 export function createCodegenPlugin(options: CodegenPluginOptions = {}): CodegenPlugin {
   const factoryOptions = options as Record<string, unknown>
@@ -134,129 +124,124 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
         flags: CODEGEN_FLAGS,
         optionsSchema,
         flagMapping: CODEGEN_FLAG_MAP,
-        async run({ flags, jsonMode, print, options: effectiveOptions, config, configPath }): Promise<undefined | number> {
-          return wrapPluginRun({
-            command: 'codegen',
-            label: 'Codegen',
-            jsonMode,
-            print,
-            configErrorClass: CodegenConfigError,
-            fn: async () => {
-              const checkMode = flags['--check'] === true
-              const configDir = resolve(configPath, '..')
-              const outFile = resolve(configDir, effectiveOptions.outFile)
-              const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
-              const generated = generateTypeArtifacts({
+        run: runCommand({
+          command: 'codegen',
+          label: 'Codegen',
+          fn: async ({ flags, jsonMode, print, options: effectiveOptions, config, configPath }) => {
+            const checkMode = flags['--check'] === true
+            const configDir = resolve(configPath, '..')
+            const outFile = resolve(configDir, effectiveOptions.outFile)
+            const definitions = await loadSchemaDefinitions(config.schema, { cwd: configDir })
+            const generated = generateTypeArtifacts({
+              definitions,
+              options: effectiveOptions,
+            })
+
+            let ingestGenerated: GenerateIngestArtifactsOutput | null = null
+            let ingestOutFile: string | null = null
+            if (effectiveOptions.emitIngest) {
+              ingestGenerated = generateIngestArtifacts({
                 definitions,
                 options: effectiveOptions,
               })
+              ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
+            }
 
-              let ingestGenerated: GenerateIngestArtifactsOutput | null = null
-              let ingestOutFile: string | null = null
-              if (effectiveOptions.emitIngest) {
-                ingestGenerated = generateIngestArtifacts({
-                  definitions,
-                  options: effectiveOptions,
-                })
-                ingestOutFile = resolve(configDir, effectiveOptions.ingestOutFile)
-              }
+            let migrationsGenerated: GenerateMigrationArtifactsOutput | null = null
+            let migrationsOutFile: string | null = null
+            if (effectiveOptions.emitMigrations) {
+              migrationsGenerated = await generateMigrationArtifacts({
+                migrationsDir: resolve(configDir, config.migrationsDir),
+                options: effectiveOptions,
+              })
+              migrationsOutFile = resolve(configDir, effectiveOptions.migrationsOutFile)
+            }
 
-              let migrationsGenerated: GenerateMigrationArtifactsOutput | null = null
-              let migrationsOutFile: string | null = null
-              if (effectiveOptions.emitMigrations) {
-                migrationsGenerated = await generateMigrationArtifacts({
-                  migrationsDir: resolve(configDir, config.migrationsDir),
-                  options: effectiveOptions,
-                })
-                migrationsOutFile = resolve(configDir, effectiveOptions.migrationsOutFile)
-              }
+            if (checkMode) {
+              const current = await readMaybe(outFile)
+              const typeCheckResult = checkGeneratedOutput({
+                label: 'Codegen',
+                outFile,
+                expected: generated.content,
+                current,
+                missingCode: 'codegen_missing_output',
+                staleCode: 'codegen_stale_output',
+              })
 
-              if (checkMode) {
-                const current = await readMaybe(outFile)
-                const typeCheckResult = checkGeneratedOutput({
-                  label: 'Codegen',
-                  outFile,
-                  expected: generated.content,
-                  current,
-                  missingCode: 'codegen_missing_output',
-                  staleCode: 'codegen_stale_output',
-                })
-
-                const results = [typeCheckResult]
-
-                if (ingestGenerated && ingestOutFile) {
-                  const ingestCurrent = await readMaybe(ingestOutFile)
-                  results.push(checkGeneratedOutput({
-                    label: 'Codegen ingest',
-                    outFile: ingestOutFile,
-                    expected: ingestGenerated.content,
-                    current: ingestCurrent,
-                    missingCode: 'codegen_missing_ingest_output',
-                    staleCode: 'codegen_stale_ingest_output',
-                  }))
-                }
-
-                if (migrationsGenerated && migrationsOutFile) {
-                  const migrationsCurrent = await readMaybe(migrationsOutFile)
-                  results.push(checkGeneratedOutput({
-                    label: 'Codegen migrations',
-                    outFile: migrationsOutFile,
-                    expected: migrationsGenerated.content,
-                    current: migrationsCurrent,
-                    missingCode: 'codegen_missing_migrations_output',
-                    staleCode: 'codegen_stale_migrations_output',
-                  }))
-                }
-
-                const checkResult = mergeCheckResults(results)
-                const payload = {
-                  ok: checkResult.ok,
-                  findingCodes: checkResult.findings.map((finding) => finding.code),
-                  outFile,
-                  mode: 'check',
-                }
-
-                if (jsonMode) {
-                  print(payload)
-                } else {
-                  if (checkResult.ok) {
-                    print(`Codegen up-to-date: ${outFile}`)
-                  } else {
-                    const firstCode = checkResult.findings[0]?.code ?? 'codegen_stale_output'
-                    print(`Codegen check failed (${firstCode}): ${outFile}`)
-                  }
-                }
-                return checkResult.ok ? 0 : 1
-              }
-
-              await writeAtomic(outFile, generated.content)
+              const results = [typeCheckResult]
 
               if (ingestGenerated && ingestOutFile) {
-                await writeAtomic(ingestOutFile, ingestGenerated.content)
+                const ingestCurrent = await readMaybe(ingestOutFile)
+                results.push(checkGeneratedOutput({
+                  label: 'Codegen ingest',
+                  outFile: ingestOutFile,
+                  expected: ingestGenerated.content,
+                  current: ingestCurrent,
+                  missingCode: 'codegen_missing_ingest_output',
+                  staleCode: 'codegen_stale_ingest_output',
+                }))
               }
 
               if (migrationsGenerated && migrationsOutFile) {
-                await writeAtomic(migrationsOutFile, migrationsGenerated.content)
+                const migrationsCurrent = await readMaybe(migrationsOutFile)
+                results.push(checkGeneratedOutput({
+                  label: 'Codegen migrations',
+                  outFile: migrationsOutFile,
+                  expected: migrationsGenerated.content,
+                  current: migrationsCurrent,
+                  missingCode: 'codegen_missing_migrations_output',
+                  staleCode: 'codegen_stale_migrations_output',
+                }))
               }
 
+              const checkResult = mergeCheckResults(results)
               const payload = {
-                ok: true,
+                ok: checkResult.ok,
+                findingCodes: checkResult.findings.map((finding) => finding.code),
                 outFile,
-                declarationCount: generated.declarationCount,
-                findingCodes: generated.findings.map((finding) => finding.code),
-                mode: 'write',
+                mode: 'check',
               }
 
               if (jsonMode) {
                 print(payload)
               } else {
-                print(`Codegen wrote ${outFile} (${generated.declarationCount} declarations)`)
+                if (checkResult.ok) {
+                  print(`Codegen up-to-date: ${outFile}`)
+                } else {
+                  const firstCode = checkResult.findings[0]?.code ?? 'codegen_stale_output'
+                  print(`Codegen check failed (${firstCode}): ${outFile}`)
+                }
               }
+              return checkResult.ok ? 0 : 1
+            }
 
-              return 0
-            },
-          })
-        },
+            await writeAtomic(outFile, generated.content)
+
+            if (ingestGenerated && ingestOutFile) {
+              await writeAtomic(ingestOutFile, ingestGenerated.content)
+            }
+
+            if (migrationsGenerated && migrationsOutFile) {
+              await writeAtomic(migrationsOutFile, migrationsGenerated.content)
+            }
+
+            const payload = {
+              ok: true,
+              outFile,
+              declarationCount: generated.declarationCount,
+              findingCodes: generated.findings.map((finding) => finding.code),
+              mode: 'write',
+            }
+
+            if (jsonMode) {
+              print(payload)
+            } else {
+              print(`Codegen wrote ${outFile} (${generated.declarationCount} declarations)`)
+            }
+
+            return 0
+          },
+        }),
       },
     ],
     hooks: {
