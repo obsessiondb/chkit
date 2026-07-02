@@ -36,6 +36,10 @@ export default defineConfig({
 							name: 'Lucas García de Viedma (ObsessionDB)',
 							url: 'https://obsessiondb.com',
 						},
+						alvaro: {
+							name: 'Alvaro García',
+							url: 'https://x.com/alvaro__data',
+						},
 					},
 				}),
 			],
