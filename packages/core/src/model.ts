@@ -32,6 +32,21 @@ export function defineConfig<T extends ChxUserConfig>(config: ChxConfigInput<T>)
   return config
 }
 
+// A cluster name is interpolated into `ON CLUSTER '<name>'`, so constrain it to
+// the characters legal in a `remote_servers` key (an XML element name: letters,
+// digits, `_`, `-`, `.`) or a `{macro}` — injection-safe inside the single
+// quotes, while still failing fast on typos like quotes or whitespace.
+const CLUSTER_NAME_PATTERN = /^([A-Za-z_][A-Za-z0-9_.-]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
+
+function assertValidClusterName(name: string): string {
+  if (!CLUSTER_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid clickhouse.cluster "${name}". Expected a cluster name (e.g. "my_cluster", "prod-eu-1") or a macro (e.g. "{cluster}").`,
+    )
+  }
+  return name
+}
+
 export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
   const outDir = config.outDir ?? './chkit'
   const migrationsDir = config.migrationsDir ?? join(outDir, 'migrations')
@@ -59,6 +74,9 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
           password: config.clickhouse.password ?? '',
           database: config.clickhouse.database ?? 'default',
           secure: config.clickhouse.secure ?? false,
+          cluster: config.clickhouse.cluster
+            ? assertValidClusterName(config.clickhouse.cluster)
+            : undefined,
         }
       : undefined,
   }
