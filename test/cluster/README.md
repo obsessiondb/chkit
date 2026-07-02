@@ -52,8 +52,10 @@ clickhouse: {
 }
 ```
 
-Cluster e2e tests are gated behind `CHKIT_CLUSTER_E2E=1` and hard-fail (never
-skip) if the cluster isn't reachable.
+Cluster e2e tests run whenever their file is invoked (they are not in the
+default test task) and hard-fail — never skip — if the cluster isn't reachable.
+`CHKIT_CLUSTER_E2E_URL2` overrides the second node's endpoint (defaults to
+`http://localhost:8124`).
 
 ## Multi-shard cluster
 

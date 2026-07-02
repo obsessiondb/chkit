@@ -33,13 +33,15 @@ export function defineConfig<T extends ChxUserConfig>(config: ChxConfigInput<T>)
 }
 
 // A cluster name is interpolated into `ON CLUSTER '<name>'`, so constrain it to
-// an identifier or a `{macro}` to keep it injection-safe and fail fast on typos.
-const CLUSTER_NAME_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
+// the characters legal in a `remote_servers` key (an XML element name: letters,
+// digits, `_`, `-`, `.`) or a `{macro}` — injection-safe inside the single
+// quotes, while still failing fast on typos like quotes or whitespace.
+const CLUSTER_NAME_PATTERN = /^([A-Za-z_][A-Za-z0-9_.-]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
 
 function assertValidClusterName(name: string): string {
   if (!CLUSTER_NAME_PATTERN.test(name)) {
     throw new Error(
-      `Invalid clickhouse.cluster "${name}". Expected an identifier (e.g. "my_cluster") or a macro (e.g. "{cluster}").`,
+      `Invalid clickhouse.cluster "${name}". Expected a cluster name (e.g. "my_cluster", "prod-eu-1") or a macro (e.g. "{cluster}").`,
     )
   }
   return name

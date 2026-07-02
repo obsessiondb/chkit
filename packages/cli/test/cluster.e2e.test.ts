@@ -190,7 +190,8 @@ export default schema(table({
 `
     const project = await scaffold(schema(box, "'id'"))
 
-    runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'init', '--json'], cliEnv)
+    const genInit = runCli(project.dir, ['generate', '--config', project.configPath, '--name', 'init', '--json'], cliEnv)
+    expect(genInit.exitCode, formatTestDiagnostic('generate init', genInit)).toBe(0)
     const created = runCli(project.dir, ['migrate', '--config', project.configPath, '--execute', '--json'], cliEnv)
     expect(created.exitCode, formatTestDiagnostic('create', created)).toBe(0)
     await waitForTable(node1, DATABASE, box)

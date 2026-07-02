@@ -43,7 +43,7 @@ For self-managed multi-node ClickHouse clusters, set `clickhouse.cluster` to the
 
 ```ts
 clickhouse: {
-  url: process.env.CLICKHOUSE_URL ?? 'http://localhost:9000',
+  url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
   password: process.env.CLICKHOUSE_PASSWORD ?? '',
   database: 'default',
   cluster: 'my_cluster',
@@ -56,6 +56,8 @@ When `cluster` is set, chkit:
 - creates its migration journal (`_chkit_migrations`) as a `ReplicatedReplacingMergeTree`, keeping applied-migration history consistent across every node — so running `migrate` against a load-balanced endpoint never re-applies migrations.
 
 chkit does **not** rewrite your table engines: declare `ReplicatedMergeTree` (or another `Replicated*`/`Shared*` variant) yourself for tables whose data should replicate. Empty-argument engines (e.g. `ENGINE = ReplicatedMergeTree`) are recommended so the server's `default_replica_path` supplies a collision-free Keeper path, which also keeps drop-and-recreate safe.
+
+Cluster mode expects the standard `{shard}` and `{replica}` macros on every node (`<macros><shard>…</shard><replica>…</replica></macros>` in each server's configuration) — the journal's replicated engine interpolates both. Standard cluster layouts, including replica-only setups (`shard: 1`), define them already.
 
 Leave `cluster` unset for single-node servers, ClickHouse Cloud, or ObsessionDB, where replication is automatic (SharedMergeTree) and `ON CLUSTER` is unnecessary. The value accepts an identifier (`my_cluster`) or a macro (`{cluster}`) when your nodes define one.
 

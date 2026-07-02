@@ -90,8 +90,104 @@ describe('applyOnClusterToPlan', () => {
   })
 
   test('leaves statements without a known anchor untouched', () => {
-    const plan = planOf([op('drop_table', 'TRUNCATE TABLE db.t;')])
-    expect(applyOnClusterToPlan(plan, 'c').operations[0]?.sql).toBe('TRUNCATE TABLE db.t;')
+    const plan = planOf([op('drop_table', 'INSERT INTO db.t SELECT 1;')])
+    expect(applyOnClusterToPlan(plan, 'c').operations[0]?.sql).toBe('INSERT INTO db.t SELECT 1;')
+  })
+
+  // These statement shapes are not emitted by chkit yet; the anchors exist as a
+  // forward-compatible safety net so injection already works if a future command
+  // starts producing them. Placements confirmed against the ClickHouse reference.
+  test('injects into speculative after-name anchors', () => {
+    const plan = planOf([
+      op('create_table', 'CREATE DICTIONARY IF NOT EXISTS db.d (id UInt64) PRIMARY KEY id SOURCE(NULL());'),
+      op('create_table', 'CREATE FUNCTION add_one AS (x) -> x + 1;'),
+      op('drop_table', 'DROP DATABASE IF EXISTS db;'),
+      op('drop_table', 'DROP DICTIONARY IF EXISTS db.d;'),
+      op('create_table', 'ATTACH TABLE IF NOT EXISTS db.t;'),
+      op('drop_table', 'DETACH TABLE IF EXISTS db.t;'),
+      op('drop_table', 'TRUNCATE TABLE IF EXISTS db.t;'),
+      op('drop_table', 'OPTIMIZE TABLE db.t FINAL;'),
+    ])
+
+    const sql = applyOnClusterToPlan(plan, 'c').operations.map((o) => o.sql)
+
+    expect(sql).toEqual([
+      "CREATE DICTIONARY IF NOT EXISTS db.d ON CLUSTER 'c' (id UInt64) PRIMARY KEY id SOURCE(NULL());",
+      "CREATE FUNCTION add_one ON CLUSTER 'c' AS (x) -> x + 1;",
+      "DROP DATABASE IF EXISTS db ON CLUSTER 'c';",
+      "DROP DICTIONARY IF EXISTS db.d ON CLUSTER 'c';",
+      "ATTACH TABLE IF NOT EXISTS db.t ON CLUSTER 'c';",
+      "DETACH TABLE IF EXISTS db.t ON CLUSTER 'c';",
+      "TRUNCATE TABLE IF EXISTS db.t ON CLUSTER 'c';",
+      "OPTIMIZE TABLE db.t ON CLUSTER 'c' FINAL;",
+    ])
+  })
+
+  test('handles both guarded and unguarded forms of the same statement', () => {
+    const plan = planOf([
+      op('drop_table', 'DROP TABLE IF EXISTS db.t;'),
+      op('drop_table', 'DROP TABLE db.t;'),
+      op('create_table', 'CREATE TABLE db.t (`id` UInt64) ENGINE = Memory;'),
+      op('drop_table', 'TRUNCATE TABLE db.t;'),
+    ])
+
+    const sql = applyOnClusterToPlan(plan, 'c').operations.map((o) => o.sql)
+
+    expect(sql).toEqual([
+      "DROP TABLE IF EXISTS db.t ON CLUSTER 'c';",
+      "DROP TABLE db.t ON CLUSTER 'c';",
+      "CREATE TABLE db.t ON CLUSTER 'c' (`id` UInt64) ENGINE = Memory;",
+      "TRUNCATE TABLE db.t ON CLUSTER 'c';",
+    ])
+  })
+
+  test('is idempotent — never double-injects when ON CLUSTER is already present', () => {
+    const plan = planOf([
+      op('create_table', "CREATE TABLE IF NOT EXISTS db.t ON CLUSTER 'x'\n(\n  `id` UInt64\n) ENGINE = MergeTree();"),
+      op('alter_table_rename_table', "RENAME TABLE db.a TO db.b ON CLUSTER 'x';"),
+    ])
+
+    const sql = applyOnClusterToPlan(plan, 'c').operations.map((o) => o.sql)
+
+    expect(sql).toEqual([
+      "CREATE TABLE IF NOT EXISTS db.t ON CLUSTER 'x'\n(\n  `id` UInt64\n) ENGINE = MergeTree();",
+      "RENAME TABLE db.a TO db.b ON CLUSTER 'x';",
+    ])
+  })
+
+  test('still injects when user content contains the words "on cluster"', () => {
+    const plan = planOf([
+      op(
+        'create_table',
+        "CREATE TABLE db.t\n(\n  `id` UInt64 COMMENT 'aggregated on cluster level'\n) ENGINE = MergeTree()\nORDER BY (`id`);",
+      ),
+      op('create_view', "CREATE VIEW IF NOT EXISTS db.v AS\nSELECT 'on cluster' AS label;"),
+    ])
+
+    const sql = applyOnClusterToPlan(plan, 'c').operations.map((o) => o.sql)
+
+    expect(sql).toEqual([
+      "CREATE TABLE db.t ON CLUSTER 'c'\n(\n  `id` UInt64 COMMENT 'aggregated on cluster level'\n) ENGINE = MergeTree()\nORDER BY (`id`);",
+      "CREATE VIEW IF NOT EXISTS db.v ON CLUSTER 'c' AS\nSELECT 'on cluster' AS label;",
+    ])
+  })
+
+  test('appends ON CLUSTER at the end for speculative trailing anchors', () => {
+    const plan = planOf([
+      op('alter_table_rename_table', 'RENAME DATABASE db.a TO db.b;'),
+      op('alter_table_rename_table', 'RENAME DICTIONARY db.a TO db.b;'),
+      op('alter_table_rename_table', 'EXCHANGE TABLES db.a AND db.b;'),
+      op('alter_table_rename_table', 'EXCHANGE DICTIONARIES db.a AND db.b;'),
+    ])
+
+    const sql = applyOnClusterToPlan(plan, 'c').operations.map((o) => o.sql)
+
+    expect(sql).toEqual([
+      "RENAME DATABASE db.a TO db.b ON CLUSTER 'c';",
+      "RENAME DICTIONARY db.a TO db.b ON CLUSTER 'c';",
+      "EXCHANGE TABLES db.a AND db.b ON CLUSTER 'c';",
+      "EXCHANGE DICTIONARIES db.a AND db.b ON CLUSTER 'c';",
+    ])
   })
 })
 
@@ -102,6 +198,15 @@ describe('resolveConfig cluster validation', () => {
     )
     expect(resolveConfig({ schema: 's', clickhouse: { url: 'u', cluster: '{cluster}' } }).clickhouse?.cluster).toBe(
       '{cluster}',
+    )
+  })
+
+  test('passes through names with dashes and dots', () => {
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'u', cluster: 'prod-eu-1' } }).clickhouse?.cluster).toBe(
+      'prod-eu-1',
+    )
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'u', cluster: 'eu.west.main' } }).clickhouse?.cluster).toBe(
+      'eu.west.main',
     )
   })
 
