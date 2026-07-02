@@ -51,6 +51,26 @@ export async function waitForColumn(
   }, RETRY_OPTIONS)
 }
 
+/**
+ * Polls a query until its rows satisfy `predicate`, then returns them. Use for
+ * reads that race DDL/DML propagation on managed ClickHouse (e.g. journal rows
+ * written by a just-finished migration that aren't yet visible via FINAL).
+ */
+export async function waitForRows<T>(
+  executor: ClickHouseExecutor,
+  sql: string,
+  predicate: (rows: T[]) => boolean,
+  label = 'waitForRows',
+): Promise<T[]> {
+  return pRetry(async () => {
+    const rows = await executor.query<T>(sql)
+    if (!predicate(rows)) {
+      throw new Error(`${label}: predicate not yet satisfied`)
+    }
+    return rows
+  }, RETRY_OPTIONS)
+}
+
 export async function waitForTableAbsent(
   executor: ClickHouseExecutor,
   database: string,

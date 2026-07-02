@@ -12,6 +12,7 @@ import {
   quoteIdent,
   runCli,
   waitForColumn,
+  waitForRows,
   waitForTable,
 } from './e2e-testkit.js'
 
@@ -83,9 +84,14 @@ describe('@chkit/cli sync migration resume e2e (#6)', () => {
       const run3 = migrate()
       expect(run3.exitCode).toBe(0)
 
-      const completed = await executor.query<{ n: number }>(
+      // The journal write races propagation on managed ClickHouse, so poll
+      // (FINAL read) until the completed row is visible rather than asserting once.
+      const completed = await waitForRows<{ n: number }>(
+        executor,
         `SELECT count() AS n FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} FINAL ` +
           `WHERE name = '${migrationName}' AND migration_completed = 1`,
+        (rows) => Number(rows[0]?.n ?? 0) === 1,
+        'sync-resume: migration_completed',
       )
       expect(Number(completed[0]?.n ?? 0)).toBe(1)
     } finally {
