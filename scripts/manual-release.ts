@@ -33,7 +33,7 @@ import {
 	statSync,
 	writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import {
@@ -175,6 +175,9 @@ function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 	)
 
 	if (dryRun) {
+		// `changeset status --output` resolves the path relative to cwd, so an
+		// absolute path gets cwd prepended again (…/chkit/Users/marc/…). Pass a
+		// cwd-relative path; keep the absolute STATUS_FILE for the log message.
 		runCommand('bun', [
 			'run',
 			'changeset',
@@ -182,7 +185,7 @@ function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 			'status',
 			'--verbose',
 			'--output',
-			STATUS_FILE,
+			relative(process.cwd(), STATUS_FILE),
 		])
 		logLine(`Changeset status report: ${STATUS_FILE}`)
 		return true
