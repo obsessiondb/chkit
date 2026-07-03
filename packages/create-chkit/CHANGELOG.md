@@ -1,5 +1,12 @@
 # create-chkit
 
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [c1d8d0d]
+  - @chkit/plugin-obsessiondb@0.1.1
+
 ## 0.1.0
 
 ### Patch Changes
