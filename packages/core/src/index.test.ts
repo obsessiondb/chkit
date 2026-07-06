@@ -479,6 +479,38 @@ describe('@chkit/core planner v1', () => {
     expect(plan.renameSuggestions).toEqual([])
   })
 
+  test('does not recreate when a key expression differs only by whitespace (#176)', () => {
+    const columns = [
+      { name: 'sso_id', type: 'String' },
+      { name: 'session_end', type: 'DateTime' },
+    ]
+    // As ClickHouse stores and introspects it (normalized spacing).
+    const introspected = [
+      table({
+        database: 'app',
+        name: 'sessions',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['sso_id', 'toStartOfHour(session_end)'],
+        orderBy: ['sso_id', 'toStartOfHour(session_end)'],
+      }),
+    ]
+    // As a user might write the same expression in config.
+    const config = [
+      table({
+        database: 'app',
+        name: 'sessions',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['sso_id', 'toStartOfHour(  session_end )'],
+        orderBy: ['sso_id', 'toStartOfHour(  session_end )'],
+      }),
+    ]
+
+    const plan = planDiff(introspected, config)
+    expect(plan.operations).toEqual([])
+  })
+
   test('recreates table when structural keys change', () => {
     const oldDefs = [
       table({

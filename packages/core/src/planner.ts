@@ -107,8 +107,36 @@ function pushCreateDatabaseOperation(
   })
 }
 
+// Whitespace outside string/identifier quotes carries no meaning in a key
+// clause, and ClickHouse stores key expressions in its own normalized spacing
+// (e.g. `toStartOfHour( session_end )` is stored and introspected back as
+// `toStartOfHour(session_end)`). Strip such whitespace so a config clause and
+// the introspected clause compare equal regardless of spacing, avoiding a
+// phantom table recreate. Comparison-only — never used to render DDL, so
+// keyword expressions like `INTERVAL 1 HOUR` keep their spacing when emitted.
+function stripInsignificantWhitespace(token: string): string {
+  let out = ''
+  let quote: "'" | '"' | '`' | null = null
+  for (let i = 0; i < token.length; i += 1) {
+    const char = token[i] ?? ''
+    if (quote) {
+      out += char
+      if (char === quote && token[i - 1] !== '\\') quote = null
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      out += char
+      continue
+    }
+    if (/\s/.test(char)) continue
+    out += char
+  }
+  return out
+}
+
 function normalizeClauseList(value: string[] | undefined): string {
-  return (value ?? []).join(',')
+  return (value ?? []).map(stripInsignificantWhitespace).join(',')
 }
 
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
