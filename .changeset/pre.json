@@ -1,0 +1,21 @@
+{
+  "mode": "pre",
+  "tag": "beta",
+  "initialVersions": {
+    "@chkit/docs": "0.0.2",
+    "chkit": "0.1.1",
+    "@chkit/clickhouse": "0.1.1",
+    "@chkit/codegen": "0.1.1",
+    "@chkit/core": "0.1.1",
+    "create-chkit": "0.1.1",
+    "@chkit/plugin-backfill": "0.1.1",
+    "@chkit/plugin-codegen": "0.1.1",
+    "@chkit/plugin-obsessiondb": "0.1.1",
+    "@chkit/plugin-pull": "0.1.1"
+  },
+  "changesets": [
+    "backfill-sql-scanner",
+    "key-clause-function-expressions",
+    "shared-plugin-command-runner"
+  ]
+}
