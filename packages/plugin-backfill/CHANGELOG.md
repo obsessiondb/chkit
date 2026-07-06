@@ -1,5 +1,16 @@
 # @chkit/plugin-backfill
 
+## 0.1.2-beta.0
+
+### Patch Changes
+
+- 9ad23f9: Refactor the backfill chunk-SQL rewriter (`chunking/sql.ts`): fold the duplicated quote/paren-aware scan loops into one shared `scanSqlTokens` primitive (with `findTopLevelKeywords`/`splitTopLevel` on top) and split the oversized `rewriteSelectColumns` into focused helpers. Behavior is unchanged — the same customer SQL rewriting is now covered by direct unit tests for quoted-string, escaped-quote, nested-subquery, and missing-FROM edge cases.
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.0
+  - @chkit/clickhouse@0.1.2-beta.0
+
 ## 0.1.1
 
 ### Patch Changes

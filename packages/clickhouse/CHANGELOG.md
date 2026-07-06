@@ -1,5 +1,13 @@
 # @chkit/clickhouse
 
+## 0.1.2-beta.0
+
+### Patch Changes
+
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.0
+
 ## 0.1.1
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-obsessiondb",
-  "version": "0.1.1",
+  "version": "0.1.2-beta.0",
   "description": "ObsessionDB managed ClickHouse integration plugin for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
