@@ -23,6 +23,6 @@ export {
   renderCodec,
 } from './codec.js'
 export { assertValidDefinitions, validateDefinitions } from './validate.js'
-export { wrapPluginRun } from './plugin-error.js'
+export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plugin-error.js'
 export { splitSqlStatements, extractExecutableStatements } from './sql-splitter.js'
 export { importModuleFile } from './ts-import.js'
