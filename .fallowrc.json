@@ -4,6 +4,7 @@
     "conditions": ["source", "bun"]
   },
   "ignorePatterns": ["examples/**"],
+  "entry": ["apps/docs/src/components/*.astro"],
   "duplicates": {
     "ignore": [
       "packages/**/*.test.ts",
@@ -16,7 +17,8 @@
     "ignore": [
       "packages/**/*.test.ts",
       "packages/**/*.spec.ts",
-      "packages/**/*.e2e.test.ts"
+      "packages/**/*.e2e.test.ts",
+      "packages/core/src/model.ts"
     ]
   }
 }

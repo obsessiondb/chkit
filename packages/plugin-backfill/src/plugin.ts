@@ -1,5 +1,5 @@
 import { createClickHouseExecutor } from '@chkit/clickhouse'
-import { wrapPluginRun, type SafeParseable } from '@chkit/core'
+import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
 import { executeBackfill, type BackfillProgress } from './async-backfill.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
@@ -44,9 +44,14 @@ import {
 } from './state.js'
 import type {
   BackfillPlugin,
+  BackfillPluginCommandContext,
   BackfillPluginRegistration,
   BackfillRunState,
 } from './types.js'
+
+const runCommand = createPluginRunner<BackfillPluginCommandContext>({
+  configErrorClass: BackfillConfigError,
+})
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(1)} TiB`
@@ -192,21 +197,6 @@ async function runBackfill(input: {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function withFactoryDefaults<T>(
-  schema: SafeParseable<T>,
-  defaults: Record<string, unknown>,
-): SafeParseable<T> {
-  return {
-    safeParse(data) {
-      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
-    },
-  }
-}
-
 export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin {
   const factoryOptions = options as Record<string, unknown>
   const planOptionsSchema = withFactoryDefaults(PlanSchema, factoryOptions)
@@ -228,61 +218,57 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: PLAN_FLAGS,
         optionsSchema: planOptionsSchema,
         flagMapping: PLAN_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'plan',
-            label: 'Backfill plan',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const opts = context.options as PlanOptions
+        run: runCommand({
+          command: 'plan',
+          label: 'Backfill plan',
+          fn: async (context) => {
+            const opts = context.options as PlanOptions
 
-              if (!context.config.clickhouse) {
-                throw new BackfillConfigError(
-                  'ClickHouse connection is required for backfill planning. Configure clickhouse in your clickhouse.config.ts.'
+            if (!context.config.clickhouse) {
+              throw new BackfillConfigError(
+                'ClickHouse connection is required for backfill planning. Configure clickhouse in your clickhouse.config.ts.'
+              )
+            }
+
+            const db = createClickHouseExecutor(context.config.clickhouse)
+
+            try {
+              const output = await buildBackfillPlan({
+                opts,
+                configPath: context.configPath,
+                config: context.config,
+                clickhouse: context.config.clickhouse,
+                clickhouseQuery: async <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => {
+                  const result = await db.query(sql, settings)
+                  return result as T[]
+                },
+                // ObsessionDB enables parallel replicas by default, which inflates
+                // aggregate results (count, GROUP BY). Disable for planning queries
+                // until ObsessionDB handles it at the profile level.
+                querySettings: { enable_parallel_replicas: 0 },
+              })
+
+              const payload = planPayload(output)
+              if (context.jsonMode) {
+                context.print(payload)
+              } else {
+                const partitionCount = output.plan.chunkPlan.partitions.length
+                const totalBytes = formatBytes(output.plan.chunkPlan.totalBytesCompressed)
+                const primarySortKey = output.plan.chunkPlan.table.sortKeys[0]
+                const sortKeyLabel = primarySortKey
+                  ? `, sort key: ${primarySortKey.name} (${primarySortKey.category})`
+                  : ''
+                context.print(
+                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`
                 )
               }
 
-              const db = createClickHouseExecutor(context.config.clickhouse)
-
-              try {
-                const output = await buildBackfillPlan({
-                  opts,
-                  configPath: context.configPath,
-                  config: context.config,
-                  clickhouse: context.config.clickhouse,
-                  clickhouseQuery: async <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => {
-                    const result = await db.query(sql, settings)
-                    return result as T[]
-                  },
-                  // ObsessionDB enables parallel replicas by default, which inflates
-                  // aggregate results (count, GROUP BY). Disable for planning queries
-                  // until ObsessionDB handles it at the profile level.
-                  querySettings: { enable_parallel_replicas: 0 },
-                })
-
-                const payload = planPayload(output)
-                if (context.jsonMode) {
-                  context.print(payload)
-                } else {
-                  const partitionCount = output.plan.chunkPlan.partitions.length
-                  const totalBytes = formatBytes(output.plan.chunkPlan.totalBytesCompressed)
-                  const primarySortKey = output.plan.chunkPlan.table.sortKeys[0]
-                  const sortKeyLabel = primarySortKey
-                    ? `, sort key: ${primarySortKey.name} (${primarySortKey.category})`
-                    : ''
-                  context.print(
-                    `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`
-                  )
-                }
-
-                return 0
-              } finally {
-                await db.close()
-              }
-            },
-          }),
+              return 0
+            } finally {
+              await db.close()
+            }
+          },
+        }),
       },
       {
         name: 'submit',
@@ -290,25 +276,21 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: SUBMIT_FLAGS,
         optionsSchema: submitOptionsSchema,
         flagMapping: SUBMIT_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'submit',
-            label: 'Backfill submit',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              // Reaching this handler means no managed backend intercepted the
-              // command. The ObsessionDB plugin handles `submit` via its
-              // onBeforePluginCommand hook when a service is selected; without
-              // one there is nowhere to submit to.
-              throw new BackfillConfigError(
-                'backfill submit requires a managed job backend. Log in and select an ObsessionDB service ' +
-                  '(`chkit obsessiondb login`, then `chkit obsessiondb service select`), ' +
-                  'or use `chkit backfill run --local` to execute the backfill against a direct connection.',
-              )
-            },
-          }),
+        run: runCommand({
+          command: 'submit',
+          label: 'Backfill submit',
+          fn: async () => {
+            // Reaching this handler means no managed backend intercepted the
+            // command. The ObsessionDB plugin handles `submit` via its
+            // onBeforePluginCommand hook when a service is selected; without
+            // one there is nowhere to submit to.
+            throw new BackfillConfigError(
+              'backfill submit requires a managed job backend. Log in and select an ObsessionDB service ' +
+                '(`chkit obsessiondb login`, then `chkit obsessiondb service select`), ' +
+                'or use `chkit backfill run --local` to execute the backfill against a direct connection.',
+            )
+          },
+        }),
       },
       {
         name: 'run',
@@ -316,36 +298,32 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: RUN_FLAGS,
         optionsSchema: runOptionsSchema,
         flagMapping: RUN_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'run',
-            label: 'Backfill run',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const opts = context.options as RunOptions
+        run: runCommand({
+          command: 'run',
+          label: 'Backfill run',
+          fn: async (context) => {
+            const opts = context.options as RunOptions
 
-              if (!context.config.clickhouse) {
-                throw new BackfillConfigError(
-                  'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
-                )
-              }
+            if (!context.config.clickhouse) {
+              throw new BackfillConfigError(
+                'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
+              )
+            }
 
-              return runBackfill({
-                planId: opts.planId,
-                forceEnvironment: opts.forceEnvironment,
-                concurrency: opts.concurrency,
-                pollIntervalMs: opts.pollIntervalMs,
-                stateDir: opts.stateDir,
-                configPath: context.configPath,
-                config: context.config,
-                clickhouse: context.config.clickhouse,
-                print: context.print,
-                jsonMode: context.jsonMode,
-              })
-            },
-          }),
+            return runBackfill({
+              planId: opts.planId,
+              forceEnvironment: opts.forceEnvironment,
+              concurrency: opts.concurrency,
+              pollIntervalMs: opts.pollIntervalMs,
+              stateDir: opts.stateDir,
+              configPath: context.configPath,
+              config: context.config,
+              clickhouse: context.config.clickhouse,
+              print: context.print,
+              jsonMode: context.jsonMode,
+            })
+          },
+        }),
       },
       {
         name: 'resume',
@@ -353,60 +331,56 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: RESUME_FLAGS,
         optionsSchema: resumeOptionsSchema,
         flagMapping: RESUME_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'resume',
-            label: 'Backfill resume',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const opts = context.options as ResumeOptions
+        run: runCommand({
+          command: 'resume',
+          label: 'Backfill resume',
+          fn: async (context) => {
+            const opts = context.options as ResumeOptions
 
-              if (!context.config.clickhouse) {
-                throw new BackfillConfigError(
-                  'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
-                )
-              }
+            if (!context.config.clickhouse) {
+              throw new BackfillConfigError(
+                'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
+              )
+            }
 
-              const { stateDir } = await readPlan({
-                planId: opts.planId,
-                configPath: context.configPath,
-                config: context.config,
-                stateDir: opts.stateDir,
-              })
-              const paths = backfillPaths(stateDir, opts.planId)
-              const existingRun = await readRun(paths.runPath)
-              if (!existingRun) {
-                throw new BackfillConfigError(
-                  `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
-                )
+            const { stateDir } = await readPlan({
+              planId: opts.planId,
+              configPath: context.configPath,
+              config: context.config,
+              stateDir: opts.stateDir,
+            })
+            const paths = backfillPaths(stateDir, opts.planId)
+            const existingRun = await readRun(paths.runPath)
+            if (!existingRun) {
+              throw new BackfillConfigError(
+                `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
+              )
+            }
+            if (existingRun.status === 'completed') {
+              if (context.jsonMode) {
+                context.print({ ok: true, noop: true, planId: opts.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
+              } else {
+                context.print(`Backfill ${opts.planId}: already completed. Nothing to resume.`)
               }
-              if (existingRun.status === 'completed') {
-                if (context.jsonMode) {
-                  context.print({ ok: true, noop: true, planId: opts.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
-                } else {
-                  context.print(`Backfill ${opts.planId}: already completed. Nothing to resume.`)
-                }
-                return 0
-              }
+              return 0
+            }
 
-              return runBackfill({
-                planId: opts.planId,
-                forceEnvironment: opts.forceEnvironment,
-                concurrency: opts.concurrency,
-                pollIntervalMs: opts.pollIntervalMs,
-                stateDir: opts.stateDir,
-                resumeFrom: existingRun.progress,
-                replayFailed: opts.replayFailed,
-                configPath: context.configPath,
-                config: context.config,
-                clickhouse: context.config.clickhouse,
-                print: context.print,
-                jsonMode: context.jsonMode,
-              })
-            },
-          }),
+            return runBackfill({
+              planId: opts.planId,
+              forceEnvironment: opts.forceEnvironment,
+              concurrency: opts.concurrency,
+              pollIntervalMs: opts.pollIntervalMs,
+              stateDir: opts.stateDir,
+              resumeFrom: existingRun.progress,
+              replayFailed: opts.replayFailed,
+              configPath: context.configPath,
+              config: context.config,
+              clickhouse: context.config.clickhouse,
+              print: context.print,
+              jsonMode: context.jsonMode,
+            })
+          },
+        }),
       },
       {
         name: 'status',
@@ -414,37 +388,33 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: PLAN_ID_FLAGS,
         optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'status',
-            label: 'Backfill status',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const opts = context.options as StatusOptions
-              const summary = await getBackfillStatus({
-                planId: opts.planId,
-                config: context.config,
-                configPath: context.configPath,
-                stateDir: opts.stateDir,
-              })
-              const payload = statusPayload(summary)
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                let line = `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed}, ${payload.rowsWritten} rows written)`
-                if (payload.lastError) line += ` \u2014 ${payload.lastError}`
-                context.print(line)
-                if (payload.status === 'completed' && payload.rowsWritten === 0) {
-                  context.print(
-                    'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
-                  )
-                }
+        run: runCommand({
+          command: 'status',
+          label: 'Backfill status',
+          fn: async (context) => {
+            const opts = context.options as StatusOptions
+            const summary = await getBackfillStatus({
+              planId: opts.planId,
+              config: context.config,
+              configPath: context.configPath,
+              stateDir: opts.stateDir,
+            })
+            const payload = statusPayload(summary)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              let line = `Backfill status ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total}, failed=${payload.chunkCounts.failed}, ${payload.rowsWritten} rows written)`
+              if (payload.lastError) line += ` \u2014 ${payload.lastError}`
+              context.print(line)
+              if (payload.status === 'completed' && payload.rowsWritten === 0) {
+                context.print(
+                  'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+                )
               }
-              return payload.ok ? 0 : 1
-            },
-          }),
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
       {
         name: 'cancel',
@@ -452,32 +422,28 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: PLAN_ID_FLAGS,
         optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'cancel',
-            label: 'Backfill cancel',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const opts = context.options as StatusOptions
-              const summary = await cancelBackfillRun({
-                planId: opts.planId,
-                config: context.config,
-                configPath: context.configPath,
-                stateDir: opts.stateDir,
-              })
-              const payload = cancelPayload(summary)
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                context.print(
-                  `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
-                )
-              }
-              return payload.ok ? 0 : 1
-            },
-          }),
+        run: runCommand({
+          command: 'cancel',
+          label: 'Backfill cancel',
+          fn: async (context) => {
+            const opts = context.options as StatusOptions
+            const summary = await cancelBackfillRun({
+              planId: opts.planId,
+              config: context.config,
+              configPath: context.configPath,
+              stateDir: opts.stateDir,
+            })
+            const payload = cancelPayload(summary)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+              )
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
       {
         name: 'doctor',
@@ -485,35 +451,31 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
         flags: PLAN_ID_FLAGS,
         optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
-        run: async (context) =>
-          wrapPluginRun({
-            command: 'doctor',
-            label: 'Backfill doctor',
-            jsonMode: context.jsonMode,
-            print: context.print,
-            configErrorClass: BackfillConfigError,
-            fn: async () => {
-              const opts = context.options as StatusOptions
-              const report = await getBackfillDoctorReport({
-                planId: opts.planId,
-                config: context.config,
-                configPath: context.configPath,
-                stateDir: opts.stateDir,
-              })
-              const payload = doctorPayload(report)
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                context.print(
-                  `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`
-                )
-                for (const recommendation of payload.recommendations) {
-                  context.print(`- ${recommendation}`)
-                }
+        run: runCommand({
+          command: 'doctor',
+          label: 'Backfill doctor',
+          fn: async (context) => {
+            const opts = context.options as StatusOptions
+            const report = await getBackfillDoctorReport({
+              planId: opts.planId,
+              config: context.config,
+              configPath: context.configPath,
+              stateDir: opts.stateDir,
+            })
+            const payload = doctorPayload(report)
+            if (context.jsonMode) {
+              context.print(payload)
+            } else {
+              context.print(
+                `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`
+              )
+              for (const recommendation of payload.recommendations) {
+                context.print(`- ${recommendation}`)
               }
-              return payload.ok ? 0 : 1
-            },
-          }),
+            }
+            return payload.ok ? 0 : 1
+          },
+        }),
       },
     ],
     hooks: {

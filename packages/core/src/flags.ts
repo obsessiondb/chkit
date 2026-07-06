@@ -81,6 +81,25 @@ export interface SafeParseable<T> {
 }
 
 /**
+ * Layer plugin-factory options under parsed data so registration-time defaults
+ * apply wherever the schema is evaluated (command dispatch, hooks).
+ */
+export function withFactoryDefaults<T>(
+  schema: SafeParseable<T>,
+  defaults: Record<string, unknown>,
+): SafeParseable<T> {
+  return {
+    safeParse(data) {
+      return schema.safeParse({ ...defaults, ...(isPlainRecord(data) ? data : {}) })
+    },
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
  * Two-layer option resolution: registration options → CLI flags.
  * Merges sources, validates through a schema, and throws ErrorClass on failure.
  */
