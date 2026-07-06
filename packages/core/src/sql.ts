@@ -8,7 +8,7 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { renderCodec } from './codec.js'
-import { normalizeKeyColumns } from './key-clause.js'
+import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderDefault(value: string | number | boolean): string {
@@ -27,9 +27,14 @@ function renderColumn(col: ColumnDefinition): string {
   return out
 }
 
-function renderKeyClauseColumns(columns: string[]): string {
+function renderKeyClauseColumns(columns: string[], columnNames: Set<string>): string {
   return normalizeKeyColumns(columns)
-    .map((column) => `\`${column}\``)
+    .map((column) =>
+      // Quote a token when it names a declared column (including names that
+      // need quoting like `user-id`) or is a bare identifier. Only true
+      // expressions (e.g. `toStartOfHour(ts)`) are emitted verbatim.
+      columnNames.has(column) || isPlainColumnReference(column) ? `\`${column}\`` : column
+    )
     .join(', ')
 }
 
@@ -61,12 +66,13 @@ function renderTableSQL(def: TableDefinition): string {
   )
   const body = [...columns, ...indexes, ...projections].join(',\n  ')
 
+  const columnNames = new Set(def.columns.map((column) => column.name))
   const clauses: string[] = []
   if (def.partitionBy) clauses.push(`PARTITION BY ${def.partitionBy}`)
-  clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey)})`)
-  clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy)})`)
+  clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey, columnNames)})`)
+  clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy, columnNames)})`)
   if (def.uniqueKey && def.uniqueKey.length > 0) {
-    clauses.push(`UNIQUE KEY (${renderKeyClauseColumns(def.uniqueKey)})`)
+    clauses.push(`UNIQUE KEY (${renderKeyClauseColumns(def.uniqueKey, columnNames)})`)
   }
   if (def.ttl) clauses.push(`TTL ${def.ttl}`)
   if (def.settings && Object.keys(def.settings).length > 0) {

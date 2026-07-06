@@ -51,3 +51,15 @@ export function splitTopLevelComma(input: string): string[] {
 export function normalizeKeyColumns(values: string[] | undefined): string[] {
   return (values ?? []).flatMap((value) => splitTopLevelComma(value.trim()))
 }
+
+const PLAIN_COLUMN_REFERENCE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * A key entry references a table column only when it is a bare identifier.
+ * Anything else — function calls like `toDate(ts)`, arithmetic, or tuples — is
+ * an expression that ClickHouse validates itself, so it must not be checked
+ * against the table's declared column list.
+ */
+export function isPlainColumnReference(token: string): boolean {
+  return PLAIN_COLUMN_REFERENCE.test(token)
+}

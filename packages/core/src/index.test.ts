@@ -77,6 +77,48 @@ describe('@chkit/core smoke', () => {
     expect(sql).toContain('UNIQUE KEY (`id`, `org_id`)')
   })
 
+  test('renders function expressions in key clauses without quoting them (#176)', () => {
+    const events = table({
+      database: 'chatty',
+      name: 'session',
+      columns: [
+        { name: 'sso_id', type: 'String' },
+        { name: 'session_id', type: 'String' },
+        { name: 'session_end', type: 'DateTime' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['sso_id', 'toStartOfHour(session_end)', 'session_id'],
+      orderBy: ['sso_id', 'toStartOfHour(session_end)', 'session_id', 'session_end'],
+    })
+
+    const sql = toCreateSQL(events)
+    // Plain columns stay backtick-quoted; function expressions are emitted verbatim.
+    expect(sql).toContain('PRIMARY KEY (`sso_id`, toStartOfHour(session_end), `session_id`)')
+    expect(sql).toContain(
+      'ORDER BY (`sso_id`, toStartOfHour(session_end), `session_id`, `session_end`)'
+    )
+  })
+
+  test('quotes declared columns in key clauses even when the name needs quoting (#176)', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'user-id', type: 'String' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['user-id', 'toStartOfHour(ts)'],
+      orderBy: ['user-id', 'toStartOfHour(ts)'],
+    })
+
+    const sql = toCreateSQL(events)
+    // `user-id` is a declared column (not a bare identifier) and must stay
+    // quoted; only the true expression is emitted verbatim.
+    expect(sql).toContain('PRIMARY KEY (`user-id`, toStartOfHour(ts))')
+    expect(sql).toContain('ORDER BY (`user-id`, toStartOfHour(ts))')
+  })
+
   test('table with orderBy but no primaryKey does not crash; PK defaults to orderBy (#19)', () => {
     // A user can omit primaryKey at runtime (JS, or a `.ts` config without
     // strict types). ClickHouse derives the PK from ORDER BY, so this must
@@ -457,6 +499,70 @@ describe('@chkit/core planner v1', () => {
     expect(plan.renameSuggestions).toEqual([])
   })
 
+  test('does not recreate when a key expression differs only by whitespace (#176)', () => {
+    const columns = [
+      { name: 'sso_id', type: 'String' },
+      { name: 'session_end', type: 'DateTime' },
+    ]
+    // As ClickHouse stores and introspects it (normalized spacing).
+    const introspected = [
+      table({
+        database: 'app',
+        name: 'sessions',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['sso_id', 'toStartOfHour(session_end)'],
+        orderBy: ['sso_id', 'toStartOfHour(session_end)'],
+      }),
+    ]
+    // As a user might write the same expression in config.
+    const config = [
+      table({
+        database: 'app',
+        name: 'sessions',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['sso_id', 'toStartOfHour(  session_end )'],
+        orderBy: ['sso_id', 'toStartOfHour(  session_end )'],
+      }),
+    ]
+
+    const plan = planDiff(introspected, config)
+    expect(plan.operations).toEqual([])
+  })
+
+  test('does not recreate when a key column differs only by identifier quoting (#178)', () => {
+    const columns = [
+      { name: 'user-id', type: 'String' },
+      { name: 'ts', type: 'DateTime' },
+    ]
+    // As introspected from ClickHouse: identifier backtick-quoted in the key.
+    const introspected = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['`user-id`'],
+        orderBy: ['`user-id`', 'toStartOfHour(ts)'],
+      }),
+    ]
+    // As written in config: bare column name.
+    const config = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['user-id'],
+        orderBy: ['user-id', 'toStartOfHour(ts)'],
+      }),
+    ]
+
+    const plan = planDiff(introspected, config)
+    expect(plan.operations).toEqual([])
+  })
+
   test('recreates table when structural keys change', () => {
     const oldDefs = [
       table({
@@ -621,6 +727,25 @@ describe('@chkit/core planner v1', () => {
       'primary_key_missing_column',
       'order_by_missing_column',
     ])
+  })
+
+  test('allows function expressions in primaryKey and orderBy', () => {
+    const defs = [
+      table({
+        database: 'bi',
+        name: 'price_history_label',
+        columns: [
+          { name: 'csin', type: 'String' },
+          { name: 'product_changed_at', type: 'DateTime' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['toDate(product_changed_at)', 'csin', 'product_changed_at'],
+        orderBy: ['toDate(product_changed_at)', 'csin', 'product_changed_at'],
+      }),
+    ]
+
+    const issues = validateDefinitions(defs)
+    expect(issues).toEqual([])
   })
 
   test('validates duplicate projection names', () => {
