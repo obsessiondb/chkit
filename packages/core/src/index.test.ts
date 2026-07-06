@@ -99,6 +99,26 @@ describe('@chkit/core smoke', () => {
     )
   })
 
+  test('quotes declared columns in key clauses even when the name needs quoting (#176)', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'user-id', type: 'String' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['user-id', 'toStartOfHour(ts)'],
+      orderBy: ['user-id', 'toStartOfHour(ts)'],
+    })
+
+    const sql = toCreateSQL(events)
+    // `user-id` is a declared column (not a bare identifier) and must stay
+    // quoted; only the true expression is emitted verbatim.
+    expect(sql).toContain('PRIMARY KEY (`user-id`, toStartOfHour(ts))')
+    expect(sql).toContain('ORDER BY (`user-id`, toStartOfHour(ts))')
+  })
+
   test('table with orderBy but no primaryKey does not crash; PK defaults to orderBy (#19)', () => {
     // A user can omit primaryKey at runtime (JS, or a `.ts` config without
     // strict types). ClickHouse derives the PK from ORDER BY, so this must
