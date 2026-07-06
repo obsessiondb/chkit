@@ -28,6 +28,125 @@ describe('@chkit/plugin-pull options', () => {
 })
 
 describe('@chkit/plugin-pull renderSchemaFile', () => {
+  test('renders a full table + view + refreshable MV schema byte-for-byte', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [
+          { name: 'id', type: 'UInt64', codec: { kind: 'ZSTD', level: 3 } },
+          { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+          { name: 'source', type: 'String', nullable: true, comment: 'origin' },
+          {
+            name: 'payload',
+            type: 'String',
+            codec: [{ kind: 'Delta', size: 4 }, { kind: 'raw', expression: 'LZ4' }, { kind: 'ZSTD' }],
+          },
+        ],
+        primaryKey: ['id'],
+        orderBy: ['id', 'received_at'],
+        uniqueKey: ['id'],
+        partitionBy: 'toYYYYMM(received_at)',
+        ttl: 'received_at + INTERVAL 30 DAY',
+        settings: { index_granularity: 8192, ttl_only_drop_parts: 1 },
+        indexes: [
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
+          {
+            name: 'idx_body',
+            expression: 'payload',
+            type: 'tokenbf_v1',
+            sizeBytes: 256,
+            hashFunctions: 2,
+            randomSeed: 0,
+            granularity: 1,
+          },
+        ],
+        projections: [{ name: 'proj_by_source', query: 'SELECT source, count() GROUP BY source' }],
+      },
+      {
+        kind: 'view',
+        database: 'app',
+        name: 'events_view',
+        as: 'SELECT id FROM app.events',
+      },
+      {
+        kind: 'materialized_view',
+        database: 'analytics',
+        name: 'daily_mv',
+        to: { database: 'analytics', name: 'daily_rollup' },
+        refresh: {
+          every: '1 HOUR',
+          randomize: '30 SECOND',
+          dependsOn: [{ database: 'analytics', name: 'upstream' }],
+          settings: { refresh_retries: 3 },
+          append: true,
+        },
+        as: 'SELECT toDate(received_at) AS day, count() AS c FROM app.events GROUP BY day',
+      },
+    ])
+
+    expect(content).toBe(`import { schema, table, view, materializedView, codec } from '@chkit/core'
+
+// Pulled from live ClickHouse metadata via chkit plugin pull schema
+
+const app_events = table({
+  database: "app",
+  name: "events",
+  engine: "MergeTree()",
+  columns: [
+    { name: "id", type: "UInt64", codec: { kind: "ZSTD", level: 3 } },
+    { name: "received_at", type: "DateTime64(3)", default: "fn:now64(3)" },
+    { name: "source", type: "String", nullable: true, comment: "origin" },
+    { name: "payload", type: "String", codec: [{ kind: "Delta", size: 4 }, codec.raw("LZ4"), { kind: "ZSTD", level: 1 }] },
+  ],
+  primaryKey: ["id"],
+  orderBy: ["id", "received_at"],
+  uniqueKey: ["id"],
+  partitionBy: "toYYYYMM(received_at)",
+  ttl: "received_at + INTERVAL 30 DAY",
+  settings: {
+    index_granularity: 8192,
+    ttl_only_drop_parts: 1,
+  },
+  indexes: [
+    { name: "idx_body", expression: "payload", type: "tokenbf_v1", sizeBytes: 256, hashFunctions: 2, randomSeed: 0, granularity: 1 },
+    { name: "idx_source", expression: "source", type: "set", maxRows: 0, granularity: 1 },
+  ],
+  projections: [
+    { name: "proj_by_source", query: "SELECT source, count() GROUP BY source" },
+  ],
+})
+
+const app_events_view = view({
+  database: "app",
+  name: "events_view",
+  as: "SELECT id FROM app.events",
+})
+
+const analytics_daily_mv = materializedView({
+  database: "analytics",
+  name: "daily_mv",
+  to: { database: "analytics", name: "daily_rollup" },
+  refresh: {
+    every: "1 HOUR",
+    randomize: "30 SECOND",
+    dependsOn: [
+      { database: "analytics", name: "upstream" },
+    ],
+    settings: {
+      refresh_retries: 3,
+    },
+    append: true,
+  },
+  as: "SELECT toDate(received_at) AS day, count() AS c FROM app.events GROUP BY day",
+})
+
+export default schema(app_events, app_events_view, analytics_daily_mv)
+`)
+  })
+
   test('renders deterministic table definitions', () => {
     const content = renderSchemaFile([
       {

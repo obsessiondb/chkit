@@ -3,13 +3,40 @@ import {
   isRawCodec,
   type ColumnCodec,
   type ColumnCodecSpec,
+  type ColumnDefinition,
+  type MaterializedViewDefinition,
   type MaterializedViewRefresh,
+  type ProjectionDefinition,
   type SchemaDefinition,
+  type SkipIndexDefinition,
+  type TableDefinition,
+  type ViewDefinition,
 } from '@chkit/core'
 
 export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   const canonical = canonicalizeDefinitions(definitions)
   const declarationNames = new Map<string, number>()
+  const lines: string[] = [
+    renderImportStatement(canonical),
+    '',
+    '// Pulled from live ClickHouse metadata via chkit plugin pull schema',
+    '',
+  ]
+
+  const references: string[] = []
+
+  for (const definition of canonical) {
+    const variableName = resolveTableVariableName(definition.database, definition.name, declarationNames)
+    references.push(variableName)
+    lines.push(...renderDefinition(definition, variableName))
+    lines.push('')
+  }
+
+  lines.push(`export default schema(${references.join(', ')})`)
+  return `${lines.join('\n')}\n`
+}
+
+function renderImportStatement(canonical: SchemaDefinition[]): string {
   const hasTable = canonical.some((definition) => definition.kind === 'table')
   const hasView = canonical.some((definition) => definition.kind === 'view')
   const hasMaterializedView = canonical.some((definition) => definition.kind === 'materialized_view')
@@ -23,131 +50,188 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   if (hasView) imports.push('view')
   if (hasMaterializedView) imports.push('materializedView')
   if (hasRawCodec) imports.push('codec')
-  const lines: string[] = [
-    `import { ${imports.join(', ')} } from '@chkit/core'`,
-    '',
-    '// Pulled from live ClickHouse metadata via chkit plugin pull schema',
-    '',
-  ]
+  return `import { ${imports.join(', ')} } from '@chkit/core'`
+}
 
-  const references: string[] = []
-
-  for (const definition of canonical) {
-    const variableName = resolveTableVariableName(definition.database, definition.name, declarationNames)
-    references.push(variableName)
-
-    if (definition.kind === 'table') {
-      lines.push(`const ${variableName} = table({`)
-      lines.push(`  database: ${renderString(definition.database)},`)
-      lines.push(`  name: ${renderString(definition.name)},`)
-      lines.push(`  engine: ${renderString(definition.engine)},`)
-      lines.push('  columns: [')
-
-      for (const column of definition.columns) {
-        const parts: string[] = [
-          `name: ${renderString(column.name)}`,
-          `type: ${renderString(column.type)}`,
-        ]
-        if (column.nullable) parts.push('nullable: true')
-        if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
-        if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
-        if (column.codec) parts.push(`codec: ${renderCodecSource(column.codec)}`)
-        lines.push(`    { ${parts.join(', ')} },`)
-      }
-
-      lines.push('  ],')
-      lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
-      lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
-      if (definition.uniqueKey && definition.uniqueKey.length > 0) {
-        lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
-      }
-      if (definition.partitionBy) {
-        lines.push(`  partitionBy: ${renderString(definition.partitionBy)},`)
-      }
-      if (definition.ttl) {
-        lines.push(`  ttl: ${renderString(definition.ttl)},`)
-      }
-      if (definition.settings && Object.keys(definition.settings).length > 0) {
-        lines.push('  settings: {')
-        for (const key of Object.keys(definition.settings).sort()) {
-          const value = definition.settings[key]
-          if (value === undefined) continue
-          lines.push(`    ${renderKey(key)}: ${renderLiteral(value)},`)
-        }
-        lines.push('  },')
-      }
-      if (definition.indexes && definition.indexes.length > 0) {
-        lines.push('  indexes: [')
-        for (const index of definition.indexes) {
-          const parts = [
-            `name: ${renderString(index.name)}`,
-            `expression: ${renderString(index.expression)}`,
-            `type: ${renderString(index.type)}`,
-          ]
-          switch (index.type) {
-            case 'minmax':
-              break
-            case 'set':
-              parts.push(`maxRows: ${index.maxRows}`)
-              break
-            case 'bloom_filter':
-              if (index.falsePositiveRate !== undefined) {
-                parts.push(`falsePositiveRate: ${index.falsePositiveRate}`)
-              }
-              break
-            case 'tokenbf_v1':
-              parts.push(
-                `sizeBytes: ${index.sizeBytes}`,
-                `hashFunctions: ${index.hashFunctions}`,
-                `randomSeed: ${index.randomSeed}`
-              )
-              break
-            case 'ngrambf_v1':
-              parts.push(
-                `ngramSize: ${index.ngramSize}`,
-                `sizeBytes: ${index.sizeBytes}`,
-                `hashFunctions: ${index.hashFunctions}`,
-                `randomSeed: ${index.randomSeed}`
-              )
-              break
-          }
-          parts.push(`granularity: ${index.granularity}`)
-          lines.push(`    { ${parts.join(', ')} },`)
-        }
-        lines.push('  ],')
-      }
-      if (definition.projections && definition.projections.length > 0) {
-        lines.push('  projections: [')
-        for (const projection of definition.projections) {
-          lines.push(
-            `    { name: ${renderString(projection.name)}, query: ${renderString(projection.query)} },`
-          )
-        }
-        lines.push('  ],')
-      }
-      lines.push('})')
-    } else if (definition.kind === 'view') {
-      lines.push(`const ${variableName} = view({`)
-      lines.push(`  database: ${renderString(definition.database)},`)
-      lines.push(`  name: ${renderString(definition.name)},`)
-      lines.push(`  as: ${renderString(definition.as)},`)
-      lines.push('})')
-    } else {
-      lines.push(`const ${variableName} = materializedView({`)
-      lines.push(`  database: ${renderString(definition.database)},`)
-      lines.push(`  name: ${renderString(definition.name)},`)
-      lines.push(`  to: { database: ${renderString(definition.to.database)}, name: ${renderString(definition.to.name)} },`)
-      if (definition.refresh) {
-        lines.push(...renderRefreshLines(definition.refresh))
-      }
-      lines.push(`  as: ${renderString(definition.as)},`)
-      lines.push('})')
-    }
-    lines.push('')
+function renderDefinition(definition: SchemaDefinition, variableName: string): string[] {
+  switch (definition.kind) {
+    case 'table':
+      return renderTableDefinition(definition, variableName)
+    case 'view':
+      return renderViewDefinition(definition, variableName)
+    default:
+      return renderMaterializedViewDefinition(definition, variableName)
   }
+}
 
-  lines.push(`export default schema(${references.join(', ')})`)
-  return `${lines.join('\n')}\n`
+function renderTableDefinition(definition: TableDefinition, variableName: string): string[] {
+  const lines = renderDeclarationHeader('table', variableName, definition.database, definition.name)
+  lines.push(`  engine: ${renderString(definition.engine)},`)
+  lines.push('  columns: [')
+  for (const column of definition.columns) {
+    lines.push(`    ${renderColumn(column)},`)
+  }
+  lines.push('  ],')
+  lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
+  lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
+  if (definition.uniqueKey && definition.uniqueKey.length > 0) {
+    lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
+  }
+  if (definition.partitionBy) {
+    lines.push(`  partitionBy: ${renderString(definition.partitionBy)},`)
+  }
+  if (definition.ttl) {
+    lines.push(`  ttl: ${renderString(definition.ttl)},`)
+  }
+  if (definition.settings && Object.keys(definition.settings).length > 0) {
+    lines.push(...renderSettingsLines(definition.settings, '  '))
+  }
+  if (definition.indexes && definition.indexes.length > 0) {
+    lines.push(...renderIndexLines(definition.indexes))
+  }
+  if (definition.projections && definition.projections.length > 0) {
+    lines.push(...renderProjectionLines(definition.projections))
+  }
+  lines.push('})')
+  return lines
+}
+
+function renderViewDefinition(definition: ViewDefinition, variableName: string): string[] {
+  const lines = renderDeclarationHeader('view', variableName, definition.database, definition.name)
+  lines.push(`  as: ${renderString(definition.as)},`)
+  lines.push('})')
+  return lines
+}
+
+function renderMaterializedViewDefinition(
+  definition: MaterializedViewDefinition,
+  variableName: string
+): string[] {
+  const lines = renderDeclarationHeader('materializedView', variableName, definition.database, definition.name)
+  lines.push(`  to: { database: ${renderString(definition.to.database)}, name: ${renderString(definition.to.name)} },`)
+  if (definition.refresh) {
+    lines.push(...renderRefreshLines(definition.refresh))
+  }
+  lines.push(`  as: ${renderString(definition.as)},`)
+  lines.push('})')
+  return lines
+}
+
+function renderDeclarationHeader(
+  factory: string,
+  variableName: string,
+  database: string,
+  name: string
+): string[] {
+  return [
+    `const ${variableName} = ${factory}({`,
+    `  database: ${renderString(database)},`,
+    `  name: ${renderString(name)},`,
+  ]
+}
+
+function renderColumn(column: ColumnDefinition): string {
+  const parts: string[] = [
+    `name: ${renderString(column.name)}`,
+    `type: ${renderString(column.type)}`,
+  ]
+  if (column.nullable) parts.push('nullable: true')
+  if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
+  if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
+  if (column.codec) parts.push(`codec: ${renderCodecSource(column.codec)}`)
+  return `{ ${parts.join(', ')} }`
+}
+
+function renderIndexLines(indexes: SkipIndexDefinition[]): string[] {
+  const lines: string[] = ['  indexes: [']
+  for (const index of indexes) {
+    lines.push(`    ${renderIndex(index)},`)
+  }
+  lines.push('  ],')
+  return lines
+}
+
+function renderIndex(index: SkipIndexDefinition): string {
+  const parts = [
+    `name: ${renderString(index.name)}`,
+    `expression: ${renderString(index.expression)}`,
+    `type: ${renderString(index.type)}`,
+  ]
+  switch (index.type) {
+    case 'minmax':
+      break
+    case 'set':
+      parts.push(`maxRows: ${index.maxRows}`)
+      break
+    case 'bloom_filter':
+      if (index.falsePositiveRate !== undefined) {
+        parts.push(`falsePositiveRate: ${index.falsePositiveRate}`)
+      }
+      break
+    case 'tokenbf_v1':
+      parts.push(
+        `sizeBytes: ${index.sizeBytes}`,
+        `hashFunctions: ${index.hashFunctions}`,
+        `randomSeed: ${index.randomSeed}`
+      )
+      break
+    case 'ngrambf_v1':
+      parts.push(
+        `ngramSize: ${index.ngramSize}`,
+        `sizeBytes: ${index.sizeBytes}`,
+        `hashFunctions: ${index.hashFunctions}`,
+        `randomSeed: ${index.randomSeed}`
+      )
+      break
+  }
+  parts.push(`granularity: ${index.granularity}`)
+  return `{ ${parts.join(', ')} }`
+}
+
+function renderProjectionLines(projections: ProjectionDefinition[]): string[] {
+  const lines: string[] = ['  projections: [']
+  for (const projection of projections) {
+    lines.push(`    { name: ${renderString(projection.name)}, query: ${renderString(projection.query)} },`)
+  }
+  lines.push('  ],')
+  return lines
+}
+
+function renderRefreshLines(refresh: MaterializedViewRefresh): string[] {
+  const lines: string[] = []
+  lines.push('  refresh: {')
+  if (refresh.every) lines.push(`    every: ${renderString(refresh.every)},`)
+  if (refresh.after) lines.push(`    after: ${renderString(refresh.after)},`)
+  if (refresh.offset) lines.push(`    offset: ${renderString(refresh.offset)},`)
+  if (refresh.randomize) lines.push(`    randomize: ${renderString(refresh.randomize)},`)
+  if (refresh.dependsOn && refresh.dependsOn.length > 0) {
+    lines.push('    dependsOn: [')
+    for (const dep of refresh.dependsOn) {
+      lines.push(`      { database: ${renderString(dep.database)}, name: ${renderString(dep.name)} },`)
+    }
+    lines.push('    ],')
+  }
+  if (refresh.settings && Object.keys(refresh.settings).length > 0) {
+    lines.push(...renderSettingsLines(refresh.settings, '    '))
+  }
+  if (refresh.append) lines.push('    append: true,')
+  if (refresh.empty) lines.push('    empty: true,')
+  lines.push('  },')
+  return lines
+}
+
+function renderSettingsLines(
+  settings: Record<string, string | number | boolean>,
+  indent: string
+): string[] {
+  const lines: string[] = [`${indent}settings: {`]
+  for (const key of Object.keys(settings).sort()) {
+    const value = settings[key]
+    if (value === undefined) continue
+    lines.push(`${indent}  ${renderKey(key)}: ${renderLiteral(value)},`)
+  }
+  lines.push(`${indent}},`)
+  return lines
 }
 
 function resolveTableVariableName(
@@ -180,37 +264,6 @@ function renderStringArray(values: string[]): string {
 function renderLiteral(value: string | number | boolean): string {
   if (typeof value === 'string') return renderString(value)
   return String(value)
-}
-
-function renderRefreshLines(refresh: MaterializedViewRefresh): string[] {
-  const lines: string[] = []
-  lines.push('  refresh: {')
-  if (refresh.every) lines.push(`    every: ${renderString(refresh.every)},`)
-  if (refresh.after) lines.push(`    after: ${renderString(refresh.after)},`)
-  if (refresh.offset) lines.push(`    offset: ${renderString(refresh.offset)},`)
-  if (refresh.randomize) lines.push(`    randomize: ${renderString(refresh.randomize)},`)
-  if (refresh.dependsOn && refresh.dependsOn.length > 0) {
-    lines.push('    dependsOn: [')
-    for (const dep of refresh.dependsOn) {
-      lines.push(
-        `      { database: ${renderString(dep.database)}, name: ${renderString(dep.name)} },`
-      )
-    }
-    lines.push('    ],')
-  }
-  if (refresh.settings && Object.keys(refresh.settings).length > 0) {
-    lines.push('    settings: {')
-    for (const key of Object.keys(refresh.settings).sort()) {
-      const value = refresh.settings[key]
-      if (value === undefined) continue
-      lines.push(`      ${renderKey(key)}: ${renderLiteral(value)},`)
-    }
-    lines.push('    },')
-  }
-  if (refresh.append) lines.push('    append: true,')
-  if (refresh.empty) lines.push('    empty: true,')
-  lines.push('  },')
-  return lines
 }
 
 function renderKey(value: string): string {
