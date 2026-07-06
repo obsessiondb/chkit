@@ -531,6 +531,38 @@ describe('@chkit/core planner v1', () => {
     expect(plan.operations).toEqual([])
   })
 
+  test('does not recreate when a key column differs only by identifier quoting (#178)', () => {
+    const columns = [
+      { name: 'user-id', type: 'String' },
+      { name: 'ts', type: 'DateTime' },
+    ]
+    // As introspected from ClickHouse: identifier backtick-quoted in the key.
+    const introspected = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['`user-id`'],
+        orderBy: ['`user-id`', 'toStartOfHour(ts)'],
+      }),
+    ]
+    // As written in config: bare column name.
+    const config = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['user-id'],
+        orderBy: ['user-id', 'toStartOfHour(ts)'],
+      }),
+    ]
+
+    const plan = planDiff(introspected, config)
+    expect(plan.operations).toEqual([])
+  })
+
   test('recreates table when structural keys change', () => {
     const oldDefs = [
       table({
