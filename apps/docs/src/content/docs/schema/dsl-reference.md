@@ -116,6 +116,18 @@ The `engine` field accepts any string. Common engines include `MergeTree`, `Repl
 Key clause arrays support comma-separated strings: `['id, org_id']` is normalized to `['id', 'org_id']`. Prefer one column per array element for clarity.
 :::
 
+:::caution
+`primaryKey`/`orderBy` entries may be **function expressions**, not just column names — e.g. `['toStartOfHour(session_end)', 'id']`. Bare column names are validated against `columns` and quoted; expressions are passed through to ClickHouse unchanged, and spacing differences are ignored when detecting drift.
+
+Write expressions in ClickHouse's **canonical form**, because ClickHouse rewrites some syntax when it stores the key, and chkit compares against that stored form. A mismatch makes `drift`/`check` report perpetual drift and `migrate` recreate the table on every run. Known rewrites to avoid in keys:
+
+- `INTERVAL 1 HOUR` → write `toIntervalHour(1)` (e.g. `toStartOfInterval(ts, toIntervalHour(1))`)
+- `x::Date` or `CAST(x AS Date)` → write `CAST(x, 'Date')`
+- Do not use `ASC`/`DESC` in a key — ClickHouse drops it and the key no longer matches.
+
+Plain function chains like `toStartOfHour(ts)`, `toDate(ts)`, and arithmetic (`a + 1`, `h % 8`) round-trip unchanged.
+:::
+
 ## Columns
 
 Each entry in the `columns` array is a `ColumnDefinition`.
