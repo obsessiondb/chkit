@@ -1,6 +1,6 @@
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
-import { normalizeKeyColumns } from './key-clause.js'
+import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import type {
   ColumnDefinition,
   MaterializedViewDefinition,
@@ -120,7 +120,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
   }
 
   for (const column of normalizeKeyColumns(def.primaryKey)) {
-    if (!columnSet.has(column)) {
+    if (isPlainColumnReference(column) && !columnSet.has(column)) {
       pushValidationIssue(
         issues,
         def,
@@ -131,7 +131,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
   }
 
   for (const column of normalizeKeyColumns(def.orderBy)) {
-    if (!columnSet.has(column)) {
+    if (isPlainColumnReference(column) && !columnSet.has(column)) {
       pushValidationIssue(
         issues,
         def,

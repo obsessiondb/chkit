@@ -91,8 +91,8 @@ const events = table({
 | `name` | `string` | Table name |
 | `columns` | `ColumnDefinition[]` | Column definitions (see [Columns](#columns)) |
 | `engine` | `string` | Engine clause, e.g. `'MergeTree'`, `'ReplacingMergeTree(ver)'` |
-| `primaryKey` | `string[]` | Primary key columns |
-| `orderBy` | `string[]` | ORDER BY columns |
+| `primaryKey` | `string[]` | Primary key columns or expressions, e.g. `['toDate(ts)', 'id']` |
+| `orderBy` | `string[]` | ORDER BY columns or expressions, e.g. `['toStartOfHour(ts)', 'id']` |
 
 ### Optional fields
 
@@ -431,8 +431,8 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Duplicate column names** -- repeated column name within a table
 - **Duplicate index names** -- repeated index name within a table
 - **Duplicate projection names** -- repeated projection name within a table
-- **Primary key references missing column** -- `primaryKey` includes a column not in `columns`
-- **Order by references missing column** -- `orderBy` includes a column not in `columns`
+- **Primary key references missing column** -- `primaryKey` includes a bare column name not in `columns` (function expressions like `toDate(ts)` are passed through to ClickHouse unchecked)
+- **Order by references missing column** -- `orderBy` includes a bare column name not in `columns` (function expressions like `toStartOfHour(ts)` are passed through to ClickHouse unchecked)
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
 - **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)

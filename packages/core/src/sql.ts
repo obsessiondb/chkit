@@ -8,7 +8,7 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { renderCodec } from './codec.js'
-import { normalizeKeyColumns } from './key-clause.js'
+import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderDefault(value: string | number | boolean): string {
@@ -29,7 +29,7 @@ function renderColumn(col: ColumnDefinition): string {
 
 function renderKeyClauseColumns(columns: string[]): string {
   return normalizeKeyColumns(columns)
-    .map((column) => `\`${column}\``)
+    .map((column) => (isPlainColumnReference(column) ? `\`${column}\`` : column))
     .join(', ')
 }
 

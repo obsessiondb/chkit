@@ -77,6 +77,28 @@ describe('@chkit/core smoke', () => {
     expect(sql).toContain('UNIQUE KEY (`id`, `org_id`)')
   })
 
+  test('renders function expressions in key clauses without quoting them (#176)', () => {
+    const events = table({
+      database: 'chatty',
+      name: 'session',
+      columns: [
+        { name: 'sso_id', type: 'String' },
+        { name: 'session_id', type: 'String' },
+        { name: 'session_end', type: 'DateTime' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['sso_id', 'toStartOfHour(session_end)', 'session_id'],
+      orderBy: ['sso_id', 'toStartOfHour(session_end)', 'session_id', 'session_end'],
+    })
+
+    const sql = toCreateSQL(events)
+    // Plain columns stay backtick-quoted; function expressions are emitted verbatim.
+    expect(sql).toContain('PRIMARY KEY (`sso_id`, toStartOfHour(session_end), `session_id`)')
+    expect(sql).toContain(
+      'ORDER BY (`sso_id`, toStartOfHour(session_end), `session_id`, `session_end`)'
+    )
+  })
+
   test('table with orderBy but no primaryKey does not crash; PK defaults to orderBy (#19)', () => {
     // A user can omit primaryKey at runtime (JS, or a `.ts` config without
     // strict types). ClickHouse derives the PK from ORDER BY, so this must
@@ -621,6 +643,25 @@ describe('@chkit/core planner v1', () => {
       'primary_key_missing_column',
       'order_by_missing_column',
     ])
+  })
+
+  test('allows function expressions in primaryKey and orderBy', () => {
+    const defs = [
+      table({
+        database: 'bi',
+        name: 'price_history_label',
+        columns: [
+          { name: 'csin', type: 'String' },
+          { name: 'product_changed_at', type: 'DateTime' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['toDate(product_changed_at)', 'csin', 'product_changed_at'],
+        orderBy: ['toDate(product_changed_at)', 'csin', 'product_changed_at'],
+      }),
+    ]
+
+    const issues = validateDefinitions(defs)
+    expect(issues).toEqual([])
   })
 
   test('validates duplicate projection names', () => {
