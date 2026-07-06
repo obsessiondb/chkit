@@ -44,4 +44,4 @@ The plugin hooks into `generate`, `migrate`, `status`, `drift`, `check`, and `qu
 - [Getting Started](/obsessiondb/getting-started/) — sign up, authenticate, and select your first service.
 - [Engine Rewriting](/obsessiondb/engine-rewriting/) — how `Shared*` engines are stripped for non-ObsessionDB targets.
 - [Services](/obsessiondb/services/) — list, select, alias, and override services per command.
-- [Backfill Plugin](/plugins/backfill/) — for backfills against ObsessionDB once a service is selected.
+- [Backfill Jobs](/obsessiondb/backfills/) — submit backfills as managed jobs and track them in the console.
