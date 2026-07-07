@@ -32,7 +32,7 @@ export function buildChunkExecutionSql(input: {
   target: string
   table: Pick<TableProfile, 'sortKeys'>
   sourceTarget?: string
-  mvAsQuery?: string
+  mvReplayQueries?: string[]
   targetColumns?: string[]
   idempotencyToken?: string
 }): string {
@@ -41,15 +41,20 @@ export function buildChunkExecutionSql(input: {
   const settings = buildSettingsClause(input.idempotencyToken ?? '')
   const chunkConditions = buildChunkConditions(input.chunk, input.table.sortKeys)
 
-  if (input.mvAsQuery) {
-    let filtered = injectPartitionFilter(input.mvAsQuery, input.chunk.partitionId)
-    for (const condition of chunkConditions) {
-      filtered = injectWhereCondition(filtered, condition)
-    }
-    if (input.targetColumns?.length) {
-      filtered = rewriteSelectColumns(filtered, input.targetColumns)
-    }
-    return [header, `INSERT INTO ${input.target}`, filtered, settings].join('\n')
+  if (input.mvReplayQueries?.length) {
+    // Each MV feeding the target becomes a filtered SELECT; UNION ALL replays
+    // them in one INSERT so a single query_id and dedup token cover the chunk.
+    const selects = input.mvReplayQueries.map((query) => {
+      let filtered = injectPartitionFilter(query, input.chunk.partitionId)
+      for (const condition of chunkConditions) {
+        filtered = injectWhereCondition(filtered, condition)
+      }
+      if (input.targetColumns?.length) {
+        filtered = rewriteSelectColumns(filtered, input.targetColumns)
+      }
+      return filtered
+    })
+    return [header, `INSERT INTO ${input.target}`, selects.join('\nUNION ALL\n'), settings].join('\n')
   }
 
   const lines = [

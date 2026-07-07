@@ -228,7 +228,7 @@ export const events_mv = {
           target: output.plan.target,
           sourceTarget: output.plan.execution.sourceTarget,
           table: output.plan.chunkPlan.table,
-          mvAsQuery: output.plan.execution.mvAsQuery,
+          mvReplayQueries: output.plan.execution.mvReplayQueries,
           targetColumns: output.plan.execution.targetColumns,
           idempotencyToken: generateIdempotencyToken(output.plan.planId, chunk.id),
         })
@@ -240,6 +240,79 @@ export const events_mv = {
       expect(sql).toContain('GROUP BY event_time')
       expect(sql).toContain('SETTINGS async_insert=0')
       expect(sql).not.toContain('FROM app.events_agg')
+      // Single MV: no UNION ALL, output identical to prior behavior.
+      expect(sql).not.toContain('UNION ALL')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('replays every MV feeding the target via UNION ALL when multiple MVs exist', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+
+    try {
+      await writeFile(
+        schemaPath,
+        `export const events_target = {
+  kind: 'table',
+  database: 'app',
+  name: 'events_agg',
+  columns: [
+    { name: 'event_time', type: 'DateTime' },
+    { name: 'count', type: 'UInt64' },
+  ],
+  engine: 'MergeTree',
+  primaryKey: ['event_time'],
+  orderBy: ['event_time'],
+}
+export const web_mv = {
+  kind: 'materialized_view',
+  database: 'app',
+  name: 'web_mv',
+  to: { database: 'app', name: 'events_agg' },
+  as: 'SELECT toStartOfHour(event_time) AS event_time, count() AS count FROM app.web_events GROUP BY event_time',
+}
+export const api_mv = {
+  kind: 'materialized_view',
+  database: 'app',
+  name: 'api_mv',
+  to: { database: 'app', name: 'events_agg' },
+  as: 'SELECT toStartOfHour(event_time) AS event_time, count() AS count FROM app.api_events GROUP BY event_time',
+}
+`
+      )
+
+      const config = resolveConfig({
+        schema: './schema.ts',
+        metaDir: './chkit/meta',
+      })
+      const opts = PlanSchema.parse({ target: 'app.events_agg' })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: createMockQuery() })
+
+      expect(output.plan.execution.mode).toBe('mv_replay')
+      expect(output.plan.execution.mvReplayQueries).toHaveLength(2)
+
+      const chunk = output.plan.chunkPlan.chunks[0]
+      const sql = chunk
+        ? buildChunkExecutionSql({
+          planId: output.plan.planId,
+          chunk,
+          target: output.plan.target,
+          sourceTarget: output.plan.execution.sourceTarget,
+          table: output.plan.chunkPlan.table,
+          mvReplayQueries: output.plan.execution.mvReplayQueries,
+          targetColumns: output.plan.execution.targetColumns,
+          idempotencyToken: generateIdempotencyToken(output.plan.planId, chunk.id),
+        })
+        : ''
+
+      // Both source tables are replayed, joined by a single UNION ALL, under one INSERT.
+      expect(sql.match(/INSERT INTO app\.events_agg/g)).toHaveLength(1)
+      expect(sql).toContain('FROM app.web_events')
+      expect(sql).toContain('FROM app.api_events')
+      expect(sql.match(/UNION ALL/g)).toHaveLength(1)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
