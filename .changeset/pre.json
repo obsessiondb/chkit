@@ -15,6 +15,7 @@
   },
   "changesets": [
     "backfill-sql-scanner",
+    "generate-empty-migration",
     "key-clause-function-expressions",
     "shared-plugin-command-runner"
   ]
