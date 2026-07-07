@@ -42,7 +42,7 @@ This is what `snapshot.json` is for. `generate` diffs your schema against the sn
 
 The default locations come from `outDir` (`./chkit`); `migrationsDir` and `metaDir` override the two subfolders individually. See [Configuration](/configuration/overview/).
 
-Neither file is optional. `migrate` decides what is pending by comparing the `.sql` files on disk against what it has already applied, and it verifies a checksum of every applied file. Both checks fail if the artifacts are not in the repo.
+Both files belong in git. `migrate` decides what is pending by comparing the `.sql` files on disk against what it has already applied, and it verifies a checksum of every applied file that is present. These checks validate the artifacts that are committed — they do not catch one you forgot to commit: a missing migration is simply absent from the pending set and never runs, and the checksum verification skips an applied file whose `.sql` is gone rather than failing. Keeping both files in the repo is a discipline to enforce in code review, not something the tooling detects for you.
 
 ### Applied state is not committed
 
