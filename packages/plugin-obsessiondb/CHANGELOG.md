@@ -1,5 +1,16 @@
 # @chkit/plugin-obsessiondb
 
+## 0.1.2-beta.1
+
+### Patch Changes
+
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.1
+  - @chkit/core@0.1.2-beta.1
+  - @chkit/clickhouse@0.1.2-beta.1
+
 ## 0.1.2-beta.0
 
 ### Patch Changes

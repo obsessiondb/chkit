@@ -1,6 +1,6 @@
 {
   "name": "@chkit/clickhouse",
-  "version": "0.1.2-beta.0",
+  "version": "0.1.2-beta.1",
   "description": "ClickHouse client wrapper for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
