@@ -22,6 +22,26 @@ interface GenerateApplyPayload {
   riskSummary: MigrationPlan['riskSummary']
 }
 
+interface GenerateEmptyPayload {
+  mode: 'empty'
+  migrationFile: string
+}
+
+export function emitGenerateEmptyOutput(result: { migrationFile: string }, jsonMode: boolean): void {
+  const payload: GenerateEmptyPayload = {
+    mode: 'empty',
+    migrationFile: result.migrationFile,
+  }
+
+  if (jsonMode) {
+    emitJson('generate', payload)
+    return
+  }
+
+  console.log(`Generated empty migration: ${result.migrationFile}`)
+  console.log('Snapshot unchanged. Add your SQL to the file, then run "chkit migrate".')
+}
+
 export function emitGeneratePlanOutput(plan: MigrationPlan, jsonMode: boolean, scope: TableScope): void {
   const payload: GeneratePlanPayload = {
     scope,

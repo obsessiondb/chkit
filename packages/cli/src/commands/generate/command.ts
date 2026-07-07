@@ -1,4 +1,4 @@
-import { generateArtifacts } from '@chkit/codegen'
+import { generateArtifacts, generateEmptyMigration } from '@chkit/codegen'
 import { applyOnClusterToPlan, ChxValidationError, planDiff } from '@chkit/core'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
@@ -32,7 +32,7 @@ import {
   remapOldDefinitionsForTableRenames,
   resolveActiveTableMappings,
 } from './rename-mappings.js'
-import { emitGenerateApplyOutput, emitGeneratePlanOutput } from './output.js'
+import { emitGenerateApplyOutput, emitGenerateEmptyOutput, emitGeneratePlanOutput } from './output.js'
 import { debug } from '../../runtime/debug.js'
 
 const GENERATE_FLAGS = defineFlags([
@@ -41,6 +41,7 @@ const GENERATE_FLAGS = defineFlags([
   { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },
   { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },
   { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
+  { name: '--empty', type: 'boolean', description: 'Scaffold a blank manual migration (no schema diff, snapshot untouched)' },
 ] as const)
 
 export const generateCommand: ChxPluginCommand = {
@@ -59,8 +60,24 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   const tableSelector = f['--table']
   const planMode = f['--dryrun'] === true
   const jsonMode = f['--json'] === true
+  const emptyMode = f['--empty'] === true
 
-  debug('generate', `flags: name=${migrationName ?? '(auto)'}, dryrun=${planMode}, json=${jsonMode}`)
+  debug('generate', `flags: name=${migrationName ?? '(auto)'}, dryrun=${planMode}, json=${jsonMode}, empty=${emptyMode}`)
+
+  // `--empty` scaffolds a blank manual migration: no schema diff, no plugin
+  // pipeline, and the snapshot is left untouched. Short-circuit before any of
+  // that machinery so the file is a pristine stub for hand-editing.
+  if (emptyMode) {
+    debug('generate', 'empty mode: scaffolding blank migration')
+    const result = await generateEmptyMigration({
+      migrationsDir: dirs.migrationsDir,
+      migrationName,
+      migrationId,
+      cliVersion: CLI_VERSION,
+    })
+    emitGenerateEmptyOutput(result, jsonMode)
+    return 0
+  }
 
   await pluginRuntime.runOnConfigLoaded({
     command: 'generate',

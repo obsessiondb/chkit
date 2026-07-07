@@ -23,6 +23,7 @@ chkit generate [flags]
 | `--rename-column <mapping>` | string | — | Explicit column rename: `db.table.old_column=new_column` |
 | `--table <selector>` | string | — | Scope operations to matching tables |
 | `--dryrun` | boolean | `false` | Print the plan without writing any files |
+| `--empty` | boolean | `false` | Scaffold a blank manual migration without diffing the schema |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -74,6 +75,14 @@ With `--dryrun`, the command prints the migration plan (operations with risk lev
 
 Plans for objects in a database lead with a `create_database` operation (`CREATE DATABASE IF NOT EXISTS`, risk `safe`), so a single new table reports `operationCount: 2` — the `create_database` plus the `create_table`. The `CREATE DATABASE` is idempotent and a no-op if the database already exists.
 
+### Empty mode
+
+With `--empty`, the command skips the schema diff entirely and writes a blank, timestamped migration stub for you to hand-edit. Use it for DDL that chkit does not model — raw `INSERT`/backfill statements, `OPTIMIZE`, manual dictionary reloads, or one-off data fixes.
+
+The stub carries the standard migration header (with `operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. The `--name` and `--migration-id` flags apply; without `--name`, the file defaults to `manual`. Schema-diff flags (`--table`, `--rename-table`, `--rename-column`, `--dryrun`) are not used in empty mode.
+
+`chkit migrate` picks the file up like any other migration and applies it in filename order. Write your SQL into the stub *before* applying it — editing a migration after it has run triggers a checksum mismatch.
+
 ### Codegen integration
 
 If the codegen plugin is configured with `runOnGenerate: true` (the default), `chkit generate` automatically runs codegen after writing migration artifacts. A codegen failure causes `generate` to fail.
@@ -94,6 +103,12 @@ chkit generate --name add_users_table
 
 ```sh
 chkit generate --dryrun
+```
+
+**Scaffold a blank manual migration:**
+
+```sh
+chkit generate --empty --name backfill_signups
 ```
 
 **Scope to a specific table:**
@@ -153,6 +168,17 @@ chkit generate --rename-column analytics.events.old_name=new_name
   "definitionCount": 3,
   "operationCount": 2,
   "riskSummary": { "safe": 2, "caution": 0, "danger": 0 }
+}
+```
+
+### Empty mode (`--empty`)
+
+```json
+{
+  "command": "generate",
+  "schemaVersion": 1,
+  "mode": "empty",
+  "migrationFile": "./chkit/migrations/20260604104251_backfill_signups.sql"
 }
 ```
 
