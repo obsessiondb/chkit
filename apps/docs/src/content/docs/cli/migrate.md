@@ -249,6 +249,7 @@ Metadata keys are parsed from contiguous `-- key: value` comments at the top of 
 
 ## Related commands
 
+- [The migration workflow](/guides/migration-workflow/) — the full generate → commit → migrate loop, and hand-written migrations
 - [`chkit generate`](/cli/generate/) — produce migration files from schema changes
 - [`chkit status`](/cli/status/) — check migration state without applying
 - [`chkit check`](/cli/check/) — CI gate that evaluates pending migrations and checksums

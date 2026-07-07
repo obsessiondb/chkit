@@ -26,6 +26,25 @@ export interface GenerateArtifactsOutput {
   snapshot: Snapshot
 }
 
+export interface GenerateEmptyMigrationInput {
+  migrationsDir: string
+  migrationName?: string
+  migrationId?: string
+  cliVersion?: string
+  now?: Date
+}
+
+export interface GenerateEmptyMigrationOutput {
+  migrationFile: string
+  sql: string
+}
+
+const EMPTY_PLAN: MigrationPlan = {
+  operations: [],
+  renameSuggestions: [],
+  riskSummary: { safe: 0, caution: 0, danger: 0 },
+}
+
 function safeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()
 }
@@ -76,13 +95,13 @@ async function writeNewMigrationFile(input: {
   }
 }
 
-function buildMigrationContent(input: {
+function buildMigrationHeader(input: {
   generatedAt: string
   cliVersion: string
   definitionCount: number
   plan: MigrationPlan
-}): string {
-  const header = [
+}): string[] {
+  return [
     '-- chkit-migration-format: v1',
     `-- generated-at: ${input.generatedAt}`,
     `-- cli-version: ${input.cliVersion}`,
@@ -91,6 +110,15 @@ function buildMigrationContent(input: {
     `-- rename-suggestion-count: ${input.plan.renameSuggestions.length}`,
     `-- risk-summary: safe=${input.plan.riskSummary.safe}, caution=${input.plan.riskSummary.caution}, danger=${input.plan.riskSummary.danger}`,
   ]
+}
+
+function buildMigrationContent(input: {
+  generatedAt: string
+  cliVersion: string
+  definitionCount: number
+  plan: MigrationPlan
+}): string {
+  const header = buildMigrationHeader(input)
 
   const renameHints = input.plan.renameSuggestions.map(
     (suggestion) =>
@@ -105,6 +133,20 @@ function buildMigrationContent(input: {
 
   if (!body) return `${withHints.join('\n')}\n`
   return `${withHints.join('\n')}\n\n${body}\n`
+}
+
+function buildEmptyMigrationContent(input: { generatedAt: string; cliVersion: string }): string {
+  const header = buildMigrationHeader({
+    generatedAt: input.generatedAt,
+    cliVersion: input.cliVersion,
+    definitionCount: 0,
+    plan: EMPTY_PLAN,
+  })
+  const placeholder = [
+    '-- Empty migration scaffold. Write your SQL statements below.',
+    '-- Statements run in order and are separated by semicolons.',
+  ]
+  return `${header.join('\n')}\n\n${placeholder.join('\n')}\n`
 }
 
 export async function generateArtifacts(input: GenerateArtifactsInput): Promise<GenerateArtifactsOutput> {
@@ -144,4 +186,35 @@ export async function generateArtifacts(input: GenerateArtifactsInput): Promise<
     sql,
     snapshot,
   }
+}
+
+/**
+ * Scaffold a blank manual migration file. Unlike {@link generateArtifacts},
+ * this performs no schema diff and does not touch the snapshot — it just writes
+ * a timestamped `.sql` stub for the user to hand-edit.
+ */
+export async function generateEmptyMigration(
+  input: GenerateEmptyMigrationInput
+): Promise<GenerateEmptyMigrationOutput> {
+  const now = input.now ?? new Date()
+  const generatedTimestamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
+  const customMigrationId = input.migrationId ? safeMigrationId(input.migrationId) : ''
+  const timestamp = customMigrationId || generatedTimestamp
+  const migrationName = safeName(input.migrationName ?? 'manual')
+
+  await mkdir(input.migrationsDir, { recursive: true })
+
+  const sql = buildEmptyMigrationContent({
+    generatedAt: now.toISOString(),
+    cliVersion: input.cliVersion ?? '0.1.0',
+  })
+
+  const migrationFile = await writeNewMigrationFile({
+    migrationsDir: input.migrationsDir,
+    timestamp,
+    migrationName,
+    sql,
+  })
+
+  return { migrationFile, sql }
 }

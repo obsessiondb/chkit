@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { planDiff, table } from '@chkit/core'
 
-import { generateArtifacts } from './index'
+import { generateArtifacts, generateEmptyMigration } from './index'
 
 describe('@chkit/codegen smoke', () => {
   test('writes migration and snapshot artifacts', async () => {
@@ -228,6 +228,62 @@ describe('@chkit/codegen smoke', () => {
       )
       expect(migrationFile).toContain('-- operation: alter_table_rename_table')
       expect(migrationFile).toContain('-- operation: alter_table_rename_column')
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('generateEmptyMigration', () => {
+  test('writes a blank migration stub without touching a snapshot', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+    try {
+      const migrationsDir = join(workdir, 'migrations')
+
+      const result = await generateEmptyMigration({
+        migrationsDir,
+        migrationName: 'seed data',
+        now: new Date('2026-01-02T03:04:05.678Z'),
+      })
+
+      expect(result.migrationFile.endsWith('20260102030405_seed_data.sql')).toBe(true)
+      const migrationFile = await readFile(result.migrationFile, 'utf8')
+      expect(migrationFile).toContain('-- chkit-migration-format: v1')
+      expect(migrationFile).toContain('-- generated-at: 2026-01-02T03:04:05.678Z')
+      expect(migrationFile).toContain('-- operation-count: 0')
+      expect(migrationFile).toContain('-- Empty migration scaffold. Write your SQL statements below.')
+      // The stub must never write a snapshot — that is the whole point of --empty.
+      await expect(readFile(join(workdir, 'meta', 'snapshot.json'), 'utf8')).rejects.toThrow()
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+
+  test('defaults the migration name to "manual"', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+    try {
+      const result = await generateEmptyMigration({
+        migrationsDir: join(workdir, 'migrations'),
+        now: new Date('2026-01-02T03:04:05.678Z'),
+      })
+
+      expect(result.migrationFile.endsWith('20260102030405_manual.sql')).toBe(true)
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+
+  test('avoids overwriting a stub generated in the same second', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+    try {
+      const migrationsDir = join(workdir, 'migrations')
+      const now = new Date('2026-01-02T03:04:05.678Z')
+
+      const first = await generateEmptyMigration({ migrationsDir, now })
+      const second = await generateEmptyMigration({ migrationsDir, now })
+
+      expect(first.migrationFile.endsWith('20260102030405_manual.sql')).toBe(true)
+      expect(second.migrationFile.endsWith('20260102030405_manual_001.sql')).toBe(true)
     } finally {
       await rm(workdir, { recursive: true, force: true })
     }
