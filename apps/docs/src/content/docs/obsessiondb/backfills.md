@@ -39,7 +39,7 @@ The backend runs the chunks server-side, so there is no local checkpoint and not
 
 ## Track progress
 
-The console link from `submit` is the primary way to watch a job. From the CLI, the remote job commands query the backend directly — they take a `--job-id` or `--service-slug` instead of a local `--plan-id`:
+The console link from `submit` is the primary way to watch a job. It opens the job in the ObsessionDB console under Service → Jobs, with live progress and controls to pause, retry, or cancel the run. The [Jobs docs](https://obsessiondb.com/docs/jobs) cover that view in full. From the CLI, the remote job commands query the backend directly — they take a `--job-id` or `--service-slug` instead of a local `--plan-id`:
 
 ```sh
 # Status of one job
