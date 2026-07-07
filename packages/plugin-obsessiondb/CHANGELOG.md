@@ -1,5 +1,18 @@
 # @chkit/plugin-obsessiondb
 
+## 0.1.2-beta.2
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.2
+  - @chkit/core@0.1.2-beta.2
+  - @chkit/clickhouse@0.1.2-beta.2
+
 ## 0.1.2-beta.1
 
 ### Patch Changes
