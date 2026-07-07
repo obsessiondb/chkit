@@ -25,7 +25,11 @@ export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' 
 interface BackfillExecutionPlan {
   mode: 'copy' | 'mv_replay'
   sourceTarget: string
-  mvAsQuery?: string
+  /**
+   * One `SELECT` per materialized view feeding the target table. mv_replay
+   * inserts all of them (via `UNION ALL`) so every MV's rows are rebuilt.
+   */
+  mvReplayQueries?: string[]
   targetColumns?: string[]
   requireIdempotencyToken: boolean
 }

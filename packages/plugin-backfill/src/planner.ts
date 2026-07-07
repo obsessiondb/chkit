@@ -5,7 +5,7 @@ import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
 import { generateChunkPlan } from './chunking/planner.js'
-import { findMvForTarget } from './detect.js'
+import { findMvsForTarget } from './detect.js'
 import { BackfillConfigError } from './errors.js'
 import type { PlanOptions } from './options.js'
 import {
@@ -61,16 +61,16 @@ export async function buildBackfillPlan(input: {
   const stateDir = computeBackfillStateDir(input.config, input.configPath, opts.stateDir)
   const paths = backfillPaths(stateDir, chunkPlan.planId)
 
-  let mvAsQuery: string | undefined
+  let mvReplayQueries: string[] | undefined
   let targetColumns: string[] | undefined
 
   try {
     const definitions = await loadSchemaDefinitions(input.config.schema, {
       cwd: dirname(input.configPath),
     })
-    const mv = findMvForTarget(definitions, database, table)
-    if (mv) {
-      mvAsQuery = mv.as
+    const mvs = findMvsForTarget(definitions, database, table)
+    if (mvs.length > 0) {
+      mvReplayQueries = mvs.map((mv) => mv.as)
       const tableDef = definitions.find(
         (definition) => definition.kind === 'table' && definition.database === database && definition.name === table
       )
@@ -91,9 +91,9 @@ export async function buildBackfillPlan(input: {
     to: derivedTo,
     chunkPlan,
     execution: {
-      mode: mvAsQuery ? 'mv_replay' as const : 'copy' as const,
+      mode: mvReplayQueries ? 'mv_replay' as const : 'copy' as const,
       sourceTarget: opts.target,
-      ...(mvAsQuery ? { mvAsQuery } : {}),
+      ...(mvReplayQueries ? { mvReplayQueries } : {}),
       ...(targetColumns ? { targetColumns } : {}),
       requireIdempotencyToken: opts.requireIdempotencyToken,
     },

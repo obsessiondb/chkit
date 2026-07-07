@@ -108,6 +108,26 @@ describe('buildSubmitTasks', () => {
 		const [first] = buildSubmitTasks(makePlan(false))
 		expect(first?.sql).not.toContain('insert_deduplication_token=')
 	})
+
+	test('replays every MV via UNION ALL for an mv_replay plan', () => {
+		const plan = makePlan()
+		plan.execution = {
+			mode: 'mv_replay',
+			sourceTarget: 'app.events',
+			mvReplayQueries: [
+				'SELECT id FROM app.web_events',
+				'SELECT id FROM app.api_events',
+			],
+			targetColumns: ['id'],
+			requireIdempotencyToken: true,
+		}
+
+		const [first] = buildSubmitTasks(plan)
+		expect(first?.sql.match(/INSERT INTO app\.events/g)).toHaveLength(1)
+		expect(first?.sql).toContain('FROM app.web_events')
+		expect(first?.sql).toContain('FROM app.api_events')
+		expect(first?.sql.match(/UNION ALL/g)).toHaveLength(1)
+	})
 })
 
 describe('parseSubmitInput', () => {

@@ -38,7 +38,7 @@ export function buildSubmitTasks(plan: BackfillPlanState): SubmitTask[] {
 			target: plan.target,
 			sourceTarget: plan.execution.sourceTarget,
 			table: plan.chunkPlan.table,
-			mvAsQuery: plan.execution.mvAsQuery,
+			mvReplayQueries: plan.execution.mvReplayQueries,
 			targetColumns: plan.execution.targetColumns,
 			idempotencyToken: plan.execution.requireIdempotencyToken
 				? generateIdempotencyToken(plan.planId, chunk.id)

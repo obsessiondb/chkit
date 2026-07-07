@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { table, materializedView } from '@chkit/core'
 import type { SchemaDefinition } from '@chkit/core'
 
-import { detectCandidatesFromTable, extractSchemaTimeColumn, findMvForTarget, findTableForTarget } from './detect.js'
+import { detectCandidatesFromTable, extractSchemaTimeColumn, findMvsForTarget, findTableForTarget } from './detect.js'
 
 describe('@chkit/plugin-backfill detect', () => {
   test('finds DateTime column in ORDER BY as top candidate', () => {
@@ -234,7 +234,7 @@ describe('@chkit/plugin-backfill detect', () => {
     expect(extractSchemaTimeColumn(def)).toBeUndefined()
   })
 
-  test('findMvForTarget returns MV matching target to.database and to.name', () => {
+  test('findMvsForTarget returns MV matching target to.database and to.name', () => {
     const mv = materializedView({
       database: 'app',
       name: 'events_mv',
@@ -253,14 +253,14 @@ describe('@chkit/plugin-backfill detect', () => {
       mv,
     ]
 
-    const found = findMvForTarget(definitions, 'app', 'events_agg')
+    const found = findMvsForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found?.name).toBe('events_mv')
-    expect(found?.as).toBe('SELECT count() FROM app.events')
+    expect(found).toHaveLength(1)
+    expect(found[0]?.name).toBe('events_mv')
+    expect(found[0]?.as).toBe('SELECT count() FROM app.events')
   })
 
-  test('findMvForTarget returns undefined when no MV targets the table', () => {
+  test('findMvsForTarget returns an empty array when no MV targets the table', () => {
     const definitions: SchemaDefinition[] = [
       table({
         database: 'app',
@@ -272,10 +272,10 @@ describe('@chkit/plugin-backfill detect', () => {
       }),
     ]
 
-    expect(findMvForTarget(definitions, 'app', 'events')).toBeUndefined()
+    expect(findMvsForTarget(definitions, 'app', 'events')).toEqual([])
   })
 
-  test('findMvForTarget returns first MV when multiple target the same table', () => {
+  test('findMvsForTarget returns ALL MVs when multiple target the same table', () => {
     const mv1 = materializedView({
       database: 'app',
       name: 'hourly_mv',
@@ -290,9 +290,8 @@ describe('@chkit/plugin-backfill detect', () => {
     })
     const definitions: SchemaDefinition[] = [mv1, mv2]
 
-    const found = findMvForTarget(definitions, 'app', 'events_agg')
+    const found = findMvsForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found?.name).toBe('hourly_mv')
+    expect(found.map((mv) => mv.name)).toEqual(['hourly_mv', 'daily_mv'])
   })
 })

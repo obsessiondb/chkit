@@ -140,7 +140,7 @@ async function runBackfill(input: {
           target: plan.target,
           sourceTarget: plan.execution.sourceTarget,
           table: plan.chunkPlan.table,
-          mvAsQuery: plan.execution.mvAsQuery,
+          mvReplayQueries: plan.execution.mvReplayQueries,
           targetColumns: plan.execution.targetColumns,
           idempotencyToken: plan.execution.requireIdempotencyToken
             ? generateIdempotencyToken(plan.planId, planChunk.id)
