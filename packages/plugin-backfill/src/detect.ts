@@ -21,21 +21,23 @@ function isDateTimeType(type: string): boolean {
   return false
 }
 
-export function findMvForTarget(
+/**
+ * Return every materialized view whose `to` target is `database.table`.
+ * ClickHouse allows several MVs to feed the same destination table, so an
+ * mv_replay backfill must replay all of them — returning only the first would
+ * silently drop the rest.
+ */
+export function findMvsForTarget(
   definitions: SchemaDefinition[],
   database: string,
   table: string
-): MaterializedViewDefinition | undefined {
-  for (const def of definitions) {
-    if (
+): MaterializedViewDefinition[] {
+  return definitions.filter(
+    (def): def is MaterializedViewDefinition =>
       def.kind === 'materialized_view' &&
       def.to.database === database &&
       def.to.name === table
-    ) {
-      return def
-    }
-  }
-  return undefined
+  )
 }
 
 export function findTableForTarget(
