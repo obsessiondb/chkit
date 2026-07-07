@@ -180,6 +180,7 @@ bunx chkit query "DESCRIBE events"
 
 ## Where to next
 
+- [The migration workflow](/guides/migration-workflow/) — how the pieces fit, what to commit, and how a team without production access ships changes
 - [The CLI reference](/cli/overview/) — every command and flag used above
 - [Schema DSL reference](/schema/dsl-reference/) — columns, engines, views, and materialized views
 - [Configuration](/configuration/overview/) — what `clickhouse.config.ts` controls
