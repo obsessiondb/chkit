@@ -169,6 +169,7 @@ chkit generate --rename-column analytics.events.old_name=new_name
 
 ## Related commands
 
+- [The migration workflow](/guides/migration-workflow/) — why generate is offline, and what to commit alongside the SQL
 - [`chkit init`](/cli/init/) — scaffold a project before your first generate
 - [`chkit migrate`](/cli/migrate/) — apply generated migrations to ClickHouse
 - [`chkit codegen`](/cli/codegen/) — manually trigger TypeScript type generation

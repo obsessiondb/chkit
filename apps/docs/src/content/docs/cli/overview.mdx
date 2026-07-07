@@ -5,6 +5,9 @@ sidebar:
   order: 1
 ---
 
+import { Image } from 'astro:assets';
+import commandConnections from '../../../assets/command-connections.png';
+
 The `chkit` CLI manages ClickHouse schemas, migrations, drift detection, and CI checks from the command line. It follows a workflow-oriented design: define your schema in TypeScript, generate migrations, apply them, and verify everything stays in sync.
 
 ## Commands
@@ -21,6 +24,16 @@ The `chkit` CLI manages ClickHouse schemas, migrations, drift detection, and CI 
 | [`chkit pull`](/cli/pull/) | Introspect live ClickHouse and generate a TypeScript schema file |
 | [`chkit codegen`](/cli/codegen/) | Generate TypeScript types from schema definitions |
 | [`chkit plugin`](/cli/plugin/) | List or run plugin commands |
+
+## Connection requirements
+
+Some commands run entirely against local files; others read or write a live ClickHouse instance. Generating a migration is offline, so it needs no connection or credentials. Applying one, or introspecting a live database, connects.
+
+<Image src={commandConnections} alt="Two groups of commands. No connection: generate (diff schema vs snapshot), codegen (types from schema), and editing schema files. Connects to ClickHouse: migrate (apply SQL), pull (introspect), status (read journal), check and drift (compare live DB to code)." />
+
+| Needs a connection | Offline |
+|--------------------|---------|
+| `migrate` (apply SQL), `pull` (introspect), `status` (read journal), `check` / `drift` (compare live DB to code) | `generate` (diff schema vs. snapshot), `codegen` (types from schema), editing schema files |
 
 ## Typical workflow
 

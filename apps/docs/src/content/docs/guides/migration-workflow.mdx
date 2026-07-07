@@ -1,0 +1,112 @@
+---
+title: The migration workflow
+description: "How chkit's ahead-of-time migration model works: what snapshot.json holds, which files to commit, and how a team deploys when only some developers can reach production."
+---
+
+import { Image } from 'astro:assets';
+import workflowOverview from '../../../assets/workflow-overview.png';
+
+chkit turns schema changes into SQL ahead of time and commits that SQL to git, rather than computing the difference live against the database at deploy. This page describes that architecture and the workflow it produces: what `snapshot.json` holds, which files belong in version control, and how a team ships changes when only some developers can reach production.
+
+## The diff is computed ahead of time
+
+A migration is the difference between the schema you have and the schema you want. That difference can be computed at two moments.
+
+- **At deploy, against the live database.** The tool connects, introspects the current schema, and works out the changes on the fly. This is how Doctrine works.
+- **Ahead of time, on a developer's machine, then stored.** The difference is computed once, written to a file, reviewed, and committed. Deploy replays it. This is how chkit works, like Prisma Migrate or Drizzle.
+
+chkit uses the second approach. `chkit generate` computes the diff and writes it to a SQL file; `chkit migrate` later replays that exact SQL. The migration is a reviewable artifact that travels with the pull request, and deployment is deterministic because it never regenerates anything. Because the diff is worked out ahead of time, computing it needs no database connection at all. (For the full split of which commands connect and which run offline, see the [CLI overview](/cli/overview/#connection-requirements).)
+
+<Image src={workflowOverview} alt="The chkit migration workflow: edit schema.ts, run generate offline to write migration SQL and snapshot.json, commit both to git, then migrate applies the same files per environment in CI, each tracking its own _chkit_migrations journal." />
+
+## The diff needs a baseline: that's the snapshot
+
+To compute where the schema is against where it should be, the diff needs both sides. The target side is your TypeScript schema. The baseline, the last-known state, has to come from somewhere.
+
+There are two ways to supply that baseline. Introspect a live database, which ties every diff to a reachable instance and to which instance you point at. Or read a committed file. chkit keeps the baseline in a file: `chkit/meta/snapshot.json`.
+
+This is what `snapshot.json` is for. `generate` diffs your schema against the snapshot, writes the migration SQL, then rewrites the snapshot to the new state so the next diff has a fresh baseline. Because the baseline is a committed file rather than a live introspection, generation is deterministic: the same schema and snapshot always produce the same migration.
+
+## What to commit
+
+`generate` writes two files, and the record of which migrations have run lives somewhere else entirely. That split is the whole story of what belongs in version control.
+
+### Two artifacts, both committed
+
+`generate` produces two files, both under `chkit/` by default. They are the source of truth for a migration, so both belong in version control.
+
+| File | What it is | Commit? |
+|------|------------|---------|
+| `chkit/migrations/<timestamp>_<name>.sql` | The SQL to apply, with a header describing each operation and its risk level. Without `--name` it is named `<timestamp>_auto.sql`. | **Yes** |
+| `chkit/meta/snapshot.json` | The last-known schema state. `generate` diffs against it, then overwrites it with the new state. | **Yes** |
+
+The default locations come from `outDir` (`./chkit`); `migrationsDir` and `metaDir` override the two subfolders individually. See [Configuration](/configuration/overview/).
+
+Neither file is optional. `migrate` decides what is pending by comparing the `.sql` files on disk against what it has already applied, and it verifies a checksum of every applied file. Both checks fail if the artifacts are not in the repo.
+
+### Applied state is not committed
+
+The record of which migrations have run is deliberately not a file. It lives in a `_chkit_migrations` table inside each ClickHouse database. That is what lets `test`, `stage`, and `prod` each sit at a different point while sharing the same committed files: every environment tracks its own applied set, so there is nothing about applied state to commit. See [`chkit migrate`](/cli/migrate/#journal).
+
+## The team workflow this produces
+
+This is the workflow for a team where only some developers can reach production. Assume one person has a one-time connection to prod and nobody else does.
+
+1. **Seed the project once.** The person with access runs [`chkit pull`](/cli/pull/) against prod to introspect the existing schema into TypeScript, then `chkit generate` to produce the initial snapshot. Commit the schema files, the migration(s), and `snapshot.json`.
+
+   ```sh
+   chkit pull --out-file ./src/db/schema/pulled.ts   # connects to prod, one time
+   chkit generate --name baseline                    # offline; writes snapshot.json
+   ```
+
+2. **Everyone else works offline.** Any developer edits the TypeScript schema and runs `generate`. No production access and no local ClickHouse are needed, because the snapshot is the baseline being diffed against.
+
+   ```sh
+   # edit src/db/schema/*.ts
+   chkit generate --name add_level_column            # offline
+   ```
+
+   They review the generated `.sql` and commit it with the updated `snapshot.json`. The pull request now contains the exact SQL that will run.
+
+3. **CI deploys.** [`chkit migrate --apply`](/cli/migrate/) runs in the pipeline against each environment. This is the only step that connects, and it applies the reviewed, committed SQL. See [CI/CD integration](/guides/ci-cd/).
+
+Nothing in this loop asks a developer to generate against a live ClickHouse. Doing so would tie a migration's correctness to that instance matching prod; diffing against the committed snapshot removes that dependency.
+
+## Promoting across environments
+
+The same committed migration files flow through every environment: `test`, then `stage`, then `prod`. Each has its own `_chkit_migrations` journal, so `migrate` applies only what an environment is missing and skips what it already has. Promotion is running `chkit migrate --apply` against the next environment with the same commit checked out.
+
+:::caution
+Once a migration is applied, do not edit its `.sql` file. `migrate` checksums every applied file and aborts if one changed since it ran. This catches an already-shipped migration being rewritten instead of superseded by a new one. To change course, add a new migration.
+:::
+
+## Hand-written migrations
+
+A migration does not have to come from `generate`. Because deploy replays committed `.sql` files, `migrate` applies any `.sql` file in the migrations directory that is not yet in the journal, whether chkit wrote it or not. There is no scaffold command for a blank migration, and none is required.
+
+To add custom SQL such as a data seed or a backfill, create a file in `chkit/migrations/` following the `<timestamp>_<name>.sql` naming convention so it orders correctly alongside generated ones:
+
+```sql
+-- chkit/migrations/20260707120000_seed_lookup_data.sql
+INSERT INTO default.regions (id, name) VALUES
+  (1, 'emea'),
+  (2, 'amer'),
+  (3, 'apac');
+```
+
+Run `chkit migrate` and it is picked up like any generated migration, applied in timestamp order and recorded in the journal. A few things carry over from generated migrations:
+
+- **It is immutable once applied.** The checksum gate blocks edits afterward, the same as for generated files.
+- **Destructive statements** (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, …) require `--allow-destructive` in CI, even when hand-written. See [destructive operation safety](/cli/migrate/#destructive-operation-safety).
+- **Large data loads**, such as a multi-minute `INSERT ... SELECT` or a backfill, can be marked `mode=async` so chkit submits the query without blocking on the HTTP response and polls for progress. See [async operations](/cli/migrate/#async-operations-modeasync).
+
+For structural changes that must preserve data, the common pattern is a hand-written migration that creates a new table, runs `INSERT INTO new SELECT ... FROM old`, then swaps names. See the [DSL reference](/schema/dsl-reference/).
+
+## Related pages
+
+- [Tutorial: your first schema](/tutorials/first-schema/) — the same loop, hands-on from an empty folder
+- [`chkit generate`](/cli/generate/) — the offline diff-and-write command in detail
+- [`chkit migrate`](/cli/migrate/) — applying migrations, the journal, checksums, and destructive-operation safety
+- [`chkit pull`](/cli/pull/) — introspect an existing database to seed a project
+- [CI/CD integration](/guides/ci-cd/) — running `generate`, `migrate`, and `check` in a pipeline
+- [Configuration](/configuration/overview/) — `outDir`, `migrationsDir`, and `metaDir`
