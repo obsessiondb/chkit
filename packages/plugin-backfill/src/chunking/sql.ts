@@ -145,6 +145,93 @@ export function rewriteSelectColumns(query: string, targetColumns: string[]): st
   return `${trimmed.slice(0, projectionStart)} ${prefix}${rewritten.join(', ')}\n${trimmed.slice(bounds.fromPos)}`
 }
 
+/**
+ * Extract the primary source table an mv_replay backfill must chunk against —
+ * the table read by the first top-level `FROM` in a materialized view's
+ * `SELECT`. Chunk conditions (`_partition_id`, sort-key ranges) are injected
+ * into that SELECT and run against this source, so its physical metadata is
+ * what sizing must introspect, not the (legitimately empty) target.
+ *
+ * Handles `db.table`, bare `table`, and backtick-quoted identifiers, ignoring a
+ * trailing alias or clause. Returns `undefined` when the `FROM` target is a
+ * subquery, a table function, or otherwise not a plain table reference — the
+ * caller decides how to treat an unresolvable source.
+ */
+export function extractSourceTableRef(
+  query: string,
+): { database?: string; table: string } | undefined {
+  const fromHit = findTopLevelKeywords(query, ['FROM']).find((hit) => hit.keyword === 'FROM')
+  if (!fromHit) return undefined
+
+  const token = readFirstTableToken(query.slice(fromHit.position + 'FROM'.length))
+  if (!token) return undefined
+
+  return parseTableIdentifier(token)
+}
+
+/**
+ * Read the identifier immediately following `FROM`. Stops at the first
+ * whitespace, comma, or closing paren (an alias or trailing clause). Returns
+ * `undefined` for a subquery (`FROM (…)`) or table function (`name(…)`), which
+ * are not plain table references.
+ */
+function readFirstTableToken(text: string): string | undefined {
+  let index = 0
+  while (index < text.length && /\s/.test(text[index] ?? '')) index++
+  if (index >= text.length || text[index] === '(') return undefined
+
+  let token = ''
+  let inBacktick = false
+  for (; index < text.length; index++) {
+    const char = text[index] ?? ''
+    if (char === '`') {
+      inBacktick = !inBacktick
+      token += char
+      continue
+    }
+    if (inBacktick) {
+      token += char
+      continue
+    }
+    if (char === '(') return undefined // table function, e.g. numbers(10)
+    if (/\s/.test(char) || char === ',' || char === ')') break
+    token += char
+  }
+
+  return token.length > 0 ? token : undefined
+}
+
+/** Split a possibly-qualified, possibly-backticked identifier into db/table. */
+function parseTableIdentifier(ref: string): { database?: string; table: string } | undefined {
+  const segments: string[] = []
+  let current = ''
+  let inBacktick = false
+  for (const char of ref) {
+    if (char === '`') {
+      inBacktick = !inBacktick
+      continue
+    }
+    if (char === '.' && !inBacktick) {
+      segments.push(current)
+      current = ''
+      continue
+    }
+    current += char
+  }
+  segments.push(current)
+
+  if (segments.length === 1) {
+    const table = segments[0] ?? ''
+    return table ? { table } : undefined
+  }
+  if (segments.length === 2) {
+    const database = segments[0] ?? ''
+    const table = segments[1] ?? ''
+    return database && table ? { database, table } : undefined
+  }
+  return undefined // db.schema.table or malformed — unsupported
+}
+
 export function injectSortKeyFilter(
   query: string,
   sortKeyColumn: string,
