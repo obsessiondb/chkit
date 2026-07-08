@@ -14,6 +14,7 @@
     "@chkit/plugin-pull": "0.1.1"
   },
   "changesets": [
+    "backfill-mv-replay-empty-target",
     "backfill-replay-all-mvs",
     "backfill-sql-scanner",
     "generate-empty-migration",
