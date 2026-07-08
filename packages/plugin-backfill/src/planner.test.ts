@@ -45,6 +45,75 @@ function createMockQuery(opts: {
   }
 }
 
+/**
+ * A mock that only knows about `sourceTable`: every introspection query scoped
+ * to any other table (e.g. the empty aggregate target) returns no rows. This
+ * lets a test assert that mv_replay planning introspects the MV *source* and
+ * not the target.
+ */
+function createSourceScopedMockQuery(opts: {
+  sourceTable: string
+  partitions?: Array<{
+    partition_id: string
+    total_rows: string
+    total_bytes: string
+    total_uncompressed_bytes?: string
+    min_time: string
+    max_time: string
+  }>
+  sortingKey?: string
+  columnRows?: Array<{ name: string; type: string }>
+}): <T>(sql: string) => Promise<T[]> {
+  const partitions = opts.partitions ?? [
+    {
+      partition_id: '202606',
+      total_rows: '1000',
+      total_bytes: '500000',
+      total_uncompressed_bytes: '1000000',
+      min_time: '2026-06-01 00:00:00',
+      max_time: '2026-06-30 18:00:00',
+    },
+  ]
+  const sortingKey = opts.sortingKey ?? 'id'
+  const columnRows = opts.columnRows ?? [{ name: 'id', type: 'UInt64' }]
+  const table = opts.sourceTable
+
+  return async <T>(sql: string) => {
+    if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }] as T[]
+    if (sql.includes('FROM system.parts')) {
+      return (sql.includes(`table = '${table}'`) ? partitions : []) as T[]
+    }
+    if (sql.includes('FROM system.tables')) {
+      return (sql.includes(`name = '${table}'`) ? [{ sorting_key: sortingKey }] : []) as T[]
+    }
+    if (sql.includes('FROM system.columns')) {
+      return (sql.includes(`table = '${table}'`) ? columnRows : []) as T[]
+    }
+    return [] as T[]
+  }
+}
+
+const MV_REPLAY_SCHEMA = `export const events_target = {
+  kind: 'table',
+  database: 'app',
+  name: 'events_agg',
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'count', type: 'UInt64' },
+  ],
+  engine: 'SummingMergeTree',
+  primaryKey: ['id'],
+  orderBy: ['id'],
+}
+export const events_mv = {
+  kind: 'materialized_view',
+  database: 'app',
+  name: 'events_mv',
+  to: { database: 'app', name: 'events_agg' },
+  as: 'SELECT id, count() AS count FROM app.raw_events GROUP BY id',
+}
+`
+
 describe('@chkit/plugin-backfill planning', () => {
   test('each plan gets a unique random id and canonical chunk plan', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
@@ -365,6 +434,82 @@ export const api_mv = {
       expect(output.plan.execution.requireIdempotencyToken).toBe(false)
       expect(sql).toContain('SETTINGS async_insert=0')
       expect(sql).not.toContain('insert_deduplication_token')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('mv_replay chunks the MV source even when the target aggregate is empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+
+    try {
+      await writeFile(schemaPath, MV_REPLAY_SCHEMA)
+
+      const config = resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' })
+      const opts = PlanSchema.parse({ target: 'app.events_agg' })
+
+      // The target (events_agg) is empty; only the MV source (raw_events) has
+      // partitions. Before the fix this threw "No partitions found for
+      // app.events_agg" because planning introspected the target.
+      const output = await buildBackfillPlan({
+        opts,
+        configPath,
+        config,
+        clickhouseQuery: createSourceScopedMockQuery({ sourceTable: 'raw_events' }),
+      })
+
+      expect(output.plan.execution.mode).toBe('mv_replay')
+      // Chunk plan is sourced from the MV's FROM table, not the target.
+      expect(output.plan.chunkPlan.table.database).toBe('app')
+      expect(output.plan.chunkPlan.table.table).toBe('raw_events')
+      expect(output.plan.chunkPlan.chunks.length).toBeGreaterThan(0)
+
+      const chunk = output.plan.chunkPlan.chunks[0]
+      const sql = chunk
+        ? buildChunkExecutionSql({
+          planId: output.plan.planId,
+          chunk,
+          target: output.plan.target,
+          sourceTarget: output.plan.execution.sourceTarget,
+          table: output.plan.chunkPlan.table,
+          mvReplayQueries: output.plan.execution.mvReplayQueries,
+          targetColumns: output.plan.execution.targetColumns,
+          idempotencyToken: generateIdempotencyToken(output.plan.planId, chunk.id),
+        })
+        : ''
+
+      expect(sql).toContain('INSERT INTO app.events_agg')
+      expect(sql).toContain('FROM app.raw_events')
+      // Chunk conditions reference the source's real partition, not the target.
+      expect(sql).toContain("_partition_id = '202606'")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('mv_replay still fails fast when the MV source itself is empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-plugin-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+
+    try {
+      await writeFile(schemaPath, MV_REPLAY_SCHEMA)
+
+      const config = resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' })
+      const opts = PlanSchema.parse({ target: 'app.events_agg' })
+
+      // No partitions for the source either — the empty-check must still guard,
+      // now pointed at the source rather than the target.
+      await expect(
+        buildBackfillPlan({
+          opts,
+          configPath,
+          config,
+          clickhouseQuery: createSourceScopedMockQuery({ sourceTable: 'raw_events', partitions: [] }),
+        })
+      ).rejects.toThrow('No partitions found for app.raw_events')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

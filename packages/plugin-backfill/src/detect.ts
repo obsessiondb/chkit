@@ -1,5 +1,6 @@
 import type { MaterializedViewDefinition, SchemaDefinition, TableDefinition } from '@chkit/core'
 
+import { extractSourceTableRef } from './chunking/sql.js'
 import './table-config.js'
 import type { TimeColumnCandidate } from './types.js'
 
@@ -38,6 +39,35 @@ export function findMvsForTarget(
       def.to.database === database &&
       def.to.name === table
   )
+}
+
+/**
+ * Resolve the single source table an mv_replay backfill should size its chunks
+ * against — the table the materialized views read `FROM`. The injected chunk
+ * conditions (`_partition_id`, sort-key ranges) run against that source, so the
+ * chunk planner must introspect it rather than the target, which is
+ * legitimately empty while a fresh aggregate is being bootstrapped.
+ *
+ * An unqualified `FROM` table defaults to the view's own database, matching
+ * ClickHouse name resolution. Returns `undefined` when a source can't be
+ * resolved to a single shared table — either a `FROM` we can't parse, or MVs
+ * fanning in from different sources (which one chunk plan can't drive) — so the
+ * caller falls back to introspecting the target, preserving multi-source replay.
+ */
+export function resolveMvReplaySource(
+  mvs: MaterializedViewDefinition[]
+): { database: string; table: string } | undefined {
+  const sources = new Map<string, { database: string; table: string }>()
+
+  for (const mv of mvs) {
+    const ref = extractSourceTableRef(mv.as)
+    if (!ref) return undefined
+    const database = ref.database ?? mv.database
+    sources.set(`${database}.${ref.table}`, { database, table: ref.table })
+  }
+
+  const distinct = [...sources.values()]
+  return distinct.length === 1 ? distinct[0] : undefined
 }
 
 export function findTableForTarget(
