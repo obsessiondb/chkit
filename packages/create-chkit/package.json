@@ -1,6 +1,6 @@
 {
   "name": "create-chkit",
-  "version": "0.1.2-beta.2",
+  "version": "0.1.2-beta.4",
   "description": "Scaffold a new chkit project from an example",
   "license": "MIT",
   "author": "ObsessionDB",

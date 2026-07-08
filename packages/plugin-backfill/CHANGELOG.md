@@ -1,5 +1,31 @@
 # @chkit/plugin-backfill
 
+## 0.1.2-beta.4
+
+### Patch Changes
+
+- f85f568: Fix `mv_replay` backfill of a from-scratch empty aggregate target. Chunk planning now sizes chunks against the materialized view's source table (the one it reads `FROM`) instead of the target, so bootstrapping an empty rollup no longer fails with "No partitions found for &lt;target&gt;". The empty-check still guards the source, and multi-view fan-in from different sources keeps its existing behaviour.
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 9ad23f9: Refactor the backfill chunk-SQL rewriter (`chunking/sql.ts`): fold the duplicated quote/paren-aware scan loops into one shared `scanSqlTokens` primitive (with `findTopLevelKeywords`/`splitTopLevel` on top) and split the oversized `rewriteSelectColumns` into focused helpers. Behavior is unchanged — the same customer SQL rewriting is now covered by direct unit tests for quoted-string, escaped-quote, nested-subquery, and missing-FROM edge cases.
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.4
+  - @chkit/clickhouse@0.1.2-beta.4
+
+## 0.1.2-beta.3
+
+### Patch Changes
+
+- f85f568: Fix `mv_replay` backfill of a from-scratch empty aggregate target. Chunk planning now sizes chunks against the materialized view's source table (the one it reads `FROM`) instead of the target, so bootstrapping an empty rollup no longer fails with "No partitions found for &lt;target&gt;". The empty-check still guards the source, and multi-view fan-in from different sources keeps its existing behaviour.
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 9ad23f9: Refactor the backfill chunk-SQL rewriter (`chunking/sql.ts`): fold the duplicated quote/paren-aware scan loops into one shared `scanSqlTokens` primitive (with `findTopLevelKeywords`/`splitTopLevel` on top) and split the oversized `rewriteSelectColumns` into focused helpers. Behavior is unchanged — the same customer SQL rewriting is now covered by direct unit tests for quoted-string, escaped-quote, nested-subquery, and missing-FROM edge cases.
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.3
+  - @chkit/clickhouse@0.1.2-beta.3
+
 ## 0.1.2-beta.2
 
 ### Patch Changes
