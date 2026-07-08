@@ -100,7 +100,7 @@ The plugin supports two strategies for backfilling data, chosen automatically ba
 
 **Table backfill** (`table` strategy): For direct table targets, inserts data by selecting from the same table within the time window. This is the most common case.
 
-**Materialized view replay** (`mv_replay` strategy): When the target is the `to` table of one or more materialized views, the plugin replays each view's aggregation query over every chunk window, re-materializing the aggregation for that window and ensuring correctness for aggregate backfills. A target fed by several materialized views replays them all in a single `INSERT … SELECT … UNION ALL …` per chunk, so no view's rows are missed. Requires `requireIdempotencyToken: true` for safe resumable retries.
+**Materialized view replay** (`mv_replay` strategy): When the target is the `to` table of one or more materialized views, the plugin replays each view's aggregation query over every chunk window, re-materializing the aggregation for that window and ensuring correctness for aggregate backfills. A target fed by several materialized views replays them all in a single `INSERT … SELECT … UNION ALL …` per chunk, so no view's rows are missed. Because the chunks are sized from the view's **source** table (the one it reads `FROM`) rather than the target, a from-scratch **empty** aggregate target is fine — it's the case being bootstrapped. Requires `requireIdempotencyToken: true` for safe resumable retries.
 
 ## Time column resolution
 

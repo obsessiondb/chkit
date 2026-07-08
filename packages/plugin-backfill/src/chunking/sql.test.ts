@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  extractSourceTableRef,
   findTopLevelKeywords,
   injectSortKeyFilter,
   rewriteSelectColumns,
@@ -139,6 +140,62 @@ describe('rewriteSelectColumns', () => {
   test('preserves a leading DISTINCT', () => {
     const rewritten = rewriteSelectColumns('SELECT DISTINCT a AS x, b AS y FROM t', ['y', 'x'])
     expect(rewritten).toContain('SELECT DISTINCT b AS y, a AS x')
+  })
+})
+
+describe('extractSourceTableRef', () => {
+  test('extracts a qualified database.table', () => {
+    expect(extractSourceTableRef('SELECT * FROM solana.raw_token_transfers')).toEqual({
+      database: 'solana',
+      table: 'raw_token_transfers',
+    })
+  })
+
+  test('stops at a trailing clause', () => {
+    expect(
+      extractSourceTableRef('SELECT a, count() AS c FROM app.events GROUP BY a ORDER BY c'),
+    ).toEqual({ database: 'app', table: 'events' })
+  })
+
+  test('ignores a table alias', () => {
+    expect(extractSourceTableRef('SELECT * FROM app.events AS e WHERE e.x = 1')).toEqual({
+      database: 'app',
+      table: 'events',
+    })
+    expect(extractSourceTableRef('SELECT * FROM app.events e')).toEqual({
+      database: 'app',
+      table: 'events',
+    })
+  })
+
+  test('returns a bare table with no database', () => {
+    expect(extractSourceTableRef('SELECT count() FROM raw_events')).toEqual({ table: 'raw_events' })
+  })
+
+  test('strips backtick-quoted identifiers', () => {
+    expect(extractSourceTableRef('SELECT * FROM `app`.`events`')).toEqual({
+      database: 'app',
+      table: 'events',
+    })
+  })
+
+  test('ignores a FROM keyword hiding inside a string literal', () => {
+    expect(extractSourceTableRef("SELECT 'FROM sneaky' AS note FROM app.events")).toEqual({
+      database: 'app',
+      table: 'events',
+    })
+  })
+
+  test('returns undefined for a subquery source', () => {
+    expect(extractSourceTableRef('SELECT * FROM (SELECT * FROM app.events) AS s')).toBeUndefined()
+  })
+
+  test('returns undefined for a table-function source', () => {
+    expect(extractSourceTableRef('SELECT * FROM numbers(10)')).toBeUndefined()
+  })
+
+  test('returns undefined when there is no FROM', () => {
+    expect(extractSourceTableRef('SELECT 1')).toBeUndefined()
   })
 })
 
