@@ -1,6 +1,7 @@
 import {
   canonicalizeDefinitions,
   type ColumnDefinition,
+  type DictionaryDefinition,
   type MaterializedViewDefinition,
   type TableDefinition,
   type ViewDefinition,
@@ -230,17 +231,18 @@ export function mapColumnType(
   return { tsType, zodType: resolved.zodType, nullable }
 }
 
-function renderTableInterface(
-  table: TableDefinition,
+function renderFieldsInterface(
+  fields: ColumnDefinition[],
   interfaceName: string,
+  pathPrefix: string,
   options: Required<CodegenPluginOptions>
 ): { lines: string[]; findings: CodegenFinding[] } {
   const lines: string[] = [`export type ${interfaceName} = {`]
   const findings: CodegenFinding[] = []
   const zodFields: string[] = []
 
-  for (const column of table.columns) {
-    const path = `${table.database}.${table.name}.${column.name}`
+  for (const column of fields) {
+    const path = `${pathPrefix}.${column.name}`
     const mapped = mapColumnType({ column, path }, options)
     if (mapped.finding) findings.push(mapped.finding)
     lines.push(`  ${renderPropertyName(column.name)}: ${mapped.tsType}`)
@@ -259,6 +261,31 @@ function renderTableInterface(
     lines.push(`export type ${interfaceName}Output = z.output<typeof ${interfaceName}Schema>`)
   }
   return { lines, findings }
+}
+
+function renderTableInterface(
+  table: TableDefinition,
+  interfaceName: string,
+  options: Required<CodegenPluginOptions>
+): { lines: string[]; findings: CodegenFinding[] } {
+  return renderFieldsInterface(table.columns, interfaceName, `${table.database}.${table.name}`, options)
+}
+
+function renderDictionaryInterface(
+  definition: DictionaryDefinition,
+  interfaceName: string,
+  options: Required<CodegenPluginOptions>
+): { lines: string[]; findings: CodegenFinding[] } {
+  const fields: ColumnDefinition[] = definition.attributes.map((attribute) => ({
+    name: attribute.name,
+    type: attribute.type,
+  }))
+  return renderFieldsInterface(
+    fields,
+    interfaceName,
+    `${definition.database}.${definition.name}`,
+    options
+  )
 }
 
 function renderViewInterface(
@@ -284,11 +311,15 @@ export function generateTypeArtifacts(
   const normalized = normalizeCodegenOptions(input.options)
   const definitions = canonicalizeDefinitions(input.definitions)
   const sortedDefinitions = definitions
-    .filter((definition): definition is TableDefinition | ViewDefinition | MaterializedViewDefinition => {
-      if (definition.kind === 'table') return true
-      if (!normalized.includeViews) return false
-      return definition.kind === 'view' || definition.kind === 'materialized_view'
-    })
+    .filter(
+      (
+        definition
+      ): definition is TableDefinition | ViewDefinition | MaterializedViewDefinition | DictionaryDefinition => {
+        if (definition.kind === 'table' || definition.kind === 'dictionary') return true
+        if (!normalized.includeViews) return false
+        return definition.kind === 'view' || definition.kind === 'materialized_view'
+      }
+    )
     .sort((a, b) => {
       if (a.database !== b.database) return a.database.localeCompare(b.database)
       return a.name.localeCompare(b.name)
@@ -302,7 +333,9 @@ export function generateTypeArtifacts(
     const rendered =
       entry.definition.kind === 'table'
         ? renderTableInterface(entry.definition, entry.interfaceName, normalized)
-        : renderViewInterface(entry.definition, entry.interfaceName)
+        : entry.definition.kind === 'dictionary'
+          ? renderDictionaryInterface(entry.definition, entry.interfaceName, normalized)
+          : renderViewInterface(entry.definition, entry.interfaceName)
     findings.push(...rendered.findings)
     bodyLines.push(...rendered.lines)
     bodyLines.push('')

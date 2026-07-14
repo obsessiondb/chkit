@@ -1,4 +1,9 @@
-import type { MaterializedViewDefinition, TableDefinition, ViewDefinition } from '@chkit/core'
+import type {
+  DictionaryDefinition,
+  MaterializedViewDefinition,
+  TableDefinition,
+  ViewDefinition,
+} from '@chkit/core'
 
 import type { CodegenPluginOptions, ResolvedTableName } from './types.js'
 
@@ -39,7 +44,10 @@ export function renderPropertyName(name: string): string {
 }
 
 function baseRowTypeName(
-  definition: Pick<TableDefinition | ViewDefinition | MaterializedViewDefinition, 'database' | 'name'>,
+  definition: Pick<
+    TableDefinition | ViewDefinition | MaterializedViewDefinition | DictionaryDefinition,
+    'database' | 'name'
+  >,
   style: Required<CodegenPluginOptions>['tableNameStyle']
 ): string {
   const combined = `${definition.database}_${definition.name}`
@@ -54,7 +62,7 @@ function baseRowTypeName(
 }
 
 export function resolveTableNames(
-  definitions: Array<TableDefinition | ViewDefinition | MaterializedViewDefinition>,
+  definitions: Array<TableDefinition | ViewDefinition | MaterializedViewDefinition | DictionaryDefinition>,
   style: Required<CodegenPluginOptions>['tableNameStyle']
 ): ResolvedTableName[] {
   const baseNames = definitions.map((definition) => ({
