@@ -1,6 +1,6 @@
 ---
 title: Pull Plugin
-description: Introspect live ClickHouse tables, views, and materialized views and generate chkit schema files.
+description: Introspect live ClickHouse tables, views, materialized views, and dictionaries and generate chkit schema files.
 sidebar:
   order: 3
 ---
@@ -11,6 +11,7 @@ This document covers practical usage of the optional `pull` plugin.
 
 - Connects to a live ClickHouse instance and introspects table metadata (columns, engines, indexes, projections, partitioning, TTL, settings).
 - Introspects views and materialized views (including `TO` clause parsing).
+- Introspects dictionaries (attributes, primary key, `SOURCE`/`LAYOUT`/`LIFETIME`), preserving ClickHouse's `[HIDDEN]` password redaction — see [Credential handling](#credential-handling-hidden-passwords).
 - Generates a deterministic TypeScript schema file using `@chkit/core` builders.
 - Supports filtering by database and dry-run previews.
 
@@ -106,7 +107,39 @@ export default schema(app_events, app_events_view, app_events_mv)
 
 Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projections` when present in the source metadata.
 
+## Credential handling (`[HIDDEN]` passwords)
+
+ClickHouse redacts inline `SOURCE(...)` passwords to `[HIDDEN]` on introspection (`system.tables.create_table_query`, `SHOW CREATE DICTIONARY`) and does not offer a way to recover the original value via `pull` — chkit does not attempt `format_display_secrets_in_show_and_select`. When a pulled dictionary's `source` contains `[HIDDEN]`, the generated file emits it verbatim with a leading comment:
+
+```ts
+// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X).
+const default_users_dict = dictionary({
+  database: "default",
+  name: "users_dict",
+  attributes: [
+    { name: "id", type: "UInt64" },
+    { name: "name", type: "String" },
+  ],
+  primaryKey: ["id"],
+  source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+  layout: "HASHED()",
+  lifetime: "300",
+})
+```
+
+Replace `[HIDDEN]` with a real credential — typically an environment-variable interpolation, matching how you'd author the dictionary by hand (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)):
+
+```ts
+source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_PASSWORD}' db 'app' table 'users')`,
+```
+
+For round-trip fidelity without a manual edit, use [named collections](https://clickhouse.com/docs/operations/named-collections) on the ClickHouse side instead of an inline password — chkit does not require this, but it's the ClickHouse-native way to avoid the redaction entirely.
+
+Because chkit masks the `password '...'` token before comparing `source` for drift, a live `[HIDDEN]` value is never reported as perpetual drift against your real secret once you've filled it in.
+
 ## Current limits
 
 - Materialized views without a `TO` clause are skipped.
+- Dictionaries whose `create_table_query` can't be parsed (attributes, primary key, or `SOURCE`/`LAYOUT`/`LIFETIME` missing) are skipped.
+- XML-config dictionaries (not created via DDL) are not introspected.
 - Requires a live ClickHouse connection.
