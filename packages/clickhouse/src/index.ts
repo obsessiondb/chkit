@@ -92,7 +92,7 @@ export interface ClickHouseExecutor {
 }
 
 export interface SchemaObjectRef {
-	kind: 'table' | 'view' | 'materialized_view'
+	kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
 	database: string
 	name: string
 }
@@ -159,13 +159,23 @@ export {
 	parseTTLFromCreateTableQuery,
 	parseUniqueKeyFromCreateTableQuery,
 } from './create-table-parser.js'
+export {
+	parseCommentFromCreateDictionaryQuery,
+	parseDictionaryAttributesFromCreateDictionaryQuery,
+	parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+	parseLayoutFromCreateDictionaryQuery,
+	parseLifetimeFromCreateDictionaryQuery,
+	parseSourceFromCreateDictionaryQuery,
+	type ParsedDictionaryAttribute,
+} from './create-dictionary-parser.js'
 
 export function inferSchemaKindFromEngine(
 	engine: string,
 ): SchemaObjectRef['kind'] | null {
 	if (engine === 'View') return 'view'
 	if (engine === 'MaterializedView') return 'materialized_view'
-	if (!engine || engine === 'Dictionary') return null
+	if (engine === 'Dictionary') return 'dictionary'
+	if (!engine) return null
 	return 'table'
 }
 
@@ -468,6 +478,7 @@ export function assertStreamedQuerySucceeded(input: {
 export {
 	waitForColumn,
 	waitForDDLPropagation,
+	waitForDictionary,
 	waitForTable,
 	waitForTableAbsent,
 	waitForView,

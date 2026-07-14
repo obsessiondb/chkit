@@ -10,12 +10,18 @@ import {
   createStatelessClickHouseClient,
   formatConnectionError,
   inferSchemaKindFromEngine,
+  parseCommentFromCreateDictionaryQuery,
+  parseDictionaryAttributesFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
   parseEngineFromCreateTableQuery,
+  parseLayoutFromCreateDictionaryQuery,
+  parseLifetimeFromCreateDictionaryQuery,
   parseOrderByFromCreateTableQuery,
   parsePartitionByFromCreateTableQuery,
   parsePrimaryKeyFromCreateTableQuery,
   parseProjectionsFromCreateTableQuery,
   parseSettingsFromCreateTableQuery,
+  parseSourceFromCreateDictionaryQuery,
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
 } from './index'
@@ -158,7 +164,7 @@ describe('@chkit/clickhouse smoke', () => {
     expect(inferSchemaKindFromEngine('MergeTree')).toBe('table')
     expect(inferSchemaKindFromEngine('View')).toBe('view')
     expect(inferSchemaKindFromEngine('MaterializedView')).toBe('materialized_view')
-    expect(inferSchemaKindFromEngine('Dictionary')).toBeNull()
+    expect(inferSchemaKindFromEngine('Dictionary')).toBe('dictionary')
   })
 
   test('parses settings and ttl from create table query', () => {
@@ -484,5 +490,67 @@ describe('formatConnectionError', () => {
 
   test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
     expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
+  })
+})
+
+describe('create-dictionary-parser', () => {
+  const query = `CREATE DICTIONARY default.users_dict
+(
+  \`id\` UInt64,
+  \`name\` String,
+  \`email\` String DEFAULT '',
+  \`parent_id\` UInt64 HIERARCHICAL
+)
+PRIMARY KEY id
+SOURCE(MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users'))
+LAYOUT(HASHED())
+LIFETIME(MIN 0 MAX 300)
+COMMENT 'User lookup dictionary'`
+
+  test('parses attributes including defaults and modifiers', () => {
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(query)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      { name: 'name', type: 'String' },
+      { name: 'email', type: 'String', default: '' },
+      { name: 'parent_id', type: 'UInt64', hierarchical: true },
+    ])
+  })
+
+  test('parses primary key', () => {
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)).toEqual(['id'])
+  })
+
+  test('parses source, layout, lifetime, comment', () => {
+    expect(parseSourceFromCreateDictionaryQuery(query)).toBe(
+      "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')"
+    )
+    expect(parseLayoutFromCreateDictionaryQuery(query)).toBe('HASHED()')
+    expect(parseLifetimeFromCreateDictionaryQuery(query)).toBe('MIN 0 MAX 300')
+    expect(parseCommentFromCreateDictionaryQuery(query)).toBe('User lookup dictionary')
+  })
+
+  test('returns empty results for undefined query', () => {
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(undefined)).toEqual([])
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(undefined)).toEqual([])
+    expect(parseSourceFromCreateDictionaryQuery(undefined)).toBeUndefined()
+  })
+
+  test('parses a composite primary key and an expression attribute', () => {
+    const compositeQuery = `CREATE DICTIONARY default.pairs_dict
+(
+  \`a\` String,
+  \`b\` String,
+  \`full_name\` String EXPRESSION concat(a, ' ', b)
+)
+PRIMARY KEY a, b
+SOURCE(HTTP(url 'http://example.com/pairs' format 'TSV'))
+LAYOUT(COMPLEX_KEY_HASHED())
+LIFETIME(300)`
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(compositeQuery)).toEqual(['a', 'b'])
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(compositeQuery)).toEqual([
+      { name: 'a', type: 'String' },
+      { name: 'b', type: 'String' },
+      { name: 'full_name', type: 'String', expression: "concat(a, ' ', b)" },
+    ])
   })
 })

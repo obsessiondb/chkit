@@ -259,6 +259,42 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).toContain('export default schema(app_events_view, app_events_mv)')
   })
 
+  test('renders a dictionary definition with a hidden-secret note', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'dictionary',
+        database: 'app',
+        name: 'users_dict',
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String' },
+          { name: 'email', type: 'String', default: '' },
+        ],
+        primaryKey: ['id'],
+        source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+        layout: 'HASHED()',
+        lifetime: '300',
+        comment: 'User lookup dictionary',
+      },
+    ])
+
+    expect(content).toContain("import { schema, dictionary } from '@chkit/core'")
+    expect(content).toContain(
+      "// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X)."
+    )
+    expect(content).toContain('const app_users_dict = dictionary({')
+    expect(content).toContain('{ name: "id", type: "UInt64" }')
+    expect(content).toContain('{ name: "email", type: "String", default: "" }')
+    expect(content).toContain('primaryKey: ["id"]')
+    expect(content).toContain(
+      'source: "MYSQL(host \'db\' port 3306 user \'reader\' password \'[HIDDEN]\' db \'app\' table \'users\')"'
+    )
+    expect(content).toContain('layout: "HASHED()"')
+    expect(content).toContain('lifetime: "300"')
+    expect(content).toContain('comment: "User lookup dictionary"')
+    expect(content).toContain('export default schema(app_users_dict)')
+  })
+
   test('renders refreshable materialized view with full refresh block', () => {
     const content = renderSchemaFile([
       {
@@ -632,6 +668,46 @@ AS SELECT today() AS day, toUInt64(1) AS total`
       as: 'SELECT 1',
       refresh: { every: '1 HOUR', append: true },
     })
+  })
+
+  test('mapSystemTableRowToDefinition parses a dictionary row', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'users_dict',
+      engine: 'Dictionary',
+      create_table_query: `CREATE DICTIONARY app.users_dict
+(
+  \`id\` UInt64,
+  \`name\` String
+)
+PRIMARY KEY id
+SOURCE(MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users'))
+LAYOUT(HASHED())
+LIFETIME(MIN 0 MAX 300)`,
+    })
+    expect(definition).toEqual({
+      kind: 'dictionary',
+      database: 'app',
+      name: 'users_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+      layout: 'HASHED()',
+      lifetime: 'MIN 0 MAX 300',
+    })
+  })
+
+  test('mapSystemTableRowToDefinition returns null for a dictionary with an unparsable query', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'broken_dict',
+      engine: 'Dictionary',
+      create_table_query: '',
+    })
+    expect(definition).toBeNull()
   })
 })
 

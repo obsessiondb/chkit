@@ -1,5 +1,15 @@
-import { inferSchemaKindFromEngine, type IntrospectedTable } from '@chkit/clickhouse'
+import {
+  inferSchemaKindFromEngine,
+  parseCommentFromCreateDictionaryQuery,
+  parseDictionaryAttributesFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseLayoutFromCreateDictionaryQuery,
+  parseLifetimeFromCreateDictionaryQuery,
+  parseSourceFromCreateDictionaryQuery,
+  type IntrospectedTable,
+} from '@chkit/clickhouse'
 import type {
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   ViewDefinition,
@@ -19,7 +29,37 @@ export type IntrospectedObject =
       MaterializedViewDefinition,
       'database' | 'name' | 'to' | 'as' | 'refresh'
     >)
+  | ({ kind: 'dictionary' } & Pick<
+      DictionaryDefinition,
+      'database' | 'name' | 'attributes' | 'primaryKey' | 'source' | 'layout' | 'lifetime' | 'comment'
+    >)
   | IntrospectedTable
+
+function mapDictionaryRowToDefinition(
+  row: SystemTableRow
+): Extract<IntrospectedObject, { kind: 'dictionary' }> | null {
+  const query = row.create_table_query
+  const attributes = parseDictionaryAttributesFromCreateDictionaryQuery(query)
+  const primaryKey = parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)
+  const source = parseSourceFromCreateDictionaryQuery(query)
+  const layout = parseLayoutFromCreateDictionaryQuery(query)
+  const lifetime = parseLifetimeFromCreateDictionaryQuery(query)
+  if (attributes.length === 0 || primaryKey.length === 0 || !source || !layout || !lifetime) {
+    return null
+  }
+  const comment = parseCommentFromCreateDictionaryQuery(query)
+  return {
+    kind: 'dictionary',
+    database: row.database,
+    name: row.name,
+    attributes,
+    primaryKey,
+    source,
+    layout,
+    lifetime,
+    ...(comment ? { comment } : {}),
+  }
+}
 
 export function mapSystemTableRowToDefinition(
   row: SystemTableRow
@@ -37,6 +77,9 @@ export function mapSystemTableRowToDefinition(
     const refresh = parseRefreshClause(row.create_table_query)
     const base = { kind: 'materialized_view' as const, database: row.database, name: row.name, to, as }
     return refresh ? { ...base, refresh } : base
+  }
+  if (kind === 'dictionary') {
+    return mapDictionaryRowToDefinition(row)
   }
   return null
 }

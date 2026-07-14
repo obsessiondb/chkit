@@ -270,7 +270,11 @@ async function pullSchema(input: {
   }
 
   const outFile = resolve(process.cwd(), input.options.outFile)
-  let objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }> = []
+  let objects: Array<{
+    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+    database: string
+    name: string
+  }> = []
   let selectedDatabases = input.options.databases
 
   if (db && (!customIntrospector || selectedDatabases.length === 0)) {
@@ -346,6 +350,19 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
         as: introspected.as,
       }
     }
+    if (introspected.kind === 'dictionary') {
+      return {
+        kind: 'dictionary',
+        database: introspected.database,
+        name: introspected.name,
+        attributes: introspected.attributes,
+        primaryKey: introspected.primaryKey,
+        source: introspected.source,
+        layout: introspected.layout,
+        lifetime: introspected.lifetime,
+        ...(introspected.comment ? { comment: introspected.comment } : {}),
+      }
+    }
     return {
       kind: 'materialized_view',
       database: introspected.database,
@@ -367,7 +384,11 @@ function normalizeDefault(value: TableDefinition['columns'][number]['default']):
 }
 
 function summarizeSkippedObjects(
-  objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }>,
+  objects: Array<{
+    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+    database: string
+    name: string
+  }>,
   definitions: SchemaDefinition[],
   selectedDatabases: string[]
 ): Array<{ kind: string; count: number }> {
@@ -423,7 +444,7 @@ async function listNonTableRows(
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})
-  AND engine IN ('View', 'MaterializedView')`
+  AND engine IN ('View', 'MaterializedView', 'Dictionary')`
   )
 }
 

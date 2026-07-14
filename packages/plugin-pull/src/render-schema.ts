@@ -4,6 +4,8 @@ import {
   type ColumnCodec,
   type ColumnCodecSpec,
   type ColumnDefinition,
+  type DictionaryAttribute,
+  type DictionaryDefinition,
   type MaterializedViewDefinition,
   type MaterializedViewRefresh,
   type ProjectionDefinition,
@@ -40,6 +42,7 @@ function renderImportStatement(canonical: SchemaDefinition[]): string {
   const hasTable = canonical.some((definition) => definition.kind === 'table')
   const hasView = canonical.some((definition) => definition.kind === 'view')
   const hasMaterializedView = canonical.some((definition) => definition.kind === 'materialized_view')
+  const hasDictionary = canonical.some((definition) => definition.kind === 'dictionary')
   const hasRawCodec = canonical.some(
     (definition) =>
       definition.kind === 'table' &&
@@ -49,6 +52,7 @@ function renderImportStatement(canonical: SchemaDefinition[]): string {
   if (hasTable) imports.push('table')
   if (hasView) imports.push('view')
   if (hasMaterializedView) imports.push('materializedView')
+  if (hasDictionary) imports.push('dictionary')
   if (hasRawCodec) imports.push('codec')
   return `import { ${imports.join(', ')} } from '@chkit/core'`
 }
@@ -59,6 +63,8 @@ function renderDefinition(definition: SchemaDefinition, variableName: string): s
       return renderTableDefinition(definition, variableName)
     case 'view':
       return renderViewDefinition(definition, variableName)
+    case 'dictionary':
+      return renderDictionaryDefinition(definition, variableName)
     default:
       return renderMaterializedViewDefinition(definition, variableName)
   }
@@ -115,6 +121,44 @@ function renderMaterializedViewDefinition(
   lines.push(`  as: ${renderString(definition.as)},`)
   lines.push('})')
   return lines
+}
+
+const HIDDEN_SECRET_NOTE =
+  "// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X)."
+
+function renderDictionaryDefinition(definition: DictionaryDefinition, variableName: string): string[] {
+  const lines: string[] = []
+  if (definition.source.includes('[HIDDEN]')) {
+    lines.push(HIDDEN_SECRET_NOTE)
+  }
+  lines.push(...renderDeclarationHeader('dictionary', variableName, definition.database, definition.name))
+  lines.push('  attributes: [')
+  for (const attribute of definition.attributes) {
+    lines.push(`    ${renderDictionaryAttribute(attribute)},`)
+  }
+  lines.push('  ],')
+  lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
+  lines.push(`  source: ${renderString(definition.source)},`)
+  lines.push(`  layout: ${renderString(definition.layout)},`)
+  lines.push(`  lifetime: ${renderString(definition.lifetime)},`)
+  if (definition.comment) {
+    lines.push(`  comment: ${renderString(definition.comment)},`)
+  }
+  lines.push('})')
+  return lines
+}
+
+function renderDictionaryAttribute(attribute: DictionaryAttribute): string {
+  const parts: string[] = [`name: ${renderString(attribute.name)}`, `type: ${renderString(attribute.type)}`]
+  if (attribute.expression !== undefined) {
+    parts.push(`expression: ${renderString(attribute.expression)}`)
+  } else if (attribute.default !== undefined) {
+    parts.push(`default: ${renderLiteral(attribute.default)}`)
+  }
+  if (attribute.hierarchical) parts.push('hierarchical: true')
+  if (attribute.injective) parts.push('injective: true')
+  if (attribute.isObjectId) parts.push('isObjectId: true')
+  return `{ ${parts.join(', ')} }`
 }
 
 function renderDeclarationHeader(
