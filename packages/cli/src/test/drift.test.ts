@@ -23,6 +23,35 @@ describe('@chkit/cli drift comparer', () => {
     )
   })
 
+  test('treats a dictionary like other non-table kinds for existence drift', () => {
+    const result = compareSchemaObjects(
+      [{ kind: 'dictionary', database: 'app', name: 'users_dict' }],
+      []
+    )
+
+    expect(result.missing).toEqual(['dictionary:app.users_dict'])
+    expect(result.objectDrift).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'missing_object',
+          object: 'dictionary:app.users_dict',
+          expectedKind: 'dictionary',
+        }),
+      ])
+    )
+  })
+
+  test('no drift when a dictionary exists on both sides', () => {
+    const result = compareSchemaObjects(
+      [{ kind: 'dictionary', database: 'app', name: 'users_dict' }],
+      [{ kind: 'dictionary', database: 'app', name: 'users_dict' }]
+    )
+
+    expect(result.missing).toHaveLength(0)
+    expect(result.extra).toHaveLength(0)
+    expect(result.objectDrift).toHaveLength(0)
+  })
+
   test('emits object-level drift reason codes', () => {
     const result = compareSchemaObjects(
       [
