@@ -156,7 +156,39 @@ export interface MaterializedViewDefinition {
   comment?: string
 }
 
-export type SchemaDefinition = TableDefinition | ViewDefinition | MaterializedViewDefinition
+export interface DictionaryAttribute {
+  name: string
+  type: PrimitiveColumnType | string
+  /** DEFAULT / null_value for missing keys. */
+  default?: string | number | boolean
+  /** EXPRESSION — computed from source columns. Mutually exclusive with default. */
+  expression?: string
+  hierarchical?: boolean
+  injective?: boolean
+  isObjectId?: boolean
+}
+
+export interface DictionaryDefinition {
+  kind: 'dictionary'
+  database: string
+  name: string
+  renamedFrom?: { database?: string; name: string }
+  attributes: DictionaryAttribute[]
+  primaryKey: string[]
+  /** Raw SOURCE(...) body, e.g. `MYSQL(host '...' password '${env}' ...)`. */
+  source: string
+  /** Raw LAYOUT(...) body, e.g. `HASHED()` / `COMPLEX_KEY_HASHED()`. */
+  layout: string
+  /** Raw LIFETIME(...) body, e.g. `300` / `MIN 300 MAX 360`. */
+  lifetime: string
+  comment?: string
+}
+
+export type SchemaDefinition =
+  | TableDefinition
+  | ViewDefinition
+  | MaterializedViewDefinition
+  | DictionaryDefinition
 
 export interface ChxCheckConfig {
   failOnPending?: boolean
@@ -278,6 +310,8 @@ export type MigrationOperationType =
   | 'alter_table_drop_projection'
   | 'alter_table_reset_setting'
   | 'alter_table_modify_ttl'
+  | 'create_dictionary'
+  | 'drop_dictionary'
 
 export interface MigrationOperation {
   type: MigrationOperationType
@@ -320,6 +354,12 @@ export type ValidationIssueCode =
   | 'codec_chain_must_end_with_general'
   | 'codec_chain_multiple_general'
   | 'codec_chain_empty'
+  | 'dictionary_missing_primary_key'
+  | 'dictionary_primary_key_missing_attribute'
+  | 'dictionary_missing_source'
+  | 'dictionary_missing_layout'
+  | 'dictionary_missing_lifetime'
+  | 'dictionary_attribute_default_expression_exclusive'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

@@ -10,7 +10,7 @@ export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'
 export { splitTopLevelComma } from './key-clause.js'
 export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
-export { toCreateSQL } from './sql.js'
+export { renderDictionarySQL, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

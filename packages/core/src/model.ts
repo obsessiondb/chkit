@@ -5,6 +5,7 @@ import type {
   ChxConfigInput,
   ChxResolvedConfig,
   ChxUserConfig,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   SchemaDefinition,
   TableDefinition,
@@ -96,6 +97,12 @@ export function materializedView(
   return { ...input, kind: 'materialized_view' }
 }
 
+export function dictionary(
+  input: Omit<DictionaryDefinition, 'kind'>
+): DictionaryDefinition {
+  return { ...input, kind: 'dictionary' }
+}
+
 export function schema(...definitions: SchemaDefinition[]): SchemaDefinition[] {
   return definitions
 }
@@ -103,5 +110,7 @@ export function schema(...definitions: SchemaDefinition[]): SchemaDefinition[] {
 export function isSchemaDefinition(value: unknown): value is SchemaDefinition {
   if (!value || typeof value !== 'object') return false
   const kind = (value as { kind?: string }).kind
-  return kind === 'table' || kind === 'view' || kind === 'materialized_view'
+  return (
+    kind === 'table' || kind === 'view' || kind === 'materialized_view' || kind === 'dictionary'
+  )
 }

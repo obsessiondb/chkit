@@ -3,6 +3,7 @@ import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import type {
   ColumnDefinition,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   SchemaDefinition,
@@ -222,6 +223,80 @@ function validateMaterializedViewDefinition(
   }
 }
 
+function validateDictionaryDefinition(def: DictionaryDefinition, issues: ValidationIssue[]): void {
+  const attributeSeen = new Set<string>()
+  const attributeSet = new Set<string>()
+  for (const attribute of def.attributes) {
+    if (attributeSeen.has(attribute.name)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'duplicate_column_name',
+        `Dictionary ${def.database}.${def.name} has duplicate attribute name "${attribute.name}"`
+      )
+      continue
+    }
+    attributeSeen.add(attribute.name)
+    attributeSet.add(attribute.name)
+
+    if (attribute.default !== undefined && attribute.expression !== undefined) {
+      pushValidationIssue(
+        issues,
+        def,
+        'dictionary_attribute_default_expression_exclusive',
+        `Dictionary ${def.database}.${def.name} attribute "${attribute.name}" sets both "default" and "expression"; choose one`
+      )
+    }
+  }
+
+  if (def.primaryKey.length === 0) {
+    pushValidationIssue(
+      issues,
+      def,
+      'dictionary_missing_primary_key',
+      `Dictionary ${def.database}.${def.name} requires a non-empty primaryKey`
+    )
+  } else {
+    for (const column of def.primaryKey) {
+      if (!attributeSet.has(column)) {
+        pushValidationIssue(
+          issues,
+          def,
+          'dictionary_primary_key_missing_attribute',
+          `Dictionary ${def.database}.${def.name} primaryKey references missing attribute "${column}"`
+        )
+      }
+    }
+  }
+
+  if (def.source.trim().length === 0) {
+    pushValidationIssue(
+      issues,
+      def,
+      'dictionary_missing_source',
+      `Dictionary ${def.database}.${def.name} requires a non-empty "source"`
+    )
+  }
+
+  if (def.layout.trim().length === 0) {
+    pushValidationIssue(
+      issues,
+      def,
+      'dictionary_missing_layout',
+      `Dictionary ${def.database}.${def.name} requires a non-empty "layout"`
+    )
+  }
+
+  if (def.lifetime.trim().length === 0) {
+    pushValidationIssue(
+      issues,
+      def,
+      'dictionary_missing_lifetime',
+      `Dictionary ${def.database}.${def.name} requires a non-empty "lifetime"`
+    )
+  }
+}
+
 export function validateDefinitions(definitions: SchemaDefinition[]): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   const objectKeys = new Set<string>()
@@ -242,6 +317,8 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
       validateTableDefinition(def, issues)
     } else if (def.kind === 'materialized_view') {
       validateMaterializedViewDefinition(def, issues, definitions)
+    } else if (def.kind === 'dictionary') {
+      validateDictionaryDefinition(def, issues)
     }
   }
 

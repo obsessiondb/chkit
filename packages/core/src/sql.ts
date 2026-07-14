@@ -1,5 +1,7 @@
 import type {
   ColumnDefinition,
+  DictionaryAttribute,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   SchemaDefinition,
@@ -145,10 +147,35 @@ export function renderAlterModifyRefresh(def: MaterializedViewDefinition): strin
   return `ALTER TABLE ${def.database}.${def.name} MODIFY ${renderRefreshClause(def.refresh)};`
 }
 
+function renderDictionaryAttribute(attr: DictionaryAttribute): string {
+  let out = `\`${attr.name}\` ${attr.type}`
+  if (attr.expression !== undefined) out += ` EXPRESSION ${attr.expression}`
+  else if (attr.default !== undefined) out += ` DEFAULT ${renderDefault(attr.default)}`
+  if (attr.hierarchical) out += ' HIERARCHICAL'
+  if (attr.injective) out += ' INJECTIVE'
+  if (attr.isObjectId) out += ' IS_OBJECT_ID'
+  return out
+}
+
+export function renderDictionarySQL(def: DictionaryDefinition, replace = false): string {
+  const verb = replace ? 'CREATE OR REPLACE DICTIONARY' : 'CREATE DICTIONARY IF NOT EXISTS'
+  const attrs = def.attributes.map(renderDictionaryAttribute).join(',\n  ')
+  const pk = renderKeyClauseColumns(def.primaryKey, new Set(def.attributes.map((a) => a.name)))
+  const clauses = [
+    `PRIMARY KEY ${pk}`,
+    `SOURCE(${def.source})`,
+    `LAYOUT(${def.layout})`,
+    `LIFETIME(${def.lifetime})`,
+  ]
+  if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
+  return `${verb} ${def.database}.${def.name}\n(\n  ${attrs}\n)\n${clauses.join('\n')};`
+}
+
 export function toCreateSQL(def: SchemaDefinition): string {
   assertValidDefinitions([def])
   if (def.kind === 'table') return renderTableSQL(def)
   if (def.kind === 'view') return renderViewSQL(def)
+  if (def.kind === 'dictionary') return renderDictionarySQL(def)
   return renderMaterializedViewSQL(def)
 }
 

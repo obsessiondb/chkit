@@ -3,6 +3,7 @@ import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
   ColumnRenameSuggestion,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   MigrationOperation,
@@ -24,6 +25,7 @@ import {
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
   renderAlterResetSetting,
+  renderDictionarySQL,
   toCreateSQL,
 } from './sql.js'
 import { assertValidDefinitions } from './validate.js'
@@ -55,6 +57,15 @@ function pushDropOperation(
     })
     return
   }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'drop_dictionary',
+      key: definitionKey(def),
+      risk,
+      sql: `DROP DICTIONARY IF EXISTS ${def.database}.${def.name};`,
+    })
+    return
+  }
   operations.push( {
     type: 'drop_materialized_view',
     key: definitionKey(def),
@@ -80,6 +91,15 @@ function pushCreateOperation(
   if (def.kind === 'view') {
     operations.push( {
       type: 'create_view',
+      key: definitionKey(def),
+      risk,
+      sql: toCreateSQL(def),
+    })
+    return
+  }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'create_dictionary',
       key: definitionKey(def),
       risk,
       sql: toCreateSQL(def),
@@ -294,6 +314,38 @@ function diffMaterializedView(
   }
 
   return []
+}
+
+// Redacts inline SOURCE() credentials for comparison only, mirroring what
+// ClickHouse itself does on introspection (`[HIDDEN]`). A definition whose
+// only difference is the password must not diff every run — never used to
+// render DDL, so the real secret still reaches ClickHouse.
+function maskDictionarySecrets(source: string): string {
+  return source.replace(/password\s+'(?:[^'\\]|\\.)*'/gi, "password '[HIDDEN]'")
+}
+
+function dictionaryComparisonShape(def: DictionaryDefinition) {
+  const { source, ...rest } = def
+  return { ...rest, source: maskDictionarySecrets(source) }
+}
+
+function diffDictionary(
+  oldDef: DictionaryDefinition,
+  newDef: DictionaryDefinition
+): MigrationOperation[] {
+  const unchanged =
+    JSON.stringify(dictionaryComparisonShape(oldDef)) ===
+    JSON.stringify(dictionaryComparisonShape(newDef))
+  if (unchanged) return []
+
+  return [
+    {
+      type: 'create_dictionary',
+      key: definitionKey(newDef),
+      risk: 'caution',
+      sql: renderDictionarySQL(newDef, true),
+    },
+  ]
 }
 
 function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
@@ -547,6 +599,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     ) {
       const mvOps = diffMaterializedView(oldDef, newDef)
       operations.push(...mvOps)
+      continue
+    }
+
+    if (newDef.kind === oldDef.kind && newDef.kind === 'dictionary' && oldDef.kind === 'dictionary') {
+      operations.push(...diffDictionary(oldDef, newDef))
       continue
     }
 

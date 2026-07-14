@@ -1,5 +1,7 @@
 import type {
   ColumnDefinition,
+  DictionaryAttribute,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   ProjectionDefinition,
@@ -20,7 +22,8 @@ function sortByName<T extends { name: string }>(items: T[]): T[] {
 function sortKind(kind: SchemaDefinition['kind']): number {
   if (kind === 'table') return 0
   if (kind === 'view') return 1
-  return 2
+  if (kind === 'materialized_view') return 2
+  return 3
 }
 
 function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
@@ -168,9 +171,38 @@ function canonicalizeMaterializedView(def: MaterializedViewDefinition): Material
   return canonical
 }
 
+function canonicalizeDictionaryAttribute(attribute: DictionaryAttribute): DictionaryAttribute {
+  return {
+    ...attribute,
+    name: attribute.name.trim(),
+    type: typeof attribute.type === 'string' ? attribute.type.trim() : attribute.type,
+  }
+}
+
+function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition {
+  return {
+    ...def,
+    database: def.database.trim(),
+    name: def.name.trim(),
+    renamedFrom: def.renamedFrom
+      ? {
+          database: def.renamedFrom.database?.trim(),
+          name: def.renamedFrom.name.trim(),
+        }
+      : undefined,
+    attributes: def.attributes.map(canonicalizeDictionaryAttribute),
+    primaryKey: normalizeKeyColumns(def.primaryKey),
+    source: normalizeSQLFragment(def.source),
+    layout: normalizeSQLFragment(def.layout),
+    lifetime: normalizeSQLFragment(def.lifetime),
+    comment: def.comment?.trim(),
+  }
+}
+
 export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition {
   if (def.kind === 'table') return canonicalizeTable(def)
   if (def.kind === 'view') return canonicalizeView(def)
+  if (def.kind === 'dictionary') return canonicalizeDictionary(def)
   return canonicalizeMaterializedView(def)
 }
 
