@@ -318,6 +318,7 @@ export type MigrationOperationType =
   | 'alter_table_modify_ttl'
   | 'create_dictionary'
   | 'drop_dictionary'
+  | 'rename_dictionary'
 
 export interface MigrationOperation {
   type: MigrationOperationType

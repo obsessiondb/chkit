@@ -432,7 +432,7 @@ ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW C
 
 ### No `ALTER DICTIONARY`
 
-ClickHouse has no `ALTER DICTIONARY` — every structural change to a dictionary is rendered as a single `CREATE OR REPLACE DICTIONARY` statement (atomic, dependency-safe). See [Structural vs. alterable properties](#structural-vs-alterable-properties).
+ClickHouse has no `ALTER DICTIONARY` — every structural change to a dictionary is rendered as a single `CREATE OR REPLACE DICTIONARY` statement (atomic, dependency-safe). See [Structural vs. alterable properties](#structural-vs-alterable-properties). A pure rename (`renamedFrom` with no other change) is the one exception — it renders as `RENAME DICTIONARY`, not a replace; see [Dictionary rename](#dictionary-rename).
 
 ## Type system reference
 
@@ -483,7 +483,22 @@ columns: [
 ]
 ```
 
-Both table and column renames can be overridden by CLI flags `--rename-table` and `--rename-column`.
+### Dictionary rename
+
+Set `renamedFrom` on a dictionary definition to rename a dictionary. This emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` statement instead of a `drop_dictionary` + `create_dictionary` pair:
+
+```ts
+const lookupDict = dictionary({
+  database: 'app',
+  name: 'lookup_dict', // new name
+  renamedFrom: { name: 'users_dict' }, // old name
+  // ...
+})
+```
+
+The `database` field in `renamedFrom` is optional and defaults to the dictionary's current database.
+
+Table, column, and dictionary renames can all be overridden by CLI flags: `--rename-table`, `--rename-column`, and `--rename-dictionary`.
 
 ## Plugin configuration
 

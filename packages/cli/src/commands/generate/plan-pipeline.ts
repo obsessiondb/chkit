@@ -6,7 +6,7 @@ import type {
   SchemaDefinition,
 } from '@chkit/core'
 
-import type { ColumnRenameMapping, TableRenameMapping } from './rename-mappings.js'
+import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping } from './rename-mappings.js'
 
 export function applySelectedRenameSuggestions(
   plan: MigrationPlan,
@@ -104,6 +104,57 @@ export function applyExplicitTableRenames(
   }
 }
 
+export function applyExplicitDictionaryRenames(
+  plan: MigrationPlan,
+  mappings: DictionaryRenameMapping[]
+): MigrationPlan {
+  if (mappings.length === 0) return plan
+
+  const operationKeysToRemove = new Set<string>()
+  const extraOperations: MigrationOperation[] = []
+  const createDatabaseOps = new Set(
+    plan.operations.filter((operation) => operation.type === 'create_database').map((operation) => operation.key)
+  )
+
+  for (const mapping of mappings) {
+    operationKeysToRemove.add(`dictionary:${mapping.oldDatabase}.${mapping.oldName}`)
+    operationKeysToRemove.add(`dictionary:${mapping.newDatabase}.${mapping.newName}`)
+    if (mapping.oldDatabase !== mapping.newDatabase) {
+      const dbKey = `database:${mapping.newDatabase}`
+      if (!createDatabaseOps.has(dbKey)) {
+        extraOperations.push({
+          type: 'create_database',
+          key: dbKey,
+          risk: 'safe',
+          sql: `CREATE DATABASE IF NOT EXISTS ${mapping.newDatabase};`,
+        })
+        createDatabaseOps.add(dbKey)
+      }
+    }
+    extraOperations.push({
+      type: 'rename_dictionary',
+      key: `dictionary:${mapping.newDatabase}.${mapping.newName}:rename_dictionary`,
+      risk: 'caution',
+      sql: `RENAME DICTIONARY IF EXISTS ${mapping.oldDatabase}.${mapping.oldName} TO ${mapping.newDatabase}.${mapping.newName};`,
+    })
+  }
+
+  const operations = [
+    ...plan.operations.filter((operation) => !operationKeysToRemove.has(operation.key)),
+    ...extraOperations,
+  ].sort((a, b) => {
+    const rankOrder = rankOperation(a) - rankOperation(b)
+    if (rankOrder !== 0) return rankOrder
+    return a.key.localeCompare(b.key)
+  })
+
+  return {
+    operations,
+    riskSummary: summarizeRisk(operations),
+    renameSuggestions: plan.renameSuggestions,
+  }
+}
+
 export function buildExplicitColumnRenameSuggestions(
   plan: MigrationPlan,
   mappings: ColumnRenameMapping[]
@@ -167,7 +218,7 @@ export function assertCliColumnMappingsResolvable(
 function rankOperation(op: MigrationOperation): number {
   if (op.type.startsWith('drop_')) return 0
   if (op.type === 'create_database') return 1
-  if (op.type === 'alter_table_rename_table') return 2
+  if (op.type === 'alter_table_rename_table' || op.type === 'rename_dictionary') return 2
   if (op.type.startsWith('alter_')) return 3
   if (op.type === 'create_table') return 4
   if (op.type === 'create_view') return 5

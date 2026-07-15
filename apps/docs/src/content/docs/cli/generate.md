@@ -21,6 +21,7 @@ chkit generate [flags]
 | `--migration-id <id>` | string | — | Escape hatch: override the default timestamp migration prefix |
 | `--rename-table <mapping>` | string | — | Explicit table rename: `old_db.old_table=new_db.new_table` |
 | `--rename-column <mapping>` | string | — | Explicit column rename: `db.table.old_column=new_column` |
+| `--rename-dictionary <mapping>` | string | — | Explicit dictionary rename: `old_db.old_dict=new_db.new_dict` |
 | `--table <selector>` | string | — | Scope operations to matching tables |
 | `--dryrun` | boolean | `false` | Print the plan without writing any files |
 | `--empty` | boolean | `false` | Scaffold a blank manual migration without diffing the schema |
@@ -63,9 +64,11 @@ An empty match set emits a warning and produces no output.
 chkit detects potential renames through two mechanisms:
 
 1. **Schema metadata** — set `renamedFrom` on your schema definition
-2. **CLI flags** — `--rename-table old_db.old_table=new_db.new_table` and `--rename-column db.table.old_col=new_col`
+2. **CLI flags** — `--rename-table old_db.old_table=new_db.new_table`, `--rename-column db.table.old_col=new_col`, and `--rename-dictionary old_db.old_dict=new_db.new_dict`
 
 CLI flags take priority when both sources specify a mapping for the same object. Rename flags accept comma-separated values for multiple mappings.
+
+A dictionary rename emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` statement instead of a `drop_dictionary` + `create_dictionary` pair — see [Dictionary rename](/schema/dsl-reference/#dictionary-rename).
 
 Validation errors are raised for conflicting, chained, or cyclic rename mappings.
 
@@ -79,7 +82,7 @@ Plans for objects in a database lead with a `create_database` operation (`CREATE
 
 With `--empty`, the command skips the schema diff entirely and writes a blank, timestamped migration stub for you to hand-edit. Use it for DDL that chkit does not model — raw `INSERT`/backfill statements, `OPTIMIZE`, manual dictionary reloads, or one-off data fixes.
 
-The stub carries the standard migration header (with `operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. The `--name` and `--migration-id` flags apply; without `--name`, the file defaults to `manual`. Schema-diff flags (`--table`, `--rename-table`, `--rename-column`, `--dryrun`) are not used in empty mode.
+The stub carries the standard migration header (with `operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. The `--name` and `--migration-id` flags apply; without `--name`, the file defaults to `manual`. Schema-diff flags (`--table`, `--rename-table`, `--rename-column`, `--rename-dictionary`, `--dryrun`) are not used in empty mode.
 
 `chkit migrate` picks the file up like any other migration and applies it in filename order. Write your SQL into the stub *before* applying it — editing a migration after it has run triggers a checksum mismatch.
 
@@ -127,6 +130,12 @@ chkit generate --rename-table old_db.users=new_db.accounts
 
 ```sh
 chkit generate --rename-column analytics.events.old_name=new_name
+```
+
+**Explicit dictionary rename:**
+
+```sh
+chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
 ```
 
 ## Exit codes
