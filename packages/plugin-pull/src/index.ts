@@ -360,6 +360,8 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
         source: introspected.source,
         layout: introspected.layout,
         lifetime: introspected.lifetime,
+        ...(introspected.range ? { range: introspected.range } : {}),
+        ...(introspected.settings ? { settings: introspected.settings } : {}),
         ...(introspected.comment ? { comment: introspected.comment } : {}),
       }
     }

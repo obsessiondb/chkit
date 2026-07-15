@@ -3,6 +3,8 @@ import {
   parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseDictionaryRangeFromCreateDictionaryQuery,
+  parseDictionarySettingsFromCreateDictionaryQuery,
   parseLayoutFromCreateDictionaryQuery,
   parseLifetimeFromCreateDictionaryQuery,
   parseSourceFromCreateDictionaryQuery,
@@ -31,7 +33,16 @@ export type IntrospectedObject =
     >)
   | ({ kind: 'dictionary' } & Pick<
       DictionaryDefinition,
-      'database' | 'name' | 'attributes' | 'primaryKey' | 'source' | 'layout' | 'lifetime' | 'comment'
+      | 'database'
+      | 'name'
+      | 'attributes'
+      | 'primaryKey'
+      | 'source'
+      | 'layout'
+      | 'lifetime'
+      | 'range'
+      | 'settings'
+      | 'comment'
     >)
   | IntrospectedTable
 
@@ -48,6 +59,8 @@ function mapDictionaryRowToDefinition(
     return null
   }
   const comment = parseCommentFromCreateDictionaryQuery(query)
+  const range = parseDictionaryRangeFromCreateDictionaryQuery(query)
+  const settings = parseDictionarySettingsFromCreateDictionaryQuery(query)
   return {
     kind: 'dictionary',
     database: row.database,
@@ -57,6 +70,8 @@ function mapDictionaryRowToDefinition(
     source,
     layout,
     lifetime,
+    ...(range ? { range } : {}),
+    ...(settings ? { settings } : {}),
     ...(comment ? { comment } : {}),
   }
 }

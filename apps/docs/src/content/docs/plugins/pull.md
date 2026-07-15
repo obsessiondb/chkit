@@ -11,7 +11,7 @@ This document covers practical usage of the optional `pull` plugin.
 
 - Connects to a live ClickHouse instance and introspects table metadata (columns, engines, indexes, projections, partitioning, TTL, settings).
 - Introspects views and materialized views (including `TO` clause parsing).
-- Introspects dictionaries (attributes, primary key, `SOURCE`/`LAYOUT`/`LIFETIME`), preserving ClickHouse's `[HIDDEN]` password redaction — see [Credential handling](#credential-handling-hidden-passwords).
+- Introspects dictionaries (attributes — including `HIERARCHICAL`/`BIDIRECTIONAL`/`INJECTIVE`/`IS_OBJECT_ID` modifiers — primary key, `SOURCE`/`LAYOUT`/`LIFETIME`/`RANGE`/`SETTINGS`), preserving ClickHouse's `[HIDDEN]` password redaction — see [Credential handling](#credential-handling-hidden-passwords).
 - Generates a deterministic TypeScript schema file using `@chkit/core` builders.
 - Supports filtering by database and dry-run previews.
 

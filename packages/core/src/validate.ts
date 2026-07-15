@@ -247,6 +247,15 @@ function validateDictionaryDefinition(def: DictionaryDefinition, issues: Validat
         `Dictionary ${def.database}.${def.name} attribute "${attribute.name}" sets both "default" and "expression"; choose one`
       )
     }
+
+    if (attribute.bidirectional && !attribute.hierarchical) {
+      pushValidationIssue(
+        issues,
+        def,
+        'dictionary_bidirectional_requires_hierarchical',
+        `Dictionary ${def.database}.${def.name} attribute "${attribute.name}" sets "bidirectional" without "hierarchical"; bidirectional only applies to hierarchical attributes`
+      )
+    }
   }
 
   if (def.primaryKey.length === 0) {
@@ -294,6 +303,19 @@ function validateDictionaryDefinition(def: DictionaryDefinition, issues: Validat
       'dictionary_missing_lifetime',
       `Dictionary ${def.database}.${def.name} requires a non-empty "lifetime"`
     )
+  }
+
+  if (def.range) {
+    for (const column of [def.range.min, def.range.max]) {
+      if (!attributeSet.has(column)) {
+        pushValidationIssue(
+          issues,
+          def,
+          'dictionary_range_missing_attribute',
+          `Dictionary ${def.database}.${def.name} range references missing attribute "${column}"`
+        )
+      }
+    }
   }
 }
 

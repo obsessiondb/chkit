@@ -6,11 +6,19 @@ export interface ParsedDictionaryAttribute {
   default?: string | number
   expression?: string
   hierarchical?: boolean
+  bidirectional?: boolean
   injective?: boolean
   isObjectId?: boolean
 }
 
-const MODIFIER_KEYWORDS = ['DEFAULT', 'EXPRESSION', 'HIERARCHICAL', 'INJECTIVE', 'IS_OBJECT_ID']
+const MODIFIER_KEYWORDS = [
+  'DEFAULT',
+  'EXPRESSION',
+  'HIERARCHICAL',
+  'BIDIRECTIONAL',
+  'INJECTIVE',
+  'IS_OBJECT_ID',
+]
 
 function extractBalancedParenGroup(
   text: string,
@@ -161,6 +169,11 @@ function applyAttributeModifiers(attribute: ParsedDictionaryAttribute, tail: str
       remaining = remaining.replace(/^HIERARCHICAL\b/i, '').trim()
       continue
     }
+    if (/^BIDIRECTIONAL\b/i.test(remaining)) {
+      attribute.bidirectional = true
+      remaining = remaining.replace(/^BIDIRECTIONAL\b/i, '').trim()
+      continue
+    }
     if (/^INJECTIVE\b/i.test(remaining)) {
       attribute.injective = true
       remaining = remaining.replace(/^INJECTIVE\b/i, '').trim()
@@ -233,4 +246,38 @@ export function parseCommentFromCreateDictionaryQuery(query: string | undefined)
   const match = /\bCOMMENT\s+'((?:[^'\\]|\\.|'')*)'/i.exec(query)
   if (!match?.[1]) return undefined
   return match[1].replace(/\\'/g, "'").replace(/''/g, "'")
+}
+
+function stripBackticks(value: string): string {
+  const trimmed = value.trim()
+  return trimmed.startsWith('`') && trimmed.endsWith('`') ? trimmed.slice(1, -1) : trimmed
+}
+
+export function parseDictionaryRangeFromCreateDictionaryQuery(
+  query: string | undefined
+): { min: string; max: string } | undefined {
+  if (!query) return undefined
+  const body = extractKeywordParenBody(query, 'RANGE')
+  if (!body) return undefined
+  const match = /^MIN\s+(\S+)\s+MAX\s+(\S+)$/i.exec(body.trim())
+  if (!match?.[1] || !match[2]) return undefined
+  return { min: stripBackticks(match[1]), max: stripBackticks(match[2]) }
+}
+
+export function parseDictionarySettingsFromCreateDictionaryQuery(
+  query: string | undefined
+): Record<string, string | number> | undefined {
+  if (!query) return undefined
+  const body = extractKeywordParenBody(query, 'SETTINGS')
+  if (!body) return undefined
+  const out: Record<string, string | number> = {}
+  for (const part of splitTopLevelComma(body)) {
+    const eq = part.indexOf('=')
+    if (eq === -1) continue
+    const key = part.slice(0, eq).trim()
+    if (!key) continue
+    const { value } = consumeQuotedOrBareValue(part.slice(eq + 1).trim())
+    out[key] = value
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }

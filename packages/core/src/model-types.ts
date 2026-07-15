@@ -164,6 +164,8 @@ export interface DictionaryAttribute {
   /** EXPRESSION — computed from source columns. Mutually exclusive with default. */
   expression?: string
   hierarchical?: boolean
+  /** Enables bidirectional parent/child lookups. Only valid alongside hierarchical. */
+  bidirectional?: boolean
   injective?: boolean
   isObjectId?: boolean
 }
@@ -181,6 +183,10 @@ export interface DictionaryDefinition {
   layout: string
   /** Raw LIFETIME(...) body, e.g. `300` / `MIN 300 MAX 360`. */
   lifetime: string
+  /** RANGE(MIN ... MAX ...) — required by RANGE_HASHED / COMPLEX_KEY_RANGE_HASHED layouts. */
+  range?: { min: string; max: string }
+  /** Raw SETTINGS(...) key/value pairs. */
+  settings?: Record<string, string | number>
   comment?: string
 }
 
@@ -360,6 +366,8 @@ export type ValidationIssueCode =
   | 'dictionary_missing_layout'
   | 'dictionary_missing_lifetime'
   | 'dictionary_attribute_default_expression_exclusive'
+  | 'dictionary_range_missing_attribute'
+  | 'dictionary_bidirectional_requires_hierarchical'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

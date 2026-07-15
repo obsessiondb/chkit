@@ -938,6 +938,34 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       const def = dictionary({ ...baseDictionary })
       await assertValidSQL(client, renderDictionarySQL(def, true))
     })
+
+    test('dictionary with RANGE_HASHED layout, RANGE, and SETTINGS', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'start_date', type: 'Date' },
+          { name: 'end_date', type: 'Date' },
+          { name: 'value', type: 'String' },
+        ],
+        layout: 'RANGE_HASHED()',
+        range: { min: 'start_date', max: 'end_date' },
+        settings: { dictionary_use_async_executor: 1, max_threads: 4 },
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with a BIDIRECTIONAL hierarchical attribute', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+          { name: 'name', type: 'String' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
   })
 
   // =========================================================================

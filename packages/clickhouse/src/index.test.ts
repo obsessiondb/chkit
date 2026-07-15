@@ -13,6 +13,8 @@ import {
   parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseDictionaryRangeFromCreateDictionaryQuery,
+  parseDictionarySettingsFromCreateDictionaryQuery,
   parseEngineFromCreateTableQuery,
   parseLayoutFromCreateDictionaryQuery,
   parseLifetimeFromCreateDictionaryQuery,
@@ -552,5 +554,42 @@ LIFETIME(300)`
       { name: 'b', type: 'String' },
       { name: 'full_name', type: 'String', expression: "concat(a, ' ', b)" },
     ])
+  })
+
+  test('parses RANGE, SETTINGS, and BIDIRECTIONAL modifier', () => {
+    const rangeQuery = `CREATE DICTIONARY default.rates_dict
+(
+  \`id\` UInt64,
+  \`parent_id\` UInt64 HIERARCHICAL BIDIRECTIONAL,
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LIFETIME(MIN 0 MAX 300)
+LAYOUT(RANGE_HASHED())
+RANGE(MIN start_date MAX end_date)
+SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)`
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(rangeQuery)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+      { name: 'start_date', type: 'DateTime' },
+      { name: 'end_date', type: 'DateTime' },
+    ])
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(rangeQuery)).toEqual({
+      min: 'start_date',
+      max: 'end_date',
+    })
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(rangeQuery)).toEqual({
+      dictionary_use_async_executor: 1,
+      max_threads: 8,
+    })
+  })
+
+  test('RANGE and SETTINGS return undefined when absent', () => {
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(query)).toBeUndefined()
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(query)).toBeUndefined()
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(undefined)).toBeUndefined()
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(undefined)).toBeUndefined()
   })
 })

@@ -163,6 +163,8 @@ export {
 	parseCommentFromCreateDictionaryQuery,
 	parseDictionaryAttributesFromCreateDictionaryQuery,
 	parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+	parseDictionaryRangeFromCreateDictionaryQuery,
+	parseDictionarySettingsFromCreateDictionaryQuery,
 	parseLayoutFromCreateDictionaryQuery,
 	parseLifetimeFromCreateDictionaryQuery,
 	parseSourceFromCreateDictionaryQuery,

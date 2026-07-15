@@ -141,6 +141,14 @@ function renderDictionaryDefinition(definition: DictionaryDefinition, variableNa
   lines.push(`  source: ${renderString(definition.source)},`)
   lines.push(`  layout: ${renderString(definition.layout)},`)
   lines.push(`  lifetime: ${renderString(definition.lifetime)},`)
+  if (definition.range) {
+    lines.push(
+      `  range: { min: ${renderString(definition.range.min)}, max: ${renderString(definition.range.max)} },`
+    )
+  }
+  if (definition.settings && Object.keys(definition.settings).length > 0) {
+    lines.push(...renderSettingsLines(definition.settings, '  '))
+  }
   if (definition.comment) {
     lines.push(`  comment: ${renderString(definition.comment)},`)
   }
@@ -156,6 +164,7 @@ function renderDictionaryAttribute(attribute: DictionaryAttribute): string {
     parts.push(`default: ${renderLiteral(attribute.default)}`)
   }
   if (attribute.hierarchical) parts.push('hierarchical: true')
+  if (attribute.bidirectional) parts.push('bidirectional: true')
   if (attribute.injective) parts.push('injective: true')
   if (attribute.isObjectId) parts.push('isObjectId: true')
   return `{ ${parts.join(', ')} }`

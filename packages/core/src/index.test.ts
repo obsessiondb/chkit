@@ -1783,6 +1783,54 @@ describe('@chkit/core dictionaries', () => {
     expect(plan.operations).toHaveLength(0)
   })
 
+  test('renders RANGE, SETTINGS, and BIDIRECTIONAL clauses', () => {
+    const dict = dictionary({
+      ...baseDictionary,
+      attributes: [
+        ...baseDictionary.attributes,
+        { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+        { name: 'start_date', type: 'DateTime' },
+        { name: 'end_date', type: 'DateTime' },
+      ],
+      layout: 'RANGE_HASHED()',
+      range: { min: 'start_date', max: 'end_date' },
+      settings: { dictionary_use_async_executor: 1, max_threads: 8 },
+    })
+    const sql = toCreateSQL(dict)
+    expect(sql).toContain('`parent_id` UInt64 HIERARCHICAL BIDIRECTIONAL')
+    expect(sql).toContain('RANGE(MIN `start_date` MAX `end_date`)')
+    expect(sql).toContain('SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)')
+  })
+
+  test('validation: range references missing attribute', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, range: { min: 'not_an_attribute', max: 'name' } }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_range_missing_attribute')
+  })
+
+  test('validation: bidirectional requires hierarchical', () => {
+    const issues = validateDefinitions([
+      dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', bidirectional: true },
+        ],
+      }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_bidirectional_requires_hierarchical')
+  })
+
+  test('binary diff: adding settings produces a single CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary, settings: { max_threads: 4 } })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain('SETTINGS(max_threads = 4)')
+  })
+
   test('create ordering: create_dictionary ranks after create_table', () => {
     const usersTable = table({
       database: 'app',

@@ -180,6 +180,10 @@ function canonicalizeDictionaryAttribute(attribute: DictionaryAttribute): Dictio
 }
 
 function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition {
+  const settings = def.settings
+    ? Object.fromEntries(Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b)))
+    : undefined
+
   return {
     ...def,
     database: def.database.trim(),
@@ -195,6 +199,10 @@ function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition
     source: normalizeSQLFragment(def.source),
     layout: normalizeSQLFragment(def.layout),
     lifetime: normalizeSQLFragment(def.lifetime),
+    range: def.range
+      ? { min: def.range.min.trim(), max: def.range.max.trim() }
+      : undefined,
+    settings: settings && Object.keys(settings).length > 0 ? settings : undefined,
     comment: def.comment?.trim(),
   }
 }

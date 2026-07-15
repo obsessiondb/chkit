@@ -295,6 +295,34 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).toContain('export default schema(app_users_dict)')
   })
 
+  test('renders a dictionary with range, settings, and a bidirectional attribute', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'dictionary',
+        database: 'app',
+        name: 'rates_dict',
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+          { name: 'start_date', type: 'DateTime' },
+          { name: 'end_date', type: 'DateTime' },
+        ],
+        primaryKey: ['id'],
+        source: "HTTP(url 'http://example.com/rates' format 'TSV')",
+        layout: 'RANGE_HASHED()',
+        lifetime: '300',
+        range: { min: 'start_date', max: 'end_date' },
+        settings: { dictionary_use_async_executor: 1, max_threads: 8 },
+      },
+    ])
+
+    expect(content).toContain('{ name: "parent_id", type: "UInt64", hierarchical: true, bidirectional: true }')
+    expect(content).toContain('range: { min: "start_date", max: "end_date" }')
+    expect(content).toContain('settings: {')
+    expect(content).toContain('dictionary_use_async_executor: 1')
+    expect(content).toContain('max_threads: 8')
+  })
+
   test('renders refreshable materialized view with full refresh block', () => {
     const content = renderSchemaFile([
       {
@@ -697,6 +725,42 @@ LIFETIME(MIN 0 MAX 300)`,
       source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
       layout: 'HASHED()',
       lifetime: 'MIN 0 MAX 300',
+    })
+  })
+
+  test('mapSystemTableRowToDefinition parses a dictionary row with RANGE and SETTINGS', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'rates_dict',
+      engine: 'Dictionary',
+      create_table_query: `CREATE DICTIONARY app.rates_dict
+(
+  \`id\` UInt64,
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LIFETIME(MIN 0 MAX 300)
+LAYOUT(RANGE_HASHED())
+RANGE(MIN start_date MAX end_date)
+SETTINGS(dictionary_use_async_executor = 1)`,
+    })
+    expect(definition).toEqual({
+      kind: 'dictionary',
+      database: 'app',
+      name: 'rates_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'start_date', type: 'DateTime' },
+        { name: 'end_date', type: 'DateTime' },
+      ],
+      primaryKey: ['id'],
+      source: "HTTP(url 'http://example.com/rates' format 'TSV')",
+      layout: 'RANGE_HASHED()',
+      lifetime: 'MIN 0 MAX 300',
+      range: { min: 'start_date', max: 'end_date' },
+      settings: { dictionary_use_async_executor: 1 },
     })
   })
 

@@ -396,6 +396,8 @@ const usersDict = dictionary({
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `range` | `{ min: string; max: string }` | `RANGE(MIN ... MAX ...)` — required by `RANGE_HASHED` / `COMPLEX_KEY_RANGE_HASHED` layouts. Both `min` and `max` must name declared attributes |
+| `settings` | `Record<string, string \| number>` | Raw `SETTINGS(...)` key/value pairs, e.g. `{ dictionary_use_async_executor: 1 }` |
 | `comment` | `string` | Dictionary comment |
 | `renamedFrom` | `{ database?: string; name: string }` | Previous identity for rename tracking |
 
@@ -414,6 +416,7 @@ Each entry in the `attributes` array is a `DictionaryAttribute`.
 | `default` | `string \| number \| boolean` | `DEFAULT` value for missing keys. Mutually exclusive with `expression` |
 | `expression` | `string` | `EXPRESSION` computed from source columns. Mutually exclusive with `default` |
 | `hierarchical` | `boolean` | Marks the attribute `HIERARCHICAL` |
+| `bidirectional` | `boolean` | Marks the attribute `BIDIRECTIONAL` — enables parent/child lookups in both directions. Only valid alongside `hierarchical` |
 | `injective` | `boolean` | Marks the attribute `INJECTIVE` |
 | `isObjectId` | `boolean` | Marks the attribute `IS_OBJECT_ID` (MongoDB sources) |
 
@@ -530,6 +533,8 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Dictionary primary key references missing attribute** (`dictionary_primary_key_missing_attribute`) -- a `primaryKey` entry doesn't name a declared attribute
 - **Dictionary missing source/layout/lifetime** (`dictionary_missing_source`, `dictionary_missing_layout`, `dictionary_missing_lifetime`) -- one of these raw-string fields is empty
 - **Dictionary attribute default/expression exclusive** (`dictionary_attribute_default_expression_exclusive`) -- an attribute sets both `default` and `expression`
+- **Dictionary range references missing attribute** (`dictionary_range_missing_attribute`) -- `range.min`/`range.max` doesn't name a declared attribute
+- **Dictionary bidirectional requires hierarchical** (`dictionary_bidirectional_requires_hierarchical`) -- an attribute sets `bidirectional` without `hierarchical`
 
 ## Structural vs. alterable properties
 
