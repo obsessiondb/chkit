@@ -169,17 +169,17 @@ describe('@chkit/plugin-pull live env e2e', () => {
         // canonicalized into name order, while the live source keeps creation
         // order, and drift keys by name too.
         const details = await executor.listTableDetails([projectionDatabase])
-        const byName = (table: { name: string } | undefined) =>
-          [...(details.find((entry) => entry.name === table?.name)?.projections ?? [])].sort(
+        const projectionsOf = (tableName: string) =>
+          [...(details.find((entry) => entry.name === tableName)?.projections ?? [])].sort(
             (left, right) => left.name.localeCompare(right.name)
           )
 
-        const sourceProjections = byName({ name: sourceTable })
+        const sourceProjections = projectionsOf(sourceTable)
         expect(sourceProjections).toEqual([
           { name: 'agg_by_sender', query: 'SELECT sender, sum(cnt) GROUP BY sender' },
           { name: 'by_receiver', index: '(receiver, sender)', type: 'basic' },
         ])
-        expect(byName({ name: recreatedTable })).toEqual(sourceProjections)
+        expect(projectionsOf(recreatedTable)).toEqual(sourceProjections)
       } finally {
         await rm(dir, { recursive: true, force: true })
       }

@@ -325,6 +325,8 @@ export type ValidationIssueCode =
   | 'duplicate_column_name'
   | 'duplicate_index_name'
   | 'duplicate_projection_name'
+  | 'projection_ambiguous_kind'
+  | 'projection_empty_index'
   | 'primary_key_missing_column'
   | 'order_by_missing_column'
   | 'refresh_requires_every_or_after'

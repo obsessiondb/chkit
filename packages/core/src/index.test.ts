@@ -6,6 +6,7 @@ import {
   codec,
   collectDefinitionsFromModule,
   materializedView,
+  normalizeProjectionIndex,
   planDiff,
   schema,
   table,
@@ -129,6 +130,43 @@ describe('@chkit/core smoke', () => {
     expect(renderIndex('(toYYYYMM(ts), a)')).toBe(
       'PROJECTION `p` INDEX (toYYYYMM(ts), a) TYPE basic'
     )
+    // Redundant parens are peeled at every level, including inside a tuple...
+    expect(renderIndex('((a, b))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(((a,b)))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(a, (b))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(a), (b)')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    // ...but a genuine nested tuple is not redundant and survives.
+    expect(renderIndex('(a, (b, c))')).toBe('PROJECTION `p` INDEX (a, (b, c)) TYPE basic')
+    // ClickHouse prints a space after every argument separator.
+    expect(renderIndex('(concat(a,b), ts)')).toBe(
+      'PROJECTION `p` INDEX (concat(a, b), ts) TYPE basic'
+    )
+    expect(renderIndex('cityHash64(a,b)')).toBe('PROJECTION `p` INDEX cityHash64(a, b) TYPE basic')
+    // A paren inside a quoted identifier is text, not nesting.
+    expect(renderIndex('(`weird)name`)')).toBe('PROJECTION `p` INDEX `weird)name` TYPE basic')
+  })
+
+  // The index is normalized at canonicalize time and again at render time, so a
+  // form that keeps changing would make every generate re-emit a drop + rebuild.
+  test('normalizes index expressions idempotently', () => {
+    const inputs = [
+      'b',
+      '(b)',
+      '(a,b)',
+      '((a,b))',
+      '(((a,b)))',
+      '(a), (b)',
+      '(a, (b))',
+      '(a, (b, c))',
+      'concat(a,b)',
+      '(concat(a,b), ts)',
+      '(toYYYYMM(ts))',
+      '(`weird)name`)',
+    ]
+    for (const input of inputs) {
+      const once = normalizeProjectionIndex(input)
+      expect(normalizeProjectionIndex(once)).toBe(once)
+    }
   })
 
   test('treats parens-only differences in an index projection as no change', () => {
@@ -145,6 +183,45 @@ describe('@chkit/core smoke', () => {
     ]
 
     expect(planDiff(defs('(id)'), defs('id')).operations).toEqual([])
+  })
+
+  // Both keys present satisfies the union, so TypeScript admits it — e.g. when
+  // converting a SELECT projection to index-only and leaving `query` behind.
+  // Without this, the SELECT body is silently discarded.
+  test('rejects a projection that sets both query and index', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'p', query: 'SELECT id', index: 'id', type: 'basic' }],
+    })
+
+    expect(validateDefinitions([events]).map((issue) => issue.code)).toContain(
+      'projection_ambiguous_kind'
+    )
+  })
+
+  test('rejects an index-only projection with an empty index expression', () => {
+    const build = (index: string) =>
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [{ name: 'p', index, type: 'basic' }],
+      })
+
+    for (const empty of ['', '   ', '()']) {
+      expect(validateDefinitions([build(empty)]).map((issue) => issue.code)).toContain(
+        'projection_empty_index'
+      )
+    }
+    expect(validateDefinitions([build('id')])).toEqual([])
   })
 
   test('plans add and drop for index-only projections', () => {
