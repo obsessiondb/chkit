@@ -1,5 +1,6 @@
 import {
   canonicalizeDefinitions,
+  isIndexProjection,
   isRawCodec,
   type ColumnCodec,
   type ColumnCodecSpec,
@@ -191,7 +192,10 @@ function renderIndex(index: SkipIndexDefinition): string {
 function renderProjectionLines(projections: ProjectionDefinition[]): string[] {
   const lines: string[] = ['  projections: [']
   for (const projection of projections) {
-    lines.push(`    { name: ${renderString(projection.name)}, query: ${renderString(projection.query)} },`)
+    const fields = isIndexProjection(projection)
+      ? `index: ${renderString(projection.index)}, type: ${renderString(projection.type)}`
+      : `query: ${renderString(projection.query)}`
+    lines.push(`    { name: ${renderString(projection.name)}, ${fields} },`)
   }
   lines.push('  ],')
   return lines

@@ -170,6 +170,34 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).toContain("export default schema(app_events)")
   })
 
+  test('renders an index-only projection pulled from a live table', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'solana',
+        name: 'address_counterparts',
+        engine: 'AggregatingMergeTree()',
+        columns: [
+          { name: 'sender', type: 'String' },
+          { name: 'receiver', type: 'String' },
+        ],
+        primaryKey: ['sender'],
+        orderBy: ['sender', 'receiver'],
+        projections: [
+          { name: 'by_receiver', index: '(receiver, sender)', type: 'basic' },
+          { name: 'agg_by_sender', query: 'SELECT sender, sum(cnt) GROUP BY sender' },
+        ],
+      },
+    ])
+
+    expect(content).toContain(
+      '    { name: "by_receiver", index: "(receiver, sender)", type: "basic" },'
+    )
+    expect(content).toContain(
+      '    { name: "agg_by_sender", query: "SELECT sender, sum(cnt) GROUP BY sender" },'
+    )
+  })
+
   test('renders structured index args in pulled schema', () => {
     const content = renderSchemaFile([
       {
