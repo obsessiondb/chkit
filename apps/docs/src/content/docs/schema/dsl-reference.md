@@ -273,18 +273,31 @@ indexes: [
 
 ## Projections
 
-Each entry in the `projections` array is a `ProjectionDefinition`.
+Each entry in the `projections` array is a `ProjectionDefinition`, which takes one of two forms.
+
+A **SELECT projection** stores a rewritten copy of the data.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Projection name |
 | `query` | `string` | Projection SELECT query |
 
+An **index-only projection** stores no SELECT body. It reorders parts by a secondary key so lookups on that key prune instead of scanning.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Projection name |
+| `index` | `string` | Expression list to order by, e.g. `receiver, sender` |
+| `type` | `string` | Projection index type. ClickHouse currently accepts `basic` |
+
 ```ts
 projections: [
   { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
+  { name: 'by_receiver', index: 'receiver, sender', type: 'basic' },
 ]
 ```
+
+The `index` expression is rendered the way ClickHouse itself normalizes it: a single expression is emitted bare (`INDEX receiver`) and several are emitted as a tuple (`INDEX (receiver, sender)`). Writing `'(receiver)'` and `'receiver'` therefore produces the same table, and neither reads as drift.
 
 ## `view()`
 

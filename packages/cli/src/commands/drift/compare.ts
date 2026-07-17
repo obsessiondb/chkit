@@ -1,5 +1,7 @@
 import {
   normalizeEngine as coreNormalizeEngine,
+  isIndexProjection,
+  normalizeProjectionIndex,
   normalizeSQLFragment,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -227,6 +229,12 @@ function normalizeIndexShape(index: SkipIndexDefinition): string {
 }
 
 function normalizeProjectionShape(projection: ProjectionDefinition): string {
+  if (isIndexProjection(projection)) {
+    return [
+      `index=${normalizeProjectionIndex(projection.index)}`,
+      `type=${projection.type.trim()}`,
+    ].join('|')
+  }
   return `query=${normalizeSQLFragment(projection.query)}`
 }
 

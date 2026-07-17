@@ -100,10 +100,25 @@ export type SkipIndexDefinition = SkipIndexBase &
       }
   )
 
-export interface ProjectionDefinition {
+export interface SelectProjectionDefinition {
   name: string
   query: string
 }
+
+/**
+ * An index-only projection (`PROJECTION p INDEX (a, b) TYPE basic`) has no
+ * SELECT body: it only reorders parts to prune on a secondary key. ClickHouse
+ * currently accepts `basic` as the only index type, but `type` stays a string
+ * so new types work without a DSL change.
+ */
+export interface IndexProjectionDefinition {
+  name: string
+  /** Expression list, e.g. `receiver, sender`. Parenthesized on render. */
+  index: string
+  type: string
+}
+
+export type ProjectionDefinition = SelectProjectionDefinition | IndexProjectionDefinition
 
 // biome-ignore lint/suspicious/noEmptyInterface: must be an interface for declaration merging by plugins
 export interface TablePlugins {}

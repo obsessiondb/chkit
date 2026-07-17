@@ -2,6 +2,7 @@ import type {
   ColumnDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
+  ProjectionDefinition,
   SchemaDefinition,
   SkipIndexDefinition,
   TableDefinition,
@@ -9,6 +10,7 @@ import type {
 } from './model.js'
 import { renderCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
+import { renderProjectionBody } from './projection.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderDefault(value: string | number | boolean): string {
@@ -62,7 +64,7 @@ function renderTableSQL(def: TableDefinition): string {
       `INDEX \`${idx.name}\` (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.granularity}`
   )
   const projections = (def.projections ?? []).map(
-    (projection) => `PROJECTION \`${projection.name}\` (${projection.query})`
+    (projection) => `PROJECTION \`${projection.name}\` ${renderProjectionBody(projection)}`
   )
   const body = [...columns, ...indexes, ...projections].join(',\n  ')
 
@@ -176,8 +178,11 @@ export function renderAlterDropIndex(def: TableDefinition, indexName: string): s
   return `ALTER TABLE ${def.database}.${def.name} DROP INDEX IF EXISTS \`${indexName}\`;`
 }
 
-export function renderAlterAddProjection(def: TableDefinition, projection: { name: string; query: string }): string {
-  return `ALTER TABLE ${def.database}.${def.name} ADD PROJECTION IF NOT EXISTS \`${projection.name}\` (${projection.query});`
+export function renderAlterAddProjection(
+  def: TableDefinition,
+  projection: ProjectionDefinition
+): string {
+  return `ALTER TABLE ${def.database}.${def.name} ADD PROJECTION IF NOT EXISTS \`${projection.name}\` ${renderProjectionBody(projection)};`
 }
 
 export function renderAlterDropProjection(def: TableDefinition, projectionName: string): string {

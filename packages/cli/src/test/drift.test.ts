@@ -123,6 +123,101 @@ describe('@chkit/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  // ClickHouse rewrites a single-column `INDEX (id)` to `INDEX id`, so a schema
+  // written with parens must not read as drift against the live table.
+  test('treats an index-only projection as clean regardless of index parens', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'by_receiver', index: '(receiver)', type: 'basic' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [{ name: 'by_receiver', index: 'receiver', type: 'basic' }],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  test('reports projection_mismatch when an index projection changes type', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'by_receiver', index: 'receiver, id', type: 'basic' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [{ name: 'by_receiver', index: 'receiver', type: 'basic' }],
+    })
+
+    expect(result?.reasonCodes).toContain('projection_mismatch')
+    expect(result?.projectionDiffs).toEqual(['by_receiver'])
+  })
+
+  // A SELECT projection and an index-only projection sharing a name are
+  // different objects; the fingerprint must not collapse them.
+  test('reports projection_mismatch when a select projection becomes index-only', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'p', index: 'receiver', type: 'basic' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [{ name: 'p', query: 'SELECT receiver' }],
+    })
+
+    expect(result?.reasonCodes).toContain('projection_mismatch')
+  })
+
   test('treats quoted string defaults and implicit engine settings as equivalent', () => {
     const expected = table({
       database: 'app',
