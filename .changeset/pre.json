@@ -18,6 +18,7 @@
     "backfill-replay-all-mvs",
     "backfill-sql-scanner",
     "generate-empty-migration",
+    "index-only-projections",
     "key-clause-function-expressions",
     "shared-plugin-command-runner"
   ]
