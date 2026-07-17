@@ -1,9 +1,8 @@
-import { normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
+import { normalizeProjectionIndex, normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
 
-interface ProjectionDefinitionShape {
-  name: string
-  query: string
-}
+type ProjectionDefinitionShape =
+  | { name: string; query: string }
+  | { name: string; index: string; type: string }
 
 function parseClauseFromCreateTableQuery(
   createTableQuery: string | undefined,
@@ -142,12 +141,26 @@ export function parseProjectionsFromCreateTableQuery(
   const parts = splitTopLevelComma(body)
   const projections: ProjectionDefinitionShape[] = []
   for (const part of parts) {
+    // Index-only projections have no SELECT body, so they must be matched
+    // before the parenthesized SELECT form.
+    const indexMatch = part.match(
+      /^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+INDEX\s+([\s\S]+?)\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/i
+    )
+    if (indexMatch) {
+      const name = (indexMatch[1] ?? indexMatch[2] ?? '').trim()
+      const index = normalizeProjectionIndex(indexMatch[3] ?? '')
+      const type = (indexMatch[4] ?? '').trim()
+      if (!name || !index || !type) continue
+      projections.push({ name, index, type })
+      continue
+    }
+
     const match = part.match(
-      /^\s*PROJECTION\s+(`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\(([\s\S]*)\)\s*$/i
+      /^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\(([\s\S]*)\)\s*$/i
     )
     if (!match) continue
-    const name = (match[2] ?? match[3] ?? '').trim()
-    const query = normalizeSQLFragment((match[4] ?? '').trim())
+    const name = (match[1] ?? match[2] ?? '').trim()
+    const query = normalizeSQLFragment((match[3] ?? '').trim())
     if (!name || !query) continue
     projections.push({ name, query })
   }

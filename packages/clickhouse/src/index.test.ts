@@ -426,6 +426,51 @@ ORDER BY id;`
       },
     ])
   })
+
+  // Verbatim SHOW CREATE TABLE output from ClickHouse 26.3, including its own
+  // pretty-printing of the SELECT body. Index-only projections used to be
+  // dropped here, which is what made `chkit pull` lose them entirely.
+  test('parses index-only projections alongside select projections', () => {
+    const query = `CREATE TABLE default.address_counterparts
+(
+    \`sender\` String,
+    \`receiver\` String,
+    \`cnt\` UInt64,
+    PROJECTION by_receiver INDEX (receiver, sender) TYPE basic,
+    PROJECTION agg_by_sender
+    (
+        SELECT
+            sender,
+            sum(cnt)
+        GROUP BY sender
+    )
+)
+ENGINE = SharedMergeTree
+ORDER BY (sender, receiver)
+SETTINGS storage_policy = 's3', index_granularity = 8192`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'by_receiver', index: '(receiver, sender)', type: 'basic' },
+      { name: 'agg_by_sender', query: 'SELECT sender, sum(cnt) GROUP BY sender' },
+    ])
+  })
+
+  // ClickHouse drops the parens around a single-column index expression, so the
+  // parser sees the bare form even when the table was created with `INDEX (b)`.
+  test('parses a single-column index projection with a backticked name', () => {
+    const query = `CREATE TABLE app.events
+(
+  \`a\` String,
+  \`b\` String,
+  PROJECTION \`p_one\` INDEX b TYPE basic
+)
+ENGINE = MergeTree
+ORDER BY a`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p_one', index: 'b', type: 'basic' },
+    ])
+  })
 })
 
 describe('formatConnectionError', () => {

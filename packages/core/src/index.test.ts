@@ -6,6 +6,7 @@ import {
   codec,
   collectDefinitionsFromModule,
   materializedView,
+  normalizeProjectionIndex,
   planDiff,
   schema,
   table,
@@ -54,6 +55,203 @@ describe('@chkit/core smoke', () => {
     const sql = toCreateSQL(events)
     expect(sql).toContain('UNIQUE KEY (`id`)')
     expect(sql).toContain('PROJECTION `p_recent` (SELECT id ORDER BY id DESC LIMIT 10)')
+  })
+
+  test('renders an index-only projection without wrapping parens', () => {
+    const counterparts = table({
+      database: 'solana',
+      name: 'address_counterparts',
+      columns: [
+        { name: 'sender', type: 'String' },
+        { name: 'receiver', type: 'String' },
+      ],
+      engine: 'AggregatingMergeTree()',
+      primaryKey: ['sender'],
+      orderBy: ['sender', 'receiver'],
+      projections: [{ name: 'by_receiver', index: 'receiver, sender', type: 'basic' }],
+    })
+
+    const sql = toCreateSQL(counterparts)
+    expect(sql).toContain('PROJECTION `by_receiver` INDEX (receiver, sender) TYPE basic')
+    expect(sql).not.toContain('PROJECTION `by_receiver` (')
+  })
+
+  test('renders both projection kinds on the same table', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [
+        { name: 'p_by_source', index: 'source', type: 'basic' },
+        { name: 'p_recent', query: 'SELECT id ORDER BY id DESC LIMIT 10' },
+      ],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('PROJECTION `p_by_source` INDEX source TYPE basic')
+    expect(sql).toContain('PROJECTION `p_recent` (SELECT id ORDER BY id DESC LIMIT 10)')
+  })
+
+  // ClickHouse rewrites `INDEX (b)` to `INDEX b` and rejects `INDEX a, b`, so
+  // the renderer has to emit exactly the form ClickHouse echoes back or drift
+  // never reads clean. Each expectation here mirrors a form verified against a
+  // live 26.3 instance.
+  test('renders index expressions the way ClickHouse normalizes them', () => {
+    const renderIndex = (index: string): string => {
+      const sql = toCreateSQL(
+        table({
+          database: 'app',
+          name: 'events',
+          columns: [
+            { name: 'a', type: 'String' },
+            { name: 'b', type: 'String' },
+            { name: 'ts', type: 'DateTime' },
+          ],
+          engine: 'MergeTree()',
+          primaryKey: ['a'],
+          orderBy: ['a'],
+          projections: [{ name: 'p', index, type: 'basic' }],
+        })
+      )
+      return sql.split('\n').find((line) => line.includes('PROJECTION'))?.trim() ?? ''
+    }
+
+    expect(renderIndex('b')).toBe('PROJECTION `p` INDEX b TYPE basic')
+    expect(renderIndex('(b)')).toBe('PROJECTION `p` INDEX b TYPE basic')
+    expect(renderIndex('(a, b)')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('a, b')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(toYYYYMM(ts))')).toBe('PROJECTION `p` INDEX toYYYYMM(ts) TYPE basic')
+    expect(renderIndex('(toYYYYMM(ts), a)')).toBe(
+      'PROJECTION `p` INDEX (toYYYYMM(ts), a) TYPE basic'
+    )
+    // Redundant parens are peeled at every level, including inside a tuple...
+    expect(renderIndex('((a, b))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(((a,b)))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(a, (b))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(a), (b)')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    // ...but a genuine nested tuple is not redundant and survives.
+    expect(renderIndex('(a, (b, c))')).toBe('PROJECTION `p` INDEX (a, (b, c)) TYPE basic')
+    // ClickHouse prints a space after every argument separator.
+    expect(renderIndex('(concat(a,b), ts)')).toBe(
+      'PROJECTION `p` INDEX (concat(a, b), ts) TYPE basic'
+    )
+    expect(renderIndex('cityHash64(a,b)')).toBe('PROJECTION `p` INDEX cityHash64(a, b) TYPE basic')
+    // A paren inside a quoted identifier is text, not nesting.
+    expect(renderIndex('(`weird)name`)')).toBe('PROJECTION `p` INDEX `weird)name` TYPE basic')
+  })
+
+  // The index is normalized at canonicalize time and again at render time, so a
+  // form that keeps changing would make every generate re-emit a drop + rebuild.
+  test('normalizes index expressions idempotently', () => {
+    const inputs = [
+      'b',
+      '(b)',
+      '(a,b)',
+      '((a,b))',
+      '(((a,b)))',
+      '(a), (b)',
+      '(a, (b))',
+      '(a, (b, c))',
+      'concat(a,b)',
+      '(concat(a,b), ts)',
+      '(toYYYYMM(ts))',
+      '(`weird)name`)',
+    ]
+    for (const input of inputs) {
+      const once = normalizeProjectionIndex(input)
+      expect(normalizeProjectionIndex(once)).toBe(once)
+    }
+  })
+
+  test('treats parens-only differences in an index projection as no change', () => {
+    const defs = (index: string) => [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [{ name: 'p_by_id', index, type: 'basic' }],
+      }),
+    ]
+
+    expect(planDiff(defs('(id)'), defs('id')).operations).toEqual([])
+  })
+
+  // Both keys present satisfies the union, so TypeScript admits it — e.g. when
+  // converting a SELECT projection to index-only and leaving `query` behind.
+  // Without this, the SELECT body is silently discarded.
+  test('rejects a projection that sets both query and index', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'p', query: 'SELECT id', index: 'id', type: 'basic' }],
+    })
+
+    expect(validateDefinitions([events]).map((issue) => issue.code)).toContain(
+      'projection_ambiguous_kind'
+    )
+  })
+
+  test('rejects an index-only projection with an empty index expression', () => {
+    const build = (index: string) =>
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [{ name: 'p', index, type: 'basic' }],
+      })
+
+    for (const empty of ['', '   ', '()']) {
+      expect(validateDefinitions([build(empty)]).map((issue) => issue.code)).toContain(
+        'projection_empty_index'
+      )
+    }
+    expect(validateDefinitions([build('id')])).toEqual([])
+  })
+
+  test('plans add and drop for index-only projections', () => {
+    const base = {
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    } as const
+
+    const oldDefs = [
+      table({ ...base, projections: [{ name: 'p_drop', index: 'source', type: 'basic' }] }),
+    ]
+    const newDefs = [
+      table({ ...base, projections: [{ name: 'p_add', index: 'source, id', type: 'basic' }] }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_add_projection',
+      'alter_table_drop_projection',
+    ])
+    expect(plan.operations[0]?.sql).toContain(
+      'ADD PROJECTION IF NOT EXISTS `p_add` INDEX (source, id) TYPE basic'
+    )
   })
 
   test('normalizes comma-delimited key clauses in create table sql', () => {
