@@ -503,6 +503,23 @@ ORDER BY a`
     expect(parseOrderByFromCreateTableQuery(query)).toBe('id')
     expect(parseSettingsFromCreateTableQuery(query)).toEqual({ index_granularity: '8192' })
   })
+
+  // Regression for #196: a backtick-quoted column name containing a paren used
+  // to unbalance the body scan and truncate the parse, dropping the projection.
+  test('handles a backtick column name containing a paren', () => {
+    const query = `CREATE TABLE app.events (\`id\` UInt64, \`weird)name\` String, PROJECTION p INDEX id TYPE basic) ENGINE = MergeTree ORDER BY id`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p', index: 'id', type: 'basic' },
+    ])
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('id')
+  })
+
+  test('keeps backtick identifiers intact inside key clauses', () => {
+    const query = `CREATE TABLE app.events (\`id\` UInt64, \`w)x\` String) ENGINE = MergeTree ORDER BY (\`w)x\`, id)`
+
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('(`w)x`, id)')
+  })
 })
 
 describe('formatConnectionError', () => {
