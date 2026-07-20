@@ -388,6 +388,70 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).toContain('default: "fn:\'\'"')
   })
 
+  test('excludes ObsessionDB metadata tables from pulled schema output', async () => {
+    const introspectedTable = (name: string) => ({
+      database: 'app',
+      name,
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        introspectedTable('events'),
+        introspectedTable('metadata_folder'),
+        introspectedTable('metadata_table_folder'),
+        introspectedTable('metadata_table_tag'),
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { definitionCount: number; tableCount: number; content: string }
+    expect(payload.definitionCount).toBe(1)
+    expect(payload.tableCount).toBe(1)
+    expect(payload.content).toContain('const app_events = table({')
+    expect(payload.content).not.toContain('metadata_folder')
+    expect(payload.content).not.toContain('metadata_table_folder')
+    expect(payload.content).not.toContain('metadata_table_tag')
+  })
+
   test('supports introspected view and materialized_view objects', async () => {
     const plugin = createPullPlugin({
       databases: ['app'],

@@ -245,6 +245,23 @@ export function pull(options: PullPluginOptions = {}): PullPluginRegistration {
 
 // ───── Internal helpers ─────
 
+// ObsessionDB provisions these product-metadata tables inside customer
+// databases. They are ObsessionDB internals, not part of the user's schema, so
+// pull must neither emit them nor count them as skipped/unsupported (#126).
+const OBSESSIONDB_METADATA_TABLES = new Set([
+  'metadata_folder',
+  'metadata_table_folder',
+  'metadata_table_tag',
+])
+
+function isObsessionDbMetadataTable(object: { kind?: string; name: string }): boolean {
+  // An introspected object is a table when it says so or omits `kind` entirely,
+  // mirroring mapIntrospectedObjectToDefinition — a custom introspector returns
+  // bare table objects without a `kind` field.
+  const isTable = object.kind == null || object.kind === 'table'
+  return isTable && OBSESSIONDB_METADATA_TABLES.has(object.name)
+}
+
 async function pullSchema(input: {
   config: ResolvedChxConfig
   executor?: ClickHouseExecutor | null
@@ -274,18 +291,22 @@ async function pullSchema(input: {
   let selectedDatabases = input.options.databases
 
   if (db && (!customIntrospector || selectedDatabases.length === 0)) {
-    objects = await db.listSchemaObjects()
+    objects = (await db.listSchemaObjects()).filter(
+      (item) => !isObsessionDbMetadataTable(item)
+    )
     if (selectedDatabases.length === 0) {
       selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
     }
   }
 
-  const introspected = customIntrospector
-    ? await customIntrospector({
-        config: input.config.clickhouse as NonNullable<ResolvedChxConfig['clickhouse']>,
-        databases: selectedDatabases,
-      })
-    : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
+  const introspected = (
+    customIntrospector
+      ? await customIntrospector({
+          config: input.config.clickhouse as NonNullable<ResolvedChxConfig['clickhouse']>,
+          databases: selectedDatabases,
+        })
+      : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
+  ).filter((object) => !isObsessionDbMetadataTable(object))
 
   const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
   const content = renderSchemaFile(definitions)
