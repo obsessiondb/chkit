@@ -72,4 +72,31 @@ describe('canonicalizeSqlFragments', () => {
     expect(map.size).toBe(0)
     expect(called).toBe(false)
   })
+
+  // Guards against overflowing ClickHouse's max_query_size (256 KiB) on a large
+  // schema, which would throw and silently drop the whole run to string
+  // comparison — the feature no-opping exactly where it's needed.
+  test('splits large input into multiple bounded queries and merges the results', async () => {
+    const sqls: string[] = []
+    // Echo each literal in the received array back as `SELECT <fragment>`, so
+    // every fragment maps to itself regardless of how batching splits them.
+    const executor = {
+      async query<T>(sql: string): Promise<T[]> {
+        sqls.push(sql)
+        const literalCount = (sql.match(/'/g)?.length ?? 0) / 2
+        return [{ formatted: Array.from({ length: literalCount }, () => 'SELECT ok') } as unknown as T]
+      },
+    } as unknown as ClickHouseExecutor
+
+    // ~40 bytes of literal each × 8000 ≈ 320 KB → forces several batches.
+    const fragments = Array.from({ length: 8000 }, (_, i) => `expr_${i}_${'x'.repeat(30)}`)
+    const map = await canonicalizeSqlFragments(executor, fragments, { wrap: true })
+
+    expect(sqls.length).toBeGreaterThan(1)
+    for (const sql of sqls) expect(sql.length).toBeLessThan(200_000)
+    // Every distinct fragment was formatted across the batches.
+    expect(map.size).toBe(fragments.length)
+    expect(map.get(fragments[0]!)).toBe('ok')
+    expect(map.get(fragments.at(-1)!)).toBe('ok')
+  })
 })

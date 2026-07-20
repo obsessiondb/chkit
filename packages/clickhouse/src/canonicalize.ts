@@ -9,6 +9,29 @@ function stripSelectPrefix(formatted: string): string | null {
   return match?.[1]?.trim() ?? null
 }
 
+// Keep each batched query well under ClickHouse's default max_query_size
+// (262144 bytes) so a large schema doesn't overflow a single query — which would
+// throw and silently drop the whole run back to string comparison.
+const MAX_BATCH_LITERAL_BYTES = 128_000
+
+function batchFragments(fragments: readonly string[]): string[][] {
+  const batches: string[][] = []
+  let current: string[] = []
+  let size = 0
+  for (const fragment of fragments) {
+    const cost = quoteLiteral(fragment).length + 2 // literal + ", " separator
+    if (current.length > 0 && size + cost > MAX_BATCH_LITERAL_BYTES) {
+      batches.push(current)
+      current = []
+      size = 0
+    }
+    current.push(fragment)
+    size += cost
+  }
+  if (current.length > 0) batches.push(current)
+  return batches
+}
+
 /**
  * Canonicalize SQL fragments through ClickHouse's own formatter, so a schema
  * fragment can be compared against what ClickHouse actually stores. The server
@@ -34,21 +57,23 @@ export async function canonicalizeSqlFragments(
   const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
   if (unique.length === 0) return result
 
-  const arrayLiteral = unique.map(quoteLiteral).join(', ')
   const formatCall = options.wrap
     ? `formatQuerySingleLineOrNull('SELECT ' || fragment)`
     : `formatQuerySingleLineOrNull(fragment)`
-  const rows = await executor.query<{ formatted: Array<string | null> }>(
-    `SELECT arrayMap(fragment -> ${formatCall}, [${arrayLiteral}]) AS formatted`
-  )
 
-  const formatted = rows[0]?.formatted ?? []
-  for (let i = 0; i < unique.length; i += 1) {
-    const raw = unique[i]
-    const value = formatted[i]
-    if (raw === undefined || value == null) continue
-    const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
-    if (canonical) result.set(raw, canonical)
+  for (const batch of batchFragments(unique)) {
+    const arrayLiteral = batch.map(quoteLiteral).join(', ')
+    const rows = await executor.query<{ formatted: Array<string | null> }>(
+      `SELECT arrayMap(fragment -> ${formatCall}, [${arrayLiteral}]) AS formatted`
+    )
+    const formatted = rows[0]?.formatted ?? []
+    for (let i = 0; i < batch.length; i += 1) {
+      const raw = batch[i]
+      const value = formatted[i]
+      if (raw === undefined || value == null) continue
+      const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
+      if (canonical) result.set(raw, canonical)
+    }
   }
   return result
 }
