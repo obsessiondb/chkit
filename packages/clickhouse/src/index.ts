@@ -159,6 +159,7 @@ export {
 	parseTTLFromCreateTableQuery,
 	parseUniqueKeyFromCreateTableQuery,
 } from './create-table-parser.js'
+export { canonicalizeSqlFragments } from './canonicalize.js'
 
 export function inferSchemaKindFromEngine(
 	engine: string,
