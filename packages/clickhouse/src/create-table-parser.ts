@@ -10,17 +10,28 @@ function parseClauseFromCreateTableQuery(
   stopPattern: RegExp
 ): string | undefined {
   if (!createTableQuery) return undefined
-  const start = createTableQuery.match(clausePattern)
+  // Table-level clauses (ENGINE, ORDER BY, PRIMARY KEY, ...) only appear after
+  // the column list. Searching the whole query would match a keyword inside the
+  // body — e.g. the `ORDER BY` of a projection's SELECT — and swallow the real
+  // clause plus everything up to the next stop keyword (issue #190).
+  const options = extractTableOptions(createTableQuery)
+  const start = options.match(clausePattern)
   if (!start || start.index === undefined) return undefined
-  const afterClause = createTableQuery.slice(start.index + start[0].length)
+  const afterClause = options.slice(start.index + start[0].length)
   const stop = afterClause.match(stopPattern)
   const raw = (stop ? afterClause.slice(0, stop.index) : afterClause).trim()
   if (!raw) return undefined
   return normalizeSQLFragment(raw)
 }
 
-function extractCreateTableBody(createTableQuery: string | undefined): string | undefined {
-  if (!createTableQuery) return undefined
+/**
+ * Positions of the parens that open and close the column list — the close being
+ * the one right before the table-level `ENGINE =`. Returns undefined when there
+ * is no balanced column list (e.g. a view, or a query we can't parse).
+ */
+function findColumnListBounds(
+  createTableQuery: string
+): { open: number; close: number } | undefined {
   const engineMatch = /\)\s*ENGINE\s*=/i.exec(createTableQuery)
   if (!engineMatch || engineMatch.index === undefined) return undefined
   const left = createTableQuery.slice(0, engineMatch.index + 1)
@@ -50,19 +61,34 @@ function extractCreateTableBody(createTableQuery: string | undefined): string | 
     }
     if (char === ')') {
       depth -= 1
-      if (depth === 0) {
-        const body = left.slice(openIndex + 1, i).trim()
-        return body.length > 0 ? body : undefined
-      }
+      if (depth === 0) return { open: openIndex, close: i }
     }
   }
 
   return undefined
 }
 
+function extractCreateTableBody(createTableQuery: string | undefined): string | undefined {
+  if (!createTableQuery) return undefined
+  const bounds = findColumnListBounds(createTableQuery)
+  if (!bounds) return undefined
+  const body = createTableQuery.slice(bounds.open + 1, bounds.close).trim()
+  return body.length > 0 ? body : undefined
+}
+
+/**
+ * Everything after the column list: `ENGINE = ... PARTITION BY ... ORDER BY ...`.
+ * This is where table-level clauses live. Falls back to the whole query when the
+ * column list can't be located, preserving behaviour for unparseable inputs.
+ */
+function extractTableOptions(createTableQuery: string): string {
+  const bounds = findColumnListBounds(createTableQuery)
+  return bounds ? createTableQuery.slice(bounds.close + 1) : createTableQuery
+}
+
 export function parseSettingsFromCreateTableQuery(createTableQuery: string | undefined): Record<string, string> {
   if (!createTableQuery) return {}
-  const settingsMatch = createTableQuery.match(/\bSETTINGS\b([\s\S]*?)(?:;|$)/i)
+  const settingsMatch = extractTableOptions(createTableQuery).match(/\bSETTINGS\b([\s\S]*?)(?:;|$)/i)
   if (!settingsMatch?.[1]) return {}
   const rawSettings = settingsMatch[1].trim()
   if (!rawSettings) return {}
@@ -81,7 +107,7 @@ export function parseSettingsFromCreateTableQuery(createTableQuery: string | und
 
 export function parseTTLFromCreateTableQuery(createTableQuery: string | undefined): string | undefined {
   if (!createTableQuery) return undefined
-  const ttlMatch = createTableQuery.match(/\bTTL\b([\s\S]*?)(?:\bSETTINGS\b|;|$)/i)
+  const ttlMatch = extractTableOptions(createTableQuery).match(/\bTTL\b([\s\S]*?)(?:\bSETTINGS\b|;|$)/i)
   const raw = ttlMatch?.[1]?.trim()
   if (!raw) return undefined
   return normalizeSQLFragment(raw)
