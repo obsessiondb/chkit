@@ -3,12 +3,31 @@ import {
   isIndexProjection,
   normalizeProjectionIndex,
   normalizeSQLFragment,
+  splitTopLevelComma,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
   type TableDefinition,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
+
+/**
+ * Canonicalizes SQL fragments to the exact form ClickHouse stores, so a schema
+ * fragment compares equal to what a live table reports even when the two are
+ * spelled differently (`cityHash64(a,b)` vs `cityHash64(a, b)`, `n*2+1` vs
+ * `(n * 2) + 1`, `INTERVAL 5 YEAR` vs `toIntervalYear(5)`). Only ClickHouse's own
+ * formatter can produce this, so it is injected by the drift command; when it is
+ * absent (offline, or a fragment ClickHouse couldn't parse) each field falls
+ * back to plain string normalization (#195).
+ */
+export interface SqlCanonicalizer {
+  expression(fragment: string): string | null
+  query(fragment: string): string | null
+}
+
+function canonicalizeExpression(base: string, canonicalizer?: SqlCanonicalizer): string {
+  return canonicalizer?.expression(base) ?? base
+}
 
 type TableDriftReasonCode =
   | 'missing_column'
@@ -220,29 +239,45 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   }
 }
 
-function normalizeIndexShape(index: SkipIndexDefinition): string {
+function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {
   return [
-    `expr=${normalizeSQLFragment(index.expression)}`,
+    `expr=${canonicalizeExpression(normalizeSQLFragment(index.expression), canonicalizer)}`,
     `type=${renderIndexTypeFingerprint(index)}`,
     `granularity=${index.granularity}`,
   ].join('|')
 }
 
-function normalizeProjectionShape(projection: ProjectionDefinition): string {
+function normalizeProjectionShape(
+  projection: ProjectionDefinition,
+  canonicalizer?: SqlCanonicalizer
+): string {
   if (isIndexProjection(projection)) {
     return [
       `index=${normalizeProjectionIndex(projection.index)}`,
       `type=${projection.type.trim()}`,
     ].join('|')
   }
-  return `query=${normalizeSQLFragment(projection.query)}`
+  const base = normalizeSQLFragment(projection.query)
+  return `query=${canonicalizer?.query(base) ?? base}`
 }
 
-function normalizeClause(value: string | undefined): string {
+/** Strip backticks and one layer of wrapping parens; the shared prep both the
+ *  comparison and the fragment collector build on. */
+function normalizeClauseBase(value: string | undefined): string {
   if (!value) return ''
   const normalized = normalizeSQLFragment(value).replace(/`/g, '')
   const wrapped = normalized.match(/^\((.*)\)$/)
   return wrapped?.[1] ? normalizeSQLFragment(wrapped[1]) : normalized
+}
+
+function normalizeClause(value: string | undefined, canonicalizer?: SqlCanonicalizer): string {
+  const base = normalizeClauseBase(value)
+  if (!canonicalizer || base === '') return base
+  // Canonicalize each element so a function expression in a key/partition clause
+  // (`cityHash64(a,b)`) matches ClickHouse's stored spelling.
+  return splitTopLevelComma(base)
+    .map((element) => canonicalizeExpression(element.trim(), canonicalizer))
+    .join(', ')
 }
 
 function normalizeEngine(value: string | undefined): string {
@@ -250,7 +285,58 @@ function normalizeEngine(value: string | undefined): string {
   return coreNormalizeEngine(normalizeSQLFragment(value)).toLowerCase()
 }
 
-export function compareTableShape(expected: TableDefinition, actual: ActualTableShape): TableDriftDetail | null {
+/**
+ * Every SQL fragment `compareTableShape` will look up in a `SqlCanonicalizer`,
+ * at the exact granularity it looks them up (whole expressions for index/ttl,
+ * per-element for key/partition clauses, whole query for SELECT projections).
+ * The drift command collects these across all compared tables, formats them in
+ * one round-trip, and hands back a map-backed canonicalizer.
+ */
+export function collectTableSqlFragments(
+  expected: TableDefinition,
+  actual: ActualTableShape
+): { expressions: string[]; queries: string[] } {
+  const expressions: string[] = []
+  const queries: string[] = []
+
+  const addExpression = (raw: string | undefined) => {
+    if (raw) expressions.push(normalizeSQLFragment(raw))
+  }
+  const addClause = (value: string | undefined) => {
+    const base = normalizeClauseBase(value)
+    if (base) expressions.push(...splitTopLevelComma(base).map((element) => element.trim()))
+  }
+
+  for (const index of expected.indexes ?? []) addExpression(index.expression)
+  for (const index of actual.indexes) addExpression(index.expression)
+
+  addExpression(expected.ttl)
+  addExpression(actual.ttl)
+
+  addClause((expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy).join(', '))
+  addClause(actual.primaryKey ?? actual.orderBy)
+  addClause(expected.orderBy.join(', '))
+  addClause(actual.orderBy)
+  addClause((expected.uniqueKey ?? []).join(', '))
+  addClause(actual.uniqueKey)
+  addClause(expected.partitionBy)
+  addClause(actual.partitionBy)
+
+  for (const projection of expected.projections ?? []) {
+    if (!isIndexProjection(projection)) queries.push(normalizeSQLFragment(projection.query))
+  }
+  for (const projection of actual.projections) {
+    if (!isIndexProjection(projection)) queries.push(normalizeSQLFragment(projection.query))
+  }
+
+  return { expressions, queries }
+}
+
+export function compareTableShape(
+  expected: TableDefinition,
+  actual: ActualTableShape,
+  canonicalizer?: SqlCanonicalizer
+): TableDriftDetail | null {
   const columnDiff = diffByName(
     expected.columns,
     actual.columns,
@@ -264,13 +350,21 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   const settingDiffs = diffSettings(expected.settings ?? {}, actual.settings)
 
   const expectedIndexes = new Map(
-    (expected.indexes ?? []).map((idx) => [idx.name, normalizeIndexShape(idx)])
+    (expected.indexes ?? []).map((idx) => [idx.name, normalizeIndexShape(idx, canonicalizer)])
   )
-  const actualIndexes = new Map(actual.indexes.map((idx) => [idx.name, normalizeIndexShape(idx)]))
+  const actualIndexes = new Map(
+    actual.indexes.map((idx) => [idx.name, normalizeIndexShape(idx, canonicalizer)])
+  )
   const indexDiffs = diffNamedShapeMaps(expectedIndexes, actualIndexes)
 
-  const expectedTTL = expected.ttl ? normalizeSQLFragment(expected.ttl) : ''
-  const actualTTL = actual.ttl ? normalizeSQLFragment(actual.ttl) : ''
+  const expectedTTL = canonicalizeExpression(
+    expected.ttl ? normalizeSQLFragment(expected.ttl) : '',
+    canonicalizer
+  )
+  const actualTTL = canonicalizeExpression(
+    actual.ttl ? normalizeSQLFragment(actual.ttl) : '',
+    canonicalizer
+  )
   const ttlMismatch = expectedTTL !== actualTTL
 
   const engineMismatch = normalizeEngine(expected.engine) !== normalizeEngine(actual.engine)
@@ -279,28 +373,32 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   // Mirror that on both sides (as canonical.ts does for the schema), else every
   // such table drifts forever (#194).
   const expectedPrimaryKey = normalizeClause(
-    (expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy).join(', ')
+    (expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy).join(', '),
+    canonicalizer
   )
-  const actualPrimaryKey = normalizeClause(actual.primaryKey ?? actual.orderBy)
+  const actualPrimaryKey = normalizeClause(actual.primaryKey ?? actual.orderBy, canonicalizer)
   const primaryKeyMismatch = expectedPrimaryKey !== actualPrimaryKey
-  const expectedOrderBy = normalizeClause(expected.orderBy.join(', '))
-  const actualOrderBy = normalizeClause(actual.orderBy)
+  const expectedOrderBy = normalizeClause(expected.orderBy.join(', '), canonicalizer)
+  const actualOrderBy = normalizeClause(actual.orderBy, canonicalizer)
   const orderByMismatch = expectedOrderBy !== actualOrderBy
-  const expectedUniqueKey = normalizeClause((expected.uniqueKey ?? []).join(', '))
-  const actualUniqueKey = normalizeClause(actual.uniqueKey)
+  const expectedUniqueKey = normalizeClause((expected.uniqueKey ?? []).join(', '), canonicalizer)
+  const actualUniqueKey = normalizeClause(actual.uniqueKey, canonicalizer)
   const uniqueKeyMismatch = expectedUniqueKey !== actualUniqueKey
-  const expectedPartitionBy = normalizeClause(expected.partitionBy)
-  const actualPartitionBy = normalizeClause(actual.partitionBy)
+  const expectedPartitionBy = normalizeClause(expected.partitionBy, canonicalizer)
+  const actualPartitionBy = normalizeClause(actual.partitionBy, canonicalizer)
   const partitionByMismatch = expectedPartitionBy !== actualPartitionBy
 
   const expectedProjections = new Map(
     (expected.projections ?? []).map((projection) => [
       projection.name,
-      normalizeProjectionShape(projection),
+      normalizeProjectionShape(projection, canonicalizer),
     ])
   )
   const actualProjections = new Map(
-    actual.projections.map((projection) => [projection.name, normalizeProjectionShape(projection)])
+    actual.projections.map((projection) => [
+      projection.name,
+      normalizeProjectionShape(projection, canonicalizer),
+    ])
   )
   const projectionDiffs = diffNamedShapeMaps(expectedProjections, actualProjections)
 
