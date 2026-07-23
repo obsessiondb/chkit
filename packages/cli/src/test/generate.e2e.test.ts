@@ -463,6 +463,7 @@ describe('@chkit/cli generate e2e', () => {
         'schemaVersion',
         'scope',
         'snapshotFile',
+        'warnings',
       ])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
@@ -547,6 +548,61 @@ describe('@chkit/cli generate e2e', () => {
       expect(payload.scope.matchCount).toBe(0)
       expect(payload.operationCount).toBe(0)
       expect(payload.warning).toContain('No tables matched selector')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun warns when a new dictionary SOURCE(...) has a plain-text password', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password 'secret' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { warnings: string[] }
+      expect(
+        payload.warnings.some(
+          (warning) => warning.includes('app.users_dict') && warning.includes('plain text')
+        )
+      ).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun warns when only a dictionary SOURCE(...) password changed', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password 'old-secret' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password 'new-secret' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operationCount: number
+        warnings: string[]
+      }
+      expect(payload.operationCount).toBe(0)
+      expect(
+        payload.warnings.some(
+          (warning) => warning.includes('app.users_dict') && warning.includes('masks passwords')
+        )
+      ).toBe(true)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

@@ -14,6 +14,7 @@ import {
   resolveTableScope,
   tableKeysFromDefinitions,
 } from '../../runtime/table-scope.js'
+import { detectDictionaryPasswordWarnings } from './dictionary-password-warnings.js'
 import {
   applyExplicitDictionaryRenames,
   applyExplicitTableRenames,
@@ -203,8 +204,14 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   // post-pass, after all plan transforms (renames, plugins, scope filtering).
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
+  const dictionaryPasswordWarnings = detectDictionaryPasswordWarnings({
+    plan,
+    definitions,
+    previousDefinitions: remappedPreviousDefinitions,
+  })
+
   if (planMode) {
-    emitGeneratePlanOutput(plan, jsonMode, resolvedScope)
+    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)
     return 0
   }
 
@@ -246,6 +253,6 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     }
   }
 
-  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope)
+  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)
   return 0
 }

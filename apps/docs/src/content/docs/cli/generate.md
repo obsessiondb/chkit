@@ -72,6 +72,13 @@ A dictionary rename emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` stat
 
 Validation errors are raised for conflicting, chained, or cyclic rename mappings.
 
+### Dictionary password warnings
+
+A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), so any credentials it embeds are written verbatim into the generated migration SQL — ClickHouse has no DDL-level secret substitution. `generate` surfaces two warnings for this, printed to the console and included as a `warnings` array in `--json` output:
+
+- **Plain-text password**: a dictionary being created or replaced this run has a literal `password '...'` in its `SOURCE(...)` — it will land in the committed migration file as plain text.
+- **Undetected password change**: an existing dictionary's `SOURCE(...)` password changed but nothing else did. chkit masks passwords before diffing, which means a password-only change produces no operation and no migration. Apply the new password directly against ClickHouse, or scaffold a manual statement with `chkit generate --empty`.
+
 ### Dryrun mode
 
 With `--dryrun`, the command prints the migration plan (operations with risk levels and SQL) without writing any files. Useful for previewing changes before committing.
@@ -161,7 +168,8 @@ chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
     { "type": "create_database", "key": "database:default", "risk": "safe", "sql": "CREATE DATABASE IF NOT EXISTS default;" },
     { "type": "create_table", "key": "default.users", "risk": "safe", "sql": "CREATE TABLE ..." }
   ],
-  "renameSuggestions": []
+  "renameSuggestions": [],
+  "warnings": []
 }
 ```
 
@@ -176,7 +184,8 @@ chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
   "snapshotFile": "./chkit/meta/snapshot.json",
   "definitionCount": 3,
   "operationCount": 2,
-  "riskSummary": { "safe": 2, "caution": 0, "danger": 0 }
+  "riskSummary": { "safe": 2, "caution": 0, "danger": 0 },
+  "warnings": []
 }
 ```
 
