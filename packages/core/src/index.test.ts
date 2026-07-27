@@ -1771,7 +1771,7 @@ describe('@chkit/core dictionaries', () => {
     expect(plan.operations[0]?.risk).toBe('danger')
   })
 
-  test('binary diff: source differing only by password produces no diff', () => {
+  test('binary diff: a real password change produces a CREATE OR REPLACE DICTIONARY op', () => {
     const oldDefs = [dictionary({ ...baseDictionary })]
     const newDefs = [
       dictionary({
@@ -1780,7 +1780,36 @@ describe('@chkit/core dictionaries', () => {
       }),
     ]
     const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain("password 'a-different-secret'")
+  })
+
+  test('binary diff: a [HIDDEN] source placeholder never drives a diff on its own', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')`,
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
     expect(plan.operations).toHaveLength(0)
+  })
+
+  test('binary diff: a [HIDDEN] source placeholder does not suppress unrelated field changes', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')`,
+        layout: 'COMPLEX_KEY_HASHED()',
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain("password '[HIDDEN]'")
   })
 
   test('renders RANGE, SETTINGS, and BIDIRECTIONAL clauses', () => {

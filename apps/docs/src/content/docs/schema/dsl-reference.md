@@ -428,7 +428,7 @@ Inline credentials in `source` (e.g. a MySQL/PostgreSQL `password '...'`) should
 source: `MYSQL(host 'db' password '${process.env.MYSQL_PASSWORD}' ...)`,
 ```
 
-ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW CREATE DICTIONARY`, `system.dictionaries`). chkit masks the `password '...'` token before comparing `source` for drift/diff purposes, so a live `[HIDDEN]` value is never reported as perpetual drift against your real secret — see [Pull: credential handling](/plugins/pull/#credential-handling-hidden-passwords).
+ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW CREATE DICTIONARY`, `system.dictionaries`). A real password change diffs and migrates like any other field change. The one exception is a `source` that still carries the literal `[HIDDEN]` placeholder written by `chkit pull` — chkit never knows the real value in that case, so it excludes `source` from the diff entirely rather than risk rendering `[HIDDEN]` into DDL — see [Pull: credential handling](/plugins/pull/#credential-handling-hidden-passwords).
 
 ### No `ALTER DICTIONARY`
 
@@ -561,7 +561,7 @@ When a property changes, chkit determines whether the table can be altered in pl
 
 Views and materialized views always use drop + recreate.
 
-Dictionaries have no ALTER at all: any change to `attributes`, `primaryKey`, `layout`, `lifetime`, or `comment` renders as a single `CREATE OR REPLACE DICTIONARY` (`risk=caution`). A `source` change is compared with the password masked (see [Credentials in `source`](#credentials-in-source)), so only a real credential/connection change triggers a replace. Removing a dictionary from schema emits `DROP DICTIONARY` (`risk=danger`, requires `--allow-destructive`).
+Dictionaries have no ALTER at all: any change to `attributes`, `primaryKey`, `layout`, `lifetime`, `source` (including a password change), or `comment` renders as a single `CREATE OR REPLACE DICTIONARY` (`risk=caution`) — except a `source` still carrying the `[HIDDEN]` introspection placeholder, which is excluded from the diff entirely (see [Credentials in `source`](#credentials-in-source)). Removing a dictionary from schema emits `DROP DICTIONARY` (`risk=danger`, requires `--allow-destructive`).
 
 :::danger
 Changing a structural property on an existing table generates a `DROP TABLE` followed by `CREATE TABLE` — **all rows are permanently deleted and the table is recreated empty**. The data is not copied over. The drop is classified `risk=danger` (blocked without `--allow-destructive`) and `chkit migrate` flags it with the distinct `table_recreate_data_loss` warning. To preserve data, migrate by hand instead: create a new table with the desired structure, `INSERT INTO new SELECT ... FROM old`, then swap names and drop the old table.

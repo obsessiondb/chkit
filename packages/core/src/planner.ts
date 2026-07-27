@@ -316,26 +316,30 @@ function diffMaterializedView(
   return []
 }
 
-// Redacts inline SOURCE() credentials for comparison only, mirroring what
-// ClickHouse itself does on introspection (`[HIDDEN]`). A definition whose
-// only difference is the password must not diff every run — never used to
-// render DDL, so the real secret still reaches ClickHouse.
-function maskDictionarySecrets(source: string): string {
-  return source.replace(/password\s+'(?:[^'\\]|\\.)*'/gi, "password '[HIDDEN]'")
+// `chkit pull` writes ClickHouse's own introspection placeholder
+// (`password '[HIDDEN]'`) into `source` when it can't recover a dictionary's
+// real credential. That placeholder must never drive a diff — rendering it
+// would deploy the literal string "[HIDDEN]" as the password. A real
+// password value, by contrast, is fully known to chkit (it's a plain string
+// in the schema file) and a change to it is a genuine diff like any other.
+function dictionarySourceIsHidden(source: string): boolean {
+  return source.includes('[HIDDEN]')
 }
 
-function dictionaryComparisonShape(def: DictionaryDefinition) {
+function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
+  if (!omitSource) return def
   const { source, ...rest } = def
-  return { ...rest, source: maskDictionarySecrets(source) }
+  return rest
 }
 
 function diffDictionary(
   oldDef: DictionaryDefinition,
   newDef: DictionaryDefinition
 ): MigrationOperation[] {
+  const omitSource = dictionarySourceIsHidden(newDef.source)
   const unchanged =
-    JSON.stringify(dictionaryComparisonShape(oldDef)) ===
-    JSON.stringify(dictionaryComparisonShape(newDef))
+    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
+    JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
   if (unchanged) return []
 
   return [

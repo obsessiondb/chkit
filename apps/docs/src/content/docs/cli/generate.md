@@ -74,10 +74,11 @@ Validation errors are raised for conflicting, chained, or cyclic rename mappings
 
 ### Dictionary password warnings
 
-A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), so any credentials it embeds are written verbatim into the generated migration SQL — ClickHouse has no DDL-level secret substitution. `generate` surfaces two warnings for this, printed to the console and included as a `warnings` array in `--json` output:
+A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), so any credentials it embeds are written verbatim into the generated migration SQL — ClickHouse has no DDL-level secret substitution. A password change is a real diff like any other field change and produces a `CREATE OR REPLACE DICTIONARY` migration.
 
-- **Plain-text password**: a dictionary being created or replaced this run has a literal `password '...'` in its `SOURCE(...)` — it will land in the committed migration file as plain text.
-- **Undetected password change**: an existing dictionary's `SOURCE(...)` password changed but nothing else did. chkit masks passwords before diffing, which means a password-only change produces no operation and no migration. Apply the new password directly against ClickHouse, or scaffold a manual statement with `chkit generate --empty`.
+`generate` warns when a dictionary being created or replaced this run has a literal `password '...'` in its `SOURCE(...)` — it will land in the committed migration file as plain text. This prints to the console and is included as a `warnings` array in `--json` output.
+
+The one exception: a dictionary whose `source` still carries ClickHouse's `[HIDDEN]` introspection placeholder (written by [`chkit pull`](/plugins/pull/#credential-handling-hidden-passwords) when it can't recover the real password) never produces a migration on its own — chkit doesn't know the real value, so it can't safely diff or render it. Replace `[HIDDEN]` with a real credential in the schema file first.
 
 ### Dryrun mode
 

@@ -109,7 +109,7 @@ Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projecti
 
 ## Credential handling (`[HIDDEN]` passwords)
 
-ClickHouse redacts inline `SOURCE(...)` passwords to `[HIDDEN]` on introspection (`system.tables.create_table_query`, `SHOW CREATE DICTIONARY`) and does not offer a way to recover the original value via `pull` — chkit does not attempt `format_display_secrets_in_show_and_select`. When a pulled dictionary's `source` contains `[HIDDEN]`, the generated file emits it verbatim with a leading comment:
+ClickHouse redacts inline `SOURCE(...)` passwords to `[HIDDEN]` on introspection (`system.tables.create_table_query`, `SHOW CREATE DICTIONARY`) and does not offer a way to recover the original value via `pull` — chkit does not attempt `format_display_secrets_in_show_and_select`. When a pulled dictionary's `source` contains `[HIDDEN]`, `chkit pull` prints a console warning (and includes it in a `warnings` array in `--json` output), and the generated file emits the source verbatim with a leading comment:
 
 ```ts
 // NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X).
@@ -135,7 +135,7 @@ source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_P
 
 For round-trip fidelity without a manual edit, use [named collections](https://clickhouse.com/docs/operations/named-collections) on the ClickHouse side instead of an inline password — chkit does not require this, but it's the ClickHouse-native way to avoid the redaction entirely.
 
-Because chkit masks the `password '...'` token before comparing `source` for drift, a live `[HIDDEN]` value is never reported as perpetual drift against your real secret once you've filled it in.
+Because a `source` still carrying `[HIDDEN]` is excluded from the diff entirely (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), `chkit generate` won't produce a migration for that dictionary's `source` until you replace the placeholder with a real value.
 
 ## Current limits
 

@@ -500,6 +500,64 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).toContain('const app_users_mv = materializedView({')
   })
 
+  test('warns when an introspected dictionary SOURCE(...) password is [HIDDEN]', async () => {
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          kind: 'dictionary',
+          database: 'app',
+          name: 'users_dict',
+          attributes: [{ name: 'id', type: 'UInt64' }],
+          primaryKey: ['id'],
+          source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+          layout: 'HASHED()',
+          lifetime: '300',
+        },
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { warnings: string[] }
+    expect(
+      payload.warnings.some(
+        (warning) => warning.includes('app.users_dict') && warning.includes('[HIDDEN]')
+      )
+    ).toBe(true)
+  })
+
   test('writes schema file and fails on existing file without --force', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-'))
     const outFile = join(dir, 'schema.ts')

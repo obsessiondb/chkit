@@ -133,6 +133,19 @@ interface PullSchemaResult {
   databases: string[]
   skippedObjects: Array<{ kind: string; count: number }>
   content: string
+  warnings: string[]
+}
+
+// ClickHouse redacts a dictionary's SOURCE(...) password to `[HIDDEN]` on
+// introspection and offers no way to recover the real value via pull — flag
+// it immediately so the placeholder doesn't sit unnoticed in the schema file.
+function dictionaryHiddenPasswordWarnings(definitions: SchemaDefinition[]): string[] {
+  return definitions
+    .filter((def) => def.kind === 'dictionary' && def.source.includes('[HIDDEN]'))
+    .map(
+      (def) =>
+        `Dictionary "${def.database}.${def.name}" SOURCE(...) password was redacted by ClickHouse to '[HIDDEN]' — chkit could not recover the real value. Replace it in the generated schema file before this dictionary's source can be diffed or migrated.`
+    )
 }
 
 function stringArrayFlag(value: string | string[] | boolean | undefined): string[] | undefined {
@@ -208,6 +221,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               databases: pulled.databases,
               skippedObjects: pulled.skippedObjects,
               dryrun,
+              warnings: pulled.warnings,
               ...(dryrun ? { content: pulled.content } : {}),
             }
 
@@ -226,6 +240,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
                 `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
               )
             }
+            for (const warning of pulled.warnings) console.warn(`Warning: ${warning}`)
             return 0
           },
         }),
@@ -295,6 +310,7 @@ async function pullSchema(input: {
   const content = renderSchemaFile(definitions)
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
+  const warnings = dictionaryHiddenPasswordWarnings(definitions)
 
   return {
     outFile,
@@ -303,6 +319,7 @@ async function pullSchema(input: {
     databases: selectedDatabases,
     skippedObjects,
     content,
+    warnings,
   }
 }
 
