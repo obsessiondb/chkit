@@ -14,22 +14,30 @@ import {
   resolveTableScope,
   tableKeysFromDefinitions,
 } from '../../runtime/table-scope.js'
+import { detectDictionaryPasswordWarnings } from './dictionary-password-warnings.js'
 import {
+  applyExplicitDictionaryRenames,
   applyExplicitTableRenames,
   applySelectedRenameSuggestions,
   assertCliColumnMappingsResolvable,
   buildExplicitColumnRenameSuggestions,
 } from './plan-pipeline.js'
 import {
+  assertCliDictionaryMappingsResolvable,
   assertCliTableMappingsResolvable,
   assertNoConflictingColumnMappings,
+  assertNoConflictingDictionaryMappings,
   assertNoConflictingTableMappings,
   collectSchemaRenameMappings,
   mergeColumnMappings,
+  mergeDictionaryMappings,
   mergeTableMappings,
   parseRenameColumnMappings,
+  parseRenameDictionaryMappings,
   parseRenameTableMappings,
+  remapOldDefinitionsForDictionaryRenames,
   remapOldDefinitionsForTableRenames,
+  resolveActiveDictionaryMappings,
   resolveActiveTableMappings,
 } from './rename-mappings.js'
 import { emitGenerateApplyOutput, emitGenerateEmptyOutput, emitGeneratePlanOutput } from './output.js'
@@ -40,6 +48,7 @@ const GENERATE_FLAGS = defineFlags([
   { name: '--migration-id', type: 'string', description: 'Override the default timestamp migration prefix', placeholder: '<id>' },
   { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },
   { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },
+  { name: '--rename-dictionary', type: 'string[]', description: 'Explicit dictionary rename mapping', placeholder: '<mapping>' },
   { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
   { name: '--empty', type: 'boolean', description: 'Scaffold a blank manual migration (no schema diff, snapshot untouched)' },
 ] as const)
@@ -99,11 +108,14 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
 
   const renameTableValues = f['--rename-table'] ?? []
   const renameColumnValues = f['--rename-column'] ?? []
+  const renameDictionaryValues = f['--rename-dictionary'] ?? []
   const cliTableMappings = parseRenameTableMappings(renameTableValues)
   const cliColumnMappings = parseRenameColumnMappings(renameColumnValues)
+  const cliDictionaryMappings = parseRenameDictionaryMappings(renameDictionaryValues)
   const schemaMappings = collectSchemaRenameMappings(definitions)
   const tableMappings = mergeTableMappings(schemaMappings.tableMappings, cliTableMappings)
   const columnMappings = mergeColumnMappings(schemaMappings.columnMappings, cliColumnMappings)
+  const dictionaryMappings = mergeDictionaryMappings(schemaMappings.dictionaryMappings, cliDictionaryMappings)
 
   const { migrationsDir, metaDir } = dirs
   const previousDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
@@ -131,12 +143,19 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
 
   assertNoConflictingTableMappings(tableMappings)
   assertNoConflictingColumnMappings(columnMappings)
+  assertNoConflictingDictionaryMappings(dictionaryMappings)
   assertCliTableMappingsResolvable(cliTableMappings, previousDefinitions, definitions)
+  assertCliDictionaryMappingsResolvable(cliDictionaryMappings, previousDefinitions, definitions)
 
   const activeTableMappings = resolveActiveTableMappings(previousDefinitions, definitions, tableMappings)
-  const remappedPreviousDefinitions = remapOldDefinitionsForTableRenames(
+  const activeDictionaryMappings = resolveActiveDictionaryMappings(
     previousDefinitions,
-    activeTableMappings
+    definitions,
+    dictionaryMappings
+  )
+  const remappedPreviousDefinitions = remapOldDefinitionsForDictionaryRenames(
+    remapOldDefinitionsForTableRenames(previousDefinitions, activeTableMappings),
+    activeDictionaryMappings
   )
 
   debug('generate', `previous snapshot: ${previousDefinitions.length} definitions, current: ${definitions.length} definitions`)
@@ -161,6 +180,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   }
 
   plan = applyExplicitTableRenames(plan, activeTableMappings)
+  plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
   assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
   plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings))
 
@@ -184,8 +204,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   // post-pass, after all plan transforms (renames, plugins, scope filtering).
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
+  const dictionaryPasswordWarnings = detectDictionaryPasswordWarnings(plan)
+
   if (planMode) {
-    emitGeneratePlanOutput(plan, jsonMode, resolvedScope)
+    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)
     return 0
   }
 
@@ -227,6 +249,6 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     }
   }
 
-  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope)
+  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)
   return 0
 }

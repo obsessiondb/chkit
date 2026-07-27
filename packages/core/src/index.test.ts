@@ -5,6 +5,8 @@ import {
   canonicalizeDefinitions,
   codec,
   collectDefinitionsFromModule,
+  dictionary,
+  isSchemaDefinition,
   materializedView,
   normalizeProjectionIndex,
   planDiff,
@@ -1871,5 +1873,202 @@ describe('@chkit/core refreshable materialized views', () => {
     expect(
       issues.some((i) => i.code === 'refresh_append_required_for_replicated_target')
     ).toBe(false)
+  })
+})
+
+describe('@chkit/core dictionaries', () => {
+  const baseDictionary = {
+    database: 'app',
+    name: 'users_dict',
+    attributes: [
+      { name: 'id', type: 'UInt64' },
+      { name: 'name', type: 'String' },
+      { name: 'email', type: 'String', default: '' },
+    ],
+    primaryKey: ['id'],
+    source: `MYSQL(host 'db' port 3306 user 'reader' password 'secret' db 'app' table 'users')`,
+    layout: `HASHED()`,
+    lifetime: `300`,
+  } as const
+
+  test('dictionary() builds a valid definition and isSchemaDefinition accepts it', () => {
+    const dict = dictionary({ ...baseDictionary })
+    expect(dict.kind).toBe('dictionary')
+    expect(isSchemaDefinition(dict)).toBe(true)
+  })
+
+  test('renders CREATE DICTIONARY SQL', () => {
+    const dict = dictionary({ ...baseDictionary, comment: 'User lookup dictionary' })
+    const sql = toCreateSQL(dict)
+    expect(sql).toContain('CREATE DICTIONARY IF NOT EXISTS app.users_dict')
+    expect(sql).toContain('PRIMARY KEY `id`')
+    expect(sql).toContain("SOURCE(MYSQL(host 'db' port 3306")
+    expect(sql).toContain('LAYOUT(HASHED())')
+    expect(sql).toContain('LIFETIME(300)')
+    expect(sql).toContain("COMMENT 'User lookup dictionary'")
+  })
+
+  test('validation: missing primaryKey', () => {
+    const issues = validateDefinitions([dictionary({ ...baseDictionary, primaryKey: [] })])
+    expect(issues.map((i) => i.code)).toContain('dictionary_missing_primary_key')
+  })
+
+  test('validation: primaryKey references missing attribute', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, primaryKey: ['not_an_attribute'] }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_primary_key_missing_attribute')
+  })
+
+  test('validation: missing source/layout/lifetime', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, source: '', layout: '', lifetime: '' }),
+    ])
+    const codes = issues.map((i) => i.code)
+    expect(codes).toContain('dictionary_missing_source')
+    expect(codes).toContain('dictionary_missing_layout')
+    expect(codes).toContain('dictionary_missing_lifetime')
+  })
+
+  test('validation: default and expression are mutually exclusive', () => {
+    const issues = validateDefinitions([
+      dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String', default: 'x', expression: 'upper(name)' },
+        ],
+      }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_attribute_default_expression_exclusive')
+  })
+
+  test('binary diff: unchanged definitions produce no operations', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(0)
+  })
+
+  test('binary diff: structural change produces a single CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary, layout: 'COMPLEX_KEY_HASHED()' })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain('CREATE OR REPLACE DICTIONARY')
+    expect(plan.operations[0]?.risk).toBe('caution')
+  })
+
+  test('binary diff: removing a dictionary produces a drop_dictionary op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const plan = planDiff(oldDefs, [])
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('drop_dictionary')
+    expect(plan.operations[0]?.sql).toBe('DROP DICTIONARY IF EXISTS app.users_dict;')
+    expect(plan.operations[0]?.risk).toBe('danger')
+  })
+
+  test('binary diff: a real password change produces a CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password 'a-different-secret' db 'app' table 'users')`,
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain("password 'a-different-secret'")
+  })
+
+  test('binary diff: a [HIDDEN] source placeholder never drives a diff on its own', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')`,
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(0)
+  })
+
+  test('binary diff: a [HIDDEN] source placeholder does not suppress unrelated field changes', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')`,
+        layout: 'COMPLEX_KEY_HASHED()',
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain("password '[HIDDEN]'")
+  })
+
+  test('renders RANGE, SETTINGS, and BIDIRECTIONAL clauses', () => {
+    const dict = dictionary({
+      ...baseDictionary,
+      attributes: [
+        ...baseDictionary.attributes,
+        { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+        { name: 'start_date', type: 'DateTime' },
+        { name: 'end_date', type: 'DateTime' },
+      ],
+      layout: 'RANGE_HASHED()',
+      range: { min: 'start_date', max: 'end_date' },
+      settings: { dictionary_use_async_executor: 1, max_threads: 8 },
+    })
+    const sql = toCreateSQL(dict)
+    expect(sql).toContain('`parent_id` UInt64 HIERARCHICAL BIDIRECTIONAL')
+    expect(sql).toContain('RANGE(MIN `start_date` MAX `end_date`)')
+    expect(sql).toContain('SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)')
+  })
+
+  test('validation: range references missing attribute', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, range: { min: 'not_an_attribute', max: 'name' } }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_range_missing_attribute')
+  })
+
+  test('validation: bidirectional requires hierarchical', () => {
+    const issues = validateDefinitions([
+      dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', bidirectional: true },
+        ],
+      }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_bidirectional_requires_hierarchical')
+  })
+
+  test('binary diff: adding settings produces a single CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary, settings: { max_threads: 4 } })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain('SETTINGS(max_threads = 4)')
+  })
+
+  test('create ordering: create_dictionary ranks after create_table', () => {
+    const usersTable = table({
+      database: 'app',
+      name: 'users',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const plan = planDiff([], [usersTable, dictionary({ ...baseDictionary })])
+    const types = plan.operations.map((op) => op.type)
+    expect(types.indexOf('create_table')).toBeLessThan(types.indexOf('create_dictionary'))
   })
 })

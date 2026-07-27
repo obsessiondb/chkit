@@ -3,6 +3,7 @@ import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
   ColumnRenameSuggestion,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   MigrationOperation,
@@ -24,6 +25,7 @@ import {
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
   renderAlterResetSetting,
+  renderDictionarySQL,
   toCreateSQL,
 } from './sql.js'
 import { assertValidDefinitions } from './validate.js'
@@ -55,6 +57,15 @@ function pushDropOperation(
     })
     return
   }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'drop_dictionary',
+      key: definitionKey(def),
+      risk,
+      sql: `DROP DICTIONARY IF EXISTS ${def.database}.${def.name};`,
+    })
+    return
+  }
   operations.push( {
     type: 'drop_materialized_view',
     key: definitionKey(def),
@@ -80,6 +91,15 @@ function pushCreateOperation(
   if (def.kind === 'view') {
     operations.push( {
       type: 'create_view',
+      key: definitionKey(def),
+      risk,
+      sql: toCreateSQL(def),
+    })
+    return
+  }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'create_dictionary',
       key: definitionKey(def),
       risk,
       sql: toCreateSQL(def),
@@ -294,6 +314,42 @@ function diffMaterializedView(
   }
 
   return []
+}
+
+// `chkit pull` writes ClickHouse's own introspection placeholder
+// (`password '[HIDDEN]'`) into `source` when it can't recover a dictionary's
+// real credential. That placeholder must never drive a diff — rendering it
+// would deploy the literal string "[HIDDEN]" as the password. A real
+// password value, by contrast, is fully known to chkit (it's a plain string
+// in the schema file) and a change to it is a genuine diff like any other.
+function dictionarySourceIsHidden(source: string): boolean {
+  return source.includes('[HIDDEN]')
+}
+
+function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
+  if (!omitSource) return def
+  const { source, ...rest } = def
+  return rest
+}
+
+function diffDictionary(
+  oldDef: DictionaryDefinition,
+  newDef: DictionaryDefinition
+): MigrationOperation[] {
+  const omitSource = dictionarySourceIsHidden(newDef.source)
+  const unchanged =
+    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
+    JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
+  if (unchanged) return []
+
+  return [
+    {
+      type: 'create_dictionary',
+      key: definitionKey(newDef),
+      risk: 'caution',
+      sql: renderDictionarySQL(newDef, true),
+    },
+  ]
 }
 
 function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
@@ -547,6 +603,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     ) {
       const mvOps = diffMaterializedView(oldDef, newDef)
       operations.push(...mvOps)
+      continue
+    }
+
+    if (newDef.kind === oldDef.kind && newDef.kind === 'dictionary' && oldDef.kind === 'dictionary') {
+      operations.push(...diffDictionary(oldDef, newDef))
       continue
     }
 

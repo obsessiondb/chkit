@@ -106,5 +106,6 @@ export {
   waitForTable,
   waitForView,
   waitForColumn,
+  waitForDictionary,
   waitForRows,
 } from './ddl-propagation.js'

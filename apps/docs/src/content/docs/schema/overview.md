@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-In chkit, your ClickHouse schema lives in TypeScript files. You declare tables, views, and materialized views as plain values using functions from `@chkit/core`, group them with `schema()`, and let chkit handle the rest — diffing them against the database, generating migration SQL, and applying it safely.
+In chkit, your ClickHouse schema lives in TypeScript files. You declare tables, views, materialized views, and dictionaries as plain values using functions from `@chkit/core`, group them with `schema()`, and let chkit handle the rest — diffing them against the database, generating migration SQL, and applying it safely.
 
 A typical schema file looks like this:
 
@@ -33,7 +33,7 @@ chkit discovers schema files using the `schema` glob in your [configuration](/co
 
 ## Concepts
 
-- **Definitions** — tables, views, and materialized views are values created with `table()`, `view()`, and `materializedView()`. They describe the *desired* state of your database.
+- **Definitions** — tables, views, materialized views, and dictionaries are values created with `table()`, `view()`, `materializedView()`, and `dictionary()`. They describe the *desired* state of your database.
 - **Schema groups** — `schema(...)` collects definitions into a single export, but any exported definition is also discovered automatically.
 - **Diff + plan** — when you run `chkit generate`, chkit compares your schema to the live database (or the last applied state) and emits migration SQL.
 - **Engines** — `MergeTree`, `ReplacingMergeTree`, `AggregatingMergeTree`, and their `Shared` variants for [ObsessionDB](https://obsessiondb.com) are all first-class.

@@ -21,14 +21,19 @@ const ON_CLUSTER_ANCHORS = [
   'CREATE VIEW',
   'CREATE MATERIALIZED VIEW',
   'CREATE DATABASE',
+  'CREATE DICTIONARY',
+  // A structural dictionary change renders as `CREATE OR REPLACE DICTIONARY`
+  // (there is no `ALTER DICTIONARY`), which does NOT share the `CREATE
+  // DICTIONARY` prefix — it needs its own anchor or ON CLUSTER injection
+  // silently no-ops for every dictionary replace.
+  'CREATE OR REPLACE DICTIONARY',
   'ALTER TABLE',
   'DROP TABLE',
   'DROP VIEW',
+  'DROP DICTIONARY',
   // --- Not emitted by chkit yet; kept as a forward-compatible safety net ---
-  'CREATE DICTIONARY',
   'CREATE FUNCTION',
   'DROP DATABASE',
-  'DROP DICTIONARY',
   'ATTACH TABLE',
   'DETACH TABLE',
   'TRUNCATE TABLE',
@@ -37,13 +42,13 @@ const ON_CLUSTER_ANCHORS = [
 
 // Statements where `ON CLUSTER` goes at the very END, after the full object
 // list — not after the first name. RENAME and EXCHANGE take multiple object
-// references (`a TO b`, `a AND b`), so the clause can only be appended. Only
-// `RENAME TABLE` is emitted by chkit today; the rest are the same-family
-// safety net described above.
+// references (`a TO b`, `a AND b`), so the clause can only be appended.
+// `RENAME TABLE` and `RENAME DICTIONARY` are emitted by chkit today; the rest
+// are the same-family forward-compatible safety net described above.
 const ON_CLUSTER_TRAILING_ANCHORS = [
   'RENAME TABLE',
-  'RENAME DATABASE',
   'RENAME DICTIONARY',
+  'RENAME DATABASE',
   'EXCHANGE TABLES',
   'EXCHANGE DICTIONARIES',
 ] as const

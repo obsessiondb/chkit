@@ -1,6 +1,14 @@
-import type { SchemaDefinition, TableDefinition } from '@chkit/core'
+import type { DictionaryDefinition, SchemaDefinition, TableDefinition } from '@chkit/core'
 
 export interface TableRenameMapping {
+  oldDatabase: string
+  oldName: string
+  newDatabase: string
+  newName: string
+  source: 'cli' | 'schema'
+}
+
+export interface DictionaryRenameMapping {
   oldDatabase: string
   oldName: string
   newDatabase: string
@@ -24,8 +32,28 @@ export function parseRenameTableMappings(values: string[]): TableRenameMapping[]
         `Invalid --rename-table mapping "${mapping}". Expected format: old_db.old_table=new_db.new_table`
       )
     }
-    const from = parseQualifiedTable(fromRaw)
-    const to = parseQualifiedTable(toRaw)
+    const from = parseQualifiedName(fromRaw)
+    const to = parseQualifiedName(toRaw)
+    return {
+      oldDatabase: from.database,
+      oldName: from.name,
+      newDatabase: to.database,
+      newName: to.name,
+      source: 'cli',
+    }
+  })
+}
+
+export function parseRenameDictionaryMappings(values: string[]): DictionaryRenameMapping[] {
+  return values.map((mapping) => {
+    const [fromRaw, toRaw, ...rest] = mapping.split('=').map((part) => part.trim())
+    if (!fromRaw || !toRaw || rest.length > 0) {
+      throw new Error(
+        `Invalid --rename-dictionary mapping "${mapping}". Expected format: old_db.old_dict=new_db.new_dict`
+      )
+    }
+    const from = parseQualifiedName(fromRaw)
+    const to = parseQualifiedName(toRaw)
     return {
       oldDatabase: from.database,
       oldName: from.name,
@@ -63,14 +91,38 @@ export function parseRenameColumnMappings(values: string[]): ColumnRenameMapping
 
 export function collectSchemaRenameMappings(
   definitions: SchemaDefinition[]
-): { tableMappings: TableRenameMapping[]; columnMappings: ColumnRenameMapping[] } {
+): {
+  tableMappings: TableRenameMapping[]
+  columnMappings: ColumnRenameMapping[]
+  dictionaryMappings: DictionaryRenameMapping[]
+} {
   const tableMappings: TableRenameMapping[] = []
   const columnMappings: ColumnRenameMapping[] = []
+  const dictionaryMappings: DictionaryRenameMapping[] = []
 
   for (const definition of definitions) {
-    if (definition.kind !== 'table') continue
-    if (definition.renamedFrom) {
-      tableMappings.push({
+    if (definition.kind === 'table') {
+      if (definition.renamedFrom) {
+        tableMappings.push({
+          oldDatabase: definition.renamedFrom.database ?? definition.database,
+          oldName: definition.renamedFrom.name,
+          newDatabase: definition.database,
+          newName: definition.name,
+          source: 'schema',
+        })
+      }
+      for (const column of definition.columns) {
+        if (!column.renamedFrom) continue
+        columnMappings.push({
+          database: definition.database,
+          table: definition.name,
+          from: column.renamedFrom,
+          to: column.name,
+          source: 'schema',
+        })
+      }
+    } else if (definition.kind === 'dictionary' && definition.renamedFrom) {
+      dictionaryMappings.push({
         oldDatabase: definition.renamedFrom.database ?? definition.database,
         oldName: definition.renamedFrom.name,
         newDatabase: definition.database,
@@ -78,25 +130,37 @@ export function collectSchemaRenameMappings(
         source: 'schema',
       })
     }
-    for (const column of definition.columns) {
-      if (!column.renamedFrom) continue
-      columnMappings.push({
-        database: definition.database,
-        table: definition.name,
-        from: column.renamedFrom,
-        to: column.name,
-        source: 'schema',
-      })
-    }
   }
 
-  return { tableMappings, columnMappings }
+  return { tableMappings, columnMappings, dictionaryMappings }
 }
 
 export function mergeTableMappings(
   schemaMappings: TableRenameMapping[],
   cliMappings: TableRenameMapping[]
 ): TableRenameMapping[] {
+  const merged = [...schemaMappings]
+  for (const cliMapping of cliMappings) {
+    const cliOldKey = `${cliMapping.oldDatabase}.${cliMapping.oldName}`
+    const cliNewKey = `${cliMapping.newDatabase}.${cliMapping.newName}`
+    for (let i = merged.length - 1; i >= 0; i -= 1) {
+      const entry = merged[i]
+      if (!entry) continue
+      const oldKey = `${entry.oldDatabase}.${entry.oldName}`
+      const newKey = `${entry.newDatabase}.${entry.newName}`
+      if (oldKey === cliOldKey || newKey === cliNewKey) {
+        merged.splice(i, 1)
+      }
+    }
+    merged.push(cliMapping)
+  }
+  return merged
+}
+
+export function mergeDictionaryMappings(
+  schemaMappings: DictionaryRenameMapping[],
+  cliMappings: DictionaryRenameMapping[]
+): DictionaryRenameMapping[] {
   const merged = [...schemaMappings]
   for (const cliMapping of cliMappings) {
     const cliOldKey = `${cliMapping.oldDatabase}.${cliMapping.oldName}`
@@ -149,6 +213,18 @@ export function resolveActiveTableMappings(
   )
 }
 
+export function resolveActiveDictionaryMappings(
+  previousDefinitions: SchemaDefinition[],
+  nextDefinitions: SchemaDefinition[],
+  mappings: DictionaryRenameMapping[]
+): DictionaryRenameMapping[] {
+  return mappings.filter(
+    (mapping) =>
+      dictionaryExists(previousDefinitions, mapping.oldDatabase, mapping.oldName) &&
+      dictionaryExists(nextDefinitions, mapping.newDatabase, mapping.newName)
+  )
+}
+
 export function assertNoConflictingTableMappings(mappings: TableRenameMapping[]): void {
   const byOld = new Map<string, TableRenameMapping>()
   const byNew = new Map<string, TableRenameMapping>()
@@ -173,6 +249,35 @@ export function assertNoConflictingTableMappings(mappings: TableRenameMapping[])
     if (byNew.has(key)) {
       throw new Error(
         `Unsupported chained or cyclic table rename mapping involving "${key}". Use direct one-step mappings only.`
+      )
+    }
+  }
+}
+
+export function assertNoConflictingDictionaryMappings(mappings: DictionaryRenameMapping[]): void {
+  const byOld = new Map<string, DictionaryRenameMapping>()
+  const byNew = new Map<string, DictionaryRenameMapping>()
+
+  for (const mapping of mappings) {
+    const oldKey = `${mapping.oldDatabase}.${mapping.oldName}`
+    const newKey = `${mapping.newDatabase}.${mapping.newName}`
+    const existingOld = byOld.get(oldKey)
+    if (existingOld && (existingOld.newDatabase !== mapping.newDatabase || existingOld.newName !== mapping.newName)) {
+      throw new Error(`Conflicting dictionary rename source mapping for "${oldKey}".`)
+    }
+    byOld.set(oldKey, mapping)
+
+    const existingNew = byNew.get(newKey)
+    if (existingNew && (existingNew.oldDatabase !== mapping.oldDatabase || existingNew.oldName !== mapping.oldName)) {
+      throw new Error(`Conflicting dictionary rename target mapping for "${newKey}".`)
+    }
+    byNew.set(newKey, mapping)
+  }
+
+  for (const key of byOld.keys()) {
+    if (byNew.has(key)) {
+      throw new Error(
+        `Unsupported chained or cyclic dictionary rename mapping involving "${key}". Use direct one-step mappings only.`
       )
     }
   }
@@ -224,6 +329,31 @@ export function assertCliTableMappingsResolvable(
   }
 }
 
+export function assertCliDictionaryMappingsResolvable(
+  cliMappings: DictionaryRenameMapping[],
+  previousDefinitions: SchemaDefinition[],
+  nextDefinitions: SchemaDefinition[]
+): void {
+  for (const mapping of cliMappings) {
+    const hasOld = dictionaryExists(previousDefinitions, mapping.oldDatabase, mapping.oldName)
+    const hasNew = dictionaryExists(nextDefinitions, mapping.newDatabase, mapping.newName)
+    if (hasOld && hasNew) continue
+    if (!hasOld && !hasNew) {
+      throw new Error(
+        `--rename-dictionary mapping "${mapping.oldDatabase}.${mapping.oldName}=${mapping.newDatabase}.${mapping.newName}" is invalid: source dictionary is missing from previous snapshot and target dictionary is missing from current schema.`
+      )
+    }
+    if (!hasOld) {
+      throw new Error(
+        `--rename-dictionary mapping "${mapping.oldDatabase}.${mapping.oldName}=${mapping.newDatabase}.${mapping.newName}" is invalid: source dictionary is missing from previous snapshot.`
+      )
+    }
+    throw new Error(
+      `--rename-dictionary mapping "${mapping.oldDatabase}.${mapping.oldName}=${mapping.newDatabase}.${mapping.newName}" is invalid: target dictionary is missing from current schema.`
+    )
+  }
+}
+
 export function remapOldDefinitionsForTableRenames(
   previousDefinitions: SchemaDefinition[],
   mappings: TableRenameMapping[]
@@ -248,10 +378,34 @@ export function remapOldDefinitionsForTableRenames(
   })
 }
 
-function parseQualifiedTable(input: string): { database: string; name: string } {
+export function remapOldDefinitionsForDictionaryRenames(
+  previousDefinitions: SchemaDefinition[],
+  mappings: DictionaryRenameMapping[]
+): SchemaDefinition[] {
+  if (mappings.length === 0) return previousDefinitions
+
+  const mappingByOld = new Map<string, DictionaryRenameMapping>()
+  for (const mapping of mappings) {
+    mappingByOld.set(`${mapping.oldDatabase}.${mapping.oldName}`, mapping)
+  }
+
+  return previousDefinitions.map((definition) => {
+    if (definition.kind !== 'dictionary') return definition
+    const mapping = mappingByOld.get(`${definition.database}.${definition.name}`)
+    if (!mapping) return definition
+    const remapped: DictionaryDefinition = {
+      ...definition,
+      database: mapping.newDatabase,
+      name: mapping.newName,
+    }
+    return remapped
+  })
+}
+
+function parseQualifiedName(input: string): { database: string; name: string } {
   const [database, name, ...rest] = input.split('.').map((part) => part.trim())
   if (!database || !name || rest.length > 0) {
-    throw new Error(`Invalid table reference "${input}". Expected format: database.table`)
+    throw new Error(`Invalid object reference "${input}". Expected format: database.name`)
   }
   return { database, name }
 }
@@ -259,5 +413,12 @@ function parseQualifiedTable(input: string): { database: string; name: string } 
 function tableExists(definitions: SchemaDefinition[], database: string, name: string): boolean {
   return definitions.some(
     (definition) => definition.kind === 'table' && definition.database === database && definition.name === name
+  )
+}
+
+function dictionaryExists(definitions: SchemaDefinition[], database: string, name: string): boolean {
+  return definitions.some(
+    (definition) =>
+      definition.kind === 'dictionary' && definition.database === database && definition.name === name
   )
 }

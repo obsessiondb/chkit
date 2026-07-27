@@ -1,5 +1,7 @@
 import type {
   ColumnDefinition,
+  DictionaryAttribute,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   SchemaDefinition,
@@ -20,7 +22,8 @@ function sortByName<T extends { name: string }>(items: T[]): T[] {
 function sortKind(kind: SchemaDefinition['kind']): number {
   if (kind === 'table') return 0
   if (kind === 'view') return 1
-  return 2
+  if (kind === 'materialized_view') return 2
+  return 3
 }
 
 function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
@@ -161,9 +164,46 @@ function canonicalizeMaterializedView(def: MaterializedViewDefinition): Material
   return canonical
 }
 
+function canonicalizeDictionaryAttribute(attribute: DictionaryAttribute): DictionaryAttribute {
+  return {
+    ...attribute,
+    name: attribute.name.trim(),
+    type: typeof attribute.type === 'string' ? attribute.type.trim() : attribute.type,
+  }
+}
+
+function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition {
+  const settings = def.settings
+    ? Object.fromEntries(Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b)))
+    : undefined
+
+  return {
+    ...def,
+    database: def.database.trim(),
+    name: def.name.trim(),
+    renamedFrom: def.renamedFrom
+      ? {
+          database: def.renamedFrom.database?.trim(),
+          name: def.renamedFrom.name.trim(),
+        }
+      : undefined,
+    attributes: def.attributes.map(canonicalizeDictionaryAttribute),
+    primaryKey: normalizeKeyColumns(def.primaryKey),
+    source: normalizeSQLFragment(def.source),
+    layout: normalizeSQLFragment(def.layout),
+    lifetime: normalizeSQLFragment(def.lifetime),
+    range: def.range
+      ? { min: def.range.min.trim(), max: def.range.max.trim() }
+      : undefined,
+    settings: settings && Object.keys(settings).length > 0 ? settings : undefined,
+    comment: def.comment?.trim(),
+  }
+}
+
 export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition {
   if (def.kind === 'table') return canonicalizeTable(def)
   if (def.kind === 'view') return canonicalizeView(def)
+  if (def.kind === 'dictionary') return canonicalizeDictionary(def)
   return canonicalizeMaterializedView(def)
 }
 
