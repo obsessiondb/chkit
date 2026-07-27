@@ -669,4 +669,39 @@ SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)`
     expect(parseDictionaryRangeFromCreateDictionaryQuery(undefined)).toBeUndefined()
     expect(parseDictionarySettingsFromCreateDictionaryQuery(undefined)).toBeUndefined()
   })
+
+  test('an EXPRESSION calling the range() array function does not shadow the real RANGE clause', () => {
+    // `range(...)` is a real ClickHouse array function, so it can legitimately
+    // appear inside an attribute's EXPRESSION. The parser must not mistake it
+    // for the dictionary-level RANGE(MIN ... MAX ...) clause.
+    const shadowedRangeQuery = `CREATE DICTIONARY default.rates_dict
+(
+  \`id\` UInt64,
+  \`buckets\` String EXPRESSION arrayStringConcat(arrayMap(x -> toString(x), range(1, 10)), ','),
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LAYOUT(RANGE_HASHED())
+LIFETIME(MIN 0 MAX 300)
+RANGE(MIN start_date MAX end_date)`
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(shadowedRangeQuery)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      {
+        name: 'buckets',
+        type: 'String',
+        expression: "arrayStringConcat(arrayMap(x -> toString(x), range(1, 10)), ',')",
+      },
+      { name: 'start_date', type: 'DateTime' },
+      { name: 'end_date', type: 'DateTime' },
+    ])
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(shadowedRangeQuery)).toEqual({
+      min: 'start_date',
+      max: 'end_date',
+    })
+    expect(parseSourceFromCreateDictionaryQuery(shadowedRangeQuery)).toBe(
+      "HTTP(url 'http://example.com/rates' format 'TSV')"
+    )
+  })
 })

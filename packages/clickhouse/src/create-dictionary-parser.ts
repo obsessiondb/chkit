@@ -53,24 +53,52 @@ function extractBalancedParenGroup(
   return undefined
 }
 
-function extractCreateDictionaryBody(query: string | undefined): string | undefined {
-  if (!query) return undefined
+/**
+ * Positions of the parens that open and close the attribute list — the close
+ * being the one right before the dictionary's `PRIMARY KEY ...` clause.
+ * Returns undefined when there is no balanced attribute list (e.g. a query we
+ * can't parse).
+ */
+function findAttributeListBounds(query: string): { open: number; close: number } | undefined {
   const nameMatch = query.match(
     /\bCREATE\s+(?:OR\s+REPLACE\s+)?DICTIONARY\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\w.]+\s*/i
   )
   if (!nameMatch || nameMatch.index === undefined) return undefined
   const start = nameMatch.index + nameMatch[0].length
+  const openIndex = query.indexOf('(', start)
+  if (openIndex === -1) return undefined
   const group = extractBalancedParenGroup(query, start)
-  if (!group) return undefined
-  const trimmed = group.content.trim()
-  return trimmed.length > 0 ? trimmed : undefined
+  return group ? { open: openIndex, close: group.endIndex - 1 } : undefined
+}
+
+function extractCreateDictionaryBody(query: string | undefined): string | undefined {
+  if (!query) return undefined
+  const bounds = findAttributeListBounds(query)
+  if (!bounds) return undefined
+  const body = query.slice(bounds.open + 1, bounds.close).trim()
+  return body.length > 0 ? body : undefined
+}
+
+/**
+ * Everything after the attribute list: `PRIMARY KEY ... SOURCE(...) LAYOUT(...)
+ * ...`. This is where dictionary-level clauses live. Table-level keywords like
+ * SOURCE/RANGE can also appear inside an attribute's EXPRESSION (`range()` is a
+ * real ClickHouse array function) — searching the whole query would risk
+ * matching one of those instead of the real clause. Falls back to the whole
+ * query when the attribute list can't be located, preserving behaviour for
+ * unparseable inputs.
+ */
+function extractDictionaryOptions(query: string): string {
+  const bounds = findAttributeListBounds(query)
+  return bounds ? query.slice(bounds.close + 1) : query
 }
 
 function extractKeywordParenBody(query: string, keyword: string): string | undefined {
-  const match = new RegExp(`\\b${keyword}\\s*\\(`, 'i').exec(query)
+  const options = extractDictionaryOptions(query)
+  const match = new RegExp(`\\b${keyword}\\s*\\(`, 'i').exec(options)
   if (!match || match.index === undefined) return undefined
   const openIndex = match.index + match[0].length - 1
-  const group = extractBalancedParenGroup(query, openIndex)
+  const group = extractBalancedParenGroup(options, openIndex)
   return group ? group.content.trim() : undefined
 }
 
@@ -215,10 +243,10 @@ export function parseDictionaryPrimaryKeyFromCreateDictionaryQuery(
   query: string | undefined
 ): string[] {
   if (!query) return []
-  const match =
-    /\)\s*PRIMARY\s+KEY\s+([\s\S]*?)(?:\bSOURCE\s*\(|\bLAYOUT\s*\(|\bLIFETIME\s*\(|\bCOMMENT\b|;|$)/i.exec(
-      query
-    )
+  const options = extractDictionaryOptions(query)
+  const match = /^\s*PRIMARY\s+KEY\s+([\s\S]*?)(?:\bSOURCE\s*\(|\bLAYOUT\s*\(|\bLIFETIME\s*\(|\bCOMMENT\b|;|$)/i.exec(
+    options
+  )
   const raw = match?.[1]?.trim()
   if (!raw) return []
   return splitTopLevelComma(raw)

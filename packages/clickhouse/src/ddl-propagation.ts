@@ -146,7 +146,7 @@ export async function waitForDDLPropagation(
       return waitForView(executor, parsed.database, parsed.table)
 
     case 'create_dictionary':
-      return waitForTable(executor, parsed.database, parsed.table)
+      return waitForDictionary(executor, parsed.database, parsed.table)
 
     case 'alter_table_add_column':
     case 'alter_table_modify_column':
