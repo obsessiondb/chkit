@@ -13,6 +13,7 @@ import {
   type ChxInlinePluginRegistration,
   createPluginRunner,
   defineFlags,
+  type DictionaryDefinition,
   type FlagMapping,
   normalizeEngine,
   type ResolvedChxConfig,
@@ -136,16 +137,32 @@ interface PullSchemaResult {
   warnings: string[]
 }
 
+const PASSWORD_LITERAL_RE = /password\s+'(?!\[HIDDEN\])(?:[^'\\]|\\.)*'/i
+
 // ClickHouse redacts a dictionary's SOURCE(...) password to `[HIDDEN]` on
-// introspection and offers no way to recover the real value via pull — flag
-// it immediately so the placeholder doesn't sit unnoticed in the schema file.
-function dictionaryHiddenPasswordWarnings(definitions: SchemaDefinition[]): string[] {
+// introspection by default, and offers no way to recover the real value via
+// pull — flag it so the placeholder doesn't sit unnoticed in the schema
+// file. That redaction can also be turned off server-side (server config
+// `display_secrets_in_show_and_select` plus the `displaySecretsInShowAndSelect`
+// grant on the connecting user), in which case ClickHouse hands chkit the
+// real password and it's written verbatim into the schema file — chkit has
+// no way to detect or opt out of that, so flag it too.
+function dictionaryPasswordWarnings(definitions: SchemaDefinition[]): string[] {
   return definitions
-    .filter((def) => def.kind === 'dictionary' && def.source.includes('[HIDDEN]'))
-    .map(
-      (def) =>
-        `Dictionary "${def.database}.${def.name}" SOURCE(...) password was redacted by ClickHouse to '[HIDDEN]' — chkit could not recover the real value. Replace it in the generated schema file before this dictionary's source can be diffed or migrated.`
-    )
+    .filter((def): def is DictionaryDefinition => def.kind === 'dictionary')
+    .flatMap((def) => {
+      if (def.source.includes('[HIDDEN]')) {
+        return [
+          `Dictionary "${def.database}.${def.name}" SOURCE(...) password was redacted by ClickHouse to '[HIDDEN]' — chkit could not recover the real value. Replace it in the generated schema file before this dictionary's source can be diffed or migrated. To have ClickHouse reveal real passwords on introspection instead, grant the connecting user "displaySecretsInShowAndSelect" and enable the server-side "display_secrets_in_show_and_select" setting.`,
+        ]
+      }
+      if (PASSWORD_LITERAL_RE.test(def.source)) {
+        return [
+          `Dictionary "${def.database}.${def.name}" SOURCE(...) has a plain-text password — ClickHouse returned the real credential on introspection and it was written verbatim into the generated schema file.`,
+        ]
+      }
+      return []
+    })
 }
 
 function stringArrayFlag(value: string | string[] | boolean | undefined): string[] | undefined {
@@ -310,7 +327,7 @@ async function pullSchema(input: {
   const content = renderSchemaFile(definitions)
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
-  const warnings = dictionaryHiddenPasswordWarnings(definitions)
+  const warnings = dictionaryPasswordWarnings(definitions)
 
   return {
     outFile,
