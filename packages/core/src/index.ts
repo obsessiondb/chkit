@@ -9,6 +9,7 @@ export {
 export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'
 export { splitTopLevelComma } from './key-clause.js'
+export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 export { renderDictionarySQL, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'

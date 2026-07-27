@@ -1,6 +1,7 @@
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
+import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 import type {
   ColumnDefinition,
   DictionaryDefinition,
@@ -118,6 +119,27 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       continue
     }
     projectionSeen.add(projection.name)
+
+    // A projection carrying both keys satisfies the union, so TypeScript admits
+    // it. Renders as index-only and drops the SELECT body on the floor.
+    if ('index' in projection && 'query' in projection) {
+      pushValidationIssue(
+        issues,
+        def,
+        'projection_ambiguous_kind',
+        `Table ${def.database}.${def.name} projection "${projection.name}" sets both "query" and "index"; use "query" for a SELECT projection or "index"/"type" for an index-only projection`
+      )
+      continue
+    }
+
+    if (isIndexProjection(projection) && normalizeProjectionIndex(projection.index) === '') {
+      pushValidationIssue(
+        issues,
+        def,
+        'projection_empty_index',
+        `Table ${def.database}.${def.name} projection "${projection.name}" has an empty index expression`
+      )
+    }
   }
 
   for (const column of normalizeKeyColumns(def.primaryKey)) {

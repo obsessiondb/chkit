@@ -1,5 +1,7 @@
 import {
   normalizeEngine as coreNormalizeEngine,
+  isIndexProjection,
+  normalizeProjectionIndex,
   normalizeSQLFragment,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -227,6 +229,12 @@ function normalizeIndexShape(index: SkipIndexDefinition): string {
 }
 
 function normalizeProjectionShape(projection: ProjectionDefinition): string {
+  if (isIndexProjection(projection)) {
+    return [
+      `index=${normalizeProjectionIndex(projection.index)}`,
+      `type=${projection.type.trim()}`,
+    ].join('|')
+  }
   return `query=${normalizeSQLFragment(projection.query)}`
 }
 
@@ -266,8 +274,14 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   const ttlMismatch = expectedTTL !== actualTTL
 
   const engineMismatch = normalizeEngine(expected.engine) !== normalizeEngine(actual.engine)
-  const expectedPrimaryKey = normalizeClause(expected.primaryKey.join(', '))
-  const actualPrimaryKey = normalizeClause(actual.primaryKey)
+  // ClickHouse derives PRIMARY KEY from ORDER BY when it is omitted, then omits
+  // it from SHOW CREATE — so a table with only ORDER BY reports no primary key.
+  // Mirror that on both sides (as canonical.ts does for the schema), else every
+  // such table drifts forever (#194).
+  const expectedPrimaryKey = normalizeClause(
+    (expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy).join(', ')
+  )
+  const actualPrimaryKey = normalizeClause(actual.primaryKey ?? actual.orderBy)
   const primaryKeyMismatch = expectedPrimaryKey !== actualPrimaryKey
   const expectedOrderBy = normalizeClause(expected.orderBy.join(', '))
   const actualOrderBy = normalizeClause(actual.orderBy)

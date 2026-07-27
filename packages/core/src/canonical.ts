@@ -4,7 +4,6 @@ import type {
   DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
-  ProjectionDefinition,
   SchemaDefinition,
   SkipIndexDefinition,
   TableDefinition,
@@ -13,6 +12,7 @@ import type {
 import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
 import { canonicalizeCodec } from './codec.js'
+import { canonicalizeProjection } from './projection.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
@@ -41,13 +41,6 @@ function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
   return {
     ...index,
     expression: normalizeSQLFragment(index.expression),
-  }
-}
-
-function canonicalizeProjection(projection: ProjectionDefinition): ProjectionDefinition {
-  return {
-    ...projection,
-    query: normalizeSQLFragment(projection.query),
   }
 }
 

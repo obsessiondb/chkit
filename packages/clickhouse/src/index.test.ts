@@ -434,6 +434,83 @@ ORDER BY id;`
       },
     ])
   })
+
+  // Verbatim SHOW CREATE TABLE output from ClickHouse 26.3, including its own
+  // pretty-printing of the SELECT body. Index-only projections used to be
+  // dropped here, which is what made `chkit pull` lose them entirely.
+  test('parses index-only projections alongside select projections', () => {
+    const query = `CREATE TABLE default.address_counterparts
+(
+    \`sender\` String,
+    \`receiver\` String,
+    \`cnt\` UInt64,
+    PROJECTION by_receiver INDEX (receiver, sender) TYPE basic,
+    PROJECTION agg_by_sender
+    (
+        SELECT
+            sender,
+            sum(cnt)
+        GROUP BY sender
+    )
+)
+ENGINE = SharedMergeTree
+ORDER BY (sender, receiver)
+SETTINGS storage_policy = 's3', index_granularity = 8192`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'by_receiver', index: '(receiver, sender)', type: 'basic' },
+      { name: 'agg_by_sender', query: 'SELECT sender, sum(cnt) GROUP BY sender' },
+    ])
+  })
+
+  // ClickHouse drops the parens around a single-column index expression, so the
+  // parser sees the bare form even when the table was created with `INDEX (b)`.
+  test('parses a single-column index projection with a backticked name', () => {
+    const query = `CREATE TABLE app.events
+(
+  \`a\` String,
+  \`b\` String,
+  PROJECTION \`p_one\` INDEX b TYPE basic
+)
+ENGINE = MergeTree
+ORDER BY a`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p_one', index: 'b', type: 'basic' },
+    ])
+  })
+
+  // Regression for #190: a PROJECTION whose SELECT body contains ORDER BY sits
+  // in the column list, before the table-level clauses. The parsers used to
+  // match that inner ORDER BY and swallow the engine into orderBy/primaryKey.
+  test('ignores clause keywords inside a projection SELECT body', () => {
+    const query = `CREATE TABLE bi.price_history (\`day\` Date, \`csin\` String, \`min_price\` UInt32, \`_version\` UInt64 DEFAULT now64(), PROJECTION by_csin_day (SELECT csin, day, min_price ORDER BY csin, day)) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/bi/price_history_new', '{replica}', _version) PARTITION BY toYYYYMM(day) ORDER BY (day, csin) TTL day + toIntervalYear(5) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild'`
+
+    expect(parseEngineFromCreateTableQuery(query)).toBe(
+      "ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/bi/price_history_new', '{replica}', _version)"
+    )
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('(day, csin)')
+    expect(parsePrimaryKeyFromCreateTableQuery(query)).toBeUndefined()
+    expect(parsePartitionByFromCreateTableQuery(query)).toBe('toYYYYMM(day)')
+    expect(parseTTLFromCreateTableQuery(query)).toBe('day + toIntervalYear(5)')
+    expect(parseSettingsFromCreateTableQuery(query)).toEqual({
+      index_granularity: '8192',
+      deduplicate_merge_projection_mode: "'rebuild'",
+    })
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'by_csin_day', query: 'SELECT csin, day, min_price ORDER BY csin, day' },
+    ])
+  })
+
+  // A column-level TTL lives in the column list too, and must not be mistaken
+  // for the table-level TTL / SETTINGS.
+  test('reads table-level TTL past a column-level TTL', () => {
+    const query = `CREATE TABLE app.events (\`id\` UInt64, \`ts\` DateTime, \`tmp\` String TTL ts + toIntervalDay(1)) ENGINE = MergeTree ORDER BY id TTL ts + toIntervalYear(1) SETTINGS index_granularity = 8192`
+
+    expect(parseTTLFromCreateTableQuery(query)).toBe('ts + toIntervalYear(1)')
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('id')
+    expect(parseSettingsFromCreateTableQuery(query)).toEqual({ index_granularity: '8192' })
+  })
 })
 
 describe('formatConnectionError', () => {

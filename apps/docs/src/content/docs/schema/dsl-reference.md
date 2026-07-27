@@ -273,18 +273,33 @@ indexes: [
 
 ## Projections
 
-Each entry in the `projections` array is a `ProjectionDefinition`.
+Each entry in the `projections` array is a `ProjectionDefinition`, which takes one of two forms.
+
+A **SELECT projection** stores a rewritten copy of the data.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Projection name |
 | `query` | `string` | Projection SELECT query |
 
+An **index-only projection** stores no SELECT body. It reorders parts by a secondary key so lookups on that key prune instead of scanning.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Projection name |
+| `index` | `string` | Expression list to order by, e.g. `receiver, sender` |
+| `type` | `string` | Projection index type. ClickHouse currently accepts `basic` |
+
 ```ts
 projections: [
   { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
+  { name: 'by_receiver', index: 'receiver, sender', type: 'basic' },
 ]
 ```
+
+The `index` expression is rendered the way ClickHouse normalizes it: a single expression is emitted bare (`INDEX receiver`), several are emitted as a tuple (`INDEX (receiver, sender)`), redundant parentheses are dropped, and a space follows every argument separator. Writing `'(receiver)'` and `'receiver'` therefore produce the same table, and neither reads as drift.
+
+A projection must be exactly one of the two kinds. Setting both `query` and `index` on the same entry is a `projection_ambiguous_kind` validation error, and an empty `index` is a `projection_empty_index` error.
 
 ## `view()`
 
@@ -539,6 +554,8 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Duplicate column names** -- repeated column name within a table
 - **Duplicate index names** -- repeated index name within a table
 - **Duplicate projection names** -- repeated projection name within a table
+- **Ambiguous projection kind** (`projection_ambiguous_kind`) -- a projection sets both `query` and `index`; use one or the other (see [Projections](#projections))
+- **Empty projection index** (`projection_empty_index`) -- an index-only projection whose `index` expression is empty
 - **Primary key references missing column** -- `primaryKey` includes a bare column name not in `columns` (function expressions like `toDate(ts)` are passed through to ClickHouse unchecked)
 - **Order by references missing column** -- `orderBy` includes a bare column name not in `columns` (function expressions like `toStartOfHour(ts)` are passed through to ClickHouse unchecked)
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
