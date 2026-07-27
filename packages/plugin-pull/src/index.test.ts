@@ -287,6 +287,70 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).toContain('export default schema(app_events_view, app_events_mv)')
   })
 
+  test('renders a dictionary definition with a hidden-secret note', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'dictionary',
+        database: 'app',
+        name: 'users_dict',
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String' },
+          { name: 'email', type: 'String', default: '' },
+        ],
+        primaryKey: ['id'],
+        source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+        layout: 'HASHED()',
+        lifetime: '300',
+        comment: 'User lookup dictionary',
+      },
+    ])
+
+    expect(content).toContain("import { schema, dictionary } from '@chkit/core'")
+    expect(content).toContain(
+      "// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X)."
+    )
+    expect(content).toContain('const app_users_dict = dictionary({')
+    expect(content).toContain('{ name: "id", type: "UInt64" }')
+    expect(content).toContain('{ name: "email", type: "String", default: "" }')
+    expect(content).toContain('primaryKey: ["id"]')
+    expect(content).toContain(
+      'source: "MYSQL(host \'db\' port 3306 user \'reader\' password \'[HIDDEN]\' db \'app\' table \'users\')"'
+    )
+    expect(content).toContain('layout: "HASHED()"')
+    expect(content).toContain('lifetime: "300"')
+    expect(content).toContain('comment: "User lookup dictionary"')
+    expect(content).toContain('export default schema(app_users_dict)')
+  })
+
+  test('renders a dictionary with range, settings, and a bidirectional attribute', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'dictionary',
+        database: 'app',
+        name: 'rates_dict',
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+          { name: 'start_date', type: 'DateTime' },
+          { name: 'end_date', type: 'DateTime' },
+        ],
+        primaryKey: ['id'],
+        source: "HTTP(url 'http://example.com/rates' format 'TSV')",
+        layout: 'RANGE_HASHED()',
+        lifetime: '300',
+        range: { min: 'start_date', max: 'end_date' },
+        settings: { dictionary_use_async_executor: 1, max_threads: 8 },
+      },
+    ])
+
+    expect(content).toContain('{ name: "parent_id", type: "UInt64", hierarchical: true, bidirectional: true }')
+    expect(content).toContain('range: { min: "start_date", max: "end_date" }')
+    expect(content).toContain('settings: {')
+    expect(content).toContain('dictionary_use_async_executor: 1')
+    expect(content).toContain('max_threads: 8')
+  })
+
   test('renders refreshable materialized view with full refresh block', () => {
     const content = renderSchemaFile([
       {
@@ -462,6 +526,122 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).toContain("import { schema, table, view, materializedView } from '@chkit/core'")
     expect(payload.content).toContain('const app_users_view = view({')
     expect(payload.content).toContain('const app_users_mv = materializedView({')
+  })
+
+  test('warns when an introspected dictionary SOURCE(...) password is [HIDDEN]', async () => {
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          kind: 'dictionary',
+          database: 'app',
+          name: 'users_dict',
+          attributes: [{ name: 'id', type: 'UInt64' }],
+          primaryKey: ['id'],
+          source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+          layout: 'HASHED()',
+          lifetime: '300',
+        },
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { warnings: string[] }
+    expect(
+      payload.warnings.some(
+        (warning) => warning.includes('app.users_dict') && warning.includes('[HIDDEN]')
+      )
+    ).toBe(true)
+  })
+
+  test('warns when an introspected dictionary SOURCE(...) password is plain text', async () => {
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          kind: 'dictionary',
+          database: 'app',
+          name: 'users_dict',
+          attributes: [{ name: 'id', type: 'UInt64' }],
+          primaryKey: ['id'],
+          source: "MYSQL(host 'db' port 3306 user 'reader' password 'super-secret-pw' db 'app' table 'users')",
+          layout: 'HASHED()',
+          lifetime: '300',
+        },
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { warnings: string[] }
+    expect(
+      payload.warnings.some(
+        (warning) => warning.includes('app.users_dict') && warning.includes('plain-text password')
+      )
+    ).toBe(true)
   })
 
   test('writes schema file and fails on existing file without --force', async () => {
@@ -660,6 +840,82 @@ AS SELECT today() AS day, toUInt64(1) AS total`
       as: 'SELECT 1',
       refresh: { every: '1 HOUR', append: true },
     })
+  })
+
+  test('mapSystemTableRowToDefinition parses a dictionary row', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'users_dict',
+      engine: 'Dictionary',
+      create_table_query: `CREATE DICTIONARY app.users_dict
+(
+  \`id\` UInt64,
+  \`name\` String
+)
+PRIMARY KEY id
+SOURCE(MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users'))
+LAYOUT(HASHED())
+LIFETIME(MIN 0 MAX 300)`,
+    })
+    expect(definition).toEqual({
+      kind: 'dictionary',
+      database: 'app',
+      name: 'users_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+      layout: 'HASHED()',
+      lifetime: 'MIN 0 MAX 300',
+    })
+  })
+
+  test('mapSystemTableRowToDefinition parses a dictionary row with RANGE and SETTINGS', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'rates_dict',
+      engine: 'Dictionary',
+      create_table_query: `CREATE DICTIONARY app.rates_dict
+(
+  \`id\` UInt64,
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LIFETIME(MIN 0 MAX 300)
+LAYOUT(RANGE_HASHED())
+RANGE(MIN start_date MAX end_date)
+SETTINGS(dictionary_use_async_executor = 1)`,
+    })
+    expect(definition).toEqual({
+      kind: 'dictionary',
+      database: 'app',
+      name: 'rates_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'start_date', type: 'DateTime' },
+        { name: 'end_date', type: 'DateTime' },
+      ],
+      primaryKey: ['id'],
+      source: "HTTP(url 'http://example.com/rates' format 'TSV')",
+      layout: 'RANGE_HASHED()',
+      lifetime: 'MIN 0 MAX 300',
+      range: { min: 'start_date', max: 'end_date' },
+      settings: { dictionary_use_async_executor: 1 },
+    })
+  })
+
+  test('mapSystemTableRowToDefinition returns null for a dictionary with an unparsable query', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'broken_dict',
+      engine: 'Dictionary',
+      create_table_query: '',
+    })
+    expect(definition).toBeNull()
   })
 })
 

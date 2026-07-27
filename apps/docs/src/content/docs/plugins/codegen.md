@@ -10,6 +10,7 @@ This document covers practical usage of the optional `codegen` plugin.
 ## What it does
 
 - Generates deterministic TypeScript row types from chkit schema definitions.
+- Generates a typed interface (and optional Zod schema) for each `dictionary()` from its `attributes` — dictionaries are always included, regardless of `includeViews`.
 - Optionally generates Zod schemas from the same definitions.
 - Optionally generates typed ingestion functions for inserting rows into ClickHouse tables. Generated ingest helpers gzip-compress request bodies by default and can opt out per call.
 - Optionally generates a self-contained runtime migration module with all migration SQL inlined, for environments without filesystem access (e.g., Cloudflare Workers).
@@ -186,4 +187,4 @@ When `runOnGenerate` is enabled (the default), the migration module is regenerat
 
 - Query-level type inference is not included.
 - Arbitrary SQL expression typing is not included.
-- Views/materialized views are opt-in and emitted conservatively.
+- Views/materialized views are opt-in (`includeViews`) and emitted conservatively (`{ [key: string]: unknown }`). Dictionaries are always included and typed from `attributes`, since their shape is structured rather than an arbitrary query.

@@ -28,7 +28,7 @@ type ObjectDriftReasonCode = 'missing_object' | 'extra_object' | 'kind_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
 interface SchemaObjectShape {
-  kind: 'table' | 'view' | 'materialized_view'
+  kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
   database: string
   name: string
 }

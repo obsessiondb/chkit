@@ -1,5 +1,6 @@
 import type {
   ChxInlinePluginRegistration,
+  DictionaryDefinition,
   FlagDef,
   FlagMapping,
   MaterializedViewDefinition,
@@ -132,7 +133,7 @@ export interface CodegenPluginCheckResult {
 }
 
 export interface ResolvedTableName {
-  definition: TableDefinition | ViewDefinition | MaterializedViewDefinition
+  definition: TableDefinition | ViewDefinition | MaterializedViewDefinition | DictionaryDefinition
   interfaceName: string
 }
 

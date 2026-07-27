@@ -142,6 +142,14 @@ function describeDestructiveOperation(
       recommendation: 'Confirm replacement view rollout and dependency readiness.',
     }
   }
+  if (type === 'drop_dictionary') {
+    return {
+      warningCode: 'drop_dictionary_dependency_break',
+      reason: 'Dropping a dictionary removes a lookup source used by dictGet() calls and joins.',
+      impact: 'Queries and materialized views that call dictGet() against this dictionary will fail.',
+      recommendation: 'Confirm no queries or views still reference this dictionary before approving.',
+    }
+  }
 
   return {
     warningCode: 'destructive_operation_review_required',
@@ -198,6 +206,7 @@ const DESTRUCTIVE_SQL_RULES: Array<{ type: string; re: RegExp }> = [
   { type: 'drop_materialized_view', re: /\bDROP\s+MATERIALIZED\s+VIEW\b/i },
   { type: 'drop_view', re: /\bDROP\s+VIEW\b/i },
   { type: 'drop_table', re: /\bDROP\s+(?:TEMPORARY\s+)?TABLE\b/i },
+  { type: 'drop_dictionary', re: /\bDROP\s+DICTIONARY\b/i },
   { type: 'alter_table_drop_column', re: /\bDROP\s+COLUMN\b/i },
   { type: 'truncate_table', re: /\bTRUNCATE\s+(?:TABLE|DATABASE|ALL\s+TABLES)\b/i },
   { type: 'detach', re: /\bDETACH\s+(?:TABLE|VIEW|DICTIONARY|DATABASE|PARTITION|PART)\b/i },
@@ -212,7 +221,7 @@ function classifyDestructiveStatement(statement: string): string | null {
 
 function extractObjectKey(statement: string): string {
   const match = statement.match(
-    /\b(?:TABLE|VIEW|DATABASE)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?/i,
+    /\b(?:TABLE|VIEW|DATABASE|DICTIONARY)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?/i,
   )
   return match?.[1] ?? 'unknown'
 }

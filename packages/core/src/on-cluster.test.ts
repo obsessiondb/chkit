@@ -94,6 +94,24 @@ describe('applyOnClusterToPlan', () => {
     expect(applyOnClusterToPlan(plan, 'c').operations[0]?.sql).toBe('INSERT INTO db.t SELECT 1;')
   })
 
+  test('injects ON CLUSTER for dictionary create-or-replace, drop, and rename', () => {
+    const plan = planOf([
+      op('create_dictionary', 'CREATE DICTIONARY IF NOT EXISTS db.d\n(\n  `id` UInt64\n)\nPRIMARY KEY `id`\nSOURCE(NULL())\nLAYOUT(FLAT())\nLIFETIME(0);'),
+      op('create_dictionary', 'CREATE OR REPLACE DICTIONARY db.d\n(\n  `id` UInt64\n)\nPRIMARY KEY `id`\nSOURCE(NULL())\nLAYOUT(FLAT())\nLIFETIME(0);'),
+      op('drop_dictionary', 'DROP DICTIONARY IF EXISTS db.d;'),
+      op('rename_dictionary', 'RENAME DICTIONARY IF EXISTS db.old TO db.new;'),
+    ])
+
+    const sql = applyOnClusterToPlan(plan, 'c').operations.map((o) => o.sql)
+
+    expect(sql).toEqual([
+      "CREATE DICTIONARY IF NOT EXISTS db.d ON CLUSTER 'c'\n(\n  `id` UInt64\n)\nPRIMARY KEY `id`\nSOURCE(NULL())\nLAYOUT(FLAT())\nLIFETIME(0);",
+      "CREATE OR REPLACE DICTIONARY db.d ON CLUSTER 'c'\n(\n  `id` UInt64\n)\nPRIMARY KEY `id`\nSOURCE(NULL())\nLAYOUT(FLAT())\nLIFETIME(0);",
+      "DROP DICTIONARY IF EXISTS db.d ON CLUSTER 'c';",
+      "RENAME DICTIONARY IF EXISTS db.old TO db.new ON CLUSTER 'c';",
+    ])
+  })
+
   // These statement shapes are not emitted by chkit yet; the anchors exist as a
   // forward-compatible safety net so injection already works if a future command
   // starts producing them. Placements confirmed against the ClickHouse reference.
