@@ -18,6 +18,7 @@ The `backfill` plugin is in alpha. Its API, configuration, and CLI flags may cha
 
 - Builds deterministic, immutable backfill plans that divide a time window into chunks.
 - Executes backfills via async query submission with configurable concurrency and server-side polling.
+- Runs either locally against a direct ClickHouse connection or as a managed job on [ObsessionDB](/obsessiondb/backfills/) — the same plan, a different execution venue.
 - Detects materialized views and automatically generates correct CTE-wrapped replay queries.
 - Supports resume from checkpoint, cancel, status monitoring, and doctor-style diagnostics.
 - Integrates with [`chkit check`](/cli/check/) for CI enforcement of pending backfills.
@@ -33,7 +34,19 @@ The plugin follows a plan-then-execute lifecycle:
 
 Additional commands: `resume` (continue from checkpoint with optional failed-chunk replay), `cancel` (mark run as cancelled), `doctor` (actionable diagnostics).
 
+To run the plan on a managed backend instead of your own machine, replace `run` with `submit` — see **Execution modes** below.
+
 [`chkit check`](/cli/check/) integration reports pending or failed backfills in CI.
+
+## Execution modes: local vs managed jobs
+
+Backfills run in one of two venues. Both build the identical chunk plan with the same chunking algorithm — only where the chunks execute differs.
+
+**Local execution** (`run`, `resume`) — Opens a direct ClickHouse connection and submits chunks as async queries from your machine, polling for completion. This is the default and requires a `clickhouse` block in your config. Plan and run checkpoint state live on disk under `stateDir`, so `resume`, `status`, `cancel`, and `doctor` operate on local files.
+
+**Managed job** (`submit`) — Builds the same plan and hands the chunks to a managed job backend, which runs them server-side. Nothing streams from your machine and there is no local checkpoint to babysit — the command prints a job ID and a console link to track progress. Today the only managed backend is [ObsessionDB](/obsessiondb/backfills/); `submit` requires an authenticated session with a selected service.
+
+When ObsessionDB is the active target (logged in with a service selected), `plan`, `run`, and `resume` are refused rather than silently opening a direct connection that bypasses ObsessionDB. Use `submit` to run the backfill as a managed job, or pass `--local` to force local execution against a direct ClickHouse connection. See [Backfill Jobs](/obsessiondb/backfills/) for the managed path in detail.
 
 ## Plugin setup
 
@@ -87,7 +100,7 @@ The plugin supports two strategies for backfilling data, chosen automatically ba
 
 **Table backfill** (`table` strategy): For direct table targets, inserts data by selecting from the same table within the time window. This is the most common case.
 
-**Materialized view replay** (`mv_replay` strategy): When the target is a materialized view's `to` table, the plugin detects the view's aggregation query and wraps it in a CTE (Common Table Expression). This re-materializes the aggregation for each chunk window, ensuring correctness for aggregate backfills. Requires `requireIdempotencyToken: true` for safe resumable retries.
+**Materialized view replay** (`mv_replay` strategy): When the target is the `to` table of one or more materialized views, the plugin replays each view's aggregation query over every chunk window, re-materializing the aggregation for that window and ensuring correctness for aggregate backfills. A target fed by several materialized views replays them all in a single `INSERT … SELECT … UNION ALL …` per chunk, so no view's rows are missed. Because the chunks are sized from the view's **source** table (the one it reads `FROM`) rather than the target, a from-scratch **empty** aggregate target is fine — it's the case being bootstrapped. Requires `requireIdempotencyToken: true` for safe resumable retries.
 
 ## Time column resolution
 
@@ -174,6 +187,19 @@ Build a deterministic backfill plan and persist immutable plan state.
 | `--time-column <column>` | No | Time column for WHERE clause (auto-detected if omitted) |
 | `--force-large-window` | No | Allow windows exceeding `limits.maxWindowHours` |
 | `--force` | No | Delete existing plan and regenerate from scratch |
+
+### `chkit plugin backfill submit`
+
+Build the plan with the same chunking algorithm as `run`, then submit it to a managed job backend instead of executing it locally. Requires an authenticated [ObsessionDB](/obsessiondb/backfills/) session with a selected service (`chkit obsessiondb login`, then `chkit obsessiondb service select`); without one, the command explains how to set it up or fall back to `run --local`. On success it prints the job ID and a console link to track progress — the backend runs the chunks, so no local polling is needed. See [Backfill Jobs](/obsessiondb/backfills/) for the full managed flow.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--target <db.table>` | Yes | Target table in `database.table` format |
+| `--from <timestamp>` | No | Window start (ISO timestamp; defaults to the table's earliest partition) |
+| `--to <timestamp>` | No | Window end (ISO timestamp; defaults to the table's latest partition) |
+| `--max-chunk-bytes <size>` | No | Max bytes per chunk (e.g. `10G`, `500M`) |
+| `--title <title>` | No | Human-readable job title shown in the console |
+| `--concurrency <n>` | No | Max concurrent tasks the backend runs (1–48) |
 
 ### `chkit plugin backfill run`
 
@@ -276,6 +302,15 @@ chkit plugin backfill status --plan-id <planId>
 chkit plugin backfill plan --target analytics.events --from 2025-01-01 --to 2025-02-01
 chkit plugin backfill run --plan-id <planId>   # some chunks fail
 chkit plugin backfill resume --plan-id <planId>   # automatically retries failed chunks
+```
+
+**Managed backfill on ObsessionDB:**
+
+```sh
+chkit obsessiondb login
+chkit obsessiondb service select
+chkit plugin backfill submit --target analytics.events --from 2025-01-01 --to 2025-02-01
+# prints a job ID and a console link — the backend runs the chunks server-side
 ```
 
 **CI enforcement:**

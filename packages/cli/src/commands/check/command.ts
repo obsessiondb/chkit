@@ -39,7 +39,7 @@ export const checkCommand: ChxPluginCommand = {
     const db = pluginContext.executor
     const database = config.clickhouse?.database
 
-    const journalStore = createJournalStore(db)
+    const journalStore = createJournalStore(db, config.clickhouse?.cluster)
     const files = await listMigrations(migrationsDir)
     const journal = await journalStore.readJournal()
     const databaseMissing = journalStore.databaseMissing

@@ -11,7 +11,9 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  createPluginRunner,
   defineFlags,
+  type DictionaryDefinition,
   type FlagMapping,
   normalizeEngine,
   type ResolvedChxConfig,
@@ -19,7 +21,7 @@ import {
   type SchemaDefinition,
   splitTopLevelComma,
   type TableDefinition,
-  wrapPluginRun,
+  withFactoryDefaults,
 } from '@chkit/core'
 export { renderSchemaFile } from './render-schema.js'
 import { renderSchemaFile } from './render-schema.js'
@@ -132,6 +134,35 @@ interface PullSchemaResult {
   databases: string[]
   skippedObjects: Array<{ kind: string; count: number }>
   content: string
+  warnings: string[]
+}
+
+const PASSWORD_LITERAL_RE = /password\s+'(?!\[HIDDEN\])(?:[^'\\]|\\.)*'/i
+
+// ClickHouse redacts a dictionary's SOURCE(...) password to `[HIDDEN]` on
+// introspection by default, and offers no way to recover the real value via
+// pull — flag it so the placeholder doesn't sit unnoticed in the schema
+// file. That redaction can also be turned off server-side (server config
+// `display_secrets_in_show_and_select` plus the `displaySecretsInShowAndSelect`
+// grant on the connecting user), in which case ClickHouse hands chkit the
+// real password and it's written verbatim into the schema file — chkit has
+// no way to detect or opt out of that, so flag it too.
+function dictionaryPasswordWarnings(definitions: SchemaDefinition[]): string[] {
+  return definitions
+    .filter((def): def is DictionaryDefinition => def.kind === 'dictionary')
+    .flatMap((def) => {
+      if (def.source.includes('[HIDDEN]')) {
+        return [
+          `Dictionary "${def.database}.${def.name}" SOURCE(...) password was redacted by ClickHouse to '[HIDDEN]' — chkit could not recover the real value. Replace it in the generated schema file before this dictionary's source can be diffed or migrated. To have ClickHouse reveal real passwords on introspection instead, grant the connecting user "displaySecretsInShowAndSelect" and enable the server-side "display_secrets_in_show_and_select" setting.`,
+        ]
+      }
+      if (PASSWORD_LITERAL_RE.test(def.source)) {
+        return [
+          `Dictionary "${def.database}.${def.name}" SOURCE(...) has a plain-text password — ClickHouse returned the real credential on introspection and it was written verbatim into the generated schema file.`,
+        ]
+      }
+      return []
+    })
 }
 
 function stringArrayFlag(value: string | string[] | boolean | undefined): string[] | undefined {
@@ -144,16 +175,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function withFactoryDefaults<T>(
-  schema: SafeParseable<T>,
-  defaults: Record<string, unknown>,
-): SafeParseable<T> {
-  return {
-    safeParse(data) {
-      return schema.safeParse({ ...defaults, ...(isRecord(data) ? data : {}) })
-    },
-  }
-}
+const runCommand = createPluginRunner<PullPluginCommandContext>({
+  configErrorClass: PullConfigError,
+})
 
 export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
   const { introspect: introspector, ...factoryOptions } = options
@@ -172,74 +196,71 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
         flags: PULL_SCHEMA_FLAGS,
         optionsSchema,
         flagMapping: PULL_FLAG_MAP,
-        async run({ flags, jsonMode, print, options: opts, config, pluginContext }) {
-          return wrapPluginRun({
-            command: 'schema',
-            label: 'Pull schema',
-            jsonMode,
-            print,
-            configErrorClass: PullConfigError,
-            fn: async () => {
-              const flagOptions = {
-                ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
-                ...(flags['--force'] === true || flags['--overwrite'] === true
-                  ? { overwrite: true }
-                  : {}),
-                ...(stringArrayFlag(flags['--database'])
-                  ? { databases: stringArrayFlag(flags['--database']) }
-                  : {}),
-              }
-              const effectiveOptions = PullSchema.parse({
-                ...factoryOptions,
-                ...(isRecord(opts) ? opts : {}),
-                ...flagOptions,
-              })
-              const dryrun = flags['--dryrun'] === true
-              const pulled = await pullSchema({
-                config,
-                executor: pluginContext?.hasExecutor ? pluginContext.executor : null,
-                options: { ...effectiveOptions, introspect: introspector },
-              })
+        run: runCommand({
+          command: 'schema',
+          label: 'Pull schema',
+          fn: async ({ flags, jsonMode, print, options: opts, config, pluginContext }) => {
+            const flagOptions = {
+              ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
+              ...(flags['--force'] === true || flags['--overwrite'] === true
+                ? { overwrite: true }
+                : {}),
+              ...(stringArrayFlag(flags['--database'])
+                ? { databases: stringArrayFlag(flags['--database']) }
+                : {}),
+            }
+            const effectiveOptions = PullSchema.parse({
+              ...factoryOptions,
+              ...(isRecord(opts) ? opts : {}),
+              ...flagOptions,
+            })
+            const dryrun = flags['--dryrun'] === true
+            const pulled = await pullSchema({
+              config,
+              executor: pluginContext?.hasExecutor ? pluginContext.executor : null,
+              options: { ...effectiveOptions, introspect: introspector },
+            })
 
-              if (!dryrun) {
-                await writeSchemaFile({
-                  outFile: pulled.outFile,
-                  content: pulled.content,
-                  overwrite: effectiveOptions.overwrite,
-                })
-              }
-
-              const payload = {
-                ok: true,
-                command: 'schema' as const,
+            if (!dryrun) {
+              await writeSchemaFile({
                 outFile: pulled.outFile,
-                definitionCount: pulled.definitionCount,
-                tableCount: pulled.tableCount,
-                databases: pulled.databases,
-                skippedObjects: pulled.skippedObjects,
-                dryrun,
-                ...(dryrun ? { content: pulled.content } : {}),
-              }
+                content: pulled.content,
+                overwrite: effectiveOptions.overwrite,
+              })
+            }
 
-              if (jsonMode) {
-                print(payload)
-                return 0
-              }
+            const payload = {
+              ok: true,
+              command: 'schema' as const,
+              outFile: pulled.outFile,
+              definitionCount: pulled.definitionCount,
+              tableCount: pulled.tableCount,
+              databases: pulled.databases,
+              skippedObjects: pulled.skippedObjects,
+              dryrun,
+              warnings: pulled.warnings,
+              ...(dryrun ? { content: pulled.content } : {}),
+            }
 
-              if (dryrun) {
-                print(
-                  `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
-                )
-                print(pulled.content)
-              } else {
-                print(
-                  `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
-                )
-              }
+            if (jsonMode) {
+              print(payload)
               return 0
-            },
-          })
-        },
+            }
+
+            if (dryrun) {
+              print(
+                `Pull preview: ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'}`
+              )
+              print(pulled.content)
+            } else {
+              print(
+                `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
+              )
+            }
+            for (const warning of pulled.warnings) console.warn(`Warning: ${warning}`)
+            return 0
+          },
+        }),
       },
     ],
   }
@@ -281,7 +302,11 @@ async function pullSchema(input: {
   }
 
   const outFile = resolve(process.cwd(), input.options.outFile)
-  let objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }> = []
+  let objects: Array<{
+    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+    database: string
+    name: string
+  }> = []
   let selectedDatabases = input.options.databases
 
   if (db && (!customIntrospector || selectedDatabases.length === 0)) {
@@ -302,6 +327,7 @@ async function pullSchema(input: {
   const content = renderSchemaFile(definitions)
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
+  const warnings = dictionaryPasswordWarnings(definitions)
 
   return {
     outFile,
@@ -310,6 +336,7 @@ async function pullSchema(input: {
     databases: selectedDatabases,
     skippedObjects,
     content,
+    warnings,
   }
 }
 
@@ -357,6 +384,21 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
         as: introspected.as,
       }
     }
+    if (introspected.kind === 'dictionary') {
+      return {
+        kind: 'dictionary',
+        database: introspected.database,
+        name: introspected.name,
+        attributes: introspected.attributes,
+        primaryKey: introspected.primaryKey,
+        source: introspected.source,
+        layout: introspected.layout,
+        lifetime: introspected.lifetime,
+        ...(introspected.range ? { range: introspected.range } : {}),
+        ...(introspected.settings ? { settings: introspected.settings } : {}),
+        ...(introspected.comment ? { comment: introspected.comment } : {}),
+      }
+    }
     return {
       kind: 'materialized_view',
       database: introspected.database,
@@ -378,7 +420,11 @@ function normalizeDefault(value: TableDefinition['columns'][number]['default']):
 }
 
 function summarizeSkippedObjects(
-  objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }>,
+  objects: Array<{
+    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+    database: string
+    name: string
+  }>,
   definitions: SchemaDefinition[],
   selectedDatabases: string[]
 ): Array<{ kind: string; count: number }> {
@@ -434,7 +480,7 @@ async function listNonTableRows(
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})
-  AND engine IN ('View', 'MaterializedView')`
+  AND engine IN ('View', 'MaterializedView', 'Dictionary')`
   )
 }
 

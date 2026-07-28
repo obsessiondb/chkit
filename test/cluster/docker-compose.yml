@@ -1,0 +1,72 @@
+# Local ClickHouse replicated cluster for chkit cluster-mode e2e verification.
+#
+#   1 shard x 2 replicas (ch1, ch2) + 1 ClickHouse Keeper.
+#   Cluster name: test_cluster
+#
+# NOT wired into normal CI (would slow it down). Run locally:
+#   docker compose -f test/cluster/docker-compose.yml up -d
+#   docker compose -f test/cluster/docker-compose.yml down -v   # reset
+#
+# Endpoints (from host):
+#   ch1  http://localhost:8123  (native 9000)
+#   ch2  http://localhost:8124  (native 9001)
+#   user: default   password: clusterpass
+name: chkit-cluster
+
+x-ch-common: &ch-common
+  image: clickhouse/clickhouse-server:25.3
+  environment:
+    CLICKHOUSE_PASSWORD: clusterpass
+  ulimits:
+    nofile: { soft: 262144, hard: 262144 }
+  networks: [chkit]
+  depends_on:
+    keeper:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "clickhouse-client --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 20s
+
+services:
+  keeper:
+    image: clickhouse/clickhouse-keeper:25.3
+    container_name: chkit-keeper
+    hostname: keeper
+    volumes:
+      - ./keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+    networks: [chkit]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9181"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  ch1:
+    <<: *ch-common
+    container_name: chkit-ch1
+    hostname: ch1
+    volumes:
+      - ./config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./ch1/node.xml:/etc/clickhouse-server/config.d/node.xml:ro
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+
+  ch2:
+    <<: *ch-common
+    container_name: chkit-ch2
+    hostname: ch2
+    volumes:
+      - ./config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./ch2/node.xml:/etc/clickhouse-server/config.d/node.xml:ro
+    ports:
+      - "8124:8123"
+      - "9001:9000"
+
+networks:
+  chkit:
+    driver: bridge

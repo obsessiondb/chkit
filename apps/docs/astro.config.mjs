@@ -3,14 +3,16 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightBlog from 'starlight-blog';
 import react from '@astrojs/react';
+import sitemap from '@astrojs/sitemap';
 import rawMarkdown from './src/integrations/raw-markdown';
 
 const isDev = process.argv.includes('dev');
 
 // https://astro.build/config
 export default defineConfig({
-	// Canonical site URL — enables the sitemap, canonical links, and the
-	// blog's RSS feed (starlight-blog only emits /blog/rss.xml when `site` is set).
+	// Canonical site URL — required for the @astrojs/sitemap integration,
+	// canonical links, and the blog's RSS feed (starlight-blog only emits
+	// /blog/rss.xml when `site` is set).
 	site: 'https://chkit.obsessiondb.com',
 	integrations: [
 		starlight({
@@ -38,6 +40,7 @@ export default defineConfig({
 				}),
 			],
 			components: {
+				Head: './src/components/Head.astro',
 				Header: './src/components/Header.astro',
 				Hero: './src/components/Hero.astro',
 				Footer: './src/components/Footer.astro',
@@ -50,6 +53,7 @@ export default defineConfig({
 					label: 'Getting Started',
 					items: [
 						{ label: 'Overview', slug: 'getting-started' },
+						{ label: 'For AI Agents', slug: 'ai-agents' },
 						{ label: 'Start with an example', slug: 'getting-started/with-an-example' },
 						{ label: 'Add to an existing project', slug: 'getting-started/add-to-existing-project' },
 					],
@@ -84,6 +88,7 @@ export default defineConfig({
 				},
 			],
 		}),
+		sitemap(),
 		...(isDev ? [react()] : []),
 		rawMarkdown(),
 	],

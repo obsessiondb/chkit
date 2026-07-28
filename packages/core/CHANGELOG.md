@@ -1,5 +1,77 @@
 # @chkit/core
 
+## 0.1.2-beta.5
+
+### Patch Changes
+
+- 3f1db03: Support index-only projections (`PROJECTION p INDEX (a, b) TYPE basic`) end to end. `ProjectionDefinition` is now a union of the existing `{ name, query }` SELECT form and a new `{ name, index, type }` index-only form, which renders without the wrapping parens that made the SELECT form invalid for it. `chkit pull` previously parsed only the SELECT form and dropped index-only projections on the floor, so a pulled schema silently recreated the table without them; they now round-trip through pull, generate, migrate, and drift.
+
+  Index expressions are normalized to the exact form ClickHouse stores — a single expression bare (`INDEX a`), several as a tuple (`INDEX (a, b)`), redundant parens peeled at every level, and a space after each argument separator — so `'(a)'` and `'a'`, or `'concat(x,y)'` and `'concat(x, y)'`, describe the same table and no longer read as drift.
+
+  Two new validation errors guard the new form: `projection_ambiguous_kind` when an entry sets both `query` and `index` (which would otherwise silently discard the SELECT body), and `projection_empty_index` when the index expression is empty (which would otherwise emit invalid DDL).
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+
+## 0.1.2-beta.4
+
+### Patch Changes
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+
+## 0.1.2-beta.3
+
+### Patch Changes
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+
+## 0.1.2-beta.2
+
+### Patch Changes
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+
+## 0.1.2-beta.1
+
+### Patch Changes
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+
+## 0.1.2-beta.0
+
+### Patch Changes
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+
+## 0.1.1
+
+### Patch Changes
+
+- 6b87e6d: Add ClickHouse cluster support. Set `clickhouse.cluster` in your config to run all generated DDL `ON CLUSTER <name>` and store the migration journal in a replicated engine — for self-managed multi-node clusters. Your table engines are passed through unchanged (declare `ReplicatedMergeTree` yourself). Leave `cluster` unset for single-node, ClickHouse Cloud, or ObsessionDB, where replication is automatic and `ON CLUSTER` is unnecessary.
+
 ## 0.1.0
 
 ### Patch Changes

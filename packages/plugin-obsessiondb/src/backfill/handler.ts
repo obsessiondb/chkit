@@ -1,6 +1,9 @@
+import type { ResolvedChxConfig } from '@chkit/core'
+
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { loadSelectedService } from '../service/storage.js'
 import { createJobsClient, isSessionExpiredError, type JobsClient } from './client.js'
+import { handleSubmit } from './submit.js'
 
 interface BeforePluginCommandContext {
   targetPlugin: string
@@ -31,6 +34,14 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
 
   // --local flag bypasses remote routing and runs against the direct ClickHouse connection.
   if (context.flags['--local'] === true) return { handled: false }
+
+  // `submit` builds the plan with the same chunking algorithm as the local path
+  // and submits it to the ObsessionDB job backend. Only intercept when there is a
+  // backend to submit to (authenticated + service selected); otherwise let the
+  // local command print its "no managed backend" guidance.
+  if (context.command === 'submit') {
+    return routeSubmit(context)
+  }
 
   if (EXECUTION_SUBCOMMANDS.has(context.command)) {
     return guardRemoteExecution(context)
@@ -65,10 +76,33 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
   }
 }
 
-// A backfill execution command targets ObsessionDB when the user is authenticated and a
-// service is selected (the same condition under which getContext hands out the remote
-// executor). In that case remote execution is not implemented yet, so refuse with a clear
-// message rather than opening a direct ClickHouse connection that bypasses ObsessionDB.
+// `submit` targets ObsessionDB when authenticated and a service is selected (the
+// same condition under which getContext hands out the remote executor). Without a
+// service there is nothing to submit to, so defer to the local command's guidance.
+async function routeSubmit(
+  context: BeforePluginCommandContext,
+): Promise<HandlerResult> {
+  const creds = await loadCredentials()
+  if (!creds) return { handled: false }
+
+  const selected = await loadSelectedService(context.configPath)
+  if (!selected) return { handled: false }
+
+  const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
+  return handleSubmit({
+    flags: context.flags,
+    configPath: context.configPath,
+    jsonMode: context.jsonMode,
+    config: context.config as Pick<ResolvedChxConfig, 'metaDir' | 'schema'>,
+    print: context.print,
+    credentials: effectiveCreds,
+    serviceSlug: selected.service_slug,
+  })
+}
+
+// `plan`/`run`/`resume` run the chunk loop against a direct ClickHouse connection.
+// Against ObsessionDB the managed path is `backfill submit`, so point users there
+// rather than silently opening a direct connection that bypasses ObsessionDB.
 async function guardRemoteExecution(
   context: BeforePluginCommandContext,
 ): Promise<HandlerResult> {
@@ -82,8 +116,8 @@ async function guardRemoteExecution(
   if (!hasService) return { handled: false }
 
   const message =
-    `Backfill ${context.command} against ObsessionDB is not supported yet — it will submit jobs to the ObsessionDB backend, which is not implemented. ` +
-    'Re-run with --local to execute against a direct ClickHouse connection, or unselect the service with `chkit obsessiondb service select`.'
+    `Backfill ${context.command} runs locally and is not supported directly against ObsessionDB. ` +
+    'Use `chkit backfill submit` to run it as a managed ObsessionDB job, or re-run with --local to execute against a direct ClickHouse connection.'
   if (context.jsonMode) {
     context.print({ ok: false, command: `backfill ${context.command}`, error: message })
   } else {

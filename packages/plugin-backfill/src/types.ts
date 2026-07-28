@@ -25,7 +25,11 @@ export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' 
 interface BackfillExecutionPlan {
   mode: 'copy' | 'mv_replay'
   sourceTarget: string
-  mvAsQuery?: string
+  /**
+   * One `SELECT` per materialized view feeding the target table. mv_replay
+   * inserts all of them (via `UNION ALL`) so every MV's rows are rebuilt.
+   */
+  mvReplayQueries?: string[]
   targetColumns?: string[]
   requireIdempotencyToken: boolean
 }
@@ -142,7 +146,7 @@ export interface BackfillDoctorReport {
   failedChunkIds: string[]
 }
 
-interface BackfillPluginCommandContext<TOptions = Record<string, unknown>> {
+export interface BackfillPluginCommandContext<TOptions = Record<string, unknown>> {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
@@ -161,7 +165,7 @@ export interface BackfillPlugin {
   }
   optionsSchema?: SafeParseable<Record<string, unknown>>
   commands: Array<{
-    name: 'plan' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
+    name: 'plan' | 'submit' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor'
     description: string
     flags?: ReadonlyArray<{
       name: string

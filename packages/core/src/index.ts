@@ -9,8 +9,10 @@ export {
 export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'
 export { splitTopLevelComma } from './key-clause.js'
+export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
-export { toCreateSQL } from './sql.js'
+export { renderDictionarySQL, toCreateSQL } from './sql.js'
+export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,
   codec,
@@ -22,6 +24,6 @@ export {
   renderCodec,
 } from './codec.js'
 export { assertValidDefinitions, validateDefinitions } from './validate.js'
-export { wrapPluginRun } from './plugin-error.js'
+export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plugin-error.js'
 export { splitSqlStatements, extractExecutableStatements } from './sql-splitter.js'
 export { importModuleFile } from './ts-import.js'

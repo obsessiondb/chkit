@@ -1,5 +1,6 @@
 import type { MaterializedViewDefinition, SchemaDefinition, TableDefinition } from '@chkit/core'
 
+import { extractSourceTableRef } from './chunking/sql.js'
 import './table-config.js'
 import type { TimeColumnCandidate } from './types.js'
 
@@ -21,21 +22,52 @@ function isDateTimeType(type: string): boolean {
   return false
 }
 
-export function findMvForTarget(
+/**
+ * Return every materialized view whose `to` target is `database.table`.
+ * ClickHouse allows several MVs to feed the same destination table, so an
+ * mv_replay backfill must replay all of them — returning only the first would
+ * silently drop the rest.
+ */
+export function findMvsForTarget(
   definitions: SchemaDefinition[],
   database: string,
   table: string
-): MaterializedViewDefinition | undefined {
-  for (const def of definitions) {
-    if (
+): MaterializedViewDefinition[] {
+  return definitions.filter(
+    (def): def is MaterializedViewDefinition =>
       def.kind === 'materialized_view' &&
       def.to.database === database &&
       def.to.name === table
-    ) {
-      return def
-    }
+  )
+}
+
+/**
+ * Resolve the single source table an mv_replay backfill should size its chunks
+ * against — the table the materialized views read `FROM`. The injected chunk
+ * conditions (`_partition_id`, sort-key ranges) run against that source, so the
+ * chunk planner must introspect it rather than the target, which is
+ * legitimately empty while a fresh aggregate is being bootstrapped.
+ *
+ * An unqualified `FROM` table defaults to the view's own database, matching
+ * ClickHouse name resolution. Returns `undefined` when a source can't be
+ * resolved to a single shared table — either a `FROM` we can't parse, or MVs
+ * fanning in from different sources (which one chunk plan can't drive) — so the
+ * caller falls back to introspecting the target, preserving multi-source replay.
+ */
+export function resolveMvReplaySource(
+  mvs: MaterializedViewDefinition[]
+): { database: string; table: string } | undefined {
+  const sources = new Map<string, { database: string; table: string }>()
+
+  for (const mv of mvs) {
+    const ref = extractSourceTableRef(mv.as)
+    if (!ref) return undefined
+    const database = ref.database ?? mv.database
+    sources.set(`${database}.${ref.table}`, { database, table: ref.table })
   }
-  return undefined
+
+  const distinct = [...sources.values()]
+  return distinct.length === 1 ? distinct[0] : undefined
 }
 
 export function findTableForTarget(

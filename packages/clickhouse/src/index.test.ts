@@ -10,12 +10,20 @@ import {
   createStatelessClickHouseClient,
   formatConnectionError,
   inferSchemaKindFromEngine,
+  parseCommentFromCreateDictionaryQuery,
+  parseDictionaryAttributesFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseDictionaryRangeFromCreateDictionaryQuery,
+  parseDictionarySettingsFromCreateDictionaryQuery,
   parseEngineFromCreateTableQuery,
+  parseLayoutFromCreateDictionaryQuery,
+  parseLifetimeFromCreateDictionaryQuery,
   parseOrderByFromCreateTableQuery,
   parsePartitionByFromCreateTableQuery,
   parsePrimaryKeyFromCreateTableQuery,
   parseProjectionsFromCreateTableQuery,
   parseSettingsFromCreateTableQuery,
+  parseSourceFromCreateDictionaryQuery,
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
 } from './index'
@@ -158,7 +166,7 @@ describe('@chkit/clickhouse smoke', () => {
     expect(inferSchemaKindFromEngine('MergeTree')).toBe('table')
     expect(inferSchemaKindFromEngine('View')).toBe('view')
     expect(inferSchemaKindFromEngine('MaterializedView')).toBe('materialized_view')
-    expect(inferSchemaKindFromEngine('Dictionary')).toBeNull()
+    expect(inferSchemaKindFromEngine('Dictionary')).toBe('dictionary')
   })
 
   test('parses settings and ttl from create table query', () => {
@@ -426,6 +434,83 @@ ORDER BY id;`
       },
     ])
   })
+
+  // Verbatim SHOW CREATE TABLE output from ClickHouse 26.3, including its own
+  // pretty-printing of the SELECT body. Index-only projections used to be
+  // dropped here, which is what made `chkit pull` lose them entirely.
+  test('parses index-only projections alongside select projections', () => {
+    const query = `CREATE TABLE default.address_counterparts
+(
+    \`sender\` String,
+    \`receiver\` String,
+    \`cnt\` UInt64,
+    PROJECTION by_receiver INDEX (receiver, sender) TYPE basic,
+    PROJECTION agg_by_sender
+    (
+        SELECT
+            sender,
+            sum(cnt)
+        GROUP BY sender
+    )
+)
+ENGINE = SharedMergeTree
+ORDER BY (sender, receiver)
+SETTINGS storage_policy = 's3', index_granularity = 8192`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'by_receiver', index: '(receiver, sender)', type: 'basic' },
+      { name: 'agg_by_sender', query: 'SELECT sender, sum(cnt) GROUP BY sender' },
+    ])
+  })
+
+  // ClickHouse drops the parens around a single-column index expression, so the
+  // parser sees the bare form even when the table was created with `INDEX (b)`.
+  test('parses a single-column index projection with a backticked name', () => {
+    const query = `CREATE TABLE app.events
+(
+  \`a\` String,
+  \`b\` String,
+  PROJECTION \`p_one\` INDEX b TYPE basic
+)
+ENGINE = MergeTree
+ORDER BY a`
+
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p_one', index: 'b', type: 'basic' },
+    ])
+  })
+
+  // Regression for #190: a PROJECTION whose SELECT body contains ORDER BY sits
+  // in the column list, before the table-level clauses. The parsers used to
+  // match that inner ORDER BY and swallow the engine into orderBy/primaryKey.
+  test('ignores clause keywords inside a projection SELECT body', () => {
+    const query = `CREATE TABLE bi.price_history (\`day\` Date, \`csin\` String, \`min_price\` UInt32, \`_version\` UInt64 DEFAULT now64(), PROJECTION by_csin_day (SELECT csin, day, min_price ORDER BY csin, day)) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/bi/price_history_new', '{replica}', _version) PARTITION BY toYYYYMM(day) ORDER BY (day, csin) TTL day + toIntervalYear(5) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild'`
+
+    expect(parseEngineFromCreateTableQuery(query)).toBe(
+      "ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/bi/price_history_new', '{replica}', _version)"
+    )
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('(day, csin)')
+    expect(parsePrimaryKeyFromCreateTableQuery(query)).toBeUndefined()
+    expect(parsePartitionByFromCreateTableQuery(query)).toBe('toYYYYMM(day)')
+    expect(parseTTLFromCreateTableQuery(query)).toBe('day + toIntervalYear(5)')
+    expect(parseSettingsFromCreateTableQuery(query)).toEqual({
+      index_granularity: '8192',
+      deduplicate_merge_projection_mode: "'rebuild'",
+    })
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'by_csin_day', query: 'SELECT csin, day, min_price ORDER BY csin, day' },
+    ])
+  })
+
+  // A column-level TTL lives in the column list too, and must not be mistaken
+  // for the table-level TTL / SETTINGS.
+  test('reads table-level TTL past a column-level TTL', () => {
+    const query = `CREATE TABLE app.events (\`id\` UInt64, \`ts\` DateTime, \`tmp\` String TTL ts + toIntervalDay(1)) ENGINE = MergeTree ORDER BY id TTL ts + toIntervalYear(1) SETTINGS index_granularity = 8192`
+
+    expect(parseTTLFromCreateTableQuery(query)).toBe('ts + toIntervalYear(1)')
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('id')
+    expect(parseSettingsFromCreateTableQuery(query)).toEqual({ index_granularity: '8192' })
+  })
 })
 
 describe('formatConnectionError', () => {
@@ -484,5 +569,139 @@ describe('formatConnectionError', () => {
 
   test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
     expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
+  })
+})
+
+describe('create-dictionary-parser', () => {
+  const query = `CREATE DICTIONARY default.users_dict
+(
+  \`id\` UInt64,
+  \`name\` String,
+  \`email\` String DEFAULT '',
+  \`parent_id\` UInt64 HIERARCHICAL
+)
+PRIMARY KEY id
+SOURCE(MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users'))
+LAYOUT(HASHED())
+LIFETIME(MIN 0 MAX 300)
+COMMENT 'User lookup dictionary'`
+
+  test('parses attributes including defaults and modifiers', () => {
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(query)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      { name: 'name', type: 'String' },
+      { name: 'email', type: 'String', default: '' },
+      { name: 'parent_id', type: 'UInt64', hierarchical: true },
+    ])
+  })
+
+  test('parses primary key', () => {
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)).toEqual(['id'])
+  })
+
+  test('parses source, layout, lifetime, comment', () => {
+    expect(parseSourceFromCreateDictionaryQuery(query)).toBe(
+      "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')"
+    )
+    expect(parseLayoutFromCreateDictionaryQuery(query)).toBe('HASHED()')
+    expect(parseLifetimeFromCreateDictionaryQuery(query)).toBe('MIN 0 MAX 300')
+    expect(parseCommentFromCreateDictionaryQuery(query)).toBe('User lookup dictionary')
+  })
+
+  test('returns empty results for undefined query', () => {
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(undefined)).toEqual([])
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(undefined)).toEqual([])
+    expect(parseSourceFromCreateDictionaryQuery(undefined)).toBeUndefined()
+  })
+
+  test('parses a composite primary key and an expression attribute', () => {
+    const compositeQuery = `CREATE DICTIONARY default.pairs_dict
+(
+  \`a\` String,
+  \`b\` String,
+  \`full_name\` String EXPRESSION concat(a, ' ', b)
+)
+PRIMARY KEY a, b
+SOURCE(HTTP(url 'http://example.com/pairs' format 'TSV'))
+LAYOUT(COMPLEX_KEY_HASHED())
+LIFETIME(300)`
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(compositeQuery)).toEqual(['a', 'b'])
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(compositeQuery)).toEqual([
+      { name: 'a', type: 'String' },
+      { name: 'b', type: 'String' },
+      { name: 'full_name', type: 'String', expression: "concat(a, ' ', b)" },
+    ])
+  })
+
+  test('parses RANGE, SETTINGS, and BIDIRECTIONAL modifier', () => {
+    const rangeQuery = `CREATE DICTIONARY default.rates_dict
+(
+  \`id\` UInt64,
+  \`parent_id\` UInt64 HIERARCHICAL BIDIRECTIONAL,
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LIFETIME(MIN 0 MAX 300)
+LAYOUT(RANGE_HASHED())
+RANGE(MIN start_date MAX end_date)
+SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)`
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(rangeQuery)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+      { name: 'start_date', type: 'DateTime' },
+      { name: 'end_date', type: 'DateTime' },
+    ])
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(rangeQuery)).toEqual({
+      min: 'start_date',
+      max: 'end_date',
+    })
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(rangeQuery)).toEqual({
+      dictionary_use_async_executor: 1,
+      max_threads: 8,
+    })
+  })
+
+  test('RANGE and SETTINGS return undefined when absent', () => {
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(query)).toBeUndefined()
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(query)).toBeUndefined()
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(undefined)).toBeUndefined()
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(undefined)).toBeUndefined()
+  })
+
+  test('an EXPRESSION calling the range() array function does not shadow the real RANGE clause', () => {
+    // `range(...)` is a real ClickHouse array function, so it can legitimately
+    // appear inside an attribute's EXPRESSION. The parser must not mistake it
+    // for the dictionary-level RANGE(MIN ... MAX ...) clause.
+    const shadowedRangeQuery = `CREATE DICTIONARY default.rates_dict
+(
+  \`id\` UInt64,
+  \`buckets\` String EXPRESSION arrayStringConcat(arrayMap(x -> toString(x), range(1, 10)), ','),
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LAYOUT(RANGE_HASHED())
+LIFETIME(MIN 0 MAX 300)
+RANGE(MIN start_date MAX end_date)`
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(shadowedRangeQuery)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      {
+        name: 'buckets',
+        type: 'String',
+        expression: "arrayStringConcat(arrayMap(x -> toString(x), range(1, 10)), ',')",
+      },
+      { name: 'start_date', type: 'DateTime' },
+      { name: 'end_date', type: 'DateTime' },
+    ])
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(shadowedRangeQuery)).toEqual({
+      min: 'start_date',
+      max: 'end_date',
+    })
+    expect(parseSourceFromCreateDictionaryQuery(shadowedRangeQuery)).toBe(
+      "HTTP(url 'http://example.com/rates' format 'TSV')"
+    )
   })
 })

@@ -18,6 +18,8 @@ export {
   waitForTable,
   waitForView,
   waitForColumn,
+  waitForDictionary,
+  waitForRows,
 } from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')

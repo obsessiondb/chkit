@@ -3,6 +3,7 @@ import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
   ColumnRenameSuggestion,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   MigrationOperation,
@@ -24,6 +25,7 @@ import {
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
   renderAlterResetSetting,
+  renderDictionarySQL,
   toCreateSQL,
 } from './sql.js'
 import { assertValidDefinitions } from './validate.js'
@@ -52,6 +54,15 @@ function pushDropOperation(
       key: definitionKey(def),
       risk,
       sql: `DROP VIEW IF EXISTS ${def.database}.${def.name};`,
+    })
+    return
+  }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'drop_dictionary',
+      key: definitionKey(def),
+      risk,
+      sql: `DROP DICTIONARY IF EXISTS ${def.database}.${def.name};`,
     })
     return
   }
@@ -86,6 +97,15 @@ function pushCreateOperation(
     })
     return
   }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'create_dictionary',
+      key: definitionKey(def),
+      risk,
+      sql: toCreateSQL(def),
+    })
+    return
+  }
   operations.push( {
     type: 'create_materialized_view',
     key: definitionKey(def),
@@ -107,8 +127,39 @@ function pushCreateDatabaseOperation(
   })
 }
 
+// Whitespace and identifier backtick-quoting carry no meaning in a key clause,
+// and ClickHouse normalizes both when it stores the key: `toStartOfHour( ts )`
+// comes back as `toStartOfHour(ts)`, and a column written bare as `user-id` in
+// config is stored/introspected quoted as `` `user-id` ``. Drop insignificant
+// whitespace and identifier backticks (but preserve single/double-quoted string
+// literals, which are semantic) so a config clause and the introspected clause
+// compare equal, avoiding a phantom table recreate. Comparison-only — never
+// used to render DDL, so keyword expressions like `INTERVAL 1 HOUR` and real
+// identifier quoting keep their form when emitted.
+function stripInsignificantFormatting(token: string): string {
+  let out = ''
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < token.length; i += 1) {
+    const char = token[i] ?? ''
+    if (quote) {
+      out += char
+      if (char === quote && token[i - 1] !== '\\') quote = null
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      out += char
+      continue
+    }
+    if (char === '`') continue
+    if (/\s/.test(char)) continue
+    out += char
+  }
+  return out
+}
+
 function normalizeClauseList(value: string[] | undefined): string {
-  return (value ?? []).join(',')
+  return (value ?? []).map(stripInsignificantFormatting).join(',')
 }
 
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
@@ -263,6 +314,42 @@ function diffMaterializedView(
   }
 
   return []
+}
+
+// `chkit pull` writes ClickHouse's own introspection placeholder
+// (`password '[HIDDEN]'`) into `source` when it can't recover a dictionary's
+// real credential. That placeholder must never drive a diff — rendering it
+// would deploy the literal string "[HIDDEN]" as the password. A real
+// password value, by contrast, is fully known to chkit (it's a plain string
+// in the schema file) and a change to it is a genuine diff like any other.
+function dictionarySourceIsHidden(source: string): boolean {
+  return source.includes('[HIDDEN]')
+}
+
+function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
+  if (!omitSource) return def
+  const { source, ...rest } = def
+  return rest
+}
+
+function diffDictionary(
+  oldDef: DictionaryDefinition,
+  newDef: DictionaryDefinition
+): MigrationOperation[] {
+  const omitSource = dictionarySourceIsHidden(newDef.source)
+  const unchanged =
+    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
+    JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
+  if (unchanged) return []
+
+  return [
+    {
+      type: 'create_dictionary',
+      key: definitionKey(newDef),
+      risk: 'caution',
+      sql: renderDictionarySQL(newDef, true),
+    },
+  ]
 }
 
 function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
@@ -516,6 +603,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     ) {
       const mvOps = diffMaterializedView(oldDef, newDef)
       operations.push(...mvOps)
+      continue
+    }
+
+    if (newDef.kind === oldDef.kind && newDef.kind === 'dictionary' && oldDef.kind === 'dictionary') {
+      operations.push(...diffDictionary(oldDef, newDef))
       continue
     }
 

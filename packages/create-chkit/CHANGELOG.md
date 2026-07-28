@@ -1,5 +1,45 @@
 # create-chkit
 
+## 0.1.2-beta.5
+
+### Patch Changes
+
+- Updated dependencies [3f9a246]
+  - @chkit/plugin-obsessiondb@0.1.2-beta.5
+
+## 0.1.2-beta.4
+
+### Patch Changes
+
+- Updated dependencies [3f9a246]
+  - @chkit/plugin-obsessiondb@0.1.2-beta.4
+
+## 0.1.2-beta.2
+
+### Patch Changes
+
+- Updated dependencies [3f9a246]
+  - @chkit/plugin-obsessiondb@0.1.2-beta.2
+
+## 0.1.2-beta.1
+
+### Patch Changes
+
+- @chkit/plugin-obsessiondb@0.1.2-beta.1
+
+## 0.1.2-beta.0
+
+### Patch Changes
+
+- @chkit/plugin-obsessiondb@0.1.2-beta.0
+
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [c1d8d0d]
+  - @chkit/plugin-obsessiondb@0.1.1
+
 ## 0.1.0
 
 ### Patch Changes

@@ -105,6 +105,15 @@ export const PlanSchema = z.object({
 })
 export type PlanOptions = z.infer<typeof PlanSchema>
 
+// `submit` reuses the planning options (same chunking algorithm) and adds the
+// fields a managed job backend cares about: a human-readable title and the
+// backend-side execution concurrency.
+export const SubmitSchema = PlanSchema.extend({
+  title: z.string().min(1).optional(),
+  concurrency: z.number().int().positive().max(48).optional(),
+})
+export type SubmitOptions = z.infer<typeof SubmitSchema>
+
 export const RunSchema = z.object({
   planId: z.string(),
   forceEnvironment: z.boolean().default(false),
@@ -139,6 +148,15 @@ export const PLAN_FLAGS = defineFlags([
   { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
 ] as const)
 
+export const SUBMIT_FLAGS = defineFlags([
+  { name: '--target', type: 'string', description: 'Target table (database.table)', placeholder: '<database.table>' },
+  { name: '--from', type: 'string', description: 'Filter partitions starting from timestamp', placeholder: '<timestamp>' },
+  { name: '--to', type: 'string', description: 'Filter partitions up to timestamp', placeholder: '<timestamp>' },
+  { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
+  { name: '--title', type: 'string', description: 'Human-readable job title', placeholder: '<title>' },
+  { name: '--concurrency', type: 'string', description: 'Max concurrent tasks the backend runs', placeholder: '<n>' },
+] as const)
+
 export const RUN_FLAGS = defineFlags([
   { name: '--plan-id', type: 'string', description: 'Plan ID to execute', placeholder: '<id>' },
   { name: '--force-environment', type: 'boolean', description: 'Skip environment mismatch checks' },
@@ -165,6 +183,15 @@ export const PLAN_FLAG_MAP: FlagMapping = {
   '--from': { key: 'from', coerce: (v) => normalizeTimestamp(v, '--from') },
   '--to': { key: 'to', coerce: (v) => normalizeTimestamp(v, '--to') },
   '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: parseByteSize },
+}
+
+export const SUBMIT_FLAG_MAP: FlagMapping = {
+  '--target': { key: 'target', coerce: normalizeTarget },
+  '--from': { key: 'from', coerce: (v) => normalizeTimestamp(v, '--from') },
+  '--to': { key: 'to', coerce: (v) => normalizeTimestamp(v, '--to') },
+  '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: parseByteSize },
+  '--title': { key: 'title' },
+  '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
 }
 
 function coercePositiveInt(v: string, flag: string): number {

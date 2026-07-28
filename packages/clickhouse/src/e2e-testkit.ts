@@ -102,4 +102,10 @@ export function createJournalTableName(label: string): string {
 // State-based polling (re-exported from ddl-propagation for test convenience)
 // ---------------------------------------------------------------------------
 
-export { waitForTable, waitForView, waitForColumn } from './ddl-propagation.js'
+export {
+  waitForTable,
+  waitForView,
+  waitForColumn,
+  waitForDictionary,
+  waitForRows,
+} from './ddl-propagation.js'

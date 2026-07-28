@@ -1,5 +1,116 @@
 # chkit
 
+## 0.1.2-beta.5
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 3f1db03: Support index-only projections (`PROJECTION p INDEX (a, b) TYPE basic`) end to end. `ProjectionDefinition` is now a union of the existing `{ name, query }` SELECT form and a new `{ name, index, type }` index-only form, which renders without the wrapping parens that made the SELECT form invalid for it. `chkit pull` previously parsed only the SELECT form and dropped index-only projections on the floor, so a pulled schema silently recreated the table without them; they now round-trip through pull, generate, migrate, and drift.
+
+  Index expressions are normalized to the exact form ClickHouse stores — a single expression bare (`INDEX a`), several as a tuple (`INDEX (a, b)`), redundant parens peeled at every level, and a space after each argument separator — so `'(a)'` and `'a'`, or `'concat(x,y)'` and `'concat(x, y)'`, describe the same table and no longer read as drift.
+
+  Two new validation errors guard the new form: `projection_ambiguous_kind` when an entry sets both `query` and `index` (which would otherwise silently discard the SELECT body), and `projection_empty_index` when the index expression is empty (which would otherwise emit invalid DDL).
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- Updated dependencies [278e4fa]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/codegen@0.1.2-beta.5
+  - @chkit/clickhouse@0.1.2-beta.5
+  - @chkit/core@0.1.2-beta.5
+
+## 0.1.2-beta.4
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- Updated dependencies [278e4fa]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/codegen@0.1.2-beta.4
+  - @chkit/core@0.1.2-beta.4
+  - @chkit/clickhouse@0.1.2-beta.4
+
+## 0.1.2-beta.3
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- Updated dependencies [278e4fa]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/codegen@0.1.2-beta.3
+  - @chkit/core@0.1.2-beta.3
+  - @chkit/clickhouse@0.1.2-beta.3
+
+## 0.1.2-beta.2
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- Updated dependencies [278e4fa]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/codegen@0.1.2-beta.2
+  - @chkit/core@0.1.2-beta.2
+  - @chkit/clickhouse@0.1.2-beta.2
+
+## 0.1.2-beta.1
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- Updated dependencies [278e4fa]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/codegen@0.1.2-beta.1
+  - @chkit/core@0.1.2-beta.1
+  - @chkit/clickhouse@0.1.2-beta.1
+
+## 0.1.2-beta.0
+
+### Patch Changes
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.0
+  - @chkit/clickhouse@0.1.2-beta.0
+  - @chkit/codegen@0.1.2-beta.0
+
+## 0.1.1
+
+### Patch Changes
+
+- 6b87e6d: Add ClickHouse cluster support. Set `clickhouse.cluster` in your config to run all generated DDL `ON CLUSTER <name>` and store the migration journal in a replicated engine — for self-managed multi-node clusters. Your table engines are passed through unchanged (declare `ReplicatedMergeTree` yourself). Leave `cluster` unset for single-node, ClickHouse Cloud, or ObsessionDB, where replication is automatic and `ON CLUSTER` is unnecessary.
+- Updated dependencies [6b87e6d]
+  - @chkit/core@0.1.1
+  - @chkit/clickhouse@0.1.1
+  - @chkit/codegen@0.1.1
+
 ## 0.1.0
 
 ### Patch Changes

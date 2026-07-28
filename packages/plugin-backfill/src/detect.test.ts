@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { table, materializedView } from '@chkit/core'
 import type { SchemaDefinition } from '@chkit/core'
 
-import { detectCandidatesFromTable, extractSchemaTimeColumn, findMvForTarget, findTableForTarget } from './detect.js'
+import { detectCandidatesFromTable, extractSchemaTimeColumn, findMvsForTarget, findTableForTarget, resolveMvReplaySource } from './detect.js'
 
 describe('@chkit/plugin-backfill detect', () => {
   test('finds DateTime column in ORDER BY as top candidate', () => {
@@ -234,7 +234,7 @@ describe('@chkit/plugin-backfill detect', () => {
     expect(extractSchemaTimeColumn(def)).toBeUndefined()
   })
 
-  test('findMvForTarget returns MV matching target to.database and to.name', () => {
+  test('findMvsForTarget returns MV matching target to.database and to.name', () => {
     const mv = materializedView({
       database: 'app',
       name: 'events_mv',
@@ -253,14 +253,14 @@ describe('@chkit/plugin-backfill detect', () => {
       mv,
     ]
 
-    const found = findMvForTarget(definitions, 'app', 'events_agg')
+    const found = findMvsForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found?.name).toBe('events_mv')
-    expect(found?.as).toBe('SELECT count() FROM app.events')
+    expect(found).toHaveLength(1)
+    expect(found[0]?.name).toBe('events_mv')
+    expect(found[0]?.as).toBe('SELECT count() FROM app.events')
   })
 
-  test('findMvForTarget returns undefined when no MV targets the table', () => {
+  test('findMvsForTarget returns an empty array when no MV targets the table', () => {
     const definitions: SchemaDefinition[] = [
       table({
         database: 'app',
@@ -272,10 +272,10 @@ describe('@chkit/plugin-backfill detect', () => {
       }),
     ]
 
-    expect(findMvForTarget(definitions, 'app', 'events')).toBeUndefined()
+    expect(findMvsForTarget(definitions, 'app', 'events')).toEqual([])
   })
 
-  test('findMvForTarget returns first MV when multiple target the same table', () => {
+  test('findMvsForTarget returns ALL MVs when multiple target the same table', () => {
     const mv1 = materializedView({
       database: 'app',
       name: 'hourly_mv',
@@ -290,9 +290,75 @@ describe('@chkit/plugin-backfill detect', () => {
     })
     const definitions: SchemaDefinition[] = [mv1, mv2]
 
-    const found = findMvForTarget(definitions, 'app', 'events_agg')
+    const found = findMvsForTarget(definitions, 'app', 'events_agg')
 
-    expect(found).toBeDefined()
-    expect(found?.name).toBe('hourly_mv')
+    expect(found.map((mv) => mv.name)).toEqual(['hourly_mv', 'daily_mv'])
+  })
+
+  test('resolveMvReplaySource resolves the qualified FROM table of a single MV', () => {
+    const mv = materializedView({
+      database: 'app',
+      name: 'events_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT toStartOfHour(ts) AS ts, count() AS c FROM solana.raw_events GROUP BY ts',
+    })
+
+    expect(resolveMvReplaySource([mv])).toEqual({ database: 'solana', table: 'raw_events' })
+  })
+
+  test('resolveMvReplaySource collapses multiple MVs sharing one source', () => {
+    const hourly = materializedView({
+      database: 'app',
+      name: 'hourly_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT toStartOfHour(ts) AS ts, count() AS c FROM app.raw_events GROUP BY ts',
+    })
+    const daily = materializedView({
+      database: 'app',
+      name: 'daily_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT toStartOfDay(ts) AS ts, count() AS c FROM app.raw_events GROUP BY ts',
+    })
+
+    expect(resolveMvReplaySource([hourly, daily])).toEqual({ database: 'app', table: 'raw_events' })
+  })
+
+  test('resolveMvReplaySource defaults an unqualified FROM to the MV database', () => {
+    const mv = materializedView({
+      database: 'analytics',
+      name: 'events_mv',
+      to: { database: 'analytics', name: 'events_agg' },
+      as: 'SELECT count() AS c FROM raw_events',
+    })
+
+    expect(resolveMvReplaySource([mv])).toEqual({ database: 'analytics', table: 'raw_events' })
+  })
+
+  test('resolveMvReplaySource returns undefined when MVs fan in from different sources', () => {
+    const web = materializedView({
+      database: 'app',
+      name: 'web_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT count() AS c FROM app.web_events',
+    })
+    const api = materializedView({
+      database: 'app',
+      name: 'api_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT count() AS c FROM app.api_events',
+    })
+
+    expect(resolveMvReplaySource([web, api])).toBeUndefined()
+  })
+
+  test('resolveMvReplaySource returns undefined when the FROM is a subquery', () => {
+    const mv = materializedView({
+      database: 'app',
+      name: 'events_mv',
+      to: { database: 'app', name: 'events_agg' },
+      as: 'SELECT count() AS c FROM (SELECT * FROM app.raw_events) GROUP BY 1',
+    })
+
+    expect(resolveMvReplaySource([mv])).toBeUndefined()
   })
 })

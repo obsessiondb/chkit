@@ -164,6 +164,7 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     ['truncate', 'TRUNCATE TABLE default.events;', 'truncate_table'],
     ['drop view', 'DROP VIEW default.events_v;', 'drop_view'],
     ['drop materialized view', 'DROP MATERIALIZED VIEW default.events_mv;', 'drop_materialized_view'],
+    ['drop dictionary', 'DROP DICTIONARY default.users_dict;', 'drop_dictionary'],
     ['detach', 'DETACH TABLE default.events;', 'detach'],
     ['drop database', 'DROP DATABASE analytics;', 'drop_database'],
   ]
@@ -203,6 +204,18 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(marker?.warningCode).toBe('drop_column_irreversible')
     expect(marker?.summary).toContain('DROP COLUMN')
   })
+
+  test('synthesizes a danger marker (key + preview) for a hand-written DROP DICTIONARY', () => {
+    const sql = 'DROP DICTIONARY default.users_dict;'
+    const markers = collectUnmarkedDestructiveStatements('20260101_handwritten.sql', sql)
+    expect(markers).toHaveLength(1)
+    const marker = markers[0]
+    expect(marker?.type).toBe('drop_dictionary')
+    expect(marker?.risk).toBe('danger')
+    expect(marker?.key).toBe('default.users_dict')
+    expect(marker?.warningCode).toBe('drop_dictionary_dependency_break')
+    expect(marker?.summary).toContain('DROP DICTIONARY')
+  })
 })
 
 describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () => {
@@ -233,6 +246,19 @@ describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () =
     const markers = collectDestructiveOperationMarkers('20260101_drop.sql', sql)
     expect(markers).toHaveLength(1)
     expect(markers[0]?.warningCode).toBe('drop_table_data_loss')
+  })
+
+  test('a planner-emitted drop_dictionary gets the dependency-break warning', () => {
+    const sql = [
+      '-- operation: drop_dictionary key=dictionary:default.users_dict risk=danger',
+      'DROP DICTIONARY IF EXISTS default.users_dict;',
+    ].join('\n')
+
+    const markers = collectDestructiveOperationMarkers('20260101_drop_dict.sql', sql)
+    expect(markers).toHaveLength(1)
+    const marker = markers[0]
+    expect(marker?.type).toBe('drop_dictionary')
+    expect(marker?.warningCode).toBe('drop_dictionary_dependency_break')
   })
 
   test('dropping one table while creating a different one is not a recreate', () => {

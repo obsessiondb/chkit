@@ -8,7 +8,7 @@ sidebar:
 Schema files are TypeScript files that export definitions using functions from `@chkit/core`. All exported definitions are collected when chkit loads schema files matched by the `schema` glob in your [configuration](/configuration/overview/).
 
 ```ts
-import { schema, table, view, materializedView } from '@chkit/core'
+import { schema, table, view, materializedView, dictionary } from '@chkit/core'
 ```
 
 ## `schema()`
@@ -91,8 +91,8 @@ const events = table({
 | `name` | `string` | Table name |
 | `columns` | `ColumnDefinition[]` | Column definitions (see [Columns](#columns)) |
 | `engine` | `string` | Engine clause, e.g. `'MergeTree'`, `'ReplacingMergeTree(ver)'` |
-| `primaryKey` | `string[]` | Primary key columns |
-| `orderBy` | `string[]` | ORDER BY columns |
+| `primaryKey` | `string[]` | Primary key columns or expressions, e.g. `['toDate(ts)', 'id']` |
+| `orderBy` | `string[]` | ORDER BY columns or expressions, e.g. `['toStartOfHour(ts)', 'id']` |
 
 ### Optional fields
 
@@ -114,6 +114,18 @@ The `engine` field accepts any string. Common engines include `MergeTree`, `Repl
 
 :::note
 Key clause arrays support comma-separated strings: `['id, org_id']` is normalized to `['id', 'org_id']`. Prefer one column per array element for clarity.
+:::
+
+:::caution
+`primaryKey`/`orderBy` entries may be **function expressions**, not just column names — e.g. `['toStartOfHour(session_end)', 'id']`. Bare column names are validated against `columns` and quoted; expressions are passed through to ClickHouse unchanged, and spacing differences are ignored when detecting drift.
+
+Write expressions in ClickHouse's **canonical form**, because ClickHouse rewrites some syntax when it stores the key, and chkit compares against that stored form. A mismatch makes `drift`/`check` report perpetual drift and `migrate` recreate the table on every run. Known rewrites to avoid in keys:
+
+- `INTERVAL 1 HOUR` → write `toIntervalHour(1)` (e.g. `toStartOfInterval(ts, toIntervalHour(1))`)
+- `x::Date` or `CAST(x AS Date)` → write `CAST(x, 'Date')`
+- Do not use `ASC`/`DESC` in a key — ClickHouse drops it and the key no longer matches.
+
+Plain function chains like `toStartOfHour(ts)`, `toDate(ts)`, and arithmetic (`a + 1`, `h % 8`) round-trip unchanged.
 :::
 
 ## Columns
@@ -261,18 +273,33 @@ indexes: [
 
 ## Projections
 
-Each entry in the `projections` array is a `ProjectionDefinition`.
+Each entry in the `projections` array is a `ProjectionDefinition`, which takes one of two forms.
+
+A **SELECT projection** stores a rewritten copy of the data.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `string` | Projection name |
 | `query` | `string` | Projection SELECT query |
 
+An **index-only projection** stores no SELECT body. It reorders parts by a secondary key so lookups on that key prune instead of scanning.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Projection name |
+| `index` | `string` | Expression list to order by, e.g. `receiver, sender` |
+| `type` | `string` | Projection index type. ClickHouse currently accepts `basic` |
+
 ```ts
 projections: [
   { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
+  { name: 'by_receiver', index: 'receiver, sender', type: 'basic' },
 ]
 ```
+
+The `index` expression is rendered the way ClickHouse normalizes it: a single expression is emitted bare (`INDEX receiver`), several are emitted as a tuple (`INDEX (receiver, sender)`), redundant parentheses are dropped, and a space follows every argument separator. Writing `'(receiver)'` and `'receiver'` therefore produce the same table, and neither reads as drift.
+
+A projection must be exactly one of the two kinds. Setting both `query` and `index` on the same entry is a `projection_ambiguous_kind` validation error, and an empty `index` is a `projection_empty_index` error.
 
 ## `view()`
 
@@ -341,6 +368,87 @@ const dailyReport = materializedView({
 
 See [Refreshable materialized views](/schema/refreshable-views/) for the full `refresh` field reference, including APPEND mode, `DEPENDS ON`, and the ClickHouse rules that chkit validates.
 
+## `dictionary()`
+
+Creates a [ClickHouse dictionary](https://clickhouse.com/docs/sql-reference/dictionaries) definition — a key-value lookup structure backed by an external or in-database source, queried with `dictGet()`.
+
+```ts
+dictionary(input: Omit<DictionaryDefinition, 'kind'>): DictionaryDefinition
+```
+
+```ts
+import { dictionary } from '@chkit/core'
+
+const usersDict = dictionary({
+  database: 'default',
+  name: 'users_dict',
+  attributes: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'name', type: 'String' },
+    { name: 'email', type: 'String', default: '' },
+  ],
+  primaryKey: ['id'],
+  source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_PASSWORD}' db 'app' table 'users')`,
+  layout: `HASHED()`,
+  lifetime: `300`,
+  comment: 'User lookup dictionary',
+})
+```
+
+### Required fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `database` | `string` | ClickHouse database name |
+| `name` | `string` | Dictionary name |
+| `attributes` | `DictionaryAttribute[]` | Attribute definitions (see [Dictionary attributes](#dictionary-attributes)) |
+| `primaryKey` | `string[]` | Key attribute name(s) — every entry must name a declared attribute |
+| `source` | `string` | Raw `SOURCE(...)` body, e.g. `` `MYSQL(host '...' password '...' ...)` `` |
+| `layout` | `string` | Raw `LAYOUT(...)` body, e.g. `` `HASHED()` `` or `` `COMPLEX_KEY_HASHED()` `` |
+| `lifetime` | `string` | Raw `LIFETIME(...)` body, e.g. `` `300` `` or `` `MIN 300 MAX 360` `` |
+
+### Optional fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `range` | `{ min: string; max: string }` | `RANGE(MIN ... MAX ...)` — required by `RANGE_HASHED` / `COMPLEX_KEY_RANGE_HASHED` layouts. Both `min` and `max` must name declared attributes |
+| `settings` | `Record<string, string \| number>` | Raw `SETTINGS(...)` key/value pairs, e.g. `{ dictionary_use_async_executor: 1 }` |
+| `comment` | `string` | Dictionary comment |
+| `renamedFrom` | `{ database?: string; name: string }` | Previous identity for rename tracking |
+
+:::note
+`source`, `layout`, and `lifetime` are **raw strings**, not a typed sub-DSL — chkit passes them through to ClickHouse verbatim inside `SOURCE(...)`, `LAYOUT(...)`, and `LIFETIME(...)` respectively. There is no key/layout coupling validation or required-parameter checking (e.g. `size_in_cells` for `HASHED`); ClickHouse validates the DDL when it's applied.
+:::
+
+### Dictionary attributes
+
+Each entry in the `attributes` array is a `DictionaryAttribute`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Attribute name |
+| `type` | `string` | ClickHouse type |
+| `default` | `string \| number \| boolean` | `DEFAULT` value for missing keys. Mutually exclusive with `expression` |
+| `expression` | `string` | `EXPRESSION` computed from source columns. Mutually exclusive with `default` |
+| `hierarchical` | `boolean` | Marks the attribute `HIERARCHICAL` |
+| `bidirectional` | `boolean` | Marks the attribute `BIDIRECTIONAL` — enables parent/child lookups in both directions. Only valid alongside `hierarchical` |
+| `injective` | `boolean` | Marks the attribute `INJECTIVE` |
+| `isObjectId` | `boolean` | Marks the attribute `IS_OBJECT_ID` (MongoDB sources) |
+
+### Credentials in `source`
+
+Inline credentials in `source` (e.g. a MySQL/PostgreSQL `password '...'`) should be interpolated from environment variables at schema-authoring time, the same way you'd handle any other secret in a TypeScript config file:
+
+```ts
+source: `MYSQL(host 'db' password '${process.env.MYSQL_PASSWORD}' ...)`,
+```
+
+ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW CREATE DICTIONARY`, `system.dictionaries`). A real password change diffs and migrates like any other field change. The one exception is a `source` that still carries the literal `[HIDDEN]` placeholder written by `chkit pull` — chkit never knows the real value in that case, so it excludes `source` from the diff entirely rather than risk rendering `[HIDDEN]` into DDL — see [Pull: credential handling](/plugins/pull/#credential-handling-hidden-passwords).
+
+### No `ALTER DICTIONARY`
+
+ClickHouse has no `ALTER DICTIONARY` — every structural change to a dictionary is rendered as a single `CREATE OR REPLACE DICTIONARY` statement (atomic, dependency-safe). See [Structural vs. alterable properties](#structural-vs-alterable-properties). A pure rename (`renamedFrom` with no other change) is the one exception — it renders as `RENAME DICTIONARY`, not a replace; see [Dictionary rename](#dictionary-rename).
+
 ## Type system reference
 
 The [codegen plugin](/plugins/codegen/) maps ClickHouse types to TypeScript types using these rules:
@@ -390,7 +498,22 @@ columns: [
 ]
 ```
 
-Both table and column renames can be overridden by CLI flags `--rename-table` and `--rename-column`.
+### Dictionary rename
+
+Set `renamedFrom` on a dictionary definition to rename a dictionary. This emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` statement instead of a `drop_dictionary` + `create_dictionary` pair:
+
+```ts
+const lookupDict = dictionary({
+  database: 'app',
+  name: 'lookup_dict', // new name
+  renamedFrom: { name: 'users_dict' }, // old name
+  // ...
+})
+```
+
+The `database` field in `renamedFrom` is optional and defaults to the dictionary's current database.
+
+Table, column, and dictionary renames can all be overridden by CLI flags: `--rename-table`, `--rename-column`, and `--rename-dictionary`.
 
 ## Plugin configuration
 
@@ -431,11 +554,19 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Duplicate column names** -- repeated column name within a table
 - **Duplicate index names** -- repeated index name within a table
 - **Duplicate projection names** -- repeated projection name within a table
-- **Primary key references missing column** -- `primaryKey` includes a column not in `columns`
-- **Order by references missing column** -- `orderBy` includes a column not in `columns`
+- **Ambiguous projection kind** (`projection_ambiguous_kind`) -- a projection sets both `query` and `index`; use one or the other (see [Projections](#projections))
+- **Empty projection index** (`projection_empty_index`) -- an index-only projection whose `index` expression is empty
+- **Primary key references missing column** -- `primaryKey` includes a bare column name not in `columns` (function expressions like `toDate(ts)` are passed through to ClickHouse unchecked)
+- **Order by references missing column** -- `orderBy` includes a bare column name not in `columns` (function expressions like `toStartOfHour(ts)` are passed through to ClickHouse unchecked)
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
 - **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)
+- **Dictionary missing primary key** (`dictionary_missing_primary_key`) -- a dictionary's `primaryKey` is empty
+- **Dictionary primary key references missing attribute** (`dictionary_primary_key_missing_attribute`) -- a `primaryKey` entry doesn't name a declared attribute
+- **Dictionary missing source/layout/lifetime** (`dictionary_missing_source`, `dictionary_missing_layout`, `dictionary_missing_lifetime`) -- one of these raw-string fields is empty
+- **Dictionary attribute default/expression exclusive** (`dictionary_attribute_default_expression_exclusive`) -- an attribute sets both `default` and `expression`
+- **Dictionary range references missing attribute** (`dictionary_range_missing_attribute`) -- `range.min`/`range.max` doesn't name a declared attribute
+- **Dictionary bidirectional requires hierarchical** (`dictionary_bidirectional_requires_hierarchical`) -- an attribute sets `bidirectional` without `hierarchical`
 
 ## Structural vs. alterable properties
 
@@ -446,6 +577,8 @@ When a property changes, chkit determines whether the table can be altered in pl
 **Alterable** (ALTER in place): columns, indexes, projections, settings, TTL, comment
 
 Views and materialized views always use drop + recreate.
+
+Dictionaries have no ALTER at all: any change to `attributes`, `primaryKey`, `layout`, `lifetime`, `source` (including a password change), or `comment` renders as a single `CREATE OR REPLACE DICTIONARY` (`risk=caution`) — except a `source` still carrying the `[HIDDEN]` introspection placeholder, which is excluded from the diff entirely (see [Credentials in `source`](#credentials-in-source)). Removing a dictionary from schema emits `DROP DICTIONARY` (`risk=danger`, requires `--allow-destructive`).
 
 :::danger
 Changing a structural property on an existing table generates a `DROP TABLE` followed by `CREATE TABLE` — **all rows are permanently deleted and the table is recreated empty**. The data is not copied over. The drop is classified `risk=danger` (blocked without `--allow-destructive`) and `chkit migrate` flags it with the distinct `table_recreate_data_loss` warning. To preserve data, migrate by hand instead: create a new table with the desired structure, `INSERT INTO new SELECT ... FROM old`, then swap names and drop the old table.

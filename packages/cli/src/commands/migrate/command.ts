@@ -1,26 +1,46 @@
-import { mkdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir } from 'node:fs/promises'
 
-import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import type { ResolvedChxConfig } from '@chkit/core'
+
+import {
+  defineFlags,
+  typedFlags,
+  type ChxPluginCommand,
+  type ChxPluginCommandContext,
+  type ParsedFlags,
+  type PluginRuntime,
+  type TableScope,
+} from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
+import { debug } from '../../runtime/debug.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
-import { emitJson } from '../../runtime/json-output.js'
-import { createJournalStore, resolveJournalTableName } from '../../runtime/journal-store.js'
-import { extractMigrationMetadata } from '../../runtime/migration-metadata.js'
+import { createJournalStore } from '../../runtime/journal-store.js'
 import {
   findChecksumMismatches,
   listMigrations,
   readSnapshot,
+  type MigrationJournal,
   type MigrationJournalEntry,
 } from '../../runtime/migration-store.js'
-import {
-  resolveTableScope,
-  tableKeysFromDefinitions,
-} from '../../runtime/table-scope.js'
-import { debug } from '../../runtime/debug.js'
+import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
 
 import { applyMigration } from './apply.js'
 import { scanDestructive } from './destructive.js'
+import {
+  emitApplySummaryJson,
+  emitChecksumMismatchJson,
+  emitDestructiveBlockedJson,
+  emitNoPending,
+  emitNoScopeMatch,
+  emitPlanJson,
+  renderApplied,
+  renderApplySummary,
+  renderMigrationLog,
+  renderPlanOnlyNotice,
+  renderPlanText,
+  type MigrateMode,
+} from './output.js'
 import {
   confirmApply,
   confirmDestructiveExecution,
@@ -42,9 +62,56 @@ export const migrateCommand: ChxPluginCommand = {
   run: cmdMigrate,
 }
 
-async function cmdMigrate(
-  runCtx: import('../../plugins.js').ChxPluginCommandContext,
-): Promise<undefined | number> {
+type JournalStore = ReturnType<typeof createJournalStore>
+
+/** Shared state resolved once by prepareMigration and threaded through the phases. */
+interface MigrateContext {
+  jsonMode: boolean
+  executeRequested: boolean
+  allowDestructive: boolean
+  mode: MigrateMode
+  migrationsDir: string
+  db: ClickHouseExecutor
+  journalStore: JournalStore
+  config: ResolvedChxConfig
+  flags: ParsedFlags
+  pluginRuntime: PluginRuntime
+  tableScope: TableScope
+  journal: MigrationJournal
+  pendingAll: string[]
+}
+
+interface ScopeResolution {
+  /** Set when the run terminates during scope resolution; otherwise continue. */
+  exit?: number
+  pending: string[]
+  undeterminedScope: string[]
+}
+
+async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | number> {
+  const ctx = await prepareMigration(runCtx)
+
+  const checksumExit = await runChecksumGate(ctx)
+  if (checksumExit !== undefined) return checksumExit
+
+  const scope = await resolvePendingScope(ctx)
+  if (scope.exit !== undefined) return scope.exit
+  const { pending, undeterminedScope } = scope
+
+  const planExit = await renderPlan(ctx, pending, undeterminedScope)
+  if (planExit !== undefined) return planExit
+
+  const confirmExit = await runConfirmGate(ctx)
+  if (confirmExit !== undefined) return confirmExit
+
+  const destructiveExit = await runDestructiveGate(ctx, pending)
+  if (destructiveExit !== undefined) return destructiveExit
+
+  return applyPending(ctx, pending, undeterminedScope)
+}
+
+/** Parse flags, resolve deps, run onConfigLoaded, and load the pending set. */
+async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<MigrateContext> {
   const { flags, config, configPath, pluginRuntime, pluginContext } = runCtx
   const f = typedFlags(flags, [...GLOBAL_FLAGS, ...MIGRATE_FLAGS] as const)
   const executeRequested = f['--apply'] === true || f['--execute'] === true
@@ -59,10 +126,10 @@ async function cmdMigrate(
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
   const db = pluginContext.executor
-  const journalStore = createJournalStore(db)
+  const journalStore = createJournalStore(db, config.clickhouse?.cluster)
   const snapshot = await readSnapshot(metaDir)
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
-  const mode = executeRequested ? 'execute' : 'plan'
+  const mode: MigrateMode = executeRequested ? 'execute' : 'plan'
 
   await pluginRuntime.runOnConfigLoaded({
     command: 'migrate',
@@ -79,118 +146,113 @@ async function cmdMigrate(
   const pendingAll = files.filter((file) => !appliedNames.has(file))
   debug('migrate', `migrations: total=${files.length}, applied=${journal.applied.length}, pending=${pendingAll.length}`)
 
-  const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
-  if (checksumMismatches.length > 0) {
-    debug('migrate', `checksum mismatches: ${checksumMismatches.map((m) => m.name).join(', ')}`)
-    if (jsonMode) {
-      emitJson('migrate', {
-        mode,
-        scope: tableScope,
-        error: 'Checksum mismatch detected on applied migrations',
-        checksumMismatches,
-      })
-      return 1
-    }
-    throw new Error(
-      `Checksum mismatch detected on applied migrations: ${checksumMismatches.map((item) => item.name).join(', ')}`,
-    )
+  return {
+    jsonMode,
+    executeRequested,
+    allowDestructive,
+    mode,
+    migrationsDir,
+    db,
+    journalStore,
+    config,
+    flags,
+    pluginRuntime,
+    tableScope,
+    journal,
+    pendingAll,
   }
+}
+
+/** Gate 1: block when applied migrations no longer match their recorded checksum. */
+async function runChecksumGate(ctx: MigrateContext): Promise<number | undefined> {
+  const { migrationsDir, journal, jsonMode, mode, tableScope } = ctx
+  const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
+  if (checksumMismatches.length === 0) return undefined
+
+  debug('migrate', `checksum mismatches: ${checksumMismatches.map((m) => m.name).join(', ')}`)
+  if (jsonMode) {
+    emitChecksumMismatchJson({ mode, scope: tableScope, checksumMismatches })
+    return 1
+  }
+  throw new Error(
+    `Checksum mismatch detected on applied migrations: ${checksumMismatches.map((item) => item.name).join(', ')}`,
+  )
+}
+
+/** Resolve table scope, filter the pending set, and short-circuit empty runs. */
+async function resolvePendingScope(ctx: MigrateContext): Promise<ScopeResolution> {
+  const { tableScope, jsonMode, mode, migrationsDir, pendingAll } = ctx
 
   if (tableScope.enabled && tableScope.matchCount === 0) {
-    if (jsonMode) {
-      emitJson('migrate', {
-        mode,
-        scope: tableScope,
-        pending: [],
-        applied: [],
-        warning: `No tables matched selector "${tableScope.selector ?? ''}".`,
-      })
-    } else {
-      console.log(`No tables matched selector "${tableScope.selector ?? ''}". No migrations selected.`)
-    }
-    return 0
+    emitNoScopeMatch({ jsonMode, mode, scope: tableScope })
+    return { exit: 0, pending: [], undeterminedScope: [] }
   }
 
   let pending = pendingAll
   let undeterminedScope: string[] = []
   if (tableScope.enabled) {
-    const scoped = await filterPendingByScope(
-      migrationsDir,
-      pendingAll,
-      new Set(tableScope.matchedTables),
-    )
+    const scoped = await filterPendingByScope(migrationsDir, pendingAll, new Set(tableScope.matchedTables))
     pending = scoped.inScope
     undeterminedScope = scoped.undetermined
   }
 
   if (pending.length === 0) {
-    if (jsonMode) {
-      emitJson('migrate', { mode, scope: tableScope, pending: [], applied: [] })
-    } else {
-      console.log('No pending migrations.')
-    }
-    return 0
+    emitNoPending({ jsonMode, mode, scope: tableScope })
+    return { exit: 0, pending, undeterminedScope }
   }
 
+  return { pending, undeterminedScope }
+}
+
+/** Render the pending plan (JSON early-return in plan mode, text otherwise). */
+async function renderPlan(
+  ctx: MigrateContext,
+  pending: string[],
+  undeterminedScope: string[],
+): Promise<number | undefined> {
+  const { jsonMode, executeRequested, mode, tableScope, migrationsDir } = ctx
+
   if (jsonMode && !executeRequested) {
-    emitJson('migrate', {
-      mode,
-      scope: tableScope,
-      pending,
-      ...(undeterminedScope.length > 0 ? { undeterminedMigrations: undeterminedScope } : {}),
-    })
+    emitPlanJson({ mode, scope: tableScope, pending, undeterminedScope })
     return 0
   }
 
   if (!jsonMode) {
-    if (tableScope.enabled) {
-      console.log(`Table scope: ${tableScope.selector ?? ''} (${tableScope.matchCount} matched)`)
-      for (const table of tableScope.matchedTables) console.log(`- ${table}`)
-    }
-    if (undeterminedScope.length > 0) {
-      console.log(
-        `⚠ ${undeterminedScope.length} pending migration(s) have no table markers; ` +
-          "including them because their target tables can't be determined under --table:",
-      )
-      for (const file of undeterminedScope) console.log(`  - ${file}`)
-    }
-    console.log(`Pending migrations: ${pending.length}`)
-    for (const file of pending) {
-      console.log(`- ${file}`)
-      const sql = await readFile(join(migrationsDir, file), 'utf8')
-      const meta = extractMigrationMetadata(sql)
-      if (meta.log) console.log(`    ${meta.log}`)
-    }
+    await renderPlanText({ migrationsDir, scope: tableScope, undeterminedScope, pending })
   }
 
-  if (!executeRequested) {
-    if (isBackgroundOrCI() || jsonMode) {
-      if (!jsonMode) {
-        console.log('\nPlan only. Re-run with --apply to apply and journal these migrations.')
-      }
-      return 0
-    }
+  return undefined
+}
 
-    const confirmed = await confirmApply()
-    if (!confirmed) {
-      console.log('Migration apply cancelled by user.')
-      return 0
-    }
+/** Gate 2: in plan mode, stop unless the user confirms an interactive apply. */
+async function runConfirmGate(ctx: MigrateContext): Promise<number | undefined> {
+  const { executeRequested, jsonMode } = ctx
+  if (executeRequested) return undefined
+
+  if (isBackgroundOrCI() || jsonMode) {
+    if (!jsonMode) renderPlanOnlyNotice()
+    return 0
   }
 
+  const confirmed = await confirmApply()
+  if (!confirmed) {
+    console.log('Migration apply cancelled by user.')
+    return 0
+  }
+  return undefined
+}
+
+/** Gate 3: block destructive migrations unless allowed, confirmed, or forced. */
+async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promise<number | undefined> {
+  const { migrationsDir, allowDestructive, config, jsonMode, tableScope } = ctx
   const destructive = await scanDestructive(migrationsDir, pending)
   let destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
+
   if (destructive.migrations.length > 0 && !destructiveAllowed) {
     const error =
       'Blocked destructive migration execution. Re-run with --allow-destructive or set safety.allowDestructive=true after review.'
     if (jsonMode) {
-      emitJson('migrate', {
-        mode: 'execute',
-        scope: tableScope,
-        error,
-        destructiveMigrations: destructive.migrations,
-        destructiveOperations: destructive.operations,
-      })
+      emitDestructiveBlockedJson({ scope: tableScope, error, destructive })
       return 3
     }
 
@@ -215,13 +277,20 @@ async function cmdMigrate(
     throw new Error('Blocked destructive migration execution.')
   }
 
+  return undefined
+}
+
+/** Apply each pending migration, journal it, and emit the final summary. */
+async function applyPending(
+  ctx: MigrateContext,
+  pending: string[],
+  undeterminedScope: string[],
+): Promise<number> {
+  const { jsonMode, migrationsDir, db, journalStore, pluginRuntime, config, tableScope, flags } = ctx
+
   const appliedNow: MigrationJournalEntry[] = []
   for (const file of pending) {
-    if (!jsonMode) {
-      const sql = await readFile(join(migrationsDir, file), 'utf8')
-      const meta = extractMigrationMetadata(sql)
-      if (meta.log) console.log(`  ${meta.log}`)
-    }
+    if (!jsonMode) await renderMigrationLog(migrationsDir, file)
     const entry = await applyMigration({
       db,
       journalStore,
@@ -233,19 +302,14 @@ async function cmdMigrate(
       file,
     })
     appliedNow.push(entry)
-    if (!jsonMode) console.log(`Applied: ${file}`)
+    if (!jsonMode) renderApplied(file)
   }
 
   if (jsonMode) {
-    emitJson('migrate', {
-      mode: 'execute',
-      scope: tableScope,
-      applied: appliedNow,
-      ...(undeterminedScope.length > 0 ? { undeterminedMigrations: undeterminedScope } : {}),
-    })
+    emitApplySummaryJson({ scope: tableScope, applied: appliedNow, undeterminedScope })
     return 0
   }
 
-  console.log(`\nMigrations recorded in ClickHouse ${resolveJournalTableName()} table.`)
+  renderApplySummary()
   return 0
 }

@@ -170,6 +170,75 @@ describe('@chkit/cli generate e2e', () => {
     }
   })
 
+  test('generate --dryrun with --rename-dictionary emits RENAME DICTIONARY, not drop+create', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "FILE(path '/dev/null' format 'CSV')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst lookupDict = dictionary({\n  database: 'app',\n  name: 'lookup_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "FILE(path '/dev/null' format 'CSV')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, lookupDict)\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'generate',
+        '--config',
+        fixture.configPath,
+        '--dryrun',
+        '--rename-dictionary',
+        'app.users_dict=app.lookup_dict',
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operations: Array<{ type: string; sql: string }>
+      }
+      expect(payload.operations.some((operation) => operation.type === 'rename_dictionary')).toBe(true)
+      expect(
+        payload.operations.find((operation) => operation.type === 'rename_dictionary')?.sql
+      ).toBe('RENAME DICTIONARY IF EXISTS app.users_dict TO app.lookup_dict;')
+      expect(payload.operations.some((operation) => operation.type === 'drop_dictionary')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'create_dictionary')).toBe(false)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('schema renamedFrom metadata emits explicit rename dictionary operation', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "FILE(path '/dev/null' format 'CSV')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst lookupDict = dictionary({\n  database: 'app',\n  name: 'lookup_dict',\n  renamedFrom: { name: 'users_dict' },\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "FILE(path '/dev/null' format 'CSV')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, lookupDict)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operations: Array<{ type: string }>
+      }
+      expect(payload.operations.some((operation) => operation.type === 'rename_dictionary')).toBe(true)
+      expect(payload.operations.some((operation) => operation.type === 'drop_dictionary')).toBe(false)
+      expect(payload.operations.some((operation) => operation.type === 'create_dictionary')).toBe(false)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('cli --rename-table overrides conflicting schema renamedFrom metadata', async () => {
     const fixture = await createFixture()
     try {
@@ -394,6 +463,7 @@ describe('@chkit/cli generate e2e', () => {
         'schemaVersion',
         'scope',
         'snapshotFile',
+        'warnings',
       ])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
@@ -478,6 +548,83 @@ describe('@chkit/cli generate e2e', () => {
       expect(payload.scope.matchCount).toBe(0)
       expect(payload.operationCount).toBe(0)
       expect(payload.warning).toContain('No tables matched selector')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun warns when a new dictionary SOURCE(...) has a plain-text password', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password 'secret' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { warnings: string[] }
+      expect(
+        payload.warnings.some(
+          (warning) => warning.includes('app.users_dict') && warning.includes('plain text')
+        )
+      ).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun generates a migration when only a dictionary SOURCE(...) password changed', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password 'old-secret' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password 'new-secret' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as {
+        operationCount: number
+        operations: Array<{ type: string; sql: string }>
+        warnings: string[]
+      }
+      expect(payload.operationCount).toBe(1)
+      expect(payload.operations[0]?.type).toBe('create_dictionary')
+      expect(payload.operations[0]?.sql).toContain("password 'new-secret'")
+      expect(
+        payload.warnings.some(
+          (warning) => warning.includes('app.users_dict') && warning.includes('plain text')
+        )
+      ).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('generate --dryrun does not diff a dictionary SOURCE(...) still carrying the [HIDDEN] placeholder', async () => {
+    const fixture = await createFixture()
+    try {
+      await writeFile(
+        fixture.schemaPath,
+        `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: 'app',\n  name: 'users',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nconst usersDict = dictionary({\n  database: 'app',\n  name: 'users_dict',\n  attributes: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  primaryKey: ['id'],\n  source: "MYSQL(host 'db' user 'root' password '[HIDDEN]' table 'users')",\n  layout: 'FLAT()',\n  lifetime: '300',\n})\n\nexport default schema(users, usersDict)\n`,
+        'utf8'
+      )
+      runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { operationCount: number }
+      expect(payload.operationCount).toBe(0)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

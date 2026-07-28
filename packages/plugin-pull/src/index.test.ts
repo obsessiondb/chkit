@@ -28,6 +28,125 @@ describe('@chkit/plugin-pull options', () => {
 })
 
 describe('@chkit/plugin-pull renderSchemaFile', () => {
+  test('renders a full table + view + refreshable MV schema byte-for-byte', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [
+          { name: 'id', type: 'UInt64', codec: { kind: 'ZSTD', level: 3 } },
+          { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+          { name: 'source', type: 'String', nullable: true, comment: 'origin' },
+          {
+            name: 'payload',
+            type: 'String',
+            codec: [{ kind: 'Delta', size: 4 }, { kind: 'raw', expression: 'LZ4' }, { kind: 'ZSTD' }],
+          },
+        ],
+        primaryKey: ['id'],
+        orderBy: ['id', 'received_at'],
+        uniqueKey: ['id'],
+        partitionBy: 'toYYYYMM(received_at)',
+        ttl: 'received_at + INTERVAL 30 DAY',
+        settings: { index_granularity: 8192, ttl_only_drop_parts: 1 },
+        indexes: [
+          { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
+          {
+            name: 'idx_body',
+            expression: 'payload',
+            type: 'tokenbf_v1',
+            sizeBytes: 256,
+            hashFunctions: 2,
+            randomSeed: 0,
+            granularity: 1,
+          },
+        ],
+        projections: [{ name: 'proj_by_source', query: 'SELECT source, count() GROUP BY source' }],
+      },
+      {
+        kind: 'view',
+        database: 'app',
+        name: 'events_view',
+        as: 'SELECT id FROM app.events',
+      },
+      {
+        kind: 'materialized_view',
+        database: 'analytics',
+        name: 'daily_mv',
+        to: { database: 'analytics', name: 'daily_rollup' },
+        refresh: {
+          every: '1 HOUR',
+          randomize: '30 SECOND',
+          dependsOn: [{ database: 'analytics', name: 'upstream' }],
+          settings: { refresh_retries: 3 },
+          append: true,
+        },
+        as: 'SELECT toDate(received_at) AS day, count() AS c FROM app.events GROUP BY day',
+      },
+    ])
+
+    expect(content).toBe(`import { schema, table, view, materializedView, codec } from '@chkit/core'
+
+// Pulled from live ClickHouse metadata via chkit plugin pull schema
+
+const app_events = table({
+  database: "app",
+  name: "events",
+  engine: "MergeTree()",
+  columns: [
+    { name: "id", type: "UInt64", codec: { kind: "ZSTD", level: 3 } },
+    { name: "received_at", type: "DateTime64(3)", default: "fn:now64(3)" },
+    { name: "source", type: "String", nullable: true, comment: "origin" },
+    { name: "payload", type: "String", codec: [{ kind: "Delta", size: 4 }, codec.raw("LZ4"), { kind: "ZSTD", level: 1 }] },
+  ],
+  primaryKey: ["id"],
+  orderBy: ["id", "received_at"],
+  uniqueKey: ["id"],
+  partitionBy: "toYYYYMM(received_at)",
+  ttl: "received_at + INTERVAL 30 DAY",
+  settings: {
+    index_granularity: 8192,
+    ttl_only_drop_parts: 1,
+  },
+  indexes: [
+    { name: "idx_body", expression: "payload", type: "tokenbf_v1", sizeBytes: 256, hashFunctions: 2, randomSeed: 0, granularity: 1 },
+    { name: "idx_source", expression: "source", type: "set", maxRows: 0, granularity: 1 },
+  ],
+  projections: [
+    { name: "proj_by_source", query: "SELECT source, count() GROUP BY source" },
+  ],
+})
+
+const app_events_view = view({
+  database: "app",
+  name: "events_view",
+  as: "SELECT id FROM app.events",
+})
+
+const analytics_daily_mv = materializedView({
+  database: "analytics",
+  name: "daily_mv",
+  to: { database: "analytics", name: "daily_rollup" },
+  refresh: {
+    every: "1 HOUR",
+    randomize: "30 SECOND",
+    dependsOn: [
+      { database: "analytics", name: "upstream" },
+    ],
+    settings: {
+      refresh_retries: 3,
+    },
+    append: true,
+  },
+  as: "SELECT toDate(received_at) AS day, count() AS c FROM app.events GROUP BY day",
+})
+
+export default schema(app_events, app_events_view, analytics_daily_mv)
+`)
+  })
+
   test('renders deterministic table definitions', () => {
     const content = renderSchemaFile([
       {
@@ -49,6 +168,34 @@ describe('@chkit/plugin-pull renderSchemaFile', () => {
     expect(content).toContain('const app_events = table({')
     expect(content).toContain('default: "fn:now64(3)"')
     expect(content).toContain("export default schema(app_events)")
+  })
+
+  test('renders an index-only projection pulled from a live table', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'solana',
+        name: 'address_counterparts',
+        engine: 'AggregatingMergeTree()',
+        columns: [
+          { name: 'sender', type: 'String' },
+          { name: 'receiver', type: 'String' },
+        ],
+        primaryKey: ['sender'],
+        orderBy: ['sender', 'receiver'],
+        projections: [
+          { name: 'by_receiver', index: '(receiver, sender)', type: 'basic' },
+          { name: 'agg_by_sender', query: 'SELECT sender, sum(cnt) GROUP BY sender' },
+        ],
+      },
+    ])
+
+    expect(content).toContain(
+      '    { name: "by_receiver", index: "(receiver, sender)", type: "basic" },'
+    )
+    expect(content).toContain(
+      '    { name: "agg_by_sender", query: "SELECT sender, sum(cnt) GROUP BY sender" },'
+    )
   })
 
   test('renders structured index args in pulled schema', () => {
@@ -138,6 +285,70 @@ describe('@chkit/plugin-pull renderSchemaFile', () => {
     expect(content).toContain('const app_events_mv = materializedView({')
     expect(content).toContain('to: { database: "app", name: "events_rollup" }')
     expect(content).toContain('export default schema(app_events_view, app_events_mv)')
+  })
+
+  test('renders a dictionary definition with a hidden-secret note', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'dictionary',
+        database: 'app',
+        name: 'users_dict',
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String' },
+          { name: 'email', type: 'String', default: '' },
+        ],
+        primaryKey: ['id'],
+        source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+        layout: 'HASHED()',
+        lifetime: '300',
+        comment: 'User lookup dictionary',
+      },
+    ])
+
+    expect(content).toContain("import { schema, dictionary } from '@chkit/core'")
+    expect(content).toContain(
+      "// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X)."
+    )
+    expect(content).toContain('const app_users_dict = dictionary({')
+    expect(content).toContain('{ name: "id", type: "UInt64" }')
+    expect(content).toContain('{ name: "email", type: "String", default: "" }')
+    expect(content).toContain('primaryKey: ["id"]')
+    expect(content).toContain(
+      'source: "MYSQL(host \'db\' port 3306 user \'reader\' password \'[HIDDEN]\' db \'app\' table \'users\')"'
+    )
+    expect(content).toContain('layout: "HASHED()"')
+    expect(content).toContain('lifetime: "300"')
+    expect(content).toContain('comment: "User lookup dictionary"')
+    expect(content).toContain('export default schema(app_users_dict)')
+  })
+
+  test('renders a dictionary with range, settings, and a bidirectional attribute', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'dictionary',
+        database: 'app',
+        name: 'rates_dict',
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+          { name: 'start_date', type: 'DateTime' },
+          { name: 'end_date', type: 'DateTime' },
+        ],
+        primaryKey: ['id'],
+        source: "HTTP(url 'http://example.com/rates' format 'TSV')",
+        layout: 'RANGE_HASHED()',
+        lifetime: '300',
+        range: { min: 'start_date', max: 'end_date' },
+        settings: { dictionary_use_async_executor: 1, max_threads: 8 },
+      },
+    ])
+
+    expect(content).toContain('{ name: "parent_id", type: "UInt64", hierarchical: true, bidirectional: true }')
+    expect(content).toContain('range: { min: "start_date", max: "end_date" }')
+    expect(content).toContain('settings: {')
+    expect(content).toContain('dictionary_use_async_executor: 1')
+    expect(content).toContain('max_threads: 8')
   })
 
   test('renders refreshable materialized view with full refresh block', () => {
@@ -315,6 +526,122 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).toContain("import { schema, table, view, materializedView } from '@chkit/core'")
     expect(payload.content).toContain('const app_users_view = view({')
     expect(payload.content).toContain('const app_users_mv = materializedView({')
+  })
+
+  test('warns when an introspected dictionary SOURCE(...) password is [HIDDEN]', async () => {
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          kind: 'dictionary',
+          database: 'app',
+          name: 'users_dict',
+          attributes: [{ name: 'id', type: 'UInt64' }],
+          primaryKey: ['id'],
+          source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+          layout: 'HASHED()',
+          lifetime: '300',
+        },
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { warnings: string[] }
+    expect(
+      payload.warnings.some(
+        (warning) => warning.includes('app.users_dict') && warning.includes('[HIDDEN]')
+      )
+    ).toBe(true)
+  })
+
+  test('warns when an introspected dictionary SOURCE(...) password is plain text', async () => {
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          kind: 'dictionary',
+          database: 'app',
+          name: 'users_dict',
+          attributes: [{ name: 'id', type: 'UInt64' }],
+          primaryKey: ['id'],
+          source: "MYSQL(host 'db' port 3306 user 'reader' password 'super-secret-pw' db 'app' table 'users')",
+          layout: 'HASHED()',
+          lifetime: '300',
+        },
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { warnings: string[] }
+    expect(
+      payload.warnings.some(
+        (warning) => warning.includes('app.users_dict') && warning.includes('plain-text password')
+      )
+    ).toBe(true)
   })
 
   test('writes schema file and fails on existing file without --force', async () => {
@@ -513,6 +840,82 @@ AS SELECT today() AS day, toUInt64(1) AS total`
       as: 'SELECT 1',
       refresh: { every: '1 HOUR', append: true },
     })
+  })
+
+  test('mapSystemTableRowToDefinition parses a dictionary row', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'users_dict',
+      engine: 'Dictionary',
+      create_table_query: `CREATE DICTIONARY app.users_dict
+(
+  \`id\` UInt64,
+  \`name\` String
+)
+PRIMARY KEY id
+SOURCE(MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users'))
+LAYOUT(HASHED())
+LIFETIME(MIN 0 MAX 300)`,
+    })
+    expect(definition).toEqual({
+      kind: 'dictionary',
+      database: 'app',
+      name: 'users_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      source: "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+      layout: 'HASHED()',
+      lifetime: 'MIN 0 MAX 300',
+    })
+  })
+
+  test('mapSystemTableRowToDefinition parses a dictionary row with RANGE and SETTINGS', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'rates_dict',
+      engine: 'Dictionary',
+      create_table_query: `CREATE DICTIONARY app.rates_dict
+(
+  \`id\` UInt64,
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LIFETIME(MIN 0 MAX 300)
+LAYOUT(RANGE_HASHED())
+RANGE(MIN start_date MAX end_date)
+SETTINGS(dictionary_use_async_executor = 1)`,
+    })
+    expect(definition).toEqual({
+      kind: 'dictionary',
+      database: 'app',
+      name: 'rates_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'start_date', type: 'DateTime' },
+        { name: 'end_date', type: 'DateTime' },
+      ],
+      primaryKey: ['id'],
+      source: "HTTP(url 'http://example.com/rates' format 'TSV')",
+      layout: 'RANGE_HASHED()',
+      lifetime: 'MIN 0 MAX 300',
+      range: { min: 'start_date', max: 'end_date' },
+      settings: { dictionary_use_async_executor: 1 },
+    })
+  })
+
+  test('mapSystemTableRowToDefinition returns null for a dictionary with an unparsable query', () => {
+    const definition = __testUtils.mapSystemTableRowToDefinition({
+      database: 'app',
+      name: 'broken_dict',
+      engine: 'Dictionary',
+      create_table_query: '',
+    })
+    expect(definition).toBeNull()
   })
 })
 

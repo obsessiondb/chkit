@@ -21,8 +21,10 @@ chkit generate [flags]
 | `--migration-id <id>` | string | — | Escape hatch: override the default timestamp migration prefix |
 | `--rename-table <mapping>` | string | — | Explicit table rename: `old_db.old_table=new_db.new_table` |
 | `--rename-column <mapping>` | string | — | Explicit column rename: `db.table.old_column=new_column` |
+| `--rename-dictionary <mapping>` | string | — | Explicit dictionary rename: `old_db.old_dict=new_db.new_dict` |
 | `--table <selector>` | string | — | Scope operations to matching tables |
 | `--dryrun` | boolean | `false` | Print the plan without writing any files |
+| `--empty` | boolean | `false` | Scaffold a blank manual migration without diffing the schema |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -62,17 +64,35 @@ An empty match set emits a warning and produces no output.
 chkit detects potential renames through two mechanisms:
 
 1. **Schema metadata** — set `renamedFrom` on your schema definition
-2. **CLI flags** — `--rename-table old_db.old_table=new_db.new_table` and `--rename-column db.table.old_col=new_col`
+2. **CLI flags** — `--rename-table old_db.old_table=new_db.new_table`, `--rename-column db.table.old_col=new_col`, and `--rename-dictionary old_db.old_dict=new_db.new_dict`
 
 CLI flags take priority when both sources specify a mapping for the same object. Rename flags accept comma-separated values for multiple mappings.
 
+A dictionary rename emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` statement instead of a `drop_dictionary` + `create_dictionary` pair — see [Dictionary rename](/schema/dsl-reference/#dictionary-rename).
+
 Validation errors are raised for conflicting, chained, or cyclic rename mappings.
+
+### Dictionary password warnings
+
+A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), so any credentials it embeds are written verbatim into the generated migration SQL — ClickHouse has no DDL-level secret substitution. A password change is a real diff like any other field change and produces a `CREATE OR REPLACE DICTIONARY` migration.
+
+`generate` warns when a dictionary being created or replaced this run has a literal `password '...'` in its `SOURCE(...)` — it will land in the committed migration file as plain text. This prints to the console and is included as a `warnings` array in `--json` output.
+
+The one exception: a dictionary whose `source` still carries ClickHouse's `[HIDDEN]` introspection placeholder (written by [`chkit pull`](/plugins/pull/#credential-handling-hidden-passwords) when it can't recover the real password) never produces a migration on its own — chkit doesn't know the real value, so it can't safely diff or render it. Replace `[HIDDEN]` with a real credential in the schema file first.
 
 ### Dryrun mode
 
 With `--dryrun`, the command prints the migration plan (operations with risk levels and SQL) without writing any files. Useful for previewing changes before committing.
 
 Plans for objects in a database lead with a `create_database` operation (`CREATE DATABASE IF NOT EXISTS`, risk `safe`), so a single new table reports `operationCount: 2` — the `create_database` plus the `create_table`. The `CREATE DATABASE` is idempotent and a no-op if the database already exists.
+
+### Empty mode
+
+With `--empty`, the command skips the schema diff entirely and writes a blank, timestamped migration stub for you to hand-edit. Use it for DDL that chkit does not model — raw `INSERT`/backfill statements, `OPTIMIZE`, manual dictionary reloads, or one-off data fixes.
+
+The stub carries the standard migration header (with `operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. The `--name` and `--migration-id` flags apply; without `--name`, the file defaults to `manual`. Schema-diff flags (`--table`, `--rename-table`, `--rename-column`, `--rename-dictionary`, `--dryrun`) are not used in empty mode.
+
+`chkit migrate` picks the file up like any other migration and applies it in filename order. Write your SQL into the stub *before* applying it — editing a migration after it has run triggers a checksum mismatch.
 
 ### Codegen integration
 
@@ -96,6 +116,12 @@ chkit generate --name add_users_table
 chkit generate --dryrun
 ```
 
+**Scaffold a blank manual migration:**
+
+```sh
+chkit generate --empty --name backfill_signups
+```
+
 **Scope to a specific table:**
 
 ```sh
@@ -112,6 +138,12 @@ chkit generate --rename-table old_db.users=new_db.accounts
 
 ```sh
 chkit generate --rename-column analytics.events.old_name=new_name
+```
+
+**Explicit dictionary rename:**
+
+```sh
+chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
 ```
 
 ## Exit codes
@@ -137,7 +169,8 @@ chkit generate --rename-column analytics.events.old_name=new_name
     { "type": "create_database", "key": "database:default", "risk": "safe", "sql": "CREATE DATABASE IF NOT EXISTS default;" },
     { "type": "create_table", "key": "default.users", "risk": "safe", "sql": "CREATE TABLE ..." }
   ],
-  "renameSuggestions": []
+  "renameSuggestions": [],
+  "warnings": []
 }
 ```
 
@@ -152,7 +185,19 @@ chkit generate --rename-column analytics.events.old_name=new_name
   "snapshotFile": "./chkit/meta/snapshot.json",
   "definitionCount": 3,
   "operationCount": 2,
-  "riskSummary": { "safe": 2, "caution": 0, "danger": 0 }
+  "riskSummary": { "safe": 2, "caution": 0, "danger": 0 },
+  "warnings": []
+}
+```
+
+### Empty mode (`--empty`)
+
+```json
+{
+  "command": "generate",
+  "schemaVersion": 1,
+  "mode": "empty",
+  "migrationFile": "./chkit/migrations/20260604104251_backfill_signups.sql"
 }
 ```
 
@@ -169,6 +214,7 @@ chkit generate --rename-column analytics.events.old_name=new_name
 
 ## Related commands
 
+- [The migration workflow](/guides/migration-workflow/) — why generate is offline, and what to commit alongside the SQL
 - [`chkit init`](/cli/init/) — scaffold a project before your first generate
 - [`chkit migrate`](/cli/migrate/) — apply generated migrations to ClickHouse
 - [`chkit codegen`](/cli/codegen/) — manually trigger TypeScript type generation

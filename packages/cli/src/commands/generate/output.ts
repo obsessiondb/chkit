@@ -11,6 +11,7 @@ interface GeneratePlanPayload {
   riskSummary: MigrationPlan['riskSummary']
   operations: MigrationPlan['operations']
   renameSuggestions: MigrationPlan['renameSuggestions']
+  warnings: string[]
 }
 
 interface GenerateApplyPayload {
@@ -20,9 +21,35 @@ interface GenerateApplyPayload {
   definitionCount: number
   operationCount: number
   riskSummary: MigrationPlan['riskSummary']
+  warnings: string[]
 }
 
-export function emitGeneratePlanOutput(plan: MigrationPlan, jsonMode: boolean, scope: TableScope): void {
+interface GenerateEmptyPayload {
+  mode: 'empty'
+  migrationFile: string
+}
+
+export function emitGenerateEmptyOutput(result: { migrationFile: string }, jsonMode: boolean): void {
+  const payload: GenerateEmptyPayload = {
+    mode: 'empty',
+    migrationFile: result.migrationFile,
+  }
+
+  if (jsonMode) {
+    emitJson('generate', payload)
+    return
+  }
+
+  console.log(`Generated empty migration: ${result.migrationFile}`)
+  console.log('Snapshot unchanged. Add your SQL to the file, then run "chkit migrate".')
+}
+
+export function emitGeneratePlanOutput(
+  plan: MigrationPlan,
+  jsonMode: boolean,
+  scope: TableScope,
+  warnings: string[] = []
+): void {
   const payload: GeneratePlanPayload = {
     scope,
     mode: 'plan',
@@ -30,6 +57,7 @@ export function emitGeneratePlanOutput(plan: MigrationPlan, jsonMode: boolean, s
     riskSummary: plan.riskSummary,
     operations: plan.operations,
     renameSuggestions: plan.renameSuggestions,
+    warnings,
   }
 
   if (jsonMode) {
@@ -42,6 +70,7 @@ export function emitGeneratePlanOutput(plan: MigrationPlan, jsonMode: boolean, s
     `Risk summary: safe=${payload.riskSummary.safe}, caution=${payload.riskSummary.caution}, danger=${payload.riskSummary.danger}`
   )
   for (const line of summarizePlan(payload.operations)) console.log(`- ${line}`)
+  for (const warning of payload.warnings) console.warn(`Warning: ${warning}`)
   if (payload.renameSuggestions.length > 0) {
     console.log('\nRename suggestions (review and confirm manually):')
     for (const suggestion of payload.renameSuggestions) {
@@ -59,7 +88,8 @@ export function emitGenerateApplyOutput(
   definitions: SchemaDefinition[],
   plan: MigrationPlan,
   jsonMode: boolean,
-  scope: TableScope
+  scope: TableScope,
+  warnings: string[] = []
 ): void {
   const payload: GenerateApplyPayload = {
     scope,
@@ -68,6 +98,7 @@ export function emitGenerateApplyOutput(
     definitionCount: definitions.length,
     operationCount: plan.operations.length,
     riskSummary: plan.riskSummary,
+    warnings,
   }
 
   if (jsonMode) {
@@ -92,4 +123,5 @@ export function emitGenerateApplyOutput(
   console.log(
     `Risk summary:       safe=${plan.riskSummary.safe}, caution=${plan.riskSummary.caution}, danger=${plan.riskSummary.danger}`
   )
+  for (const warning of payload.warnings) console.warn(`Warning: ${warning}`)
 }

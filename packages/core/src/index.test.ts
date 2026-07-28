@@ -5,7 +5,10 @@ import {
   canonicalizeDefinitions,
   codec,
   collectDefinitionsFromModule,
+  dictionary,
+  isSchemaDefinition,
   materializedView,
+  normalizeProjectionIndex,
   planDiff,
   schema,
   table,
@@ -56,6 +59,203 @@ describe('@chkit/core smoke', () => {
     expect(sql).toContain('PROJECTION `p_recent` (SELECT id ORDER BY id DESC LIMIT 10)')
   })
 
+  test('renders an index-only projection without wrapping parens', () => {
+    const counterparts = table({
+      database: 'solana',
+      name: 'address_counterparts',
+      columns: [
+        { name: 'sender', type: 'String' },
+        { name: 'receiver', type: 'String' },
+      ],
+      engine: 'AggregatingMergeTree()',
+      primaryKey: ['sender'],
+      orderBy: ['sender', 'receiver'],
+      projections: [{ name: 'by_receiver', index: 'receiver, sender', type: 'basic' }],
+    })
+
+    const sql = toCreateSQL(counterparts)
+    expect(sql).toContain('PROJECTION `by_receiver` INDEX (receiver, sender) TYPE basic')
+    expect(sql).not.toContain('PROJECTION `by_receiver` (')
+  })
+
+  test('renders both projection kinds on the same table', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [
+        { name: 'p_by_source', index: 'source', type: 'basic' },
+        { name: 'p_recent', query: 'SELECT id ORDER BY id DESC LIMIT 10' },
+      ],
+    })
+
+    const sql = toCreateSQL(events)
+    expect(sql).toContain('PROJECTION `p_by_source` INDEX source TYPE basic')
+    expect(sql).toContain('PROJECTION `p_recent` (SELECT id ORDER BY id DESC LIMIT 10)')
+  })
+
+  // ClickHouse rewrites `INDEX (b)` to `INDEX b` and rejects `INDEX a, b`, so
+  // the renderer has to emit exactly the form ClickHouse echoes back or drift
+  // never reads clean. Each expectation here mirrors a form verified against a
+  // live 26.3 instance.
+  test('renders index expressions the way ClickHouse normalizes them', () => {
+    const renderIndex = (index: string): string => {
+      const sql = toCreateSQL(
+        table({
+          database: 'app',
+          name: 'events',
+          columns: [
+            { name: 'a', type: 'String' },
+            { name: 'b', type: 'String' },
+            { name: 'ts', type: 'DateTime' },
+          ],
+          engine: 'MergeTree()',
+          primaryKey: ['a'],
+          orderBy: ['a'],
+          projections: [{ name: 'p', index, type: 'basic' }],
+        })
+      )
+      return sql.split('\n').find((line) => line.includes('PROJECTION'))?.trim() ?? ''
+    }
+
+    expect(renderIndex('b')).toBe('PROJECTION `p` INDEX b TYPE basic')
+    expect(renderIndex('(b)')).toBe('PROJECTION `p` INDEX b TYPE basic')
+    expect(renderIndex('(a, b)')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('a, b')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(toYYYYMM(ts))')).toBe('PROJECTION `p` INDEX toYYYYMM(ts) TYPE basic')
+    expect(renderIndex('(toYYYYMM(ts), a)')).toBe(
+      'PROJECTION `p` INDEX (toYYYYMM(ts), a) TYPE basic'
+    )
+    // Redundant parens are peeled at every level, including inside a tuple...
+    expect(renderIndex('((a, b))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(((a,b)))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(a, (b))')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    expect(renderIndex('(a), (b)')).toBe('PROJECTION `p` INDEX (a, b) TYPE basic')
+    // ...but a genuine nested tuple is not redundant and survives.
+    expect(renderIndex('(a, (b, c))')).toBe('PROJECTION `p` INDEX (a, (b, c)) TYPE basic')
+    // ClickHouse prints a space after every argument separator.
+    expect(renderIndex('(concat(a,b), ts)')).toBe(
+      'PROJECTION `p` INDEX (concat(a, b), ts) TYPE basic'
+    )
+    expect(renderIndex('cityHash64(a,b)')).toBe('PROJECTION `p` INDEX cityHash64(a, b) TYPE basic')
+    // A paren inside a quoted identifier is text, not nesting.
+    expect(renderIndex('(`weird)name`)')).toBe('PROJECTION `p` INDEX `weird)name` TYPE basic')
+  })
+
+  // The index is normalized at canonicalize time and again at render time, so a
+  // form that keeps changing would make every generate re-emit a drop + rebuild.
+  test('normalizes index expressions idempotently', () => {
+    const inputs = [
+      'b',
+      '(b)',
+      '(a,b)',
+      '((a,b))',
+      '(((a,b)))',
+      '(a), (b)',
+      '(a, (b))',
+      '(a, (b, c))',
+      'concat(a,b)',
+      '(concat(a,b), ts)',
+      '(toYYYYMM(ts))',
+      '(`weird)name`)',
+    ]
+    for (const input of inputs) {
+      const once = normalizeProjectionIndex(input)
+      expect(normalizeProjectionIndex(once)).toBe(once)
+    }
+  })
+
+  test('treats parens-only differences in an index projection as no change', () => {
+    const defs = (index: string) => [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [{ name: 'p_by_id', index, type: 'basic' }],
+      }),
+    ]
+
+    expect(planDiff(defs('(id)'), defs('id')).operations).toEqual([])
+  })
+
+  // Both keys present satisfies the union, so TypeScript admits it — e.g. when
+  // converting a SELECT projection to index-only and leaving `query` behind.
+  // Without this, the SELECT body is silently discarded.
+  test('rejects a projection that sets both query and index', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'p', query: 'SELECT id', index: 'id', type: 'basic' }],
+    })
+
+    expect(validateDefinitions([events]).map((issue) => issue.code)).toContain(
+      'projection_ambiguous_kind'
+    )
+  })
+
+  test('rejects an index-only projection with an empty index expression', () => {
+    const build = (index: string) =>
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [{ name: 'id', type: 'UInt64' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        projections: [{ name: 'p', index, type: 'basic' }],
+      })
+
+    for (const empty of ['', '   ', '()']) {
+      expect(validateDefinitions([build(empty)]).map((issue) => issue.code)).toContain(
+        'projection_empty_index'
+      )
+    }
+    expect(validateDefinitions([build('id')])).toEqual([])
+  })
+
+  test('plans add and drop for index-only projections', () => {
+    const base = {
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'source', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    } as const
+
+    const oldDefs = [
+      table({ ...base, projections: [{ name: 'p_drop', index: 'source', type: 'basic' }] }),
+    ]
+    const newDefs = [
+      table({ ...base, projections: [{ name: 'p_add', index: 'source, id', type: 'basic' }] }),
+    ]
+
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_add_projection',
+      'alter_table_drop_projection',
+    ])
+    expect(plan.operations[0]?.sql).toContain(
+      'ADD PROJECTION IF NOT EXISTS `p_add` INDEX (source, id) TYPE basic'
+    )
+  })
+
   test('normalizes comma-delimited key clauses in create table sql', () => {
     const events = table({
       database: 'app',
@@ -75,6 +275,48 @@ describe('@chkit/core smoke', () => {
     expect(sql).toContain('PRIMARY KEY (`id`, `org_id`)')
     expect(sql).toContain('ORDER BY (`org_id`, `created_at`, `id`)')
     expect(sql).toContain('UNIQUE KEY (`id`, `org_id`)')
+  })
+
+  test('renders function expressions in key clauses without quoting them (#176)', () => {
+    const events = table({
+      database: 'chatty',
+      name: 'session',
+      columns: [
+        { name: 'sso_id', type: 'String' },
+        { name: 'session_id', type: 'String' },
+        { name: 'session_end', type: 'DateTime' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['sso_id', 'toStartOfHour(session_end)', 'session_id'],
+      orderBy: ['sso_id', 'toStartOfHour(session_end)', 'session_id', 'session_end'],
+    })
+
+    const sql = toCreateSQL(events)
+    // Plain columns stay backtick-quoted; function expressions are emitted verbatim.
+    expect(sql).toContain('PRIMARY KEY (`sso_id`, toStartOfHour(session_end), `session_id`)')
+    expect(sql).toContain(
+      'ORDER BY (`sso_id`, toStartOfHour(session_end), `session_id`, `session_end`)'
+    )
+  })
+
+  test('quotes declared columns in key clauses even when the name needs quoting (#176)', () => {
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'user-id', type: 'String' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['user-id', 'toStartOfHour(ts)'],
+      orderBy: ['user-id', 'toStartOfHour(ts)'],
+    })
+
+    const sql = toCreateSQL(events)
+    // `user-id` is a declared column (not a bare identifier) and must stay
+    // quoted; only the true expression is emitted verbatim.
+    expect(sql).toContain('PRIMARY KEY (`user-id`, toStartOfHour(ts))')
+    expect(sql).toContain('ORDER BY (`user-id`, toStartOfHour(ts))')
   })
 
   test('table with orderBy but no primaryKey does not crash; PK defaults to orderBy (#19)', () => {
@@ -457,6 +699,70 @@ describe('@chkit/core planner v1', () => {
     expect(plan.renameSuggestions).toEqual([])
   })
 
+  test('does not recreate when a key expression differs only by whitespace (#176)', () => {
+    const columns = [
+      { name: 'sso_id', type: 'String' },
+      { name: 'session_end', type: 'DateTime' },
+    ]
+    // As ClickHouse stores and introspects it (normalized spacing).
+    const introspected = [
+      table({
+        database: 'app',
+        name: 'sessions',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['sso_id', 'toStartOfHour(session_end)'],
+        orderBy: ['sso_id', 'toStartOfHour(session_end)'],
+      }),
+    ]
+    // As a user might write the same expression in config.
+    const config = [
+      table({
+        database: 'app',
+        name: 'sessions',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['sso_id', 'toStartOfHour(  session_end )'],
+        orderBy: ['sso_id', 'toStartOfHour(  session_end )'],
+      }),
+    ]
+
+    const plan = planDiff(introspected, config)
+    expect(plan.operations).toEqual([])
+  })
+
+  test('does not recreate when a key column differs only by identifier quoting (#178)', () => {
+    const columns = [
+      { name: 'user-id', type: 'String' },
+      { name: 'ts', type: 'DateTime' },
+    ]
+    // As introspected from ClickHouse: identifier backtick-quoted in the key.
+    const introspected = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['`user-id`'],
+        orderBy: ['`user-id`', 'toStartOfHour(ts)'],
+      }),
+    ]
+    // As written in config: bare column name.
+    const config = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns,
+        engine: 'MergeTree()',
+        primaryKey: ['user-id'],
+        orderBy: ['user-id', 'toStartOfHour(ts)'],
+      }),
+    ]
+
+    const plan = planDiff(introspected, config)
+    expect(plan.operations).toEqual([])
+  })
+
   test('recreates table when structural keys change', () => {
     const oldDefs = [
       table({
@@ -621,6 +927,25 @@ describe('@chkit/core planner v1', () => {
       'primary_key_missing_column',
       'order_by_missing_column',
     ])
+  })
+
+  test('allows function expressions in primaryKey and orderBy', () => {
+    const defs = [
+      table({
+        database: 'bi',
+        name: 'price_history_label',
+        columns: [
+          { name: 'csin', type: 'String' },
+          { name: 'product_changed_at', type: 'DateTime' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['toDate(product_changed_at)', 'csin', 'product_changed_at'],
+        orderBy: ['toDate(product_changed_at)', 'csin', 'product_changed_at'],
+      }),
+    ]
+
+    const issues = validateDefinitions(defs)
+    expect(issues).toEqual([])
   })
 
   test('validates duplicate projection names', () => {
@@ -1548,5 +1873,202 @@ describe('@chkit/core refreshable materialized views', () => {
     expect(
       issues.some((i) => i.code === 'refresh_append_required_for_replicated_target')
     ).toBe(false)
+  })
+})
+
+describe('@chkit/core dictionaries', () => {
+  const baseDictionary = {
+    database: 'app',
+    name: 'users_dict',
+    attributes: [
+      { name: 'id', type: 'UInt64' },
+      { name: 'name', type: 'String' },
+      { name: 'email', type: 'String', default: '' },
+    ],
+    primaryKey: ['id'],
+    source: `MYSQL(host 'db' port 3306 user 'reader' password 'secret' db 'app' table 'users')`,
+    layout: `HASHED()`,
+    lifetime: `300`,
+  } as const
+
+  test('dictionary() builds a valid definition and isSchemaDefinition accepts it', () => {
+    const dict = dictionary({ ...baseDictionary })
+    expect(dict.kind).toBe('dictionary')
+    expect(isSchemaDefinition(dict)).toBe(true)
+  })
+
+  test('renders CREATE DICTIONARY SQL', () => {
+    const dict = dictionary({ ...baseDictionary, comment: 'User lookup dictionary' })
+    const sql = toCreateSQL(dict)
+    expect(sql).toContain('CREATE DICTIONARY IF NOT EXISTS app.users_dict')
+    expect(sql).toContain('PRIMARY KEY `id`')
+    expect(sql).toContain("SOURCE(MYSQL(host 'db' port 3306")
+    expect(sql).toContain('LAYOUT(HASHED())')
+    expect(sql).toContain('LIFETIME(300)')
+    expect(sql).toContain("COMMENT 'User lookup dictionary'")
+  })
+
+  test('validation: missing primaryKey', () => {
+    const issues = validateDefinitions([dictionary({ ...baseDictionary, primaryKey: [] })])
+    expect(issues.map((i) => i.code)).toContain('dictionary_missing_primary_key')
+  })
+
+  test('validation: primaryKey references missing attribute', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, primaryKey: ['not_an_attribute'] }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_primary_key_missing_attribute')
+  })
+
+  test('validation: missing source/layout/lifetime', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, source: '', layout: '', lifetime: '' }),
+    ])
+    const codes = issues.map((i) => i.code)
+    expect(codes).toContain('dictionary_missing_source')
+    expect(codes).toContain('dictionary_missing_layout')
+    expect(codes).toContain('dictionary_missing_lifetime')
+  })
+
+  test('validation: default and expression are mutually exclusive', () => {
+    const issues = validateDefinitions([
+      dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String', default: 'x', expression: 'upper(name)' },
+        ],
+      }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_attribute_default_expression_exclusive')
+  })
+
+  test('binary diff: unchanged definitions produce no operations', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(0)
+  })
+
+  test('binary diff: structural change produces a single CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary, layout: 'COMPLEX_KEY_HASHED()' })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain('CREATE OR REPLACE DICTIONARY')
+    expect(plan.operations[0]?.risk).toBe('caution')
+  })
+
+  test('binary diff: removing a dictionary produces a drop_dictionary op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const plan = planDiff(oldDefs, [])
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('drop_dictionary')
+    expect(plan.operations[0]?.sql).toBe('DROP DICTIONARY IF EXISTS app.users_dict;')
+    expect(plan.operations[0]?.risk).toBe('danger')
+  })
+
+  test('binary diff: a real password change produces a CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password 'a-different-secret' db 'app' table 'users')`,
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain("password 'a-different-secret'")
+  })
+
+  test('binary diff: a [HIDDEN] source placeholder never drives a diff on its own', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')`,
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(0)
+  })
+
+  test('binary diff: a [HIDDEN] source placeholder does not suppress unrelated field changes', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [
+      dictionary({
+        ...baseDictionary,
+        source: `MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')`,
+        layout: 'COMPLEX_KEY_HASHED()',
+      }),
+    ]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain("password '[HIDDEN]'")
+  })
+
+  test('renders RANGE, SETTINGS, and BIDIRECTIONAL clauses', () => {
+    const dict = dictionary({
+      ...baseDictionary,
+      attributes: [
+        ...baseDictionary.attributes,
+        { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+        { name: 'start_date', type: 'DateTime' },
+        { name: 'end_date', type: 'DateTime' },
+      ],
+      layout: 'RANGE_HASHED()',
+      range: { min: 'start_date', max: 'end_date' },
+      settings: { dictionary_use_async_executor: 1, max_threads: 8 },
+    })
+    const sql = toCreateSQL(dict)
+    expect(sql).toContain('`parent_id` UInt64 HIERARCHICAL BIDIRECTIONAL')
+    expect(sql).toContain('RANGE(MIN `start_date` MAX `end_date`)')
+    expect(sql).toContain('SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)')
+  })
+
+  test('validation: range references missing attribute', () => {
+    const issues = validateDefinitions([
+      dictionary({ ...baseDictionary, range: { min: 'not_an_attribute', max: 'name' } }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_range_missing_attribute')
+  })
+
+  test('validation: bidirectional requires hierarchical', () => {
+    const issues = validateDefinitions([
+      dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', bidirectional: true },
+        ],
+      }),
+    ])
+    expect(issues.map((i) => i.code)).toContain('dictionary_bidirectional_requires_hierarchical')
+  })
+
+  test('binary diff: adding settings produces a single CREATE OR REPLACE DICTIONARY op', () => {
+    const oldDefs = [dictionary({ ...baseDictionary })]
+    const newDefs = [dictionary({ ...baseDictionary, settings: { max_threads: 4 } })]
+    const plan = planDiff(oldDefs, newDefs)
+    expect(plan.operations).toHaveLength(1)
+    expect(plan.operations[0]?.type).toBe('create_dictionary')
+    expect(plan.operations[0]?.sql).toContain('SETTINGS(max_threads = 4)')
+  })
+
+  test('create ordering: create_dictionary ranks after create_table', () => {
+    const usersTable = table({
+      database: 'app',
+      name: 'users',
+      columns: [{ name: 'id', type: 'UInt64' }],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const plan = planDiff([], [usersTable, dictionary({ ...baseDictionary })])
+    const types = plan.operations.map((op) => op.type)
+    expect(types.indexOf('create_table')).toBeLessThan(types.indexOf('create_dictionary'))
   })
 })

@@ -1,6 +1,7 @@
 import type {
 	ClickHouseExecutor,
 	ClickHouseJsonQueryResult,
+	ClickHouseSettings,
 	QueryStatus,
 	SchemaObjectRef,
 } from '@chkit/clickhouse'
@@ -20,6 +21,28 @@ function throwIfError(
 	if (res.error) {
 		throw new Error(res.error)
 	}
+}
+
+/**
+ * The workbench query API accepts only string/number setting values. Drop
+ * undefined entries and coerce booleans so chkit can forward ClickHouse query
+ * settings (e.g. `enable_parallel_replicas: 0` used by backfill planning).
+ */
+function toApiSettings(
+	settings?: ClickHouseSettings,
+): Record<string, string | number> | undefined {
+	if (!settings) return undefined
+	const out: Record<string, string | number> = {}
+	for (const [key, value] of Object.entries(settings)) {
+		if (typeof value === 'string' || typeof value === 'number') {
+			out[key] = value
+		} else if (typeof value === 'boolean') {
+			out[key] = value ? 1 : 0
+		}
+		// Skip undefined and nested setting maps — the workbench API only
+		// accepts scalar setting values.
+	}
+	return Object.keys(out).length > 0 ? out : undefined
 }
 
 export function normalizeQueryData<T>(
@@ -63,10 +86,12 @@ export function createRemoteExecutor(deps: {
 			throwIfError(res)
 		},
 
-		async query<T>(sql: string): Promise<T[]> {
+		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
+			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
+				...(apiSettings ? { settings: apiSettings } : {}),
 			})
 			throwIfError(res)
 			return normalizeQueryData<T>(res)

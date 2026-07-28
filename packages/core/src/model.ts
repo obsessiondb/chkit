@@ -5,6 +5,7 @@ import type {
   ChxConfigInput,
   ChxResolvedConfig,
   ChxUserConfig,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   SchemaDefinition,
   TableDefinition,
@@ -30,6 +31,21 @@ export function defineConfig<T extends ChxUserConfig>(config: T): T
 export function defineConfig<T extends ChxUserConfig>(config: ChxConfigFn<T>): ChxConfigFn<T>
 export function defineConfig<T extends ChxUserConfig>(config: ChxConfigInput<T>): ChxConfigInput<T> {
   return config
+}
+
+// A cluster name is interpolated into `ON CLUSTER '<name>'`, so constrain it to
+// the characters legal in a `remote_servers` key (an XML element name: letters,
+// digits, `_`, `-`, `.`) or a `{macro}` — injection-safe inside the single
+// quotes, while still failing fast on typos like quotes or whitespace.
+const CLUSTER_NAME_PATTERN = /^([A-Za-z_][A-Za-z0-9_.-]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
+
+function assertValidClusterName(name: string): string {
+  if (!CLUSTER_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid clickhouse.cluster "${name}". Expected a cluster name (e.g. "my_cluster", "prod-eu-1") or a macro (e.g. "{cluster}").`,
+    )
+  }
+  return name
 }
 
 export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
@@ -59,6 +75,9 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
           password: config.clickhouse.password ?? '',
           database: config.clickhouse.database ?? 'default',
           secure: config.clickhouse.secure ?? false,
+          cluster: config.clickhouse.cluster
+            ? assertValidClusterName(config.clickhouse.cluster)
+            : undefined,
         }
       : undefined,
   }
@@ -78,6 +97,12 @@ export function materializedView(
   return { ...input, kind: 'materialized_view' }
 }
 
+export function dictionary(
+  input: Omit<DictionaryDefinition, 'kind'>
+): DictionaryDefinition {
+  return { ...input, kind: 'dictionary' }
+}
+
 export function schema(...definitions: SchemaDefinition[]): SchemaDefinition[] {
   return definitions
 }
@@ -85,5 +110,7 @@ export function schema(...definitions: SchemaDefinition[]): SchemaDefinition[] {
 export function isSchemaDefinition(value: unknown): value is SchemaDefinition {
   if (!value || typeof value !== 'object') return false
   const kind = (value as { kind?: string }).kind
-  return kind === 'table' || kind === 'view' || kind === 'materialized_view'
+  return (
+    kind === 'table' || kind === 'view' || kind === 'materialized_view' || kind === 'dictionary'
+  )
 }

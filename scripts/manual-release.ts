@@ -8,7 +8,8 @@
  *        - default:   enters beta prerelease mode if needed
  *        - --stable:  exits prerelease mode so versions graduate to GA
  *   3. Applies pending changesets (version bump) if they exist,
- *      or detects already-bumped versions from a prior run
+ *      or detects already-bumped versions from a prior run, then
+ *      regenerates the lockfile so it matches the bumped versions
  *   4. Runs quality gates (typecheck, lint, test, build)
  *   5. Runs release guards (internal workspace deps + packed tarballs)
  *   6. Publishes all public workspace packages via `bun publish`:
@@ -33,7 +34,7 @@ import {
 	statSync,
 	writeFileSync,
 } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import {
@@ -175,6 +176,9 @@ function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 	)
 
 	if (dryRun) {
+		// `changeset status --output` resolves the path relative to cwd, so an
+		// absolute path gets cwd prepended again (…/chkit/Users/marc/…). Pass a
+		// cwd-relative path; keep the absolute STATUS_FILE for the log message.
 		runCommand('bun', [
 			'run',
 			'changeset',
@@ -182,13 +186,22 @@ function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 			'status',
 			'--verbose',
 			'--output',
-			STATUS_FILE,
+			relative(process.cwd(), STATUS_FILE),
 		])
 		logLine(`Changeset status report: ${STATUS_FILE}`)
 		return true
 	}
 
 	runCommand('bun', ['run', 'version-packages'])
+
+	// `changeset version` rewrites package.json versions but never touches the
+	// lockfile. examples/* pin sibling chkit packages to exact published betas,
+	// so once the workspace version moves past that pin bun can no longer dedupe
+	// them onto the local copies and must record fresh registry resolutions.
+	// Regenerate the lockfile here so the release commit carries them; otherwise
+	// CI's `bun install --frozen-lockfile` rejects the stale lockfile on main.
+	runCommand('bun', ['install', '--lockfile-only'])
+
 	return true
 }
 
@@ -592,8 +605,12 @@ function runQualityGates(): void {
  */
 function runReleaseGuards(): void {
 	logLine(
-		'Running release guards (internal workspace deps + packed tarballs)...',
+		'Running release guards (lockfile + internal workspace deps + packed tarballs)...',
 	)
+	// Fail here if the committed lockfile does not satisfy the bumped versions —
+	// the same check CI runs on main. This catches a stale lockfile before the
+	// release is pushed rather than after.
+	runCommand('bun', ['install', '--frozen-lockfile'])
 	runCommand('bun', ['run', 'check:workspace-deps'])
 	runCommand('bun', ['run', 'check:packed-deps'])
 }

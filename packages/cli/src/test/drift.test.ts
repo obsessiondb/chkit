@@ -23,6 +23,35 @@ describe('@chkit/cli drift comparer', () => {
     )
   })
 
+  test('treats a dictionary like other non-table kinds for existence drift', () => {
+    const result = compareSchemaObjects(
+      [{ kind: 'dictionary', database: 'app', name: 'users_dict' }],
+      []
+    )
+
+    expect(result.missing).toEqual(['dictionary:app.users_dict'])
+    expect(result.objectDrift).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'missing_object',
+          object: 'dictionary:app.users_dict',
+          expectedKind: 'dictionary',
+        }),
+      ])
+    )
+  })
+
+  test('no drift when a dictionary exists on both sides', () => {
+    const result = compareSchemaObjects(
+      [{ kind: 'dictionary', database: 'app', name: 'users_dict' }],
+      [{ kind: 'dictionary', database: 'app', name: 'users_dict' }]
+    )
+
+    expect(result.missing).toHaveLength(0)
+    expect(result.extra).toHaveLength(0)
+    expect(result.objectDrift).toHaveLength(0)
+  })
+
   test('emits object-level drift reason codes', () => {
     const result = compareSchemaObjects(
       [
@@ -121,6 +150,162 @@ describe('@chkit/cli drift comparer', () => {
     })
 
     expect(result).toBeNull()
+  })
+
+  // #194: ClickHouse derives PRIMARY KEY from ORDER BY when it is omitted, then
+  // omits it from SHOW CREATE. A pulled schema carries the derived primary key,
+  // so the live table (no PRIMARY KEY) must not read as drift against it.
+  test('treats a primary key derived from ORDER BY as clean', () => {
+    const expected = table({
+      database: 'bi',
+      name: 'price_history',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'day', type: 'Date' },
+        { name: 'csin', type: 'String' },
+      ],
+      primaryKey: ['day', 'csin'], // what `chkit pull` writes out (derived)
+      orderBy: ['day', 'csin'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: undefined, // live table has no PRIMARY KEY clause
+      orderBy: '(day, csin)',
+      columns: [
+        { name: 'day', type: 'Date' },
+        { name: 'csin', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  test('still reports primary_key_mismatch when the keys genuinely differ', () => {
+    const expected = table({
+      database: 'bi',
+      name: 'price_history',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'day', type: 'Date' },
+        { name: 'csin', type: 'String' },
+      ],
+      primaryKey: ['day'],
+      orderBy: ['day', 'csin'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(csin)',
+      orderBy: '(day, csin)',
+      columns: [
+        { name: 'day', type: 'Date' },
+        { name: 'csin', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result?.reasonCodes).toContain('primary_key_mismatch')
+  })
+
+  // ClickHouse rewrites a single-column `INDEX (id)` to `INDEX id`, so a schema
+  // written with parens must not read as drift against the live table.
+  test('treats an index-only projection as clean regardless of index parens', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'by_receiver', index: '(receiver)', type: 'basic' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [{ name: 'by_receiver', index: 'receiver', type: 'basic' }],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  test('reports projection_mismatch when an index projection changes type', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'by_receiver', index: 'receiver, id', type: 'basic' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [{ name: 'by_receiver', index: 'receiver', type: 'basic' }],
+    })
+
+    expect(result?.reasonCodes).toContain('projection_mismatch')
+    expect(result?.projectionDiffs).toEqual(['by_receiver'])
+  })
+
+  // A SELECT projection and an index-only projection sharing a name are
+  // different objects; the fingerprint must not collapse them.
+  test('reports projection_mismatch when a select projection becomes index-only', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      projections: [{ name: 'p', index: 'receiver', type: 'basic' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'receiver', type: 'String' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [{ name: 'p', query: 'SELECT receiver' }],
+    })
+
+    expect(result?.reasonCodes).toContain('projection_mismatch')
   })
 
   test('treats quoted string defaults and implicit engine settings as equivalent', () => {

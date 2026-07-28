@@ -1,5 +1,94 @@
 # @chkit/plugin-obsessiondb
 
+## 0.1.2-beta.5
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.5
+  - @chkit/clickhouse@0.1.2-beta.5
+  - @chkit/core@0.1.2-beta.5
+
+## 0.1.2-beta.4
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.4
+  - @chkit/core@0.1.2-beta.4
+  - @chkit/clickhouse@0.1.2-beta.4
+
+## 0.1.2-beta.3
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.3
+  - @chkit/core@0.1.2-beta.3
+  - @chkit/clickhouse@0.1.2-beta.3
+
+## 0.1.2-beta.2
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.2
+  - @chkit/core@0.1.2-beta.2
+  - @chkit/clickhouse@0.1.2-beta.2
+
+## 0.1.2-beta.1
+
+### Patch Changes
+
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.1
+  - @chkit/core@0.1.2-beta.1
+  - @chkit/clickhouse@0.1.2-beta.1
+
+## 0.1.2-beta.0
+
+### Patch Changes
+
+- Updated dependencies [9ad23f9]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.0
+  - @chkit/core@0.1.2-beta.0
+  - @chkit/clickhouse@0.1.2-beta.0
+
+## 0.1.1
+
+### Patch Changes
+
+- c1d8d0d: Add `chkit backfill submit` to run a backfill as a managed ObsessionDB job. It builds the plan with the same chunking algorithm as the local `run`, submits the chunks to the ObsessionDB job backend, and prints a console link to track progress instead of polling locally — the heavier, MV-replay-aware path lives in the ObsessionDB plugin. The plugin's remote executor now forwards ClickHouse query settings (e.g. `enable_parallel_replicas`) so remote plan sizing matches the local planner.
+- Updated dependencies [6b87e6d]
+- Updated dependencies [c1d8d0d]
+  - @chkit/core@0.1.1
+  - @chkit/plugin-backfill@0.1.1
+  - @chkit/clickhouse@0.1.1
+
 ## 0.1.0
 
 ### Patch Changes

@@ -1,0 +1,107 @@
+---
+interface Props {
+	prompt: string;
+	label?: string;
+}
+
+const { prompt, label = 'Copy setup prompt' } = Astro.props;
+---
+
+<div class="copy-prompt" data-copy-prompt>
+	<button type="button" class="copy-prompt-btn" data-prompt={prompt}>
+		<svg
+			width="15"
+			height="15"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			aria-hidden="true"
+		>
+			<rect x="9" y="9" width="13" height="13" rx="2"></rect>
+			<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+		</svg>
+		<span class="copy-prompt-btn-label" data-default-label={label}>{label}</span>
+	</button>
+	<pre class="copy-prompt-text"><code>{prompt}</code></pre>
+</div>
+
+<style>
+	.copy-prompt {
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: 0.5rem;
+		overflow: hidden;
+		margin: 1rem 0 1.5rem;
+	}
+
+	.copy-prompt-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		border: 0;
+		border-bottom: 1px solid var(--sl-color-gray-5);
+		background: var(--sl-color-gray-6, transparent);
+		color: var(--txt-strong);
+		cursor: pointer;
+		padding: 0.7rem 1rem;
+		font-size: 0.875rem;
+		font-weight: 600;
+		transition: background-color 120ms ease, color 120ms ease;
+	}
+
+	.copy-prompt-btn:hover {
+		background: rgba(255, 255, 255, 0.06);
+	}
+
+	.copy-prompt-btn.is-copied {
+		color: var(--accent);
+	}
+
+	.copy-prompt-text {
+		background: transparent !important;
+		border: 0 !important;
+		border-radius: 0 !important;
+		margin: 0;
+		padding: 0.85rem 1rem;
+		overflow-x: auto;
+	}
+
+	.copy-prompt-text code {
+		background: transparent;
+		color: var(--cmd-text);
+		font-family: var(--sl-font-mono);
+		font-size: 0.8125rem;
+		line-height: 1.6;
+		white-space: pre-wrap;
+	}
+</style>
+
+<script>
+	function init() {
+		document.querySelectorAll<HTMLButtonElement>('[data-copy-prompt] .copy-prompt-btn').forEach((button) => {
+			button.addEventListener('click', () => {
+				const text = button.dataset.prompt;
+				if (!text) return;
+				void navigator.clipboard.writeText(text).then(() => {
+					const label = button.querySelector<HTMLElement>('.copy-prompt-btn-label');
+					const original = label?.dataset.defaultLabel ?? '';
+					button.classList.add('is-copied');
+					if (label) label.textContent = 'Copied to clipboard';
+					setTimeout(() => {
+						button.classList.remove('is-copied');
+						if (label) label.textContent = original;
+					}, 1400);
+				});
+			});
+		});
+	}
+
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', init);
+	} else {
+		init();
+	}
+</script>

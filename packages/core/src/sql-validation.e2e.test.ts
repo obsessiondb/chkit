@@ -13,8 +13,8 @@ import type {
   SkipIndexDefinition,
   TableDefinition,
 } from './model-types.js'
-import { table, view, materializedView } from './model.js'
-import { toCreateSQL } from './sql.js'
+import { table, view, materializedView, dictionary } from './model.js'
+import { toCreateSQL, renderDictionarySQL } from './sql.js'
 import {
   renderAlterAddColumn,
   renderAlterModifyColumn,
@@ -880,6 +880,95 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
   })
 
   // =========================================================================
+  // CREATE DICTIONARY
+  // =========================================================================
+
+  describe('CREATE DICTIONARY', () => {
+    const baseDictionary = {
+      database: 'default',
+      name: 'test_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      source: "FILE(path '/dev/null' format 'CSV')",
+      layout: 'FLAT()',
+      lifetime: '300',
+    } as const
+
+    test('minimal dictionary', async () => {
+      const def = dictionary({ ...baseDictionary })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with DEFAULT / EXPRESSION / HIERARCHICAL attributes', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String', default: '' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true },
+          { name: 'upper_name', type: 'String', expression: 'upper(name)' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with COMPLEX_KEY_HASHED layout and composite primary key', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'a', type: 'String' },
+          { name: 'b', type: 'String' },
+          { name: 'value', type: 'String' },
+        ],
+        primaryKey: ['a', 'b'],
+        layout: 'COMPLEX_KEY_HASHED()',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with comment', async () => {
+      const def = dictionary({ ...baseDictionary, comment: 'A test dictionary' })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('CREATE OR REPLACE DICTIONARY', async () => {
+      const def = dictionary({ ...baseDictionary })
+      await assertValidSQL(client, renderDictionarySQL(def, true))
+    })
+
+    test('dictionary with RANGE_HASHED layout, RANGE, and SETTINGS', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'start_date', type: 'Date' },
+          { name: 'end_date', type: 'Date' },
+          { name: 'value', type: 'String' },
+        ],
+        layout: 'RANGE_HASHED()',
+        range: { min: 'start_date', max: 'end_date' },
+        settings: { dictionary_use_async_executor: 1, max_threads: 4 },
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with a BIDIRECTIONAL hierarchical attribute', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+          { name: 'name', type: 'String' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+  })
+
+  // =========================================================================
   // ALTER TABLE — MODIFY REFRESH
   // =========================================================================
 
@@ -1216,6 +1305,50 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       })
       const plan = planDiff([oldMV], [newMV])
       expect(plan.operations.length).toBe(2)
+      for (const op of plan.operations) {
+        await assertValidSQL(client, op.sql)
+      }
+    })
+
+    test('dictionary structural change — CREATE OR REPLACE', async () => {
+      const oldDict = dictionary({
+        database: 'default',
+        name: 'plan_dict',
+        attributes: [{ name: 'id', type: 'UInt64' }, { name: 'name', type: 'String' }],
+        primaryKey: ['id'],
+        source: "FILE(path '/dev/null' format 'CSV')",
+        layout: 'FLAT()',
+        lifetime: '300',
+      })
+      const newDict = dictionary({
+        database: 'default',
+        name: 'plan_dict',
+        attributes: [{ name: 'id', type: 'UInt64' }, { name: 'name', type: 'String' }],
+        primaryKey: ['id'],
+        source: "FILE(path '/dev/null' format 'CSV')",
+        layout: 'FLAT()',
+        lifetime: '600',
+      })
+      const plan = planDiff([oldDict], [newDict])
+      expect(plan.operations.length).toBe(1)
+      for (const op of plan.operations) {
+        await assertValidSQL(client, op.sql)
+      }
+    })
+
+    test('dictionary drop', async () => {
+      const oldDict = dictionary({
+        database: 'default',
+        name: 'plan_dict_drop',
+        attributes: [{ name: 'id', type: 'UInt64' }],
+        primaryKey: ['id'],
+        source: "FILE(path '/dev/null' format 'CSV')",
+        layout: 'FLAT()',
+        lifetime: '300',
+      })
+      const plan = planDiff([oldDict], [])
+      expect(plan.operations.length).toBe(1)
+      expect(plan.operations[0]?.type).toBe('drop_dictionary')
       for (const op of plan.operations) {
         await assertValidSQL(client, op.sql)
       }
