@@ -1,6 +1,6 @@
 {
   "name": "chkit",
-  "version": "0.1.2-beta.5",
+  "version": "0.1.2-beta.7",
   "description": "ClickHouse schema and migration CLI for TypeScript projects",
   "license": "MIT",
   "author": "ObsessionDB",

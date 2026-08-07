@@ -1,6 +1,6 @@
 {
   "name": "@chkit/codegen",
-  "version": "0.1.2-beta.5",
+  "version": "0.1.2-beta.7",
   "description": "Migration artifact generator for chkit",
   "license": "MIT",
   "author": "ObsessionDB",

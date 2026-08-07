@@ -1,5 +1,85 @@
 # chkit
 
+## 0.1.2-beta.7
+
+### Patch Changes
+
+- 65c90d6: Add `dictionary()` as a first-class ClickHouse schema primitive, mirroring `materializedView()` across the full lifecycle: DSL authoring, validation, canonicalization, SQL rendering, migration planning/diff, drift, `check`, destructive-op safety, `pull` introspection, and `codegen` typed interfaces.
+
+  - `dictionary({ database, name, attributes, primaryKey, source, layout, lifetime, range?, settings?, comment? })` — attributes support `default`/`expression` (mutually exclusive), `hierarchical`, `bidirectional` (requires `hierarchical`), `injective`, and `isObjectId`. `range: { min, max }` renders `RANGE(MIN ... MAX ...)` for `RANGE_HASHED`/`COMPLEX_KEY_RANGE_HASHED` layouts, and `settings` renders `SETTINGS(...)`.
+  - ClickHouse has no `ALTER DICTIONARY`, so any structural change plans a single atomic `CREATE OR REPLACE DICTIONARY`. Dropping a dictionary is treated as destructive and blocked without `--allow-destructive`.
+  - Set `renamedFrom` on a dictionary (or pass `--rename-dictionary old_db.old=new_db.new` to `chkit generate`) to rename a dictionary via `RENAME DICTIONARY IF EXISTS ... TO ...` instead of a destructive drop + create.
+  - `chkit pull` introspects live dictionaries (including `RANGE`/`SETTINGS` and all attribute modifiers) into typed schema files, preserving ClickHouse's `[HIDDEN]` password redaction on `SOURCE(...)` credentials. A `SOURCE(...)` password change diffs and migrates like any other field change; `chkit generate` warns when a literal password is about to be written into migration SQL as plain text. `chkit pull` warns in two cases: when an introspected password comes back as `[HIDDEN]` (chkit can't recover the real value, so that dictionary's `source` is excluded from future diffs until it's replaced), and when ClickHouse is configured to reveal real passwords on introspection (`display_secrets_in_show_and_select` + `displaySecretsInShowAndSelect`), since that writes a plain-text credential into the generated schema file with no other indication. All warnings print to the console and are included as a `warnings` array in `--json` output.
+  - `codegen` generates a typed interface (and optional Zod schema) for each dictionary from its `attributes`, always included regardless of `includeViews`.
+  - `ON CLUSTER` mode stamps `ON CLUSTER <name>` onto every dictionary DDL statement, including `CREATE OR REPLACE DICTIONARY` and `RENAME DICTIONARY`.
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 3f1db03: Support index-only projections (`PROJECTION p INDEX (a, b) TYPE basic`) end to end. `ProjectionDefinition` is now a union of the existing `{ name, query }` SELECT form and a new `{ name, index, type }` index-only form, which renders without the wrapping parens that made the SELECT form invalid for it. `chkit pull` previously parsed only the SELECT form and dropped index-only projections on the floor, so a pulled schema silently recreated the table without them; they now round-trip through pull, generate, migrate, and drift.
+
+  Index expressions are normalized to the exact form ClickHouse stores — a single expression bare (`INDEX a`), several as a tuple (`INDEX (a, b)`), redundant parens peeled at every level, and a space after each argument separator — so `'(a)'` and `'a'`, or `'concat(x,y)'` and `'concat(x, y)'`, describe the same table and no longer read as drift.
+
+  Two new validation errors guard the new form: `projection_ambiguous_kind` when an entry sets both `query` and `index` (which would otherwise silently discard the SELECT body), and `projection_empty_index` when the index expression is empty (which would otherwise emit invalid DDL).
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- 8296b8a: Fix two related pull/drift bugs around tables whose `ORDER BY` is declared alongside a projection or a derived primary key.
+
+  `chkit pull` parsed table-level clauses (`ENGINE`, `ORDER BY`, `PRIMARY KEY`, `PARTITION BY`, `TTL`, `SETTINGS`) by matching the first keyword anywhere in `SHOW CREATE TABLE`. A projection whose `SELECT` body contains `ORDER BY` — or a column-level `TTL` — sits in the column list before those clauses, so the parser matched the inner keyword and swallowed the engine into `orderBy`/`primaryKey`, producing an invalid pulled schema (#190). Table-level clauses are now parsed only from the portion after the column list.
+
+  `chkit drift` always reported `primary_key_mismatch` for any table whose `PRIMARY KEY` is derived from `ORDER BY`. ClickHouse omits the derived key from `SHOW CREATE TABLE`, but the schema carries it, so the two never matched. Drift now applies the same derivation to the live side, so a derived primary key reads clean while a genuine primary-key difference is still reported (#194).
+
+- Updated dependencies [65c90d6]
+- Updated dependencies [278e4fa]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.7
+  - @chkit/clickhouse@0.1.2-beta.7
+  - @chkit/codegen@0.1.2-beta.7
+
+## 0.1.2-beta.6
+
+### Patch Changes
+
+- 65c90d6: Add `dictionary()` as a first-class ClickHouse schema primitive, mirroring `materializedView()` across the full lifecycle: DSL authoring, validation, canonicalization, SQL rendering, migration planning/diff, drift, `check`, destructive-op safety, `pull` introspection, and `codegen` typed interfaces.
+
+  - `dictionary({ database, name, attributes, primaryKey, source, layout, lifetime, range?, settings?, comment? })` — attributes support `default`/`expression` (mutually exclusive), `hierarchical`, `bidirectional` (requires `hierarchical`), `injective`, and `isObjectId`. `range: { min, max }` renders `RANGE(MIN ... MAX ...)` for `RANGE_HASHED`/`COMPLEX_KEY_RANGE_HASHED` layouts, and `settings` renders `SETTINGS(...)`.
+  - ClickHouse has no `ALTER DICTIONARY`, so any structural change plans a single atomic `CREATE OR REPLACE DICTIONARY`. Dropping a dictionary is treated as destructive and blocked without `--allow-destructive`.
+  - Set `renamedFrom` on a dictionary (or pass `--rename-dictionary old_db.old=new_db.new` to `chkit generate`) to rename a dictionary via `RENAME DICTIONARY IF EXISTS ... TO ...` instead of a destructive drop + create.
+  - `chkit pull` introspects live dictionaries (including `RANGE`/`SETTINGS` and all attribute modifiers) into typed schema files, preserving ClickHouse's `[HIDDEN]` password redaction on `SOURCE(...)` credentials. A `SOURCE(...)` password change diffs and migrates like any other field change; `chkit generate` warns when a literal password is about to be written into migration SQL as plain text. `chkit pull` warns in two cases: when an introspected password comes back as `[HIDDEN]` (chkit can't recover the real value, so that dictionary's `source` is excluded from future diffs until it's replaced), and when ClickHouse is configured to reveal real passwords on introspection (`display_secrets_in_show_and_select` + `displaySecretsInShowAndSelect`), since that writes a plain-text credential into the generated schema file with no other indication. All warnings print to the console and are included as a `warnings` array in `--json` output.
+  - `codegen` generates a typed interface (and optional Zod schema) for each dictionary from its `attributes`, always included regardless of `includeViews`.
+  - `ON CLUSTER` mode stamps `ON CLUSTER <name>` onto every dictionary DDL statement, including `CREATE OR REPLACE DICTIONARY` and `RENAME DICTIONARY`.
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- 3f1db03: Support index-only projections (`PROJECTION p INDEX (a, b) TYPE basic`) end to end. `ProjectionDefinition` is now a union of the existing `{ name, query }` SELECT form and a new `{ name, index, type }` index-only form, which renders without the wrapping parens that made the SELECT form invalid for it. `chkit pull` previously parsed only the SELECT form and dropped index-only projections on the floor, so a pulled schema silently recreated the table without them; they now round-trip through pull, generate, migrate, and drift.
+
+  Index expressions are normalized to the exact form ClickHouse stores — a single expression bare (`INDEX a`), several as a tuple (`INDEX (a, b)`), redundant parens peeled at every level, and a space after each argument separator — so `'(a)'` and `'a'`, or `'concat(x,y)'` and `'concat(x, y)'`, describe the same table and no longer read as drift.
+
+  Two new validation errors guard the new form: `projection_ambiguous_kind` when an entry sets both `query` and `index` (which would otherwise silently discard the SELECT body), and `projection_empty_index` when the index expression is empty (which would otherwise emit invalid DDL).
+
+- 5a8d805: Support ClickHouse function expressions in `primaryKey`/`orderBy` (e.g. `toDate(ts)`, `toStartOfHour(session_end)`). Validation no longer reports `primary_key_missing_column`/`order_by_missing_column` for expression entries, and generated DDL emits them verbatim instead of quoting the whole expression as a column name. Plain column references are still validated and backtick-quoted as before.
+
+  Migration planning now compares key clauses independent of insignificant whitespace and identifier backtick-quoting, so an expression written as `toStartOfHour( ts )` or a column written bare as `user-id` no longer diffs against ClickHouse's normalized `toStartOfHour(ts)` / `` `user-id` `` and triggers a phantom table recreate on `migrate`/`drift`/`check`.
+
+- 8296b8a: Fix two related pull/drift bugs around tables whose `ORDER BY` is declared alongside a projection or a derived primary key.
+
+  `chkit pull` parsed table-level clauses (`ENGINE`, `ORDER BY`, `PRIMARY KEY`, `PARTITION BY`, `TTL`, `SETTINGS`) by matching the first keyword anywhere in `SHOW CREATE TABLE`. A projection whose `SELECT` body contains `ORDER BY` — or a column-level `TTL` — sits in the column list before those clauses, so the parser matched the inner keyword and swallowed the engine into `orderBy`/`primaryKey`, producing an invalid pulled schema (#190). Table-level clauses are now parsed only from the portion after the column list.
+
+  `chkit drift` always reported `primary_key_mismatch` for any table whose `PRIMARY KEY` is derived from `ORDER BY`. ClickHouse omits the derived key from `SHOW CREATE TABLE`, but the schema carries it, so the two never matched. Drift now applies the same derivation to the live side, so a derived primary key reads clean while a genuine primary-key difference is still reported (#194).
+
+- Updated dependencies [65c90d6]
+- Updated dependencies [278e4fa]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.6
+  - @chkit/clickhouse@0.1.2-beta.6
+  - @chkit/codegen@0.1.2-beta.6
+
 ## 0.1.2-beta.5
 
 ### Patch Changes
