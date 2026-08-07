@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-codegen",
-  "version": "0.1.2-beta.5",
+  "version": "0.1.2-beta.7",
   "description": "TypeScript type and Zod schema generation plugin for chkit",
   "license": "MIT",
   "author": "ObsessionDB",

@@ -17,9 +17,11 @@
     "backfill-mv-replay-empty-target",
     "backfill-replay-all-mvs",
     "backfill-sql-scanner",
+    "dictionary-schema-primitive",
     "generate-empty-migration",
     "index-only-projections",
     "key-clause-function-expressions",
+    "pull-clause-and-derived-primary-key",
     "shared-plugin-command-runner"
   ]
 }
