@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.0 — 2026-08-10
+
+**Full parity with the TypeScript chkit.** Every remaining gap is closed;
+the parity decision log lives in `DRIFT.md`.
+
+### Added
+- **Dictionary primitive** — `dictionary()` DSL, validation (8 codes),
+  `CREATE / CREATE OR REPLACE / RENAME / DROP DICTIONARY` planning with
+  `[HIDDEN]`-password handling, `--rename-dictionary`, create-dictionary
+  parser, pull introspection + rendering, codegen Pydantic models, drift
+  and safety-marker coverage.
+- **Phase-2 backfill engine** — chunking planner (partition slices, byte
+  budgets, all split strategies), chunk-execution SQL builder with MV
+  replay (every feeding MV via `UNION ALL`, chunks sized from the MV
+  source), async submit/poll execution loop with atomic checkpointing,
+  real `plan` / `run` / `resume` / `doctor` commands, managed
+  `backfill submit` to ObsessionDB jobs with console deep-links, and the
+  `on_check` findings (`backfill_required_pending`, ...).
+- **Index-only projections** (`{"index": ..., "type": ...}`) and
+  **function expressions in `primaryKey`/`orderBy`**.
+- **CLI**: top-level `chkit codegen` and `chkit obsessiondb <cmd>`
+  shortcuts; `chkit plugin <name> <cmd>` now forwards the command's own
+  `--flags`.
+- **Config**: function-style configs — `define_config(lambda env: ...)`
+  with `ChxConfigEnv(command, mode)`; `check.failOnExtraObjects`;
+  per-table `plugins` field on `table()`.
+
+### Fixed
+- Wheel now packages `chkit_plugin_codegen` and `chkit_plugin_backfill`
+  (previously missing from `pip install chkit-py`).
+- `ClickHouseClient.submit()` crashed on every live call (unsupported
+  `query_id=` kwarg) — affected `migrate --apply` async statements.
+- Snapshots serialize with `exclude_none`, matching TS `JSON.stringify`
+  key omission so TS tooling reads Python-written snapshots correctly.
+- JS-fidelity fixes across ports: `Number()`/`String()` semantics for
+  chunk boundaries, `Date.parse` sub-millisecond truncation, WHATWG
+  `URL.origin` environment fingerprints (TS-written plans now run under
+  Python), JS `\s` whitespace class in key-clause comparison, `??` vs
+  truthiness in drift primary-key fallback.
+- Plugin command `--json` output prints real JSON (was Python dict repr).
+- Table-clause parsing no longer swallows clauses when a projection's
+  SELECT contains `ORDER BY`, and a primary key derived from `ORDER BY`
+  no longer reads as drift.
+
 ## 0.1.4 — 2026-06-05
 
 Documentation refresh — no code changes.
