@@ -2,50 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
-from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
 
-
-def _resolve_clickhouse_env() -> dict[str, Any]:
-    """Resolve ClickHouse connection params from env, defaulting to local Docker.
-
-    Default for a fresh Docker run: ``http://localhost:8123`` with the
-    ``default`` user and empty password. The TypeScript suite hard-fails on
-    missing env, but the user's local dev workflow is "Docker on localhost
-    with default config" — we honour that.
-    """
-    host = (os.environ.get("CLICKHOUSE_HOST") or "").strip()
-    url = (os.environ.get("CLICKHOUSE_URL") or "").strip()
-    if not url and host:
-        url = f"https://{host}"
-    if not url:
-        url = "http://localhost:8123"
-
-    username = (os.environ.get("CLICKHOUSE_USER") or "default").strip() or "default"
-    password = os.environ.get("CLICKHOUSE_PASSWORD")
-    if password is None:
-        password = ""
-    database = (os.environ.get("CLICKHOUSE_DB") or "default").strip() or "default"
-
-    parsed = urlparse(url)
-    host_only = parsed.hostname or "localhost"
-    port = parsed.port
-    secure = parsed.scheme == "https"
-    if port is None:
-        port = 8443 if secure else 8123
-
-    return {
-        "host": host_only,
-        "port": port,
-        "secure": secure,
-        "username": username,
-        "password": password,
-        "database": database,
-    }
+from tests.e2e_testkit import live_env_to_client_kwargs, resolve_live_env
 
 
 class _QueryClient:
@@ -93,7 +55,7 @@ def _parse_version(raw: str) -> tuple[int, ...]:
 @pytest.fixture(scope="session")
 def ch_client() -> Any:
     """Session-scoped ClickHouse client. Hard-fails if connection is impossible."""
-    params = _resolve_clickhouse_env()
+    params = live_env_to_client_kwargs(resolve_live_env())
     try:
         client = clickhouse_connect.get_client(**params)
         # eager connection check
