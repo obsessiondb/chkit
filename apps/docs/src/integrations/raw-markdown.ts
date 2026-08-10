@@ -1,9 +1,10 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AstroIntegration } from 'astro';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
-const SITE_TAGLINE = 'ClickHouse schema management and migration toolkit for TypeScript.';
+const SITE_TAGLINE = 'ClickHouse schema management and migration toolkit for TypeScript and Python.';
 
 interface DocEntry {
 	slug: string;
@@ -27,8 +28,12 @@ function extractFrontmatter(content: string): { title: string; description: stri
 }
 
 // Strip extension and collapse "index" / "<dir>/index" into the directory slug.
+// Windows `relative()` emits backslashes — normalize so slugs are URL-shaped.
 function toSlug(rel: string): string {
-	return rel.replace(/\.mdx?$/, '').replace(/(^|\/)index$/, '');
+	return rel
+		.replaceAll('\\', '/')
+		.replace(/\.mdx?$/, '')
+		.replace(/(^|\/)index$/, '');
 }
 
 function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
@@ -97,7 +102,7 @@ function generateLlmsTxt(entries: DocEntry[]): string {
 		'',
 		`> ${SITE_TAGLINE}`,
 		'',
-		'chkit defines ClickHouse schemas in TypeScript, diffs them into migration SQL, applies migrations, and verifies the live database stays in sync. Each link below points to the raw Markdown of that page.',
+		'chkit defines ClickHouse schemas in TypeScript or Python, diffs them into migration SQL, applies migrations, and verifies the live database stays in sync. Each link below points to the raw Markdown of that page.',
 		'',
 		'## Docs',
 		'',
@@ -116,8 +121,8 @@ export default function rawMarkdown(): AstroIntegration {
 		name: 'raw-markdown',
 		hooks: {
 			'astro:build:done': ({ dir, logger }) => {
-				const srcDir = new URL('../src/content/docs/', dir).pathname;
-				const distDir = new URL(dir).pathname;
+				const srcDir = fileURLToPath(new URL('../src/content/docs/', dir));
+				const distDir = fileURLToPath(dir);
 				const rawDir = join(distDir, '_raw');
 
 				const entries = collectMarkdownFiles(srcDir, rawDir);

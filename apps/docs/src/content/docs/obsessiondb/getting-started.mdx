@@ -5,11 +5,13 @@ sidebar:
   order: 2
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Connect chkit to ObsessionDB without copying URLs or tokens by hand: scaffold a project and pick a connection in one prompt, or sign up and claim a free dev instance straight from the CLI.
 
 ## Connect in one step
 
-When you scaffold a project with `bun create chkit@latest` or run `chkit init` in an existing one, chkit asks how you want to connect:
+When you scaffold a project with `bun create chkit@latest` (TypeScript) or run `chkit init` in an existing one (both languages), chkit asks how you want to connect:
 
 ```
 Claim a free ObsessionDB dev instance   email code, ready in seconds
@@ -28,22 +30,42 @@ The rest of this page covers each path as standalone CLI commands, which is also
 
 ## Install the plugin
 
-```sh
-bun add -d @chkit/plugin-obsessiondb
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d @chkit/plugin-obsessiondb
+    ```
 
-Register it in your `clickhouse.config.ts`:
+    Register it in your `clickhouse.config.ts`:
 
-```ts
-import { defineConfig } from '@chkit/core'
-import { obsessiondb } from '@chkit/plugin-obsessiondb'
+    ```ts
+    import { defineConfig } from '@chkit/core'
+    import { obsessiondb } from '@chkit/plugin-obsessiondb'
 
-export default defineConfig({
-  schema: './src/db/schema/**/*.ts',
-  outDir: './chkit',
-  plugins: [obsessiondb()],
-})
-```
+    export default defineConfig({
+      schema: './src/db/schema/**/*.ts',
+      outDir: './chkit',
+      plugins: [obsessiondb()],
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    The plugin ships inside `chkit-py`. Register it in your `clickhouse.config.py`:
+
+    ```python
+    from chkit import define_config
+    from chkit_plugin_obsessiondb import obsessiondb
+
+    config = define_config(
+        {
+            "schema": "./src/db/schema/**/*.py",
+            "outDir": "./chkit",
+            "plugins": [obsessiondb()],
+        }
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 You don't need a `clickhouse` block — once a service is selected, the plugin routes SQL through the ObsessionDB API.
 

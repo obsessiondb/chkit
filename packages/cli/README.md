@@ -4,6 +4,8 @@ ClickHouse schema and migration CLI for TypeScript projects.
 
 Define your ClickHouse schema in TypeScript, generate migrations automatically, detect drift, and run CI checks -- all from a single CLI.
 
+Also available for Python as [chkit-py](https://pypi.org/project/chkit-py/) — same CLI, same schema semantics.
+
 ## Features
 
 - **Schema-as-code** -- Define tables, views, and materialized views in TypeScript using a declarative DSL

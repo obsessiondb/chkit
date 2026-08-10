@@ -5,24 +5,46 @@ sidebar:
   order: 2
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 ClickHouse [refreshable materialized views](https://clickhouse.com/docs/materialized-view/refreshable-materialized-view) (RMVs) periodically re-execute a SELECT on a schedule, rather than firing per-INSERT like regular incremental MVs. They've been production-ready since ClickHouse 24.10.
 
 chkit models an RMV as a regular `materializedView()` with an extra `refresh` field:
 
-```ts
-import { materializedView } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { materializedView } from '@chkit/core'
 
-const dailyReport = materializedView({
-  database: 'analytics',
-  name: 'daily_report_mv',
-  to: { database: 'analytics', name: 'daily_report' },
-  refresh: {
-    every: '1 DAY',
-    offset: '2 HOUR',
-  },
-  as: 'SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day',
-})
-```
+    const dailyReport = materializedView({
+      database: 'analytics',
+      name: 'daily_report_mv',
+      to: { database: 'analytics', name: 'daily_report' },
+      refresh: {
+        every: '1 DAY',
+        offset: '2 HOUR',
+      },
+      as: 'SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import materialized_view
+
+    daily_report = materialized_view(
+        database="analytics",
+        name="daily_report_mv",
+        to={"database": "analytics", "name": "daily_report"},
+        refresh={
+            "every": "1 DAY",
+            "offset": "2 HOUR",
+        },
+        as_="SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 Without a `refresh` field, the definition is a plain incremental materialized view.
 
@@ -50,43 +72,87 @@ Intervals use the ClickHouse form: `<integer> <unit>` where `<unit>` is `SECOND`
 
 APPEND is useful for periodic snapshots where you want history, e.g.:
 
-```ts
-const hourlySnapshot = materializedView({
-  database: 'analytics',
-  name: 'hourly_snapshot_mv',
-  to: { database: 'analytics', name: 'hourly_snapshots' },
-  refresh: {
-    every: '1 HOUR',
-    append: true,
-  },
-  as: 'SELECT now() AS snapshot_ts, org_id, count() AS cnt FROM analytics.events GROUP BY org_id',
-})
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    const hourlySnapshot = materializedView({
+      database: 'analytics',
+      name: 'hourly_snapshot_mv',
+      to: { database: 'analytics', name: 'hourly_snapshots' },
+      refresh: {
+        every: '1 HOUR',
+        append: true,
+      },
+      as: 'SELECT now() AS snapshot_ts, org_id, count() AS cnt FROM analytics.events GROUP BY org_id',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    hourly_snapshot = materialized_view(
+        database="analytics",
+        name="hourly_snapshot_mv",
+        to={"database": "analytics", "name": "hourly_snapshots"},
+        refresh={
+            "every": "1 HOUR",
+            "append": True,
+        },
+        as_="SELECT now() AS snapshot_ts, org_id, count() AS cnt FROM analytics.events GROUP BY org_id",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 ## Chaining refreshes with `DEPENDS ON`
 
 Use `dependsOn` to ensure an RMV runs only after its upstream MVs have refreshed:
 
-```ts
-const hourlyBase = materializedView({
-  database: 'analytics',
-  name: 'hourly_base_mv',
-  to: { database: 'analytics', name: 'hourly_base' },
-  refresh: { every: '1 HOUR' },
-  as: 'SELECT ...',
-})
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    const hourlyBase = materializedView({
+      database: 'analytics',
+      name: 'hourly_base_mv',
+      to: { database: 'analytics', name: 'hourly_base' },
+      refresh: { every: '1 HOUR' },
+      as: 'SELECT ...',
+    })
 
-const hourlyAggregate = materializedView({
-  database: 'analytics',
-  name: 'hourly_aggregate_mv',
-  to: { database: 'analytics', name: 'hourly_aggregate' },
-  refresh: {
-    every: '1 HOUR',
-    dependsOn: [{ database: 'analytics', name: 'hourly_base_mv' }],
-  },
-  as: 'SELECT ... FROM analytics.hourly_base GROUP BY ...',
-})
-```
+    const hourlyAggregate = materializedView({
+      database: 'analytics',
+      name: 'hourly_aggregate_mv',
+      to: { database: 'analytics', name: 'hourly_aggregate' },
+      refresh: {
+        every: '1 HOUR',
+        dependsOn: [{ database: 'analytics', name: 'hourly_base_mv' }],
+      },
+      as: 'SELECT ... FROM analytics.hourly_base GROUP BY ...',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    hourly_base = materialized_view(
+        database="analytics",
+        name="hourly_base_mv",
+        to={"database": "analytics", "name": "hourly_base"},
+        refresh={"every": "1 HOUR"},
+        as_="SELECT ...",
+    )
+
+    hourly_aggregate = materialized_view(
+        database="analytics",
+        name="hourly_aggregate_mv",
+        to={"database": "analytics", "name": "hourly_aggregate"},
+        refresh={
+            "every": "1 HOUR",
+            "dependsOn": [{"database": "analytics", "name": "hourly_base_mv"}],
+        },
+        as_="SELECT ... FROM analytics.hourly_base GROUP BY ...",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 `DEPENDS ON` is only supported with `REFRESH EVERY` — ClickHouse rejects it when paired with `REFRESH AFTER`. chkit enforces this at `generate` / `check` time (`refresh_depends_on_requires_every`).
 

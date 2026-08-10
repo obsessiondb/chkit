@@ -5,11 +5,13 @@ sidebar:
   order: 2
 ---
 
-This document covers practical usage of the optional `codegen` plugin.
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This document covers practical usage of the optional `codegen` plugin. In TypeScript it emits row types (plus optional Zod schemas, ingest helpers, and a runtime migration module); in Python it emits one Pydantic model per table and dictionary — Pydantic covers both static typing and runtime validation, so there is no separate Zod-style output.
 
 ## What it does
 
-- Generates deterministic TypeScript row types from chkit schema definitions.
+- Generates deterministic row types from chkit schema definitions — TypeScript interfaces, or Pydantic models in Python.
 - Generates a typed interface (and optional Zod schema) for each `dictionary()` from its `attributes` — dictionaries are always included, regardless of `includeViews`.
 - Optionally generates Zod schemas from the same definitions.
 - Optionally generates typed ingestion functions for inserting rows into ClickHouse tables. Generated ingest helpers gzip-compress request bodies by default and can opt out per call.
@@ -32,41 +34,73 @@ The plugin is designed so your existing chkit workflow can stay the same.
 
 ## Plugin setup
 
-In `clickhouse.config.ts`, register `codegen(...)` from `@chkit/plugin-codegen`.
+Register `codegen(...)` in your config's `plugins` array.
 
-:::note
-`zod` is a peer dependency (`^4.0.0`). Install it alongside the plugin — generated Zod schemas (`emitZod: true`) import `zod` from your project, so they resolve against your own copy rather than a bundled one.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    :::note
+    `zod` is a peer dependency (`^4.0.0`). Install it alongside the plugin — generated Zod schemas (`emitZod: true`) import `zod` from your project, so they resolve against your own copy rather than a bundled one.
 
-```sh
-bun add -d @chkit/plugin-codegen zod
-```
-:::
+    ```sh
+    bun add -d @chkit/plugin-codegen zod
+    ```
+    :::
 
-Recommended typed setup:
+    Recommended typed setup:
 
-```ts
-import { defineConfig } from '@chkit/core'
-import { codegen } from '@chkit/plugin-codegen'
+    ```ts
+    import { defineConfig } from '@chkit/core'
+    import { codegen } from '@chkit/plugin-codegen'
 
-export default defineConfig({
-  schema: './src/db/schema/**/*.ts',
-  plugins: [
-    codegen({
-      outFile: './src/generated/chkit-types.ts',
-      emitZod: false,
-      emitIngest: false,
-      ingestOutFile: './src/generated/chkit-ingest.ts',
-      emitMigrations: false,
-      migrationsOutFile: './src/generated/chkit-migrations.ts',
-      tableNameStyle: 'pascal',
-      bigintMode: 'string',
-      includeViews: false,
-      runOnGenerate: true,
-      failOnUnsupportedType: true,
-    }),
-  ],
-})
-```
+    export default defineConfig({
+      schema: './src/db/schema/**/*.ts',
+      plugins: [
+        codegen({
+          outFile: './src/generated/chkit-types.ts',
+          emitZod: false,
+          emitIngest: false,
+          ingestOutFile: './src/generated/chkit-ingest.ts',
+          emitMigrations: false,
+          migrationsOutFile: './src/generated/chkit-migrations.ts',
+          tableNameStyle: 'pascal',
+          bigintMode: 'string',
+          includeViews: false,
+          runOnGenerate: true,
+          failOnUnsupportedType: true,
+        }),
+      ],
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    The plugin ships inside `chkit-py` — nothing extra to install.
+
+    ```python
+    from chkit import define_config
+    from chkit_plugin_codegen import codegen
+
+    config = define_config(
+        {
+            "schema": "./src/db/schema/**/*.py",
+            "plugins": [
+                codegen(
+                    {
+                        "outFile": "./src/generated/chkit_models.py",
+                        "tableNameStyle": "pascal",
+                        "bigintMode": "int",
+                        "includeViews": False,
+                        "runOnGenerate": True,
+                        "failOnUnsupportedType": True,
+                    }
+                ),
+            ],
+        }
+    )
+    ```
+
+    The output is a single module with one Pydantic model per table and dictionary. The `emitZod` / `emitIngest` / `emitMigrations` emitters are TypeScript-only by design — Pydantic already provides runtime validation, and the ingest/migration-module emitters target JS runtimes.
+  </TabItem>
+</Tabs>
 
 ## Options
 
@@ -77,10 +111,12 @@ export default defineConfig({
 - `emitMigrations` (default: `false`)
 - `migrationsOutFile` (default: `./src/generated/chkit-migrations.ts`)
 - `tableNameStyle` (default: `pascal`) values: `pascal | camel | raw`
-- `bigintMode` (default: `string`) values: `string | bigint`
+- `bigintMode` (default: `string`) values: `string | bigint` — in Python the values are `int | str` (default `int`; the TS spellings are accepted as aliases)
 - `includeViews` (default: `false`)
 - `runOnGenerate` (default: `true`)
 - `failOnUnsupportedType` (default: `true`)
+
+Python supports `outFile` (default `./src/generated/chkit_models.py`), `tableNameStyle`, `bigintMode`, `includeViews`, `runOnGenerate`, and `failOnUnsupportedType`; the `emit*` options are TypeScript-only (see Plugin setup above).
 
 Invalid option values fail fast at startup via plugin config validation.
 

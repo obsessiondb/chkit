@@ -5,6 +5,8 @@ sidebar:
   order: 11
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Lists registered plugins, lists a plugin's commands, or runs a specific plugin command.
 
 ## Synopsis
@@ -38,17 +40,28 @@ With both a plugin name and command name, executes the command. Any additional a
 Some plugins have top-level CLI shortcuts:
 
 - `chkit codegen` is equivalent to `chkit plugin codegen codegen`
-- `chkit pull` is equivalent to `chkit plugin pull schema`
+- `chkit pull` is equivalent to `chkit plugin pull schema` (TypeScript; in Python `pull` is a built-in command with no plugin behind it)
 
 ### Plugin registration
 
-Plugins are registered inline in the `plugins` array of `clickhouse.config.ts`:
+Plugins are registered inline in the `plugins` array of your config:
 
-```ts
-import { codegen } from '@chkit/plugin-codegen'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { codegen } from '@chkit/plugin-codegen'
 
-plugins: [codegen({ outFile: './types.ts' })]
-```
+    plugins: [codegen({ outFile: './types.ts' })]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit_plugin_codegen import codegen
+
+    "plugins": [codegen({"outFile": "./models.py"})]
+    ```
+  </TabItem>
+</Tabs>
 
 ### Plugin lifecycle hooks
 

@@ -8,6 +8,8 @@ sidebar:
     variant: caution
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 This document covers practical usage of the optional `backfill` plugin.
 
 :::caution[Alpha]
@@ -50,11 +52,13 @@ When ObsessionDB is the active target (logged in with a service selected), `plan
 
 ## Plugin setup
 
-In `clickhouse.config.ts`, register `backfill(...)` from `@chkit/plugin-backfill`.
+Register `backfill(...)` in your config's `plugins` array.
 
-```ts
-import { defineConfig } from '@chkit/core'
-import { backfill } from '@chkit/plugin-backfill'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { defineConfig } from '@chkit/core'
+    import { backfill } from '@chkit/plugin-backfill'
 
 export default defineConfig({
   schema: './src/db/schema/**/*.ts',
@@ -75,7 +79,31 @@ export default defineConfig({
     }),
   ],
 })
-```
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import define_config
+    from chkit_plugin_backfill import backfill
+
+    config = define_config(
+        {
+            "schema": "./src/db/schema/**/*.py",
+            "plugins": [
+                backfill(
+                    {
+                        "stateDir": "./chkit/backfill",
+                        "chunkHours": 6,
+                        "timeColumn": "created_at",
+                    }
+                ),
+            ],
+        }
+    )
+    ```
+    The Python plugin is at full parity with the TypeScript plugin: `plan`, `run`, `resume`, `status`, `cancel`, `doctor`, and managed `submit` all work end-to-end.
+  </TabItem>
+</Tabs>
 
 The `run` and `resume` commands execute SQL against ClickHouse when a connection is configured. Configure `clickhouse` at the top level of `clickhouse.config.ts`:
 
@@ -113,26 +141,52 @@ The backfill plugin needs a time column to build WHERE clauses for each chunk. I
 
 Schema-level configuration is the recommended approach when different tables use different time columns. Define it directly in the `table()` call:
 
-```ts
-import { table } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { table } from '@chkit/core'
 
-export const events = table({
-  database: 'app',
-  name: 'events',
-  columns: [
-    { name: 'event_time', type: 'DateTime' },
-    { name: 'id', type: 'UInt64' },
-  ],
-  engine: 'MergeTree',
-  orderBy: ['event_time', 'id'],
-  primaryKey: ['event_time', 'id'],
-  plugins: {
-    backfill: { timeColumn: 'event_time' },
-  },
-})
-```
+    export const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'event_time', type: 'DateTime' },
+        { name: 'id', type: 'UInt64' },
+      ],
+      engine: 'MergeTree',
+      orderBy: ['event_time', 'id'],
+      primaryKey: ['event_time', 'id'],
+      plugins: {
+        backfill: { timeColumn: 'event_time' },
+      },
+    })
+    ```
 
-This requires importing `@chkit/plugin-backfill` somewhere in the project (typically in `clickhouse.config.ts`) to activate the type augmentation. The `plugins.backfill` object is fully typed — autocomplete and type errors work as expected.
+    This requires importing `@chkit/plugin-backfill` somewhere in the project (typically in `clickhouse.config.ts`) to activate the type augmentation. The `plugins.backfill` object is fully typed — autocomplete and type errors work as expected.
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import table
+
+    events = table(
+        database="app",
+        name="events",
+        columns=[
+            {"name": "event_time", "type": "DateTime"},
+            {"name": "id", "type": "UInt64"},
+        ],
+        engine="MergeTree",
+        order_by=["event_time", "id"],
+        primary_key=["event_time", "id"],
+        plugins={
+            "backfill": {"timeColumn": "event_time"},
+        },
+    )
+    ```
+
+    In Python `plugins` is a plain dict; the field is metadata only and never affects diffing.
+  </TabItem>
+</Tabs>
 
 ## Options
 

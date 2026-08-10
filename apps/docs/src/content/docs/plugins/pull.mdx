@@ -5,14 +5,16 @@ sidebar:
   order: 3
 ---
 
-This document covers practical usage of the optional `pull` plugin.
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This document covers practical usage of `pull`. In TypeScript it is an optional plugin (`@chkit/plugin-pull`); in Python, [`chkit pull`](/cli/pull/) is a built-in CLI command — same introspection, no registration needed.
 
 ## What it does
 
 - Connects to a live ClickHouse instance and introspects table metadata (columns, engines, indexes, projections, partitioning, TTL, settings).
 - Introspects views and materialized views (including `TO` clause parsing).
 - Introspects dictionaries (attributes — including `HIERARCHICAL`/`BIDIRECTIONAL`/`INJECTIVE`/`IS_OBJECT_ID` modifiers — primary key, `SOURCE`/`LAYOUT`/`LIFETIME`/`RANGE`/`SETTINGS`), preserving ClickHouse's `[HIDDEN]` password redaction — see [Credential handling](#credential-handling-hidden-passwords).
-- Generates a deterministic TypeScript schema file using `@chkit/core` builders.
+- Generates a deterministic schema file using the chkit builders — TypeScript (`@chkit/core`) or Python (`chkit`).
 - Supports filtering by database and dry-run previews.
 
 ## How it fits your workflow
@@ -20,29 +22,40 @@ This document covers practical usage of the optional `pull` plugin.
 The plugin is designed for bootstrapping a chkit project from an existing ClickHouse deployment.
 
 - [`chkit pull`](/cli/pull/) (alias for `chkit plugin pull schema`):
-  - Connects to ClickHouse, introspects all schema objects, and writes a TypeScript schema file.
+  - Connects to ClickHouse, introspects all schema objects, and writes a schema file in your project's language.
   - Generated file works directly with [`chkit generate`](/cli/generate/) and [`chkit check`](/cli/check/).
 - Dry-run mode previews the output without writing to disk.
 
 ## Plugin setup
 
-In `clickhouse.config.ts`, register `pull(...)` from `@chkit/plugin-pull`.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    In `clickhouse.config.ts`, register `pull(...)` from `@chkit/plugin-pull`.
 
-```ts
-import { defineConfig } from '@chkit/core'
-import { pull } from '@chkit/plugin-pull'
+    ```ts
+    import { defineConfig } from '@chkit/core'
+    import { pull } from '@chkit/plugin-pull'
 
-export default defineConfig({
-  schema: './src/db/schema/**/*.ts',
-  plugins: [
-    pull({
-      outFile: './src/db/schema/pulled.ts',
-      databases: ['analytics'],
-      overwrite: false,
-    }),
-  ],
-})
-```
+    export default defineConfig({
+      schema: './src/db/schema/**/*.ts',
+      plugins: [
+        pull({
+          outFile: './src/db/schema/pulled.ts',
+          databases: ['analytics'],
+          overwrite: false,
+        }),
+      ],
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    No setup — `chkit pull` is built into the CLI. Configure behavior with flags:
+
+    ```sh
+    chkit pull --out-file src/db/schema/pulled.py --database analytics
+    ```
+  </TabItem>
+</Tabs>
 
 ## Options
 
@@ -61,7 +74,7 @@ Invalid option values fail fast at startup via plugin config validation.
 Useful flags:
 
 - `--out-file <path>` — Override output file path.
-- `--database <name>` — Filter to databases (comma-separated or repeated).
+- `--database <name>` — Filter to databases (repeat the flag for several).
 - `--dryrun` — Preview output without writing.
 - `--force` / `--overwrite` — Overwrite existing output file.
 
@@ -69,10 +82,12 @@ Exit codes: 0 (success), 1 (runtime error), 2 (config error).
 
 ## Generated output format
 
-The plugin produces a TypeScript module that imports builders from `@chkit/core` and exports a default schema.
+The output is a schema module that imports the chkit builders and exports the pulled definitions.
 
-```ts
-import { schema, table, view, materializedView } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { schema, table, view, materializedView } from '@chkit/core'
 
 // Pulled from live ClickHouse metadata via chkit plugin pull schema
 
@@ -103,7 +118,43 @@ const app_events_mv = materializedView({
 })
 
 export default schema(app_events, app_events_view, app_events_mv)
-```
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # Schema pulled from live ClickHouse metadata via `chkit pull`.
+    from chkit import ColumnDefinition, TableRef, materialized_view, schema, table, view
+
+    app_events = table(
+        database="app",
+        name="events",
+        engine="MergeTree()",
+        columns=[
+            ColumnDefinition(name="id", type="UInt64"),
+            ColumnDefinition(name="received_at", type="DateTime64(3)", default="fn:now64(3)"),
+        ],
+        primary_key=["id"],
+        order_by=["id"],
+        partition_by="toYYYYMM(received_at)",
+    )
+
+    app_events_view = view(
+        database="app",
+        name="events_view",
+        as_="SELECT id FROM app.events",
+    )
+
+    app_events_mv = materialized_view(
+        database="app",
+        name="events_mv",
+        to=TableRef(database="app", name="events_rollup"),
+        as_="SELECT id, count() AS c FROM app.events GROUP BY id",
+    )
+
+    definitions = schema(app_events, app_events_view, app_events_mv)
+    ```
+  </TabItem>
+</Tabs>
 
 Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projections` when present in the source metadata.
 
@@ -111,9 +162,11 @@ Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projecti
 
 By default, ClickHouse redacts inline `SOURCE(...)` passwords to `[HIDDEN]` on introspection (`system.tables.create_table_query`, `SHOW CREATE DICTIONARY`), and chkit does not attempt to work around that. When a pulled dictionary's `source` contains `[HIDDEN]`, `chkit pull` prints a console warning (and includes it in a `warnings` array in `--json` output), and the generated file emits the source verbatim with a leading comment:
 
-```ts
-// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X).
-const default_users_dict = dictionary({
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    // NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X).
+    const default_users_dict = dictionary({
   database: "default",
   name: "users_dict",
   attributes: [
@@ -125,13 +178,41 @@ const default_users_dict = dictionary({
   layout: "HASHED()",
   lifetime: "300",
 })
-```
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential.
+    default_users_dict = dictionary(
+        database="default",
+        name="users_dict",
+        attributes=[
+            DictionaryAttribute(name="id", type="UInt64"),
+            DictionaryAttribute(name="name", type="String"),
+        ],
+        primary_key=["id"],
+        source="MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')",
+        layout="HASHED()",
+        lifetime="300",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 Replace `[HIDDEN]` with a real credential — typically an environment-variable interpolation, matching how you'd author the dictionary by hand (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)):
 
-```ts
-source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_PASSWORD}' db 'app' table 'users')`,
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_PASSWORD}' db 'app' table 'users')`,
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    source=f"MYSQL(host 'db' port 3306 user 'reader' password '{os.environ['MYSQL_PASSWORD']}' db 'app' table 'users')",
+    ```
+  </TabItem>
+</Tabs>
 
 For round-trip fidelity without a manual edit, use [named collections](https://clickhouse.com/docs/operations/named-collections) on the ClickHouse side instead of an inline password — chkit does not require this, but it's the ClickHouse-native way to avoid the redaction entirely.
 

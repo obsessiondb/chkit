@@ -3,6 +3,8 @@ title: Troubleshooting
 description: Common chkit errors mapped to their causes and fixes — missing dependencies, connection and auth failures, rejected migrations, blocked destructive operations, and drift.
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 A reference for the errors you are most likely to hit when running chkit, what causes each, and how to fix it. Errors are grouped by the stage where they surface: loading the project, connecting to ClickHouse, and running migrations.
 
 ## Quick reference
@@ -27,19 +29,38 @@ The config (`clickhouse.config.ts`) and your schema files import `@chkit/core`, 
 
 Install the dependencies in the project directory:
 
-```sh
-bun add -d chkit @chkit/core
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d chkit @chkit/core
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install chkit-py
+    ```
+    The Python equivalent of this error is a `ModuleNotFoundError: No module named 'chkit'` from your schema files — same cause, same fix.
+  </TabItem>
+</Tabs>
 
 ### `Unknown file extension ".ts"`
 
 Older chkit versions could not load a TypeScript config under plain Node. Recent versions bundle a loader, so the fix is to upgrade:
 
-```sh
-bun add -d chkit@latest
-```
-
-Under Bun this never occurred; under Node it now works the same way.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d chkit@latest
+    ```
+    Under Bun this never occurred; under Node it now works the same way.
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install --upgrade chkit-py
+    ```
+    This error is TypeScript-specific; Python configs (`clickhouse.config.py`) are plain modules and never hit it.
+  </TabItem>
+</Tabs>
 
 ## Connecting to ClickHouse
 

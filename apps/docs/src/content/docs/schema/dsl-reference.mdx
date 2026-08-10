@@ -1,87 +1,159 @@
 ---
 title: Schema DSL Reference
-description: Complete reference for chkit schema definition functions, column types, and table options.
+description: Complete reference for chkit schema definition functions, column types, and table options — in TypeScript and Python.
 sidebar:
   order: 3
 ---
 
-Schema files are TypeScript files that export definitions using functions from `@chkit/core`. All exported definitions are collected when chkit loads schema files matched by the `schema` glob in your [configuration](/configuration/overview/).
+import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-```ts
-import { schema, table, view, materializedView, dictionary } from '@chkit/core'
-```
+Schema files export definitions using functions from `@chkit/core` (TypeScript) or `chkit` (Python, via [chkit-py](/python/overview/)). All exported definitions are collected when chkit loads schema files matched by the `schema` glob in your [configuration](/configuration/overview/). The two implementations share every field's semantics — pick your language once and the whole page follows.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { schema, table, view, materializedView, dictionary } from '@chkit/core'
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import schema, table, view, materialized_view, dictionary
+    ```
+  </TabItem>
+</Tabs>
+
+:::note[Python calling conventions]
+The Python DSL accepts both the TypeScript camelCase names and snake_case equivalents everywhere — `primary_key` or `primaryKey`, `renamed_from` or `renamedFrom`, `maxRows` or `max_rows` — so examples port with their keys unchanged. Because `as` is a Python keyword, `view()` and `materialized_view()` take the SELECT body as `as_`. Columns, indexes, projections, and attributes accept plain dicts (validated on entry) or model instances (`ColumnDefinition`, `SkipIndexSet`, ...). Field tables on this page use the camelCase names.
+:::
 
 ## `schema()`
 
 Groups definitions into a single array for export.
 
-```ts
-schema(...definitions: SchemaDefinition[]): SchemaDefinition[]
-```
-
-```ts
-export default schema(users, events)
-```
-
-You can also export definitions individually -- any exported value with a valid `kind` is discovered automatically.
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    export default schema(users, events)
+    ```
+    Any exported value with a valid `kind` is also discovered automatically.
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    definitions = schema(users, events)
+    ```
+    Any module-level definition is also discovered automatically, including definitions nested in lists or tuples.
+  </TabItem>
+</Tabs>
 
 ## `table()`
 
 Creates a table definition.
 
-```ts
-table(input: Omit<TableDefinition, 'kind'>): TableDefinition
-```
-
 **Minimal example:**
 
-```ts
-import { schema, table } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { schema, table } from '@chkit/core'
 
-const users = table({
-  database: 'app',
-  name: 'users',
-  columns: [
-    { name: 'id', type: 'UInt64' },
-    { name: 'email', type: 'String' },
-  ],
-  engine: 'MergeTree',
-  primaryKey: ['id'],
-  orderBy: ['id'],
-})
+    const users = table({
+      database: 'app',
+      name: 'users',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'email', type: 'String' },
+      ],
+      engine: 'MergeTree',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
 
-export default schema(users)
-```
+    export default schema(users)
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import schema, table
+
+    users = table(
+        database="app",
+        name="users",
+        columns=[
+            {"name": "id", "type": "UInt64"},
+            {"name": "email", "type": "String"},
+        ],
+        engine="MergeTree",
+        primary_key=["id"],
+        order_by=["id"],
+    )
+
+    definitions = schema(users)
+    ```
+  </TabItem>
+</Tabs>
 
 **Comprehensive example (all features):**
 
-```ts
-const events = table({
-  database: 'analytics',
-  name: 'events',
-  columns: [
-    { name: 'id', type: 'UInt64' },
-    { name: 'org_id', type: 'String' },
-    { name: 'source', type: 'LowCardinality(String)' },
-    { name: 'payload', type: 'String', nullable: true },
-    { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
-    { name: 'status', type: 'String', default: 'pending', comment: 'Event processing status' },
-  ],
-  engine: 'MergeTree',
-  primaryKey: ['id'],
-  orderBy: ['org_id', 'received_at', 'id'],
-  partitionBy: 'toYYYYMM(received_at)',
-  ttl: 'received_at + INTERVAL 90 DAY',
-  settings: { index_granularity: 8192 },
-  indexes: [
-    { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
-  ],
-  projections: [
-    { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
-  ],
-  comment: 'Raw ingested events',
-})
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    const events = table({
+      database: 'analytics',
+      name: 'events',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'org_id', type: 'String' },
+        { name: 'source', type: 'LowCardinality(String)' },
+        { name: 'payload', type: 'String', nullable: true },
+        { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+        { name: 'status', type: 'String', default: 'pending', comment: 'Event processing status' },
+      ],
+      engine: 'MergeTree',
+      primaryKey: ['id'],
+      orderBy: ['org_id', 'received_at', 'id'],
+      partitionBy: 'toYYYYMM(received_at)',
+      ttl: 'received_at + INTERVAL 90 DAY',
+      settings: { index_granularity: 8192 },
+      indexes: [
+        { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
+      ],
+      projections: [
+        { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
+      ],
+      comment: 'Raw ingested events',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    events = table(
+        database="analytics",
+        name="events",
+        columns=[
+            {"name": "id", "type": "UInt64"},
+            {"name": "org_id", "type": "String"},
+            {"name": "source", "type": "LowCardinality(String)"},
+            {"name": "payload", "type": "String", "nullable": True},
+            {"name": "received_at", "type": "DateTime64(3)", "default": "fn:now64(3)"},
+            {"name": "status", "type": "String", "default": "pending", "comment": "Event processing status"},
+        ],
+        engine="MergeTree",
+        primary_key=["id"],
+        order_by=["org_id", "received_at", "id"],
+        partition_by="toYYYYMM(received_at)",
+        ttl="received_at + INTERVAL 90 DAY",
+        settings={"index_granularity": 8192},
+        indexes=[
+            {"name": "idx_source", "expression": "source", "type": "set", "maxRows": 0, "granularity": 1},
+        ],
+        projections=[
+            {"name": "p_recent", "query": "SELECT id ORDER BY received_at DESC LIMIT 10"},
+        ],
+        comment="Raw ingested events",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 ### Required fields
 
@@ -167,10 +239,20 @@ See the ClickHouse [data types reference](https://clickhouse.com/docs/sql-refere
 
 When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL.
 
-```ts
-{ name: 'payload', type: 'String', nullable: true }
-// SQL: `payload` Nullable(String)
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    { name: 'payload', type: 'String', nullable: true }
+    // SQL: `payload` Nullable(String)
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    {"name": "payload", "type": "String", "nullable": True}
+    # SQL: `payload` Nullable(String)
+    ```
+  </TabItem>
+</Tabs>
 
 ### `default` (string | number | boolean, optional)
 
@@ -180,10 +262,20 @@ Default value for the column.
 - **Number/boolean** values are rendered literally: `default: 0` produces `DEFAULT 0`
 - **`fn:` prefix** -- for function-call defaults, prefix the string with `fn:` to emit a raw SQL expression:
 
-```ts
-{ name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' }
-// SQL: `received_at` DateTime64(3) DEFAULT now64(3)
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' }
+    // SQL: `received_at` DateTime64(3) DEFAULT now64(3)
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    {"name": "received_at", "type": "DateTime64(3)", "default": "fn:now64(3)"}
+    # SQL: `received_at` DateTime64(3) DEFAULT now64(3)
+    ```
+  </TabItem>
+</Tabs>
 
 ### `comment` (string, optional)
 
@@ -197,14 +289,28 @@ Previous column name for rename tracking. See [Rename support](#rename-support).
 
 Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is an object with a `kind`, or an **array** forming a chain (zero or more preprocessors followed by exactly one general codec).
 
-```ts
-columns: [
-  { name: 'ts', type: 'DateTime64(3)', codec: { kind: 'Delta', size: 4 } },
-  { name: 'amount', type: 'Float64', codec: { kind: 'ZSTD', level: 3 } },
-  // chain: preprocessor then general codec
-  { name: 'seq', type: 'UInt64', codec: [{ kind: 'DoubleDelta' }, { kind: 'LZ4HC', level: 9 }] },
-]
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    columns: [
+      { name: 'ts', type: 'DateTime64(3)', codec: { kind: 'Delta', size: 4 } },
+      { name: 'amount', type: 'Float64', codec: { kind: 'ZSTD', level: 3 } },
+      // chain: preprocessor then general codec
+      { name: 'seq', type: 'UInt64', codec: [{ kind: 'DoubleDelta' }, { kind: 'LZ4HC', level: 9 }] },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    columns=[
+        {"name": "ts", "type": "DateTime64(3)", "codec": {"kind": "Delta", "size": 4}},
+        {"name": "amount", "type": "Float64", "codec": {"kind": "ZSTD", "level": 3}},
+        # chain: preprocessor then general codec
+        {"name": "seq", "type": "UInt64", "codec": [{"kind": "DoubleDelta"}, {"kind": "LZ4HC", "level": 9}]},
+    ]
+    ```
+  </TabItem>
+</Tabs>
 
 **General codecs** (the compressor; at most one, and it must come last in a chain):
 
@@ -223,13 +329,23 @@ columns: [
 
 **Raw escape hatch** — for codecs not yet typed (new ClickHouse versions, unusual arg shapes), pass the inner expression through verbatim:
 
-```ts
-{ name: 'blob', type: 'String', codec: { kind: 'raw', expression: 'T64, LZ4' } }
-// → CODEC(T64, LZ4)
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    { name: 'blob', type: 'String', codec: { kind: 'raw', expression: 'T64, LZ4' } }
+    // → CODEC(T64, LZ4)
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    {"name": "blob", "type": "String", "codec": {"kind": "raw", "expression": "T64, LZ4"}}
+    # → CODEC(T64, LZ4)
+    ```
+  </TabItem>
+</Tabs>
 
 :::caution
-Use the typed `{ kind: 'ZSTD', level: 3 }` shape — an unrecognized shape such as `codec: { general: 'ZSTD' }` is **not** a valid `ColumnCodecSpec` and renders an empty `CODEC()`, silently shipping a column with no codec.
+Use the typed `{ kind: 'ZSTD', level: 3 }` shape — an unrecognized shape such as `codec: { general: 'ZSTD' }` is **not** a valid `ColumnCodecSpec` and renders an empty `CODEC()`, silently shipping a column with no codec. (The Python port rejects unknown codec keys at validation time.)
 :::
 
 Codec chains are validated (see [Validation rules](#validation-rules)): a chain must be non-empty, contain at most one general codec, and end with the general codec.
@@ -255,21 +371,43 @@ Type-specific fields:
 | `tokenbf_v1` | `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `tokenbf_v1(size_bytes, n_hash, seed)` |
 | `ngrambf_v1` | `ngramSize`, `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `ngrambf_v1(n, size_bytes, n_hash, seed)` |
 
-```ts
-indexes: [
-  { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
-  { name: 'idx_ts', expression: 'received_at', type: 'minmax', granularity: 3 },
-  {
-    name: 'idx_body',
-    expression: 'body',
-    type: 'tokenbf_v1',
-    sizeBytes: 256,
-    hashFunctions: 2,
-    randomSeed: 0,
-    granularity: 1,
-  },
-]
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    indexes: [
+      { name: 'idx_source', expression: 'source', type: 'set', maxRows: 0, granularity: 1 },
+      { name: 'idx_ts', expression: 'received_at', type: 'minmax', granularity: 3 },
+      {
+        name: 'idx_body',
+        expression: 'body',
+        type: 'tokenbf_v1',
+        sizeBytes: 256,
+        hashFunctions: 2,
+        randomSeed: 0,
+        granularity: 1,
+      },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    indexes=[
+        {"name": "idx_source", "expression": "source", "type": "set", "maxRows": 0, "granularity": 1},
+        {"name": "idx_ts", "expression": "received_at", "type": "minmax", "granularity": 3},
+        {
+            "name": "idx_body",
+            "expression": "body",
+            "type": "tokenbf_v1",
+            "sizeBytes": 256,
+            "hashFunctions": 2,
+            "randomSeed": 0,
+            "granularity": 1,
+        },
+    ]
+    ```
+    Model classes are importable when dicts feel too loose: `SkipIndexMinmax`, `SkipIndexSet`, `SkipIndexBloomFilter`, `SkipIndexTokenBF`, `SkipIndexNgramBF`.
+  </TabItem>
+</Tabs>
 
 ## Projections
 
@@ -290,12 +428,24 @@ An **index-only projection** stores no SELECT body. It reorders parts by a secon
 | `index` | `string` | Expression list to order by, e.g. `receiver, sender` |
 | `type` | `string` | Projection index type. ClickHouse currently accepts `basic` |
 
-```ts
-projections: [
-  { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
-  { name: 'by_receiver', index: 'receiver, sender', type: 'basic' },
-]
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    projections: [
+      { name: 'p_recent', query: 'SELECT id ORDER BY received_at DESC LIMIT 10' },
+      { name: 'by_receiver', index: 'receiver, sender', type: 'basic' },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    projections=[
+        {"name": "p_recent", "query": "SELECT id ORDER BY received_at DESC LIMIT 10"},
+        {"name": "by_receiver", "index": "receiver, sender", "type": "basic"},
+    ]
+    ```
+  </TabItem>
+</Tabs>
 
 The `index` expression is rendered the way ClickHouse normalizes it: a single expression is emitted bare (`INDEX receiver`), several are emitted as a tuple (`INDEX (receiver, sender)`), redundant parentheses are dropped, and a space follows every argument separator. Writing `'(receiver)'` and `'receiver'` therefore produce the same table, and neither reads as drift.
 
@@ -305,10 +455,6 @@ A projection must be exactly one of the two kinds. Setting both `query` and `ind
 
 Creates a view definition.
 
-```ts
-view(input: Omit<ViewDefinition, 'kind'>): ViewDefinition
-```
-
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `database` | `string` | yes | Database name |
@@ -316,23 +462,34 @@ view(input: Omit<ViewDefinition, 'kind'>): ViewDefinition
 | `as` | `string` | yes | SELECT query |
 | `comment` | `string` | no | View comment |
 
-```ts
-import { view } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { view } from '@chkit/core'
 
-const activeUsers = view({
-  database: 'app',
-  name: 'active_users',
-  as: 'SELECT id, email FROM app.users WHERE active = 1',
-})
-```
+    const activeUsers = view({
+      database: 'app',
+      name: 'active_users',
+      as: 'SELECT id, email FROM app.users WHERE active = 1',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import view
+
+    active_users = view(
+        database="app",
+        name="active_users",
+        as_="SELECT id, email FROM app.users WHERE active = 1",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 ## `materializedView()`
 
-Creates a materialized view definition.
-
-```ts
-materializedView(input: Omit<MaterializedViewDefinition, 'kind'>): MaterializedViewDefinition
-```
+Creates a materialized view definition. In Python the factory is `materialized_view()`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -343,28 +500,59 @@ materializedView(input: Omit<MaterializedViewDefinition, 'kind'>): MaterializedV
 | `as` | `string` | yes | SELECT query |
 | `comment` | `string` | no | View comment |
 
-```ts
-import { materializedView } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { materializedView } from '@chkit/core'
 
-const eventCounts = materializedView({
-  database: 'analytics',
-  name: 'event_counts_mv',
-  to: { database: 'analytics', name: 'event_counts' },
-  as: 'SELECT org_id, count() AS total FROM analytics.events GROUP BY org_id',
-})
-```
+    const eventCounts = materializedView({
+      database: 'analytics',
+      name: 'event_counts_mv',
+      to: { database: 'analytics', name: 'event_counts' },
+      as: 'SELECT org_id, count() AS total FROM analytics.events GROUP BY org_id',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import materialized_view
+
+    event_counts = materialized_view(
+        database="analytics",
+        name="event_counts_mv",
+        to={"database": "analytics", "name": "event_counts"},
+        as_="SELECT org_id, count() AS total FROM analytics.events GROUP BY org_id",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 For a refreshable (scheduled) materialized view, add the `refresh` field:
 
-```ts
-const dailyReport = materializedView({
-  database: 'analytics',
-  name: 'daily_report_mv',
-  to: { database: 'analytics', name: 'daily_report' },
-  refresh: { every: '1 DAY', offset: '2 HOUR' },
-  as: 'SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day',
-})
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    const dailyReport = materializedView({
+      database: 'analytics',
+      name: 'daily_report_mv',
+      to: { database: 'analytics', name: 'daily_report' },
+      refresh: { every: '1 DAY', offset: '2 HOUR' },
+      as: 'SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    daily_report = materialized_view(
+        database="analytics",
+        name="daily_report_mv",
+        to={"database": "analytics", "name": "daily_report"},
+        refresh={"every": "1 DAY", "offset": "2 HOUR"},
+        as_="SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 See [Refreshable materialized views](/schema/refreshable-views/) for the full `refresh` field reference, including APPEND mode, `DEPENDS ON`, and the ClickHouse rules that chkit validates.
 
@@ -372,28 +560,53 @@ See [Refreshable materialized views](/schema/refreshable-views/) for the full `r
 
 Creates a [ClickHouse dictionary](https://clickhouse.com/docs/sql-reference/dictionaries) definition — a key-value lookup structure backed by an external or in-database source, queried with `dictGet()`.
 
-```ts
-dictionary(input: Omit<DictionaryDefinition, 'kind'>): DictionaryDefinition
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { dictionary } from '@chkit/core'
 
-```ts
-import { dictionary } from '@chkit/core'
+    const usersDict = dictionary({
+      database: 'default',
+      name: 'users_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+        { name: 'email', type: 'String', default: '' },
+      ],
+      primaryKey: ['id'],
+      source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_PASSWORD}' db 'app' table 'users')`,
+      layout: `HASHED()`,
+      lifetime: `300`,
+      comment: 'User lookup dictionary',
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import os
 
-const usersDict = dictionary({
-  database: 'default',
-  name: 'users_dict',
-  attributes: [
-    { name: 'id', type: 'UInt64' },
-    { name: 'name', type: 'String' },
-    { name: 'email', type: 'String', default: '' },
-  ],
-  primaryKey: ['id'],
-  source: `MYSQL(host 'db' port 3306 user 'reader' password '${process.env.MYSQL_PASSWORD}' db 'app' table 'users')`,
-  layout: `HASHED()`,
-  lifetime: `300`,
-  comment: 'User lookup dictionary',
-})
-```
+    from chkit import dictionary
+
+    users_dict = dictionary(
+        database="default",
+        name="users_dict",
+        attributes=[
+            {"name": "id", "type": "UInt64"},
+            {"name": "name", "type": "String"},
+            {"name": "email", "type": "String", "default": ""},
+        ],
+        primary_key=["id"],
+        source=(
+            f"MYSQL(host 'db' port 3306 user 'reader' "
+            f"password '{os.environ['MYSQL_PASSWORD']}' db 'app' table 'users')"
+        ),
+        layout="HASHED()",
+        lifetime="300",
+        comment="User lookup dictionary",
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 ### Required fields
 
@@ -437,11 +650,20 @@ Each entry in the `attributes` array is a `DictionaryAttribute`.
 
 ### Credentials in `source`
 
-Inline credentials in `source` (e.g. a MySQL/PostgreSQL `password '...'`) should be interpolated from environment variables at schema-authoring time, the same way you'd handle any other secret in a TypeScript config file:
+Inline credentials in `source` (e.g. a MySQL/PostgreSQL `password '...'`) should be interpolated from environment variables at schema-authoring time, the same way you'd handle any other secret in a config file:
 
-```ts
-source: `MYSQL(host 'db' password '${process.env.MYSQL_PASSWORD}' ...)`,
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    source: `MYSQL(host 'db' password '${process.env.MYSQL_PASSWORD}' ...)`,
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    source=f"MYSQL(host 'db' password '{os.environ['MYSQL_PASSWORD']}' ...)",
+    ```
+  </TabItem>
+</Tabs>
 
 ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW CREATE DICTIONARY`, `system.dictionaries`). A real password change diffs and migrates like any other field change. The one exception is a `source` that still carries the literal `[HIDDEN]` placeholder written by `chkit pull` — chkit never knows the real value in that case, so it excludes `source` from the diff entirely rather than risk rendering `[HIDDEN]` into DDL — see [Pull: credential handling](/plugins/pull/#credential-handling-hidden-passwords).
 
@@ -451,7 +673,7 @@ ClickHouse has no `ALTER DICTIONARY` — every structural change to a dictionary
 
 ## Type system reference
 
-The [codegen plugin](/plugins/codegen/) maps ClickHouse types to TypeScript types using these rules:
+The [codegen plugin](/plugins/codegen/) maps ClickHouse types to TypeScript types using these rules (the Python codegen plugin emits Pydantic models with the analogous Python types — `string` → `str`, `number` → `int`/`float`, `T[]` → `list[T]`, and so on):
 
 | Category | ClickHouse Types | TypeScript Type |
 |----------|-----------------|-----------------|
@@ -477,14 +699,28 @@ chkit tracks renames to avoid destructive drop-and-recreate operations.
 
 Set `renamedFrom` on a table definition to rename a table:
 
-```ts
-const users = table({
-  database: 'app',
-  name: 'accounts', // new name
-  renamedFrom: { name: 'users' }, // old name
-  // ...
-})
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    const users = table({
+      database: 'app',
+      name: 'accounts', // new name
+      renamedFrom: { name: 'users' }, // old name
+      // ...
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    users = table(
+        database="app",
+        name="accounts",                 # new name
+        renamed_from={"name": "users"},  # old name
+        # ...
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 The `database` field in `renamedFrom` is optional and defaults to the table's current database.
 
@@ -492,24 +728,49 @@ The `database` field in `renamedFrom` is optional and defaults to the table's cu
 
 Set `renamedFrom` on a column definition to rename a column:
 
-```ts
-columns: [
-  { name: 'user_email', type: 'String', renamedFrom: 'email' },
-]
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    columns: [
+      { name: 'user_email', type: 'String', renamedFrom: 'email' },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    columns=[
+        {"name": "user_email", "type": "String", "renamedFrom": "email"},
+    ]
+    ```
+  </TabItem>
+</Tabs>
 
 ### Dictionary rename
 
 Set `renamedFrom` on a dictionary definition to rename a dictionary. This emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` statement instead of a `drop_dictionary` + `create_dictionary` pair:
 
-```ts
-const lookupDict = dictionary({
-  database: 'app',
-  name: 'lookup_dict', // new name
-  renamedFrom: { name: 'users_dict' }, // old name
-  // ...
-})
-```
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    const lookupDict = dictionary({
+      database: 'app',
+      name: 'lookup_dict', // new name
+      renamedFrom: { name: 'users_dict' }, // old name
+      // ...
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    lookup_dict = dictionary(
+        database="app",
+        name="lookup_dict",                   # new name
+        renamed_from={"name": "users_dict"},  # old name
+        # ...
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 The `database` field in `renamedFrom` is optional and defaults to the dictionary's current database.
 
@@ -517,26 +778,50 @@ Table, column, and dictionary renames can all be overridden by CLI flags: `--ren
 
 ## Plugin configuration
 
-The `plugins` field on a table definition provides per-table configuration for plugins. Each plugin that supports table-level config augments the `TablePlugins` interface via TypeScript declaration merging, so the available keys and their types depend on which plugin packages are imported.
+The `plugins` field on a table definition provides per-table configuration for plugins. In TypeScript, each plugin that supports table-level config augments the `TablePlugins` interface via declaration merging; in Python it is a plain dict.
 
-```ts
-import { table } from '@chkit/core'
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { table } from '@chkit/core'
 
-const events = table({
-  database: 'app',
-  name: 'events',
-  columns: [
-    { name: 'event_time', type: 'DateTime' },
-    { name: 'id', type: 'UInt64' },
-  ],
-  engine: 'MergeTree',
-  orderBy: ['event_time', 'id'],
-  primaryKey: ['event_time', 'id'],
-  plugins: {
-    backfill: { timeColumn: 'event_time' },
-  },
-})
-```
+    const events = table({
+      database: 'app',
+      name: 'events',
+      columns: [
+        { name: 'event_time', type: 'DateTime' },
+        { name: 'id', type: 'UInt64' },
+      ],
+      engine: 'MergeTree',
+      orderBy: ['event_time', 'id'],
+      primaryKey: ['event_time', 'id'],
+      plugins: {
+        backfill: { timeColumn: 'event_time' },
+      },
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import table
+
+    events = table(
+        database="app",
+        name="events",
+        columns=[
+            {"name": "event_time", "type": "DateTime"},
+            {"name": "id", "type": "UInt64"},
+        ],
+        engine="MergeTree",
+        order_by=["event_time", "id"],
+        primary_key=["event_time", "id"],
+        plugins={
+            "backfill": {"timeColumn": "event_time"},
+        },
+    )
+    ```
+  </TabItem>
+</Tabs>
 
 Currently supported plugin keys:
 

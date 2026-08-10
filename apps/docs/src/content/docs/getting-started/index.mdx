@@ -9,7 +9,11 @@ sidebar:
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 import CopyPromptButton from '../../../components/CopyPromptButton.astro';
 
-chkit is a ClickHouse schema and migration toolkit for TypeScript projects. Pick the path that matches what you're working on.
+chkit is a ClickHouse schema and migration toolkit for TypeScript and Python projects. Pick the path that matches what you're working on.
+
+:::note[Working in Python?]
+chkit also ships as [chkit-py](/python/overview/) — same CLI, same schema semantics, `pip install chkit-py`. The reference pages on this site carry synced TypeScript/Python tabs.
+:::
 
 ## Let an agent set it up
 
@@ -28,7 +32,7 @@ Prefer to do it yourself? Pick a path below.
   <LinkCard
     title="Add to an existing project"
     href="/getting-started/add-to-existing-project/"
-    description="Install chkit alongside your application code, generate your first migration, and apply it. Best if you already have a TypeScript project."
+    description="Install chkit alongside your application code, generate your first migration, and apply it. Best if you already have a TypeScript or Python project."
   />
 </CardGrid>
 
@@ -46,5 +50,5 @@ Once either path is working:
 - [The migration workflow](/guides/migration-workflow/) — how generate, snapshot, and migrate fit together, and what to commit
 - [CLI reference](/cli/overview/) — every command, flag, and expected output
 - [Configuration](/configuration/overview/) — wire up `clickhouse.config.ts`
-- [Schema DSL](/schema/dsl-reference/) — define tables, views, and materialized views
+- [Schema DSL](/schema/dsl-reference/) — define tables, views, materialized views, and dictionaries
 - [Troubleshooting](/guides/troubleshooting/) — fixes for common errors if a command fails
