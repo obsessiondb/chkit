@@ -139,7 +139,11 @@ def run(
     )
 
     with ClickHouseClient.connect(config.clickhouse) as client:
-        journal_store = JournalStore(client)
+        # ``cluster`` opts the journal into ReplicatedReplacingMergeTree
+        # created ``ON CLUSTER`` so history stays consistent across nodes.
+        journal_store = JournalStore(
+            client, cluster=config.clickhouse.cluster if config.clickhouse else None
+        )
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         pending_all = [f for f in files if f not in applied_names]

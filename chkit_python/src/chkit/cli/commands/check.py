@@ -116,7 +116,9 @@ def run(  # noqa: PLR0912, PLR0915
 
     live_drifted = False
     with ClickHouseClient.connect(config.clickhouse) as client:
-        store = JournalStore(client)
+        store = JournalStore(
+            client, cluster=config.clickhouse.cluster if config.clickhouse else None
+        )
         journal = store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         pending_all = [f for f in files if f not in applied_names]

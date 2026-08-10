@@ -57,6 +57,7 @@ from chkit.cli.table_scope import (
 )
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxResolvedConfig, ChxValidationError, SchemaDefinition
+from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
 from chkit.core.validate import validate_definitions
@@ -378,6 +379,16 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
             plan=plan,
         )
     )
+
+    # Cluster mode: stamp ``ON CLUSTER <name>`` onto every DDL statement as a
+    # final post-pass, after all plan transforms (renames, plugins, scope
+    # filtering) — so plugin-injected SQL is also covered. ``migrate`` never
+    # re-runs this: the clause is baked into the migration file at generate
+    # time and applied verbatim.
+    plan = apply_on_cluster_to_plan(
+        plan, config.clickhouse.cluster if config.clickhouse else None
+    )
+
     if not plan.operations:
         if output_json:
             typer.echo(

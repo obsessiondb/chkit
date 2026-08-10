@@ -38,6 +38,7 @@ from chkit.cli.migration_store import (
     now_iso,
 )
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.core.on_cluster import on_cluster_clause
 
 OperationStatus = Literal["started", "completed", "failed"]
 
@@ -193,13 +194,31 @@ def _is_unknown_database_error(error: BaseException) -> bool:
 
 
 class JournalStore:
-    """Imperative wrapper over the ``_chkit_migrations`` table."""
+    """Imperative wrapper over the ``_chkit_migrations`` table.
 
-    __slots__ = ("_bootstrapped", "_client", "_database_missing", "_table")
+    Pass ``cluster`` to opt into cluster mode: DDL statements this store emits
+    are stamped with ``ON CLUSTER '<name>'`` and the journal itself is
+    stored in a ``ReplicatedReplacingMergeTree`` engine on a no-``{shard}``
+    Keeper path (one cluster-wide replication group). Leave ``cluster`` unset
+    for single-node, ClickHouse Cloud, or ObsessionDB.
+    """
 
-    def __init__(self, client: ClickHouseClient) -> None:
+    __slots__ = (
+        "_bootstrapped",
+        "_client",
+        "_cluster",
+        "_database_missing",
+        "_on_cluster",
+        "_table",
+    )
+
+    def __init__(
+        self, client: ClickHouseClient, cluster: str | None = None
+    ) -> None:
         self._client: ClickHouseClient = client
         self._table: str = resolve_journal_table_name()
+        self._cluster: str | None = cluster
+        self._on_cluster: str = on_cluster_clause(cluster)
         self._bootstrapped: bool = False
         self._database_missing: bool = False
 
@@ -212,15 +231,34 @@ class JournalStore:
         return self._table
 
     def _create_table_sql(self) -> str:
+        # In cluster mode the journal must be consistent across every node, so
+        # it uses a replicated engine with a no-``{shard}`` Keeper path (one
+        # cluster-wide replication group) created ``ON CLUSTER``. ``{uuid}`` is
+        # minted once per CREATE and propagated to all nodes, so a dropped
+        # journal's stale Keeper entries can never collide with a recreate
+        # (REPLICA_ALREADY_EXISTS). The replica id is ``{shard}_{replica}``
+        # rather than bare ``{replica}``: because the path omits ``{shard}``,
+        # all nodes across all shards share it, so the replica name must be
+        # unique cluster-wide — per-shard ``{replica}`` naming (the common
+        # multi-shard layout) would otherwise collide. The read path already
+        # uses SYNC REPLICA + FINAL + sequential consistency. Single-node/Cloud
+        # keeps the plain engine.
+        engine = (
+            "ReplicatedReplacingMergeTree("
+            "'/clickhouse/tables/{uuid}/chkit_journal', "
+            "'{shard}_{replica}', applied_at)"
+            if self._cluster
+            else "ReplacingMergeTree(applied_at)"
+        )
         return (
-            f"CREATE TABLE IF NOT EXISTS {self._table} (\n"
+            f"CREATE TABLE IF NOT EXISTS {self._table}{self._on_cluster} (\n"
             f"    name String,\n"
             f"    applied_at DateTime64(3, 'UTC'),\n"
             f"    checksum String,\n"
             f"    chkit_version String,\n"
             f"    migration_completed Bool DEFAULT true,\n"
             f"    operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []\n"
-            f") ENGINE = ReplacingMergeTree(applied_at)\n"
+            f") ENGINE = {engine}\n"
             f"ORDER BY (name)\n"
             f"SETTINGS index_granularity = 1"
         )
@@ -251,12 +289,14 @@ class JournalStore:
     def _ensure_schema_upgraded(self) -> None:
         # Old journal tables predate per-operation tracking. Add the columns
         # idempotently. ``ADD COLUMN IF NOT EXISTS`` is a metadata-only op.
+        # In cluster mode both ALTERs carry ``ON CLUSTER '<name>'`` so every
+        # replica converges on the new column set in the same DDL round-trip.
         self._client.execute(
-            f"ALTER TABLE {self._table} "
+            f"ALTER TABLE {self._table}{self._on_cluster} "
             f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
         )
         self._client.execute(
-            f"ALTER TABLE {self._table} "
+            f"ALTER TABLE {self._table}{self._on_cluster} "
             f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
         )
 

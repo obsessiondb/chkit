@@ -73,7 +73,9 @@ def run(
     )
 
     with ClickHouseClient.connect(config.clickhouse) as client:
-        store = JournalStore(client)
+        store = JournalStore(
+            client, cluster=config.clickhouse.cluster if config.clickhouse else None
+        )
         journal = store.read_journal(project_files=files)
         database_missing = store.database_missing
         applied_names = {entry.name for entry in journal.applied}
