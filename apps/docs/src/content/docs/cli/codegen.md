@@ -1,11 +1,11 @@
 ---
 title: "chkit codegen"
-description: "Generate TypeScript types, ingestion functions, and runtime migration modules from schema definitions."
+description: "Generate typed row models (TypeScript types or Pydantic models), plus TypeScript-only ingestion functions and runtime migration modules from schema definitions."
 sidebar:
   order: 9
 ---
 
-Shortcut for `chkit plugin codegen codegen`. Generates TypeScript row types, optional Zod schemas, ingestion functions, and runtime migration modules from your schema definitions.
+Shortcut for `chkit plugin codegen codegen`. Generates TypeScript row types, optional Zod schemas (in Python: Pydantic models), ingestion functions, and runtime migration modules from your schema definitions.
 
 ## Synopsis
 

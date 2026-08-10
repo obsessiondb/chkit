@@ -1,11 +1,11 @@
 ---
 title: "chkit pull"
-description: "Introspect live ClickHouse and generate a TypeScript schema file."
+description: "Introspect live ClickHouse and generate a schema file."
 sidebar:
   order: 8
 ---
 
-Shortcut for `chkit plugin pull schema`. Introspects your live ClickHouse instance and generates a deterministic TypeScript schema file.
+Shortcut for `chkit plugin pull schema`. Introspects your live ClickHouse instance and generates a deterministic schema file (TypeScript, or Python under chkit-py).
 
 ## Synopsis
 

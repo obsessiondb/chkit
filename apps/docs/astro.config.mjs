@@ -83,6 +83,10 @@ export default defineConfig({
 					autogenerate: { directory: 'plugins' },
 				},
 				{
+					label: 'Python',
+					autogenerate: { directory: 'python' },
+				},
+				{
 					label: 'CLI Reference',
 					autogenerate: { directory: 'cli' },
 				},

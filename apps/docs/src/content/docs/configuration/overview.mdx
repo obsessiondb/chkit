@@ -1,0 +1,110 @@
+---
+title: "Configuration Overview"
+description: "clickhouse.config.ts / clickhouse.config.py structure and defaults."
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+`chkit` is configured through `clickhouse.config.ts` (TypeScript) or `clickhouse.config.py` (Python). The option keys and defaults are identical.
+
+## Core Fields
+
+- `schema`: glob path to [schema files](/schema/dsl-reference/)
+- `outDir`: root folder for generated artifacts
+- `migrationsDir`: SQL migration file folder
+- `metaDir`: state folder (`snapshot.json`)
+- `plugins`: plugin registrations
+- `clickhouse`: live connection options
+- `check`: CI gate behavior
+- `safety`: destructive migration safety behavior
+
+Migration state (the journal of applied migrations) is not stored in `metaDir`. It lives in the `_chkit_migrations` table in your configured `clickhouse.database`, so `status`, `migrate`, and `check` require a ClickHouse connection.
+
+## Example
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { defineConfig } from '@chkit/core'
+
+    export default defineConfig({
+      schema: './src/db/schema/**/*.ts',
+      outDir: './chkit',
+      migrationsDir: './chkit/migrations',
+      metaDir: './chkit/meta',
+      clickhouse: {
+        url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
+        username: process.env.CLICKHOUSE_USER ?? 'default',
+        password: process.env.CLICKHOUSE_PASSWORD ?? '',
+        database: process.env.CLICKHOUSE_DB ?? 'default',
+      },
+    })
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import os
+
+    from chkit import define_config
+
+    config = define_config(
+        {
+            "schema": "./src/db/schema/**/*.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": os.environ.get("CLICKHOUSE_URL", "http://localhost:8123"),
+                "username": os.environ.get("CLICKHOUSE_USER", "default"),
+                "password": os.environ.get("CLICKHOUSE_PASSWORD", ""),
+                "database": os.environ.get("CLICKHOUSE_DB", "default"),
+            },
+        }
+    )
+    ```
+  </TabItem>
+</Tabs>
+
+## Cluster mode (`ON CLUSTER`)
+
+For self-managed multi-node ClickHouse clusters, set `clickhouse.cluster` to the cluster name from your server's `remote_servers` config:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    clickhouse: {
+      url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
+      password: process.env.CLICKHOUSE_PASSWORD ?? '',
+      database: 'default',
+      cluster: 'my_cluster',
+    },
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    "clickhouse": {
+        "url": os.environ.get("CLICKHOUSE_URL", "http://localhost:8123"),
+        "password": os.environ.get("CLICKHOUSE_PASSWORD", ""),
+        "database": "default",
+        "cluster": "my_cluster",
+    },
+    ```
+  </TabItem>
+</Tabs>
+
+When `cluster` is set, chkit:
+
+- emits every generated DDL statement with an `ON CLUSTER <name>` clause, so `generate` bakes it into the migration files and `migrate` propagates each change to all nodes via ClickHouse's distributed DDL queue, and
+- creates its migration journal (`_chkit_migrations`) as a `ReplicatedReplacingMergeTree`, keeping applied-migration history consistent across every node — so running `migrate` against a load-balanced endpoint never re-applies migrations.
+
+chkit does **not** rewrite your table engines: declare `ReplicatedMergeTree` (or another `Replicated*`/`Shared*` variant) yourself for tables whose data should replicate. Empty-argument engines (e.g. `ENGINE = ReplicatedMergeTree`) are recommended so the server's `default_replica_path` supplies a collision-free Keeper path, which also keeps drop-and-recreate safe.
+
+Cluster mode expects the standard `{shard}` and `{replica}` macros on every node (`<macros><shard>…</shard><replica>…</replica></macros>` in each server's configuration) — the journal's replicated engine interpolates both. Standard cluster layouts, including replica-only setups (`shard: 1`), define them already.
+
+Leave `cluster` unset for single-node servers, ClickHouse Cloud, or ObsessionDB, where replication is automatic (SharedMergeTree) and `ON CLUSTER` is unnecessary. The value accepts an identifier (`my_cluster`) or a macro (`{cluster}`) when your nodes define one.
+
+## User profile config fallback
+
+Project-scoped commands (`generate`, `migrate`, `status`, `drift`, `check`, `codegen`, `pull`) always require a project config in the working directory.
+
+[`chkit query`](/cli/query/) is the exception: when no project config is found, chkit falls back to a user-profile config at `~/.config/chkit/config.ts` (`config.py` in Python; honoring `XDG_CONFIG_HOME`). This lets ad-hoc queries run from any directory. If ObsessionDB credentials are present (`~/.config/chkit/credentials.json`), chkit synthesizes a minimal query-only config automatically, so `chkit query` works after `chkit obsessiondb login` without a local config file at all.

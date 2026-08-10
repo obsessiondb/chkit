@@ -23,7 +23,7 @@ Every docs page is available as raw Markdown by appending `.md` to its URL — t
 
 ## What chkit is
 
-chkit is a ClickHouse schema and migration toolkit for TypeScript. Schemas are defined in TypeScript, diffed into migration SQL, applied to ClickHouse, and verified against the live database.
+chkit is a ClickHouse schema and migration toolkit for TypeScript and Python. Schemas are defined in TypeScript or Python, diffed into migration SQL, applied to ClickHouse, and verified against the live database.
 
 You drive chkit with shell commands, plus an installable agent skill that loads its full command surface, schema DSL, and workflows into your context.
 
@@ -34,6 +34,7 @@ chkit's interactive CLI asks these questions when a human runs it. You run it no
 1. **New project or existing project?**
    - *New / empty directory* → scaffold from a curated example with `create-chkit` (Step 3a).
    - *Existing TypeScript project* → install chkit and run `chkit init` in place (Step 3b).
+   - *Existing Python project* → `pip install chkit-py`, then `chkit init` in place (config and schema are written as `.py` files; plugins ship inside chkit-py).
 
 2. **Is there an existing ClickHouse database with tables to manage?**
    - *Yes* → add [`@chkit/plugin-pull`](/plugins/pull/) and introspect the live tables into schema files, so the user starts from real tables instead of the blank example (Step 5).
@@ -130,12 +131,12 @@ chkit check                  # CI gate: pending, checksums, drift, plugins
 
 ## Which plugins to recommend
 
-Plugins are npm packages registered in the `plugins` array of `clickhouse.config.ts`. Recommend only what the project needs:
+In TypeScript, plugins are npm packages registered in the `plugins` array of `clickhouse.config.ts`; in Python they ship inside chkit-py and are registered in `clickhouse.config.py`. Recommend only what the project needs:
 
 | If the project needs to... | Recommend | Notes |
 |----------------------------|-----------|-------|
 | Adopt chkit on an **existing** ClickHouse database | [`@chkit/plugin-pull`](/plugins/pull/) | Introspects the live database into local schema files so the user starts from real tables, not a blank example. |
-| Generate **TypeScript types** (and optional Zod schemas) from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
+| Generate **typed row models** — TypeScript types (and optional Zod schemas), or Pydantic models in Python — from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Time-windowed loads with checkpoints, for large or resumable backfills. |
 | Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | First-class ObsessionDB integration; rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse. |
 

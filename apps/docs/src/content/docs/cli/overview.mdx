@@ -8,7 +8,7 @@ sidebar:
 import { Image } from 'astro:assets';
 import commandConnections from '../../../assets/command-connections.png';
 
-The `chkit` CLI manages ClickHouse schemas, migrations, drift detection, and CI checks from the command line. It follows a workflow-oriented design: define your schema in TypeScript, generate migrations, apply them, and verify everything stays in sync.
+The `chkit` CLI manages ClickHouse schemas, migrations, drift detection, and CI checks from the command line. It follows a workflow-oriented design: define your schema in TypeScript or Python, generate migrations, apply them, and verify everything stays in sync.
 
 ## Commands
 
@@ -21,8 +21,8 @@ The `chkit` CLI manages ClickHouse schemas, migrations, drift detection, and CI 
 | [`chkit drift`](/cli/drift/) | Compare snapshot against live ClickHouse and report differences |
 | [`chkit check`](/cli/check/) | Run policy checks for CI gates (pending, checksums, drift, plugins) |
 | [`chkit query`](/cli/query/) | Run an ad-hoc SQL query against the configured target |
-| [`chkit pull`](/cli/pull/) | Introspect live ClickHouse and generate a TypeScript schema file |
-| [`chkit codegen`](/cli/codegen/) | Generate TypeScript types from schema definitions |
+| [`chkit pull`](/cli/pull/) | Introspect live ClickHouse and generate a schema file |
+| [`chkit codegen`](/cli/codegen/) | Generate typed row models from schema definitions |
 | [`chkit plugin`](/cli/plugin/) | List or run plugin commands |
 
 ## Connection requirements
@@ -51,7 +51,7 @@ These flags are available on every command that loads a config file:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--config <path>` | string | `clickhouse.config.ts` | Path to the chkit config file |
+| `--config <path>` | string | `clickhouse.config.ts` / `clickhouse.config.py` | Path to the chkit config file |
 | `--json` | boolean | `false` | Emit machine-readable JSON output |
 | `--table <selector>` | string | — | Narrow some commands to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`). Effect varies per command — see note below |
 | `--help` | boolean | — | Show help text |

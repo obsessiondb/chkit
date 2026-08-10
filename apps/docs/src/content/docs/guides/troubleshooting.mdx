@@ -1,0 +1,104 @@
+---
+title: Troubleshooting
+description: Common chkit errors mapped to their causes and fixes — missing dependencies, connection and auth failures, rejected migrations, blocked destructive operations, and drift.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A reference for the errors you are most likely to hit when running chkit, what causes each, and how to fix it. Errors are grouped by the stage where they surface: loading the project, connecting to ClickHouse, and running migrations.
+
+## Quick reference
+
+| Error message contains | Cause | Fix |
+|------------------------|-------|-----|
+| `could not load its dependencies: cannot find "@chkit/core"` | Dependencies not installed yet | Run `bun install` (or `npm`/`pnpm install`) in the project |
+| `Unknown file extension ".ts"` | Old chkit that could not load `.ts` configs under Node | Upgrade chkit — recent versions bundle a TypeScript loader |
+| `Authentication failed for user "..."` | Wrong `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | Check the credentials in your environment |
+| `Could not connect to ClickHouse at ... (connection refused)` | Nothing listening at the URL | Confirm the server is running and `CLICKHOUSE_URL` host/port are correct |
+| `Could not connect to ClickHouse at ... (host not found)` | Typo'd or unresolvable host | Check the host in `CLICKHOUSE_URL` |
+| `Unknown data type family: ...` | A migration references an invalid ClickHouse type | Fix the column type in the schema/migration and regenerate |
+| `Blocked destructive migration execution` (exit code 3) | A `risk=danger` operation in non-interactive mode | Review, then re-run with `--allow-destructive` |
+| `Checksum mismatch detected on applied migrations` (exit code 1) | A migration file was edited after being applied | Restore the original file, or apply a new forward migration |
+| `extra_object` entries in `drift` / `check` | Tables chkit does not manage exist in the database | Expected on shared databases; only fails CI if you opt into `check.failOnExtraObjects` |
+
+## Project loading
+
+### `could not load its dependencies: cannot find "@chkit/core"`
+
+The config (`clickhouse.config.ts`) and your schema files import `@chkit/core`, but it is not installed yet. This commonly happens when you run a command immediately after `chkit init`, before installing.
+
+Install the dependencies in the project directory:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d chkit @chkit/core
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install chkit-py
+    ```
+    The Python equivalent of this error is a `ModuleNotFoundError: No module named 'chkit'` from your schema files — same cause, same fix.
+  </TabItem>
+</Tabs>
+
+### `Unknown file extension ".ts"`
+
+Older chkit versions could not load a TypeScript config under plain Node. Recent versions bundle a loader, so the fix is to upgrade:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d chkit@latest
+    ```
+    Under Bun this never occurred; under Node it now works the same way.
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install --upgrade chkit-py
+    ```
+    This error is TypeScript-specific; Python configs (`clickhouse.config.py`) are plain modules and never hit it.
+  </TabItem>
+</Tabs>
+
+## Connecting to ClickHouse
+
+### `Authentication failed for user "<user>" at <url>`
+
+`CLICKHOUSE_USER` or `CLICKHOUSE_PASSWORD` is wrong. chkit collapses the raw ClickHouse auth blurb (Cloud reset URLs, server file paths) into this single line. Verify the credentials your environment exports.
+
+### `Could not connect to ClickHouse at <url> (<reason>)`
+
+The endpoint is unreachable. The reason narrows it down:
+
+- **connection refused** — nothing is listening on that host/port. Confirm the server is up and the port is right.
+- **host not found** — the host does not resolve. Check for a typo in `CLICKHOUSE_URL`.
+- **connection timed out** / **host unreachable** — a network or firewall issue between you and the server.
+
+If `CLICKHOUSE_URL` is unset, chkit falls back to `http://localhost:8123`; the message says so when that is what happened.
+
+## Running migrations
+
+### `Unknown data type family: <type>`
+
+ClickHouse rejected a statement because a column type is not valid (for example a typo like `NotARealType`). Fix the type in the schema definition, regenerate the migration, and re-apply.
+
+### `Blocked destructive migration execution` (exit code 3)
+
+A migration contains a destructive operation (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DETACH`, …) and you are running non-interactively without approval. After reviewing the plan, re-run with `--allow-destructive` (or set `safety.allowDestructive: true` in config). See [`chkit migrate`](/cli/migrate/#destructive-operation-safety).
+
+### `Checksum mismatch detected on applied migrations` (exit code 1)
+
+A migration file changed on disk after it was already applied — chkit verifies SHA-256 checksums before applying. Restore the original file content, or, if the change is intentional, write a new forward migration instead of editing history.
+
+### `extra_object` reported by `drift` / `check`
+
+On a shared or pre-existing database, every table chkit does not manage is reported as an `extra_object`. By default these are informational and do **not** fail `check`. They only flip the gate to failing if you opt in with `check.failOnExtraObjects: true`. See [`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/).
+
+## Related pages
+
+- [Configuration overview](/configuration/overview/) — config fields and environment variables
+- [`chkit migrate`](/cli/migrate/) — applying migrations and destructive-operation safety
+- [`chkit status`](/cli/status/) — inspecting migration state
+- [CI/CD Integration](/guides/ci-cd/) — running chkit unattended
