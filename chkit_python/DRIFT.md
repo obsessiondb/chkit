@@ -1104,3 +1104,151 @@ N/A.
 | Round-2 average | 9.7 |
 | Main-sync (#M1-M3) | 10/10 |
 | **Overall combined** | **~9.8** |
+
+---
+
+## Main sync 2026-07-02 — Category C: ClickHouse ON CLUSTER support
+
+TS commit ``6b87e6d`` — ~1,225 insertions across core + cli + tests. This
+port covers the behavioral contract; the docker-based live 2-node cluster
+e2e is deferred (see "Deferred" below).
+
+### #C1 `apply_on_cluster_to_plan` — PORTED
+
+- **TS:** new `packages/core/src/on-cluster.ts` (127 LoC). Two anchor
+  tables — after-object placement (`CREATE TABLE`, `ALTER TABLE`,
+  `DROP TABLE`, `CREATE VIEW`, `CREATE MATERIALIZED VIEW`,
+  `CREATE DATABASE`, `CREATE DICTIONARY`, `CREATE OR REPLACE
+  DICTIONARY`, `DROP VIEW`, `DROP DICTIONARY`, plus forward-compat
+  `CREATE FUNCTION`, `DROP DATABASE`, `ATTACH/DETACH/TRUNCATE/OPTIMIZE
+  TABLE`) and trailing-anchor placement (`RENAME TABLE`, `RENAME
+  DICTIONARY`, `RENAME DATABASE`, `EXCHANGE TABLES`, `EXCHANGE
+  DICTIONARIES`). Skips optional `IF [NOT] EXISTS` guard when locating
+  the object reference. Positional idempotency check — user COMMENTs or
+  view bodies containing "on cluster" cannot suppress injection.
+- **Python:** new
+  [`src/chkit/core/on_cluster.py`](src/chkit/core/on_cluster.py). Same
+  two anchor tables, same regex semantics. Trailing loop runs BEFORE
+  per-object loop (matches TS). `_ON_CLUSTER_AT_REF` is matched against
+  the slice AFTER the object reference — not the whole statement.
+  `_ON_CLUSTER_AT_END` uses `.search()` (end-anchored only). Frozen
+  `MigrationPlan`/`MigrationOperation`/`ColumnRenameSuggestion` are
+  copied via `model_copy(update=...)` — all non-SQL fields preserved.
+- Re-exported from `chkit.core` and top-level `chkit`.
+
+### #C2 `clickhouse.cluster` config field + validation — PORTED
+
+- **TS:** new optional `cluster?: string` on
+  `ChxUserClickHouseConfig`/`ChxResolvedClickHouseConfig`. Validator
+  regex `^([A-Za-z_][A-Za-z0-9_.-]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`
+  accepts identifiers with dashes/dots (e.g. `prod-eu-1`,
+  `eu.west.main`) and `{cluster}`-style macros. Rejected on typos like
+  quotes/whitespace so interpolation into `ON CLUSTER '<name>'` is
+  injection-safe.
+- **Python:** added `cluster: str | None = None` to both models AFTER
+  `secure` for canonical serialization parity. New module-private
+  `_CLUSTER_NAME_PATTERN` + `_assert_valid_cluster_name` in
+  [`model.py`](src/chkit/core/model.py). Uses `re.fullmatch` (not
+  `re.match`) so a multi-line value like `"prod\nDROP TABLE x"` cannot
+  slip past a start-only anchor. Error message contains the literal
+  `Invalid clickhouse.cluster` prefix so the TS-parity test regex
+  matches. Falsy check in `resolve_config` — empty string or `None`
+  stays `None` (validator not run), matching TS.
+
+### #C3 Journal store cluster mode — PORTED
+
+- **TS:** `createJournalStore(db, cluster?)` in
+  `packages/cli/src/runtime/journal-store.ts`. When cluster set:
+  engine becomes
+  `ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/chkit_journal',
+  '{shard}_{replica}', applied_at)` — no-`{shard}` Keeper path (one
+  cluster-wide replication group), `{uuid}` for drop-recreate safety,
+  `{shard}_{replica}` unique cluster-wide for multi-shard layouts. CREATE
+  TABLE + both ALTER TABLE ADD COLUMN statements carry `ON CLUSTER
+  '<name>'`. Non-cluster mode unchanged.
+- **Python:** [`JournalStore.__init__`](src/chkit/cli/journal_store.py)
+  now takes optional `cluster: str | None`. `_on_cluster` cached via
+  `on_cluster_clause(cluster)`. `_create_table_sql` injects the clause
+  and switches engine. `_ensure_schema_upgraded` stamps both ALTERs.
+- Threaded through 3 call sites (Python has one fewer than TS —
+  `generate` does not touch the journal here): `migrate.py`,
+  `status.py`, `check.py` each pass
+  `cluster=config.clickhouse.cluster if config.clickhouse else None`.
+
+### #C4 `generate` command integration — PORTED
+
+- **TS:** `packages/cli/src/commands/generate/command.ts` calls
+  `applyOnClusterToPlan(plan, config.clickhouse?.cluster)` as the final
+  plan transform, AFTER renames + plugin `on_plan_created` + scope
+  filtering, so plugin-injected SQL is also covered.
+- **Python:** [`generate.py`](src/chkit/cli/commands/generate.py)
+  calls `apply_on_cluster_to_plan(plan, ...)` immediately after
+  `plugin_runtime.run_on_plan_created(...)`, before the empty-plan
+  check. `migrate` does NOT re-run this — the clause is baked into the
+  migration file at generate time and re-executed verbatim.
+
+### Tests added
+
+- [`tests/test_on_cluster.py`](tests/test_on_cluster.py) — 19 tests,
+  case-by-case parity with TS `on-cluster.test.ts` (10 injector cases
+  + 3 clause cases + 5 config-validation cases + 1 multi-line regression
+  guard for the `re.fullmatch` vs `re.match` fix).
+- [`tests/test_journal_store_cluster.py`](tests/test_journal_store_cluster.py)
+  — 5 tests. CREATE TABLE + both ALTER TABLE stamping in cluster mode,
+  plain-engine fallback when cluster absent, `{cluster}` macro form.
+- [`tests/test_on_cluster_generate_e2e.py`](tests/test_on_cluster_generate_e2e.py)
+  — 3 tests. Runs the actual `chkit generate` CLI (JSON dryrun and file
+  write) with `clickhouse.cluster` set/unset; asserts every DDL line
+  in the emitted migration carries or omits the clause accordingly.
+
+### Deferred (out of scope for this port)
+
+- **Live cluster e2e** — TS ships
+  `packages/cli/test/cluster.e2e.test.ts` +
+  `cluster-2shard.e2e.test.ts` against docker fixtures under
+  `test/cluster/`. Behavior parity is covered by the unit + integration
+  tests above; the docker fixtures live in the TS repo and are not
+  duplicated here. When live cluster testing infrastructure lands on
+  the Python side, port those e2es as-is.
+
+### Design divergences (justified)
+
+- **Test dictionary op types:** TS `on-cluster.test.ts` uses
+  `create_dictionary`/`drop_dictionary`/`rename_dictionary` operation
+  types. Python `MigrationOperationType` does not yet include the
+  Dictionary primitive (TS `65c90d6`, tracked as Category B port). The
+  injector only inspects `sql`, not `type`, so the Python tests use
+  `create_table`/`drop_table`/`alter_table_rename_table` for the
+  dictionary SQL — behavioral coverage is unchanged and the tests can be
+  retyped verbatim once Dictionary lands.
+- **Debug log:** TS emits a `debug('journal', ...)` line noting the
+  `CHKIT_JOURNAL_TABLE` env override and cluster suffix. Python
+  `journal_store.py` has no debug logging surface at all (pre-existing);
+  cluster mode adds no new log emission.
+
+### Follow-up observed during Category C (not fixed here)
+
+- **`generate.py` plan-transform ordering divergence** — TS order is
+  `run_on_plan_created` → `filter_plan_by_table_scope` →
+  `apply_on_cluster_to_plan`. Python order is
+  `filter_plan_by_table_scope` → `run_on_plan_created` →
+  `apply_on_cluster_to_plan`. Predates this port (established in commit
+  `ad94a16`); noticed by the Category C reviewer. Consequence: in
+  Python, plugin-added SQL touching out-of-scope tables is not filtered
+  out before ON CLUSTER stamping. Out of scope for this port; track as
+  a separate parity fix.
+
+### Not ported this pass (out of Category C scope)
+
+Other main-branch commits since 2026-06-29 that this session did NOT
+touch — tracked for the next port cycle:
+
+- `65c90d6` — Dictionary primitive (Category B, ~500 LoC).
+- `c1d8d0d` — `chkit backfill submit` (Category D, obsessiondb-scoped).
+- `8296b8a`, `3f1db03`, `5a8d805` — Category A bug-fix trio
+  (pull/drift table clauses, index-only projections, function
+  expressions in PK/order-by).
+- `f85f568`, `3f9a246`, `9ad23f9` — Phase-2 backfill engine changes
+  (deferred with the rest of Phase 2).
+- `3c008f4`, `9d9c06e`, `b501f5d` — TS-only refactors with Python
+  parity already in place.
