@@ -1598,6 +1598,34 @@ Accepted divergences (deliberate, Python-side):
 - Missing-column coercion yields 0 where TS yields NaN (unreachable
   with the fixed introspection SQL).
 
+Accepted theoretical/cosmetic edge cases (reviewer-flagged, declined —
+no realistic input reaches them; listed so the decision is on record):
+
+- NaN propagation: malformed `system.parts` metadata (NaN
+  `bytesUncompressed`) raises `ValueError` at `math.ceil`/`floor`
+  where TS limps through `Array.from({length: NaN})` → `[]` and
+  degrades later. Failing earlier and louder is preferred.
+- Console URL: a non-special scheme (`foo://console-api.x`) returns
+  the rewritten URL where TS `URL.origin` returns the literal string
+  `"null"` (faithfully porting that would replicate a bug); JS
+  `encodeURIComponent` leaves `!'()*` raw where Python's `quote`
+  percent-encodes them — slugs/job ids are `[a-z0-9-]` in practice.
+- `extract_schema_time_column` returns `None` for a non-string
+  `plugins.backfill.timeColumn` where TS passes the malformed raw
+  value through.
+- Non-UTF-8 binary string sort keys may deliver different Python
+  strings than the TS JSON transport (clickhouse-connect decodes
+  native UTF-8; TS reads JSON-escaped strings) — transport-level,
+  outside the chunking modules' control.
+- `backfill()` returns the `ChxPlugin` itself; TS returns a
+  `{plugin, name, enabled, options}` registration wrapper — the
+  Python plugin-framework registration model (pre-existing, applies
+  to every plugin, not backfill-specific).
+- `sdk.py` does not re-export a logging library (TS sdk re-exports
+  `@logtape/logtape`); stdlib `logging` is the platform equivalent.
+- `list_plan_ids`: a file literally named `.json` yields id `""` in
+  TS and is skipped here; symlinked plan files count here, not in TS.
+
 ### Tests
 
 1:1 ports (TS case-for-case): `test_backfill_chunking_sql.py` (34),
