@@ -51,49 +51,50 @@ default. Set `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`,
 
 ## TypeScript parity
 
-This port matches the upstream TypeScript chkit **1:1 for the core surface**:
-the schema DSL, the canonicalization + diff + planner pipeline, the codec
-parser/renderer, validation, and the five CLI commands above. The journal
-lives in the same ClickHouse `_chkit_migrations` table as the TS version, so
-both implementations can share a database without divergence.
+This port matches the upstream TypeScript chkit on every user-facing
+surface: schema DSL, canonicalization + diff + planner pipeline, codec
+parser/renderer, validation, all CLI commands, the plugin runtime + its
+hooks, and every first-party plugin. The journal lives in the same
+ClickHouse `_chkit_migrations` table as the TS version, so both
+implementations can share a database without divergence.
 
-**What is 1:1 today (covered by 271 ported tests + manual E2E against
-ClickHouse 24.8):**
+**Covered — 1:1 with TS:**
 
-- `chkit.core` model, canonicalization, codec, planner, validation,
-  snapshot, SQL rendering.
-- `chkit init` — same scaffold filenames, schema location, config shape,
-  next-steps message as TS.
-- `chkit generate` — same SQL header format (`chkit-migration-format`,
-  `cli-version`, etc.), per-operation comments, `safe_name`-based filenames,
-  collision suffixes, `--name` / `--migration-id` / `--dryrun` flags.
-- `chkit migrate` — plan-by-default, `--apply` / `--execute`,
+- `chkit.core` — model, canonicalization, codec, planner, validation,
+  snapshot, SQL rendering, `apply_on_cluster_to_plan`.
+- All CLI commands: `init`, `generate`, `migrate`, `status`, `check`,
+  `drift` (with live-DB compare), `pull`, `query`, `plugin`. Codegen
+  runs automatically after `chkit generate` when the plugin is
+  registered (via the `on_plan_created` hook).
+- Flag surface — `--rename-table` / `--rename-column`, `--table
+  <selector>` on generate/migrate/status/check/drift, `--dryrun` /
+  `--json` / `--config`, `--strict`, `--apply` / `--execute` /
   `--allow-destructive` (exit code 3 when blocked).
-- `chkit status` — same output text, same fields in `--json`, same
-  database-missing warning.
-- `chkit check --strict` — same policy gates (`failOnPending`,
-  `failOnChecksumMismatch`, `failOnDrift`).
-- `chkit drift` — snapshot vs current-schema diff with TS-shape output.
-- Journal table schema (`_chkit_migrations`,
-  `ReplacingMergeTree(applied_at) ORDER BY (name)`), `CHKIT_JOURNAL_TABLE`
-  override, checksum mismatch detection.
+- Plugin runtime + all hooks (`on_config_loaded`, `on_schema_loaded`,
+  `on_plan_created`, `on_before_apply`, `on_after_apply`, `on_check`,
+  `on_check_report`, `on_before_plugin_command`, `on_pull_introspect`,
+  `on_init`, `on_complete`).
+- First-party plugins: `chkit_plugin_codegen` (Pydantic model
+  generator), `chkit_plugin_obsessiondb` (auth, service management,
+  remote executor, backfill routing, `Shared*`-engine rewrites),
+  `chkit_plugin_backfill` (local-backfill scaffold — Phase-2 execution
+  engine deferred).
+- Journal — `_chkit_migrations` table (schema + `CHKIT_JOURNAL_TABLE`
+  override + checksum mismatch detection), per-operation async
+  tracking, `INSERT race condition` retry, ON CLUSTER +
+  `ReplicatedReplacingMergeTree` engine when cluster mode is enabled.
+- `ON CLUSTER <name>` support — set `clickhouse.cluster` and every
+  generated DDL statement is stamped as a final plan post-pass.
 
-**What is intentionally out of scope for this first base** — these are
-recorded in [PARITY.md](PARITY.md) and tracked for future releases:
+**Not ported by design** — Python convention or ecosystem difference:
 
-- Plugins (`@chkit/plugin-codegen`, `plugin-pull`, `plugin-backfill`,
-  `plugin-obsessiondb`) and the plugin runtime.
-- `chkit query` and `chkit plugin` commands.
-- `--table` scope filter on `generate` / `migrate` / `check` / `drift`.
-- Rename mappings (`--rename-table`, `--rename-column`).
-- Per-operation async tracking in the journal.
-- Live-DB introspection in `drift` (column diff, settings diff, engine
-  mismatch detection).
-- Interactive confirm prompts in `migrate`.
-- User profile config and ObsessionDB credentials layer.
+- `chkit skills` proxy (no `npx` analogue), `create-chkit` separate
+  scaffolder (use `chkit init --example <name>` instead), `deps.ts`
+  auto-install (Python convention is explicit `pip install`),
+  `internal-plugins/skill-hint` AI-agent detection.
 
-See [PARITY.md](PARITY.md) for the full TS-vs-Python matrix and the rationale
-behind each deferral.
+See [DRIFT.md](DRIFT.md) for the append-only decision log covering every
+port choice, known limitation, and won't-port item.
 
 ## Development
 
