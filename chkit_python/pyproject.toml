@@ -1,0 +1,140 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chkit-py"
+version = "0.2.0"
+description = "ClickHouse schema management and migrations — define schemas in Python, diff them into safe SQL migrations"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "ObsessionDB" }]
+keywords = ["clickhouse", "schema", "migrations", "database", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Code Generators",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.9,<3",
+    "typer>=0.15,<1",
+    "clickhouse-connect>=0.8,<1",
+    "rich>=13.9,<14",
+    "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.13",
+    "pyright>=1.1.390",
+    "ruff>=0.8",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-httpx>=0.30",
+]
+publish = [
+    "build>=1.2",
+    "twine>=5.1",
+]
+
+[project.scripts]
+chkit = "chkit.cli.main:app"
+
+[project.urls]
+Homepage = "https://chkit.obsessiondb.com"
+Documentation = "https://chkit.obsessiondb.com/python/overview/"
+Repository = "https://github.com/obsessiondb/chkit"
+Issues = "https://github.com/obsessiondb/chkit/issues"
+Changelog = "https://github.com/obsessiondb/chkit/blob/main/chkit_python/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/chkit",
+    "src/chkit_plugin_backfill",
+    "src/chkit_plugin_codegen",
+    "src/chkit_plugin_obsessiondb",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_unimported = true
+disallow_any_explicit = false
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+strict_optional = true
+strict_equality = true
+extra_checks = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "error"
+reportImplicitStringConcatenation = "warning"
+reportImportCycles = "error"
+reportShadowedImports = "error"
+reportUnnecessaryTypeIgnoreComment = "warning"
+include = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "ANN", "TID",
+    "RET", "ARG", "PL", "PERF", "RUF", "PT", "PIE", "ERA", "FBT",
+]
+ignore = [
+    "ANN401",   # Allow Any in narrow internal cases
+    "PLR0913",  # Too many arguments - common for data models
+    "FBT001",   # Boolean positional arg (CLI flags etc)
+    "FBT002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are exempt from arg-count/magic-value/annotation noise, and from
+# UPPERCASE acronyms in function names (we mirror TS describe-block names).
+"tests/**" = ["PLR2004", "ANN", "ARG", "B009", "N802", "E501", "PERF401"]
+# Parser/planner code is necessarily branchy: exhaustive discriminated-union
+# dispatch and per-operation-type branches are clearer as flat code than as
+# data-driven dispatch tables. PERF401 prefers comprehensions over append loops
+# but the imperative style is explicit and intentional here.
+"src/chkit/core/codec.py" = ["PLR0911", "PLR0912", "PLR2004", "E501"]
+"src/chkit/core/planner.py" = ["PLR0911", "PLR0912", "PERF401"]
+"src/chkit/core/model.py" = ["E501", "PLC0415"]
+"src/chkit/core/flags.py" = ["PLR0912"]
+# CLI commands necessarily branch on flag combinations + output mode.
+"src/chkit/cli/commands/migrate.py" = ["PLR0912", "PLR0915"]
+# Imperative ClickHouse interactions: broad exception catching is on purpose
+# (every error path falls through to the "database missing" check).
+"src/chkit/cli/journal_store.py" = ["BLE001"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]

@@ -1,0 +1,66 @@
+name: Publish chkit-py to PyPI
+
+# Publishes on tags like `chkit-py-v0.2.0` via PyPI trusted publishing (OIDC):
+# no API tokens stored in the repo. One-time setup on pypi.org: project
+# `chkit-py` → Publishing → add a trusted publisher for
+# obsessiondb/chkit with workflow `publish-chkit-py.yml`.
+on:
+  push:
+    tags:
+      - "chkit-py-v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chkit_python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches package version
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          tag="${GITHUB_REF_NAME#chkit-py-v}"
+          if [ "$version" != "$tag" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject version $version" >&2
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Smoke-test the wheel
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install dist/*.whl
+          /tmp/wheeltest/bin/python -c "import chkit, chkit_plugin_backfill, chkit_plugin_codegen, chkit_plugin_obsessiondb; print(chkit.__version__)"
+          /tmp/wheeltest/bin/chkit --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chkit-py-dist
+          path: chkit_python/dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: chkit-py-dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

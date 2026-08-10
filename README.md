@@ -4,13 +4,13 @@
 
 # chkit
 
-**ClickHouse schema and migration CLI for TypeScript projects.**
+**ClickHouse schema and migration toolkit for TypeScript and Python.**
 
 [![npm version](https://img.shields.io/npm/v/chkit?label=npm)](https://www.npmjs.com/package/chkit)
 [![CI](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml/badge.svg)](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-chkit.obsessiondb.com-blue)](https://chkit.obsessiondb.com)
 
-Define your ClickHouse tables, views, and materialized views in TypeScript. chkit diffs your schema, generates migration SQL, applies it safely, and keeps your dev and production databases in sync -- all from the command line.
+Define your ClickHouse tables, views, materialized views, and dictionaries in TypeScript or Python. chkit diffs your schema, generates migration SQL, applies it safely, and keeps your dev and production databases in sync -- all from the command line.
 
 > **Status: beta.** chkit powers production workloads and the CLI surface and schema DSL are stable. We may still make small breaking changes to UX and internal APIs before 1.0.
 
@@ -115,6 +115,10 @@ See the [configuration docs](https://chkit.obsessiondb.com/configuration/overvie
 | [`@chkit/plugin-codegen`](packages/plugin-codegen) | Codegen plugin for the CLI |
 | [`@chkit/plugin-backfill`](packages/plugin-backfill) | Backfill plugin for data migrations |
 | [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB integration: auto-rewrite `Shared` engines for ClickHouse targets |
+
+## Python
+
+chkit is also available for Python as [`chkit-py`](https://pypi.org/project/chkit-py/) (`pip install chkit-py`) — same CLI, same schema semantics, with config and schema files written as `.py`. The port lives in [`chkit_python/`](chkit_python).
 
 ## Documentation
 
