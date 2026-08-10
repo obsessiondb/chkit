@@ -66,6 +66,7 @@ from chkit.core.model import (
     table,
     view,
 )
+from chkit.core.on_cluster import apply_on_cluster_to_plan, on_cluster_clause
 from chkit.core.planner import plan_diff
 from chkit.core.plugin_error import wrap_plugin_run
 from chkit.core.schema_loader import (
@@ -120,6 +121,7 @@ __all__ = [
     "ValidationIssue",
     "ValidationIssueCode",
     "ViewDefinition",
+    "apply_on_cluster_to_plan",
     "assert_valid_definitions",
     "canonicalize_codec",
     "canonicalize_definition",
@@ -143,6 +145,7 @@ __all__ = [
     "normalize_engine",
     "normalize_key_columns",
     "normalize_sql_fragment",
+    "on_cluster_clause",
     "parse_codec",
     "parse_flags",
     "plan_diff",

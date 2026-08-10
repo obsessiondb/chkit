@@ -8,6 +8,7 @@ guarantee that round-tripping a definition produces an equal object.
 from __future__ import annotations
 
 import os
+import re
 from typing import Annotated, Any, Final, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -366,6 +367,13 @@ class ChxUserClickHouseConfig(_StrictModel):
     password: str | None = None
     database: str | None = None
     secure: bool | None = None
+    # Cluster name for self-managed multi-node clusters. When set, chkit emits
+    # ``ON CLUSTER <name>`` on generated DDL and stores its migration journal
+    # in a replicated engine. Leave unset for single-node, ClickHouse Cloud, or
+    # ObsessionDB (SharedMergeTree auto-replicates — ``ON CLUSTER`` is
+    # unnecessary). Accepts an identifier (e.g. ``"my_cluster"``) or a macro
+    # (e.g. ``"{cluster}"``).
+    cluster: str | None = None
 
 
 class ChxResolvedClickHouseConfig(_StrictModel):
@@ -374,6 +382,29 @@ class ChxResolvedClickHouseConfig(_StrictModel):
     password: str
     database: str
     secure: bool
+    cluster: str | None = None
+
+
+# A cluster name is interpolated into ``ON CLUSTER '<name>'``, so constrain it
+# to the characters legal in a ``remote_servers`` key (an XML element name:
+# letters, digits, ``_``, ``-``, ``.``) or a ``{macro}`` — injection-safe
+# inside the single quotes, while still failing fast on typos like quotes or
+# whitespace. ``re.fullmatch`` is used so a multi-line value like
+# ``"prod\nDROP TABLE x"`` cannot slip past a start-only anchor.
+_CLUSTER_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_.-]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+)
+
+
+def _assert_valid_cluster_name(name: str) -> str:
+    if _CLUSTER_NAME_PATTERN.fullmatch(name) is None:
+        msg = (
+            f'Invalid clickhouse.cluster "{name}". '
+            f'Expected a cluster name (e.g. "my_cluster", "prod-eu-1") '
+            f'or a macro (e.g. "{{cluster}}").'
+        )
+        raise ValueError(msg)
+    return name
 
 
 class ChxUserConfig(_StrictModel):
@@ -743,6 +774,10 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
             password=ch.password if ch.password is not None else "",
             database=ch.database if ch.database is not None else "default",
             secure=ch.secure if ch.secure is not None else False,
+            # Falsy check (matches TS ``config.clickhouse.cluster``) — ``None``
+            # and ``""`` skip validation and stay ``None``, so cluster mode is
+            # opt-in and never engages silently.
+            cluster=_assert_valid_cluster_name(ch.cluster) if ch.cluster else None,
         )
 
     return ChxResolvedConfig(
