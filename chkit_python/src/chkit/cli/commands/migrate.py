@@ -56,6 +56,7 @@ from chkit.cli.table_scope import (
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
+from chkit.core.model import ChxConfigEnv
 from chkit.core.sql_splitter import extract_executable_statements
 from chkit.plugins import (
     ChxOnAfterApplyContext,
@@ -76,7 +77,7 @@ def _collect_destructive_markers_for_pending(
     return out
 
 
-def run(
+def run(  # noqa: PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -115,7 +116,7 @@ def run(
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
 ) -> None:
-    config = load_config(config_path)
+    config = load_config(config_path, ChxConfigEnv(command="migrate"))
     if config.clickhouse is None:
         msg = "clickhouse.config.py must include a `clickhouse` block to migrate."
         raise typer.BadParameter(msg)

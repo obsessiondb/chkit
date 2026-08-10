@@ -41,6 +41,7 @@ from chkit.cli.table_scope import (
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
+from chkit.core.model import ChxConfigEnv
 from chkit.core.planner import plan_diff
 
 
@@ -71,7 +72,7 @@ def run(  # noqa: PLR0912, PLR0915
         ),
     ] = False,
 ) -> None:
-    config = load_config(config_path)
+    config = load_config(config_path, ChxConfigEnv(command="drift"))
     meta_dir = Path(config.meta_dir)
     snapshot = read_snapshot(meta_dir)
     if snapshot is None:
@@ -96,7 +97,7 @@ def run(  # noqa: PLR0912, PLR0915
                 meta_dir=meta_dir,
                 snapshot=snapshot,
                 database=config.clickhouse.database,
-                fail_on_extra_objects=False,
+                fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
             )
 

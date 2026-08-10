@@ -91,6 +91,23 @@ def wait_for_view(client: Any, database: str, view_name: str) -> None:
     _poll(_check)
 
 
+def wait_for_dictionary(client: Any, database: str, dictionary_name: str) -> None:
+    """Poll ``system.dictionaries`` until ``database.dictionary_name`` appears."""
+    sql = (
+        f"SELECT 1 AS x FROM system.dictionaries "
+        f"WHERE database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}'"
+    )
+
+    def _check() -> bool:
+        result = client.query(sql)
+        if len(result.rows) == 0:
+            msg = f"wait_for_dictionary: {database}.{dictionary_name} not yet visible"
+            raise RuntimeError(msg)
+        return True
+
+    _poll(_check)
+
+
 def wait_for_column(
     client: Any, database: str, table_name: str, column_name: str
 ) -> None:
@@ -262,10 +279,14 @@ def _parse_operation_key(
         - ``table:db.t:column:c``
         - ``table:db.t:index:i``
         - ``table:db.t:projection:p``
+        - ``dictionary:db.d``
     """
-    if not key.startswith("table:"):
+    if key.startswith("table:"):
+        rest = key[len("table:") :]
+    elif key.startswith("dictionary:"):
+        rest = key[len("dictionary:") :]
+    else:
         return None
-    rest = key[len("table:") :]
     dot = rest.find(".")
     if dot == -1:
         return None
@@ -298,7 +319,7 @@ def _parse_operation_key(
     return database, table, column, index, projection
 
 
-def wait_for_ddl_propagation(  # noqa: PLR0911
+def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     client: Any, operation_type: str, operation_key: str
 ) -> None:
     """Dispatch the right ``wait_for_*`` based on the operation type + key.
@@ -307,6 +328,8 @@ def wait_for_ddl_propagation(  # noqa: PLR0911
 
     - create_table / alter_rename_table              → wait_for_table
     - create_view / create_materialized_view         → wait_for_view
+    - create_dictionary                               → wait_for_dictionary
+    - drop_dictionary                                 → wait_for_table_absent
     - alter_table_add_column / alter_table_modify_column → wait_for_column
     - alter_table_drop_column                         → wait_for_column_absent
     - drop_table / drop_view / drop_materialized_view → wait_for_table_absent
@@ -328,6 +351,9 @@ def wait_for_ddl_propagation(  # noqa: PLR0911
     if operation_type in {"create_view", "create_materialized_view"}:
         wait_for_view(client, database, table)
         return
+    if operation_type == "create_dictionary":
+        wait_for_dictionary(client, database, table)
+        return
     if operation_type in {"alter_table_add_column", "alter_table_modify_column"}:
         if column is not None:
             wait_for_column(client, database, table, column)
@@ -336,7 +362,12 @@ def wait_for_ddl_propagation(  # noqa: PLR0911
         if column is not None:
             wait_for_column_absent(client, database, table, column)
         return
-    if operation_type in {"drop_table", "drop_view", "drop_materialized_view"}:
+    if operation_type in {
+        "drop_table",
+        "drop_view",
+        "drop_materialized_view",
+        "drop_dictionary",
+    }:
         wait_for_table_absent(client, database, table)
         return
     if operation_type == "alter_table_add_index" and index is not None:

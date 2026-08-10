@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from chkit.cli.config_loader import load_config
 from chkit.cli.config_merge import merge_user_config, plugin_name_of
 from chkit.cli.user_config import (
     USER_CREDENTIALS_FILE,
@@ -16,6 +17,7 @@ from chkit.cli.user_config import (
 )
 from chkit.core.model import (
     ChxCheckConfig,
+    ChxConfigEnv,
     ChxSafetyConfig,
     ChxUserClickHouseConfig,
     ChxUserConfig,
@@ -144,3 +146,23 @@ def test_merge_safety_overlay_overrides() -> None:
     merged = merge_user_config(base, overlay)
     assert merged.safety is not None
     assert merged.safety.allow_destructive is True
+
+
+def test_load_config_supports_function_config(tmp_path: Path) -> None:
+    """TS parity: `config` may be a callable receiving ChxConfigEnv."""
+    config_file = tmp_path / "clickhouse.config.py"
+    config_file.write_text(
+        "from chkit import define_config\n"
+        "config = define_config(\n"
+        "    lambda env: {\n"
+        '        "schema": f"./schema-{env.command or \'none\'}/**/*.py",\n'
+        "    }\n"
+        ")\n",
+        encoding="utf-8",
+    )
+
+    resolved = load_config(config_file, ChxConfigEnv(command="generate"))
+    assert resolved.schema_ == ["./schema-generate/**/*.py"]
+
+    resolved_default = load_config(config_file)
+    assert resolved_default.schema_ == ["./schema-none/**/*.py"]

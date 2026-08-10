@@ -27,6 +27,7 @@ from chkit.core.model import (
     SkipIndexDefinition,
     TableDefinition,
 )
+from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
 
 _MIN_QUOTED_LEN = 2
@@ -275,7 +276,15 @@ def _normalize_index_shape(index: SkipIndexDefinition) -> str:
 
 
 def _normalize_projection_shape(projection: ProjectionDefinition) -> str:
-    return f"query={normalize_sql_fragment(projection.query)}"
+    if is_index_projection(projection):
+        type_text = projection.type.strip() if projection.type is not None else ""
+        return "|".join(
+            [
+                f"index={normalize_projection_index(projection.index or '')}",
+                f"type={type_text}",
+            ]
+        )
+    return f"query={normalize_sql_fragment(projection.query or '')}"
 
 
 def _normalize_clause(value: str | None) -> str:
@@ -327,8 +336,18 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         expected.engine
     ) != _normalize_engine_for_compare(actual.engine)
 
-    expected_pk = _normalize_clause(", ".join(expected.primary_key))
-    actual_pk = _normalize_clause(actual.primary_key)
+    # ClickHouse derives PRIMARY KEY from ORDER BY when it is omitted, then
+    # omits it from SHOW CREATE — so a table with only ORDER BY reports no
+    # primary key. Mirror that on both sides (as canonical.py does for the
+    # schema), else every such table drifts forever (#194).
+    expected_pk = _normalize_clause(
+        ", ".join(expected.primary_key if expected.primary_key else expected.order_by)
+    )
+    # `is not None` (not truthiness) mirrors TS `actual.primaryKey ?? actual.orderBy`:
+    # an empty-string primary key must compare as-is, not fall back.
+    actual_pk = _normalize_clause(
+        actual.primary_key if actual.primary_key is not None else actual.order_by
+    )
     primary_key_mismatch = expected_pk != actual_pk
 
     expected_order_by = _normalize_clause(", ".join(expected.order_by))

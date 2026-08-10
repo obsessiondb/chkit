@@ -49,7 +49,7 @@ from chkit.core.model import (
 )
 from chkit.core.sql_normalizer import normalize_sql_fragment
 
-SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view"]
+SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view", "dictionary"]
 
 __all__ = [
     "IntrospectedTable",
@@ -130,7 +130,9 @@ def infer_schema_kind_from_engine(engine: str) -> SchemaObjectKind | None:
         return "view"
     if engine == "MaterializedView":
         return "materialized_view"
-    if not engine or engine == "Dictionary":
+    if engine == "Dictionary":
+        return "dictionary"
+    if not engine:
         return None
     return "table"
 
@@ -303,7 +305,9 @@ def build_introspected_tables(
                 ),
                 indexes=[normalize_index_from_system_row(i) for i in idx_rows],
                 projections=[
-                    ProjectionDefinition(name=p.name, query=p.query)
+                    ProjectionDefinition(
+                        name=p.name, query=p.query, index=p.index, type=p.type
+                    )
                     for p in parse_projections_from_create_table_query(
                         table_row.create_table_query
                     )

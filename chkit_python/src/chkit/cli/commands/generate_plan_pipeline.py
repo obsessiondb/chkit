@@ -14,6 +14,7 @@ from collections.abc import Sequence
 
 from chkit.cli.commands.generate_rename_mappings import (
     ColumnRenameMapping,
+    DictionaryRenameMapping,
     TableRenameMapping,
 )
 from chkit.core.model import (
@@ -136,6 +137,63 @@ def apply_explicit_table_renames(
     )
 
 
+def apply_explicit_dictionary_renames(
+    plan: MigrationPlan,
+    mappings: Sequence[DictionaryRenameMapping],
+) -> MigrationPlan:
+    """Replace pairs of (drop-old, create-new) with a RENAME DICTIONARY statement."""
+    if not mappings:
+        return plan
+
+    keys_to_remove: set[str] = set()
+    extra_operations: list[MigrationOperation] = []
+    create_database_keys = {
+        op.key for op in plan.operations if op.type == "create_database"
+    }
+
+    for mapping in mappings:
+        keys_to_remove.add(f"dictionary:{mapping.old_database}.{mapping.old_name}")
+        keys_to_remove.add(f"dictionary:{mapping.new_database}.{mapping.new_name}")
+
+        if mapping.old_database != mapping.new_database:
+            db_key = f"database:{mapping.new_database}"
+            if db_key not in create_database_keys:
+                extra_operations.append(
+                    MigrationOperation(
+                        type="create_database",
+                        key=db_key,
+                        risk="safe",
+                        sql=f"CREATE DATABASE IF NOT EXISTS {mapping.new_database};",
+                    )
+                )
+                create_database_keys.add(db_key)
+
+        extra_operations.append(
+            MigrationOperation(
+                type="rename_dictionary",
+                key=(
+                    f"dictionary:{mapping.new_database}.{mapping.new_name}"
+                    f":rename_dictionary"
+                ),
+                risk="caution",
+                sql=(
+                    f"RENAME DICTIONARY IF EXISTS "
+                    f"{mapping.old_database}.{mapping.old_name} TO "
+                    f"{mapping.new_database}.{mapping.new_name};"
+                ),
+            )
+        )
+
+    kept = [op for op in plan.operations if op.key not in keys_to_remove]
+    operations = _sorted(kept + extra_operations)
+
+    return MigrationPlan(
+        operations=operations,
+        risk_summary=_summarize_risk(operations),
+        rename_suggestions=list(plan.rename_suggestions),
+    )
+
+
 def build_explicit_column_rename_suggestions(
     plan: MigrationPlan,
     mappings: Sequence[ColumnRenameMapping],
@@ -216,6 +274,7 @@ def assert_cli_column_mappings_resolvable(
 _EXACT_RANKS: dict[str, int] = {
     "create_database": _CREATE_DATABASE_RANK,
     "alter_table_rename_table": _ALTER_TABLE_RENAME_RANK,
+    "rename_dictionary": _ALTER_TABLE_RENAME_RANK,
     "create_table": _CREATE_TABLE_RANK,
     "create_view": _CREATE_VIEW_RANK,
 }

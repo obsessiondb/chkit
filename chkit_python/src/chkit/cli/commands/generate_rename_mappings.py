@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from chkit.core.model import SchemaDefinition, TableDefinition
+from chkit.core.model import DictionaryDefinition, SchemaDefinition, TableDefinition
 
 _TWO_PARTS = 2
 _THREE_PARTS = 3
@@ -28,6 +28,15 @@ _THREE_PARTS = 3
 
 @dataclass(frozen=True, slots=True)
 class TableRenameMapping:
+    old_database: str
+    old_name: str
+    new_database: str
+    new_name: str
+    source: Literal["cli", "schema"]
+
+
+@dataclass(frozen=True, slots=True)
+class DictionaryRenameMapping:
     old_database: str
     old_name: str
     new_database: str
@@ -48,6 +57,7 @@ class ColumnRenameMapping:
 class SchemaRenameMappings:
     table_mappings: list[TableRenameMapping]
     column_mappings: list[ColumnRenameMapping]
+    dictionary_mappings: list[DictionaryRenameMapping]
 
 
 def parse_rename_table_mappings(values: list[str]) -> list[TableRenameMapping]:
@@ -70,6 +80,37 @@ def parse_rename_table_mappings(values: list[str]) -> list[TableRenameMapping]:
         to_db, to_name = _parse_qualified_table(to_raw)
         result.append(
             TableRenameMapping(
+                old_database=from_db,
+                old_name=from_name,
+                new_database=to_db,
+                new_name=to_name,
+                source="cli",
+            )
+        )
+    return result
+
+
+def parse_rename_dictionary_mappings(
+    values: list[str],
+) -> list[DictionaryRenameMapping]:
+    """Parse ``--rename-dictionary`` values into mappings.
+
+    Each value must match ``old_db.old_dict=new_db.new_dict``.
+    """
+    result: list[DictionaryRenameMapping] = []
+    for mapping in values:
+        parts = [part.strip() for part in mapping.split("=")]
+        if len(parts) != _TWO_PARTS or not all(parts):
+            msg = (
+                f'Invalid --rename-dictionary mapping "{mapping}". '
+                f"Expected format: old_db.old_dict=new_db.new_dict"
+            )
+            raise ValueError(msg)
+        from_raw, to_raw = parts
+        from_db, from_name = _parse_qualified_table(from_raw)
+        to_db, to_name = _parse_qualified_table(to_raw)
+        result.append(
+            DictionaryRenameMapping(
                 old_database=from_db,
                 old_name=from_name,
                 new_database=to_db,
@@ -120,35 +161,52 @@ def collect_schema_rename_mappings(
     """Walk definitions, harvest ``renamed_from`` metadata into mappings."""
     table_mappings: list[TableRenameMapping] = []
     column_mappings: list[ColumnRenameMapping] = []
+    dictionary_mappings: list[DictionaryRenameMapping] = []
 
     for definition in definitions:
-        if not isinstance(definition, TableDefinition):
-            continue
-        if definition.renamed_from is not None:
-            table_mappings.append(
-                TableRenameMapping(
-                    old_database=definition.renamed_from.database or definition.database,
+        if isinstance(definition, TableDefinition):
+            if definition.renamed_from is not None:
+                table_mappings.append(
+                    TableRenameMapping(
+                        old_database=definition.renamed_from.database
+                        or definition.database,
+                        old_name=definition.renamed_from.name,
+                        new_database=definition.database,
+                        new_name=definition.name,
+                        source="schema",
+                    )
+                )
+            for column in definition.columns:
+                if column.renamed_from is None:
+                    continue
+                column_mappings.append(
+                    ColumnRenameMapping(
+                        database=definition.database,
+                        table=definition.name,
+                        from_=column.renamed_from,
+                        to=column.name,
+                        source="schema",
+                    )
+                )
+        elif (
+            isinstance(definition, DictionaryDefinition)
+            and definition.renamed_from is not None
+        ):
+            dictionary_mappings.append(
+                DictionaryRenameMapping(
+                    old_database=definition.renamed_from.database
+                    or definition.database,
                     old_name=definition.renamed_from.name,
                     new_database=definition.database,
                     new_name=definition.name,
                     source="schema",
                 )
             )
-        for column in definition.columns:
-            if column.renamed_from is None:
-                continue
-            column_mappings.append(
-                ColumnRenameMapping(
-                    database=definition.database,
-                    table=definition.name,
-                    from_=column.renamed_from,
-                    to=column.name,
-                    source="schema",
-                )
-            )
 
     return SchemaRenameMappings(
-        table_mappings=table_mappings, column_mappings=column_mappings
+        table_mappings=table_mappings,
+        column_mappings=column_mappings,
+        dictionary_mappings=dictionary_mappings,
     )
 
 
@@ -162,6 +220,25 @@ def merge_table_mappings(
         cli_old_key = f"{cli_mapping.old_database}.{cli_mapping.old_name}"
         cli_new_key = f"{cli_mapping.new_database}.{cli_mapping.new_name}"
         # Iterate back-to-front so deletions don't invalidate indices.
+        for index in range(len(merged) - 1, -1, -1):
+            entry = merged[index]
+            old_key = f"{entry.old_database}.{entry.old_name}"
+            new_key = f"{entry.new_database}.{entry.new_name}"
+            if old_key == cli_old_key or new_key == cli_new_key:
+                merged.pop(index)
+        merged.append(cli_mapping)
+    return merged
+
+
+def merge_dictionary_mappings(
+    schema_mappings: Sequence[DictionaryRenameMapping],
+    cli_mappings: Sequence[DictionaryRenameMapping],
+) -> list[DictionaryRenameMapping]:
+    """CLI mappings displace schema mappings sharing a source or target key."""
+    merged = list(schema_mappings)
+    for cli_mapping in cli_mappings:
+        cli_old_key = f"{cli_mapping.old_database}.{cli_mapping.old_name}"
+        cli_new_key = f"{cli_mapping.new_database}.{cli_mapping.new_name}"
         for index in range(len(merged) - 1, -1, -1):
             entry = merged[index]
             old_key = f"{entry.old_database}.{entry.old_name}"
@@ -205,6 +282,135 @@ def resolve_active_table_mappings(
         if _table_exists(previous_definitions, mapping.old_database, mapping.old_name)
         and _table_exists(next_definitions, mapping.new_database, mapping.new_name)
     ]
+
+
+def resolve_active_dictionary_mappings(
+    previous_definitions: Sequence[SchemaDefinition],
+    next_definitions: Sequence[SchemaDefinition],
+    mappings: Sequence[DictionaryRenameMapping],
+) -> list[DictionaryRenameMapping]:
+    """Keep only mappings whose source exists in old and target exists in new."""
+    return [
+        mapping
+        for mapping in mappings
+        if _dictionary_exists(
+            previous_definitions, mapping.old_database, mapping.old_name
+        )
+        and _dictionary_exists(next_definitions, mapping.new_database, mapping.new_name)
+    ]
+
+
+def assert_no_conflicting_dictionary_mappings(
+    mappings: Sequence[DictionaryRenameMapping],
+) -> None:
+    """Reject duplicate sources, duplicate targets, and chained/cyclic mappings."""
+    by_old: dict[str, DictionaryRenameMapping] = {}
+    by_new: dict[str, DictionaryRenameMapping] = {}
+
+    for mapping in mappings:
+        old_key = f"{mapping.old_database}.{mapping.old_name}"
+        new_key = f"{mapping.new_database}.{mapping.new_name}"
+
+        existing_old = by_old.get(old_key)
+        if existing_old is not None and (
+            existing_old.new_database != mapping.new_database
+            or existing_old.new_name != mapping.new_name
+        ):
+            msg = f'Conflicting dictionary rename source mapping for "{old_key}".'
+            raise ValueError(msg)
+        by_old[old_key] = mapping
+
+        existing_new = by_new.get(new_key)
+        if existing_new is not None and (
+            existing_new.old_database != mapping.old_database
+            or existing_new.old_name != mapping.old_name
+        ):
+            msg = f'Conflicting dictionary rename target mapping for "{new_key}".'
+            raise ValueError(msg)
+        by_new[new_key] = mapping
+
+    for key in by_old:
+        if key in by_new:
+            msg = (
+                f"Unsupported chained or cyclic dictionary rename mapping "
+                f'involving "{key}". Use direct one-step mappings only.'
+            )
+            raise ValueError(msg)
+
+
+def assert_cli_dictionary_mappings_resolvable(
+    cli_mappings: Sequence[DictionaryRenameMapping],
+    previous_definitions: Sequence[SchemaDefinition],
+    next_definitions: Sequence[SchemaDefinition],
+) -> None:
+    """Every CLI dictionary mapping must reference a real source and target."""
+    for mapping in cli_mappings:
+        has_old = _dictionary_exists(
+            previous_definitions, mapping.old_database, mapping.old_name
+        )
+        has_new = _dictionary_exists(
+            next_definitions, mapping.new_database, mapping.new_name
+        )
+        if has_old and has_new:
+            continue
+        spec = (
+            f"{mapping.old_database}.{mapping.old_name}"
+            f"={mapping.new_database}.{mapping.new_name}"
+        )
+        if not has_old and not has_new:
+            msg = (
+                f'--rename-dictionary mapping "{spec}" is invalid: source dictionary '
+                f"is missing from previous snapshot and target dictionary is missing "
+                f"from current schema."
+            )
+            raise ValueError(msg)
+        if not has_old:
+            msg = (
+                f'--rename-dictionary mapping "{spec}" is invalid: source dictionary '
+                f"is missing from previous snapshot."
+            )
+            raise ValueError(msg)
+        msg = (
+            f'--rename-dictionary mapping "{spec}" is invalid: target dictionary '
+            f"is missing from current schema."
+        )
+        raise ValueError(msg)
+
+
+def remap_old_definitions_for_dictionary_renames(
+    previous_definitions: Sequence[SchemaDefinition],
+    mappings: Sequence[DictionaryRenameMapping],
+) -> list[SchemaDefinition]:
+    """Rewrite old DictionaryDefinition entries to use the new database/name.
+
+    Used by the diff engine so that an explicit rename doesn't appear as
+    a drop + create pair.
+    """
+    if not mappings:
+        return list(previous_definitions)
+
+    mapping_by_old: dict[str, DictionaryRenameMapping] = {}
+    for mapping in mappings:
+        mapping_by_old[f"{mapping.old_database}.{mapping.old_name}"] = mapping
+
+    remapped: list[SchemaDefinition] = []
+    for definition in previous_definitions:
+        if not isinstance(definition, DictionaryDefinition):
+            remapped.append(definition)
+            continue
+        match = mapping_by_old.get(f"{definition.database}.{definition.name}")
+        if match is None:
+            remapped.append(definition)
+            continue
+        remapped.append(
+            definition.model_copy(
+                update={
+                    "database": match.new_database,
+                    "name": match.new_name,
+                }
+            )
+        )
+    return remapped
 
 
 def assert_no_conflicting_table_mappings(
@@ -344,9 +550,10 @@ def remap_old_definitions_for_table_renames(
 
 
 def _parse_qualified_table(input_: str) -> tuple[str, str]:
+    # Shared by --rename-table and --rename-dictionary (TS parseQualifiedName).
     parts = [part.strip() for part in input_.split(".")]
     if len(parts) != _TWO_PARTS or not all(parts):
-        msg = f'Invalid table reference "{input_}". Expected format: database.table'
+        msg = f'Invalid object reference "{input_}". Expected format: database.name'
         raise ValueError(msg)
     return parts[0], parts[1]
 
@@ -356,5 +563,16 @@ def _table_exists(
 ) -> bool:
     return any(
         isinstance(d, TableDefinition) and d.database == database and d.name == name
+        for d in definitions
+    )
+
+
+def _dictionary_exists(
+    definitions: Sequence[SchemaDefinition], database: str, name: str
+) -> bool:
+    return any(
+        isinstance(d, DictionaryDefinition)
+        and d.database == database
+        and d.name == name
         for d in definitions
     )

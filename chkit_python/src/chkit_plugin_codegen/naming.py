@@ -16,6 +16,7 @@ import re
 from collections.abc import Sequence
 
 from chkit.core import (
+    DictionaryDefinition,
     MaterializedViewDefinition,
     TableDefinition,
     ViewDefinition,
@@ -79,7 +80,10 @@ def render_attribute_name(name: str) -> str:
 
 
 def _base_class_name(
-    definition: TableDefinition | ViewDefinition | MaterializedViewDefinition,
+    definition: TableDefinition
+    | ViewDefinition
+    | MaterializedViewDefinition
+    | DictionaryDefinition,
     style: TableNameStyle,
 ) -> str:
     combined = f"{definition.database}_{definition.name}"
@@ -92,13 +96,24 @@ def _base_class_name(
 
 
 def resolve_table_names(
-    definitions: Sequence[TableDefinition | ViewDefinition | MaterializedViewDefinition],
+    definitions: Sequence[
+        TableDefinition
+        | ViewDefinition
+        | MaterializedViewDefinition
+        | DictionaryDefinition
+    ],
     style: TableNameStyle,
 ) -> list[ResolvedTableName]:
     """Compute the per-table emitted class names, deduplicating collisions."""
-    bases: list[tuple[TableDefinition | ViewDefinition | MaterializedViewDefinition, str]] = [
-        (defn, _base_class_name(defn, style)) for defn in definitions
-    ]
+    bases: list[
+        tuple[
+            TableDefinition
+            | ViewDefinition
+            | MaterializedViewDefinition
+            | DictionaryDefinition,
+            str,
+        ]
+    ] = [(defn, _base_class_name(defn, style)) for defn in definitions]
     counts: dict[str, int] = {}
     resolved: list[ResolvedTableName] = []
     for definition, base in bases:

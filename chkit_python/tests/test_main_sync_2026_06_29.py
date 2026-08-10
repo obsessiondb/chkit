@@ -42,6 +42,9 @@ from chkit_plugin_obsessiondb import (
     service_list_envelope,
     whoami_envelope,
 )
+from chkit_plugin_obsessiondb import (
+    backfill_handler as obsessiondb_backfill_handler,
+)
 from chkit_plugin_obsessiondb.api_client import USER_AGENT
 
 BASE = "https://api.test.obsessiondb.com"
@@ -168,7 +171,10 @@ def test_M2_guard_refuses_plan_when_authed_and_service_selected(
     )
     assert isinstance(result, ChxOnBeforePluginCommandHandled)
     assert result.exit_code == 1
-    assert any("not supported yet" in str(m) for m in msgs)
+    assert any(
+        "not supported directly against ObsessionDB" in str(m) for m in msgs
+    )
+    assert any("backfill submit" in str(m) for m in msgs)
     assert any("--local" in str(m) for m in msgs)
 
 
@@ -206,7 +212,12 @@ def test_M2_guard_json_mode_emits_error_envelope(
     assert isinstance(payload, dict)
     assert payload["ok"] is False
     assert payload["command"] == "backfill resume"
-    assert "not supported yet" in payload["error"]
+    assert (
+        "Backfill resume runs locally and is not supported directly against "
+        "ObsessionDB" in payload["error"]
+    )
+    assert "chkit backfill submit" in payload["error"]
+    assert "--local" in payload["error"]
 
 
 def test_M2_local_flag_bypasses_guard_even_when_service_selected(
@@ -226,6 +237,99 @@ def test_M2_local_flag_bypasses_guard_even_when_service_selected(
     )
     # --local short-circuits to Unhandled, letting the local plugin's Phase-2
     # stub run (which will tell the user it isn't ported yet, separately).
+    assert isinstance(result, ChxOnBeforePluginCommandUnhandled)
+
+
+def test_M2_submit_is_not_guarded_routes_to_handle_submit_when_service_selected(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``submit`` targets ObsessionDB when authed + service selected: the
+    handler invokes ``handle_submit`` instead of guarding."""
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = tmp_path / "clickhouse.config.py"
+    save_selected_service(
+        config_path, SelectedService(service_slug="prod-eu", service_name="prod")
+    )
+    captured: list[Any] = []
+
+    def fake_handle_submit(context: Any) -> int:
+        captured.append(context)
+        return 0
+
+    monkeypatch.setattr(
+        obsessiondb_backfill_handler, "handle_submit", fake_handle_submit
+    )
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="submit",
+            flags={"--target": "app.events"},
+            config_path=config_path,
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 0
+    [submit_ctx] = captured
+    assert submit_ctx.service_slug == "prod-eu"
+    assert submit_ctx.credentials.access_token == "tok"
+    assert submit_ctx.flags == {"--target": "app.events"}
+
+
+def test_M2_submit_propagates_handle_submit_exit_code(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = tmp_path / "clickhouse.config.py"
+    save_selected_service(
+        config_path, SelectedService(service_slug="prod-eu", service_name="prod")
+    )
+    monkeypatch.setattr(
+        obsessiondb_backfill_handler, "handle_submit", lambda _ctx: 1
+    )
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="submit",
+            flags={"--target": "app.events"},
+            config_path=config_path,
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 1
+
+
+def test_M2_submit_unhandled_when_not_authed(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No creds → defer submit to the local command's guidance."""
+
+    def fail_handle_submit(_ctx: Any) -> int:
+        msg = "handle_submit must not be called without credentials"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        obsessiondb_backfill_handler, "handle_submit", fail_handle_submit
+    )
+    result = handle_backfill_command(
+        _bf_ctx(command="submit", flags={"--target": "app.events"})
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandUnhandled)
+
+
+def test_M2_submit_unhandled_when_authed_but_no_service(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Authed but no service selected → nothing to submit to; defer."""
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+
+    def fail_handle_submit(_ctx: Any) -> int:
+        msg = "handle_submit must not be called without a selected service"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        obsessiondb_backfill_handler, "handle_submit", fail_handle_submit
+    )
+    result = handle_backfill_command(
+        _bf_ctx(command="submit", flags={"--target": "app.events"})
+    )
     assert isinstance(result, ChxOnBeforePluginCommandUnhandled)
 
 

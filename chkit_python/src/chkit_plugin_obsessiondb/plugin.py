@@ -161,6 +161,36 @@ def create_obsessiondb_plugin(
                 run=service_command_run,
             ),
         ],
+        # Mirror of TS BACKFILL_EXTEND_COMMANDS: register the remote-routing
+        # flags against the `backfill` plugin commands so the dispatcher
+        # accepts them and the on_before_plugin_command hook can route on them.
+        extend_commands=[
+            {
+                "command": ["backfill"],
+                "flags": [
+                    {
+                        "name": "--local",
+                        "type": "boolean",
+                        "description": "Force local execution (skip remote routing)",
+                    },
+                ],
+            },
+            {
+                "command": ["backfill"],
+                "flags": [
+                    {
+                        "name": "--job-id",
+                        "type": "string",
+                        "description": "Remote job ID for status/cancel",
+                    },
+                    {
+                        "name": "--service-slug",
+                        "type": "string",
+                        "description": "ObsessionDB service slug for listing jobs",
+                    },
+                ],
+            },
+        ],
     )
 
 

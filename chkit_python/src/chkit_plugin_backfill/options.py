@@ -10,12 +10,14 @@ Defaults match TS exactly.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
 from chkit_plugin_backfill.errors import BackfillConfigError
 
 _GiB = 1024**3
@@ -89,12 +91,10 @@ def _normalize_plan_id(raw: str) -> str:
 
 
 def _coerce_positive_int(raw: str, flag: str) -> int:
-    try:
-        parsed = float(raw)
-    except ValueError as error:
-        msg = f"Invalid value for {flag}. Expected integer > 0."
-        raise BackfillConfigError(msg) from error
-    if parsed <= 0 or not parsed.is_integer():
+    # JS `Number(raw)` grammar (rejects `3_0`, accepts `0x10`), then the TS
+    # isInteger/positivity checks.
+    parsed = parse_js_number(raw)
+    if not math.isfinite(parsed) or parsed <= 0 or not parsed.is_integer():
         msg = f"Invalid value for {flag}. Expected integer > 0."
         raise BackfillConfigError(msg)
     return int(parsed)
@@ -106,7 +106,15 @@ def _coerce_positive_int(raw: str, flag: str) -> int:
 class PluginConfig(BaseModel):
     """User-supplied options to ``backfill({...})``. All fields optional."""
 
+    # Accepts an int or a suffixed size string ("10G", "500M") like TS.
     max_chunk_bytes: int | None = Field(default=None, alias="maxChunkBytes", gt=0)
+
+    @field_validator("max_chunk_bytes", mode="before")
+    @classmethod
+    def _coerce_byte_size(cls, value: object) -> object:
+        if isinstance(value, str):
+            return parse_byte_size(value)
+        return value
     max_retries_per_chunk: int | None = Field(default=None, alias="maxRetriesPerChunk", gt=0)
     retry_delay_ms: int | None = Field(default=None, alias="retryDelayMs", ge=0)
     max_parallel_chunks: int | None = Field(default=None, alias="maxParallelChunks", gt=0)
@@ -123,7 +131,9 @@ class PluginConfig(BaseModel):
     min_chunk_minutes: float | None = Field(default=None, alias="minChunkMinutes", gt=0)
     state_dir: str | None = Field(default=None, alias="stateDir", min_length=1)
 
-    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+    # TS PluginConfigSchema is non-strict zod: unknown keys are stripped, not
+    # rejected ("validated softly at load time").
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
 
 class PlanOptions(BaseModel):
@@ -147,6 +157,17 @@ class PlanOptions(BaseModel):
     state_dir: str | None = Field(default=None, alias="stateDir", min_length=1)
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+
+
+class SubmitOptions(PlanOptions):
+    """``submit`` reuses the planning options (same chunking algorithm).
+
+    Adds the fields a managed job backend cares about: a human-readable title
+    and the backend-side execution concurrency.
+    """
+
+    title: str | None = Field(default=None, min_length=1)
+    concurrency: int | None = Field(default=None, gt=0, le=48)
 
 
 class RunOptions(BaseModel):
@@ -260,6 +281,31 @@ PLAN_FLAG_MAP: dict[str, dict[str, Any]] = {
     "--from": {"key": "from", "coerce": lambda v: _normalize_timestamp(v, "--from")},
     "--to": {"key": "to", "coerce": lambda v: _normalize_timestamp(v, "--to")},
     "--max-chunk-bytes": {"key": "max_chunk_bytes", "coerce": parse_byte_size},
+}
+
+SUBMIT_FLAGS: list[dict[str, Any]] = [
+    *PLAN_FLAGS,
+    {
+        "name": "--title",
+        "type": "string",
+        "description": "Human-readable job title",
+        "placeholder": "<title>",
+    },
+    {
+        "name": "--concurrency",
+        "type": "string",
+        "description": "Max concurrent tasks the backend runs",
+        "placeholder": "<n>",
+    },
+]
+
+SUBMIT_FLAG_MAP: dict[str, dict[str, Any]] = {
+    **PLAN_FLAG_MAP,
+    "--title": {"key": "title"},
+    "--concurrency": {
+        "key": "concurrency",
+        "coerce": lambda v: _coerce_positive_int(v, "--concurrency"),
+    },
 }
 
 RUN_FLAG_MAP: dict[str, dict[str, Any]] = {

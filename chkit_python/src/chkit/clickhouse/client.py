@@ -116,9 +116,23 @@ class ClickHouseClient:
         """Run a statement (DDL or DML) without returning rows."""
         self._client.command(statement)
 
-    def query(self, statement: str) -> QueryResult:
-        """Run a SELECT and return rows as a list of dicts."""
-        result = self._client.query(statement)
+    def query(
+        self,
+        statement: str,
+        settings: dict[str, Any] | None = None,
+    ) -> QueryResult:
+        """Run a SELECT and return rows as a list of dicts.
+
+        ``settings`` are per-query ClickHouse settings (mirrors the TS
+        executor's ``query(sql, settings)``); ``None``-valued entries are
+        dropped, matching ``JSON.stringify`` omitting ``undefined``.
+        """
+        effective_settings = (
+            {key: value for key, value in settings.items() if value is not None}
+            if settings is not None
+            else None
+        )
+        result = self._client.query(statement, settings=effective_settings)
         column_names: list[str] = list(result.column_names)
         rows: list[dict[str, Any]] = [
             dict(zip(column_names, row, strict=True)) for row in result.result_rows
@@ -159,7 +173,10 @@ class ClickHouseClient:
         and the CLI polls ``query_status`` until terminal.
         """
         qid = query_id or str(uuid.uuid4())
-        self._client.command(statement, query_id=qid)
+        # clickhouse-connect's command() has no query_id parameter; over HTTP
+        # the id travels as a query parameter, which the driver forwards from
+        # per-query settings. Verified live: the id lands in system.query_log.
+        self._client.command(statement, settings={"query_id": qid})
         return qid
 
     def insert(

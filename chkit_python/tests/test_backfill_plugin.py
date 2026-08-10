@@ -15,7 +15,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from chkit.cli.table_scope import TableScope
 from chkit.core.model import (
@@ -103,10 +102,61 @@ def _make_command_context(
     )
 
 
+def _make_chunk(chunk_id: str) -> dict[str, Any]:
+    return {
+        "id": chunk_id,
+        "partitionId": "2026-01",
+        "ranges": [],
+        "estimate": {
+            "rows": 100,
+            "bytesCompressed": 1000,
+            "bytesUncompressed": 2000,
+            "confidence": "high",
+            "reason": "partition-metadata",
+        },
+        "analysis": {"lineage": []},
+    }
+
+
+def _make_chunk_plan(
+    plan_id: str, chunk_ids: list[str]
+) -> dict[str, Any]:
+    return {
+        "planId": plan_id,
+        "generatedAt": "2026-01-01T00:00:00.000Z",
+        "rowProbeStrategy": "count",
+        "targetChunkBytes": 10 * 1024**3,
+        "table": {"database": "events", "table": "actions", "sortKeys": []},
+        "partitions": [
+            {
+                "partitionId": "2026-01",
+                "rows": 100 * len(chunk_ids),
+                "bytesCompressed": 1000 * len(chunk_ids),
+                "bytesUncompressed": 2000 * len(chunk_ids),
+                "minTime": "2026-01-01T00:00:00.000Z",
+                "maxTime": "2026-01-02T00:00:00.000Z",
+            }
+        ],
+        "chunks": [_make_chunk(chunk_id) for chunk_id in chunk_ids],
+        "totalRows": 100 * len(chunk_ids),
+        "totalBytesCompressed": 1000 * len(chunk_ids),
+        "totalBytesUncompressed": 2000 * len(chunk_ids),
+        "stats": {
+            "totalPartitions": 1,
+            "oversizedPartitions": 0,
+            "focusedChunks": 0,
+            "totalChunks": len(chunk_ids),
+            "avgChunkBytes": 2000,
+            "maxChunkBytes": 2000,
+            "minChunkBytes": 2000,
+        },
+    }
+
+
 def _make_plan(
     *,
     plan_id: str = "0123456789abcdef",
-    chunks: list[dict[str, str]] | None = None,
+    chunk_ids: list[str] | None = None,
 ) -> BackfillPlanState:
     return BackfillPlanState.model_validate(
         {
@@ -115,7 +165,7 @@ def _make_plan(
             "createdAt": "2026-01-01T00:00:00.000Z",
             "from": "2026-01-01T00:00:00.000Z",
             "to": "2026-01-02T00:00:00.000Z",
-            "chunkPlan": {"chunks": chunks or [{"id": "c1"}, {"id": "c2"}]},
+            "chunkPlan": _make_chunk_plan(plan_id, chunk_ids or ["c1", "c2"]),
             "execution": BackfillExecutionPlan(
                 mode="copy",
                 source_target="events.actions",
@@ -226,9 +276,11 @@ def test_run_options_defaults_match_ts() -> None:
     assert opts.force_environment is False
 
 
-def test_plugin_config_rejects_unknown_keys() -> None:
-    with pytest.raises(ValidationError):
-        PluginConfig.model_validate({"bogus": True})
+def test_plugin_config_strips_unknown_keys() -> None:
+    """TS PluginConfigSchema is non-strict zod: unknown keys are stripped."""
+    cfg = PluginConfig.model_validate({"bogus": True, "maxParallelChunks": 2})
+    assert cfg.max_parallel_chunks == 2
+    assert not hasattr(cfg, "bogus")
 
 
 # ---------- state ----------
@@ -342,7 +394,7 @@ def test_read_plan_raises_on_legacy_layout(tmp_path: Path) -> None:
 
 
 def test_summarize_run_status_counts_done_and_pending(tmp_path: Path) -> None:
-    plan = _make_plan(chunks=[{"id": "c1"}, {"id": "c2"}, {"id": "c3"}])
+    plan = _make_plan(chunk_ids=["c1", "c2", "c3"])
     run = BackfillRunState(
         planId="0123456789abcdef",
         target="events.actions",
@@ -391,13 +443,68 @@ def test_backfill_plugin_factory_shape() -> None:
     assert plugin.manifest == ChxPluginManifest(name="backfill", api_version=1)
     assert plugin.commands is not None
     names = [c.name for c in plugin.commands]
-    assert set(names) == {"status", "cancel", "plan", "run", "resume", "doctor"}
+    assert set(names) == {
+        "status",
+        "cancel",
+        "submit",
+        "plan",
+        "run",
+        "resume",
+        "doctor",
+    }
 
 
-def test_phase_two_stubs_return_two(tmp_path: Path) -> None:
+def test_submit_without_backend_prints_managed_backend_error(tmp_path: Path) -> None:
     plugin = backfill()
     assert plugin.commands is not None
-    for name in ("plan", "run", "resume", "doctor"):
+    cmd = next(c for c in plugin.commands if c.name == "submit")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=_cfg(tmp_path), tmp_path=tmp_path, flags={}, msgs=msgs
+        )
+    )
+    assert code == 2
+    assert any("Backfill submit failed:" in str(m) for m in msgs)
+    assert any("managed job backend" in str(m) for m in msgs)
+
+
+def test_plan_without_clickhouse_reports_config_error(tmp_path: Path) -> None:
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "plan")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=_cfg(tmp_path),
+            tmp_path=tmp_path,
+            flags={"--target": "events.actions"},
+            msgs=msgs,
+        )
+    )
+    assert code == 2
+    assert any("Backfill plan failed:" in str(m) for m in msgs)
+    assert any("ClickHouse connection is required" in str(m) for m in msgs)
+
+
+def test_plan_requires_target(tmp_path: Path) -> None:
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "plan")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=_cfg(tmp_path), tmp_path=tmp_path, flags={}, msgs=msgs
+        )
+    )
+    assert code == 2
+    assert any("--target" in str(m) for m in msgs)
+
+
+def test_run_and_resume_require_plan_id(tmp_path: Path) -> None:
+    plugin = backfill()
+    assert plugin.commands is not None
+    for name in ("run", "resume"):
         cmd = next(c for c in plugin.commands if c.name == name)
         msgs: list[Any] = []
         code = cmd.run(
@@ -406,7 +513,7 @@ def test_phase_two_stubs_return_two(tmp_path: Path) -> None:
             )
         )
         assert code == 2
-        assert any("Phase 2" in str(m) for m in msgs)
+        assert any("--plan-id" in str(m) for m in msgs)
 
 
 def test_status_command_requires_plan_id(tmp_path: Path) -> None:
@@ -419,11 +526,13 @@ def test_status_command_requires_plan_id(tmp_path: Path) -> None:
             config=_cfg(tmp_path), tmp_path=tmp_path, flags={}, msgs=msgs
         )
     )
-    assert code == 1
-    assert any("--plan-id is required" in str(m) for m in msgs)
+    assert code == 2
+    assert any("--plan-id" in str(m) for m in msgs)
 
 
-def test_status_command_reports_missing_run(tmp_path: Path) -> None:
+def test_status_command_reports_planned_when_no_run(tmp_path: Path) -> None:
+    """Aligned with TS ``getBackfillStatus``: a plan without a run summarizes
+    as ``planned`` with all chunks pending (exit 0), not an error."""
     cfg = _cfg(tmp_path)
     plan = _make_plan()
     paths = backfill_paths(
@@ -439,11 +548,15 @@ def test_status_command_reports_missing_run(tmp_path: Path) -> None:
             config=cfg,
             tmp_path=tmp_path,
             flags={"--plan-id": plan.plan_id},
+            json_mode=True,
             msgs=msgs,
         )
     )
-    assert code == 1
-    assert any("No run state" in str(m) for m in msgs)
+    assert code == 0
+    payload = msgs[0]
+    assert payload["status"] == "planned"
+    assert payload["chunkCounts"]["pending"] == 2
+    assert payload["chunkCounts"]["total"] == 2
 
 
 def test_status_command_prints_summary_on_existing_run(tmp_path: Path) -> None:
@@ -477,7 +590,8 @@ def test_status_command_prints_summary_on_existing_run(tmp_path: Path) -> None:
     assert code == 0
     payload = msgs[0]
     assert payload["planId"] == plan.plan_id
-    assert payload["target"] == "events.actions"
+    assert payload["command"] == "status"
+    assert payload["status"] == "running"
 
 
 def test_cancel_command_marks_run_cancelled(tmp_path: Path) -> None:
@@ -509,6 +623,8 @@ def test_cancel_command_marks_run_cancelled(tmp_path: Path) -> None:
     reread = read_run(paths.run_path)
     assert reread is not None
     assert reread.status == "cancelled"
+    assert reread.completed_at is not None
+    assert reread.last_error == "Cancelled by operator"
 
 
 def test_cancel_command_when_no_run(tmp_path: Path) -> None:
@@ -530,5 +646,32 @@ def test_cancel_command_when_no_run(tmp_path: Path) -> None:
             msgs=msgs,
         )
     )
+    assert code == 2
+    assert any("Backfill cancel failed:" in str(m) for m in msgs)
+    assert any("Run state not found" in str(m) for m in msgs)
+
+
+def test_doctor_reports_plan_missing_run(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    plan = _make_plan()
+    paths = backfill_paths(
+        compute_backfill_state_dir(cfg, tmp_path / "x.config.py"), plan.plan_id
+    )
+    write_json(paths.plan_path, plan)
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "doctor")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=cfg,
+            tmp_path=tmp_path,
+            flags={"--plan-id": plan.plan_id},
+            json_mode=True,
+            msgs=msgs,
+        )
+    )
     assert code == 1
-    assert any("No run to cancel" in str(m) for m in msgs)
+    payload = msgs[0]
+    assert payload["issueCodes"] == ["backfill_plan_missing"]
+    assert any("backfill run --plan-id" in r for r in payload["recommendations"])

@@ -23,6 +23,7 @@ from chkit.clickhouse.client import (
     ClickHouseClient,
     ClickHouseJsonQueryResult,
 )
+from chkit.core.model import ChxConfigEnv
 
 DEFAULT_SHOWN_ROW_LIMIT = 25
 EXPECTED_TOKEN_CAP = 8
@@ -139,7 +140,7 @@ def run(
         )
         raise typer.BadParameter(msg)
 
-    config = load_config(config_path)
+    config = load_config(config_path, ChxConfigEnv(command="query"))
     if config.clickhouse is None:
         msg = (
             "No target configured. Provide a `clickhouse` block in "

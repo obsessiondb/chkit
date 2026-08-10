@@ -278,18 +278,36 @@ def test_remote_client_is_a_context_manager() -> None:
 # ---------- jobs_api ----------
 
 
+def _job_payload(job_id: str, status: str, **extra: object) -> dict[str, object]:
+    """A contract-shaped jobSummary/jobDetail row (camelCase, per jobs.ts)."""
+    payload: dict[str, object] = {
+        "id": job_id,
+        "serviceId": "svc-id-1",
+        "title": None,
+        "type": "backfill",
+        "target": "app.events",
+        "status": status,
+        "concurrency": 4,
+        "totalTasks": 3,
+        "completedTasks": 1,
+        "failedTasks": 0,
+        "createdAt": "2026-08-10T00:00:00Z",
+        "updatedAt": "2026-08-10T00:05:00Z",
+    }
+    payload.update(extra)
+    return payload
+
+
 def test_jobs_get_parses_response(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{BASE}/rpc/jobs/get",
-        json={
-            "id": "job-1",
-            "service_slug": SVC,
-            "status": "running",
-        },
+        json=_job_payload("job-1", "running", maxRetries=3, tasks=[]),
     )
     job = jobs_get(_creds(), job_id="job-1")
     assert job.id == "job-1"
     assert job.status == "running"
+    assert job.service_id == "svc-id-1"
+    assert job.max_retries == 3
 
 
 def test_jobs_list_parses_response(httpx_mock: HTTPXMock) -> None:
@@ -297,22 +315,21 @@ def test_jobs_list_parses_response(httpx_mock: HTTPXMock) -> None:
         url=f"{BASE}/rpc/jobs/list",
         json={
             "jobs": [
-                {"id": "j-1", "service_slug": SVC, "status": "pending"},
-                {"id": "j-2", "service_slug": SVC, "status": "completed"},
-            ]
+                _job_payload("j-1", "pending"),
+                _job_payload("j-2", "completed"),
+            ],
+            "total": 2,
         },
     )
-    jobs = jobs_list(_creds(), service_slug=SVC)
-    assert [j.id for j in jobs] == ["j-1", "j-2"]
+    listing = jobs_list(_creds(), service_slug=SVC)
+    assert [j.id for j in listing.jobs] == ["j-1", "j-2"]
+    assert listing.total == 2
 
 
-def test_jobs_cancel_parses_response(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(
-        url=f"{BASE}/rpc/jobs/cancel",
-        json={"id": "job-1", "service_slug": SVC, "status": "cancelled"},
-    )
-    job = jobs_cancel(_creds(), job_id="job-1")
-    assert job.status == "cancelled"
+def test_jobs_cancel_returns_empty_object(httpx_mock: HTTPXMock) -> None:
+    """Per the jobs contract, `cancel` returns an empty object on success."""
+    httpx_mock.add_response(url=f"{BASE}/rpc/jobs/cancel", json={})
+    assert jobs_cancel(_creds(), job_id="job-1") == {}
 
 
 # ---------- backfill_handler ----------
@@ -383,7 +400,7 @@ def test_handler_status_with_job_id_calls_get(
     save_credentials(_creds())
     httpx_mock.add_response(
         url=f"{BASE}/rpc/jobs/get",
-        json={"id": "j-1", "service_slug": SVC, "status": "completed"},
+        json=_job_payload("j-1", "completed", maxRetries=3, tasks=[]),
     )
     msgs: list[Any] = []
     result = handle_backfill_command(
@@ -400,7 +417,7 @@ def test_handler_status_with_service_slug_calls_list(
     save_credentials(_creds())
     httpx_mock.add_response(
         url=f"{BASE}/rpc/jobs/list",
-        json={"jobs": [{"id": "j-1", "service_slug": SVC, "status": "pending"}]},
+        json={"jobs": [_job_payload("j-1", "pending")], "total": 1},
     )
     msgs: list[Any] = []
     result = handle_backfill_command(
@@ -413,27 +430,19 @@ def test_handler_status_with_service_slug_calls_list(
 def test_handler_cancel_requires_job_id(
     isolated_home: Path,
 ) -> None:
+    """Missing-flag errors PROPAGATE (TS rethrows non-session errors)."""
     save_credentials(_creds())
-    msgs: list[Any] = []
-    result = handle_backfill_command(
-        _bf_ctx(command="cancel", flags={}, msgs=msgs)
-    )
-    assert isinstance(result, ChxOnBeforePluginCommandHandled)
-    assert result.exit_code == 1
-    assert any("--job-id is required" in str(m) for m in msgs)
+    with pytest.raises(RuntimeError, match="--job-id is required"):
+        handle_backfill_command(_bf_ctx(command="cancel", flags={}))
 
 
 def test_handler_list_requires_service_slug(
     isolated_home: Path,
 ) -> None:
+    """Missing-flag errors PROPAGATE (TS rethrows non-session errors)."""
     save_credentials(_creds())
-    msgs: list[Any] = []
-    result = handle_backfill_command(
-        _bf_ctx(command="list", flags={}, msgs=msgs)
-    )
-    assert isinstance(result, ChxOnBeforePluginCommandHandled)
-    assert result.exit_code == 1
-    assert any("--service-slug is required" in str(m) for m in msgs)
+    with pytest.raises(RuntimeError, match="--service-slug is required"):
+        handle_backfill_command(_bf_ctx(command="list", flags={}))
 
 
 # ---------- onboarding (full wizard) ----------

@@ -328,11 +328,14 @@ class PluginRuntime:
 
     def run_on_before_plugin_command(
         self,
-        _plugin_name: str,
+        plugin_name: str,
         _command_name: str,
         context: ChxOnBeforePluginCommandContext,
     ) -> ChxOnBeforePluginCommandResult:
         for entry in self._plugins:
+            # A plugin never intercepts its own commands (TS parity).
+            if entry.plugin.manifest.name == plugin_name:
+                continue
             hook = _get_hook(entry.plugin, "on_before_plugin_command")
             if hook is None:
                 continue

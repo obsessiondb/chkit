@@ -59,7 +59,7 @@ _OPERATION_LINE = re.compile(
 )
 
 _OBJECT_KEY_RE = re.compile(
-    r"\b(?:TABLE|VIEW|DATABASE)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?",
+    r"\b(?:TABLE|VIEW|DATABASE|DICTIONARY)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?",
     re.IGNORECASE,
 )
 
@@ -74,6 +74,7 @@ _DESTRUCTIVE_SQL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("drop_view", re.compile(r"\bDROP\s+VIEW\b", re.IGNORECASE)),
     ("drop_table", re.compile(r"\bDROP\s+(?:TEMPORARY\s+)?TABLE\b", re.IGNORECASE)),
+    ("drop_dictionary", re.compile(r"\bDROP\s+DICTIONARY\b", re.IGNORECASE)),
     ("alter_table_drop_column", re.compile(r"\bDROP\s+COLUMN\b", re.IGNORECASE)),
     (
         "truncate_table",
@@ -246,6 +247,22 @@ def _describe_destructive_operation(
                 "Dependent workloads may fail until compatible replacements are in place."
             ),
             recommendation="Confirm replacement view rollout and dependency readiness.",
+        )
+    if type_ == "drop_dictionary":
+        return _OperationDetail(
+            warning_code="drop_dictionary_dependency_break",
+            reason=(
+                "Dropping a dictionary removes a lookup source used by "
+                "dictGet() calls and joins."
+            ),
+            impact=(
+                "Queries and materialized views that call dictGet() against "
+                "this dictionary will fail."
+            ),
+            recommendation=(
+                "Confirm no queries or views still reference this dictionary "
+                "before approving."
+            ),
         )
     return _OperationDetail(
         warning_code="destructive_operation_review_required",

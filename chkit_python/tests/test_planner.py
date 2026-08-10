@@ -60,3 +60,27 @@ def test_initial_create_emits_create_database_and_create_table() -> None:
     types = [op.type for op in plan.operations]
     assert "create_database" in types
     assert "create_table" in types
+
+
+def test_per_table_plugins_field_is_accepted_and_ignored_by_diff() -> None:
+    """TS `TablePlugins` parity: metadata only, never drives a diff."""
+
+    def build(plugins: dict[str, object] | None) -> object:
+        return table(
+            database="app",
+            name="events",
+            columns=[
+                {"name": "event_time", "type": "DateTime"},
+                {"name": "id", "type": "UInt64"},
+            ],
+            engine="MergeTree()",
+            primary_key=["event_time", "id"],
+            order_by=["event_time", "id"],
+            plugins=plugins,
+        )
+
+    plan = plan_diff(
+        [build(None)],  # type: ignore[list-item]
+        [build({"backfill": {"timeColumn": "event_time"}})],  # type: ignore[list-item]
+    )
+    assert plan.operations == []

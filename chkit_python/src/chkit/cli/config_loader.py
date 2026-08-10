@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from chkit.core.model import ChxResolvedConfig, ChxUserConfig, resolve_config
+from chkit.core.model import (
+    ChxConfigEnv,
+    ChxResolvedConfig,
+    ChxUserConfig,
+    resolve_config,
+)
 
 
 def _load_module(config_path: Path) -> Any:
@@ -24,13 +29,16 @@ def _load_module(config_path: Path) -> Any:
 DEFAULT_CONFIG_FILE = "clickhouse.config.py"
 
 
-def load_config(config_path: Path | None = None) -> ChxResolvedConfig:
+def load_config(
+    config_path: Path | None = None, env: ChxConfigEnv | None = None
+) -> ChxResolvedConfig:
     """Resolve a ``ChxResolvedConfig`` from a config file.
 
     The default path is ``./clickhouse.config.py`` — matching the TypeScript
     ``clickhouse.config.ts`` convention. The module must export a ``config``
-    attribute of type ``ChxUserConfig`` (or a dict that validates against
-    ``ChxUserConfig``).
+    attribute: a ``ChxUserConfig``, a dict that validates against it, or —
+    mirroring the TS function-config form — a callable
+    ``(env: ChxConfigEnv) -> config`` for dynamic per-command configs.
     """
     path = config_path if config_path is not None else Path(DEFAULT_CONFIG_FILE)
     if not path.exists():
@@ -42,6 +50,9 @@ def load_config(config_path: Path | None = None) -> ChxResolvedConfig:
     if raw_config is None:
         msg = f"Config file {path} must export a `config` attribute"
         raise AttributeError(msg)
+
+    if callable(raw_config) and not isinstance(raw_config, ChxUserConfig):
+        raw_config = raw_config(env if env is not None else ChxConfigEnv())
 
     user_config = (
         raw_config

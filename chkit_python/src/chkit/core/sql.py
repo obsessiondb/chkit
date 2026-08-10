@@ -8,9 +8,11 @@ from typing import Any, TypeAlias
 from pydantic import TypeAdapter
 
 from chkit.core.codec import render_codec
-from chkit.core.key_clause import normalize_key_columns
+from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
     ColumnDefinition,
+    DictionaryAttribute,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
     ProjectionDefinition,
@@ -24,6 +26,7 @@ from chkit.core.model import (
     TableRef,
     ViewDefinition,
 )
+from chkit.core.projection import render_projection_body
 from chkit.core.validate import assert_valid_definitions
 
 _COLUMN_ADAPTER: TypeAdapter[ColumnDefinition] = TypeAdapter(ColumnDefinition)
@@ -77,8 +80,14 @@ def _render_column(col: ColumnDefinition) -> str:
     return out
 
 
-def _render_key_clause_columns(columns: list[str]) -> str:
-    return ", ".join(f"`{c}`" for c in normalize_key_columns(columns))
+def _render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
+    # Quote a token when it names a declared column (including names that need
+    # quoting like `user-id`) or is a bare identifier. Only true expressions
+    # (e.g. `toStartOfHour(ts)`) are emitted verbatim.
+    return ", ".join(
+        f"`{c}`" if c in column_names or is_plain_column_reference(c) else c
+        for c in normalize_key_columns(columns)
+    )
 
 
 def _render_index_type(idx: SkipIndexDefinition) -> str:
@@ -111,7 +120,7 @@ def _render_settings_clause(settings: dict[str, str | int | float | bool]) -> st
 
 
 def _render_projection(p: ProjectionDefinition) -> str:
-    return f"PROJECTION `{p.name}` ({p.query})"
+    return f"PROJECTION `{p.name}` {render_projection_body(p)}"
 
 
 def _render_index_line(idx: SkipIndexDefinition) -> str:
@@ -127,13 +136,20 @@ def _render_table_sql(definition: TableDefinition) -> str:
     projections_block = [_render_projection(p) for p in (definition.projections or [])]
     body = ",\n  ".join(columns + indexes_block + projections_block)
 
+    column_names = {column.name for column in definition.columns}
     clauses: list[str] = []
     if definition.partition_by is not None:
         clauses.append(f"PARTITION BY {definition.partition_by}")
-    clauses.append(f"PRIMARY KEY ({_render_key_clause_columns(definition.primary_key)})")
-    clauses.append(f"ORDER BY ({_render_key_clause_columns(definition.order_by)})")
+    clauses.append(
+        f"PRIMARY KEY ({_render_key_clause_columns(definition.primary_key, column_names)})"
+    )
+    clauses.append(
+        f"ORDER BY ({_render_key_clause_columns(definition.order_by, column_names)})"
+    )
     if definition.unique_key is not None and len(definition.unique_key) > 0:
-        clauses.append(f"UNIQUE KEY ({_render_key_clause_columns(definition.unique_key)})")
+        clauses.append(
+            f"UNIQUE KEY ({_render_key_clause_columns(definition.unique_key, column_names)})"
+        )
     if definition.ttl is not None:
         clauses.append(f"TTL {definition.ttl}")
     if definition.settings is not None and len(definition.settings) > 0:
@@ -218,12 +234,78 @@ def render_alter_modify_refresh(definition: MaterializedViewDefinition) -> str:
     return f"ALTER TABLE {definition.database}.{definition.name} MODIFY {clause};"
 
 
+def _render_dictionary_attribute(attr: DictionaryAttribute) -> str:
+    out = f"`{attr.name}` {attr.type}"
+    if attr.expression is not None:
+        out += f" EXPRESSION {attr.expression}"
+    elif attr.default is not None:
+        out += f" DEFAULT {_render_default(attr.default)}"
+    if attr.hierarchical:
+        out += " HIERARCHICAL"
+    if attr.bidirectional:
+        out += " BIDIRECTIONAL"
+    if attr.injective:
+        out += " INJECTIVE"
+    if attr.is_object_id:
+        out += " IS_OBJECT_ID"
+    return out
+
+
+def _render_dictionary_range_column(column: str, column_names: set[str]) -> str:
+    if column in column_names or is_plain_column_reference(column):
+        return f"`{column}`"
+    return column
+
+
+def _render_dictionary_settings(settings: dict[str, str | int | float]) -> str:
+    parts: list[str] = []
+    for key, value in settings.items():
+        if isinstance(value, str):
+            escaped = value.replace("'", "''")
+            parts.append(f"{key} = '{escaped}'")
+        else:
+            parts.append(f"{key} = {value}")
+    return ", ".join(parts)
+
+
+def render_dictionary_sql(definition: DictionaryDefinition, replace: bool = False) -> str:
+    verb = (
+        "CREATE OR REPLACE DICTIONARY" if replace else "CREATE DICTIONARY IF NOT EXISTS"
+    )
+    attrs = ",\n  ".join(
+        _render_dictionary_attribute(a) for a in definition.attributes
+    )
+    column_names = {attribute.name for attribute in definition.attributes}
+    pk = _render_key_clause_columns(definition.primary_key, column_names)
+    clauses = [
+        f"PRIMARY KEY {pk}",
+        f"SOURCE({definition.source})",
+        f"LAYOUT({definition.layout})",
+        f"LIFETIME({definition.lifetime})",
+    ]
+    if definition.range is not None:
+        min_col = _render_dictionary_range_column(definition.range.min, column_names)
+        max_col = _render_dictionary_range_column(definition.range.max, column_names)
+        clauses.append(f"RANGE(MIN {min_col} MAX {max_col})")
+    if definition.settings is not None and len(definition.settings) > 0:
+        clauses.append(f"SETTINGS({_render_dictionary_settings(definition.settings)})")
+    if definition.comment:
+        escaped = definition.comment.replace("'", "''")
+        clauses.append(f"COMMENT '{escaped}'")
+    return (
+        f"{verb} {definition.database}.{definition.name}\n"
+        f"(\n  {attrs}\n)\n{chr(10).join(clauses)};"
+    )
+
+
 def to_create_sql(definition: SchemaDefinition) -> str:
     assert_valid_definitions([definition])
     if isinstance(definition, TableDefinition):
         return _render_table_sql(definition)
     if isinstance(definition, ViewDefinition):
         return _render_view_sql(definition)
+    if isinstance(definition, DictionaryDefinition):
+        return render_dictionary_sql(definition)
     return _render_materialized_view_sql(definition)
 
 
@@ -279,7 +361,8 @@ def render_alter_add_projection(
     normalized = _normalize_projection(projection)
     return (
         f"ALTER TABLE {definition.database}.{definition.name} "
-        f"ADD PROJECTION IF NOT EXISTS `{normalized.name}` ({normalized.query});"
+        f"ADD PROJECTION IF NOT EXISTS `{normalized.name}` "
+        f"{render_projection_body(normalized)};"
     )
 
 

@@ -48,6 +48,24 @@ from chkit_plugin_obsessiondb.workbench_api import (
 )
 
 
+def _coerce_wire_settings(
+    settings: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """TS remote-executor settings coercion: booleans become 1/0, non-scalar
+    values are dropped, and an empty map omits the ``settings`` field."""
+    if settings is None:
+        return None
+    coerced: dict[str, Any] = {}
+    for key, value in settings.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            coerced[key] = 1 if value else 0
+        elif isinstance(value, (str, int, float)):
+            coerced[key] = value
+    return coerced or None
+
+
 def _row_to_dict(row: Any, column_names: Sequence[str]) -> dict[str, Any]:
     """Normalize ``data`` rows — TS returns lists for unnamed, dicts otherwise."""
     if isinstance(row, dict):
@@ -128,9 +146,15 @@ class RemoteClickHouseClient:
         )
         _raise_if_error(result)
 
-    def query(self, statement: str) -> QueryResult:
+    def query(
+        self, statement: str, settings: dict[str, Any] | None = None
+    ) -> QueryResult:
+        effective_settings = _coerce_wire_settings(settings)
         result = workbench_query_execute(
-            self._credentials, service_slug=self._service_slug, query=statement
+            self._credentials,
+            service_slug=self._service_slug,
+            query=statement,
+            settings=effective_settings,
         )
         _raise_if_error(result)
         column_names = [col.name for col in result.meta]

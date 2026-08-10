@@ -1,21 +1,25 @@
 """Plan/run state persistence (XDG-aware, atomic-ish writes).
 
-1:1 port of ``packages/plugin-backfill/src/state.ts``. Phase 1 leaves the
-chunking-plan decoding as a pass-through (returns the raw dict); Phase 2 will
-plug in a typed decoder once the chunking module is ported.
+1:1 port of ``packages/plugin-backfill/src/state.ts``. Plans persist their
+string sort-key boundaries hex-encoded (see ``chunking/boundary_codec``);
+``read_plan`` decodes them back after validation.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import urlsplit
 
-from chkit.core import ChxResolvedConfig
+from chkit_plugin_backfill.chunking.boundary_codec import (
+    decode_chunk_plan_from_persistence,
+)
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.types import (
     BackfillEnvironment,
@@ -41,6 +45,27 @@ def random_plan_id() -> str:
     return secrets.token_hex(8)
 
 
+_SCHEME_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21}
+
+
+def _url_origin(url: str) -> str:
+    """WHATWG ``new URL(url).origin``: lowercase scheme+host, no userinfo,
+    scheme-default ports dropped. Raises ``ValueError`` on an unparseable URL
+    (TS ``new URL`` throws — the fingerprint must not be silently skipped)."""
+    split = urlsplit(url)
+    if not split.scheme or split.hostname is None:
+        msg = f"Invalid URL: {url}"
+        raise ValueError(msg)
+    scheme = split.scheme.lower()
+    host = split.hostname.lower()
+    if ":" in host:  # IPv6 literal — restore brackets
+        host = f"[{host}]"
+    port = split.port
+    if port is not None and _SCHEME_DEFAULT_PORTS.get(scheme) != port:
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
 def compute_environment_fingerprint(
     clickhouse: dict[str, str] | None,
 ) -> BackfillEnvironment | None:
@@ -50,10 +75,7 @@ def compute_environment_fingerprint(
     if not url:
         return None
     database = clickhouse.get("database") or "default"
-    split = urlsplit(url)
-    if not split.scheme or not split.netloc:
-        return None
-    origin = f"{split.scheme}://{split.netloc}"
+    origin = _url_origin(url)
     fingerprint = hash_id(f"{origin}|{database}")[:16]
     return BackfillEnvironment(
         fingerprint=fingerprint, url=origin, database=database
@@ -84,8 +106,15 @@ def ensure_environment_match(
     raise BackfillConfigError(msg)
 
 
+class _HasMetaDir(Protocol):
+    """Structural slice of ``ChxResolvedConfig`` the state layer needs."""
+
+    @property
+    def meta_dir(self) -> str: ...
+
+
 def compute_backfill_state_dir(
-    config: ChxResolvedConfig,
+    config: _HasMetaDir,
     config_path: str | Path,
     state_dir: str | None = None,
 ) -> Path:
@@ -111,14 +140,47 @@ def backfill_paths(state_dir: Path | str, plan_id: str) -> BackfillPathSet:
 def write_json(file_path: str | Path, value: object) -> None:
     path = Path(file_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=2, default=_json_default) + "\n"
-    path.write_text(payload, encoding="utf-8")
+    payload = (
+        json.dumps(_jsonable(value), indent=2, default=_json_default) + "\n"
+    )
+    # Write-then-replace so a crash mid-write never leaves a truncated
+    # checkpoint (resume depends on run.json always being parseable).
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(payload, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+_JS_INTEGER_PRINT_BOUND = 1e21
+
+
+def _jsonable(value: object) -> object:
+    """Normalize a value tree for TS-identical JSON.
+
+    Pydantic dumps produce ``float`` for JS-number fields; ``json.dumps``
+    would render ``4096.0`` where ``JSON.stringify`` renders ``4096``.
+    Integral floats collapse to int (within JS's integer-print bound) so
+    Python-written plan files byte-match TS-written ones.
+    """
+    if hasattr(value, "model_dump"):
+        dumped: object = value.model_dump(by_alias=True, exclude_none=True)
+        return _jsonable(dumped)
+    if isinstance(value, dict):
+        return {key: _jsonable(entry) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(entry) for entry in value]
+    if (
+        isinstance(value, float)
+        and value == int(value)
+        and abs(value) < _JS_INTEGER_PRINT_BOUND
+    ):
+        return int(value)
+    return value
 
 
 def _json_default(value: object) -> object:
     if hasattr(value, "model_dump"):
         dumped: object = value.model_dump(by_alias=True, exclude_none=True)
-        return dumped
+        return _jsonable(dumped)
     msg = f"Object of type {type(value).__name__} is not JSON serializable"
     raise TypeError(msg)
 
@@ -137,7 +199,7 @@ def read_plan(
     *,
     plan_id: str,
     config_path: str | Path,
-    config: ChxResolvedConfig,
+    config: _HasMetaDir,
     state_dir: str | None = None,
 ) -> tuple[BackfillPlanState, str, Path]:
     """Return ``(plan, plan_path, state_dir)`` for the given plan id.
@@ -158,6 +220,9 @@ def read_plan(
         )
         raise BackfillConfigError(msg)
     plan = BackfillPlanState.model_validate(raw)
+    plan = plan.model_copy(
+        update={"chunk_plan": decode_chunk_plan_from_persistence(plan.chunk_plan)}
+    )
     return plan, paths.plan_path, base_state_dir
 
 
@@ -184,7 +249,7 @@ def summarize_run_status(
     run_path: str | Path,
     plan: BackfillPlanState,
 ) -> BackfillStatusSummary:
-    chunks = _chunks_from_plan(plan.chunk_plan)
+    chunks = [chunk.id for chunk in plan.chunk_plan.chunks]
     totals = BackfillStatusTotals.model_construct(
         total=len(chunks), pending=0, submitted=0, running=0, done=0, failed=0
     )
@@ -215,25 +280,6 @@ def summarize_run_status(
     )
 
 
-def _chunks_from_plan(chunk_plan: dict[str, object]) -> list[str]:
-    """Return the chunk ids in plan-order, defaulting to ``[]`` if absent.
-
-    Phase 1 keeps ``chunk_plan`` as an opaque dict; this helper only inspects
-    the parts needed for status summaries (the ``chunks`` array and per-chunk
-    ``id``). Robust to either camelCase or snake_case storage shapes.
-    """
-    raw_chunks = chunk_plan.get("chunks")
-    if not isinstance(raw_chunks, list):
-        return []
-    ids: list[str] = []
-    for entry in raw_chunks:
-        if isinstance(entry, dict):
-            cid = entry.get("id")
-            if isinstance(cid, str):
-                ids.append(cid)
-    return ids
-
-
 def plan_status_for(
     run: BackfillRunState,
     total_chunks: int,
@@ -251,8 +297,9 @@ def plan_status_for(
 
 
 def chunk_ids_in_order(plan: BackfillPlanState) -> Iterable[str]:
-    """Re-export of the internal helper for callers that need plan walk order."""
-    yield from _chunks_from_plan(plan.chunk_plan)
+    """Chunk ids in plan order (for callers that need plan walk order)."""
+    for chunk in plan.chunk_plan.chunks:
+        yield chunk.id
 
 
 __all__ = [

@@ -21,6 +21,7 @@ obsessiondb plugin port.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
@@ -38,6 +39,16 @@ from chkit.cli.config_loader import load_config
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.create_dictionary_parser import (
+    parse_comment_from_create_dictionary_query,
+    parse_dictionary_attributes_from_create_dictionary_query,
+    parse_dictionary_primary_key_from_create_dictionary_query,
+    parse_dictionary_range_from_create_dictionary_query,
+    parse_dictionary_settings_from_create_dictionary_query,
+    parse_layout_from_create_dictionary_query,
+    parse_lifetime_from_create_dictionary_query,
+    parse_source_from_create_dictionary_query,
+)
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     infer_schema_kind_from_engine,
@@ -45,6 +56,8 @@ from chkit.clickhouse.introspect import (
     list_table_details,
 )
 from chkit.core.model import (
+    ChxConfigEnv,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
     SchemaDefinition,
@@ -56,6 +69,7 @@ from chkit.core.model import (
     TableDefinition,
     TableRef,
     ViewDefinition,
+    dictionary,
     materialized_view,
     table,
     view,
@@ -201,8 +215,103 @@ def _pull_definitions(
                     refresh=refresh_model,
                 )
             )
+        elif kind == "dictionary":
+            dictionary_def = _map_dictionary_row_to_definition(
+                database=str(row["database"]),
+                name=str(row["name"]),
+                query=ctq_str,
+            )
+            if dictionary_def is not None:
+                view_defs.append(dictionary_def)
 
     return table_defs + view_defs
+
+
+def _map_dictionary_row_to_definition(
+    *, database: str, name: str, query: str | None
+) -> DictionaryDefinition | None:
+    """Reconstruct a DictionaryDefinition from a CREATE DICTIONARY query."""
+    attributes = parse_dictionary_attributes_from_create_dictionary_query(query)
+    primary_key = parse_dictionary_primary_key_from_create_dictionary_query(query)
+    source = parse_source_from_create_dictionary_query(query)
+    layout = parse_layout_from_create_dictionary_query(query)
+    lifetime = parse_lifetime_from_create_dictionary_query(query)
+    if not attributes or not primary_key or not source or not layout or not lifetime:
+        return None
+    comment = parse_comment_from_create_dictionary_query(query)
+    range_parts = parse_dictionary_range_from_create_dictionary_query(query)
+    settings = parse_dictionary_settings_from_create_dictionary_query(query)
+    return dictionary(
+        database=database,
+        name=name,
+        attributes=[
+            {
+                key: value
+                for key, value in {
+                    "name": a.name,
+                    "type": a.type,
+                    "default": a.default,
+                    "expression": a.expression,
+                    "hierarchical": a.hierarchical,
+                    "bidirectional": a.bidirectional,
+                    "injective": a.injective,
+                    "is_object_id": a.is_object_id,
+                }.items()
+                if value is not None
+            }
+            for a in attributes
+        ],
+        primary_key=primary_key,
+        source=source,
+        layout=layout,
+        lifetime=lifetime,
+        range={"min": range_parts[0], "max": range_parts[1]}
+        if range_parts is not None
+        else None,
+        settings=settings,
+        comment=comment,
+    )
+
+
+_PASSWORD_LITERAL_RE = re.compile(
+    r"password\s+'(?!\[HIDDEN\])(?:[^'\\]|\\.)*'", re.IGNORECASE
+)
+
+
+def _dictionary_password_warnings(definitions: Sequence[SchemaDefinition]) -> list[str]:
+    """Flag redacted or plain-text passwords in pulled dictionary sources.
+
+    ClickHouse redacts a dictionary's SOURCE(...) password to ``[HIDDEN]`` on
+    introspection by default, and offers no way to recover the real value via
+    pull — flag it so the placeholder doesn't sit unnoticed in the schema
+    file. That redaction can also be turned off server-side, in which case
+    ClickHouse hands chkit the real password and it's written verbatim into
+    the schema file — chkit has no way to detect or opt out of that, so flag
+    it too.
+    """
+    warnings: list[str] = []
+    for definition in definitions:
+        if not isinstance(definition, DictionaryDefinition):
+            continue
+        if "[HIDDEN]" in definition.source:
+            warnings.append(
+                f'Dictionary "{definition.database}.{definition.name}" SOURCE(...) '
+                f"password was redacted by ClickHouse to '[HIDDEN]' — chkit could "
+                f"not recover the real value. Replace it in the generated schema "
+                f"file before this dictionary's source can be diffed or migrated. "
+                f"To have ClickHouse reveal real passwords on introspection "
+                f'instead, grant the connecting user "displaySecretsInShowAndSelect" '
+                f'and enable the server-side "display_secrets_in_show_and_select" '
+                f"setting."
+            )
+        elif _PASSWORD_LITERAL_RE.search(definition.source):
+            warnings.append(
+                f'Dictionary "{definition.database}.{definition.name}" SOURCE(...) '
+                f"has a plain-text password — ClickHouse returned the real "
+                f"credential on introspection and it was written verbatim into "
+                f"the generated schema file."
+            )
+    return warnings
 
 
 def _summarize_skipped_objects(
@@ -254,7 +363,7 @@ def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None
     tmp_file.replace(out_file)
 
 
-def run(
+def run(  # noqa: PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -294,7 +403,7 @@ def run(
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
 ) -> None:
-    config = load_config(config_path)
+    config = load_config(config_path, ChxConfigEnv(command="pull"))
     if config.clickhouse is None:
         msg = (
             "clickhouse.config.py must include a `clickhouse` block "
@@ -347,6 +456,8 @@ def run(
         raw_objects, definitions, selected
     )
 
+    warnings = _dictionary_password_warnings(definitions)
+
     payload: dict[str, object] = {
         "command": "schema",
         "ok": True,
@@ -357,9 +468,13 @@ def run(
         "materializedViewCount": sum(
             1 for d in definitions if isinstance(d, MaterializedViewDefinition)
         ),
+        "dictionaryCount": sum(
+            1 for d in definitions if isinstance(d, DictionaryDefinition)
+        ),
         "databases": selected,
         "dryrun": dryrun,
         "skippedObjects": skipped_objects,
+        "warnings": warnings,
     }
     if dryrun:
         payload["content"] = content
@@ -374,9 +489,10 @@ def run(
             f"{', '.join(selected) or '(none)'}"
         )
         typer.echo(content)
-        return
-
-    typer.echo(
-        f"Pulled {payload['definitionCount']} objects from "
-        f"{', '.join(selected) or '(none)'} to {out_file_abs}"
-    )
+    else:
+        typer.echo(
+            f"Pulled {payload['definitionCount']} objects from "
+            f"{', '.join(selected) or '(none)'} to {out_file_abs}"
+        )
+    for warning in warnings:
+        typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)

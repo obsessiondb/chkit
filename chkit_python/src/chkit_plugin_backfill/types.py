@@ -1,15 +1,16 @@
 """Pydantic models for backfill plan/run state.
 
-1:1 port of ``packages/plugin-backfill/src/types.ts`` (structural part only).
-The chunking-engine types (``ChunkPlan``, ``ChunkExecutionState``, etc.) live
-behind a TODO until the engine itself is ported (Phase 2).
+1:1 port of ``packages/plugin-backfill/src/types.ts``, including the typed
+``ChunkPlan`` payload from the Phase-2 chunking engine.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from chkit_plugin_backfill.chunking.types import ChunkPlan
 
 BackfillPlanStatus: TypeAlias = Literal[
     "planned", "running", "paused", "completed", "failed", "cancelled"
@@ -31,7 +32,11 @@ class BackfillEnvironment(BaseModel):
 class BackfillExecutionPlan(BaseModel):
     mode: Literal["copy", "mv_replay"]
     source_target: str = Field(..., alias="sourceTarget")
-    mv_as_query: str | None = Field(default=None, alias="mvAsQuery")
+    # One `SELECT` per materialized view feeding the target table. mv_replay
+    # inserts all of them (via `UNION ALL`) so every MV's rows are rebuilt.
+    mv_replay_queries: list[str] | None = Field(
+        default=None, alias="mvReplayQueries"
+    )
     target_columns: list[str] | None = Field(default=None, alias="targetColumns")
     require_idempotency_token: bool = Field(..., alias="requireIdempotencyToken")
 
@@ -67,12 +72,7 @@ class BackfillPlanLimits(BaseModel):
 
 
 class BackfillPlanState(BaseModel):
-    """Persisted plan blob (``<state_dir>/plans/<plan_id>.json``).
-
-    The ``chunk_plan`` field is kept as an opaque dict in Phase 1 because the
-    chunking-engine types aren't ported yet. Phase 2 will replace it with a
-    typed ``ChunkPlan`` model.
-    """
+    """Persisted plan blob (``<state_dir>/plans/<plan_id>.json``)."""
 
     plan_id: str = Field(..., alias="planId")
     target: str
@@ -80,7 +80,7 @@ class BackfillPlanState(BaseModel):
     environment: BackfillEnvironment | None = None
     from_: str = Field(..., alias="from")
     to: str
-    chunk_plan: dict[str, Any] = Field(..., alias="chunkPlan")
+    chunk_plan: ChunkPlan = Field(..., alias="chunkPlan")
     execution: BackfillExecutionPlan
     options: BackfillPlanOptions
     policy: BackfillPlanPolicy
@@ -90,15 +90,25 @@ class BackfillPlanState(BaseModel):
 
 
 class BackfillChunkProgress(BaseModel):
+    """Per-chunk execution state (TS ``BackfillChunkState``)."""
+
     status: BackfillChunkStatus
     query_id: str | None = Field(default=None, alias="queryId")
+    submitted_at: str | None = Field(default=None, alias="submittedAt")
+    finished_at: str | None = Field(default=None, alias="finishedAt")
+    read_rows: int | None = Field(default=None, alias="readRows")
+    read_bytes: int | None = Field(default=None, alias="readBytes")
     written_rows: int | None = Field(default=None, alias="writtenRows")
     written_bytes: int | None = Field(default=None, alias="writtenBytes")
+    elapsed_ms: int | None = Field(default=None, alias="elapsedMs")
     duration_ms: int | None = Field(default=None, alias="durationMs")
-    last_error: str | None = Field(default=None, alias="lastError")
-    attempts: int | None = None
+    error: str | None = None
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+
+BackfillChunkState: TypeAlias = BackfillChunkProgress
+BackfillProgress: TypeAlias = dict[str, BackfillChunkProgress]
 
 
 class BackfillRunState(BaseModel):
@@ -148,9 +158,21 @@ class BackfillPathSet(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
 
+class BackfillDoctorReport(BaseModel):
+    plan_id: str = Field(..., alias="planId")
+    status: BackfillPlanStatus
+    issue_codes: list[str] = Field(..., alias="issueCodes")
+    recommendations: list[str]
+    failed_chunk_ids: list[str] = Field(..., alias="failedChunkIds")
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+
 __all__ = [
     "BackfillChunkProgress",
+    "BackfillChunkState",
     "BackfillChunkStatus",
+    "BackfillDoctorReport",
     "BackfillEnvironment",
     "BackfillExecutionPlan",
     "BackfillPathSet",
@@ -159,6 +181,7 @@ __all__ = [
     "BackfillPlanPolicy",
     "BackfillPlanState",
     "BackfillPlanStatus",
+    "BackfillProgress",
     "BackfillRunState",
     "BackfillRunStatus",
     "BackfillStatusSummary",

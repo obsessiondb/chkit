@@ -1,12 +1,15 @@
-"""Route ``chkit plugin backfill <status|cancel|list>`` over the jobs API.
+"""Route ``chkit plugin backfill …`` through ObsessionDB where appropriate.
 
-1:1 port of ``packages/plugin-obsessiondb/src/backfill/handler.ts``.
+1:1 port of ``packages/plugin-obsessiondb/src/backfill/handler.ts`` (end
+state):
 
-Used as an ``on_before_plugin_command`` hook: when the user runs
-``chkit plugin backfill status --job-id X``, the hook intercepts before
-the (still-unported) local backfill plugin runs and routes the call to
-``jobs.get(jobId)``. ``--local`` flag and ``--plan-id`` argument both
-bypass the hook, so a local plan-id-driven check still works.
+- ``submit`` — builds the chunk plan remotely and posts it to the jobs
+  backend when authenticated + a service is selected; otherwise defers to
+  the local command's "no managed backend" guidance.
+- ``plan`` / ``run`` / ``resume`` — refused when ObsessionDB is the intended
+  target (the managed path is ``backfill submit``); ``--local`` bypasses.
+- ``status`` / ``cancel`` / ``list`` — routed to the jobs API by
+  ``--job-id`` / ``--service-slug``; ``--plan-id`` keeps them local.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from chkit.plugins import (
     ChxOnBeforePluginCommandUnhandled,
 )
 from chkit_plugin_obsessiondb.api_client import SessionExpiredError
+from chkit_plugin_obsessiondb.backfill_submit import SubmitContext, handle_submit
 from chkit_plugin_obsessiondb.credentials import (
     Credentials,
     load_credentials,
@@ -35,10 +39,10 @@ from chkit_plugin_obsessiondb.storage import load_selected_service
 _REMOTE_SUBCOMMANDS = frozenset({"status", "cancel", "list"})
 
 # Backfill execution commands run the chunked query loop. Against ObsessionDB
-# these would need to submit jobs to the backend (not yet implemented), so
-# when authed + a service is selected we refuse them instead of silently
-# falling through to the local Phase-2 stub or to a direct ClickHouse
-# connection that bypasses ObsessionDB entirely.
+# these must submit jobs to the backend rather than open a direct ClickHouse
+# connection — the managed path is `backfill submit` — so we refuse them
+# instead of silently falling back to a direct connection that bypasses
+# ObsessionDB.
 _EXECUTION_SUBCOMMANDS = frozenset({"plan", "run", "resume"})
 
 
@@ -84,18 +88,42 @@ def _dispatch(
     raise RuntimeError(msg)
 
 
+def _route_submit(
+    context: ChxOnBeforePluginCommandContext,
+) -> ChxOnBeforePluginCommandResult:
+    """``submit`` targets ObsessionDB when authenticated and a service is
+    selected (the same condition under which ``get_context`` hands out the
+    remote executor). Without a service there is nothing to submit to, so
+    defer to the local command's guidance."""
+    creds = load_credentials()
+    if creds is None:
+        return ChxOnBeforePluginCommandUnhandled()
+
+    selected = load_selected_service(context.config_path)
+    if selected is None:
+        return ChxOnBeforePluginCommandUnhandled()
+
+    exit_code = handle_submit(
+        SubmitContext(
+            flags=dict(context.flags),
+            config_path=context.config_path,
+            json_mode=context.json_mode,
+            config=context.config,
+            print=context.print,
+            credentials=_effective_credentials(creds),
+            service_slug=selected.service_slug,
+        )
+    )
+    return ChxOnBeforePluginCommandHandled(exit_code=exit_code)
+
+
 def _guard_remote_execution(
     context: ChxOnBeforePluginCommandContext,
 ) -> ChxOnBeforePluginCommandResult:
-    """Refuse backfill plan/run/resume when authed + a service is selected.
-
-    Mirrors TS ``guardRemoteExecution``: the user explicitly opted into
-    ObsessionDB routing (logged in AND a service selected, or --service flag
-    set), but the remote backfill execution path isn't implemented yet. Rather
-    than silently falling through to the local Phase-2 stub (or — worse — a
-    direct ClickHouse connection that bypasses ObsessionDB), refuse with a
-    clear message that nudges the user toward --local.
-    """
+    """``plan``/``run``/``resume`` run the chunk loop against a direct
+    ClickHouse connection. Against ObsessionDB the managed path is
+    ``backfill submit``, so point users there rather than silently opening a
+    direct connection that bypasses ObsessionDB."""
     creds = load_credentials()
     if creds is None:
         return ChxOnBeforePluginCommandUnhandled()
@@ -106,11 +134,10 @@ def _guard_remote_execution(
     if not has_service:
         return ChxOnBeforePluginCommandUnhandled()
     message = (
-        f"Backfill {context.command} against ObsessionDB is not supported yet — "
-        "it would submit jobs to the ObsessionDB backend, which is not "
-        "implemented. Re-run with --local to execute against a direct "
-        "ClickHouse connection, or unselect the service with "
-        "`chkit plugin obsessiondb service select`."
+        f"Backfill {context.command} runs locally and is not supported directly "
+        "against ObsessionDB. Use `chkit backfill submit` to run it as a managed "
+        "ObsessionDB job, or re-run with --local to execute against a direct "
+        "ClickHouse connection."
     )
     if context.json_mode:
         context.print(
@@ -131,16 +158,27 @@ def handle_backfill_command(  # noqa: PLR0911
     """Hook entry point: returns Handled (exit=0/1) or Unhandled."""
     if context.target_plugin != "backfill":
         return ChxOnBeforePluginCommandUnhandled()
+
+    # --local flag bypasses remote routing and runs against the direct
+    # ClickHouse connection.
     if context.flags.get("--local") is True:
         return ChxOnBeforePluginCommandUnhandled()
-    # Execution subcommands are guarded BEFORE the remote-routing check:
-    # they're not remote-routable (no job to query/cancel yet), but we still
-    # want to short-circuit when ObsessionDB is the intended target.
+
+    # `submit` builds the plan with the same chunking algorithm as the local
+    # path and submits it to the ObsessionDB job backend. Only intercept when
+    # there is a backend to submit to (authenticated + service selected);
+    # otherwise let the local command print its "no managed backend" guidance.
+    if context.command == "submit":
+        return _route_submit(context)
+
     if context.command in _EXECUTION_SUBCOMMANDS:
         return _guard_remote_execution(context)
+
     if context.command not in _REMOTE_SUBCOMMANDS:
         return ChxOnBeforePluginCommandUnhandled()
-    # A local plan-id status / cancel must not be shadowed by remote.
+
+    # A local backfill plugin status/cancel command uses --plan-id. Do not let
+    # the remote ObsessionDB hook shadow project-local backfill state commands.
     if isinstance(context.flags.get("--plan-id"), str):
         return ChxOnBeforePluginCommandUnhandled()
 
@@ -151,14 +189,22 @@ def handle_backfill_command(  # noqa: PLR0911
         )
         return ChxOnBeforePluginCommandHandled(exit_code=1)
 
+    # Non-session errors (missing flags, API failures) PROPAGATE, exactly as
+    # the TS hook rethrows them into the plugin runtime's error wrapper.
     try:
-        result = _dispatch(_effective_credentials(creds), context.command, context.flags)
+        result = _dispatch(
+            _effective_credentials(creds), context.command, context.flags
+        )
     except SessionExpiredError as error:
         context.print(str(error))
         return ChxOnBeforePluginCommandHandled(exit_code=1)
-    except RuntimeError as error:
-        context.print(str(error))
-        return ChxOnBeforePluginCommandHandled(exit_code=1)
 
-    context.print(result.model_dump() if hasattr(result, "model_dump") else result)
+    context.print(
+        result.model_dump(by_alias=True)
+        if hasattr(result, "model_dump")
+        else result
+    )
     return ChxOnBeforePluginCommandHandled(exit_code=0)
+
+
+__all__ = ["handle_backfill_command"]

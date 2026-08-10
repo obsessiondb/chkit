@@ -37,6 +37,9 @@ from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
     ColumnDefinition,
+    DictionaryAttribute,
+    DictionaryDefinition,
+    DictionaryRange,
     GeneralColumnCodec,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
@@ -59,6 +62,7 @@ from chkit.core.model import (
     ViewDefinition,
     collect_definitions_from_module,
     define_config,
+    dictionary,
     is_schema_definition,
     materialized_view,
     resolve_config,
@@ -69,13 +73,14 @@ from chkit.core.model import (
 from chkit.core.on_cluster import apply_on_cluster_to_plan, on_cluster_clause
 from chkit.core.planner import plan_diff
 from chkit.core.plugin_error import wrap_plugin_run
+from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.schema_loader import (
     NO_MATCH_MESSAGE,
     SchemaLoaderError,
     load_schema_definitions,
 )
 from chkit.core.snapshot import create_snapshot
-from chkit.core.sql import to_create_sql
+from chkit.core.sql import render_dictionary_sql, to_create_sql
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
 from chkit.core.sql_splitter import (
     extract_executable_statements,
@@ -95,6 +100,9 @@ __all__ = [
     "ColumnCodec",
     "ColumnCodecSpec",
     "ColumnDefinition",
+    "DictionaryAttribute",
+    "DictionaryDefinition",
+    "DictionaryRange",
     "FlagDef",
     "GeneralColumnCodec",
     "MaterializedViewDefinition",
@@ -133,9 +141,11 @@ __all__ = [
     "define_config",
     "define_flags",
     "definition_key",
+    "dictionary",
     "extract_executable_statements",
     "import_module_file",
     "is_general_codec",
+    "is_index_projection",
     "is_preprocessor_codec",
     "is_raw_codec",
     "is_schema_definition",
@@ -144,12 +154,14 @@ __all__ = [
     "materialized_view",
     "normalize_engine",
     "normalize_key_columns",
+    "normalize_projection_index",
     "normalize_sql_fragment",
     "on_cluster_clause",
     "parse_codec",
     "parse_flags",
     "plan_diff",
     "render_codec",
+    "render_dictionary_sql",
     "resolve_config",
     "schema",
     "split_sql_statements",

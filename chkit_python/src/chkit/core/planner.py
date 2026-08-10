@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.model import (
     ColumnDefinition,
     ColumnRenameSuggestion,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
     MigrationOperation,
@@ -33,6 +35,7 @@ from chkit.core.sql import (
     render_alter_modify_ttl,
     render_alter_remove_codec,
     render_alter_reset_setting,
+    render_dictionary_sql,
     to_create_sql,
 )
 from chkit.core.validate import assert_valid_definitions
@@ -64,6 +67,19 @@ def _push_drop(
                 key=definition_key(definition),
                 risk=risk,
                 sql=f"DROP VIEW IF EXISTS {definition.database}.{definition.name};",
+            )
+        )
+        return
+    if isinstance(definition, DictionaryDefinition):
+        operations.append(
+            MigrationOperation(
+                type="drop_dictionary",
+                key=definition_key(definition),
+                risk=risk,
+                sql=(
+                    f"DROP DICTIONARY IF EXISTS "
+                    f"{definition.database}.{definition.name};"
+                ),
             )
         )
         return
@@ -103,6 +119,16 @@ def _push_create(
             )
         )
         return
+    if isinstance(definition, DictionaryDefinition):
+        operations.append(
+            MigrationOperation(
+                type="create_dictionary",
+                key=definition_key(definition),
+                risk=risk,
+                sql=sql,
+            )
+        )
+        return
     operations.append(
         MigrationOperation(
             type="create_materialized_view",
@@ -126,8 +152,47 @@ def _push_create_database(
     )
 
 
+# Mirrors the JS `\s` class exactly (TS uses /\s/.test(char)); Python's
+# str.isspace() differs on U+0085/U+001C-001F (included) and U+FEFF (excluded),
+# which would let a pathological key expression diff differently across ports.
+_JS_WHITESPACE_RE = re.compile(
+    r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
+)
+
+
+def _strip_insignificant_formatting(token: str) -> str:
+    """Drop whitespace and identifier backticks for key-clause comparison.
+
+    ClickHouse normalizes both when it stores a key: ``toStartOfHour( ts )``
+    comes back as ``toStartOfHour(ts)``, and a column written bare as
+    ``user-id`` in config is stored/introspected quoted as ``` `user-id` ```.
+    Single/double-quoted string literals are semantic and preserved.
+    Comparison-only — never used to render DDL, so keyword expressions like
+    ``INTERVAL 1 HOUR`` and real identifier quoting keep their form when
+    emitted.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    for i, char in enumerate(token):
+        if quote is not None:
+            out.append(char)
+            if char == quote and (i == 0 or token[i - 1] != "\\"):
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+            out.append(char)
+            continue
+        if char == "`":
+            continue
+        if _JS_WHITESPACE_RE.match(char) is not None:
+            continue
+        out.append(char)
+    return "".join(out)
+
+
 def _join_clause(values: list[str] | None) -> str:
-    return ",".join(values or [])
+    return ",".join(_strip_insignificant_formatting(value) for value in values or [])
 
 
 def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool:
@@ -510,6 +575,45 @@ def _rank(op: MigrationOperation) -> int:
     return 5
 
 
+def _dictionary_source_is_hidden(source: str) -> bool:
+    # `chkit pull` writes ClickHouse's own introspection placeholder
+    # (`password '[HIDDEN]'`) into `source` when it can't recover a
+    # dictionary's real credential. That placeholder must never drive a diff —
+    # rendering it would deploy the literal string "[HIDDEN]" as the password.
+    # A real password value, by contrast, is fully known to chkit (it's a
+    # plain string in the schema file) and a change to it is a genuine diff
+    # like any other.
+    return "[HIDDEN]" in source
+
+
+def _dictionary_comparison_shape(
+    definition: DictionaryDefinition, omit_source: bool
+) -> dict[str, object]:
+    shape = definition.model_dump(by_alias=True)
+    if omit_source:
+        shape.pop("source", None)
+    return shape
+
+
+def _diff_dictionary(
+    old: DictionaryDefinition, new: DictionaryDefinition
+) -> list[MigrationOperation]:
+    omit_source = _dictionary_source_is_hidden(new.source)
+    if _dictionary_comparison_shape(old, omit_source) == _dictionary_comparison_shape(
+        new, omit_source
+    ):
+        return []
+
+    return [
+        MigrationOperation(
+            type="create_dictionary",
+            key=definition_key(new),
+            risk="caution",
+            sql=render_dictionary_sql(new, replace=True),
+        )
+    ]
+
+
 def plan_diff(
     old_definitions: list[SchemaDefinition], new_definitions: list[SchemaDefinition]
 ) -> MigrationPlan:
@@ -549,6 +653,12 @@ def plan_diff(
             matched, MaterializedViewDefinition
         ):
             operations.extend(_diff_materialized_view(matched, new_def))
+            continue
+
+        if isinstance(new_def, DictionaryDefinition) and isinstance(
+            matched, DictionaryDefinition
+        ):
+            operations.extend(_diff_dictionary(matched, new_def))
             continue
 
         if type(new_def) is not type(matched):

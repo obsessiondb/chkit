@@ -65,7 +65,9 @@ from chkit_plugin_obsessiondb.engine import (
     strip_shared_prefix,
 )
 from chkit_plugin_obsessiondb.jobs_api import (
-    Job,
+    JobDetail,
+    JobSubmitTask,
+    JobSummary,
     jobs_cancel,
     jobs_get,
     jobs_list,
@@ -143,7 +145,9 @@ __all__ = [
     "EnsurePluginResult",
     "ErrorEnvelope",
     "InstanceClaimStatus",
-    "Job",
+    "JobDetail",
+    "JobSubmitTask",
+    "JobSummary",
     "ObsessionDBPluginOptions",
     "OnboardingOptions",
     "OtpRateLimitError",

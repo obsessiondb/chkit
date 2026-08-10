@@ -28,6 +28,7 @@ from typing import Final
 
 from chkit.core import (
     ColumnDefinition,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     SchemaDefinition,
     TableDefinition,
@@ -257,22 +258,23 @@ def _render_header(tool_version: str) -> list[str]:
     ]
 
 
-def _render_table_model(
-    table: TableDefinition,
+def _render_fields_model(
+    fields: list[ColumnDefinition],
     class_name: str,
+    path_prefix: str,
     options: CodegenOptions,
 ) -> tuple[list[str], list[CodegenFinding], set[str]]:
-    """Render the lines for a single table → Pydantic model."""
+    """Render the lines for a list of columns → Pydantic model."""
     findings: list[CodegenFinding] = []
     imports_needed: set[str] = set()
     lines: list[str] = [f"class {class_name}(BaseModel):"]
-    if not table.columns:
+    if not fields:
         lines.append("    pass")
         lines.append("")
         return lines, findings, imports_needed
 
-    for column in table.columns:
-        path = f"{table.database}.{table.name}.{column.name}"
+    for column in fields:
+        path = f"{path_prefix}.{column.name}"
         mapped = map_column_type(column=column, path=path, options=options)
         if mapped.finding is not None:
             findings.append(mapped.finding)
@@ -292,6 +294,32 @@ def _render_table_model(
     lines.append("    model_config = ConfigDict(populate_by_name=True)")
     lines.append("")
     return lines, findings, imports_needed
+
+
+def _render_table_model(
+    table: TableDefinition,
+    class_name: str,
+    options: CodegenOptions,
+) -> tuple[list[str], list[CodegenFinding], set[str]]:
+    """Render the lines for a single table → Pydantic model."""
+    return _render_fields_model(
+        list(table.columns), class_name, f"{table.database}.{table.name}", options
+    )
+
+
+def _render_dictionary_model(
+    definition: DictionaryDefinition,
+    class_name: str,
+    options: CodegenOptions,
+) -> tuple[list[str], list[CodegenFinding], set[str]]:
+    """Render the lines for a single dictionary → Pydantic model."""
+    fields = [
+        ColumnDefinition(name=attribute.name, type=attribute.type)
+        for attribute in definition.attributes
+    ]
+    return _render_fields_model(
+        fields, class_name, f"{definition.database}.{definition.name}", options
+    )
 
 
 def _render_view_model(
@@ -325,10 +353,15 @@ def generate_type_artifacts(
 
     canonical = canonicalize_definitions(definitions)
     view_kinds = {"view", "materialized_view"}
-    filtered: list[TableDefinition | ViewDefinition | MaterializedViewDefinition] = [
+    filtered: list[
+        TableDefinition
+        | ViewDefinition
+        | MaterializedViewDefinition
+        | DictionaryDefinition
+    ] = [
         definition
         for definition in canonical
-        if definition.kind == "table"
+        if definition.kind in {"table", "dictionary"}
         or (normalized.include_views and definition.kind in view_kinds)
     ]
     filtered.sort(key=lambda d: (d.database, d.name))
@@ -345,6 +378,10 @@ def generate_type_artifacts(
         definition = entry.definition
         if isinstance(definition, TableDefinition):
             lines, table_findings, needed = _render_table_model(
+                definition, entry.class_name, normalized
+            )
+        elif isinstance(definition, DictionaryDefinition):
+            lines, table_findings, needed = _render_dictionary_model(
                 definition, entry.class_name, normalized
             )
         else:

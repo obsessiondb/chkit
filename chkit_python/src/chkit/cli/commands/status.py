@@ -31,6 +31,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.core.model import ChxConfigEnv
 
 
 def run(
@@ -53,7 +54,7 @@ def run(
         ),
     ] = None,
 ) -> None:
-    config = load_config(config_path)
+    config = load_config(config_path, ChxConfigEnv(command="status"))
     if config.clickhouse is None:
         msg = (
             "clickhouse.config.py must include a `clickhouse` block "

@@ -7,10 +7,12 @@ import typer
 from chkit import __version__
 from chkit.cli.commands import (
     check,
+    codegen_shortcut,
     drift,
     generate,
     init,
     migrate,
+    obsessiondb_shortcut,
     plugin,
     pull,
     query,
@@ -31,7 +33,21 @@ app.command("check", help="Run pre-flight checks (drift, checksums, pending).")(
 app.command("drift", help="Compare the live database against the schema snapshot.")(drift.run)
 app.command("query", help="Run a SQL string against the configured ClickHouse target.")(query.run)
 app.command("pull", help="Introspect live ClickHouse and emit a Python schema file.")(pull.run)
-app.command("plugin", help="List configured plugins or dispatch a plugin command.")(plugin.run)
+app.command(
+    "plugin",
+    help="List configured plugins or dispatch a plugin command.",
+    context_settings={"ignore_unknown_options": True},
+)(plugin.run)
+app.command(
+    "codegen",
+    help="Generate typed row models via the codegen plugin (shortcut).",
+    context_settings={"ignore_unknown_options": True},
+)(codegen_shortcut.run)
+app.command(
+    "obsessiondb",
+    help="Run ObsessionDB commands (login, signup, service, ...) via the plugin.",
+    context_settings={"ignore_unknown_options": True},
+)(obsessiondb_shortcut.run)
 
 
 @app.callback(invoke_without_command=True)

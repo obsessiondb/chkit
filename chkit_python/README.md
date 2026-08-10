@@ -61,7 +61,11 @@ implementations can share a database without divergence.
 **Covered — 1:1 with TS:**
 
 - `chkit.core` — model, canonicalization, codec, planner, validation,
-  snapshot, SQL rendering, `apply_on_cluster_to_plan`.
+  snapshot, SQL rendering, `apply_on_cluster_to_plan`. Includes the
+  Dictionary primitive (`dictionary()` — full lifecycle: DSL,
+  validation, diff/replace planning, `--rename-dictionary`, pull
+  introspection, codegen), index-only projections, and function
+  expressions in `primaryKey`/`orderBy`.
 - All CLI commands: `init`, `generate`, `migrate`, `status`, `check`,
   `drift` (with live-DB compare), `pull`, `query`, `plugin`. Codegen
   runs automatically after `chkit generate` when the plugin is
@@ -75,10 +79,13 @@ implementations can share a database without divergence.
   `on_check_report`, `on_before_plugin_command`, `on_pull_introspect`,
   `on_init`, `on_complete`).
 - First-party plugins: `chkit_plugin_codegen` (Pydantic model
-  generator), `chkit_plugin_obsessiondb` (auth, service management,
-  remote executor, backfill routing, `Shared*`-engine rewrites),
-  `chkit_plugin_backfill` (local-backfill scaffold — Phase-2 execution
-  engine deferred).
+  generator, including dictionary attribute models),
+  `chkit_plugin_obsessiondb` (auth, service management, remote
+  executor, backfill routing, `Shared*`-engine rewrites),
+  `chkit_plugin_backfill` (full chunking + execution engine: smart
+  size-aware chunk planning, async submit/poll execution loop with
+  checkpoint + resume, mv_replay detection, and the managed-job
+  `submit` path via ObsessionDB).
 - Journal — `_chkit_migrations` table (schema + `CHKIT_JOURNAL_TABLE`
   override + checksum mismatch detection), per-operation async
   tracking, `INSERT race condition` retry, ON CLUSTER +

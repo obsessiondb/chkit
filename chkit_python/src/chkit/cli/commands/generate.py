@@ -20,7 +20,11 @@ from typing import Annotated
 import typer
 
 from chkit import __version__
+from chkit.cli.commands.dictionary_password_warnings import (
+    detect_dictionary_password_warnings,
+)
 from chkit.cli.commands.generate_plan_pipeline import (
+    apply_explicit_dictionary_renames,
     apply_explicit_table_renames,
     apply_selected_rename_suggestions,
     assert_cli_column_mappings_resolvable,
@@ -28,16 +32,23 @@ from chkit.cli.commands.generate_plan_pipeline import (
 )
 from chkit.cli.commands.generate_rename_mappings import (
     ColumnRenameMapping,
+    DictionaryRenameMapping,
     TableRenameMapping,
+    assert_cli_dictionary_mappings_resolvable,
     assert_cli_table_mappings_resolvable,
     assert_no_conflicting_column_mappings,
+    assert_no_conflicting_dictionary_mappings,
     assert_no_conflicting_table_mappings,
     collect_schema_rename_mappings,
     merge_column_mappings,
+    merge_dictionary_mappings,
     merge_table_mappings,
     parse_rename_column_mappings,
+    parse_rename_dictionary_mappings,
     parse_rename_table_mappings,
+    remap_old_definitions_for_dictionary_renames,
     remap_old_definitions_for_table_renames,
+    resolve_active_dictionary_mappings,
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
@@ -56,7 +67,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxResolvedConfig, ChxValidationError, SchemaDefinition
+from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, ChxValidationError, SchemaDefinition
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
@@ -145,19 +156,23 @@ def _apply_rename_mappings(
     canonical: list[SchemaDefinition],
     rename_table: list[str] | None,
     rename_column: list[str] | None,
+    rename_dictionary: list[str] | None,
 ) -> tuple[
     list[SchemaDefinition],
     list[TableRenameMapping],
     list[ColumnRenameMapping],
     list[ColumnRenameMapping],
+    list[DictionaryRenameMapping],
 ]:
     """Parse rename flags, reconcile with schema metadata.
 
     Returns:
-        (remapped_old_defs, active_table_mappings, cli_column_mappings, column_mappings)
+        (remapped_old_defs, active_table_mappings, cli_column_mappings,
+        column_mappings, active_dictionary_mappings)
     """
     cli_table_mappings = parse_rename_table_mappings(rename_table or [])
     cli_column_mappings = parse_rename_column_mappings(rename_column or [])
+    cli_dictionary_mappings = parse_rename_dictionary_mappings(rename_dictionary or [])
     schema_mappings = collect_schema_rename_mappings(canonical)
     table_mappings = merge_table_mappings(
         schema_mappings.table_mappings, cli_table_mappings
@@ -165,26 +180,38 @@ def _apply_rename_mappings(
     column_mappings = merge_column_mappings(
         schema_mappings.column_mappings, cli_column_mappings
     )
+    dictionary_mappings = merge_dictionary_mappings(
+        schema_mappings.dictionary_mappings, cli_dictionary_mappings
+    )
 
     assert_no_conflicting_table_mappings(table_mappings)
     assert_no_conflicting_column_mappings(column_mappings)
+    assert_no_conflicting_dictionary_mappings(dictionary_mappings)
     assert_cli_table_mappings_resolvable(cli_table_mappings, old_defs, canonical)
+    assert_cli_dictionary_mappings_resolvable(
+        cli_dictionary_mappings, old_defs, canonical
+    )
 
     active_table_mappings = resolve_active_table_mappings(
         old_defs, canonical, table_mappings
     )
-    remapped_old_defs = remap_old_definitions_for_table_renames(
-        old_defs, active_table_mappings
+    active_dictionary_mappings = resolve_active_dictionary_mappings(
+        old_defs, canonical, dictionary_mappings
+    )
+    remapped_old_defs = remap_old_definitions_for_dictionary_renames(
+        remap_old_definitions_for_table_renames(old_defs, active_table_mappings),
+        active_dictionary_mappings,
     )
     return (
         remapped_old_defs,
         active_table_mappings,
         cli_column_mappings,
         column_mappings,
+        active_dictionary_mappings,
     )
 
 
-def run(  # noqa: PLR0911, PLR0912, PLR0915
+def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -231,6 +258,16 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
             ),
         ),
     ] = None,
+    rename_dictionary: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--rename-dictionary",
+            help=(
+                "Explicit dictionary rename mapping old_db.old_dict=new_db.new_dict. "
+                "Repeatable."
+            ),
+        ),
+    ] = None,
     dryrun: Annotated[
         bool,
         typer.Option("--dryrun", help="Print plan without writing artifacts."),
@@ -240,7 +277,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
 ) -> None:
-    config = load_config(config_path)
+    config = load_config(config_path, ChxConfigEnv(command="generate"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
@@ -298,11 +335,13 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
         active_table_mappings,
         cli_column_mappings,
         column_mappings,
+        active_dictionary_mappings,
     ) = _apply_rename_mappings(
         old_defs=old_defs,
         canonical=canonical,
         rename_table=rename_table,
         rename_column=rename_column,
+        rename_dictionary=rename_dictionary,
     )
 
     available_keys = sorted(
@@ -340,6 +379,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
     try:
         plan = plan_diff(remapped_old_defs, canonical)
         plan = apply_explicit_table_renames(plan, active_table_mappings)
+        plan = apply_explicit_dictionary_renames(plan, active_dictionary_mappings)
         assert_cli_column_mappings_resolvable(cli_column_mappings, plan, canonical)
         plan = apply_selected_rename_suggestions(
             plan,
@@ -389,6 +429,8 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
         plan, config.clickhouse.cluster if config.clickhouse else None
     )
 
+    dictionary_password_warnings = detect_dictionary_password_warnings(plan)
+
     if not plan.operations:
         if output_json:
             typer.echo(
@@ -423,6 +465,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
                             s.model_dump(by_alias=True) for s in plan.rename_suggestions
                         ],
                         "scope": _scope_to_payload(table_scope),
+                        "warnings": dictionary_password_warnings,
                     },
                     indent=2,
                 )
@@ -435,6 +478,8 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
         typer.echo(
             f"Risk: safe={risks.safe} caution={risks.caution} danger={risks.danger}"
         )
+        for warning in dictionary_password_warnings:
+            typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
         return
 
     artifact_definitions = (
@@ -481,6 +526,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
                     "snapshotFile": str(snapshot_path),
                     "operationCount": len(plan.operations),
                     "riskSummary": plan.risk_summary.model_dump(),
+                    "warnings": dictionary_password_warnings,
                 },
                 indent=2,
             )
@@ -495,3 +541,5 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915
     typer.echo(
         f"  Risk: safe={risks.safe} caution={risks.caution} danger={risks.danger}"
     )
+    for warning in dictionary_password_warnings:
+        typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)

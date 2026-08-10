@@ -1252,3 +1252,377 @@ touch — tracked for the next port cycle:
   (deferred with the rest of Phase 2).
 - `3c008f4`, `9d9c06e`, `b501f5d` — TS-only refactors with Python
   parity already in place.
+
+---
+
+## Main sync 2026-08-10 — full-parity pass: Category A trio + Dictionary + submit surface
+
+Policy note first: per the user's standing instruction, sync passes no
+longer defer upstream commits by category — every pending commit is
+ported in the pass, and anything that genuinely cannot land (below:
+Phase-2 backfill engine) is called out explicitly rather than silently
+queued. Each ported commit was independently reviewed by a
+TS-vs-Python parity reviewer; accepted findings are folded in below.
+
+### `5a8d805` — function expressions in primaryKey/orderBy (#178)
+
+- `key_clause.is_plain_column_reference` (fullmatch ≡ TS `^...$`).
+- `planner._strip_insignificant_formatting` + `_join_clause` — strips
+  whitespace and identifier backticks (not quoted literals) for
+  key-clause comparison only; applied to primary_key/order_by/unique_key,
+  never engine/partition_by.
+- `sql._render_key_clause_columns(columns, column_names)` — quotes
+  declared columns and bare identifiers; expressions verbatim.
+- `validate` — key checks skip expressions.
+- **Reviewer fix folded in:** whitespace stripping uses an explicit
+  JS-`\s` character class (`_JS_WHITESPACE_RE`) instead of
+  `str.isspace()`, which diverges on U+0085/U+001C–U+001F/U+FEFF.
+- Tests: `tests/test_key_clause_expressions.py` (all 5 TS cases).
+
+### `3f1db03` — index-only projections (#193)
+
+- New `core/projection.py` (`is_index_projection`,
+  `normalize_projection_index`, `canonicalize_projection`,
+  `render_projection_body`) — exact port including paren peeling,
+  idempotency, and ClickHouse comma-spacing echo.
+- **Design divergence (deliberate):** `ProjectionDefinition` stays ONE
+  Pydantic model with optional `query`/`index`/`type` instead of the TS
+  two-member union. Split enforcement mirrors where TS enforces:
+  states TS's type system cannot represent (neither kind; `index`
+  without `type`) are rejected at model construction via a
+  `model_validator`; the both-set case (TS admits structurally) surfaces
+  as `projection_ambiguous_kind`, empty index as
+  `projection_empty_index`. Both reviewer-found render holes
+  (`(None)` body, trailing `TYPE `) are closed by the validator.
+- **Snapshot interop fix (reviewer):** `write_snapshot` now dumps with
+  `exclude_none=True`. TS `JSON.stringify` omits undefined keys and
+  `isIndexProjection` is `'index' in projection`, so a Python-written
+  `"index": null` would flip every SELECT projection to index-only when
+  the TS tool reads the shared snapshot. Reading remains tolerant of
+  both styles.
+- Parser (`_INDEX_PROJECTION_RE`), drift shape fingerprints
+  (`index=...|type=...`), pull render, introspection all ported.
+- Tests: `tests/test_index_only_projections.py` (all TS core cases +
+  reviewer-requested backtick-name, multiline SHOW CREATE, construction
+  guards, pull-render case) and 3 drift tests in
+  `tests/test_drift_compare.py`.
+
+### `8296b8a` — table clauses past the column list + derived PK (#198)
+
+- `create_table_parser`: `_find_column_list_bounds` /
+  `_extract_table_options` refactor; every clause parser (including
+  SETTINGS/TTL) now searches only past the column list, so a
+  projection's inner `ORDER BY` or a column-level `TTL` can't swallow
+  table-level clauses. Falls back to whole-query when unparseable.
+- `drift_compare`: PRIMARY KEY derived from ORDER BY on both sides
+  when absent. **Reviewer fix folded in:** the actual-side fallback
+  uses `is not None` (≡ TS `??`), not truthiness — an empty-string
+  primary key compares as-is.
+- Tests: `tests/test_parser_clause_fixes.py` (all 4 TS cases, exact
+  dataclass equality per reviewer).
+
+### `65c90d6` — Dictionary primitive (#191)
+
+Full lifecycle port mirroring `materialized_view`:
+
+- Model: `DictionaryAttribute` / `DictionaryRange` /
+  `DictionaryDefinition` (+ `dictionary()` factory, `SchemaKind`,
+  operation types `create_dictionary`/`drop_dictionary`/
+  `rename_dictionary`, 8 validation codes).
+- Canonicalization (sort kind 3), validation, `render_dictionary_sql`
+  (`CREATE DICTIONARY IF NOT EXISTS` / `CREATE OR REPLACE DICTIONARY`,
+  PRIMARY KEY without parens, SOURCE/LAYOUT/LIFETIME/RANGE/SETTINGS/
+  COMMENT), planner diff (whole-shape compare; `[HIDDEN]` source is
+  excluded from the diff so the introspection placeholder never
+  deploys, but does not suppress unrelated changes).
+- `clickhouse/create_dictionary_parser.py` — new 1:1 parser port
+  (attribute modifiers, composite PK, RANGE vs the `range()` array
+  function, SETTINGS, quoted-value consumption).
+- DDL propagation: `wait_for_dictionary` + `dictionary:` operation
+  keys; `infer_schema_kind_from_engine('Dictionary') == 'dictionary'`.
+- CLI: `--rename-dictionary` on generate (parse/merge/resolve/assert/
+  remap + `RENAME DICTIONARY` plan ops ranked with table renames),
+  plain-text password warnings on generate output, safety markers
+  (`drop_dictionary_dependency_break`, DICTIONARY in the object-key
+  regex), drift object existence, pull introspection + rendering
+  (`dictionary(...)` with `[HIDDEN]` note + password warnings),
+  codegen Pydantic models from dictionary attributes.
+- ON CLUSTER anchors were already in place from the Category C port.
+- Tests: `tests/test_dictionary.py` (29 tests — core DSL/validation/
+  planner, parser, safety markers, drift).
+
+### `c1d8d0d` — `chkit backfill submit` (surface only)
+
+- `SubmitOptions` + `SUBMIT_FLAGS`/`SUBMIT_FLAG_MAP` in
+  `chkit_plugin_backfill.options`; `submit` command registered on the
+  plugin with the TS local-handler behavior (clear "requires a managed
+  job backend" error when no ObsessionDB service intercepts).
+- `chkit_plugin_obsessiondb.backfill_handler` guards `submit` alongside
+  plan/run/resume when authed + service selected.
+- **Not ported (explicit):** the managed-job submit path itself
+  (`buildSubmitTasks` → jobs backend) depends on `buildBackfillPlan` +
+  `buildChunkExecutionSql` from the Phase-2 chunking engine.
+
+### Dictionary reviewer triage (folded in post-port)
+
+- **JS `Number()` coercion parity** in
+  `create_dictionary_parser._consume_quoted_or_bare_value` — Python's
+  `int()`/`float()` accepted `1_000`/`nan`/`inf` (JS keeps them strings)
+  and re-rendered `300.0`/`1e5` with a trailing `.0`, a permanent
+  spurious-diff surface against TS-written snapshots. Now coerces only
+  JS-grammar decimals (integral floats collapse to int) and `0x` hex.
+- `_parse_qualified_table` error message updated to the TS
+  `parseQualifiedName` wording (shared by table + dictionary renames);
+  the stale-message test expectation updated with it.
+- Primary-key backtick strip narrowed to one backtick per side
+  (TS `.replace(/^`|`$/g, '')`).
+- Test debt closed at pipeline level: dictionary rename pipeline
+  (RENAME not drop+create, schema `renamed_from`), generate + pull
+  password warnings, pull dictionary rendering (incl. `[HIDDEN]` note),
+  codegen dictionary model, JS-number coercion matrix — all in
+  `tests/test_dictionary.py` (38 tests).
+- Reviewer items accepted as-is (no code change): planner comparison
+  via sorted `model_dump` is order-insensitive where TS
+  `JSON.stringify` is key-order-sensitive — Python is strictly more
+  lenient, never the reverse; codepoint vs locale settings sort;
+  `wait_for_dictionary` quoting is safer than TS.
+- Still-open e2e debt (needs live ClickHouse, consistent with prior
+  passes deferring docker-based e2e): `migrate-dictionary.e2e`,
+  `generate.e2e` dictionary flows, pull e2e, `sql-validation.e2e`
+  dictionary block.
+
+### Per-table `plugins` field (baseline gap closed in the same pass)
+
+- `TableDefinition.plugins: dict[str, Any] | None` + `table(plugins=...)`
+  kwarg — TS `TablePlugins` parity. Metadata only: ignored by the diff
+  engine (test in `tests/test_planner.py`), carried through
+  canonicalization and snapshots. Without it, a schema file ported from
+  TS carrying `plugins: {...}` failed Pydantic validation outright.
+  Consumers (backfill `timeColumn`) arrive with Phase 2.
+
+### Parity fixes surfaced by the docs dual-language pass (same day)
+
+- **Wheel packaging** — `[tool.hatch.build.targets.wheel]` only shipped
+  `chkit` + `chkit_plugin_obsessiondb`; a pip-installed `chkit-py` was
+  missing the codegen and backfill plugins entirely (the `chkit init`
+  template even suggests importing `chkit_plugin_codegen`). All four
+  packages now ship in the wheel.
+- **Function-style configs (TS `ChxConfigFn`)** — the Python loader only
+  accepted a static `config` attribute; TS allows
+  `defineConfig((env) => ({...}))` with `env: {command, mode}` (documented
+  in the CI/CD guide). Ported: `ChxConfigEnv` model, `define_config`
+  accepts a callable, `load_config(path, env)` invokes it, and every CLI
+  command threads `ChxConfigEnv(command=...)`. Test in
+  `tests/test_user_config_and_config_merge.py`.
+
+### CLI-surface parity ports (surfaced by the docs-accuracy reviewer's live CLI probes)
+
+- **Plugin dispatcher flag forwarding** — `chkit plugin <name> <cmd>`
+  hardcoded `flags={}`, so no plugin command could receive its own
+  `--flags` (Typer rejected the tokens outright). Now the `plugin`
+  command registers with `ignore_unknown_options`, and the dispatcher
+  parses forwarded tokens against the plugin command's declared flag
+  defs via `core.flags.parse_flags` (unknown flags error, TS-style);
+  remaining tokens stay positional.
+- **Top-level `chkit codegen`** — existed only in TS. New
+  `codegen_shortcut.py` dispatches `plugin codegen codegen` with
+  forwarded flags (`--check`, `--out-file`, ...). Verified live:
+  `chkit codegen` writes, `chkit codegen --check` gates.
+- **Top-level `chkit obsessiondb <cmd>`** — the Python spelling was
+  `chkit plugin obsessiondb <cmd>` while the plugin's own runbook
+  strings printed the TS spelling. New `obsessiondb_shortcut.py` makes
+  those strings correct; multi-word commands (`service select`) flow
+  through as positionals.
+- **Dispatcher DB connection made opportunistic** — an unreachable
+  ClickHouse no longer blocks plugin commands that don't need an
+  executor (codegen, backfill status); mirrors TS.
+- **`check.failOnExtraObjects`** — TS config flag was missing from
+  `ChxCheckConfig`; the drift machinery already had the parameter but
+  both call sites hardcoded `False`. Field added (default false),
+  resolved, and wired through `check`/`drift`.
+- **`backfill({maxChunkBytes: "10G"})`** — the factory only accepted
+  ints; suffix strings were CLI-flag-only. `field_validator` now
+  coerces via `parse_byte_size`, matching the documented
+  `string | number` contract.
+
+### Remaining gap after this pass (explicit, needs its own project)
+
+- ~~**Phase-2 backfill execution engine**~~ — **CLOSED** by the
+  2026-08-10 Phase-2 port entry below. No remaining gap: the full
+  chunking + execution engine, the three upstream fixes (`f85f568`,
+  `3f9a246`, `9ad23f9` — ported as end-state of `main`), and the
+  managed-submit backend half of `c1d8d0d` are all in. Everything is at
+  parity as of upstream `main`.
+
+### Environment note
+
+- `.venv` was found hollow and rebuilt from `python 3.11` +
+  `pip install -e .[dev]`; latest ruff surfaced new lint rules
+  (PLR0917) on pre-existing code — annotated rather than refactored.
+- `tests/test_e2e_testkit.py::test_create_run_tag_is_unique_across_calls`
+  is flaky (millisecond-timestamp + random-suffix collision over 100
+  iterations); observed one collision, passes on re-run. Pre-existing.
+
+
+## Main sync 2026-08-10 — Phase-2 backfill engine port (final parity gap closed)
+
+Full port of the chunking + execution engine and the managed-submit
+backend — the last TS surface with no Python counterpart. Ported as the
+end-state of `main` (includes `f85f568` MV-source chunk sizing,
+`3f9a246` multi-MV UNION ALL replay, `9ad23f9` shared SQL scanner).
+
+### Module map (TS → Python)
+
+- `chunking/{types,boundary-codec,partition-slices,sql}.ts`,
+  `chunking/utils/{binary-string,ranges,ids}.ts`,
+  `chunking/services/{metadata,row-probe,distribution}-source.ts`,
+  `chunking/strategies/*` (7 files), `chunking/planner.ts`,
+  `chunking/{analyze,strategy-policy}.ts`
+  → `chkit_plugin_backfill/chunking/` (same layout, snake_case).
+- `detect.ts` → `detect.py`; `planner.ts` → `planner.py`;
+  `queries.ts` → `queries.py`; `async-backfill.ts` → `async_backfill.py`;
+  `payload.ts` → `payload.py`; `check.ts` → `check.py`;
+  `logging.ts` → `logging_utils.py` (stdlib logging + threading.Timer
+  slow-query warnings); `sdk.ts` → `sdk.py`.
+- `plugin.ts` → real `plan`/`run`/`resume`/`status`/`cancel`/`doctor`
+  handlers in `plugin.py` (Phase-2 stubs removed), `on_check` +
+  `on_check_report` hooks, TS `wrapPluginRun` error envelope
+  (json `{ok,command,error}` / text `"<Label> failed: <msg>"`,
+  exit 2 config errors, 1 otherwise).
+- `plugin-obsessiondb/src/backfill/{submit,console-url}.ts` →
+  `chkit_plugin_obsessiondb/{backfill_submit,console_url}.py`;
+  `handler.ts` end-state → `backfill_handler.py` (submit routes to the
+  jobs backend when authed + service selected; plan/run/resume guarded
+  with the TS "runs locally… use `chkit backfill submit`" message;
+  non-session dispatch errors now PROPAGATE like TS rethrow).
+- `jobs/submit` RPC + `JobSubmitTask` added to `jobs_api.py`.
+
+### Design decisions
+
+- **Concurrency model** — TS uses fire-and-forget HTTP submits polled
+  from one event loop under `pMap`. clickhouse-connect is synchronous
+  and its sessions reject concurrent queries, so `execute_backfill`
+  runs each chunk's submit→poll lifecycle on a `ThreadPoolExecutor`
+  bounded by `--concurrency`, with a per-thread-connection executor
+  (`_ThreadLocalExecutor`). `submit()` blocks until the INSERT finishes
+  (HTTP request held open), so polling usually terminates on its first
+  check; server-side parallelism, deterministic query_ids, checkpoint
+  and `sync_progress` reconciliation semantics are unchanged. Progress
+  snapshots + `on_progress` are serialized under a dedicated lock and
+  `write_json` is write-then-`os.replace`, restoring TS's
+  always-parseable-checkpoint invariant; the first chunk failure
+  cancels queued futures (pMap `stopOnError`).
+- **Planner probes run sequentially** where TS fans out via `pMap`
+  (concurrency 10/50). `pMap` preserves input order, so results are
+  identical; wall-clock only.
+- **Determinism** — plan id = `randomBytes(8).hex` (16 chars); chunk id
+  = `sha256("chunk:<plan>:<partition>:<index>")[:16]`; idempotency
+  token = full `sha256("token:<plan>:<chunk>")` — byte-identical to TS
+  (the sha-of-options planId described in older docs does not match the
+  TS source; the TS implementation is authoritative).
+- **JS semantics pinned in helpers** — `latin1_bytes` replicates
+  Buffer latin1 (`utf-16-le[::2]` masks code units like JS);
+  `jsnum.parse_js_number`/`js_number_to_string` replicate `Number()` /
+  `String()` incl. shortest-round-trip digits above 2^53 and the JS
+  e-notation window; `time_utils` replicates `Date.parse` (truncating
+  sub-ms digits) and `toISOString`; `_js_round` handles the
+  `0.49999999999999994` double-rounding case. Plan JSON collapses
+  integral floats to ints on write so files byte-match TS.
+- **`sync_progress` / `query_status`** query plain `system.processes` /
+  `system.query_log` instead of TS's `clusterAllReplicas('cluster', …)`
+  — consistent with the client's documented divergence (the TS spelling
+  assumes ObsessionDB cluster naming; not portable to bare CH).
+- **`ClickHouseClient.submit`** passed `query_id=` to
+  clickhouse-connect's `command()`, which has no such parameter —
+  every live run/resume would have crashed (pre-existing latent bug,
+  also hit `migrate` async apply). Now sends
+  `settings={"query_id": …}`; verified live that the id lands in
+  `system.query_log`.
+
+### CLI-surface fixes surfaced by the port
+
+- **`extendCommands` consumer** — TS's `BACKFILL_EXTEND_COMMANDS`
+  registers `--local`/`--job-id`/`--service-slug` on the backfill
+  commands; the Python `ChxPlugin.extend_commands` field had no
+  consumer, so the dispatcher rejected those flags as unknown before
+  the routing hook could see them. The obsessiondb plugin now declares
+  the TS-shaped entries and `dispatch_plugin_command` merges them.
+- **Plugin `--json` output** — the dispatcher passed `typer.echo`
+  straight through, printing Python dict reprs under `--json`. Now
+  routed through `json_output.print_output` (TS `printOutput`): real
+  JSON, bare strings wrapped, non-strings suppressed in plain mode.
+- **`run_on_before_plugin_command`** now skips the target plugin's own
+  hook (TS parity — a plugin can't intercept its own commands).
+- **`jobs_api` models rewrote to the actual jobs contract** — the
+  Phase-4 models required a `service_slug` field the contract never
+  emits and invented others; `get`/`list` would have failed validation
+  against a conformant backend and `cancel` returns `{}`. Now
+  `JobSummary`/`JobDetail`/`JobsListResponse{jobs,total}` mirror
+  `contract/jobs.ts` (camelCase aliases, printed `by_alias`).
+
+### Reviewer triage (4 adversarial TS↔Python reviewers; accepted fixes folded in)
+
+Fixed from review: shortest-round-trip number printing (≥2^53 ints,
+sub-1e-4 floats); `Date.parse` sub-ms truncation; `re.ASCII` on the
+Number-grammar and sort-key-identifier regexes; JS-exact
+`DISTINCT` boundary regex (ASCII word boundary + JS whitespace class);
+empty-string column-type falsy guard in `introspect_sort_keys`;
+`_coerce_row_value` falls back through `str()` for native driver
+objects (Decimal); environment fingerprint now uses WHATWG
+`URL.origin` semantics (lowercase host, strip userinfo, drop default
+ports; **raises** on an unparseable URL instead of silently skipping
+the check — TS throws); `plan` payload key order/omission; console URL
+drops scheme-default ports and brackets IPv6; `PluginConfig` strips
+unknown keys (TS non-strict zod) instead of rejecting; `--concurrency`
+parses through the shared JS-Number emulation (rejects `3_0`, accepts
+`0x10`); remote-executor settings coerce bools→1/0, drop non-scalars,
+omit an empty map.
+
+Accepted divergences (deliberate, Python-side):
+
+- **Naive timestamps are UTC, not machine-local.** TS `new Date()`
+  interprets offsetless datetimes in the operator's local zone, making
+  the backfill window machine-dependent; the Python port has treated
+  naive input as UTC since Phase 1 and keeps that (deterministic,
+  documented). Pass an explicit `Z`/offset for identical behaviour.
+  Python's grammar is also ISO-stricter (rejects `March 5 2026`,
+  `T24:00:00`).
+- `parse_byte_size` coerces to int (TS keeps floats — `0.5` bytes is
+  accepted there, rejected here).
+- Corrupted persisted plans fail loudly: invalid hex boundaries raise
+  (Node's Buffer silently truncates), and pydantic validates state
+  files on read where TS trusts raw JSON; unknown JSON fields are
+  dropped on rewrite (`extra="ignore"`) instead of round-tripped.
+- `--job-id`/`--service-slug` values are trimmed (TS forwards raw
+  whitespace).
+- Missing-column coercion yields 0 where TS yields NaN (unreachable
+  with the fixed introspection SQL).
+
+### Tests
+
+1:1 ports (TS case-for-case): `test_backfill_chunking_sql.py` (34),
+`test_backfill_planner.py` (12), `test_backfill_detect.py` (20),
+`test_backfill_async.py` (12), `test_backfill_strategy_policy.py` (1),
+`test_obsessiondb_console_url.py` (7),
+`test_obsessiondb_backfill_submit.py` (20),
+`test_obsessiondb_backfill_handler_delta.py` (4),
+`test_backfill_plugin_delta.py` (17), plus updates to
+`test_backfill_plugin.py` (typed chunk plans, TS command semantics,
+exit-2 envelope), `test_main_sync_2026_06_29.py` (new guard message +
+submit routing) and `test_obsessiondb_phase4.py` (contract-shaped jobs
+mocks; missing-flag errors now propagate).
+Integration/e2e: `test_backfill_smart_chunking_integration.py` (6, no
+server needed — in-memory ClickHouse emulation like the TS original),
+`test_backfill_mv_replay_plan_e2e.py` (1) and
+`test_backfill_async_e2e.py` (4) — validated 11/11 against a live
+ClickHouse 24.8 during the port; they hard-fail (never skip) when the
+server is unreachable, per repo rule.
+
+Full suite after the port: 1185 non-e2e tests green, `mypy --strict`
+clean, `ruff` clean; docs site rebuilt green (42 pages).
+
+### Still-open (pre-existing, unchanged by this pass)
+
+- The oRPC wire-format caveat for all obsessiondb remote calls (see the
+  earlier entry) — the jobs-contract model fix above is orthogonal and
+  takes effect once the envelope question is settled.

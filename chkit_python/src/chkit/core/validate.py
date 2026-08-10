@@ -8,16 +8,18 @@ from typing import Final
 
 from chkit.core.canonical import definition_key
 from chkit.core.codec import canonicalize_codec, is_general_codec, is_raw_codec
-from chkit.core.key_clause import normalize_key_columns
+from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefinition,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     SchemaDefinition,
     TableDefinition,
     ValidationIssue,
     ValidationIssueCode,
 )
+from chkit.core.projection import is_index_projection, normalize_projection_index
 
 
 def _push(
@@ -127,8 +129,35 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
             continue
         projection_seen.add(projection.name)
 
+        # A projection carrying both keys satisfies the model, so Pydantic
+        # admits it. Renders as index-only and drops the SELECT body on the
+        # floor.
+        if projection.index is not None and projection.query is not None:
+            _push(
+                issues,
+                definition,
+                "projection_ambiguous_kind",
+                f'Table {definition.database}.{definition.name} projection '
+                f'"{projection.name}" sets both "query" and "index"; use '
+                f'"query" for a SELECT projection or "index"/"type" for an '
+                f"index-only projection",
+            )
+            continue
+
+        if (
+            is_index_projection(projection)
+            and normalize_projection_index(projection.index or "") == ""
+        ):
+            _push(
+                issues,
+                definition,
+                "projection_empty_index",
+                f'Table {definition.database}.{definition.name} projection '
+                f'"{projection.name}" has an empty index expression',
+            )
+
     for col in normalize_key_columns(definition.primary_key):
-        if col not in column_set:
+        if is_plain_column_reference(col) and col not in column_set:
             _push(
                 issues,
                 definition,
@@ -138,7 +167,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
             )
 
     for col in normalize_key_columns(definition.order_by):
-        if col not in column_set:
+        if is_plain_column_reference(col) and col not in column_set:
             _push(
                 issues,
                 definition,
@@ -246,6 +275,101 @@ def _validate_materialized_view(
             )
 
 
+def _validate_dictionary(  # noqa: PLR0912
+    definition: DictionaryDefinition, issues: list[ValidationIssue]
+) -> None:
+    attribute_seen: set[str] = set()
+    attribute_set: set[str] = set()
+    for attribute in definition.attributes:
+        if attribute.name in attribute_seen:
+            _push(
+                issues,
+                definition,
+                "duplicate_column_name",
+                f"Dictionary {definition.database}.{definition.name} "
+                f'has duplicate attribute name "{attribute.name}"',
+            )
+            continue
+        attribute_seen.add(attribute.name)
+        attribute_set.add(attribute.name)
+
+        if attribute.default is not None and attribute.expression is not None:
+            _push(
+                issues,
+                definition,
+                "dictionary_attribute_default_expression_exclusive",
+                f"Dictionary {definition.database}.{definition.name} attribute "
+                f'"{attribute.name}" sets both "default" and "expression"; choose one',
+            )
+
+        if attribute.bidirectional and not attribute.hierarchical:
+            _push(
+                issues,
+                definition,
+                "dictionary_bidirectional_requires_hierarchical",
+                f"Dictionary {definition.database}.{definition.name} attribute "
+                f'"{attribute.name}" sets "bidirectional" without "hierarchical"; '
+                f"bidirectional only applies to hierarchical attributes",
+            )
+
+    if len(definition.primary_key) == 0:
+        _push(
+            issues,
+            definition,
+            "dictionary_missing_primary_key",
+            f"Dictionary {definition.database}.{definition.name} "
+            f"requires a non-empty primaryKey",
+        )
+    else:
+        for column in definition.primary_key:
+            if column not in attribute_set:
+                _push(
+                    issues,
+                    definition,
+                    "dictionary_primary_key_missing_attribute",
+                    f"Dictionary {definition.database}.{definition.name} primaryKey "
+                    f'references missing attribute "{column}"',
+                )
+
+    if len(definition.source.strip()) == 0:
+        _push(
+            issues,
+            definition,
+            "dictionary_missing_source",
+            f"Dictionary {definition.database}.{definition.name} "
+            f'requires a non-empty "source"',
+        )
+
+    if len(definition.layout.strip()) == 0:
+        _push(
+            issues,
+            definition,
+            "dictionary_missing_layout",
+            f"Dictionary {definition.database}.{definition.name} "
+            f'requires a non-empty "layout"',
+        )
+
+    if len(definition.lifetime.strip()) == 0:
+        _push(
+            issues,
+            definition,
+            "dictionary_missing_lifetime",
+            f"Dictionary {definition.database}.{definition.name} "
+            f'requires a non-empty "lifetime"',
+        )
+
+    if definition.range is not None:
+        for column in (definition.range.min, definition.range.max):
+            if column not in attribute_set:
+                _push(
+                    issues,
+                    definition,
+                    "dictionary_range_missing_attribute",
+                    f"Dictionary {definition.database}.{definition.name} range "
+                    f'references missing attribute "{column}"',
+                )
+
+
 def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     object_keys: set[str] = set()
@@ -267,6 +391,8 @@ def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[Valida
             _validate_table(definition, issues)
         elif isinstance(definition, MaterializedViewDefinition):
             _validate_materialized_view(definition, issues, materialized)
+        elif isinstance(definition, DictionaryDefinition):
+            _validate_dictionary(definition, issues)
 
     return issues
 

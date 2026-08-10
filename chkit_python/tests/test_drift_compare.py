@@ -265,3 +265,37 @@ def test_table_shape_detects_projection_mismatch() -> None:
     )
     assert detail is not None
     assert "projection_mismatch" in detail.reason_codes
+
+
+def test_table_shape_index_only_projection_clean_regardless_of_parens() -> None:
+    detail = compare_table_shape(
+        _t(
+            projections=[
+                ProjectionDefinition(name="p", index="(receiver, sender)", type="basic")
+            ]
+        ),
+        _it(
+            projections=[
+                ProjectionDefinition(name="p", index="receiver, sender", type="basic")
+            ]
+        ),
+    )
+    assert detail is None
+
+
+def test_table_shape_detects_index_projection_type_mismatch() -> None:
+    detail = compare_table_shape(
+        _t(projections=[ProjectionDefinition(name="p", index="id", type="basic")]),
+        _it(projections=[ProjectionDefinition(name="p", index="id", type="other")]),
+    )
+    assert detail is not None
+    assert "projection_mismatch" in detail.reason_codes
+
+
+def test_table_shape_detects_select_vs_index_projection_mismatch() -> None:
+    detail = compare_table_shape(
+        _t(projections=[ProjectionDefinition(name="p", query="SELECT id")]),
+        _it(projections=[ProjectionDefinition(name="p", index="id", type="basic")]),
+    )
+    assert detail is not None
+    assert "projection_mismatch" in detail.reason_codes

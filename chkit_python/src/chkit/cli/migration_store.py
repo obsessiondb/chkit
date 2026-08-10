@@ -100,7 +100,11 @@ def checksum_sql(sql_text: str) -> str:
 def write_snapshot(meta_dir: Path, snapshot: Snapshot) -> Path:
     meta_dir.mkdir(parents=True, exist_ok=True)
     snapshot_path = meta_dir / "snapshot.json"
-    payload = snapshot.model_dump(mode="json", by_alias=True)
+    # exclude_none matches TS JSON.stringify, which omits undefined keys.
+    # Key *presence* is load-bearing for cross-implementation snapshots: TS
+    # classifies projections via `'index' in projection`, so a serialized
+    # `"index": null` would flip every SELECT projection to index-only there.
+    payload = snapshot.model_dump(mode="json", by_alias=True, exclude_none=True)
     snapshot_path.write_text(
         json.dumps(payload, indent=2) + "\n",
         encoding="utf-8",

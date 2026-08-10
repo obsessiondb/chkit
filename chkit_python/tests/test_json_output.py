@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from chkit.cli.commands.plugin import _split_positionals_and_flags
 from chkit.cli.json_output import (
     JSON_CONTRACT_VERSION,
     _reset_for_testing,
@@ -15,6 +16,8 @@ from chkit.cli.json_output import (
     has_emitted_json,
     print_output,
 )
+from chkit.core.model import ChxUserConfig, resolve_config
+from chkit_plugin_backfill.options import PluginConfig
 
 
 @pytest.fixture(autouse=True)
@@ -91,3 +94,32 @@ def test_emit_json_error_writes_envelope_to_stdout(
         "error": {"code": "x", "message": "y"},
     }
     assert has_emitted_json() is True
+
+
+def test_split_positionals_and_flags_mirrors_ts_dispatcher() -> None:
+    positionals, flags = _split_positionals_and_flags(
+        ["select", "--service-slug", "prod", "--json-ish=x", "extra"],
+        [
+            {"name": "--service-slug", "type": "string"},
+            {"name": "--json-ish", "type": "string"},
+        ],
+    )
+    assert positionals == ["select", "extra"]
+    assert flags == {"--service-slug": "prod", "--json-ish": "x"}
+
+
+def test_resolve_config_fail_on_extra_objects_defaults_false() -> None:
+    resolved = resolve_config(ChxUserConfig.model_validate({"schema": "./s/**/*.py"}))
+    assert resolved.check.fail_on_extra_objects is False
+
+    resolved_on = resolve_config(
+        ChxUserConfig.model_validate(
+            {"schema": "./s/**/*.py", "check": {"failOnExtraObjects": True}}
+        )
+    )
+    assert resolved_on.check.fail_on_extra_objects is True
+
+
+def test_backfill_plugin_config_accepts_suffixed_byte_size() -> None:
+    assert PluginConfig.model_validate({"maxChunkBytes": "10G"}).max_chunk_bytes == 10 * 1024**3
+    assert PluginConfig.model_validate({"maxChunkBytes": 512}).max_chunk_bytes == 512

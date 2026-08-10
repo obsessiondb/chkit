@@ -77,7 +77,9 @@ def test_parse_rename_table_rejects_too_many_equals() -> None:
 
 
 def test_parse_rename_table_rejects_missing_dot() -> None:
-    with pytest.raises(ValueError, match=r"Expected format: database\.table"):
+    # TS 65c90d6 renamed parseQualifiedTable → parseQualifiedName and made the
+    # message object-generic (shared by --rename-table and --rename-dictionary).
+    with pytest.raises(ValueError, match=r"Expected format: database\.name"):
         parse_rename_table_mappings(["bare_table=db.new"])
 
 

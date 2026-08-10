@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+import re
+from typing import Final
+
+_PLAIN_COLUMN_REFERENCE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def is_plain_column_reference(token: str) -> bool:
+    """A key entry references a table column only when it is a bare identifier.
+
+    Anything else — function calls like ``toDate(ts)``, arithmetic, or tuples —
+    is an expression that ClickHouse validates itself, so it must not be
+    checked against the table's declared column list.
+    """
+    return _PLAIN_COLUMN_REFERENCE.fullmatch(token) is not None
+
 
 def split_top_level_comma(text: str) -> list[str]:
     """Split on commas that are not inside parens, quotes, or backticks."""

@@ -48,8 +48,9 @@ def test_infer_kind_for_table_engines() -> None:
         assert infer_schema_kind_from_engine(engine) == "table"
 
 
-def test_infer_kind_returns_none_for_dictionary() -> None:
-    assert infer_schema_kind_from_engine("Dictionary") is None
+def test_infer_kind_returns_dictionary_for_dictionary_engine() -> None:
+    # First-class since the Dictionary primitive (TS 65c90d6).
+    assert infer_schema_kind_from_engine("Dictionary") == "dictionary"
 
 
 def test_infer_kind_returns_none_for_empty_string() -> None:
@@ -340,7 +341,8 @@ def test_list_schema_objects_filters_by_kind() -> None:
     assert ("events", "table") in kinds
     assert ("agg", "view") in kinds
     assert ("mv", "materialized_view") in kinds
-    assert all(ref.name != "dict" for ref in out)
+    # Dictionaries are first-class since the Dictionary primitive (TS 65c90d6).
+    assert ("dict", "dictionary") in kinds
 
 
 def test_list_schema_objects_excludes_chkit_tables_via_sql_text() -> None:

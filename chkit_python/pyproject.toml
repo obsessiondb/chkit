@@ -42,7 +42,12 @@ Repository = "https://github.com/obsessiondb/chkit"
 Issues = "https://github.com/obsessiondb/chkit/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/chkit", "src/chkit_plugin_obsessiondb"]
+packages = [
+    "src/chkit",
+    "src/chkit_plugin_backfill",
+    "src/chkit_plugin_codegen",
+    "src/chkit_plugin_obsessiondb",
+]
 
 [tool.mypy]
 python_version = "3.11"

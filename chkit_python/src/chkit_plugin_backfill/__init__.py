@@ -1,36 +1,19 @@
-"""chkit_plugin_backfill — local backfill orchestration for chkit-py (Phase 1).
+"""chkit_plugin_backfill — local backfill orchestration for chkit-py.
 
-Python port of ``packages/plugin-backfill`` (Phase 1 surface).
+Full Python port of ``packages/plugin-backfill``:
 
-**What ships in Phase 1**:
+- ``backfill()`` plugin factory with all seven commands (plan / submit /
+  run / resume / status / cancel / doctor) and the ``on_check`` hook.
+- ``chunking/`` — the chunk-plan engine (partition introspection, smart
+  size-aware splitting strategies, boundary codec, execution SQL builder).
+- ``async_backfill.py`` — bounded-concurrency submit + poll execution
+  loop with checkpoint persistence and server-side reconciliation.
+- ``planner.py`` / ``detect.py`` — ``build_backfill_plan`` orchestration
+  and table-vs-mv_replay strategy detection.
+- ``state.py`` / ``types.py`` — plan/run state files and models.
 
-- ``backfill()`` plugin factory + ``ChxPlugin`` skeleton with two
-  command stubs (``status``, ``cancel``) wired to local plan/run state.
-- ``options.py`` — Pydantic-validated plugin/CLI option models for the
-  six commands (plan / run / resume / status / cancel / doctor).
-- ``state.py`` — XDG-aware plan/run state files (``backfillPaths``,
-  ``readPlan``, ``readRun``, ``writeJson``, environment fingerprinting,
-  ``summarizeRunStatus``).
-- ``types.py`` — Pydantic models for ``BackfillPlanState`` /
-  ``BackfillRunState`` / ``BackfillStatusSummary`` (and the structural
-  envelopes the future planner + executor will use).
-- ``errors.py`` — ``BackfillConfigError``.
-
-**What is intentionally DEFERRED to Phase 2** (see ``DRIFT.md`` →
-"plugin-backfill" entry for the full rationale):
-
-- The chunking engine (``chunking/planner.ts``, 546 LoC pure algorithm
-  + ``partition-slices.ts`` + ``boundary-codec.ts`` + ``sql.ts`` + the
-  strategies directory) — ~1,400 LoC of size-aware time-window splitting.
-- The async-backfill execution engine (``async-backfill.ts``, 364 LoC
-  of bounded-concurrency + poll-by-query_id + checkpoint persistence).
-- The `plan` / `run` / `resume` / `doctor` command runners (depend on
-  the above two).
-- ``on_check`` hook (depends on the planner to detect pending backfills).
-
-The remote-backfill routing (``chkit plugin backfill status --job-id …``
-against a managed ObsessionDB instance) already works via
-``chkit_plugin_obsessiondb.backfill_handler`` (Phase 4 of obsessiondb).
+The managed-job path (``chkit plugin backfill submit`` against an
+ObsessionDB service) lives in ``chkit_plugin_obsessiondb.backfill_submit``.
 """
 
 from __future__ import annotations

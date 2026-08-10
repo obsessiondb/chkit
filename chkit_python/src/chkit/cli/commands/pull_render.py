@@ -37,6 +37,8 @@ from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
     ColumnDefinition,
+    DictionaryAttribute,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
     ProjectionDefinition,
@@ -46,6 +48,7 @@ from chkit.core.model import (
     TableDefinition,
     ViewDefinition,
 )
+from chkit.core.projection import is_index_projection
 
 _MIN_QUOTED_LEN = 2
 
@@ -55,7 +58,9 @@ _MULTI_UNDERSCORE_RE = re.compile(r"_+")
 _LEADING_TRAILING_UNDERSCORE_RE = re.compile(r"^_+|_+$")
 
 
-def render_schema_file(definitions: Sequence[SchemaDefinition]) -> str:  # noqa: PLR0912
+def render_schema_file(  # noqa: PLR0912, PLR0915
+    definitions: Sequence[SchemaDefinition],
+) -> str:
     """Render canonical Python schema source from a list of definitions."""
     canonical = canonicalize_definitions(list(definitions))
     declaration_counts: dict[str, int] = {}
@@ -100,6 +105,11 @@ def render_schema_file(definitions: Sequence[SchemaDefinition]) -> str:  # noqa:
     has_projection = any(
         isinstance(d, TableDefinition) and d.projections for d in canonical
     )
+    has_dictionary = any(isinstance(d, DictionaryDefinition) for d in canonical)
+    has_dictionary_attribute = has_dictionary
+    has_dictionary_range = any(
+        isinstance(d, DictionaryDefinition) and d.range is not None for d in canonical
+    )
 
     imports: list[str] = ["schema"]
     if has_table:
@@ -108,6 +118,12 @@ def render_schema_file(definitions: Sequence[SchemaDefinition]) -> str:  # noqa:
         imports.append("view")
     if has_materialized_view:
         imports.append("materialized_view")
+    if has_dictionary:
+        imports.append("dictionary")
+    if has_dictionary_attribute:
+        imports.append("DictionaryAttribute")
+    if has_dictionary_range:
+        imports.append("DictionaryRange")
     if has_mv_refresh:
         imports.append("MaterializedViewRefresh")
     if has_table_ref:
@@ -138,6 +154,8 @@ def render_schema_file(definitions: Sequence[SchemaDefinition]) -> str:  # noqa:
             lines.extend(_render_table(variable_name, definition))
         elif isinstance(definition, ViewDefinition):
             lines.extend(_render_view(variable_name, definition))
+        elif isinstance(definition, DictionaryDefinition):
+            lines.extend(_render_dictionary(variable_name, definition))
         elif isinstance(definition, MaterializedViewDefinition):
             lines.extend(_render_materialized_view(variable_name, definition))
         lines.append("")
@@ -239,10 +257,82 @@ def _render_index(index: SkipIndexDefinition) -> str:
 
 
 def _render_projection(projection: ProjectionDefinition) -> str:
-    return (
-        f"ProjectionDefinition(name={_render_string(projection.name)}, "
-        f"query={_render_string(projection.query)})"
+    if is_index_projection(projection):
+        fields = (
+            f"index={_render_string(projection.index or '')}, "
+            f"type={_render_string(projection.type or '')}"
+        )
+    else:
+        fields = f"query={_render_string(projection.query or '')}"
+    return f"ProjectionDefinition(name={_render_string(projection.name)}, {fields})"
+
+
+# ---------- dictionary ----------
+
+
+_HIDDEN_SECRET_NOTE = (
+    "# NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your "
+    'credential (e.g. os.environ["X"]).'
+)
+
+
+def _render_dictionary(
+    variable_name: str, definition: DictionaryDefinition
+) -> list[str]:
+    lines: list[str] = []
+    if "[HIDDEN]" in definition.source:
+        lines.append(_HIDDEN_SECRET_NOTE)
+    lines.extend(
+        [
+            f"{variable_name} = dictionary(",
+            f"    database={_render_string(definition.database)},",
+            f"    name={_render_string(definition.name)},",
+            "    attributes=[",
+        ]
     )
+    lines.extend(
+        f"        {_render_dictionary_attribute(a)}," for a in definition.attributes
+    )
+    lines.append("    ],")
+    lines.append(f"    primary_key={_render_string_list(definition.primary_key)},")
+    lines.append(f"    source={_render_string(definition.source)},")
+    lines.append(f"    layout={_render_string(definition.layout)},")
+    lines.append(f"    lifetime={_render_string(definition.lifetime)},")
+    if definition.range is not None:
+        lines.append(
+            f"    range=DictionaryRange(min={_render_string(definition.range.min)}, "
+            f"max={_render_string(definition.range.max)}),"
+        )
+    if definition.settings:
+        lines.append("    settings={")
+        for key in sorted(definition.settings):
+            value = definition.settings[key]
+            lines.append(f"        {_render_string(key)}: {_render_literal(value)},")
+        lines.append("    },")
+    if definition.comment:
+        lines.append(f"    comment={_render_string(definition.comment)},")
+    lines.append(")")
+    return lines
+
+
+def _render_dictionary_attribute(attribute: DictionaryAttribute) -> str:
+    parts: list[str] = [
+        f"name={_render_string(attribute.name)}",
+        f"type={_render_string(attribute.type)}",
+    ]
+    if attribute.expression is not None:
+        parts.append(f"expression={_render_string(attribute.expression)}")
+    elif attribute.default is not None:
+        parts.append(f"default={_render_literal(attribute.default)}")
+    if attribute.hierarchical:
+        parts.append("hierarchical=True")
+    if attribute.bidirectional:
+        parts.append("bidirectional=True")
+    if attribute.injective:
+        parts.append("injective=True")
+    if attribute.is_object_id:
+        parts.append("is_object_id=True")
+    return f"DictionaryAttribute({', '.join(parts)})"
 
 
 # ---------- view ----------

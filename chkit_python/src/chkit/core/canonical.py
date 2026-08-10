@@ -11,9 +11,11 @@ from chkit.core.codec import canonicalize_codec
 from chkit.core.key_clause import normalize_key_columns
 from chkit.core.model import (
     ColumnDefinition,
+    DictionaryAttribute,
+    DictionaryDefinition,
+    DictionaryRange,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
-    ProjectionDefinition,
     SchemaDefinition,
     SchemaKind,
     SkipIndexDefinition,
@@ -22,6 +24,7 @@ from chkit.core.model import (
     TableRenamedFrom,
     ViewDefinition,
 )
+from chkit.core.projection import canonicalize_projection
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
 
 _T = TypeVar("_T")
@@ -38,7 +41,9 @@ def _sort_kind(kind: SchemaKind) -> int:
         return 0
     if kind == "view":
         return 1
-    return 2
+    if kind == "materialized_view":
+        return 2
+    return 3
 
 
 def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
@@ -61,10 +66,6 @@ def _canonicalize_index(index: SkipIndexDefinition) -> SkipIndexDefinition:
     return index.model_copy(update={"expression": normalize_sql_fragment(index.expression)})
 
 
-def _canonicalize_projection(projection: ProjectionDefinition) -> ProjectionDefinition:
-    return projection.model_copy(update={"query": normalize_sql_fragment(projection.query)})
-
-
 def _sorted_settings(
     settings: dict[str, str | int | float | bool] | None,
 ) -> dict[str, str | int | float | bool] | None:
@@ -81,7 +82,7 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
         else None
     )
     projections = (
-        [_canonicalize_projection(p) for p in _sort_by_name(definition.projections)]
+        [canonicalize_projection(p) for p in _sort_by_name(definition.projections)]
         if definition.projections is not None
         else None
     )
@@ -224,11 +225,64 @@ def _canonicalize_materialized_view(
     )
 
 
+def _canonicalize_dictionary_attribute(
+    attribute: DictionaryAttribute,
+) -> DictionaryAttribute:
+    type_value = attribute.type
+    canon_type = type_value.strip() if isinstance(type_value, str) else type_value
+    return attribute.model_copy(
+        update={"name": attribute.name.strip(), "type": canon_type}
+    )
+
+
+def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefinition:
+    settings: dict[str, str | int | float] | None = None
+    if definition.settings is not None:
+        settings = {k: definition.settings[k] for k in sorted(definition.settings)}
+        if len(settings) == 0:
+            settings = None
+
+    renamed_from: TableRenamedFrom | None = None
+    if definition.renamed_from is not None:
+        renamed_from = TableRenamedFrom(
+            database=definition.renamed_from.database.strip()
+            if definition.renamed_from.database is not None
+            else None,
+            name=definition.renamed_from.name.strip(),
+        )
+
+    return definition.model_copy(
+        update={
+            "database": definition.database.strip(),
+            "name": definition.name.strip(),
+            "renamed_from": renamed_from,
+            "attributes": [
+                _canonicalize_dictionary_attribute(a) for a in definition.attributes
+            ],
+            "primary_key": normalize_key_columns(definition.primary_key),
+            "source": normalize_sql_fragment(definition.source),
+            "layout": normalize_sql_fragment(definition.layout),
+            "lifetime": normalize_sql_fragment(definition.lifetime),
+            "range": DictionaryRange(
+                min=definition.range.min.strip(), max=definition.range.max.strip()
+            )
+            if definition.range is not None
+            else None,
+            "settings": settings,
+            "comment": definition.comment.strip()
+            if definition.comment is not None
+            else None,
+        }
+    )
+
+
 def canonicalize_definition(definition: SchemaDefinition) -> SchemaDefinition:
     if isinstance(definition, TableDefinition):
         return _canonicalize_table(definition)
     if isinstance(definition, ViewDefinition):
         return _canonicalize_view(definition)
+    if isinstance(definition, DictionaryDefinition):
+        return _canonicalize_dictionary(definition)
     return _canonicalize_materialized_view(definition)
 
 

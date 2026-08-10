@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from typing import Annotated, Any, Final, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 _STRICT_MODEL_CONFIG: Final[ConfigDict] = ConfigDict(
@@ -219,8 +220,40 @@ SkipIndexDefinition: TypeAlias = Annotated[
 
 
 class ProjectionDefinition(_StrictModel):
+    """A SELECT projection or an index-only projection.
+
+    Mirrors the TS ``SelectProjectionDefinition | IndexProjectionDefinition``
+    union: a SELECT projection sets ``query``; an index-only projection
+    (``PROJECTION p INDEX (a, b) TYPE basic``) sets ``index`` and ``type`` and
+    has no SELECT body — it only reorders parts to prune on a secondary key.
+    ClickHouse currently accepts ``basic`` as the only index type, but ``type``
+    stays a string so new types work without a DSL change.
+
+    Kind constraints split two ways, mirroring where TS enforces them:
+    states TS's type system cannot represent (neither kind set; ``index``
+    without ``type``) are rejected at construction, while the both-set case —
+    which TS admits structurally — surfaces through ``validate.py`` as
+    ``projection_ambiguous_kind`` (plus ``projection_empty_index`` for a blank
+    index expression).
+    """
+
     name: str
-    query: str
+    query: str | None = None
+    index: str | None = None
+    type: str | None = None
+
+    @model_validator(mode="after")
+    def _check_kind(self) -> ProjectionDefinition:
+        if self.query is None and self.index is None:
+            msg = (
+                f'Projection "{self.name}" requires either "query" (SELECT '
+                f'projection) or "index"/"type" (index-only projection)'
+            )
+            raise ValueError(msg)
+        if self.index is not None and self.type is None:
+            msg = f'Index-only projection "{self.name}" requires "type"'
+            raise ValueError(msg)
+        return self
 
 
 SettingValue: TypeAlias = str | int | float | bool
@@ -254,6 +287,10 @@ class TableDefinition(_StrictModel):
     indexes: list[SkipIndexDefinition] | None = None
     projections: list[ProjectionDefinition] | None = None
     comment: str | None = None
+    # Per-table plugin configuration (TS `TablePlugins`, e.g.
+    # `{"backfill": {"timeColumn": "ts"}}`). Ignored by the diff engine —
+    # never affects migration planning or SQL generation.
+    plugins: dict[str, Any] | None = None
 
     model_config = ConfigDict(
         frozen=True,
@@ -317,8 +354,67 @@ class MaterializedViewDefinition(_StrictModel):
     )
 
 
+class DictionaryAttribute(_StrictModel):
+    name: str
+    type: ColumnType
+    # DEFAULT / null_value for missing keys. Mutually exclusive with expression.
+    default: str | int | float | bool | None = None
+    # EXPRESSION — computed from source columns. Mutually exclusive with default.
+    expression: str | None = None
+    hierarchical: bool | None = None
+    # Enables bidirectional parent/child lookups. Only valid alongside hierarchical.
+    bidirectional: bool | None = None
+    injective: bool | None = None
+    is_object_id: bool | None = Field(default=None, alias="isObjectId")
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        validate_assignment=True,
+        populate_by_name=True,
+    )
+
+
+class DictionaryRange(_StrictModel):
+    """``RANGE(MIN ... MAX ...)`` — required by RANGE_HASHED-family layouts."""
+
+    min: str
+    max: str
+
+
+class DictionaryDefinition(_StrictModel):
+    kind: Literal["dictionary"] = "dictionary"
+    database: str
+    name: str
+    renamed_from: TableRenamedFrom | None = Field(default=None, alias="renamedFrom")
+    attributes: list[DictionaryAttribute]
+    primary_key: list[str] = Field(..., alias="primaryKey")
+    # Raw SOURCE(...) body, e.g. `MYSQL(host '...' password '...' ...)`.
+    source: str
+    # Raw LAYOUT(...) body, e.g. `HASHED()` / `COMPLEX_KEY_HASHED()`.
+    layout: str
+    # Raw LIFETIME(...) body, e.g. `300` / `MIN 300 MAX 360`.
+    lifetime: str
+    range: DictionaryRange | None = None
+    # Raw SETTINGS(...) key/value pairs.
+    settings: dict[str, str | int | float] | None = None
+    comment: str | None = None
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        validate_assignment=True,
+        populate_by_name=True,
+    )
+
+
 SchemaDefinition: TypeAlias = Annotated[
-    TableDefinition | ViewDefinition | MaterializedViewDefinition,
+    TableDefinition
+    | ViewDefinition
+    | MaterializedViewDefinition
+    | DictionaryDefinition,
     Field(discriminator="kind"),
 ]
 
@@ -329,6 +425,10 @@ class ChxCheckConfig(_StrictModel):
         default=None, alias="failOnChecksumMismatch"
     )
     fail_on_drift: bool | None = Field(default=None, alias="failOnDrift")
+    # Off by default so chkit coexists with unmanaged tables on a shared DB.
+    fail_on_extra_objects: bool | None = Field(
+        default=None, alias="failOnExtraObjects"
+    )
 
     model_config = ConfigDict(
         frozen=True,
@@ -343,6 +443,9 @@ class ChxResolvedCheckConfig(_StrictModel):
     fail_on_pending: bool
     fail_on_checksum_mismatch: bool
     fail_on_drift: bool
+    # Defaulted so pre-existing constructions stay valid; resolve_config
+    # always sets it explicitly (TS default: false).
+    fail_on_extra_objects: bool = False
 
 
 class ChxSafetyConfig(_StrictModel):
@@ -426,6 +529,17 @@ class ChxUserConfig(_StrictModel):
     )
 
 
+class ChxConfigEnv(_StrictModel):
+    """Environment passed to a function-style config export.
+
+    Mirrors TS ``ChxConfigEnv`` — lets ``clickhouse.config.py`` export a
+    callable that varies the config per command (e.g. CI vs local).
+    """
+
+    command: str | None = None
+    mode: str | None = None
+
+
 class ChxResolvedConfig(_StrictModel):
     schema_: list[str]
     out_dir: str
@@ -478,6 +592,9 @@ MigrationOperationType: TypeAlias = Literal[
     "alter_table_drop_projection",
     "alter_table_reset_setting",
     "alter_table_modify_ttl",
+    "create_dictionary",
+    "drop_dictionary",
+    "rename_dictionary",
 ]
 
 
@@ -536,6 +653,8 @@ ValidationIssueCode: TypeAlias = Literal[
     "duplicate_column_name",
     "duplicate_index_name",
     "duplicate_projection_name",
+    "projection_ambiguous_kind",
+    "projection_empty_index",
     "primary_key_missing_column",
     "order_by_missing_column",
     "refresh_requires_every_or_after",
@@ -546,10 +665,18 @@ ValidationIssueCode: TypeAlias = Literal[
     "codec_chain_must_end_with_general",
     "codec_chain_multiple_general",
     "codec_chain_empty",
+    "dictionary_missing_primary_key",
+    "dictionary_primary_key_missing_attribute",
+    "dictionary_missing_source",
+    "dictionary_missing_layout",
+    "dictionary_missing_lifetime",
+    "dictionary_attribute_default_expression_exclusive",
+    "dictionary_range_missing_attribute",
+    "dictionary_bidirectional_requires_hierarchical",
 ]
 
 
-SchemaKind: TypeAlias = Literal["table", "view", "materialized_view"]
+SchemaKind: TypeAlias = Literal["table", "view", "materialized_view", "dictionary"]
 
 
 class ValidationIssue(_StrictModel):
@@ -580,6 +707,8 @@ SkipIndexInput: TypeAlias = SkipIndexDefinition | dict[str, object]
 ProjectionInput: TypeAlias = ProjectionDefinition | dict[str, object]
 TableRefInput: TypeAlias = TableRef | dict[str, object]
 MaterializedViewRefreshInput: TypeAlias = MaterializedViewRefresh | dict[str, object]
+DictionaryAttributeInput: TypeAlias = DictionaryAttribute | dict[str, object]
+DictionaryRangeInput: TypeAlias = DictionaryRange | dict[str, object]
 
 
 def _strip_none(payload: dict[str, object]) -> dict[str, object]:
@@ -607,6 +736,7 @@ def table(
     indexes: list[SkipIndexInput] | None = None,
     projections: list[ProjectionInput] | None = None,
     comment: str | None = None,
+    plugins: dict[str, Any] | None = None,
 ) -> TableDefinition:
     pk = primary_key if primary_key is not None else primaryKey
     ob = order_by if order_by is not None else orderBy
@@ -631,6 +761,7 @@ def table(
             "indexes": indexes,
             "projections": projections,
             "comment": comment,
+            "plugins": plugins,
         }
     )
     return TableDefinition.model_validate(payload)
@@ -688,12 +819,68 @@ def materialized_view(
     return MaterializedViewDefinition.model_validate(payload)
 
 
-def schema(*definitions: TableDefinition | ViewDefinition | MaterializedViewDefinition) -> list[TableDefinition | ViewDefinition | MaterializedViewDefinition]:
+def dictionary(
+    *,
+    database: str,
+    name: str,
+    attributes: list[DictionaryAttributeInput],
+    source: str,
+    layout: str,
+    lifetime: str,
+    primary_key: list[str] | None = None,
+    primaryKey: list[str] | None = None,  # noqa: N803 - 1:1 alias with TS API
+    renamed_from: TableRenamedFrom | dict[str, object] | None = None,
+    renamedFrom: TableRenamedFrom | dict[str, object] | None = None,  # noqa: N803
+    range: DictionaryRangeInput | None = None,
+    settings: dict[str, str | int | float] | None = None,
+    comment: str | None = None,
+) -> DictionaryDefinition:
+    pk = primary_key if primary_key is not None else primaryKey
+    if pk is None:
+        msg = "dictionary() requires primary_key/primaryKey"
+        raise ValueError(msg)
+
+    payload: dict[str, object] = _strip_none(
+        {
+            "kind": "dictionary",
+            "database": database,
+            "name": name,
+            "renamedFrom": renamed_from if renamed_from is not None else renamedFrom,
+            "attributes": attributes,
+            "primaryKey": pk,
+            "source": source,
+            "layout": layout,
+            "lifetime": lifetime,
+            "range": range,
+            "settings": settings,
+            "comment": comment,
+        }
+    )
+    return DictionaryDefinition.model_validate(payload)
+
+
+def schema(
+    *definitions: TableDefinition
+    | ViewDefinition
+    | MaterializedViewDefinition
+    | DictionaryDefinition,
+) -> list[
+    TableDefinition
+    | ViewDefinition
+    | MaterializedViewDefinition
+    | DictionaryDefinition
+]:
     return list(definitions)
 
 
 def is_schema_definition(value: object) -> bool:
-    return isinstance(value, TableDefinition | ViewDefinition | MaterializedViewDefinition)
+    return isinstance(
+        value,
+        TableDefinition
+        | ViewDefinition
+        | MaterializedViewDefinition
+        | DictionaryDefinition,
+    )
 
 
 def collect_definitions_from_module(
@@ -720,15 +907,24 @@ def collect_definitions_from_module(
     return canonicalize_definitions(out)
 
 
-def define_config(config: ChxUserConfig | dict[str, object]) -> ChxUserConfig:
+ChxConfigFn: TypeAlias = Callable[
+    ["ChxConfigEnv"], "ChxUserConfig | dict[str, object]"
+]
+
+
+def define_config(
+    config: ChxUserConfig | dict[str, object] | ChxConfigFn,
+) -> ChxUserConfig | ChxConfigFn:
     """Identity helper that anchors a config object at the call site.
 
-    Mirrors the TypeScript ``defineConfig`` API: accepts either a fully
-    constructed ``ChxUserConfig`` model or a plain dict (validated through
-    Pydantic on entry). Returns the resulting model — same value you'd
-    obtain from ``ChxUserConfig.model_validate`` but with a name that
-    documents intent in the user's config file.
+    Mirrors the TypeScript ``defineConfig`` API: accepts a fully constructed
+    ``ChxUserConfig`` model, a plain dict (validated through Pydantic on
+    entry), or a function ``(env: ChxConfigEnv) -> config`` for dynamic
+    per-command configs. Functions are returned unchanged — the config
+    loader calls them with the active ``ChxConfigEnv``.
     """
+    if callable(config) and not isinstance(config, ChxUserConfig):
+        return config
     if isinstance(config, ChxUserConfig):
         return config
     return ChxUserConfig.model_validate(config)
@@ -758,6 +954,9 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
         if check is None or check.fail_on_checksum_mismatch is None
         else check.fail_on_checksum_mismatch,
         fail_on_drift=True if check is None or check.fail_on_drift is None else check.fail_on_drift,
+        fail_on_extra_objects=False
+        if check is None or check.fail_on_extra_objects is None
+        else check.fail_on_extra_objects,
     )
     resolved_safety = ChxResolvedSafetyConfig(
         allow_destructive=False
