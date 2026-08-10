@@ -5,12 +5,24 @@ build-backend = "hatchling.build"
 [project]
 name = "chkit-py"
 version = "0.2.0"
-description = "ClickHouse schema and migration toolkit for Python (port of chkit TS)"
+description = "ClickHouse schema management and migrations — define schemas in Python, diff them into safe SQL migrations"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "ObsessionDB" }]
 keywords = ["clickhouse", "schema", "migrations", "database", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Code Generators",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.9,<3",
     "typer>=0.15,<1",
@@ -38,8 +50,10 @@ chkit = "chkit.cli.main:app"
 
 [project.urls]
 Homepage = "https://chkit.obsessiondb.com"
+Documentation = "https://chkit.obsessiondb.com/python/overview/"
 Repository = "https://github.com/obsessiondb/chkit"
 Issues = "https://github.com/obsessiondb/chkit/issues"
+Changelog = "https://github.com/obsessiondb/chkit/blob/main/chkit_python/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = [
