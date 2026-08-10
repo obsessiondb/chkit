@@ -9,6 +9,11 @@ on:
     tags:
       - "chkit-py-v*"
 
+# Minimal default for every job; the publish job overrides with the
+# id-token permission OIDC needs.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
