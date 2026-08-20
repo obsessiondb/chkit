@@ -20,6 +20,7 @@ import {
   type SafeParseable,
   type SchemaDefinition,
   splitTopLevelComma,
+  stripWrappingParens,
   type TableDefinition,
   withFactoryDefaults,
 } from '@chkit/core'
@@ -447,26 +448,7 @@ function summarizeSkippedObjects(
 
 function splitTopLevelCommaSeparated(input: string | undefined): string[] {
   if (!input) return []
-  return splitTopLevelComma(input).map(normalizeWrappedTuple)
-}
-
-function normalizeWrappedTuple(input: string): string {
-  const trimmed = input.trim()
-  if (!trimmed.startsWith('(') || !trimmed.endsWith(')')) {
-    return trimmed
-  }
-
-  let depth = 0
-  for (let i = 0; i < trimmed.length; i += 1) {
-    const char = trimmed[i]
-    if (char === '(') depth += 1
-    if (char === ')') depth -= 1
-    if (depth === 0 && i < trimmed.length - 1) {
-      return trimmed
-    }
-  }
-
-  return trimmed.slice(1, -1).trim()
+  return splitTopLevelComma(input).map(stripWrappingParens)
 }
 
 async function listNonTableRows(

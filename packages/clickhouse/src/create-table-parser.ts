@@ -1,4 +1,9 @@
-import { normalizeProjectionIndex, normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
+import {
+  findMatchingParen,
+  normalizeProjectionIndex,
+  normalizeSQLFragment,
+  splitTopLevelComma,
+} from '@chkit/core'
 
 type ProjectionDefinitionShape =
   | { name: string; query: string }
@@ -32,40 +37,14 @@ function parseClauseFromCreateTableQuery(
 function findColumnListBounds(
   createTableQuery: string
 ): { open: number; close: number } | undefined {
+  // Require a table-level `) ENGINE =` so we don't treat some other parenthesised
+  // fragment as the column list.
   const engineMatch = /\)\s*ENGINE\s*=/i.exec(createTableQuery)
   if (!engineMatch || engineMatch.index === undefined) return undefined
-  const left = createTableQuery.slice(0, engineMatch.index + 1)
-  const openIndex = left.indexOf('(')
+  const openIndex = createTableQuery.indexOf('(')
   if (openIndex === -1) return undefined
-
-  let depth = 0
-  let inString = false
-  let stringQuote = "'"
-  for (let i = openIndex; i < left.length; i += 1) {
-    const char = left[i]
-    if (!char) continue
-    if (inString) {
-      if (char === stringQuote && left[i - 1] !== '\\') {
-        inString = false
-      }
-      continue
-    }
-    if (char === "'" || char === '"') {
-      inString = true
-      stringQuote = char
-      continue
-    }
-    if (char === '(') {
-      depth += 1
-      continue
-    }
-    if (char === ')') {
-      depth -= 1
-      if (depth === 0) return { open: openIndex, close: i }
-    }
-  }
-
-  return undefined
+  const close = findMatchingParen(createTableQuery, openIndex)
+  return close === undefined ? undefined : { open: openIndex, close }
 }
 
 function extractCreateTableBody(createTableQuery: string | undefined): string | undefined {
