@@ -105,15 +105,22 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
 FROM (${facts})`,
           settings
         ),
-        // Every commit must start from the version the previous commit produced
-        // and advance it by at most one.
+        // Every commit must start from the version the previous commit produced,
+        // advance it by at most one, and only change the envelope when it advances.
+        // The two reads are not one snapshot; that is sound because V1 runs a
+        // single executor process and reads a namespace before appending to it.
         options.executor.query<{ invalid: string }>(
-          `SELECT countIf(fact_expected != previous_version OR fact_version < fact_expected OR fact_version > fact_expected + 1) AS invalid
+          `SELECT countIf(
+  fact_expected != previous_version OR fact_version < fact_expected OR fact_version > fact_expected + 1
+  OR (fact_version = fact_expected AND fact_checkpoint != previous_checkpoint)
+) AS invalid
 FROM (
   SELECT
     fact_expected,
     fact_version,
-    lagInFrame(fact_version, 1, toUInt64(0)) OVER (ORDER BY event_seq ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS previous_version
+    fact_checkpoint,
+    lagInFrame(fact_version, 1, toUInt64(0)) OVER (ORDER BY event_seq ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS previous_version,
+    lagInFrame(fact_checkpoint, 1, '') OVER (ORDER BY event_seq ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS previous_checkpoint
   FROM (${facts})
   WHERE fact_kind = 'batch_committed'
 )`,

@@ -89,7 +89,7 @@ definePipeline({ id: 'helpdesk', streams: [ticketStream], maxFetches: 4 })
 
 Spread `ingestionColumns` into every destination table. The loader fills `_chkit_batch_id` and `_chkit_run_id`; `_chkit_ingested_at` is set by ClickHouse at the physical insert.
 
-Rows must be deterministic for a given source page. Batch identity includes a content hash, so a field like `synced_at: new Date()` in a row defeats retry deduplication.
+Batch identity decides whether a retry is deduplicated. By default it includes a content hash of the rows, which prefers a possible duplicate over suppressing rows that changed between attempts; a field like `synced_at: new Date()` therefore defeats retry deduplication. When a chunk covers a stable source interval, declare it with `id` (for example `yield { rows, id: \`page:${cursor}\` }`): the chunk then becomes its own write unit and its identity ignores row content.
 
 ## Progress and checkpoints
 

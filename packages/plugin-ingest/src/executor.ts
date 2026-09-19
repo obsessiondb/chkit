@@ -290,6 +290,9 @@ async function readAndLoad(input: {
   const queue = createBoundedQueue<PendingBatch>(env.prefetchBatches)
   const batchSize = stream.batchSize ?? DEFAULT_BATCH_SIZE
   let budgetExhausted = false
+  // Set once this attempt has reported its outcome: detached work that finishes
+  // later may have written rows (at-least-once) but must never commit progress.
+  let abandoned = false
 
   const produce = async () => {
     let pending = emptyBatch()
@@ -330,13 +333,20 @@ async function readAndLoad(input: {
         const chunk: unknown = step.value
         assertValidChunk(stream.id, chunk, maxChunkRows)
         progress.chunks += 1
+        // A chunk that declares its source interval is one logical write unit:
+        // it is never merged with neighbours, so a replay regroups identically
+        // even when row counts changed.
+        if (chunk.id !== undefined && pending.rows.length > 0) {
+          await queue.push(pending, signal)
+          pending = emptyBatch()
+        }
         pending.rows.push(...chunk.rows)
         if (pending.intervalIds) {
           if (chunk.id === undefined) pending.intervalIds = undefined
           else pending.intervalIds.push(chunk.id)
         }
         if (chunk.state !== undefined) pending.state = { value: chunk.state }
-        if (pending.rows.length >= batchSize) {
+        if (chunk.id !== undefined || pending.rows.length >= batchSize) {
           await queue.push(pending, signal)
           pending = emptyBatch()
         }
@@ -368,6 +378,7 @@ async function readAndLoad(input: {
       const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(batch.rows)}`
       const batchId = digest([namespaceId, String(progress.version), String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
+      if (abandoned) return
       const envelope: CheckpointEnvelope | undefined = batch.state
         ? { strategy: stream.incremental.id, version: stream.incremental.version, state: batch.state.value }
         : progress.envelope
@@ -406,6 +417,7 @@ async function readAndLoad(input: {
   // After a failure, a source operation that ignores its signal must not pin
   // the stream (and its permits) forever.
   await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
+  abandoned = true
   if (rootCause) throw rootCause.error
   if (budgetExhausted) {
     env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
@@ -510,7 +522,10 @@ function append(
       }
     }
   })
-  progress.appendChain = write.catch(() => undefined)
+  // A fact that could not be confirmed poisons the chain: a later append must
+  // not reuse its sequence number, because the unconfirmed write may have landed.
+  progress.appendChain = write
+  write.catch(() => undefined)
   return write
 }
 
