@@ -1,4 +1,4 @@
-import { BATCH_ID_COLUMN, RUN_ID_COLUMN } from './destination.js'
+import { BATCH_ID_COLUMN, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
 import type { LoaderFactory } from './types.js'
 
 export interface SimpleLoaderOptions {
@@ -25,11 +25,11 @@ export function simpleLoader(options: SimpleLoaderOptions = {}): LoaderFactory {
       async write(batch) {
         for (let offset = 0, unit = 0; offset < batch.rows.length; offset += maxRows, unit += 1) {
           ctx.signal.throwIfAborted()
-          const slice = batch.rows.slice(offset, offset + maxRows).map((row) => ({
-            ...row,
-            [BATCH_ID_COLUMN]: batch.batchId,
-            [RUN_ID_COLUMN]: ctx.runId,
-          }))
+          const slice = batch.rows.slice(offset, offset + maxRows).map((row) => {
+            // Publication time is destination-owned: never let a mapped row supply it.
+            const { [INGESTED_AT_COLUMN]: _ignored, ...authored } = row
+            return { ...authored, [BATCH_ID_COLUMN]: batch.batchId, [RUN_ID_COLUMN]: ctx.runId }
+          })
           await ctx.destination.insert({ table: ctx.table, rows: slice, token: `${batch.batchId}:${unit}` })
           rows += slice.length
           writeUnits += 1

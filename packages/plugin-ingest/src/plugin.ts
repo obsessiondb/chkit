@@ -1,6 +1,6 @@
 import process from 'node:process'
 
-import { createClickHouseExecutor, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { createStatelessClickHouseExecutor, type ClickHouseExecutor } from '@chkit/clickhouse'
 import {
   createPluginRunner,
   defineFlags,
@@ -236,8 +236,10 @@ function openTarget(context: IngestPluginCommandContext) {
   const clickhouse = context.config.clickhouse
   // A direct connection carries per-insert settings (the deduplication token);
   // fall back to the host-provided executor only when no URL is configured.
+  // Streams fetch, load and journal concurrently, so the executor must not be
+  // bound to one ClickHouse HTTP session (a session allows one in-flight query).
   if (clickhouse) {
-    const executor = createClickHouseExecutor(clickhouse)
+    const executor = createStatelessClickHouseExecutor(clickhouse)
     return { executor, database: clickhouse.database, targetId: targetIdOf(clickhouse.url, clickhouse.database), close: () => executor.close() }
   }
   if (context.pluginContext?.hasExecutor) {

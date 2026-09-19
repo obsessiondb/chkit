@@ -28,6 +28,10 @@ const DEFAULT_BATCH_SIZE = 10_000
 const DEFAULT_PREFETCH_BATCHES = 1
 const DEFAULT_MAX_DURATION_MS = 60 * 60_000
 const LOAD_ATTEMPTS = 3
+const JOURNAL_APPEND_ATTEMPTS = 4
+const DEFAULT_MAX_CHUNK_ROWS = 100_000
+// How long a failed stream waits for an uncooperative reader before abandoning it.
+const READER_SHUTDOWN_GRACE_MS = 5000
 const tracer = trace.getTracer('@chkit/plugin-ingest')
 
 export interface BackfillRequest {
@@ -57,8 +61,10 @@ export interface ExecutionEnv {
 }
 
 interface ResolvedEnv extends Required<Omit<ExecutionEnv, 'signal'>> {
+  /** Host cancellation combined with the execution deadline. */
   signal: AbortSignal
-  deadline: number
+  /** Host cancellation only: distinguishes a cancelled run from an exhausted budget. */
+  hostSignal: AbortSignal
 }
 
 interface PipelinePermits {
@@ -69,12 +75,17 @@ interface PipelinePermits {
 
 interface PendingBatch {
   rows: Row[]
+  /** Declared source-interval ids, or `undefined` once any chunk omitted its id. */
+  intervalIds: string[] | undefined
   /** Candidate provider state that becomes safe once these rows have sink evidence. */
   state: { value: unknown } | undefined
 }
 
 interface StreamProgress {
+  /** Last journal sequence confirmed for this namespace. */
   seq: number
+  /** Serializes appends so a sequence number is only consumed by a confirmed fact. */
+  appendChain: Promise<void>
   version: number
   envelope: CheckpointEnvelope | undefined
   rows: number
@@ -88,7 +99,10 @@ interface StreamProgress {
  * recovers independently from its own journal-backed checkpoint.
  */
 export async function runIngestion(request: ExecutionRequest, input: ExecutionEnv): Promise<ExecutionResult> {
-  const env = resolveEnv(input)
+  const deadline = new AbortController()
+  const env = resolveEnv(input, deadline.signal)
+  // The budget is a real bound: it interrupts hung readers, retry timers and waits.
+  const deadlineTimer = setTimeout(() => deadline.abort(new BudgetExhausted('execution budget exhausted')), env.maxDurationMs)
   const runId = randomUUID()
   const cutoff = env.now()
   const streamIds = request.selected.map((entry) => entry.stream.id)
@@ -123,6 +137,7 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
       if (!ok) span.setStatus({ code: SpanStatusCode.ERROR })
       return { runId, cutoff: cutoff.toISOString(), streams, ok }
     } finally {
+      clearTimeout(deadlineTimer)
       span.end()
     }
   })
@@ -140,7 +155,7 @@ async function executeSelectedStream(
 ): Promise<StreamResult> {
   const { stream, pipeline } = entry
   const namespaceId = backfill ? `${stream.id}#backfill:${backfill.id}` : stream.id
-  const progress: StreamProgress = { seq: 0, version: 0, envelope: undefined, rows: 0, batches: 0, chunks: 0 }
+  const progress: StreamProgress = { seq: 0, appendChain: Promise.resolve(), version: 0, envelope: undefined, rows: 0, batches: 0, chunks: 0 }
   const result = (outcome: StreamOutcome, error: string | undefined): StreamResult => ({
     streamId: stream.id,
     pipelineId: pipeline.id,
@@ -169,7 +184,7 @@ async function executeSelectedStream(
       return result(outcome, undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      const outcome: StreamOutcome = env.signal.aborted ? 'cancelled' : 'failed'
+      const outcome: StreamOutcome = env.hostSignal.aborted ? 'cancelled' : env.signal.aborted ? 'budget_exhausted' : 'failed'
       recordFailure(span, error)
       env.log?.(`${namespaceId}: ${outcome} — ${message}`)
       return result(outcome, message)
@@ -226,7 +241,9 @@ async function executeStream(input: {
       if (error instanceof IngestConfigError) break
       const classification = error instanceof FetchFailure ? error.classification : classifyFailure(error, env.signal, stream.classifyError)
       if (classification.kind === 'cancelled') {
-        outcome = 'cancelled'
+        outcome = env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted'
+        // Exhausting the budget is an incomplete result, not a failure: committed progress stands.
+        if (outcome === 'budget_exhausted') failure = undefined
         break
       }
       // A FetchFailure already exhausted its fine-grained retries; an opaque
@@ -275,7 +292,7 @@ async function readAndLoad(input: {
   let budgetExhausted = false
 
   const produce = async () => {
-    let pending: PendingBatch = { rows: [], state: undefined }
+    let pending = emptyBatch()
     const reader = stream.read({
       streamId: stream.id,
       selection: input.selection,
@@ -302,21 +319,32 @@ async function readAndLoad(input: {
         }),
     })
 
-    // for-await calls iterator.return() on every early exit, so the reader's
-    // own finally blocks own cursor and connection cleanup.
-    for await (const chunk of reader) {
-      signal.throwIfAborted()
-      assertValidChunk(stream.id, chunk)
-      progress.chunks += 1
-      pending.rows.push(...chunk.rows)
-      if (chunk.state !== undefined) pending.state = { value: chunk.state }
-      if (pending.rows.length >= batchSize) {
-        await queue.push(pending, signal)
-        pending = { rows: [], state: undefined }
+    // Iterate by hand so a hung next() can be abandoned on abort; return() still
+    // runs on every exit so the reader's finally blocks own cursor cleanup.
+    const iterator = reader[Symbol.asyncIterator]()
+    const maxChunkRows = stream.budget?.maxChunkRows ?? DEFAULT_MAX_CHUNK_ROWS
+    try {
+      while (!budgetExhausted) {
+        const step = await abortable(iterator.next(), signal)
+        if (step.done) break
+        const chunk: unknown = step.value
+        assertValidChunk(stream.id, chunk, maxChunkRows)
+        progress.chunks += 1
+        pending.rows.push(...chunk.rows)
+        if (pending.intervalIds) {
+          if (chunk.id === undefined) pending.intervalIds = undefined
+          else pending.intervalIds.push(chunk.id)
+        }
+        if (chunk.state !== undefined) pending.state = { value: chunk.state }
+        if (pending.rows.length >= batchSize) {
+          await queue.push(pending, signal)
+          pending = emptyBatch()
+        }
+        if (stream.budget?.maxChunks !== undefined && progress.chunks >= stream.budget.maxChunks) budgetExhausted = true
       }
-      if (stream.budget?.maxChunks !== undefined && progress.chunks >= stream.budget.maxChunks) budgetExhausted = true
-      if (env.now().getTime() >= env.deadline) budgetExhausted = true
-      if (budgetExhausted) break
+    } finally {
+      // Never await an uncooperative reader: cleanup is best effort once we leave.
+      void Promise.resolve(iterator.return?.()).catch(() => undefined)
     }
 
     // Only a fully consumed selection may claim the strategy's completion state.
@@ -330,12 +358,15 @@ async function readAndLoad(input: {
 
   const consume = async () => {
     // Batch identity is anchored to the last durable boundary: the committed
-    // checkpoint version plus the batch's position since that version. A replay
-    // after a crash starts from that same boundary, so identical rows reproduce
-    // the identical id (and deduplication token) even in a fresh process.
+    // checkpoint version plus the batch's position since that version, so a
+    // replay in a fresh process reproduces the same id and deduplication token.
+    // Declared source-interval ids complete the identity; without them a
+    // content hash does, preferring a possible duplicate over suppressing rows
+    // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const batchId = digest([namespaceId, String(progress.version), String(sinceBoundary), canonicalJson(batch.rows)]).slice(0, 32)
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(batch.rows)}`
+      const batchId = digest([namespaceId, String(progress.version), String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       const envelope: CheckpointEnvelope | undefined = batch.state
         ? { strategy: stream.incremental.id, version: stream.incremental.version, state: batch.state.value }
@@ -364,7 +395,7 @@ async function readAndLoad(input: {
   // The first failure is the root cause; the sibling only fails because of the
   // induced abort, so it must not mask what actually went wrong.
   let rootCause: { error: unknown } | undefined
-  await Promise.allSettled(
+  const settled = Promise.allSettled(
     [produce(), consume()].map((task) =>
       task.catch((error: unknown) => {
         rootCause ??= { error }
@@ -372,6 +403,9 @@ async function readAndLoad(input: {
       })
     )
   )
+  // After a failure, a source operation that ignores its signal must not pin
+  // the stream (and its permits) forever.
+  await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
   if (rootCause) throw rootCause.error
   if (budgetExhausted) {
     env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
@@ -389,39 +423,41 @@ async function loadBatch(
   signal: AbortSignal
 ): Promise<SinkReceipt> {
   const factory = input.stream.loader ?? simpleLoader()
-  const release = await input.permits.loads.acquire(signal)
-  try {
-    return await tracer.startActiveSpan('chkit.ingest.load', async (span) => {
-      span.setAttribute('chkit.ingest.batch_id', batchId)
-      span.setAttribute('chkit.ingest.rows', rows.length)
-      try {
-        for (let attempt = 1; ; attempt += 1) {
-          const loader = factory({
-            streamId: input.stream.id,
-            runId: input.runId,
-            table: input.stream.destination,
-            destination: input.env.destination,
-            signal,
+  return tracer.startActiveSpan('chkit.ingest.load', async (span) => {
+    span.setAttribute('chkit.ingest.batch_id', batchId)
+    span.setAttribute('chkit.ingest.rows', rows.length)
+    try {
+      for (let attempt = 1; ; attempt += 1) {
+        // The load permit covers only the active write, never the backoff timer.
+        const release = await input.permits.loads.acquire(signal)
+        const loader = factory({
+          streamId: input.stream.id,
+          runId: input.runId,
+          table: input.stream.destination,
+          destination: input.env.destination,
+          signal,
+        })
+        try {
+          await loader.write({ batchId, rows })
+          return await loader.finalize()
+        } catch (error) {
+          // A cleanup failure must not replace the write failure that decides the retry.
+          await loader.abort(error).catch((cleanupError: unknown) => {
+            span.recordException(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
           })
-          try {
-            await loader.write({ batchId, rows })
-            return await loader.finalize()
-          } catch (error) {
-            await loader.abort(error)
-            if (signal.aborted || isAbortError(error) || attempt >= LOAD_ATTEMPTS) throw error
-            await input.env.sleep(1000 * 2 ** (attempt - 1), signal)
-          }
+          if (signal.aborted || isAbortError(error) || attempt >= LOAD_ATTEMPTS) throw error
+        } finally {
+          release()
         }
-      } catch (error) {
-        recordFailure(span, error)
-        throw error
-      } finally {
-        span.end()
+        await input.env.sleep(1000 * 2 ** (attempt - 1), signal)
       }
-    })
-  } finally {
-    release()
-  }
+    } catch (error) {
+      recordFailure(span, error)
+      throw error
+    } finally {
+      span.end()
+    }
+  })
 }
 
 function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
@@ -435,29 +471,47 @@ function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope 
   return stream.incremental.parseState(envelope.state)
 }
 
-async function append(
+// Appends for one namespace are serialized and the sequence number is taken
+// only when the write starts, so a fact that never lands cannot leave a gap.
+// An ambiguous failure retries the exact same deterministic fact.
+function append(
   input: { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv },
   eventKind: JournalEvent['eventKind'],
   fields: Partial<Omit<JournalEvent, 'namespaceId' | 'eventSeq' | 'eventKind' | 'runId'>>
 ): Promise<void> {
-  input.progress.seq += 1
-  await input.env.journal.append({
-    namespaceId: input.namespaceId,
-    eventSeq: input.progress.seq,
-    eventKind,
-    runId: input.runId,
-    workId: fields.workId ?? '',
-    attemptNo: fields.attemptNo ?? 0,
-    batchId: fields.batchId ?? '',
-    expectedCheckpointVersion: fields.expectedCheckpointVersion ?? input.progress.version,
-    checkpointVersion: fields.checkpointVersion ?? input.progress.version,
-    checkpoint: fields.checkpoint,
-    workState: fields.workState ?? '',
-    sinkEvidence: fields.sinkEvidence ?? '',
-    retryAt: fields.retryAt,
-    errorClass: fields.errorClass ?? '',
-    detail: fields.detail ?? {},
+  const { progress, env } = input
+  const write = progress.appendChain.then(async () => {
+    const event: JournalEvent = {
+      namespaceId: input.namespaceId,
+      eventSeq: progress.seq + 1,
+      eventKind,
+      runId: input.runId,
+      workId: fields.workId ?? '',
+      attemptNo: fields.attemptNo ?? 0,
+      batchId: fields.batchId ?? '',
+      expectedCheckpointVersion: fields.expectedCheckpointVersion ?? progress.version,
+      checkpointVersion: fields.checkpointVersion ?? progress.version,
+      checkpoint: fields.checkpoint,
+      workState: fields.workState ?? '',
+      sinkEvidence: fields.sinkEvidence ?? '',
+      retryAt: fields.retryAt,
+      errorClass: fields.errorClass ?? '',
+      detail: fields.detail ?? {},
+    }
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await env.journal.append(event)
+        progress.seq = event.eventSeq
+        return
+      } catch (error) {
+        if (attempt >= JOURNAL_APPEND_ATTEMPTS) throw error
+        // Terminal facts must still land after cancellation, so this wait ignores the run signal.
+        await env.sleep(250 * 2 ** (attempt - 1), NEVER_ABORTED)
+      }
+    }
   })
+  progress.appendChain = write.catch(() => undefined)
+  return write
 }
 
 function runEvent(seq: number, eventKind: 'run_started' | 'run_finished', runId: string, workState: JournalEvent['workState'], detail: Record<string, unknown>): JournalEvent {
@@ -480,10 +534,48 @@ function runEvent(seq: number, eventKind: 'run_started' | 'run_finished', runId:
   }
 }
 
-function assertValidChunk(streamId: string, chunk: unknown): asserts chunk is { rows: readonly Row[]; state?: unknown } {
+function assertValidChunk(
+  streamId: string,
+  chunk: unknown,
+  maxChunkRows: number
+): asserts chunk is { rows: readonly Row[]; state?: unknown; id?: string } {
   if (typeof chunk !== 'object' || chunk === null || !('rows' in chunk) || !Array.isArray(chunk.rows)) {
     throw new IngestConfigError(`Stream "${streamId}" yielded a chunk without a "rows" array.`)
   }
+  if ('id' in chunk && chunk.id !== undefined && typeof chunk.id !== 'string') {
+    throw new IngestConfigError(`Stream "${streamId}" yielded a chunk whose "id" is not a string.`)
+  }
+  if (chunk.rows.length > maxChunkRows) {
+    throw new IngestConfigError(
+      `Stream "${streamId}" yielded a chunk of ${chunk.rows.length} rows, above the ${maxChunkRows}-row bound. Yield smaller chunks or raise budget.maxChunkRows.`
+    )
+  }
+}
+
+function emptyBatch(): PendingBatch {
+  return { rows: [], intervalIds: [], state: undefined }
+}
+
+/** Resolves a fixed grace period after the signal aborts; never resolves otherwise. */
+function graceAfterAbort(signal: AbortSignal, graceMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const start = () => {
+      const timer = setTimeout(resolve, graceMs)
+      if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+    }
+    if (signal.aborted) start()
+    else signal.addEventListener('abort', start, { once: true })
+  })
+}
+
+/** Settle with the promise, or reject as soon as the signal aborts. */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
 }
 
 function permitsFor(cache: Map<string, PipelinePermits>, pipeline: PipelineDefinition): PipelinePermits {
@@ -498,20 +590,22 @@ function permitsFor(cache: Map<string, PipelinePermits>, pipeline: PipelineDefin
   return created
 }
 
-function resolveEnv(input: ExecutionEnv): ResolvedEnv {
+const NEVER_ABORTED = new AbortController().signal
+
+function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedEnv {
   const now = input.now ?? (() => new Date())
   const maxDurationMs = input.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
   return {
     journal: input.journal,
     destination: input.destination,
-    signal: input.signal ?? new AbortController().signal,
+    signal: AbortSignal.any([input.signal ?? NEVER_ABORTED, deadlineSignal]),
+    hostSignal: input.signal ?? NEVER_ABORTED,
     maxDurationMs,
     prefetchBatches: input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES,
     now,
     sleep: input.sleep ?? sleep,
     random: input.random ?? Math.random,
     log: input.log ?? (() => undefined),
-    deadline: now().getTime() + maxDurationMs,
   }
 }
 

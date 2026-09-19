@@ -18,6 +18,15 @@ export type Row = Record<string, unknown>
 export interface SourceChunk<TRow extends Row = Row, TState = unknown> {
   rows: readonly TRow[]
   state?: TState
+  /**
+   * Stable, non-secret identity of the logical source interval this chunk
+   * covers (a page cursor, an id range, a day…). Declare it only when a replay
+   * of the same interval is the same logical write: batch identity then ignores
+   * row content, so mutable provider fields cannot defeat retry deduplication.
+   * Without it, identity falls back to a content hash, which prefers a possible
+   * duplicate over suppressing rows that changed between attempts.
+   */
+  id?: string
 }
 
 export interface AttemptOptions {
@@ -89,6 +98,8 @@ export interface RetryOptions {
 export interface StreamBudget {
   /** Maximum source chunks pulled in one execution of this stream. */
   maxChunks?: number
+  /** Largest chunk a reader may yield. A bigger chunk fails the stream instead of being buffered. */
+  maxChunkRows?: number
 }
 
 export interface StreamDefinition<TRow extends Row = Row, TState = unknown, TSelection = unknown> {

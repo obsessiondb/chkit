@@ -275,6 +275,132 @@ describe('runIngestion', () => {
   })
 })
 
+describe('runtime contracts', () => {
+  const run = (pipeline: ReturnType<typeof definePipeline>, env: Parameters<typeof runIngestion>[1]) =>
+    runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { sleep: noSleep, ...env })
+
+  test('a declared interval id keeps batch identity stable when replayed rows changed', async () => {
+    const build = (label: string, withId: boolean) => {
+      resetRegistry()
+      const stream = defineStream({
+        id: 'app.mutable',
+        destination: events,
+        async *read() {
+          yield { rows: [{ id: 1, label }], ...(withId ? { id: 'page:1' } : {}) }
+        },
+      })
+      return definePipeline({ id: 'app', streams: [stream] })
+    }
+
+    const declared = createMemoryDestination()
+    await run(build('before', true), { journal: createMemoryJournal(), destination: declared })
+    await run(build('after', true), { journal: createMemoryJournal(), destination: declared })
+    expect(declared.tables.get('app.events')).toHaveLength(1)
+
+    // Without a declared interval the content hash wins: a duplicate over a suppressed change.
+    const undeclared = createMemoryDestination()
+    await run(build('before', false), { journal: createMemoryJournal(), destination: undeclared })
+    await run(build('after', false), { journal: createMemoryJournal(), destination: undeclared })
+    expect(undeclared.tables.get('app.events')).toHaveLength(2)
+  })
+
+  test('the execution budget interrupts a hung reader and preserves committed progress', async () => {
+    const journal = createMemoryJournal()
+    const stream = defineStream({
+      id: 'app.hung',
+      destination: events,
+      batchSize: 1,
+      incremental: cursorState({ id: 'test.page', version: 1, parse: (raw) => Number(raw) }),
+      async *read() {
+        yield { rows: [{ id: 1 }], state: 1 }
+        await new Promise(() => undefined)
+      },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+
+    const result = await run(pipeline, { journal, destination: createMemoryDestination(), maxDurationMs: 50 })
+
+    expect(result.streams[0]?.outcome).toBe('budget_exhausted')
+    expect((await journal.readCheckpoint('app.hung')).envelope?.state).toBe(1)
+    expect(journal.events.at(-1)?.eventKind).toBe('run_finished')
+  })
+
+  test('an oversized chunk fails the stream instead of being buffered', async () => {
+    const stream = defineStream({
+      id: 'app.big',
+      destination: events,
+      budget: { maxChunkRows: 2 },
+      async *read() {
+        yield { rows: [{ id: 1 }, { id: 2 }, { id: 3 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination: createMemoryDestination() })
+    expect(result.streams[0]?.error).toContain('above the 2-row bound')
+  })
+
+  test('a mapped row cannot supply the destination-owned publication time', async () => {
+    const destination = createMemoryDestination()
+    const stream = defineStream({
+      id: 'app.stamped',
+      destination: events,
+      async *read() {
+        yield { rows: [{ id: 1, _chkit_ingested_at: '2000-01-01 00:00:00' }] }
+      },
+    })
+    await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
+    expect(destination.tables.get('app.events')?.[0]).not.toHaveProperty('_chkit_ingested_at')
+  })
+
+  test('an ambiguous journal append retries the same fact without consuming a sequence number', async () => {
+    const journal = createMemoryJournal()
+    const append = journal.append.bind(journal)
+    let failures = 0
+    journal.append = async (event) => {
+      if (event.eventKind === 'batch_committed' && failures === 0) {
+        failures += 1
+        throw new Error('acknowledgement lost')
+      }
+      await append(event)
+    }
+    const stream = defineStream({ id: 'app.events', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+
+    expect(result.ok).toBe(true)
+    const sequences = journal.events.filter((event) => event.namespaceId === 'app.events').map((event) => event.eventSeq)
+    expect(sequences).toEqual([1, 2, 3, 4])
+  })
+
+  test('a failing loader cleanup does not mask the write failure or stop the retry', async () => {
+    const destination = createMemoryDestination()
+    let writes = 0
+    const stream = defineStream({
+      id: 'app.cleanup',
+      destination: events,
+      loader: (ctx) => ({
+        ctx,
+        async write(batch) {
+          writes += 1
+          if (writes === 1) throw new Error('write failed')
+          await ctx.destination.insert({ table: ctx.table, rows: batch.rows, token: batch.batchId })
+        },
+        finalize: async () => ({ evidence: 'clickhouse_ack', rows: 1, writeUnits: 1 }),
+        abort: async () => {
+          throw new Error('cleanup failed')
+        },
+      }),
+      async *read() {
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
+
+    expect(result.ok).toBe(true)
+    expect(writes).toBe(2)
+  })
+})
+
 describe('selectStreams', () => {
   test('repeated tags use exact AND semantics and an explicit empty selection fails', () => {
     const hourly = defineStream({ id: 'crm.people', destination: events, tags: ['schedule:1h'], async *read() {} })

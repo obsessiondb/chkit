@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 
 import { table, toCreateSQL } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import { createLiveExecutor, createPrefix, getRequiredEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
+import { createPrefix, createStatelessLiveExecutor, getRequiredEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 
 import { createClickHouseDestination, ingestionColumns } from './destination.js'
 import { runIngestion } from './executor.js'
@@ -28,7 +28,8 @@ describe('@chkit/plugin-ingest live env e2e', () => {
   let executor: ClickHouseExecutor
 
   beforeAll(async () => {
-    executor = createLiveExecutor(liveEnv)
+    // Ingestion fetches, loads and journals concurrently, so it needs a stateless executor.
+    executor = createStatelessLiveExecutor(liveEnv)
     await executor.command(toCreateSQL(destinationTable))
     await waitForTable(executor, database, destinationTable.name)
   })

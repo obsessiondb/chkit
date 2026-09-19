@@ -1,3 +1,4 @@
+import { canonicalJson } from './journal.js'
 import type { AttemptOptions, ReadContext } from './types.js'
 
 export interface Page<TItem, TCursor> {
@@ -16,8 +17,9 @@ export interface PaginateOptions<TItem, TCursor> {
 
 /**
  * Pull-based pagination over one retryable Promise step per page. Every request
- * runs through the executor attempt capability, and repeated continuations are
- * rejected so a cyclic provider cursor cannot loop forever.
+ * runs through the executor attempt capability. A continuation that was already
+ * seen (compared by canonical serialization) is rejected, so a cyclic provider
+ * cursor cannot loop forever; other non-progress is bounded by execution budgets.
  */
 export async function* paginate<TItem, TCursor>(
   options: PaginateOptions<TItem, TCursor>
@@ -34,7 +36,7 @@ export async function* paginate<TItem, TCursor>(
     if (page.items.length > 0) yield page.items
     if (page.next === undefined || page.next === null) return
 
-    const key = JSON.stringify(page.next)
+    const key = canonicalJson(page.next)
     if (seen.has(key)) {
       throw new Error(`paginate: provider returned a repeated continuation ${key}; refusing to loop.`)
     }

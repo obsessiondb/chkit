@@ -32,6 +32,7 @@ export type JournalRow = {
 }
 
 export interface ClickHouseJournalOptions {
+  /** Must allow concurrent queries: use a stateless executor, not a session-bound one. */
   executor: ClickHouseExecutor
   database: string
   targetId: string
@@ -70,38 +71,67 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
     },
 
     async readCheckpoint(namespaceId) {
-      // Physical retry duplicates are allowed; canonicalize by event_id and
-      // refuse to continue when one deterministic id carries different payloads.
-      const rows = await options.executor.query<{
-        head_seq: string
-        drifted: string
-        checkpoint_version: string
-        checkpoint_json: string
-      }>(
-        `SELECT
-  max(event_seq) AS head_seq,
-  countIf(distinct_payloads > 1) AS drifted,
-  argMaxIf(fact_version, (fact_version, event_seq, event_id), fact_kind = 'batch_committed') AS checkpoint_version,
-  argMaxIf(fact_checkpoint, (fact_version, event_seq, event_id), fact_kind = 'batch_committed') AS checkpoint_json
-FROM (
-  SELECT
+      // Physical retry duplicates are allowed, so facts are canonicalized per
+      // sequence number first. The history is then validated before anything is
+      // projected from it: a checkpoint read from a damaged journal is worthless.
+      const facts = `SELECT
     event_seq,
-    event_id,
+    uniqExact(event_id) AS owners,
+    uniqExact(payload_hash) AS payloads,
     any(event_kind) AS fact_kind,
+    any(expected_checkpoint_version) AS fact_expected,
     any(checkpoint_version) AS fact_version,
-    any(checkpoint_json) AS fact_checkpoint,
-    uniqExact(payload_hash) AS distinct_payloads
+    any(checkpoint_json) AS fact_checkpoint
   FROM ${qualified}
   WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)}
-  GROUP BY event_seq, event_id
+  GROUP BY event_seq`
+      const settings = { select_sequential_consistency: '1' }
+      const [health, transitions] = await Promise.all([
+        options.executor.query<{
+          head_seq: string
+          sequences: string
+          conflicting_owners: string
+          drifted: string
+          checkpoint_version: string
+          checkpoint_json: string
+        }>(
+          `SELECT
+  max(event_seq) AS head_seq,
+  count() AS sequences,
+  countIf(owners > 1) AS conflicting_owners,
+  countIf(payloads > 1) AS drifted,
+  argMaxIf(fact_version, event_seq, fact_kind = 'batch_committed') AS checkpoint_version,
+  argMaxIf(fact_checkpoint, event_seq, fact_kind = 'batch_committed') AS checkpoint_json
+FROM (${facts})`,
+          settings
+        ),
+        // Every commit must start from the version the previous commit produced
+        // and advance it by at most one.
+        options.executor.query<{ invalid: string }>(
+          `SELECT countIf(fact_expected != previous_version OR fact_version < fact_expected OR fact_version > fact_expected + 1) AS invalid
+FROM (
+  SELECT
+    fact_expected,
+    fact_version,
+    lagInFrame(fact_version, 1, toUInt64(0)) OVER (ORDER BY event_seq ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS previous_version
+  FROM (${facts})
+  WHERE fact_kind = 'batch_committed'
 )`,
-        { select_sequential_consistency: '1' }
-      )
-      const row = rows[0]
-      if (!row) return { version: 0, envelope: undefined, headSeq: 0 }
-      if (Number(row.drifted) > 0) {
+          settings
+        ),
+      ])
+      const row = health[0]
+      if (!row || Number(row.sequences) === 0) return emptyCheckpoint()
+
+      const problems = [
+        Number(row.head_seq) !== Number(row.sequences) ? `sequence gap (head ${row.head_seq}, ${row.sequences} facts)` : '',
+        Number(row.conflicting_owners) > 0 ? `${row.conflicting_owners} sequence number(s) owned by conflicting facts` : '',
+        Number(row.drifted) > 0 ? `${row.drifted} fact(s) with drifting payloads` : '',
+        Number(transitions[0]?.invalid ?? 0) > 0 ? `${transitions[0]?.invalid} invalid checkpoint transition(s)` : '',
+      ].filter((problem) => problem !== '')
+      if (problems.length > 0) {
         throw new Error(
-          `Ingestion journal payload drift detected for namespace "${namespaceId}": a deterministic event id has conflicting payloads. Refusing to continue.`
+          `Ingestion journal for "${namespaceId}" is not a valid history: ${problems.join('; ')}. Refusing to project a checkpoint from it; more than one executor process may have been active.`
         )
       }
       return {
@@ -116,8 +146,9 @@ FROM (
 export function toJournalRow(event: JournalEvent, targetId: string, at: Date): JournalRow {
   const checkpointJson = event.checkpoint ? canonicalJson(event.checkpoint) : ''
   const detailJson = canonicalJson(event.detail)
-  // Identity covers what makes the fact unique; the payload hash covers what a
-  // replay of that same fact must reproduce. Timestamps are excluded from both.
+  // Identity covers what makes the fact unique; the payload hash covers every
+  // authoritative field a retry of that same fact must reproduce. Only the
+  // physical append time (event_at) is excluded.
   const eventId = digest([targetId, event.namespaceId, String(event.eventSeq), event.eventKind, event.workId, event.batchId, String(event.attemptNo)])
   const payload = digest([
     eventId,
@@ -127,6 +158,9 @@ export function toJournalRow(event: JournalEvent, targetId: string, at: Date): J
     event.workState,
     event.sinkEvidence,
     event.errorClass,
+    event.runId,
+    event.retryAt ? event.retryAt.toISOString() : '',
+    detailJson,
   ])
   return {
     target_id: targetId,
