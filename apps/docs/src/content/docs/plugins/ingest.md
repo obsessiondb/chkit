@@ -99,7 +99,7 @@ Mapping fields in the reader is optional, and usually the wrong place for it. `r
 import { view } from '@chkit/core'
 import { defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
 
-export const rawTickets = rawTable({ database: 'crm_raw', name: 'tickets' })
+export const rawTickets = rawTable({ database: 'crm', name: 'tickets_raw' })
 
 export const tickets = view({
   database: 'crm',
@@ -110,7 +110,7 @@ export const tickets = view({
   raw.requester.email::String AS requester_email,
   arrayMap(t -> t.name::String, raw.tags[]) AS tags,
   parseDateTime64BestEffortOrNull(raw.updated_at::String, 3, 'UTC') AS updated_at
-FROM crm_raw.tickets FINAL`,
+FROM crm.tickets_raw FINAL`,
 })
 
 const ticketStream = defineStream({
@@ -122,7 +122,7 @@ const ticketStream = defineStream({
 })
 ```
 
-The raw table is a `ReplacingMergeTree`, so overlapping windows and replays collapse to the latest version of each `id`. Because the transform lives in ClickHouse, changing it never requires re-fetching the source: a view picks the change up immediately, and a materialized view can be rebuilt from the raw table. Keep the raw and modelled layers in separate databases so access and retention can differ.
+The raw table is a `ReplacingMergeTree`, so overlapping windows and replays collapse to the latest version of each `id`. Because the transform lives in ClickHouse, changing it never requires re-fetching the source: a view picks the change up immediately, and a materialized view can be rebuilt from the raw table. A `_raw` suffix next to the typed view of the same name keeps the pair easy to find.
 
 ## Progress and checkpoints
 
