@@ -143,6 +143,14 @@ With `cursorState`, `state` on a chunk must be the complete state that is safe t
 
 A checkpoint records its strategy id and version. Changing either makes the next run fail rather than reinterpret old state.
 
+## Retry policy
+
+Pipeline `retry` settings are defaults; a stream can override individual settings. Source attempts and reader restarts use [`p-retry`](https://github.com/sindresorhus/p-retry) for exponential backoff, jitter, retry counts, and `maxRetryTime`. The supported options are `retries`, `factor`, `minTimeout`, `maxTimeout`, `randomize`, `maxRetryTime`, `shouldRetry`, and `shouldConsumeRetry`.
+
+The policy callbacks receive p-retry's `attemptNumber`, `retriesLeft`, and `retriesConsumed`, plus a `FetchFailure` preserving the original `cause` and normalized `classification`. Returning `false` from `shouldConsumeRetry` follows p-retry's behavior: it skips consuming a retry and skips its backoff. A provider's `Retry-After` still applies, including for those unconsumed retries. Retry waits release fetch and load capacity for other streams.
+
+Once a source attempt exhausts its policy, it fails the stream; reader recovery does not multiply that retry budget. Opaque reader failures restart from the latest committed checkpoint.
+
 ## Commands
 
 ```sh

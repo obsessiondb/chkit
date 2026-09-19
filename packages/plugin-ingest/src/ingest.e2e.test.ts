@@ -73,14 +73,13 @@ describe('@chkit/plugin-ingest live env e2e', () => {
         await destination.insert(input)
       },
     }
-    const noSleep = async () => undefined
 
-    const first = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination: lossy, sleep: noSleep })
+    const first = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination: lossy })
     expect(first.ok).toBe(false)
     expect((await journal().readCheckpoint(stream.id)).envelope?.state).toBe(1)
 
     // A fresh executor process reconstructs everything from the journal.
-    const second = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination, sleep: noSleep })
+    const second = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination })
     expect(second.ok).toBe(true)
     const checkpoint = await journal().readCheckpoint(stream.id)
     expect(checkpoint.envelope).toEqual({ strategy: 'e2e.page', version: 1, state: 3 })

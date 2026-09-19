@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { table } from '@chkit/core'
 
@@ -20,7 +21,6 @@ const events = table({
   orderBy: ['id'],
 })
 
-const noSleep = async () => undefined
 const pages = (count: number, size: number) =>
   Array.from({ length: count }, (_, page) => Array.from({ length: size }, (_, index) => ({ id: page * size + index })))
 
@@ -106,11 +106,11 @@ describe('runIngestion', () => {
       },
     }
 
-    const first = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: crashing, sleep: noSleep })
+    const first = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: crashing })
     expect(first.ok).toBe(false)
     expect((await journal.readCheckpoint('app.cursor')).envelope?.state).toBe(1)
 
-    const second = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination, sleep: noSleep })
+    const second = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })
     expect(second.ok).toBe(true)
     expect((await journal.readCheckpoint('app.cursor')).envelope?.state).toBe(3)
     const ids = (destination.tables.get('app.events') ?? []).map((row) => row.id)
@@ -158,7 +158,7 @@ describe('runIngestion', () => {
     })
     const pipeline = definePipeline({ id: 'app', streams: [stream] })
 
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination(), sleep: noSleep })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination() })
 
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(result.streams[0]?.error).toContain('provider exploded')
@@ -168,7 +168,6 @@ describe('runIngestion', () => {
   test('attempt retries rate limits and transient failures but not permanent ones', async () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
-    const delays: number[] = []
     let calls = 0
     const flaky = defineStream({
       id: 'app.flaky',
@@ -177,7 +176,7 @@ describe('runIngestion', () => {
       async *read(context) {
         const rows = await context.attempt(async () => {
           calls += 1
-          if (calls === 1) throw await httpError(429, { 'retry-after': '7' })
+          if (calls === 1) throw await httpError(429, { 'retry-after': '0.02' })
           if (calls === 2) throw await httpError(503)
           return [{ id: 1 }]
         })
@@ -195,11 +194,10 @@ describe('runIngestion', () => {
 
     const result = await runIngestion(
       { selected: selectStreams([pipeline], []), backfill: undefined },
-      { journal, destination, sleep: async (ms) => { delays.push(ms) } }
+      { journal, destination }
     )
 
     expect(calls).toBe(3)
-    expect(delays).toEqual([7000, 20])
     // One failing stream does not stop its sibling.
     expect(result.streams.map((stream) => stream.outcome)).toEqual(['succeeded', 'failed'])
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass)).toEqual(['rate_limited', 'transient'])
@@ -274,7 +272,7 @@ describe('runIngestion', () => {
 
 describe('runtime contracts', () => {
   const run = (pipeline: ReturnType<typeof definePipeline>, env: Parameters<typeof runIngestion>[1]) =>
-    runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { sleep: noSleep, ...env })
+    runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, env)
 
   test.each([false, true])('new full syncs preserve changes while failed syncs reuse tokens (declared id: %s)', async (withId) => {
     const journal = createMemoryJournal()
@@ -501,6 +499,113 @@ describe('runtime contracts', () => {
 
     expect(result.ok).toBe(true)
     expect(writes).toBe(2)
+  })
+})
+
+describe('pipeline concurrency and retries', () => {
+  const run = (pipeline: ReturnType<typeof definePipeline>, env: Parameters<typeof runIngestion>[1]) =>
+    runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, env)
+
+  test.each(['fetches', 'loads'] as const)('%s release capacity during backoff and never exceed the limit', async (mode) => {
+    const order: number[] = []
+    let active = 0
+    let peak = 0
+    const operation = async (id: number) => {
+      order.push(id)
+      active += 1
+      peak = Math.max(peak, active)
+      await sleep(5)
+      active -= 1
+      if (order.length === 1) throw new Error('temporary failure')
+      return [{ id }]
+    }
+    const streams = [1, 2].map((id) => defineStream({
+      id: `app.stream${id}`, destination: events,
+      async *read({ attempt }) {
+        yield { rows: mode === 'fetches' ? await attempt(() => operation(id)) : [{ id }] }
+      },
+    }))
+    const destination: DestinationAdapter = {
+      async insert({ rows }) { if (mode === 'loads') await operation(Number(rows[0]?.id)) },
+    }
+    const result = await run(definePipeline({
+      id: 'app', streams, maxStreams: 2, maxFetches: 1, maxLoads: 1,
+      retry: { retries: 1, minTimeout: 10, randomize: false },
+    }), { journal: createMemoryJournal(), destination })
+
+    expect(result.ok).toBe(true)
+    expect(order).toEqual([1, 2, 1])
+    expect(peak).toBe(1)
+  })
+
+  test('stream limits serialize readers and cancellation prevents queued readers from starting', async () => {
+    for (const cancel of [false, true]) {
+      const controller = new AbortController()
+      const order: string[] = []
+      const streams = [1, 2].map((id) => defineStream({
+        id: `app.stream${id}`, destination: events,
+        async *read() {
+          order.push(`start:${id}`)
+          if (cancel) controller.abort()
+          await sleep(5)
+          order.push(`end:${id}`)
+          yield { rows: [] }
+        },
+      }))
+      const result = await run(definePipeline({ id: 'app', streams, maxStreams: 1 }), {
+        journal: createMemoryJournal(), destination: createMemoryDestination(), signal: controller.signal,
+      })
+      if (cancel) {
+        expect(result.streams.map((stream) => stream.outcome)).toEqual(['cancelled', 'cancelled'])
+        expect(order).not.toContain('start:2')
+      } else {
+        expect(result.ok).toBe(true)
+        expect(order).toEqual(['start:1', 'end:1', 'start:2', 'end:2'])
+      }
+    }
+  })
+
+  test('reader retries resume from committed progress and exhausted source retries do not recreate the reader', async () => {
+    const journal = createMemoryJournal()
+    const append = journal.append.bind(journal)
+    let committed: () => void = () => undefined
+    const saved = new Promise<void>((resolve) => { committed = resolve })
+    journal.append = async (event) => {
+      await append(event)
+      if (event.eventKind === 'batch_committed') committed()
+    }
+    const selections: Array<number | undefined> = []
+    let sourceCalls = 0
+    let readers = 0
+    const resumable = defineStream({
+      id: 'app.resumable', destination: events, batchSize: 1,
+      incremental: cursorState({ id: 'page', version: 1, parse: (raw) => Number(raw) }),
+      async *read({ selection }) {
+        selections.push(selection)
+        if (selection === undefined) {
+          yield { rows: [{ id: 1 }], state: 1 }
+          await saved
+          throw new Error('reader disconnected')
+        }
+        yield { rows: [{ id: 2 }], state: 2 }
+      },
+    })
+    const exhausted = defineStream({
+      id: 'app.exhausted', destination: events,
+      async *read({ attempt }) {
+        readers += 1
+        await attempt(async () => { sourceCalls += 1; throw new Error('source unavailable') })
+      },
+    })
+    const result = await run(definePipeline({
+      id: 'app', streams: [resumable, exhausted], retry: { retries: 1, minTimeout: 0 },
+    }), { journal, destination: createMemoryDestination() })
+
+    expect(result.streams.map((stream) => stream.outcome)).toEqual(['succeeded', 'failed'])
+    expect(selections).toEqual([undefined, 1])
+    expect((await journal.readCheckpoint(resumable.id)).envelope?.state).toBe(2)
+    expect(readers).toBe(1)
+    expect(sourceCalls).toBe(2)
   })
 })
 

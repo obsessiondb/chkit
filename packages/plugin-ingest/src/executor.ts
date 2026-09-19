@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
+import pLimit, { type LimitFunction } from 'p-limit'
+import pRetry, { AbortError } from 'p-retry'
 
 import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError, isAbortError } from './errors.js'
 import { canonicalJson, digest } from './journal.js'
 import { simpleLoader } from './loader.js'
 import { createBoundedQueue } from './queue.js'
 import type { SelectedStream } from './registry.js'
-import { DEFAULT_RETRY, mergeRetry, runAttempt, sleep } from './retry.js'
-import { createSemaphore, type Semaphore } from './semaphore.js'
+import { mergeRetry, runAttempt } from './retry.js'
 import type {
   AnyStreamDefinition,
   CheckpointEnvelope,
@@ -57,8 +59,6 @@ export interface ExecutionEnv {
   /** Finite number of mapped batches buffered between fetch and load. */
   prefetchBatches?: number
   now?: () => Date
-  sleep?: (ms: number, signal: AbortSignal) => Promise<void>
-  random?: () => number
   log?: (message: string) => void
 }
 
@@ -70,9 +70,9 @@ interface ResolvedEnv extends Required<Omit<ExecutionEnv, 'signal'>> {
 }
 
 interface PipelinePermits {
-  streams: Semaphore
-  fetches: Semaphore
-  loads: Semaphore
+  streams: LimitFunction
+  fetches: LimitFunction
+  loads: LimitFunction
 }
 
 interface PendingBatch {
@@ -171,30 +171,28 @@ async function executeSelectedStream(
     error,
   })
 
-  let release: (() => void) | undefined
-  try {
-    release = await permits.streams.acquire(env.signal)
-  } catch {
-    return result(env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted', 'execution interrupted before start')
-  }
-
-  return tracer.startActiveSpan('chkit.ingest.stream', async (span) => {
-    span.setAttribute('chkit.ingest.stream_id', stream.id)
-    span.setAttribute('chkit.ingest.namespace_id', namespaceId)
-    try {
-      const outcome = await executeStream({ stream, pipeline, namespaceId, backfill, runId, cutoff, permits, progress, env })
-      env.log?.(`${namespaceId}: ${outcome} (${progress.rows} rows, ${progress.batches} batches, checkpoint v${progress.version})`)
-      return result(outcome, undefined)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const outcome: StreamOutcome = env.hostSignal.aborted ? 'cancelled' : env.signal.aborted ? 'budget_exhausted' : 'failed'
-      recordFailure(span, error)
-      env.log?.(`${namespaceId}: ${outcome} — ${message}`)
-      return result(outcome, message)
-    } finally {
-      span.end()
-      release?.()
+  return permits.streams(async () => {
+    if (env.signal.aborted) {
+      return result(env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted', 'execution interrupted before start')
     }
+
+    return tracer.startActiveSpan('chkit.ingest.stream', async (span) => {
+      span.setAttribute('chkit.ingest.stream_id', stream.id)
+      span.setAttribute('chkit.ingest.namespace_id', namespaceId)
+      try {
+        const outcome = await executeStream({ stream, pipeline, namespaceId, backfill, runId, cutoff, permits, progress, env })
+        env.log?.(`${namespaceId}: ${outcome} (${progress.rows} rows, ${progress.batches} batches, checkpoint v${progress.version})`)
+        return result(outcome, undefined)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const outcome: StreamOutcome = env.hostSignal.aborted ? 'cancelled' : env.signal.aborted ? 'budget_exhausted' : 'failed'
+        recordFailure(span, error)
+        env.log?.(`${namespaceId}: ${outcome} — ${message}`)
+        return result(outcome, message)
+      } finally {
+        span.end()
+      }
+    })
   })
 }
 
@@ -217,13 +215,12 @@ async function executeStream(input: {
   progress.envelope = committed.envelope
 
   const retry = mergeRetry(pipeline.retry, stream.retry)
-  const readerAttempts = (retry.retries ?? DEFAULT_RETRY.retries) + 1
   let workId = ''
   let outcome: StreamOutcome = 'failed'
   let failure: unknown
 
-  for (let attemptNo = 1; attemptNo <= readerAttempts; attemptNo += 1) {
-    try {
+  try {
+    outcome = await runAttempt(async (attemptNo) => {
       // Re-plan from the latest durable boundary on every reader (re)creation.
       const state = restoreState(stream, progress.envelope, namespaceId)
       const selection: unknown = stream.incremental.plan({
@@ -237,25 +234,24 @@ async function executeStream(input: {
         await append(input, 'work_planned', { workId, workState: 'planned', detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } })
       }
       await append(input, 'attempt_started', { workId, attemptNo, workState: 'running' })
-      outcome = await readAndLoad({ ...input, workId, attemptNo, state, selection, retry })
-      failure = undefined
-      break
-    } catch (error) {
-      failure = error
-      if (error instanceof IngestConfigError) break
-      const classification = error instanceof FetchFailure ? error.classification : classifyFailure(error, env.signal, stream.classifyError)
-      if (classification.kind === 'cancelled') {
-        outcome = env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted'
-        // Exhausting the budget is an incomplete result, not a failure: committed progress stands.
-        if (outcome === 'budget_exhausted') failure = undefined
-        break
-      }
-      // A FetchFailure already exhausted its fine-grained retries; an opaque
-      // iterator failure gets coarse reader recreation from the last checkpoint.
-      if (error instanceof FetchFailure || classification.kind === 'permanent' || attemptNo === readerAttempts) break
-      const retryDelay = Math.min(retry.maxTimeout ?? DEFAULT_RETRY.maxTimeout, (retry.minTimeout ?? DEFAULT_RETRY.minTimeout) * 2 ** (attemptNo - 1))
-      await append(input, 'retry_scheduled', { workId, attemptNo, retryAt: new Date(env.now().getTime() + retryDelay), errorClass: classification.kind, detail: { error: messageOf(error) } })
-      await env.sleep(retryDelay, env.signal)
+      return readAndLoad({ ...input, workId, attemptNo, state, selection, retry })
+    }, retry, {
+      signal: env.signal,
+      classifier: stream.classifyError,
+      onRetry: (context, retryAfterMs) => append(input, 'retry_scheduled', {
+        workId,
+        attemptNo: context.attemptNumber,
+        retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
+        errorClass: context.error.classification.kind,
+        detail: { error: context.error.message },
+      }),
+    })
+  } catch (error) {
+    failure = error
+    if (env.signal.aborted || failureKind(error, env.signal, stream) === 'cancelled') {
+      outcome = env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted'
+      // Exhausting the budget is incomplete: committed progress stands.
+      if (outcome === 'budget_exhausted') failure = undefined
     }
   }
 
@@ -307,21 +303,20 @@ async function readAndLoad(input: {
       cutoff: input.cutoff,
       signal,
       attempt: (operation, options) =>
-        runAttempt(operation, options?.label ?? 'source', input.retry, {
+        runAttempt(() => input.permits.fetches(() => {
+          signal.throwIfAborted()
+          return operation(signal)
+        }), input.retry, {
           signal,
-          fetchPermits: input.permits.fetches,
           classifier: stream.classifyError,
-          sleep: env.sleep,
-          random: env.random,
-          now: () => env.now().getTime(),
-          onAttempt: () => undefined,
-          onRetry: ({ label, context }) =>
+          onRetry: (context, retryAfterMs) =>
             append(input, 'retry_scheduled', {
               workId: input.workId,
               attemptNo: input.attemptNo,
-              retryAt: new Date(env.now().getTime() + context.retryDelay),
+              // p-retry owns the randomized backoff; record only a provider's known not-before time.
+              retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
               errorClass: context.error.classification.kind,
-              detail: { label, sourceAttempt: context.attemptNumber, error: context.error.message },
+              detail: { label: options?.label ?? 'source', sourceAttempt: context.attemptNumber, error: context.error.message },
             }),
         }),
     })
@@ -444,32 +439,38 @@ async function loadBatch(
     span.setAttribute('chkit.ingest.batch_id', batchId)
     span.setAttribute('chkit.ingest.rows', rows.length)
     try {
-      for (let attempt = 1; ; attempt += 1) {
-        // The load permit covers only the active write, never the backoff timer.
-        const release = await input.permits.loads.acquire(signal)
+      return await pRetry(() => input.permits.loads(async () => {
+        signal.throwIfAborted()
+        // The load limit covers only the active write, never p-retry's backoff.
+        let loader: ReturnType<typeof factory>
         try {
-          const loader = factory({
+          loader = factory({
             streamId: input.stream.id,
             runId: input.runId,
             table: input.stream.destination,
             destination: input.env.destination,
             signal,
           })
-          try {
-            await loader.write({ batchId, rows })
-            return await loader.finalize()
-          } catch (error) {
-            // A cleanup failure must not replace the write failure that decides the retry.
-            await loader.abort(error).catch((cleanupError: unknown) => {
-              span.recordException(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
-            })
-            if (signal.aborted || isAbortError(error) || attempt >= LOAD_ATTEMPTS) throw error
-          }
-        } finally {
-          release()
+        } catch (error) {
+          // Construction errors are not ambiguous sink acknowledgements.
+          throw new AbortError(error instanceof Error ? error : new Error(String(error)))
         }
-        await input.env.sleep(1000 * 2 ** (attempt - 1), signal)
-      }
+        try {
+          await loader.write({ batchId, rows })
+          return await loader.finalize()
+        } catch (error) {
+          // Cleanup must not replace the write failure that decides the retry.
+          await loader.abort(error).catch((cleanupError: unknown) => {
+            span.recordException(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
+          })
+          throw error
+        }
+      }), {
+        retries: LOAD_ATTEMPTS - 1,
+        minTimeout: 1000,
+        signal,
+        shouldRetry: ({ error }) => !isAbortError(error),
+      })
     } catch (error) {
       recordFailure(span, error)
       throw error
@@ -519,16 +520,12 @@ function append(
       errorClass: fields.errorClass ?? '',
       detail: fields.detail ?? {},
     }
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        await abortable(() => env.journal.append(event), signal)
-        progress.seq = event.eventSeq
-        return
-      } catch (error) {
-        if (signal.aborted || attempt >= JOURNAL_APPEND_ATTEMPTS) throw error
-        await abortable(() => env.sleep(250 * 2 ** (attempt - 1), signal), signal)
-      }
-    }
+    await pRetry(() => abortable(() => env.journal.append(event), signal), {
+      retries: JOURNAL_APPEND_ATTEMPTS - 1,
+      minTimeout: 250,
+      signal,
+    })
+    progress.seq = event.eventSeq
   })
   // A fact that could not be confirmed poisons the chain: a later append must
   // not reuse its sequence number, because the unconfirmed write may have landed.
@@ -583,8 +580,7 @@ function emptyBatch(): PendingBatch {
 function graceAfterAbort(signal: AbortSignal, graceMs: number): Promise<void> {
   return new Promise((resolve) => {
     const start = () => {
-      const timer = setTimeout(resolve, graceMs)
-      if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+      void sleep(graceMs, undefined, { ref: false }).then(resolve)
     }
     if (signal.aborted) start()
     else signal.addEventListener('abort', start, { once: true })
@@ -608,9 +604,9 @@ function permitsFor(cache: Map<string, PipelinePermits>, pipeline: PipelineDefin
   const existing = cache.get(pipeline.id)
   if (existing) return existing
   const created: PipelinePermits = {
-    streams: createSemaphore(pipeline.maxStreams),
-    fetches: createSemaphore(pipeline.maxFetches),
-    loads: createSemaphore(pipeline.maxLoads),
+    streams: pLimit(pipeline.maxStreams),
+    fetches: pLimit(pipeline.maxFetches),
+    loads: pLimit(pipeline.maxLoads),
   }
   cache.set(pipeline.id, created)
   return created
@@ -629,8 +625,6 @@ function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedE
     maxDurationMs,
     prefetchBatches: input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES,
     now,
-    sleep: input.sleep ?? sleep,
-    random: input.random ?? Math.random,
     log: input.log ?? (() => undefined),
   }
 }

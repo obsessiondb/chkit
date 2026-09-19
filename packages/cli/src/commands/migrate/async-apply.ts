@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { setTimeout as defaultSleep } from 'node:timers/promises'
 
 import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
 
@@ -407,8 +408,4 @@ export function isoWithoutZone(date: Date): string {
 
 function firstLine(value: string): string {
   return value.split('\n')[0] ?? value
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }

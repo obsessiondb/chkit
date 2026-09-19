@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from 'node:timers/promises'
+
 import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
 import pMap from 'p-map'
 
@@ -45,10 +47,6 @@ export interface BackfillResult {
   completed: number
   failed: number
   progress: BackfillProgress
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Build the deterministic query ID for a chunk. */
