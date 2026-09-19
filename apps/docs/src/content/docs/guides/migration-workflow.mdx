@@ -21,7 +21,7 @@ chkit uses the second approach. `chkit generate` computes the diff and writes it
 
 ## The diff needs a baseline: that's the snapshot
 
-To compute where the schema is against where it should be, the diff needs both sides. The target side is your TypeScript schema. The baseline, the last-known state, has to come from somewhere.
+To compute where the schema is against where it should be, the diff needs both sides. The target side is your schema code. The baseline, the last-known state, has to come from somewhere.
 
 There are two ways to supply that baseline. Introspect a live database, which ties every diff to a reachable instance and to which instance you point at. Or read a committed file. chkit keeps the baseline in a file: `chkit/meta/snapshot.json`.
 
@@ -52,14 +52,14 @@ The record of which migrations have run is deliberately not a file. It lives in 
 
 This is the workflow for a team where only some developers can reach production. Assume one person has a one-time connection to prod and nobody else does.
 
-1. **Seed the project once.** The person with access runs [`chkit pull`](/cli/pull/) against prod to introspect the existing schema into TypeScript, then `chkit generate` to produce the initial snapshot. Commit the schema files, the migration(s), and `snapshot.json`.
+1. **Seed the project once.** The person with access runs [`chkit pull`](/cli/pull/) against prod to introspect the existing schema into schema files, then `chkit generate` to produce the initial snapshot. Commit the schema files, the migration(s), and `snapshot.json`.
 
    ```sh
    chkit pull --out-file ./src/db/schema/pulled.ts   # connects to prod, one time
    chkit generate --name baseline                    # offline; writes snapshot.json
    ```
 
-2. **Everyone else works offline.** Any developer edits the TypeScript schema and runs `generate`. No production access and no local ClickHouse are needed, because the snapshot is the baseline being diffed against.
+2. **Everyone else works offline.** Any developer edits the schema files and runs `generate`. No production access and no local ClickHouse are needed, because the snapshot is the baseline being diffed against.
 
    ```sh
    # edit src/db/schema/*.ts

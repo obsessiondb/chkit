@@ -953,35 +953,10 @@ starlight-toc a[aria-current='true'] {
 	background: var(--surface-3);
 }
 
-.chk-badge--soon:hover {
-	color: var(--txt-soft);
-}
-
 .chk-badge-logo {
 	width: 1.15rem;
 	height: 1.15rem;
 	flex: 0 0 auto;
-}
-
-/* "Coming soon" variant — dimmed badge with a small tag. */
-.chk-badge--soon {
-	color: var(--txt-muted);
-	cursor: default;
-}
-
-.chk-badge--soon .chk-badge-logo {
-	opacity: 0.55;
-}
-
-.chk-badge-soon {
-	font-family: var(--sl-font-mono);
-	font-size: 0.5625rem;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--accent);
-	border: 1px solid var(--accent-dim);
-	padding: 0.1em 0.4em;
-	margin-inline-start: 0.1rem;
 }
 
 /* Wrapper holding the section label + the card grid. */
@@ -1387,11 +1362,6 @@ kbd {
 
 .chk-footer-col a:hover {
 	color: var(--accent);
-}
-
-.chk-footer-soon {
-	font-size: 0.875rem;
-	color: var(--txt-muted);
 }
 
 /* ════════════════════════════════════════════════════

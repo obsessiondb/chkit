@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-This document covers practical usage of the optional `ingest` plugin.
+This document covers practical usage of the optional TypeScript `ingest` plugin.
 
 ## What it does
 

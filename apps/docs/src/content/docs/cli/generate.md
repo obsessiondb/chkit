@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-Compares your current TypeScript schema definitions against the previous snapshot, computes a migration plan, and writes migration SQL and an updated snapshot.
+Compares your current schema definitions against the previous snapshot, computes a migration plan, and writes migration SQL and an updated snapshot.
 
 ## Synopsis
 
@@ -217,4 +217,4 @@ chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
 - [The migration workflow](/guides/migration-workflow/) — why generate is offline, and what to commit alongside the SQL
 - [`chkit init`](/cli/init/) — scaffold a project before your first generate
 - [`chkit migrate`](/cli/migrate/) — apply generated migrations to ClickHouse
-- [`chkit codegen`](/cli/codegen/) — manually trigger TypeScript type generation
+- [`chkit codegen`](/cli/codegen/) — manually trigger type generation
