@@ -272,8 +272,8 @@ export interface ChxUserConfig {
   schema?: string | string[]
   /**
    * Single project entry module. It is imported once: exported schema
-   * definitions are collected from it, and plugin-domain definitions (for
-   * example ingestion pipelines) self-register while it loads. Mutually
+   * definitions are collected from it, and exported plugin-domain definitions
+   * (for example ingestion pipelines) are collected by their plugins. Mutually
    * exclusive with `schema`.
    */
   entry?: string

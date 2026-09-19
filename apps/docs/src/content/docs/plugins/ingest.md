@@ -19,7 +19,9 @@ The plugin never creates or changes destination tables. Your chkit schema stays 
 
 ## Plugin setup
 
-Ingestion uses the singular `entry` config field instead of `schema` globs. The entry module is imported once: exported tables are collected as schema, and pipelines register themselves while it loads.
+Ingestion uses the singular `entry` config field instead of `schema` globs. The entry module is imported once: exported tables are collected as schema, and exported pipelines form the ingestion graph. Importing a pipeline without exporting it does not activate it; remove its export to deactivate it.
+
+Configure a direct `clickhouse` connection for ingestion. A host-provided executor, including the ObsessionDB workbench executor, cannot currently guarantee JSON row encoding and per-insert deduplication settings.
 
 ```ts
 // clickhouse.config.ts
@@ -62,7 +64,8 @@ const ticketStream = defineStream({
   tags: ['schedule:1h'],
   incremental: timestampWindow({
     // Re-read one hour of overlap; ReplacingMergeTree reconciles repeats.
-    from: ({ watermark }) => (watermark ? new Date(watermark.getTime() - 3_600_000) : new Date(0)),
+    start: new Date(0),
+    overlapMs: 3_600_000,
   }),
   async *read(context) {
     const pages = paginate({
@@ -84,7 +87,7 @@ const ticketStream = defineStream({
   },
 })
 
-definePipeline({ id: 'helpdesk', streams: [ticketStream], maxFetches: 4 })
+export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream], maxFetches: 4 })
 ```
 
 Spread `ingestionColumns` into every destination table. The loader fills `_chkit_batch_id` and `_chkit_run_id`; `_chkit_ingested_at` is set by ClickHouse at the physical insert.
@@ -129,8 +132,12 @@ The raw table is a `ReplacingMergeTree`, so overlapping windows and replays coll
 | Strategy | Use when | Bookmark advances |
 |---|---|---|
 | none (full sync) | The source is small or has no change filter | Never; every run reads everything |
-| `timestampWindow({ from })` | The API filters by an updated-since timestamp | To the run cutoff, after the whole window loaded |
+| `timestampWindow({ start, overlapMs })` | The API filters by an updated-since timestamp | To the run cutoff, after the whole window loaded |
 | `cursorState({ id, version, parse })` | The provider owns the state: compound cursor, change token, page position | Whenever a yielded chunk carries `state` and its rows have been saved |
+
+`timestampWindow` starts its first sync at `start`. Later runs begin at the committed watermark minus `overlapMs` (zero by default). Explicit backfill bounds take precedence. For custom lower bounds, use `timestampWindow({ from: ({ watermark, cutoff }) => ... })` instead. Both forms retain the same checkpoint format and only advance after the entire window is saved.
+
+Provider clients can accept the exported `FetchContext` type, containing `attempt` and `signal`. `ReadContext` extends it with the stream selection and checkpoint, so readers can pass their context directly without coupling clients to checkpoint generics.
 
 With `cursorState`, `state` on a chunk must be the complete state that is safe to resume from once every row up to that chunk is saved. Omit it when you cannot make that claim; the run then restarts from the previous checkpoint after a failure.
 
@@ -156,6 +163,10 @@ A backfill uses its own checkpoint namespace, so it never moves the scheduled bo
 ## Delivery guarantee
 
 Ingestion is at-least-once. Each batch is inserted with a stable `insert_deduplication_token`, so a retry after a lost acknowledgement is suppressed while the table's deduplication window covers it. Pick a destination engine that reconciles repeats for your data, for example `ReplacingMergeTree` keyed by the provider id.
+
+Successful syncs start a new batch identity cycle, recorded by the existing journal. Failed or interrupted syncs retain their cycle for replay. This also applies to full syncs, which have no incremental bookmark.
+
+The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle; each terminal journal append has a separate five-second limit. Interrupted writes never count as successful ingestion.
 
 Run at most one ingestion process per project and target at a time. Use your scheduler's concurrency control (for example a GitHub Actions concurrency group) to enforce it.
 

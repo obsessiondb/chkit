@@ -79,6 +79,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
     uniqExact(event_id) AS owners,
     uniqExact(payload_hash) AS payloads,
     any(event_kind) AS fact_kind,
+    any(work_state) AS fact_work_state,
     any(expected_checkpoint_version) AS fact_expected,
     any(checkpoint_version) AS fact_version,
     any(checkpoint_json) AS fact_checkpoint
@@ -89,6 +90,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
       const [health, transitions] = await Promise.all([
         options.executor.query<{
           head_seq: string
+          last_success_seq: string
           sequences: string
           conflicting_owners: string
           drifted: string
@@ -97,6 +99,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
         }>(
           `SELECT
   max(event_seq) AS head_seq,
+  maxIf(event_seq, fact_kind = 'work_finished' AND fact_work_state = 'succeeded') AS last_success_seq,
   count() AS sequences,
   countIf(owners > 1) AS conflicting_owners,
   countIf(payloads > 1) AS drifted,
@@ -145,6 +148,7 @@ FROM (
         version: Number(row.checkpoint_version),
         envelope: parseEnvelope(row.checkpoint_json),
         headSeq: Number(row.head_seq),
+        lastSuccessSeq: Number(row.last_success_seq),
       }
     },
   }
@@ -225,7 +229,7 @@ export function digest(parts: readonly string[]): string {
 }
 
 export function emptyCheckpoint(): CommittedCheckpoint {
-  return { version: 0, envelope: undefined, headSeq: 0 }
+  return { version: 0, envelope: undefined, headSeq: 0, lastSuccessSeq: 0 }
 }
 
 function journalTableSql(qualified: string): string {

@@ -8,14 +8,14 @@ import {
   type ChxInlinePluginRegistration,
   type ResolvedChxConfig,
 } from '@chkit/core'
-import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
+import { loadDefinitionModules } from '@chkit/core/schema-loader'
 import { z } from 'zod'
 
 import { BATCH_ID_COLUMN, createClickHouseDestination, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
 import { IngestConfigError } from './errors.js'
 import { runIngestion, type BackfillRequest } from './executor.js'
 import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE } from './journal.js'
-import { listPipelines, selectStreams, type SelectedStream } from './registry.js'
+import { collectPipelines, selectStreams, type SelectedStream } from './registry.js'
 import type { PipelineDefinition } from './types.js'
 
 const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
@@ -198,7 +198,7 @@ export function ingest(options: IngestPluginOptions = {}): ChxInlinePluginRegist
 export function checkGraph(pipelines: readonly PipelineDefinition[]) {
   const findings: Array<{ code: string; message: string; severity: 'info' | 'warn' | 'error' }> = []
   if (pipelines.length === 0) {
-    findings.push({ code: 'ingest_no_pipelines', message: 'No ingestion pipeline is registered by the project entry.', severity: 'warn' })
+    findings.push({ code: 'ingest_no_pipelines', message: 'No ingestion pipeline is exported by the project entry.', severity: 'warn' })
   }
   for (const pipeline of pipelines) {
     for (const stream of pipeline.streams) {
@@ -216,17 +216,16 @@ export function checkGraph(pipelines: readonly PipelineDefinition[]) {
   return findings
 }
 
-// Importing the entry (or legacy schema files) is what lets definePipeline
-// self-register; the module cache guarantees this happens once per process.
+// Discover values exported from the configured entry (or legacy schema files).
 async function loadGraph(config: ResolvedChxConfig): Promise<PipelineDefinition[]> {
-  if (config.schema.length > 0) await loadSchemaDefinitions(config.schema, { cwd: process.cwd() })
-  return listPipelines()
+  if (config.schema.length === 0) return []
+  return collectPipelines(await loadDefinitionModules(config.schema, { cwd: process.cwd() }))
 }
 
 async function loadSelection(context: IngestPluginCommandContext): Promise<SelectedStream[]> {
   const pipelines = await loadGraph(context.config)
   if (pipelines.length === 0) {
-    throw new IngestConfigError('No ingestion pipeline is registered. Call definePipeline(...) from the module configured as "entry".')
+    throw new IngestConfigError('No ingestion pipeline is exported. Export a definePipeline(...) value from the module configured as "entry".')
   }
   const tags = context.flags['--tag']
   return selectStreams(pipelines, Array.isArray(tags) ? tags : typeof tags === 'string' ? [tags] : [])
@@ -234,18 +233,15 @@ async function loadSelection(context: IngestPluginCommandContext): Promise<Selec
 
 function openTarget(context: IngestPluginCommandContext) {
   const clickhouse = context.config.clickhouse
-  // A direct connection carries per-insert settings (the deduplication token);
-  // fall back to the host-provided executor only when no URL is configured.
+  // Ingestion requires JSONEachRow and per-insert deduplication settings.
+  // The host executor contract does not guarantee either capability.
   // Streams fetch, load and journal concurrently, so the executor must not be
   // bound to one ClickHouse HTTP session (a session allows one in-flight query).
   if (clickhouse) {
     const executor = createStatelessClickHouseExecutor(clickhouse)
     return { executor, database: clickhouse.database, targetId: targetIdOf(clickhouse.url, clickhouse.database), close: () => executor.close() }
   }
-  if (context.pluginContext?.hasExecutor) {
-    return { executor: context.pluginContext.executor, database: 'default', targetId: 'host-executor/default', close: async () => undefined }
-  }
-  throw new IngestConfigError('Ingestion needs a ClickHouse target. Configure clickhouse in your clickhouse.config.ts.')
+  throw new IngestConfigError('Ingestion requires a direct ClickHouse connection for JSON rows and deduplication settings. Configure clickhouse in your clickhouse.config.ts; a host-provided executor is not supported.')
 }
 
 function targetIdOf(url: string, database: string): string {

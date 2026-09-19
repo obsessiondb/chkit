@@ -70,8 +70,8 @@ export function mergeUserConfig(
   overlay: ChxUserConfig,
 ): ChxUserConfig {
   return {
-    schema: overlay.schema ?? base.schema,
-    entry: overlay.entry ?? base.entry,
+    schema: overlay.schema ?? (overlay.entry !== undefined ? undefined : base.schema),
+    entry: overlay.entry ?? (overlay.schema !== undefined ? undefined : base.entry),
     outDir: overlay.outDir ?? base.outDir,
     migrationsDir: overlay.migrationsDir ?? base.migrationsDir,
     metaDir: overlay.metaDir ?? base.metaDir,

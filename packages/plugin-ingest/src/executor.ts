@@ -29,6 +29,8 @@ const DEFAULT_PREFETCH_BATCHES = 1
 const DEFAULT_MAX_DURATION_MS = 60 * 60_000
 const LOAD_ATTEMPTS = 3
 const JOURNAL_APPEND_ATTEMPTS = 4
+// Terminal facts get a bounded chance to land even after the execution is cancelled.
+const TERMINAL_JOURNAL_TIMEOUT_MS = 5000
 const DEFAULT_MAX_CHUNK_ROWS = 100_000
 // How long a failed stream waits for an uncooperative reader before abandoning it.
 const READER_SHUTDOWN_GRACE_MS = 5000
@@ -87,6 +89,7 @@ interface StreamProgress {
   /** Serializes appends so a sequence number is only consumed by a confirmed fact. */
   appendChain: Promise<void>
   version: number
+  lastSuccessSeq: number
   envelope: CheckpointEnvelope | undefined
   rows: number
   batches: number
@@ -111,15 +114,15 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
     span.setAttribute('chkit.ingest.run_id', runId)
     span.setAttribute('chkit.ingest.stream_ids', streamIds)
     try {
-      await env.journal.ensure()
-      const runHead = (await env.journal.readCheckpoint(RUN_NAMESPACE)).headSeq
-      await env.journal.append(
+      await abortable(() => env.journal.ensure(), env.signal)
+      const runHead = (await abortable(() => env.journal.readCheckpoint(RUN_NAMESPACE), env.signal)).headSeq
+      await abortable(() => env.journal.append(
         runEvent(runHead + 1, 'run_started', runId, '', {
           streamIds,
           cutoff: cutoff.toISOString(),
           backfill: request.backfill?.id,
         })
-      )
+      ), env.signal)
 
       const permits = new Map<string, PipelinePermits>()
       const streams = await Promise.all(
@@ -129,11 +132,11 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
       )
 
       const ok = streams.every((stream) => stream.outcome === 'succeeded')
-      await env.journal.append(
+      await abortable(() => env.journal.append(
         runEvent(runHead + 2, 'run_finished', runId, ok ? 'succeeded' : 'failed', {
           outcomes: Object.fromEntries(streams.map((stream) => [stream.namespaceId, stream.outcome])),
         })
-      )
+      ), AbortSignal.timeout(TERMINAL_JOURNAL_TIMEOUT_MS))
       if (!ok) span.setStatus({ code: SpanStatusCode.ERROR })
       return { runId, cutoff: cutoff.toISOString(), streams, ok }
     } finally {
@@ -155,7 +158,7 @@ async function executeSelectedStream(
 ): Promise<StreamResult> {
   const { stream, pipeline } = entry
   const namespaceId = backfill ? `${stream.id}#backfill:${backfill.id}` : stream.id
-  const progress: StreamProgress = { seq: 0, appendChain: Promise.resolve(), version: 0, envelope: undefined, rows: 0, batches: 0, chunks: 0 }
+  const progress: StreamProgress = { seq: 0, appendChain: Promise.resolve(), version: 0, lastSuccessSeq: 0, envelope: undefined, rows: 0, batches: 0, chunks: 0 }
   const result = (outcome: StreamOutcome, error: string | undefined): StreamResult => ({
     streamId: stream.id,
     pipelineId: pipeline.id,
@@ -172,7 +175,7 @@ async function executeSelectedStream(
   try {
     release = await permits.streams.acquire(env.signal)
   } catch {
-    return result('cancelled', 'cancelled before start')
+    return result(env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted', 'execution interrupted before start')
   }
 
   return tracer.startActiveSpan('chkit.ingest.stream', async (span) => {
@@ -207,9 +210,10 @@ async function executeStream(input: {
   env: ResolvedEnv
 }): Promise<StreamOutcome> {
   const { stream, pipeline, namespaceId, progress, env } = input
-  const committed = await env.journal.readCheckpoint(namespaceId)
+  const committed = await abortable(() => env.journal.readCheckpoint(namespaceId), env.signal)
   progress.seq = committed.headSeq
   progress.version = committed.version
+  progress.lastSuccessSeq = committed.lastSuccessSeq
   progress.envelope = committed.envelope
 
   const retry = mergeRetry(pipeline.retry, stream.retry)
@@ -227,7 +231,7 @@ async function executeStream(input: {
         cutoff: input.cutoff,
         range: input.backfill ? { from: input.backfill.from, to: input.backfill.to } : undefined,
       })
-      const nextWorkId = digest([namespaceId, String(progress.version), canonicalJson(selection)]).slice(0, 24)
+      const nextWorkId = digest([namespaceId, String(progress.lastSuccessSeq), String(progress.version), canonicalJson(selection)]).slice(0, 24)
       if (nextWorkId !== workId) {
         workId = nextWorkId
         await append(input, 'work_planned', { workId, workState: 'planned', detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } })
@@ -328,7 +332,7 @@ async function readAndLoad(input: {
     const maxChunkRows = stream.budget?.maxChunkRows ?? DEFAULT_MAX_CHUNK_ROWS
     try {
       while (!budgetExhausted) {
-        const step = await abortable(iterator.next(), signal)
+        const step = await abortable(() => iterator.next(), signal)
         if (step.done) break
         const chunk: unknown = step.value
         assertValidChunk(stream.id, chunk, maxChunkRows)
@@ -367,8 +371,8 @@ async function readAndLoad(input: {
   }
 
   const consume = async () => {
-    // Batch identity is anchored to the last durable boundary: the committed
-    // checkpoint version plus the batch's position since that version, so a
+    // Batch identity uses the last successful sync, the committed checkpoint
+    // version and the batch's position since that version, so a
     // replay in a fresh process reproduces the same id and deduplication token.
     // Declared source-interval ids complete the identity; without them a
     // content hash does, preferring a possible duplicate over suppressing rows
@@ -376,7 +380,7 @@ async function readAndLoad(input: {
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
       const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(batch.rows)}`
-      const batchId = digest([namespaceId, String(progress.version), String(sinceBoundary), discriminator]).slice(0, 32)
+      const batchId = digest([namespaceId, String(progress.lastSuccessSeq), String(progress.version), String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       if (abandoned) return
       const envelope: CheckpointEnvelope | undefined = batch.state
@@ -419,6 +423,7 @@ async function readAndLoad(input: {
   await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
   abandoned = true
   if (rootCause) throw rootCause.error
+  signal.throwIfAborted()
   if (budgetExhausted) {
     env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
     return 'budget_exhausted'
@@ -442,22 +447,24 @@ async function loadBatch(
       for (let attempt = 1; ; attempt += 1) {
         // The load permit covers only the active write, never the backoff timer.
         const release = await input.permits.loads.acquire(signal)
-        const loader = factory({
-          streamId: input.stream.id,
-          runId: input.runId,
-          table: input.stream.destination,
-          destination: input.env.destination,
-          signal,
-        })
         try {
-          await loader.write({ batchId, rows })
-          return await loader.finalize()
-        } catch (error) {
-          // A cleanup failure must not replace the write failure that decides the retry.
-          await loader.abort(error).catch((cleanupError: unknown) => {
-            span.recordException(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
+          const loader = factory({
+            streamId: input.stream.id,
+            runId: input.runId,
+            table: input.stream.destination,
+            destination: input.env.destination,
+            signal,
           })
-          if (signal.aborted || isAbortError(error) || attempt >= LOAD_ATTEMPTS) throw error
+          try {
+            await loader.write({ batchId, rows })
+            return await loader.finalize()
+          } catch (error) {
+            // A cleanup failure must not replace the write failure that decides the retry.
+            await loader.abort(error).catch((cleanupError: unknown) => {
+              span.recordException(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
+            })
+            if (signal.aborted || isAbortError(error) || attempt >= LOAD_ATTEMPTS) throw error
+          }
         } finally {
           release()
         }
@@ -492,7 +499,9 @@ function append(
   fields: Partial<Omit<JournalEvent, 'namespaceId' | 'eventSeq' | 'eventKind' | 'runId'>>
 ): Promise<void> {
   const { progress, env } = input
+  const signal = eventKind === 'work_finished' ? AbortSignal.timeout(TERMINAL_JOURNAL_TIMEOUT_MS) : env.signal
   const write = progress.appendChain.then(async () => {
+    signal.throwIfAborted()
     const event: JournalEvent = {
       namespaceId: input.namespaceId,
       eventSeq: progress.seq + 1,
@@ -512,13 +521,12 @@ function append(
     }
     for (let attempt = 1; ; attempt += 1) {
       try {
-        await env.journal.append(event)
+        await abortable(() => env.journal.append(event), signal)
         progress.seq = event.eventSeq
         return
       } catch (error) {
-        if (attempt >= JOURNAL_APPEND_ATTEMPTS) throw error
-        // Terminal facts must still land after cancellation, so this wait ignores the run signal.
-        await env.sleep(250 * 2 ** (attempt - 1), NEVER_ABORTED)
+        if (signal.aborted || attempt >= JOURNAL_APPEND_ATTEMPTS) throw error
+        await abortable(() => env.sleep(250 * 2 ** (attempt - 1), signal), signal)
       }
     }
   })
@@ -526,7 +534,7 @@ function append(
   // not reuse its sequence number, because the unconfirmed write may have landed.
   progress.appendChain = write
   write.catch(() => undefined)
-  return write
+  return abortable(() => write, signal)
 }
 
 function runEvent(seq: number, eventKind: 'run_started' | 'run_finished', runId: string, workState: JournalEvent['workState'], detail: Record<string, unknown>): JournalEvent {
@@ -584,12 +592,15 @@ function graceAfterAbort(signal: AbortSignal, graceMs: number): Promise<void> {
 }
 
 /** Settle with the promise, or reject as soon as the signal aborts. */
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+function abortable<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason)
     signal.addEventListener('abort', onAbort, { once: true })
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+    Promise.resolve().then(() => {
+      signal.throwIfAborted()
+      return operation()
+    }).then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
   })
 }
 

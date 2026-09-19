@@ -28,11 +28,14 @@ export function createMemoryJournal(): MemoryJournal {
       const scoped = events.filter((event) => event.namespaceId === namespaceId)
       if (scoped.length === 0) return emptyCheckpoint()
       const headSeq = Math.max(...scoped.map((event) => event.eventSeq))
+      const lastSuccessSeq = Math.max(0, ...scoped
+        .filter((event) => event.eventKind === 'work_finished' && event.workState === 'succeeded')
+        .map((event) => event.eventSeq))
       const committed = scoped
         .filter((event) => event.eventKind === 'batch_committed')
         .sort((a, b) => a.checkpointVersion - b.checkpointVersion || a.eventSeq - b.eventSeq)
         .at(-1)
-      return { version: committed?.checkpointVersion ?? 0, envelope: committed?.checkpoint, headSeq }
+      return { version: committed?.checkpointVersion ?? 0, envelope: committed?.checkpoint, headSeq, lastSuccessSeq }
     },
   }
 }

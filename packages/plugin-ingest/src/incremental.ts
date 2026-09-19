@@ -10,13 +10,20 @@ export interface TimestampRange {
   to: Date
 }
 
-export interface TimestampWindowOptions {
-  /**
-   * Lower bound for the next read. Bootstrap and overlap are ordinary branches
-   * here; the result is selection input and is never persisted as the watermark.
-   */
-  from(input: { watermark: Date | undefined; cutoff: Date }): Date
-}
+export type TimestampWindowOptions =
+  | {
+      /** Lower bound of the first sync. Overlap applies only to later runs. */
+      start: Date
+      /** Milliseconds to re-read before the committed watermark. Defaults to zero. */
+      overlapMs?: number
+      from?: never
+    }
+  | {
+      /** Custom lower bound; this selection input is never persisted as the watermark. */
+      from(input: { watermark: Date | undefined; cutoff: Date }): Date
+      start?: never
+      overlapMs?: never
+    }
 
 export interface CursorStateOptions<TState> {
   /** Stable strategy identifier stored in the checkpoint envelope. */
@@ -44,6 +51,16 @@ export function fullSync(): IncrementalStrategy<undefined, undefined> {
 export function timestampWindow(
   options: TimestampWindowOptions
 ): IncrementalStrategy<TimestampWindowState, TimestampRange> {
+  if (options.from === undefined) {
+    if (!(options.start instanceof Date) || !Number.isFinite(options.start.getTime())) {
+      throw new IngestConfigError('timestampWindow: start must be a valid Date.')
+    }
+    if (!Number.isFinite(options.overlapMs ?? 0) || (options.overlapMs ?? 0) < 0) {
+      throw new IngestConfigError('timestampWindow: overlapMs must be a finite non-negative number.')
+    }
+  } else if (options.start !== undefined || options.overlapMs !== undefined) {
+    throw new IngestConfigError('timestampWindow: use either start/overlapMs or from, not both.')
+  }
   return {
     id: 'chkit.timestamp_window',
     version: 1,
@@ -58,7 +75,13 @@ export function timestampWindow(
     },
     plan({ state, cutoff, range }) {
       const to = range?.to ?? cutoff
-      const from = range?.from ?? options.from({ watermark: state ? new Date(state.watermark) : undefined, cutoff })
+      const watermark = state ? new Date(state.watermark) : undefined
+      const from = range?.from ?? (options.from
+        ? options.from({ watermark, cutoff })
+        : new Date(watermark ? watermark.getTime() - (options.overlapMs ?? 0) : options.start.getTime()))
+      if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+        throw new IngestConfigError('timestampWindow: planned bounds must be valid dates.')
+      }
       if (from.getTime() > to.getTime()) {
         throw new IngestConfigError(
           `timestampWindow: planned lower bound ${from.toISOString()} is after upper bound ${to.toISOString()}.`

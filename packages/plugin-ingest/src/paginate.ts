@@ -1,5 +1,5 @@
 import { canonicalJson } from './journal.js'
-import type { AttemptOptions, ReadContext } from './types.js'
+import type { AttemptOptions, FetchContext } from './types.js'
 
 export interface Page<TItem, TCursor> {
   items: readonly TItem[]
@@ -8,8 +8,7 @@ export interface Page<TItem, TCursor> {
 }
 
 export interface PaginateOptions<TItem, TCursor> {
-  // biome-ignore lint/suspicious/noExplicitAny: pagination only needs the attempt capability, not the stream generics
-  context: Pick<ReadContext<any, any>, 'attempt' | 'signal'>
+  context: FetchContext
   fetchPage(cursor: TCursor | undefined, signal: AbortSignal): Promise<Page<TItem, TCursor>>
   initial?: TCursor
   label?: AttemptOptions['label']

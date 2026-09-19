@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 
 import { table } from '@chkit/core'
 
@@ -7,7 +7,7 @@ import { HttpError } from './errors.js'
 import { runIngestion } from './executor.js'
 import { cursorState, timestampWindow } from './incremental.js'
 import { paginate } from './paginate.js'
-import { definePipeline, defineStream, resetRegistry, selectStreams } from './registry.js'
+import { definePipeline, defineStream, selectStreams } from './registry.js'
 import { createMemoryDestination, createMemoryJournal } from './testing.js'
 import type { DestinationAdapter } from './types.js'
 
@@ -27,8 +27,6 @@ const pages = (count: number, size: number) =>
 function httpError(status: number, headers: Record<string, string> = {}) {
   return HttpError.fromResponse(new Response('nope', { status, headers }))
 }
-
-beforeEach(() => resetRegistry())
 
 describe('runIngestion', () => {
   test('loads rows with runtime metadata and journals progress only after sink evidence', async () => {
@@ -126,7 +124,7 @@ describe('runIngestion', () => {
     const stream = defineStream({
       id: 'app.window',
       destination: events,
-      incremental: timestampWindow({ from: ({ watermark }) => watermark ?? new Date('2026-01-01T00:00:00Z') }),
+      incremental: timestampWindow({ start: new Date('2026-01-01T00:00:00Z') }),
       async *read({ selection }) {
         selections.push({ from: selection.from.toISOString(), to: selection.to.toISOString() })
         yield { rows: [{ id: selections.length }] }
@@ -152,7 +150,7 @@ describe('runIngestion', () => {
       id: 'app.window',
       destination: events,
       retry: { retries: 0 },
-      incremental: timestampWindow({ from: ({ watermark }) => watermark ?? new Date(0) }),
+      incremental: timestampWindow({ start: new Date(0) }),
       async *read() {
         yield { rows: [{ id: 1 }] }
         throw new Error('provider exploded')
@@ -211,7 +209,6 @@ describe('runIngestion', () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
     const build = (version: number) => {
-      resetRegistry()
       const stream = defineStream({
         id: 'app.versioned',
         destination: events,
@@ -258,7 +255,7 @@ describe('runIngestion', () => {
     const stream = defineStream({
       id: 'app.window',
       destination: events,
-      incremental: timestampWindow({ from: ({ watermark }) => watermark ?? new Date(0) }),
+      incremental: timestampWindow({ start: new Date(0) }),
       async *read() {
         yield { rows: [{ id: 1 }] }
       },
@@ -279,9 +276,115 @@ describe('runtime contracts', () => {
   const run = (pipeline: ReturnType<typeof definePipeline>, env: Parameters<typeof runIngestion>[1]) =>
     runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { sleep: noSleep, ...env })
 
+  test.each([false, true])('new full syncs preserve changes while failed syncs reuse tokens (declared id: %s)', async (withId) => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    let label = 'A'
+    const stream = defineStream({
+      id: 'app.full', destination: events, retry: { retries: 0 },
+      async *read() { yield { rows: [{ id: 1, label }], ...(withId ? { id: 'page:1' } : {}) } },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+    expect((await run(pipeline, { journal, destination })).ok).toBe(true)
+    const firstSuccess = (await journal.readCheckpoint(stream.id)).lastSuccessSeq
+    expect(firstSuccess).toBeGreaterThan(0)
+
+    label = 'B'
+    const lossy: DestinationAdapter = { async insert(input) {
+      await destination.insert(input)
+      throw new Error('acknowledgement lost')
+    } }
+    expect((await run(pipeline, { journal, destination: lossy })).ok).toBe(false)
+    expect((await journal.readCheckpoint(stream.id)).lastSuccessSeq).toBe(firstSuccess)
+    expect((await run(pipeline, { journal, destination })).ok).toBe(true)
+
+    label = 'A'
+    expect((await run(pipeline, { journal, destination })).ok).toBe(true)
+    expect(destination.tables.get('app.events')?.map((row) => row.label)).toEqual(['A', 'B', 'A'])
+    expect((await journal.readCheckpoint(stream.id)).envelope).toBeUndefined()
+  })
+
+  test.each(['deadline', 'cancel'] as const)('a hung destination never reports success after %s', async (mode) => {
+    const journal = createMemoryJournal()
+    const controller = new AbortController()
+    let finishWrite: () => void = () => undefined
+    const destination: DestinationAdapter = { insert: () => new Promise<void>((resolve) => { finishWrite = resolve }) }
+    const stream = defineStream({
+      id: 'app.hung_load', destination: events,
+      async *read() { yield { rows: [{ id: 1 }] } },
+    })
+    const timer = mode === 'cancel' ? setTimeout(() => controller.abort(), 20) : undefined
+    try {
+      const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+        journal, destination, signal: controller.signal, maxDurationMs: mode === 'deadline' ? 20 : 60_000,
+      })
+      expect(result.ok).toBe(false)
+      expect(result.streams[0]?.outcome).toBe(mode === 'deadline' ? 'budget_exhausted' : 'cancelled')
+      expect(result.streams[0]?.rows).toBe(0)
+      finishWrite()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(journal.events.filter((event) => event.eventKind === 'batch_committed')).toEqual([])
+    } finally {
+      clearTimeout(timer)
+      finishWrite()
+    }
+  }, 10_000)
+
+  test.each(['ensure', 'run_read', 'run_started', 'stream_read', 'work_planned', 'batch_committed'])(
+    'the execution deadline bounds a hung journal %s', async (stage) => {
+      const journal = createMemoryJournal()
+      const append = journal.append.bind(journal)
+      const read = journal.readCheckpoint.bind(journal)
+      const hung = () => new Promise<never>(() => undefined)
+      if (stage === 'ensure') journal.ensure = hung
+      journal.readCheckpoint = (namespace) => (
+        (stage === 'run_read' && namespace === '@run') || (stage === 'stream_read' && namespace !== '@run')
+          ? hung() : read(namespace)
+      )
+      journal.append = (event) => event.eventKind === stage ? hung() : append(event)
+      const stream = defineStream({ id: 'app.journal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+      const execution = run(definePipeline({ id: 'app', streams: [stream] }), {
+        journal, destination: createMemoryDestination(), maxDurationMs: 20,
+      })
+      if (['ensure', 'run_read', 'run_started'].includes(stage)) {
+        await expect(execution).rejects.toThrow('execution budget exhausted')
+      } else {
+        const result = await execution
+        expect(result.ok).toBe(false)
+        expect(result.streams[0]?.outcome).toBe('budget_exhausted')
+      }
+    }, 1000
+  )
+
+  test.each(['work_finished', 'run_finished'])('a hung terminal journal %s has bounded cleanup', async (stage) => {
+    const journal = createMemoryJournal()
+    const append = journal.append.bind(journal)
+    journal.append = (event) => event.eventKind === stage ? new Promise(() => undefined) : append(event)
+    const stream = defineStream({ id: 'app.terminal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+    const execution = run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, destination: createMemoryDestination(), maxDurationMs: 100,
+    })
+    if (stage === 'run_finished') await expect(execution).rejects.toThrow()
+    else expect((await execution).ok).toBe(false)
+  }, 8000)
+
+  test('a throwing loader factory releases its permit for sibling streams', async () => {
+    const failed = defineStream({
+      id: 'app.factory', destination: events, retry: { retries: 0 },
+      loader() { throw new Error('loader construction failed') },
+      async *read() { yield { rows: [{ id: 1 }] } },
+    })
+    const healthy = defineStream({ id: 'app.healthy', destination: events, async *read() { yield { rows: [{ id: 2 }] } } })
+    const destination = createMemoryDestination()
+    const result = await run(definePipeline({ id: 'app', streams: [failed, healthy], maxLoads: 1 }), {
+      journal: createMemoryJournal(), destination, maxDurationMs: 100,
+    })
+    expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed', 'succeeded'])
+    expect(destination.tables.get('app.events')?.map((row) => row.id)).toEqual([2])
+  })
+
   test('a declared interval id keeps batch identity stable when replayed rows changed', async () => {
     const build = (label: string, withId: boolean) => {
-      resetRegistry()
       const stream = defineStream({
         id: 'app.mutable',
         destination: events,
@@ -435,8 +538,9 @@ describe('selectStreams', () => {
 
   test('stream ids are globally unique across pipelines', () => {
     const stream = defineStream({ id: 'crm.people', destination: events, async *read() {} })
-    definePipeline({ id: 'a', streams: [stream] })
-    expect(() => definePipeline({ id: 'b', streams: [stream] })).toThrow('globally unique')
+    const a = definePipeline({ id: 'a', streams: [stream] })
+    const b = definePipeline({ id: 'b', streams: [stream] })
+    expect(() => selectStreams([a, b], [])).toThrow('globally unique')
   })
 })
 

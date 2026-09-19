@@ -34,14 +34,8 @@ export interface AttemptOptions {
   label?: string
 }
 
-export interface ReadContext<TSelection, TState> {
-  streamId: string
-  /** What to read this execution, planned by the incremental strategy. */
-  selection: TSelection
-  /** Last committed provider state, already validated by the strategy. */
-  state: TState | undefined
-  /** Immutable cutoff shared by every stream selected in this execution. */
-  cutoff: Date
+/** Source request capabilities, independent of selection and checkpoint types. */
+export interface FetchContext {
   signal: AbortSignal
   /**
    * Run one source operation under executor authority: fetch permit, retry
@@ -49,6 +43,16 @@ export interface ReadContext<TSelection, TState> {
    * only get coarse recovery (reader recreation from the last checkpoint).
    */
   attempt<T>(operation: (signal: AbortSignal) => Promise<T>, options?: AttemptOptions): Promise<T>
+}
+
+export interface ReadContext<TSelection, TState> extends FetchContext {
+  streamId: string
+  /** What to read this execution, planned by the incremental strategy. */
+  selection: TSelection
+  /** Last committed provider state, already validated by the strategy. */
+  state: TState | undefined
+  /** Immutable cutoff shared by every stream selected in this execution. */
+  cutoff: Date
 }
 
 /**
@@ -227,6 +231,8 @@ export interface CommittedCheckpoint {
   envelope: CheckpointEnvelope | undefined
   /** Highest journal sequence observed for the namespace (any event kind). */
   headSeq: number
+  /** Last successful work_finished sequence, or zero. Separates new syncs from replays. */
+  lastSuccessSeq: number
 }
 
 /** Authoritative append-only control state. Checkpoints are projections of it. */

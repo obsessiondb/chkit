@@ -47,7 +47,7 @@ export default defineConfig({
 })
 ```
 
-chkit imports the module once. Schema definitions it exports (directly or re-exported from other files) are collected exactly like glob-matched schema files, and plugin-domain definitions such as [ingestion pipelines](/plugins/ingest/) register themselves while it loads. `entry` and `schema` are mutually exclusive.
+chkit imports the module once. Schema definitions it exports (directly or re-exported from other files) are collected exactly like glob-matched schema files, and exported plugin-domain definitions such as [ingestion pipelines](/plugins/ingest/) are collected by their plugins. `entry` and `schema` are mutually exclusive.
 
 ## Cluster mode (`ON CLUSTER`)
 

@@ -16,15 +16,7 @@ import type {
   StreamDefinition,
 } from './types.js'
 
-// The registry lives on globalThis so that definePipeline calls made from a
-// project entry reach the plugin even when the package is resolved twice
-// (for example `source` vs `default` export conditions).
-const REGISTRY_KEY = Symbol.for('chkit.ingest.registry')
 const STREAM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
-
-interface Registry {
-  pipelines: Map<string, PipelineDefinition>
-}
 
 export interface StreamInput<TRow extends Row, TState, TSelection> {
   id: string
@@ -87,7 +79,7 @@ export function defineStream(
 }
 
 /**
- * Register a non-durable named group of streams. Pipeline identity never
+ * Define a non-durable named group of streams. Pipeline identity never
  * participates in checkpoint or batch identity, so moving a stream between
  * pipelines does not reset its state.
  */
@@ -104,16 +96,6 @@ export function definePipeline(input: PipelineInput): PipelineDefinition {
     retry: input.retry,
   }
 
-  const registry = getRegistry()
-  const owners = streamOwners(registry)
-  for (const stream of pipeline.streams) {
-    const owner = owners.get(stream.id)
-    if (owner !== undefined && owner !== pipeline.id) {
-      throw new IngestConfigError(
-        `Stream id "${stream.id}" is registered by both pipeline "${owner}" and pipeline "${pipeline.id}". Stream ids must be globally unique.`
-      )
-    }
-  }
   const seen = new Set<string>()
   for (const stream of pipeline.streams) {
     if (seen.has(stream.id)) {
@@ -122,16 +104,35 @@ export function definePipeline(input: PipelineInput): PipelineDefinition {
     seen.add(stream.id)
   }
 
-  registry.pipelines.set(pipeline.id, pipeline)
   return pipeline
 }
 
-export function listPipelines(): PipelineDefinition[] {
-  return [...getRegistry().pipelines.values()]
+/** Validate identities within this graph, without process-wide registration. */
+export function validatePipelines(pipelines: readonly PipelineDefinition[]): void {
+  const ids = new Set<string>()
+  const owners = new Map<string, string>()
+  for (const pipeline of pipelines) {
+    if (ids.has(pipeline.id)) throw new IngestConfigError(`Duplicate pipeline id "${pipeline.id}".`)
+    ids.add(pipeline.id)
+    for (const stream of pipeline.streams) {
+      const owner = owners.get(stream.id)
+      if (owner !== undefined) {
+        throw new IngestConfigError(
+          `Stream id "${stream.id}" occurs in pipelines "${owner}" and "${pipeline.id}". Stream ids must be globally unique.`
+        )
+      }
+      owners.set(stream.id, pipeline.id)
+    }
+  }
 }
 
-export function resetRegistry(): void {
-  getRegistry().pipelines.clear()
+/** Only exported pipeline values participate; aliases of the same value count once. */
+export function collectPipelines(modules: readonly Record<string, unknown>[]): PipelineDefinition[] {
+  const pipelines = [...new Set(modules.flatMap((mod) => Object.values(mod).filter(
+    (value): value is PipelineDefinition => typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'ingest_pipeline'
+  )))]
+  validatePipelines(pipelines)
+  return pipelines
 }
 
 /**
@@ -140,6 +141,7 @@ export function resetRegistry(): void {
  * No filter selects the complete graph; an explicit empty selection throws.
  */
 export function selectStreams(pipelines: readonly PipelineDefinition[], tags: readonly string[]): SelectedStream[] {
+  validatePipelines(pipelines)
   const wanted = dedupe(tags)
   const all: SelectedStream[] = pipelines.flatMap((pipeline) =>
     pipeline.streams.map((stream) => ({
@@ -157,23 +159,6 @@ export function selectStreams(pipelines: readonly PipelineDefinition[], tags: re
     )
   }
   return selected
-}
-
-function getRegistry(): Registry {
-  const holder = globalThis as { [REGISTRY_KEY]?: Registry }
-  const existing = holder[REGISTRY_KEY]
-  if (existing) return existing
-  const created: Registry = { pipelines: new Map() }
-  holder[REGISTRY_KEY] = created
-  return created
-}
-
-function streamOwners(registry: Registry): Map<string, string> {
-  const owners = new Map<string, string>()
-  for (const pipeline of registry.pipelines.values()) {
-    for (const stream of pipeline.streams) owners.set(stream.id, pipeline.id)
-  }
-  return owners
 }
 
 function assertValidId(kind: 'stream' | 'pipeline', id: string): void {
