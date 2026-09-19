@@ -38,3 +38,4 @@ If you deploy to [ObsessionDB](https://obsessiondb.com), start at the dedicated 
 - [`@chkit/plugin-codegen`](/plugins/codegen/) — TypeScript row types and optional Zod schemas, generated from your schema files.
 - [`@chkit/plugin-pull`](/plugins/pull/) — introspect a live ClickHouse database into local schema files. Useful for adopting chkit on an existing database.
 - [`@chkit/plugin-backfill`](/plugins/backfill/) — time-windowed data backfill with checkpoints, for materialized views and historical data loads.
+- [`@chkit/plugin-ingest`](/plugins/ingest/) — scheduled pull ingestion from application APIs with journaled checkpoints.

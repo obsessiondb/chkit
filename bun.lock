@@ -47,7 +47,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -64,7 +64,7 @@
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.18.0",
@@ -74,14 +74,14 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "@chkit/core": "0.1.0-beta.26",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "fast-glob": "^3.3.2",
         "jiti": "^2.7.0",
@@ -92,7 +92,7 @@
     },
     "packages/create-chkit": {
       "name": "create-chkit",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "bin": {
         "create-chkit": "./dist/bin/create-chkit.js",
       },
@@ -109,7 +109,7 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -120,7 +120,7 @@
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
@@ -131,9 +131,19 @@
         "zod": "^4.0.0",
       },
     },
+    "packages/plugin-ingest": {
+      "name": "@chkit/plugin-ingest",
+      "version": "0.1.0-beta.0",
+      "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
+        "@opentelemetry/api": "^1.9.1",
+        "zod": "^4.3.6",
+      },
+    },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -146,7 +156,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.2-beta.4",
+      "version": "0.1.2-beta.7",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -280,6 +290,8 @@
     "@chkit/plugin-backfill": ["@chkit/plugin-backfill@workspace:packages/plugin-backfill"],
 
     "@chkit/plugin-codegen": ["@chkit/plugin-codegen@workspace:packages/plugin-codegen"],
+
+    "@chkit/plugin-ingest": ["@chkit/plugin-ingest@workspace:packages/plugin-ingest"],
 
     "@chkit/plugin-obsessiondb": ["@chkit/plugin-obsessiondb@workspace:packages/plugin-obsessiondb"],
 
@@ -450,6 +462,8 @@
     "@nodelib/fs.stat": ["@nodelib/fs.stat@2.0.5", "", {}, "sha512-RkhPPp2zrqDAQA/2jNhnztcPAlv64XdhIp7a7454A5ovI7Bukxgt7MX7udwAu3zg1DcpPU0rz3VV1SeaqvY4+A=="],
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
+
+    "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 
     "@orpc/client": ["@orpc/client@1.13.4", "", { "dependencies": { "@orpc/shared": "1.13.4", "@orpc/standard-server": "1.13.4", "@orpc/standard-server-fetch": "1.13.4", "@orpc/standard-server-peer": "1.13.4" } }, "sha512-s13GPMeoooJc5Th2EaYT5HMFtWG8S03DUVytYfJv8pIhP87RYKl94w52A36denH6r/B4LaAgBeC9nTAOslK+Og=="],
 
@@ -1518,6 +1532,8 @@
     "@chkit/plugin-backfill/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-codegen/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-ingest/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-obsessiondb/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 

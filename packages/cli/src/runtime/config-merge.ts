@@ -71,6 +71,7 @@ export function mergeUserConfig(
 ): ChxUserConfig {
   return {
     schema: overlay.schema ?? base.schema,
+    entry: overlay.entry ?? base.entry,
     outDir: overlay.outDir ?? base.outDir,
     migrationsDir: overlay.migrationsDir ?? base.migrationsDir,
     metaDir: overlay.metaDir ?? base.metaDir,

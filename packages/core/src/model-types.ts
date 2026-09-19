@@ -266,7 +266,17 @@ export interface ChxInlinePluginRegistration<
 export type ChxPluginRegistration = ChxInlinePluginRegistration
 
 export interface ChxUserConfig {
-  schema: string | string[]
+  /**
+   * Glob patterns for schema files. Mutually exclusive with `entry`.
+   */
+  schema?: string | string[]
+  /**
+   * Single project entry module. It is imported once: exported schema
+   * definitions are collected from it, and plugin-domain definitions (for
+   * example ingestion pipelines) self-register while it loads. Mutually
+   * exclusive with `schema`.
+   */
+  entry?: string
   outDir?: string
   migrationsDir?: string
   metaDir?: string
@@ -278,6 +288,7 @@ export interface ChxUserConfig {
 
 export interface ChxResolvedConfig {
   schema: string[]
+  entry?: string
   outDir: string
   migrationsDir: string
   metaDir: string

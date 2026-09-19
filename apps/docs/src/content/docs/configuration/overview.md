@@ -37,6 +37,18 @@ export default defineConfig({
 })
 ```
 
+## Project entry (`entry`)
+
+Instead of `schema` globs you can point chkit at one entry module:
+
+```ts
+export default defineConfig({
+  entry: './src/chkit.ts',
+})
+```
+
+chkit imports the module once. Schema definitions it exports (directly or re-exported from other files) are collected exactly like glob-matched schema files, and plugin-domain definitions such as [ingestion pipelines](/plugins/ingest/) register themselves while it loads. `entry` and `schema` are mutually exclusive.
+
 ## Cluster mode (`ON CLUSTER`)
 
 For self-managed multi-node ClickHouse clusters, set `clickhouse.cluster` to the cluster name from your server's `remote_servers` config:
