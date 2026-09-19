@@ -91,6 +91,39 @@ Spread `ingestionColumns` into every destination table. The loader fills `_chkit
 
 Batch identity decides whether a retry is deduplicated. By default it includes a content hash of the rows, which prefers a possible duplicate over suppressing rows that changed between attempts; a field like `synced_at: new Date()` therefore defeats retry deduplication. When a chunk covers a stable source interval, declare it with `id` (for example `yield { rows, id: \`page:${cursor}\` }`): the chunk then becomes its own write unit and its identity ignores row content.
 
+## Landing raw objects
+
+Mapping fields in the reader is optional, and usually the wrong place for it. `rawTable` defines a landing table that stores each provider object untouched in a native `JSON` column next to a stable `id`; `rawRows` shapes a page for it. Typed tables are then ordinary chkit views (or materialized views) over the raw layer:
+
+```ts
+import { view } from '@chkit/core'
+import { defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
+
+export const rawTickets = rawTable({ database: 'crm_raw', name: 'tickets' })
+
+export const tickets = view({
+  database: 'crm',
+  name: 'tickets',
+  as: `SELECT
+  id AS ticket_id,
+  raw.subject::String AS subject,
+  raw.requester.email::String AS requester_email,
+  arrayMap(t -> t.name::String, raw.tags[]) AS tags,
+  parseDateTime64BestEffortOrNull(raw.updated_at::String, 3, 'UTC') AS updated_at
+FROM crm_raw.tickets FINAL`,
+})
+
+const ticketStream = defineStream({
+  id: 'helpdesk.tickets',
+  destination: rawTickets,
+  async *read(context) {
+    for await (const page of listTickets(context)) yield { rows: rawRows(page, (ticket) => ticket.id) }
+  },
+})
+```
+
+The raw table is a `ReplacingMergeTree`, so overlapping windows and replays collapse to the latest version of each `id`. Because the transform lives in ClickHouse, changing it never requires re-fetching the source: a view picks the change up immediately, and a materialized view can be rebuilt from the raw table. Keep the raw and modelled layers in separate databases so access and retention can differ.
+
 ## Progress and checkpoints
 
 | Strategy | Use when | Bookmark advances |

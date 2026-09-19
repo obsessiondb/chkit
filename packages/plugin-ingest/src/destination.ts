@@ -1,5 +1,5 @@
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import type { ColumnDefinition } from '@chkit/core'
+import { table, type ColumnDefinition, type TableDefinition } from '@chkit/core'
 
 import type { DestinationAdapter } from './types.js'
 
@@ -18,6 +18,36 @@ export const ingestionColumns: readonly ColumnDefinition[] = [
   { name: RUN_ID_COLUMN, type: 'String' },
   { name: INGESTED_AT_COLUMN, type: "DateTime64(6, 'UTC')", default: 'fn:now64(6)' },
 ]
+
+// A type alias (not an interface) so it is assignable to the index-signature Row type.
+export type RawRow = {
+  id: string
+  raw: unknown
+}
+
+/**
+ * Landing table for provider objects exactly as received: a stable id plus the
+ * untouched object in a native JSON column. Typed shapes are derived from it
+ * inside ClickHouse (views or materialized views), so changing a transform
+ * never requires re-fetching the source. Replays and overlapping windows
+ * collapse to the latest ingested version of each id.
+ */
+export function rawTable(input: { database: string; name: string; comment?: string }): TableDefinition {
+  return table({
+    database: input.database,
+    name: input.name,
+    comment: input.comment,
+    columns: [{ name: 'id', type: 'String' }, { name: 'raw', type: 'JSON' }, ...ingestionColumns],
+    engine: `ReplacingMergeTree(${INGESTED_AT_COLUMN})`,
+    primaryKey: ['id'],
+    orderBy: ['id'],
+  })
+}
+
+/** Shape provider objects for a {@link rawTable} without mapping their fields. */
+export function rawRows<T>(items: readonly T[], id: (item: T) => string): RawRow[] {
+  return items.map((item) => ({ id: id(item), raw: item }))
+}
 
 /**
  * A successful synchronous insert response (or an awaited async insert) is the

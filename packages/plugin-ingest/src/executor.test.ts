@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 
 import { table } from '@chkit/core'
 
-import { ingestionColumns } from './destination.js'
+import { ingestionColumns, rawRows, rawTable } from './destination.js'
 import { HttpError } from './errors.js'
 import { runIngestion } from './executor.js'
 import { cursorState, timestampWindow } from './incremental.js'
@@ -398,6 +398,26 @@ describe('runtime contracts', () => {
 
     expect(result.ok).toBe(true)
     expect(writes).toBe(2)
+  })
+})
+
+describe('rawTable', () => {
+  test('lands provider objects untouched next to a stable id', async () => {
+    const destination = createMemoryDestination()
+    const landing = rawTable({ database: 'app_raw', name: 'tickets' })
+    const ticket = { key: 'T-1', requester: { email: 'a@example.com' }, tags: [{ name: 'vip' }] }
+    const stream = defineStream({
+      id: 'app.tickets',
+      destination: landing,
+      async *read() {
+        yield { rows: rawRows([ticket], (item) => item.key) }
+      },
+    })
+
+    await runIngestion({ selected: selectStreams([definePipeline({ id: 'app', streams: [stream] })], []), backfill: undefined }, { journal: createMemoryJournal(), destination })
+
+    expect(landing.columns.map((column) => `${column.name}:${column.type}`).slice(0, 2)).toEqual(['id:String', 'raw:JSON'])
+    expect(destination.tables.get('app_raw.tickets')?.[0]).toMatchObject({ id: 'T-1', raw: ticket })
   })
 })
 
