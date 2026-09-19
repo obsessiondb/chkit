@@ -42,7 +42,7 @@ const RUN_FLAGS = defineFlags([
   { name: '--max-duration', type: 'string', description: 'Execution budget in seconds', placeholder: '<seconds>' },
 ] as const)
 
-export interface IngestPluginCommandContext {
+interface IngestPluginCommandContext {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean

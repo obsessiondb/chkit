@@ -108,7 +108,7 @@ export function definePipeline(input: PipelineInput): PipelineDefinition {
 }
 
 /** Validate identities within this graph, without process-wide registration. */
-export function validatePipelines(pipelines: readonly PipelineDefinition[]): void {
+function validatePipelines(pipelines: readonly PipelineDefinition[]): void {
   const ids = new Set<string>()
   const owners = new Map<string, string>()
   for (const pipeline of pipelines) {

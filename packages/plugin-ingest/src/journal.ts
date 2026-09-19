@@ -196,7 +196,7 @@ export function toJournalRow(event: JournalEvent, targetId: string, at: Date): J
   }
 }
 
-export function parseEnvelope(json: string): CheckpointEnvelope | undefined {
+function parseEnvelope(json: string): CheckpointEnvelope | undefined {
   if (json === '') return undefined
   const parsed: unknown = JSON.parse(json)
   if (

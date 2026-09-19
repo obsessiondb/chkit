@@ -85,7 +85,7 @@ export function classifyFailure(
   return classifier?.(cause, fallback) ?? fallback
 }
 
-export function classifyCommon(cause: unknown): FailureClass {
+function classifyCommon(cause: unknown): FailureClass {
   if (cause instanceof HttpError) {
     if (cause.status === 429) return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs }
     if (cause.status === 408 || cause.status === 425 || cause.status >= 500) return { kind: 'transient' }

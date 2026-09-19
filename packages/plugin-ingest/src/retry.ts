@@ -5,7 +5,7 @@ import pRetry, { AbortError } from 'p-retry'
 import { classifyFailure, FetchFailure, IngestConfigError } from './errors.js'
 import type { ErrorClassifier, RetryContext, RetryOptions } from './types.js'
 
-export const DEFAULT_RETRY = {
+const DEFAULT_RETRY = {
   retries: 5,
   factor: 2,
   minTimeout: 1000,
