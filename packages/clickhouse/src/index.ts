@@ -42,6 +42,8 @@ export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
 	table: string
 	values: T[]
 	compressed?: boolean
+	/** Per-insert settings, e.g. a stable `insert_deduplication_token`. */
+	settings?: ClickHouseSettings
 }
 
 export interface ClickHouseJsonQueryResult<
@@ -735,6 +737,7 @@ export function createExecutorWithClient(
 					table: params.table,
 					values: params.values,
 					format: 'JSONEachRow',
+					...(params.settings ? { clickhouse_settings: params.settings } : {}),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,

@@ -1,5 +1,8 @@
+import { setTimeout as sleep } from 'node:timers/promises'
+
 import { isUnknownDatabaseError, type ClickHouseExecutor } from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
+import pRetry from 'p-retry'
 
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
 import { CLI_VERSION } from './version.js'
@@ -202,15 +205,10 @@ SETTINGS index_granularity = 1`
       }
       throw error
     }
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
-        debug('journal', `DDL propagation confirmed (attempt ${attempt + 1})`)
-        break
-      } catch {
-        await new Promise((r) => setTimeout(r, 250))
-      }
-    }
+    await pRetry(async (attempt) => {
+      await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
+      debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
+    }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
     bootstrapped = true
   }
 
@@ -289,19 +287,16 @@ SETTINGS index_granularity = 1`
       }
       await ensureTable()
       const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion || CLI_VERSION)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
-      const maxAttempts = 5
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        try {
-          await db.command(insertSql)
-          break
-        } catch (error) {
-          if (!isRetryableInsertRace(error) || attempt === maxAttempts) {
-            throw error
-          }
-          debug('journal', `insert race detected — retrying (attempt ${attempt}/${maxAttempts})`)
-          await new Promise((r) => setTimeout(r, attempt * 150))
-        }
-      }
+      await pRetry(() => db.command(insertSql), {
+        retries: 4,
+        minTimeout: 0,
+        shouldRetry: async ({ error, attemptNumber }) => {
+          if (!isRetryableInsertRace(error)) return false
+          debug('journal', `insert race detected — retrying (attempt ${attemptNumber}/5)`)
+          await sleep(attemptNumber * 150)
+          return true
+        },
+      })
       await trySyncReplica()
     },
 

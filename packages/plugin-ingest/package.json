@@ -1,0 +1,57 @@
+{
+  "name": "@chkit/plugin-ingest",
+  "version": "0.1.2-beta.7",
+  "description": "Scheduled pull ingestion into ClickHouse with journaled checkpoints for chkit",
+  "license": "MIT",
+  "author": "ObsessionDB",
+  "keywords": [
+    "clickhouse",
+    "ingestion",
+    "etl",
+    "chkit-plugin"
+  ],
+  "homepage": "https://chkit.obsessiondb.com",
+  "bugs": {
+    "url": "https://github.com/obsessiondb/chkit/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/obsessiondb/chkit.git",
+    "directory": "packages/plugin-ingest"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "source": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome lint src",
+    "test": "bun test src",
+    "test:env": "doppler run --project chkit --config ci -- bun test src",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@chkit/clickhouse": "workspace:*",
+    "@chkit/core": "workspace:*",
+    "@opentelemetry/api": "^1.9.1",
+    "p-limit": "^7.2.0",
+    "p-retry": "^7.1.1",
+    "zod": "^4.3.6"
+  }
+}

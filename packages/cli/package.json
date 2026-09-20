@@ -39,11 +39,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "fast-glob": "^3.3.2",
     "@chkit/clickhouse": "workspace:*",
     "@chkit/codegen": "workspace:*",
     "@chkit/core": "workspace:*",
-    "@logtape/logtape": "^2.0.5"
+    "@logtape/logtape": "^2.0.5",
+    "fast-glob": "^3.3.2",
+    "p-retry": "^7.1.1"
   },
   "optionalDependencies": {
     "@chkit/plugin-obsessiondb": "workspace:*"

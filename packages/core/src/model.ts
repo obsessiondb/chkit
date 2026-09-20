@@ -53,8 +53,16 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
   const migrationsDir = config.migrationsDir ?? join(outDir, 'migrations')
   const metaDir = config.metaDir ?? join(outDir, 'meta')
 
+  const schemaGlobs = config.schema === undefined ? [] : Array.isArray(config.schema) ? config.schema : [config.schema]
+  if (config.entry !== undefined && schemaGlobs.length > 0) {
+    throw new Error('Config fields "entry" and "schema" are mutually exclusive. Use one project entry module or schema globs, not both.')
+  }
+
   return {
-    schema: Array.isArray(config.schema) ? config.schema : [config.schema],
+    // In entry mode the entry module is the only schema source: its exported
+    // definitions are collected exactly like any other schema file.
+    schema: config.entry !== undefined ? [config.entry] : schemaGlobs,
+    entry: config.entry,
     outDir,
     migrationsDir,
     metaDir,

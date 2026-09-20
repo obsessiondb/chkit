@@ -209,6 +209,18 @@ describe('applyOnClusterToPlan', () => {
   })
 })
 
+describe('resolveConfig project entry', () => {
+  test('entry mode makes the entry module the only schema source', () => {
+    const resolved = resolveConfig({ entry: './src/chkit.ts' })
+    expect(resolved.entry).toBe('./src/chkit.ts')
+    expect(resolved.schema).toEqual(['./src/chkit.ts'])
+  })
+
+  test('entry and schema globs are mutually exclusive', () => {
+    expect(() => resolveConfig({ entry: './src/chkit.ts', schema: './src/schema/**/*.ts' })).toThrow('mutually exclusive')
+  })
+})
+
 describe('resolveConfig cluster validation', () => {
   test('passes through an identifier and a macro', () => {
     expect(resolveConfig({ schema: 's', clickhouse: { url: 'u', cluster: 'my_cluster' } }).clickhouse?.cluster).toBe(

@@ -6,6 +6,7 @@
  */
 
 import { join, resolve } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 // Re-export all shared utilities so CLI tests only need one import
 export {
@@ -79,7 +80,7 @@ export async function runCliWithRetry(
     const result = runCli(cwd, args, extraEnv)
     if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
     if (attempt === maxAttempts) return result
-    await new Promise((r) => setTimeout(r, delayMs))
+    await sleep(delayMs)
   }
   return runCli(cwd, args, extraEnv)
 }
@@ -114,7 +115,7 @@ export async function waitForCliJson<T>(
           formatTestDiagnostic('last attempt', result)
       )
     }
-    await new Promise((r) => setTimeout(r, delayMs))
+    await sleep(delayMs)
   }
   throw new Error('waitForCliJson: unreachable')
 }
