@@ -77,6 +77,22 @@ describe('provider retry policy', () => {
     expect(calls).toBe(1)
   })
 
+  test('execution cancellation stays authoritative over the provider classifier', async () => {
+    const controller = new AbortController()
+    let classifications = 0
+    let calls = 0
+    await expect(runAttempt(async () => {
+      calls += 1
+      controller.abort(new Error('host cancelled'))
+      throw new DOMException('request aborted', 'AbortError')
+    }, immediate, {
+      ...env, signal: controller.signal,
+      classifier: () => { classifications += 1; return { kind: 'transient' } },
+    })).rejects.toThrow()
+    expect(calls).toBe(1)
+    expect(classifications).toBe(0)
+  })
+
   test('does not retry permanent, configuration, or already-exhausted source failures', async () => {
     const exhausted = new FetchFailure(new Error('already retried'), { kind: 'transient' })
     for (const cause of [await httpError(401), new IngestConfigError('invalid'), exhausted]) {

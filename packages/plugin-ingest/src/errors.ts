@@ -80,7 +80,7 @@ export function classifyFailure(
   signal: AbortSignal,
   classifier: ErrorClassifier | undefined
 ): FailureClass {
-  if (signal.aborted || isAbortError(cause)) return { kind: 'cancelled' }
+  if (signal.aborted) return { kind: 'cancelled' }
   const fallback = classifyCommon(cause)
   return classifier?.(cause, fallback) ?? fallback
 }
@@ -95,12 +95,9 @@ function classifyCommon(cause: unknown): FailureClass {
   const code = errorCode(cause)
   if (code !== undefined && TRANSIENT_NETWORK_CODES.has(code)) return { kind: 'transient' }
   if (cause instanceof TypeError && /fetch failed|network|socket/i.test(cause.message)) return { kind: 'transient' }
-  if (cause instanceof Error && cause.name === 'TimeoutError') return { kind: 'transient' }
+  // A request's own timeout/abort does not cancel the ingestion execution.
+  if (cause instanceof Error && (cause.name === 'TimeoutError' || cause.name === 'AbortError')) return { kind: 'transient' }
   return { kind: 'unknown' }
-}
-
-export function isAbortError(value: unknown): boolean {
-  return value instanceof Error && value.name === 'AbortError'
 }
 
 function errorCode(value: unknown): string | undefined {

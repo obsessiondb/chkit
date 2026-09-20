@@ -5,7 +5,8 @@ import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
 import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
 
-import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError, isAbortError } from './errors.js'
+import { toJsonRows } from './destination.js'
+import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError } from './errors.js'
 import { canonicalJson, digest } from './journal.js'
 import { simpleLoader } from './loader.js'
 import { createBoundedQueue } from './queue.js'
@@ -235,7 +236,12 @@ async function executeStream(input: {
       }
       await append(input, 'attempt_started', { workId, attemptNo, workState: 'running' })
       return readAndLoad({ ...input, workId, attemptNo, state, selection, retry })
-    }, retry, {
+    }, {
+      ...retry,
+      // Reader recreation consumes the same execution-wide chunk budget.
+      // Preserve the original failure when no further chunks may be pulled.
+      shouldRetry: (context) => progress.chunks < (stream.budget?.maxChunks ?? Infinity) && (retry.shouldRetry?.(context) ?? true),
+    }, {
       signal: env.signal,
       classifier: stream.classifyError,
       onRetry: (context, retryAfterMs) => append(input, 'retry_scheduled', {
@@ -248,7 +254,7 @@ async function executeStream(input: {
     })
   } catch (error) {
     failure = error
-    if (env.signal.aborted || failureKind(error, env.signal, stream) === 'cancelled') {
+    if (env.signal.aborted) {
       outcome = env.hostSignal.aborted ? 'cancelled' : 'budget_exhausted'
       // Exhausting the budget is incomplete: committed progress stands.
       if (outcome === 'budget_exhausted') failure = undefined
@@ -285,6 +291,8 @@ async function readAndLoad(input: {
   retry: ReturnType<typeof mergeRetry>
 }): Promise<StreamOutcome> {
   const { stream, namespaceId, progress, env } = input
+  const maxChunks = stream.budget?.maxChunks ?? Infinity
+  if (progress.chunks >= maxChunks) return 'budget_exhausted'
   const local = new AbortController()
   const signal = AbortSignal.any([env.signal, local.signal])
   const queue = createBoundedQueue<PendingBatch>(env.prefetchBatches)
@@ -349,7 +357,7 @@ async function readAndLoad(input: {
           await queue.push(pending, signal)
           pending = emptyBatch()
         }
-        if (stream.budget?.maxChunks !== undefined && progress.chunks >= stream.budget.maxChunks) budgetExhausted = true
+        if (progress.chunks >= maxChunks) budgetExhausted = true
       }
     } finally {
       // Never await an uncooperative reader: cleanup is best effort once we leave.
@@ -374,7 +382,7 @@ async function readAndLoad(input: {
     // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(batch.rows)}`
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(toJsonRows(batch.rows))}`
       const batchId = digest([namespaceId, String(progress.lastSuccessSeq), String(progress.version), String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       if (abandoned) return
@@ -469,7 +477,6 @@ async function loadBatch(
         retries: LOAD_ATTEMPTS - 1,
         minTimeout: 1000,
         signal,
-        shouldRetry: ({ error }) => !isAbortError(error),
       })
     } catch (error) {
       recordFailure(span, error)

@@ -1,7 +1,7 @@
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { table, type ColumnDefinition, type TableDefinition } from '@chkit/core'
 
-import type { DestinationAdapter } from './types.js'
+import type { DestinationAdapter, Row } from './types.js'
 
 export const BATCH_ID_COLUMN = '_chkit_batch_id'
 export const RUN_ID_COLUMN = '_chkit_run_id'
@@ -60,7 +60,7 @@ export function createClickHouseDestination(executor: ClickHouseExecutor): Desti
       if (rows.length === 0) return
       await executor.insert({
         table: `${table.database}.${table.name}`,
-        values: [...rows],
+        values: toJsonRows(rows),
         settings: {
           insert_deduplication_token: token,
           wait_for_async_insert: 1,
@@ -68,4 +68,9 @@ export function createClickHouseDestination(executor: ClickHouseExecutor): Desti
       })
     },
   }
+}
+
+/** JSONEachRow encodes big integers as exact decimal strings, including nested values. */
+export function toJsonRows(rows: readonly Row[]): Row[] {
+  return JSON.parse(JSON.stringify(rows, (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value)) as Row[]
 }

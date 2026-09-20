@@ -282,6 +282,125 @@ describe('runtime contracts', () => {
   const run = (pipeline: ReturnType<typeof definePipeline>, env: Parameters<typeof runIngestion>[1]) =>
     runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, env)
 
+  test('content-based batch identity supports BigInt rows and stays stable on replay', async () => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    const row = { id: 9007199254740993n, nested: { values: [-9223372036854775808n] } }
+    const tokens: string[] = []
+    let loseAcknowledgement = true
+    const stream = defineStream({
+      id: 'app.bigint', destination: events, retry: { retries: 0 },
+      async *read() { yield { rows: [row] } },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+    const observed: DestinationAdapter = { async insert(input) {
+      tokens.push(input.token)
+      // Custom destinations continue receiving the original values.
+      expect(input.rows[0]?.id).toBe(row.id)
+      await destination.insert(input)
+      if (loseAcknowledgement) throw new TypeError('acknowledgement lost')
+    } }
+
+    expect((await run(pipeline, { journal, destination: observed })).streams[0]?.error).toBe('acknowledgement lost')
+    loseAcknowledgement = false
+    expect((await run(pipeline, { journal, destination: observed })).ok).toBe(true)
+    expect(tokens).toHaveLength(2)
+    expect(tokens[0]).toBe(tokens[1])
+    expect(destination.tables.get('app.events')).toHaveLength(1)
+  })
+
+  test.each(['source', 'reader', 'sink'] as const)('a request-local AbortError in the %s is retried without cancelling the run', async (boundary) => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    let calls = 0
+    let classifications = 0
+    const operation = async () => {
+      if (++calls === 1) throw new DOMException('request timed out', 'AbortError')
+      return [{ id: 1 }]
+    }
+    const stream = defineStream({
+      id: 'app.local_abort', destination: events,
+      retry: { retries: 1, minTimeout: 0, randomize: false },
+      classifyError: () => { classifications += 1; return { kind: 'transient' } },
+      async *read({ attempt }) {
+        yield { rows: boundary === 'sink' ? [{ id: 1 }] : await (boundary === 'source' ? attempt(operation) : operation()) }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal,
+      destination: boundary === 'sink' ? { async insert(input) { await operation(); await destination.insert(input) } } : destination,
+    })
+
+    expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', rows: 1, error: undefined })
+    expect(calls).toBe(2)
+    expect(classifications).toBe(boundary === 'sink' ? 0 : 1)
+  })
+
+  test('exhausted request-local abort retries report failure, not budget exhaustion', async () => {
+    let calls = 0
+    const stream = defineStream({
+      id: 'app.local_abort', destination: events,
+      retry: { retries: 1, minTimeout: 0, randomize: false },
+      async *read({ attempt }) {
+        yield { rows: await attempt(async () => { calls += 1; throw new DOMException('request timed out', 'AbortError') }) }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal: createMemoryJournal(), destination: createMemoryDestination(),
+    })
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'request timed out' })
+    expect(calls).toBe(2)
+  })
+
+  test('a sink failure at the chunk limit cannot recreate the reader or hide the failure', async () => {
+    const journal = createMemoryJournal()
+    let readers = 0
+    let pulled = 0
+    const stream = defineStream({
+      id: 'app.bounded', destination: events, batchSize: 1, budget: { maxChunks: 1 },
+      retry: { retries: 2, minTimeout: 0, randomize: false },
+      incremental: timestampWindow({ start: new Date(0) }),
+      async *read() {
+        readers += 1
+        for (let id = 0; id < 3; id += 1) { pulled += 1; yield { rows: [{ id }] } }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, destination: { async insert() { throw new TypeError('sink serialization failed') } },
+    })
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', chunks: 1, error: 'sink serialization failed' })
+    expect(readers).toBe(1)
+    expect(pulled).toBe(1)
+    expect((await journal.readCheckpoint(stream.id)).envelope).toBeUndefined()
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+  })
+
+  test('reader retries share the chunk budget and never complete a partial window', async () => {
+    const journal = createMemoryJournal()
+    let readers = 0
+    let pulled = 0
+    const stream = defineStream({
+      id: 'app.bounded', destination: events, budget: { maxChunks: 2 },
+      retry: { retries: 2, minTimeout: 0, randomize: false },
+      incremental: timestampWindow({ start: new Date(0) }),
+      async *read() {
+        readers += 1
+        for (let id = 0; id < 3; id += 1) {
+          pulled += 1
+          yield { rows: [{ id }] }
+          if (readers === 1) throw new Error('reader disconnected')
+        }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, destination: createMemoryDestination(),
+    })
+    expect(result.streams[0]).toMatchObject({ outcome: 'budget_exhausted', chunks: 2, rows: 1 })
+    expect(readers).toBe(2)
+    expect(pulled).toBe(2)
+    expect((await journal.readCheckpoint(stream.id)).envelope).toBeUndefined()
+  })
+
   test.each([false, true])('new full syncs preserve changes while failed syncs reuse tokens (declared id: %s)', async (withId) => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()

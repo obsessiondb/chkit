@@ -29,6 +29,18 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     ...rawTable({ database, name: `${prefix}raw` }),
     settings: { non_replicated_deduplication_window: '100' },
   }
+  const integers = table({
+    database,
+    name: `${prefix}integers`,
+    columns: [
+      { name: 'id', type: 'UInt64' },
+      { name: 'signed', type: 'Int64' },
+      { name: 'values', type: 'Array(UInt64)' },
+      ...ingestionColumns,
+    ],
+    engine: 'MergeTree()',
+    orderBy: ['id'],
+  })
   let executor: ClickHouseExecutor
 
   beforeAll(async () => {
@@ -38,11 +50,14 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     await waitForTable(executor, database, destinationTable.name)
     await executor.command(toCreateSQL(landing))
     await waitForTable(executor, database, landing.name)
+    await executor.command(toCreateSQL(integers))
+    await waitForTable(executor, database, integers.name)
   })
 
   afterAll(async () => {
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(destinationTable.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(landing.name)}`)
+    await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(integers.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
     await executor.close()
   })
@@ -125,5 +140,27 @@ describe('@chkit/plugin-ingest live env e2e', () => {
       )
       expect(rows.map((row) => row.raw.value)).toEqual([next])
     }
+  }, 120_000)
+
+  test('BigInt rows round-trip through content hashing and JSONEachRow without losing precision', async () => {
+    const row = { id: 18446744073709551615n, signed: -9223372036854775808n, values: [9007199254740993n, 18446744073709551615n] }
+    const stream = defineStream({
+      id: `${prefix}integers`, destination: integers,
+      async *read() { yield { rows: [row] } },
+    })
+    const result = await runIngestion({
+      selected: selectStreams([definePipeline({ id: `${prefix}integers_pipeline`, streams: [stream] })], []),
+      backfill: undefined,
+    }, {
+      journal: createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable }),
+      destination: createClickHouseDestination(executor),
+    })
+    expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', rows: 1, error: undefined })
+    const rows = await executor.query<{ id: string; signed: string; values: string[] }>(
+      `SELECT id, signed, values FROM ${quoteIdent(database)}.${quoteIdent(integers.name)}`,
+      { select_sequential_consistency: '1', output_format_json_quote_64bit_integers: '1' }
+    )
+    expect(rows).toEqual([{ id: row.id.toString(), signed: row.signed.toString(), values: row.values.map(String) }])
+    expect(typeof row.id).toBe('bigint')
   }, 120_000)
 })

@@ -6,6 +6,7 @@ import type { FetchFailure } from './errors.js'
 
 // ───── Authoring: streams and pipelines ─────
 
+/** JSON-compatible column values; the ClickHouse destination encodes bigint as decimal strings. */
 export type Row = Record<string, unknown>
 
 /**
