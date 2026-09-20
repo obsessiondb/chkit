@@ -61,25 +61,29 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     const pipeline = definePipeline({ id: `${prefix}pipeline`, streams: [stream], retry: { retries: 0 } })
     const journal = () => createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable })
     const destination = createClickHouseDestination(executor)
-    let inserts = 0
+    let acknowledgementLost = false
     const lossy: DestinationAdapter = {
       insert: async (input) => {
-        inserts += 1
-        if (inserts === 2) {
+        // Target the second batch, not the second call: the live destination
+        // can itself need retries before the first batch is acknowledged.
+        if (input.rows[0]?.id === 2) {
+          if (acknowledgementLost) throw new Error('target unavailable')
           await destination.insert(input)
+          acknowledgementLost = true
           throw new Error('acknowledgement lost')
         }
-        if (inserts > 2) throw new Error('target unavailable')
         await destination.insert(input)
       },
     }
 
     const first = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination: lossy })
     expect(first.ok).toBe(false)
+    expect(first.streams[0]).toMatchObject({ outcome: 'failed', rows: 2, batches: 1, error: 'target unavailable' })
     expect((await journal().readCheckpoint(stream.id)).envelope?.state).toBe(1)
 
     // A fresh executor process reconstructs everything from the journal.
     const second = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination })
+    expect(second.streams[0]).toMatchObject({ outcome: 'succeeded', error: undefined })
     expect(second.ok).toBe(true)
     const checkpoint = await journal().readCheckpoint(stream.id)
     expect(checkpoint.envelope).toEqual({ strategy: 'e2e.page', version: 1, state: 3 })

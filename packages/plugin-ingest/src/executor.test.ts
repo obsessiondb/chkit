@@ -92,22 +92,30 @@ describe('runIngestion', () => {
       },
     })
     const pipeline = definePipeline({ id: 'app', streams: [stream], retry: { retries: 0 } })
-    let inserts = 0
+    let firstWrite = true
+    let acknowledgementLost = false
     const crashing: DestinationAdapter = {
       insert: async (input) => {
-        inserts += 1
+        // A transient error on the first batch must not shift the simulated
+        // acknowledgement loss onto that batch's retry.
+        if (firstWrite) {
+          firstWrite = false
+          throw new Error('temporary insert failure')
+        }
         // Second batch: the write lands but the acknowledgement is lost.
-        if (inserts === 2) {
+        if (input.rows[0]?.id === 2) {
+          if (acknowledgementLost) throw new Error('still down')
           await destination.insert(input)
+          acknowledgementLost = true
           throw new Error('socket hang up')
         }
-        if (inserts > 2 && inserts <= 4) throw new Error('still down')
         await destination.insert(input)
       },
     }
 
     const first = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: crashing })
     expect(first.ok).toBe(false)
+    expect(first.streams[0]).toMatchObject({ outcome: 'failed', rows: 2, batches: 1, error: 'still down' })
     expect((await journal.readCheckpoint('app.cursor')).envelope?.state).toBe(1)
 
     const second = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })
@@ -115,7 +123,7 @@ describe('runIngestion', () => {
     expect((await journal.readCheckpoint('app.cursor')).envelope?.state).toBe(3)
     const ids = (destination.tables.get('app.events') ?? []).map((row) => row.id)
     expect(ids).toEqual([0, 1, 2, 3, 4, 5])
-  })
+  }, 10_000)
 
   test('timestampWindow commits the cutoff as watermark only after the whole window loaded', async () => {
     const journal = createMemoryJournal()
