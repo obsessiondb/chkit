@@ -130,6 +130,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
       const result = await runIngestion({ selected, backfill: undefined }, {
         journal, destination: createClickHouseDestination(executor),
       })
+      expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', error: undefined })
       expect(result.ok).toBe(true)
       const checkpoint = await journal.readCheckpoint(stream.id)
       expect(checkpoint.lastSuccessSeq).toBeGreaterThan(lastSuccessSeq)
