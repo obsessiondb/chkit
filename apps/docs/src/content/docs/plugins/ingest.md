@@ -1,27 +1,29 @@
 ---
 title: Ingest Plugin
-description: Scheduled pull ingestion from application APIs into ClickHouse with journaled checkpoints.
+description: Load application API data into ClickHouse with TypeScript readers and journaled checkpoints.
 sidebar:
   order: 5
 ---
 
-This document covers practical usage of the optional TypeScript `ingest` plugin.
+Use `@chkit/plugin-ingest` to load application API data into tables defined in your chkit schema.
 
-## What it does
+Start with the [ingestion quickstart](/ingestion/quickstart/) for a complete first sync. Read the [ingestion guides](/ingestion/) for reader, storage, and checkpoint choices, or install the [authoring skill](/ingestion/agent-skill/) for a coding agent.
 
-- Runs finite, scheduled pulls from application APIs into chkit-managed tables.
+## Capabilities
+
+- Runs finite pulls from application APIs into chkit-managed tables.
 - Keeps progress in an append-only ingestion journal inside the target database. Checkpoints are a projection of that journal.
-- Saves rows before advancing the bookmark. A crash may cause rereading; it never causes unsaved rows to be skipped.
+- Records progress after writes succeed. A retry can reread rows from the last committed checkpoint.
 - Retries source requests with backoff, `Retry-After`, and failure classification.
 - Selects streams by exact tags so any external scheduler (cron, CI, Kubernetes) can drive it.
 
-The plugin never creates or changes destination tables. Your chkit schema stays the only DDL authority.
+Create and change destination tables through schema migrations before running ingestion.
 
 ## Plugin setup
 
-Ingestion uses the singular `entry` config field instead of `schema` globs. The entry module is imported once: exported tables are collected as schema, and exported pipelines form the ingestion graph. Importing a pipeline without exporting it does not activate it; remove its export to deactivate it.
+Set `entry` in place of `schema` globs. chkit imports the entry module once and collects its exported tables and pipelines. Export a pipeline to activate it; remove its export to deactivate it.
 
-Configure a direct `clickhouse` connection for ingestion. A host-provided executor, including the ObsessionDB workbench executor, cannot currently guarantee JSON row encoding and per-insert deduplication settings.
+Configure a direct `clickhouse` connection for ingestion. Host-provided executors, including the ObsessionDB workbench executor, do not provide the required JSON row encoding and per-insert deduplication settings.
 
 ```ts
 // clickhouse.config.ts
@@ -73,7 +75,9 @@ const ticketStream = defineStream({
       label: 'GET /tickets',
       fetchPage: async (cursor: string | undefined, signal) => {
         const url = new URL('https://api.example.com/tickets')
+        // This example assumes the provider supports both range parameters.
         url.searchParams.set('updated_since', context.selection.from.toISOString())
+        url.searchParams.set('updated_before', context.selection.to.toISOString())
         if (cursor) url.searchParams.set('cursor', cursor)
         const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${process.env.HELPDESK_TOKEN}` } })
         if (!response.ok) throw await HttpError.fromResponse(response)
@@ -90,13 +94,13 @@ const ticketStream = defineStream({
 export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream], maxFetches: 4 })
 ```
 
-Spread `ingestionColumns` into every destination table. The loader fills `_chkit_batch_id` and `_chkit_run_id`; `_chkit_ingested_at` is set by ClickHouse at the physical insert.
+Add `ingestionColumns` to custom destination tables. The loader fills `_chkit_batch_id` and `_chkit_run_id`; ClickHouse sets `_chkit_ingested_at` at the physical insert.
 
 Batch identity decides whether a retry is deduplicated. By default it includes a content hash of the rows, which prefers a possible duplicate over suppressing rows that changed between attempts; a field like `synced_at: new Date()` therefore defeats retry deduplication. When a chunk covers a stable source interval, declare it with `id` (for example `yield { rows, id: \`page:${cursor}\` }`): the chunk then becomes its own write unit and its identity ignores row content.
 
 ## Landing raw objects
 
-Mapping fields in the reader is optional, and usually the wrong place for it. `rawTable` defines a landing table that stores each provider object untouched in a native `JSON` column next to a stable `id`; `rawRows` shapes a page for it. Typed tables are then ordinary chkit views (or materialized views) over the raw layer:
+Retain raw objects when the query shape may change and storage is affordable. Map in the reader when the destination schema is established. `rawTable` stores the returned provider object in a native `JSON` column beside a stable `id`; use `rawRows` to load a page and a SQL view to expose typed fields:
 
 ```ts
 import { view } from '@chkit/core'
@@ -125,7 +129,7 @@ const ticketStream = defineStream({
 })
 ```
 
-The raw table is a `ReplacingMergeTree`, so overlapping windows and replays collapse to the latest version of each `id`. Because the transform lives in ClickHouse, changing it never requires re-fetching the source: a view picks the change up immediately, and a materialized view can be rebuilt from the raw table. A `_raw` suffix next to the typed view of the same name keeps the pair easy to find.
+The raw table uses `ReplacingMergeTree` to retain the latest ingested version per `id`. Query with `FINAL` to resolve repeats before background merges finish. Changes to an ordinary view can use retained fields without re-fetching the source. A materialized view needs a backfill to update stored results; fields you did not retain require a source re-fetch. See [Destinations and transformations](/ingestion/destinations/).
 
 ## Progress and checkpoints
 
@@ -164,13 +168,13 @@ chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
 
 Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
 
-A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Rerunning the same `--backfill` id resumes it.
+A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. Full-sync and cursor strategies do not interpret date bounds. See [Backfill source data](/ingestion/operations/#backfill-source-data).
 
 `chkit check` verifies that every stream destination carries the ingestion metadata columns.
 
 ## Delivery guarantee
 
-Ingestion is at-least-once. Each batch is inserted with a stable `insert_deduplication_token`, so a retry after a lost acknowledgement is suppressed while the table's deduplication window covers it. Pick a destination engine that reconciles repeats for your data, for example `ReplacingMergeTree` keyed by the provider id.
+Ingestion is at-least-once. The loader inserts batches with stable `insert_deduplication_token` values. ClickHouse suppresses retries after a lost acknowledgement when the table's engine, settings, and deduplication window support it. Pick a destination engine that reconciles repeats for your data, for example `ReplacingMergeTree` keyed by the provider ID.
 
 Successful syncs start a new batch identity cycle, recorded by the existing journal. Failed or interrupted syncs retain their cycle for replay. This also applies to full syncs, which have no incremental bookmark.
 
@@ -185,3 +189,9 @@ Run at most one ingestion process per project and target at a time. Use your sch
 | `journalTable` | `_chkit_ingestion_journal` | Journal table name in the configured database |
 | `maxDurationSeconds` | `3600` | Execution budget. Exhausting it ends the run as incomplete and keeps committed progress |
 | `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading |
+
+## Related pages
+
+- [Destinations and transformations](/ingestion/destinations/): raw or shaped storage and where to map fields.
+- [Loading and batching](/ingestion/loading/): loader choices, insert sizing, and concurrency defaults.
+- [Scheduling and recovery](/ingestion/operations/): retry defaults, execution limits, and troubleshooting.

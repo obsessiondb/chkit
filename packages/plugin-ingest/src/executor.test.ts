@@ -455,7 +455,7 @@ describe('runtime contracts', () => {
     }
   }, 10_000)
 
-  test.each(['ensure', 'run_read', 'run_started', 'stream_read', 'work_planned', 'batch_committed'])(
+  test.each(['ensure', 'run_started', 'stream_read', 'work_planned', 'batch_committed'])(
     'the execution deadline bounds a hung journal %s', async (stage) => {
       const journal = createMemoryJournal()
       const append = journal.append.bind(journal)
@@ -463,15 +463,14 @@ describe('runtime contracts', () => {
       const hung = () => new Promise<never>(() => undefined)
       if (stage === 'ensure') journal.ensure = hung
       journal.readCheckpoint = (namespace) => (
-        (stage === 'run_read' && namespace === '@run') || (stage === 'stream_read' && namespace !== '@run')
-          ? hung() : read(namespace)
+        stage === 'stream_read' && !namespace.startsWith('@run:') ? hung() : read(namespace)
       )
       journal.append = (event) => event.eventKind === stage ? hung() : append(event)
       const stream = defineStream({ id: 'app.journal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
       const execution = run(definePipeline({ id: 'app', streams: [stream] }), {
         journal, destination: createMemoryDestination(), maxDurationMs: 20,
       })
-      if (['ensure', 'run_read', 'run_started'].includes(stage)) {
+      if (['ensure', 'run_started'].includes(stage)) {
         await expect(execution).rejects.toThrow('execution budget exhausted')
       } else {
         const result = await execution

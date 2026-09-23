@@ -4,15 +4,17 @@ description: ClickHouse schema management with chkit. Use when working with chki
 allowed-tools: [Read, Edit, Grep, Glob, Bash]
 ---
 
-# chkit — ClickHouse Schema & Migration Toolkit
+# chkit: ClickHouse Schema & Migration Toolkit
 
-chkit lets you define ClickHouse schemas in TypeScript, generate migrations automatically, detect drift, and run CI checks from a single CLI.
+chkit lets you define ClickHouse schemas in TypeScript, generate migration SQL, detect drift, and run CI checks from a single CLI.
 
 Docs: https://chkit.obsessiondb.com
 
+For application API source authoring with `@chkit/plugin-ingest`, use the separate `chkit-ingestion` skill (`npx skills add obsessiondb/chkit --skill chkit-ingestion`) and the [ingestion guides](https://chkit.obsessiondb.com/ingestion.md). Its streams and checkpoints are separate from plugin-codegen's generated insert helpers.
+
 ## Configuration
 
-All chkit projects have a `clickhouse.config.ts` at the project root:
+Use `clickhouse.config.ts` at the TypeScript project root, or pass a custom path with `--config`:
 
 ```ts
 import { defineConfig } from '@chkit/core'
@@ -123,7 +125,7 @@ export const events = table({ ... })
 
 All commands support `--json` for machine-readable output and `--config <path>` for custom config files.
 
-### init — Scaffold project
+### init: Scaffold project
 
 ```sh
 chkit init
@@ -131,7 +133,7 @@ chkit init
 
 Creates `clickhouse.config.ts` and `src/db/schema/example.ts`.
 
-### generate — Create migrations
+### generate: Create migrations
 
 ```sh
 chkit generate --name add-users-table
@@ -146,7 +148,7 @@ Diffs schema definitions against the last snapshot. Each operation gets a risk l
 - **caution**: settings changes
 - **danger**: `DROP TABLE`, `DROP COLUMN`
 
-### migrate — Apply migrations
+### migrate: Apply migrations
 
 ```sh
 chkit migrate                  # Preview pending
@@ -157,16 +159,16 @@ chkit migrate --apply --table analytics.events
 
 Verifies checksums before applying. Destructive operations require explicit `--allow-destructive` in CI.
 
-### status — Migration state
+### status: Migration state
 
 ```sh
 chkit status
 # Output: Migrations: 5 total, 3 applied, 2 pending
 ```
 
-Read-only, no ClickHouse connection needed.
+Read-only; requires a ClickHouse connection to read the migration journal.
 
-### drift — Compare live vs expected
+### drift: Compare live vs expected
 
 ```sh
 chkit drift
@@ -175,7 +177,7 @@ chkit drift --table analytics.events
 
 Compares snapshot against live ClickHouse. Reports missing/extra objects and column-level differences.
 
-### check — CI gate
+### check: CI gate
 
 ```sh
 chkit check              # Run all policy checks
@@ -185,7 +187,7 @@ chkit check --json       # Machine-readable output
 
 Evaluates: pending migrations, checksum mismatches, schema drift, plugin checks. Exit code 1 on failure.
 
-### query — Run SQL against the configured target
+### query: Run SQL against the configured target
 
 ```sh
 chkit query "SELECT count() FROM users"
@@ -199,7 +201,7 @@ Uses the active executor: direct `clickhouse` config by default, or the Obsessio
 
 To rename a table or column without drop+recreate:
 
-**Table rename** — set `renamedFrom` on the table:
+**Table rename**: set `renamedFrom` on the table:
 ```ts
 const accounts = table({
   database: 'app',
@@ -209,7 +211,7 @@ const accounts = table({
 })
 ```
 
-**Column rename** — set `renamedFrom` on the column:
+**Column rename**: set `renamedFrom` on the column:
 ```ts
 columns: [
   { name: 'user_email', type: 'String', renamedFrom: 'email' },
@@ -278,7 +280,7 @@ Views and materialized views always use drop+recreate.
 
 ## Documentation
 
-Full documentation is at https://chkit.obsessiondb.com. The site supports content negotiation — request any page with `Accept: text/markdown` to receive raw source markdown instead of HTML. Fetch docs for details not covered in this skill file.
+Read the documentation at https://chkit.obsessiondb.com. Request pages with `Accept: text/markdown` for Markdown output. Fetch the relevant guide for details beyond this skill.
 
 ```sh
 curl -s -H "Accept: text/markdown" <url>

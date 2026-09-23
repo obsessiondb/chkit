@@ -3,9 +3,9 @@ title: For AI Agents
 description: How an AI coding agent should set up and operate chkit on a user's behalf.
 ---
 
-This page is written for AI coding agents (Claude Code, Cursor, Codex, GitHub Copilot, Windsurf, and others) tasked with adding ClickHouse schema management to a user's project. It tells you what to ask, what to install, and what not to do unprompted.
+Use these instructions to set up chkit in a user's project and prepare the first schema migration.
 
-If you're a human who landed here, copy the prompt below into your agent — it points the agent back at this page and lets it drive the rest.
+To delegate setup, paste the prompt below into your coding agent.
 
 ## Copy this prompt
 
@@ -19,17 +19,17 @@ recommend any plugins this project needs, and walk me through the first
 migration. Don't apply anything to the database without confirming with me first.
 ```
 
-Every docs page is available as raw Markdown by appending `.md` to its URL — this page is [`/ai-agents.md`](https://chkit.obsessiondb.com/ai-agents.md). A full machine-readable index lives at [`/llms.txt`](https://chkit.obsessiondb.com/llms.txt).
+Append `.md` to a documentation URL to read Markdown, such as [`/ai-agents.md`](https://chkit.obsessiondb.com/ai-agents.md). Find page URLs in [`/llms.txt`](https://chkit.obsessiondb.com/llms.txt).
 
 ## What chkit is
 
-chkit is a ClickHouse schema and migration toolkit for TypeScript and Python. Schemas are defined in TypeScript or Python, diffed into migration SQL, applied to ClickHouse, and verified against the live database.
+Use chkit to define ClickHouse schemas in TypeScript or Python, generate migration SQL, and check the live database for drift. Use the ingestion plugin to load API data with TypeScript readers.
 
-You drive chkit with shell commands, plus an installable agent skill that loads its full command surface, schema DSL, and workflows into your context.
+Run chkit through shell commands. Install the agent skills for command and authoring guidance.
 
-## Step 1 — Ask the user before scaffolding
+## Step 1: Ask the user before scaffolding
 
-chkit's interactive CLI asks these questions when a human runs it. You run it non-interactively, so you ask them. The answers select which commands you run — ask all three up front, then act. Do not assume answers; if the user just says "set up chkit", ask first.
+Ask these three questions before scaffolding. Use the answers to select the commands.
 
 1. **New project or existing project?**
    - *New / empty directory* → scaffold from a curated example with `create-chkit` (Step 3a).
@@ -40,25 +40,35 @@ chkit's interactive CLI asks these questions when a human runs it. You run it no
    - *Yes* → add [`@chkit/plugin-pull`](/plugins/pull/) and introspect the live tables into schema files, so the user starts from real tables instead of the blank example (Step 5).
    - *No* → keep the scaffolded example schema and edit it to match the first table.
 
-3. **How should chkit connect to a database?** — the same four paths as the CLI's connect prompt:
-   - *Claim a free ObsessionDB dev instance* — fastest; needs the user's email and a one-time code they receive by email.
-   - *Already have an ObsessionDB account* — log in and pick a service.
-   - *Already have a ClickHouse instance* — connect with environment variables.
-   - *Configure later* — scaffold only; the user wires up the connection themselves.
+3. **How should chkit connect to a database?** Use the CLI's four connection options:
+   - *Claim a free ObsessionDB dev instance*: requires the user's email and a one-time code from their inbox.
+   - *Already have an ObsessionDB account*: log in and pick a service.
+   - *Already have a ClickHouse instance*: connect with environment variables.
+   - *Configure later*: scaffold only; the user wires up the connection themselves.
 
-## Step 2 — Install the agent skill
+## Step 2: Install the agent skill
 
-chkit ships an installable agent skill that teaches you its commands, schema DSL, and workflows. Install it first — it is the most reliable way to operate chkit correctly:
+Install the skill for CLI and schema authoring instructions:
 
 ```sh
-chkit skills add obsessiondb/chkit
+chkit skills add obsessiondb/chkit --skill chkit
 ```
 
-The skill installs into the project's agent directory (for example `.claude/skills/chkit/` or `.cursor/skills/chkit/`). On an interactive `chkit init`, chkit also detects the active agent and offers to install the skill automatically.
+The skill installs into the project's agent directory (for example `.claude/skills/chkit/` or `.agents/skills/chkit/`). On an interactive `chkit init`, chkit also detects the active agent and offers to install the skill automatically.
 
-## Step 3 — Scaffold based on the answers
+### Authoring ingestion sources
 
-### 3a. New project — `create-chkit`
+For TypeScript API ingestion, install the focused authoring skill:
+
+```sh
+chkit skills add obsessiondb/chkit --skill chkit-ingestion
+```
+
+It guides decisions about raw versus shaped data, transformations, pagination, incremental state, and loaders, then links to the relevant docs. Start with the [ingestion quickstart](/ingestion/quickstart/); each guide explains when to use its alternatives. Ingestion requires a direct `clickhouse` connection; the workbench executor alone is insufficient. See [skill installation and usage](/ingestion/agent-skill/).
+
+## Step 3: Scaffold based on the answers
+
+### 3a. New project: `create-chkit`
 
 `create-chkit` downloads a curated example and wires it to the user's package manager. Pass a target directory and an example to skip the prompts:
 
@@ -68,7 +78,7 @@ bun create chkit@latest my-chkit-app --example clickbench
 
 It then runs the same connect flow as `chkit init` (Step 4). Drive it non-interactively with `--connect <choice>` (and `--email` for the claim path), or `--skip-onboarding` to scaffold only.
 
-### 3b. Existing project — `chkit init`
+### 3b. Existing project: `chkit init`
 
 Install chkit as a dev dependency, then initialize in the current directory:
 
@@ -77,22 +87,22 @@ bun add -d chkit @chkit/core
 chkit init
 ```
 
-`chkit init` writes `clickhouse.config.ts` and `src/db/schema/example.ts`, and installs any missing chkit packages so the scaffolded config resolves. It is idempotent — re-running it leaves existing files untouched.
+`chkit init` writes `clickhouse.config.ts` and `src/db/schema/example.ts`, and installs missing chkit packages. Running it again preserves existing files.
 
-Without a TTY, `init` prints the connect runbook (Step 4) instead of prompting. Pass `--yes` to skip onboarding entirely (a silent file-writer for CI), or `--connect <choice>` to drive a specific path.
+Without a TTY, `init` prints the connect runbook (Step 4) instead of prompting. Pass `--yes` to skip onboarding in CI, or `--connect <choice>` to drive a specific path.
 
-Edit `src/db/schema/example.ts` to match the table the user actually wants before running `generate` (unless you are pulling from an existing database — see Step 5).
+Edit `src/db/schema/example.ts` to match the requested table before running `generate`. For an existing database, follow Step 5 to import its schema.
 
-## Step 4 — Connect a database
+## Step 4: Connect a database
 
 Map the answer from question 3 to commands. Both `chkit init` and `create-chkit` accept the same flags, so you can drive any path without a TTY:
 
 | Choice | Flag | What to run |
 |--------|------|-------------|
-| Claim a free ObsessionDB dev instance | `--connect claim --email <you@example.com>` | Two steps — see below. Needs a code emailed to the user. |
+| Claim a free ObsessionDB dev instance | `--connect claim --email <you@example.com>` | Two steps: see below. Needs a code emailed to the user. |
 | Existing ObsessionDB account | `--connect account` | `chkit obsessiondb login` |
 | Existing ClickHouse instance | `--connect clickhouse` | Set `CLICKHOUSE_URL` (and `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` / `CLICKHOUSE_DB`) |
-| Configure later | `--connect later` or `--yes` | Nothing — scaffold only |
+| Configure later | `--connect later` or `--yes` | Nothing: scaffold only |
 
 The claim path is two steps and needs a human in the loop, because the code arrives by email:
 
@@ -103,11 +113,11 @@ chkit obsessiondb signup --email <you@example.com> --code <CODE>
 chkit obsessiondb service claim                      # provisions the free dev instance
 ```
 
-Any connected path keeps the `obsessiondb()` plugin registered in `clickhouse.config.ts` — claiming and account login need it for the remote executor, and it rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse.
+Keep `obsessiondb()` registered in `clickhouse.config.ts` for connected paths. Claiming and account login use its remote executor. The plugin rewrites `Shared` engines for non-ObsessionDB ClickHouse targets.
 
-## Step 5 — Pull existing tables (only if the user has a populated database)
+## Step 5: Pull existing tables (only if the user has a populated database)
 
-If the user answered yes to question 2, adopt their existing schema instead of the blank example. Add the plugin, register it, and introspect:
+If the user answered yes to question 2, import the existing schema. Add the plugin, register it, and introspect:
 
 ```sh
 bun add -d @chkit/plugin-pull
@@ -117,7 +127,7 @@ chkit pull
 
 This writes schema files from the live tables, so `generate` diffs against what already exists rather than recreating tables. See [`@chkit/plugin-pull`](/plugins/pull/) for options.
 
-## Step 6 — First migration
+## Step 6: First migration
 
 Once the schema reflects what the user wants:
 
@@ -136,11 +146,12 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 | If the project needs to... | Recommend | Notes |
 |----------------------------|-----------|-------|
 | Adopt chkit on an **existing** ClickHouse database | [`@chkit/plugin-pull`](/plugins/pull/) | Introspects the live database into local schema files so the user starts from real tables, not a blank example. |
-| Generate **typed row models** — TypeScript types (and optional Zod schemas), or Pydantic models in Python — from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
+| Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Time-windowed loads with checkpoints, for large or resumable backfills. |
-| Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | First-class ObsessionDB integration; rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse. |
+| **Ingest application API data** into ClickHouse | [`@chkit/plugin-ingest`](/ingestion/) | TypeScript only; finite pulls with journaled checkpoints and an external scheduler. |
+| Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and engine configuration; rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse. |
 
-When the project has none of these needs, the core CLI alone is enough — do not add plugins speculatively.
+Install plugins for the project's stated requirements.
 
 ## Guardrails
 
@@ -150,7 +161,7 @@ chkit applies DDL to real databases. Treat the following as hard rules unless th
 - **`migrate` does not apply changes without `--apply`.** Run `chkit migrate` first to plan, show the user the pending SQL, and only then run `chkit migrate --apply`.
 - **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it.
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.
-- **Never auto-apply against a production endpoint** without explicit user confirmation. Connection details come from the environment — confirm which database the env points at before `--apply`.
+- **Never auto-apply against a production endpoint** without explicit user confirmation. Connection details come from the environment: confirm which database the env points at before `--apply`.
 :::
 
 ## Machine-readable output
@@ -163,13 +174,13 @@ chkit check --json
 chkit migrate --json   # plan as JSON; add --apply to execute
 ```
 
-Debug logging goes to stderr (`CHKIT_DEBUG=1`), so it never contaminates `--json` output on stdout.
+Read debug logging from stderr (`CHKIT_DEBUG=1`) and `--json` output from stdout.
 
 ## Related pages
 
-- [Add to an existing project](/getting-started/add-to-existing-project/) — the human-facing version of the setup flow
-- [Start with an example](/getting-started/with-an-example/) — scaffold a new project from a curated example
-- [CLI reference](/cli/overview/) — every command, flag, and JSON output shape
-- [Schema DSL](/schema/dsl-reference/) — define tables, views, and materialized views
-- [Plugins overview](/plugins/overview/) — how plugins register and hook in
-- [CI/CD guide](/guides/ci-cd/) — wire `chkit check` into a pipeline gate
+- [Add to an existing project](/getting-started/add-to-existing-project/): the human-facing version of the setup flow
+- [Start with an example](/getting-started/with-an-example/): scaffold a new project from a curated example
+- [CLI reference](/cli/overview/): every command, flag, and JSON output shape
+- [Schema DSL](/schema/dsl-reference/): define tables, views, and materialized views
+- [Plugins overview](/plugins/overview/): how plugins register and hook in
+- [CI/CD guide](/guides/ci-cd/): wire `chkit check` into a pipeline gate
