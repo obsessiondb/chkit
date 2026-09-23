@@ -26,7 +26,9 @@ import type {
   StreamResult,
 } from './types.js'
 
-const RUN_NAMESPACE = '@run'
+// Run facts are correlation only, so each run owns its own namespace: two
+// overlapping processes (a deployment mistake) must not poison a shared one.
+const RUN_NAMESPACE_PREFIX = '@run:'
 const DEFAULT_BATCH_SIZE = 10_000
 const DEFAULT_PREFETCH_BATCHES = 1
 const DEFAULT_MAX_DURATION_MS = 60 * 60_000
@@ -116,9 +118,8 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
     span.setAttribute('chkit.ingest.stream_ids', streamIds)
     try {
       await abortable(() => env.journal.ensure(), env.signal)
-      const runHead = (await abortable(() => env.journal.readCheckpoint(RUN_NAMESPACE), env.signal)).headSeq
       await abortable(() => env.journal.append(
-        runEvent(runHead + 1, 'run_started', runId, '', {
+        runEvent(1, 'run_started', runId, '', {
           streamIds,
           cutoff: cutoff.toISOString(),
           backfill: request.backfill?.id,
@@ -134,7 +135,7 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
 
       const ok = streams.every((stream) => stream.outcome === 'succeeded')
       await abortable(() => env.journal.append(
-        runEvent(runHead + 2, 'run_finished', runId, ok ? 'succeeded' : 'failed', {
+        runEvent(2, 'run_finished', runId, ok ? 'succeeded' : 'failed', {
           outcomes: Object.fromEntries(streams.map((stream) => [stream.namespaceId, stream.outcome])),
         })
       ), AbortSignal.timeout(TERMINAL_JOURNAL_TIMEOUT_MS))
@@ -543,7 +544,7 @@ function append(
 
 function runEvent(seq: number, eventKind: 'run_started' | 'run_finished', runId: string, workState: JournalEvent['workState'], detail: Record<string, unknown>): JournalEvent {
   return {
-    namespaceId: RUN_NAMESPACE,
+    namespaceId: `${RUN_NAMESPACE_PREFIX}${runId}`,
     eventSeq: seq,
     eventKind,
     runId,

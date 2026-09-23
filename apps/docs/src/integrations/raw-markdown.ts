@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { AstroIntegration } from 'astro';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
-const SITE_TAGLINE = 'ClickHouse schema management and migration toolkit for TypeScript and Python.';
+const SITE_TAGLINE = 'ClickHouse schemas, migrations, and API ingestion in code. Schema workflows in TypeScript and Python; ingestion in TypeScript.';
 
 interface DocEntry {
 	slug: string;
@@ -102,7 +102,7 @@ function generateLlmsTxt(entries: DocEntry[]): string {
 		'',
 		`> ${SITE_TAGLINE}`,
 		'',
-		'chkit defines ClickHouse schemas in TypeScript or Python, diffs them into migration SQL, applies migrations, and verifies the live database stays in sync. Each link below points to the raw Markdown of that page.',
+		'chkit defines ClickHouse schemas, generates and applies reviewable migration SQL, detects drift, and syncs API data into schema-managed tables through TypeScript readers with retries and journaled checkpoints. Plugins add schema pulling, type generation, and SQL backfills. Each link below points to the raw Markdown of that page.',
 		'',
 		'## Docs',
 		'',
