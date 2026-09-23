@@ -17,7 +17,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'chkit Docs',
-			description: 'Public documentation for chkit, the ClickHouse schema and migration CLI.',
+			description: 'Define ClickHouse schemas, review migrations, and sync API data into your tables with chkit.',
 			customCss: ['./src/styles/custom.css'],
 			// Blog lives at /blog. `navigation: 'none'` so the plugin doesn't
 			// override SiteTitle/ThemeSelect (we already override both) — we add
@@ -73,6 +73,32 @@ export default defineConfig({
 				{
 					label: 'Schema',
 					autogenerate: { directory: 'schema' },
+				},
+				{
+					label: 'Ingestion',
+					items: [
+						{ label: 'Overview', slug: 'ingestion' },
+						{ label: 'Quickstart', slug: 'ingestion/quickstart' },
+						{ label: 'Authoring skill', slug: 'ingestion/agent-skill' },
+						{
+							label: 'Build a source',
+							collapsed: true,
+							items: [
+								{ slug: 'ingestion/readers' },
+								{ slug: 'ingestion/destinations' },
+								{ slug: 'ingestion/incremental-syncs' },
+								{ slug: 'ingestion/loading' },
+							],
+						},
+						{
+							label: 'Run and verify',
+							collapsed: true,
+							items: [
+								{ slug: 'ingestion/operations' },
+								{ slug: 'ingestion/testing' },
+							],
+						},
+					],
 				},
 				{
 					label: 'ObsessionDB',

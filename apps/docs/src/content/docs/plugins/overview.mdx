@@ -7,7 +7,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Plugins extend chkit with capabilities that don't belong in the core CLI — code generation, schema introspection, data backfill, ObsessionDB integration, and anything else you want to bolt on. In TypeScript they're regular npm packages; in Python they ship inside `chkit-py`. Either way, you register them in your config:
+Add plugins for code generation, schema imports, API ingestion, or SQL backfills. Install TypeScript plugins as npm packages. Python plugins ship inside `chkit-py`; ingestion requires TypeScript. Register plugins in your config:
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -49,17 +49,17 @@ Plugins extend chkit with capabilities that don't belong in the core CLI — cod
 
 ## How plugins hook in
 
-Plugins implement a small set of lifecycle hooks — for example, transforming schema definitions before diff, registering new CLI commands, running setup on startup (`onInit`) or teardown on exit (`onComplete`), and transforming SQL before a migration applies (`onBeforeApply`). The [CLI: `chkit plugin`](/cli/plugin/) command lists plugins active in your config.
+Plugin authors use lifecycle hooks to transform schema definitions before a diff, register CLI commands, run setup (`onInit`) or teardown (`onComplete`), and transform SQL before migration (`onBeforeApply`). The [CLI: `chkit plugin`](/cli/plugin/) command lists plugins active in your config.
 
-Using a plugin doesn't require knowing these hooks — each official plugin's page covers everything needed to configure it. The hooks matter only when authoring a plugin.
+Follow the plugin reference to configure a published plugin. Use the lifecycle hooks when writing a plugin.
 
 You can author your own plugins; the existing official plugins are the reference. See [Contributing](https://github.com/obsessiondb/chkit/blob/main/CONTRIBUTING.md#plugins) for the entry point.
 
 ## Official plugins
 
-If you deploy to [ObsessionDB](https://obsessiondb.com), start at the dedicated [ObsessionDB section](/obsessiondb/overview/) — `@chkit/plugin-obsessiondb` (Python: `chkit_plugin_obsessiondb`) is documented there as a first-class integration rather than as a plain plugin.
+For `@chkit/plugin-obsessiondb` (Python: `chkit_plugin_obsessiondb`), see the [ObsessionDB section](/obsessiondb/overview/).
 
-- [`@chkit/plugin-codegen`](/plugins/codegen/) — TypeScript row types and optional Zod schemas (Python: Pydantic models), generated from your schema files.
-- [`@chkit/plugin-pull`](/plugins/pull/) — introspect a live ClickHouse database into local schema files. Useful for adopting chkit on an existing database. Built into the Python CLI as `chkit pull`.
-- [`@chkit/plugin-backfill`](/plugins/backfill/) — time-windowed data backfill with checkpoints, for materialized views and historical data loads.
-- [`@chkit/plugin-ingest`](/plugins/ingest/) — scheduled pull ingestion from application APIs with journaled checkpoints (TypeScript only).
+- [`@chkit/plugin-codegen`](/plugins/codegen/): TypeScript row types and optional Zod schemas (Python: Pydantic models), generated from your schema files.
+- [`@chkit/plugin-pull`](/plugins/pull/): introspect a live ClickHouse database into local schema files. Useful for adopting chkit on an existing database. Built into the Python CLI as `chkit pull`.
+- [`@chkit/plugin-backfill`](/plugins/backfill/): time-windowed data backfill with checkpoints, for materialized views and historical data loads.
+- [`@chkit/plugin-ingest`](/ingestion/): API ingestion with an external scheduler with journaled checkpoints (TypeScript only). The dedicated guides cover source readers, storage, checkpoints, loading, and an [installable skill](/ingestion/agent-skill/).
