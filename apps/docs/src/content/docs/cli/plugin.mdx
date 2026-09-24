@@ -2,7 +2,7 @@
 title: "chkit plugin"
 description: "List installed plugins or run plugin commands."
 sidebar:
-  order: 11
+  order: 12
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -41,6 +41,7 @@ Some plugins have top-level CLI shortcuts:
 
 - `chkit codegen` is equivalent to `chkit plugin codegen codegen`
 - `chkit pull` is equivalent to `chkit plugin pull schema` (TypeScript; in Python `pull` is a built-in command with no plugin behind it)
+- `chkit ingest <subcommand>` is equivalent to `chkit plugin ingest <subcommand>` (see [`chkit ingest`](/cli/ingest/))
 
 ### Plugin registration
 
