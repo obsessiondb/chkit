@@ -170,7 +170,7 @@ Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`. `s
 
 A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. Full-sync and cursor strategies do not interpret date bounds. See [Backfill source data](/ingestion/operations/#backfill-source-data).
 
-`chkit check` verifies that every stream destination carries the ingestion metadata columns.
+`chkit check` verifies that every stream destination carries the ingestion metadata columns. See [`chkit ingest`](/cli/ingest/) for the full flag reference, exit codes, and JSON output.
 
 ## Delivery guarantee
 
@@ -192,6 +192,7 @@ Run at most one ingestion process per project and target at a time. Use your sch
 
 ## Related pages
 
+- [`chkit ingest`](/cli/ingest/): command flags, exit codes, and JSON output.
 - [Destinations and transformations](/ingestion/destinations/): raw or shaped storage and where to map fields.
 - [Loading and batching](/ingestion/loading/): loader choices, insert sizing, and concurrency defaults.
 - [Scheduling and recovery](/ingestion/operations/): retry defaults, execution limits, and troubleshooting.
