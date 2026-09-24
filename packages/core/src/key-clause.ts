@@ -1,3 +1,5 @@
+import { nextQuote } from './sql-scan.js'
+
 export function splitTopLevelComma(input: string): string[] {
   const out: string[] = []
   let current = ''
@@ -6,16 +8,12 @@ export function splitTopLevelComma(input: string): string[] {
 
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i] ?? ''
-    const prev = i > 0 ? input[i - 1] : ''
+    const prev = i > 0 ? (input[i - 1] ?? '') : ''
+    const quoteBefore = quote
+    quote = nextQuote(char, prev, quote)
 
-    if (quote) {
-      current += char
-      if (char === quote && prev !== '\\') quote = null
-      continue
-    }
-
-    if (char === "'" || char === '"' || char === '`') {
-      quote = char
+    // A char inside a quoted literal (body or delimiter) is never structural.
+    if (quoteBefore !== null || quote !== null) {
       current += char
       continue
     }

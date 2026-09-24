@@ -1,5 +1,6 @@
 import type { IndexProjectionDefinition, ProjectionDefinition } from './model-types.js'
 import { splitTopLevelComma } from './key-clause.js'
+import { nextQuote, stripWrappingParens } from './sql-scan.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
 
 export function isIndexProjection(
@@ -8,47 +9,16 @@ export function isIndexProjection(
   return 'index' in projection
 }
 
-function stripWrappingParens(input: string): string {
-  if (!input.startsWith('(') || !input.endsWith(')')) return input
-
-  // Only strip when the leading paren closes at the very end, so `(a), (b)`
-  // keeps both groups. Parens inside quoted identifiers and string literals
-  // are text, not nesting — `` (`weird)name`) `` is still a single wrapped
-  // expression.
-  let depth = 0
-  let quote: "'" | '"' | '`' | null = null
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i]
-    if (quote) {
-      if (char === quote && input[i - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === "'" || char === '"' || char === '`') {
-      quote = char
-      continue
-    }
-    if (char === '(') depth += 1
-    else if (char === ')') {
-      depth -= 1
-      if (depth === 0) return i === input.length - 1 ? input.slice(1, -1).trim() : input
-    }
-  }
-  return input
-}
-
 /** ClickHouse prints one space after every argument separator. */
 function spaceAfterCommas(input: string): string {
   let out = ''
   let quote: "'" | '"' | '`' | null = null
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i] ?? ''
-    if (quote) {
-      out += char
-      if (char === quote && input[i - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === "'" || char === '"' || char === '`') {
-      quote = char
+    const prev = i > 0 ? (input[i - 1] ?? '') : ''
+    const quoteBefore = quote
+    quote = nextQuote(char, prev, quote)
+    if (quoteBefore !== null || quote !== null) {
       out += char
       continue
     }
