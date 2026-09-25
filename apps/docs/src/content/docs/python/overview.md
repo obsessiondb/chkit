@@ -49,7 +49,7 @@ The schema/migration CLI and backfill engine share the TypeScript workflow. The 
 
 - `chkit skills` proxy and the `create-chkit` scaffolder: use `chkit init` instead.
 - `deps.ts`-style dependency auto-install: install packages explicitly with `pip`.
-- [`@chkit/plugin-ingest`](/ingestion/) and the project `entry` module: ingestion source authoring requires TypeScript.
+- [`@chkit/plugin-ingest`](/api-sync/) and the project `entry` module: API sync source authoring requires TypeScript.
 
 ## These pages
 

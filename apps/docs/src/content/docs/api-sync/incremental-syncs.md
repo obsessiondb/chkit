@@ -7,9 +7,9 @@ Use an incremental strategy to select the records to fetch and the state to comm
 
 ## Start with a full sync
 
-For a small, bounded dataset, omit `incremental` as in the [quickstart](/ingestion/quickstart/). Each run reads the source again with no bookmark. Keep this approach when the provider has no reliable change filter and the cost of a complete read is acceptable.
+For a small, bounded dataset, omit `incremental` as in the [quickstart](/api-sync/quickstart/). Each run reads the source again with no bookmark. Keep this approach when the provider has no reliable change filter and the cost of a complete read is acceptable.
 
-A full sync does not replace the destination snapshot or detect missing records. See [deletion handling](/ingestion/destinations/#handle-deleted-records) before treating the destination as a complete current-state mirror.
+A full sync does not replace the destination snapshot or detect missing records. See [deletion handling](/api-sync/destinations/#handle-deleted-records) before treating the destination as a complete current-state mirror.
 
 For expensive full reads, use the provider's change mechanism: a timestamp window for time filters, or durable provider state for a resumable change feed. Pagination tokens alone do not establish either contract.
 
@@ -17,7 +17,7 @@ For expensive full reads, use the provider's change mechanism: a timestamp windo
 
 `start` is the first run's lower bound. Later runs start at the last watermark minus `overlapMs` (default `0`). The upper bound is a fixed execution cutoff, or the explicit backfill upper bound. Choose overlap based on provider indexing delays and late updates; reconcile repeated records in the destination.
 
-This complete source module uses the client from [Readers and pagination](/ingestion/readers/#a-reusable-page-client). Save it as `src/sources/helpdesk.ts` and re-export its table and pipeline from the project entry:
+This complete source module uses the client from [Readers and pagination](/api-sync/readers/#a-reusable-page-client). Save it as `src/sources/helpdesk.ts` and re-export its table and pipeline from the project entry:
 
 ```ts
 import { definePipeline, defineStream, paginate, rawRows, rawTable, timestampWindow } from '@chkit/plugin-ingest'
@@ -126,6 +126,6 @@ The built-in full-sync and cursor strategies do not interpret `--from` / `--to`.
 
 ## Related pages
 
-- [Readers and pagination](/ingestion/readers/): provider contracts and bounded fetching.
-- [Loading and batching](/ingestion/loading/#batch-identity): checkpoint state versus batch identity.
-- [Scheduling and recovery](/ingestion/operations/#backfill-source-data): isolated historical runs.
+- [Readers and pagination](/api-sync/readers/): provider contracts and bounded fetching.
+- [Loading and batching](/api-sync/loading/#batch-identity): checkpoint state versus batch identity.
+- [Scheduling and recovery](/api-sync/operations/#backfill-source-data): isolated historical runs.

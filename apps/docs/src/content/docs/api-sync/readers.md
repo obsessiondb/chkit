@@ -44,7 +44,7 @@ export async function fetchTicketPage(
 }
 ```
 
-This helper performs one request. Call it through `context.attempt` or from `paginate`'s `fetchPage` callback, as shown in [Incremental syncs](/ingestion/incremental-syncs/#timestamp-windows). Validate untrusted response shapes at the source boundary in production; a TypeScript assertion does not validate JSON.
+This helper performs one request. Call it through `context.attempt` or from `paginate`'s `fetchPage` callback, as shown in [Incremental syncs](/api-sync/incremental-syncs/#timestamp-windows). Validate untrusted response shapes at the source boundary in production; a TypeScript assertion does not validate JSON.
 
 ## Pagination is not a checkpoint
 
@@ -61,7 +61,7 @@ Use a manual loop when page metadata must become a chunk `id` or durable `state`
 
 ## Bound work and separate accounts
 
-Yield pages as they arrive; do not collect a large source into one array. Source page size controls response memory; `batchSize` controls loading and is not a hard limit on a yielded chunk. See [Loading and batching](/ingestion/loading/).
+Yield pages as they arrive; do not collect a large source into one array. Source page size controls response memory; `batchSize` controls loading and is not a hard limit on a yielded chunk. See [Loading and batching](/api-sync/loading/).
 
 Use stable stream IDs for independently resumable accounts or resources, for example `helpdesk.account-42.tickets`. The stream ID owns the checkpoint. If several accounts share a destination table, include account identity in the record key too; a provider-local ticket ID alone may collide.
 
@@ -75,10 +75,10 @@ For a document that needs a root object and its children, assemble one complete 
 
 The default loader writes the assembled row. There is no automatic nested loader or parent/child registration. If a required child request fails, let the reader fail before yielding that root; do not publish a partial object as complete. Bound the assembled object size and report any provider-imposed truncation.
 
-For separately queried children, load a `ticket_comments` table with its own stream, stable comment IDs, and a `ticket_id` column. A child stream can discover its own roots when the provider only exposes parent-scoped endpoints. It must not assume another stream has already loaded the parents: pipeline execution does not order dependencies. Choose the row model alongside [stored shape](/ingestion/destinations/#root-objects-and-related-tables).
+For separately queried children, load a `ticket_comments` table with its own stream, stable comment IDs, and a `ticket_id` column. A child stream can discover its own roots when the provider only exposes parent-scoped endpoints. It must not assume another stream has already loaded the parents: pipeline execution does not order dependencies. Choose the row model alongside [stored shape](/api-sync/destinations/#root-objects-and-related-tables).
 
 :::caution[Child changes need a discovery path]
-If editing or deleting a comment does not update the ticket's timestamp, an incremental ticket scan may never revisit it. Use a child change feed or an application-defined reconciliation scan. Handle [deleted records](/ingestion/destinations/#handle-deleted-records) explicitly.
+If editing or deleting a comment does not update the ticket's timestamp, an incremental ticket scan may never revisit it. Use a child change feed or an application-defined reconciliation scan. Handle [deleted records](/api-sync/destinations/#handle-deleted-records) explicitly.
 :::
 
 ## Use an SDK when it helps
@@ -94,6 +94,6 @@ Pass `FetchContext` to reusable clients that need only `attempt` and `signal`; t
 
 ## Related pages
 
-- [Incremental syncs](/ingestion/incremental-syncs/): choose the durable resume boundary.
-- [Scheduling and recovery](/ingestion/operations/#retries-and-provider-errors): retry policies and provider error classification.
-- [Test a source](/ingestion/testing/): check pagination and failure behavior with fixtures.
+- [Incremental syncs](/api-sync/incremental-syncs/): choose the durable resume boundary.
+- [Scheduling and recovery](/api-sync/operations/#retries-and-provider-errors): retry policies and provider error classification.
+- [Test a source](/api-sync/testing/): check pagination and failure behavior with fixtures.

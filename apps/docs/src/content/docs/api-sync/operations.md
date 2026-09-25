@@ -116,12 +116,12 @@ Retry with `ingest run` after fixing the error; the journal supplies committed s
 
 For dependent stages, such as raw ingestion followed by a derived-document stream, invoke the stages sequentially and check the first exit code before starting the second. An unfiltered run may execute both at once; exported pipelines do not form a dependency graph.
 
-Use programmatic `runIngestion` when embedding execution in an existing service or supplying runtime adapters. The host then owns configuration, cancellation, and outcome handling. See [Testing](/ingestion/testing/) for a complete runtime example.
+Use programmatic `runIngestion` when embedding execution in an existing service or supplying runtime adapters. The host then owns configuration, cancellation, and outcome handling. See [Testing](/api-sync/testing/) for a complete runtime example.
 
 </details>
 
 ## Related pages
 
-- [Incremental syncs](/ingestion/incremental-syncs/): strategy-dependent resumption.
-- [Loading and batching](/ingestion/loading/): concurrency, buffers, and write identity.
-- [Test a source](/ingestion/testing/): verify recovery before scheduling it.
+- [Incremental syncs](/api-sync/incremental-syncs/): strategy-dependent resumption.
+- [Loading and batching](/api-sync/loading/): concurrency, buffers, and write identity.
+- [Test a source](/api-sync/testing/): verify recovery before scheduling it.

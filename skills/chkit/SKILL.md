@@ -10,7 +10,7 @@ chkit lets you define ClickHouse schemas in TypeScript, generate migration SQL, 
 
 Docs: https://chkit.obsessiondb.com
 
-For application API source authoring with `@chkit/plugin-ingest`, use the separate `chkit-ingestion` skill (`npx skills add obsessiondb/chkit --skill chkit-ingestion`) and the [ingestion guides](https://chkit.obsessiondb.com/ingestion.md). Its streams and checkpoints are separate from plugin-codegen's generated insert helpers.
+For application API source authoring with `@chkit/plugin-ingest`, use the separate `chkit-ingestion` skill (`npx skills add obsessiondb/chkit --skill chkit-ingestion`) and the [API sync guides](https://chkit.obsessiondb.com/api-sync.md). Its streams and checkpoints are separate from plugin-codegen's generated insert helpers.
 
 ## Configuration
 

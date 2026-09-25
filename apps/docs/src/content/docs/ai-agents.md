@@ -23,7 +23,7 @@ Append `.md` to a documentation URL to read Markdown, such as [`/ai-agents.md`](
 
 ## What chkit is
 
-Use chkit to define ClickHouse schemas in TypeScript or Python, generate migration SQL, and check the live database for drift. Use the ingestion plugin to load API data with TypeScript readers.
+Use chkit to define ClickHouse schemas in TypeScript or Python, generate migration SQL, and check the live database for drift. Use the ingest plugin to sync API data with TypeScript readers.
 
 Run chkit through shell commands. Install the agent skills for command and authoring guidance.
 
@@ -56,15 +56,15 @@ chkit skills add obsessiondb/chkit --skill chkit
 
 The skill installs into the project's agent directory (for example `.claude/skills/chkit/` or `.agents/skills/chkit/`). On an interactive `chkit init`, chkit also detects the active agent and offers to install the skill automatically.
 
-### Authoring ingestion sources
+### Authoring API sync sources
 
-For TypeScript API ingestion, install the focused authoring skill:
+For TypeScript API sync, install the focused authoring skill:
 
 ```sh
 chkit skills add obsessiondb/chkit --skill chkit-ingestion
 ```
 
-It guides decisions about raw versus shaped data, transformations, pagination, incremental state, and loaders, then links to the relevant docs. Start with the [ingestion quickstart](/ingestion/quickstart/); each guide explains when to use its alternatives. Ingestion requires a direct `clickhouse` connection; the workbench executor alone is insufficient. See [skill installation and usage](/ingestion/agent-skill/).
+It guides decisions about raw versus shaped data, transformations, pagination, incremental state, and loaders, then links to the relevant docs. Start with the [API sync quickstart](/api-sync/quickstart/); each guide explains when to use its alternatives. API sync requires a direct `clickhouse` connection; the workbench executor alone is insufficient. See [skill installation and usage](/api-sync/agent-skill/).
 
 ## Step 3: Scaffold based on the answers
 
@@ -148,7 +148,7 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 | Adopt chkit on an **existing** ClickHouse database | [`@chkit/plugin-pull`](/plugins/pull/) | Introspects the live database into local schema files so the user starts from real tables, not a blank example. |
 | Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Time-windowed loads with checkpoints, for large or resumable backfills. |
-| **Ingest application API data** into ClickHouse | [`@chkit/plugin-ingest`](/ingestion/) | TypeScript only; finite pulls with journaled checkpoints and an external scheduler. |
+| **Ingest application API data** into ClickHouse | [`@chkit/plugin-ingest`](/api-sync/) | TypeScript only; finite pulls with journaled checkpoints and an external scheduler. |
 | Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and engine configuration; rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse. |
 
 Install plugins for the project's stated requirements.

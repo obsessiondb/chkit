@@ -108,7 +108,7 @@ Changing the mapping affects future writes. Updating older rows requires replayi
 
 Decide what one row represents alongside its stored shape. A reader can fetch a root object and its children, but chkit does not discover relationships or load child objects automatically.
 
-**Embed children when the application consumes a complete object.** For example, retain a ticket and its comments together for document retrieval. This denormalized shape keeps its context in one record, at the cost of rebuilding that record when a child changes. Fetch all required child pages before yielding the root; see [nested loading](/ingestion/readers/#parent-records-and-child-collections).
+**Embed children when the application consumes a complete object.** For example, retain a ticket and its comments together for document retrieval. This denormalized shape keeps its context in one record, at the cost of rebuilding that record when a child changes. Fetch all required child pages before yielding the root; see [nested loading](/api-sync/readers/#parent-records-and-child-collections).
 
 **Use separate entity tables when children need independent queries or updates.** For a warehouse, `tickets`, `ticket_comments`, and `customers` can have their own columns and stable keys, with `ticket_id` and `customer_id` linking them. Each stream has one destination; define separate streams for separately loaded tables, or derive them in ClickHouse from retained raw objects.
 
@@ -200,7 +200,7 @@ A separate stream can read retained raw tables, assemble documents in `read`, an
 
 ## Related pages
 
-- [Readers and pagination](/ingestion/readers/): fetch root objects and their children.
-- [Loading and batching](/ingestion/loading/): start with the default loader.
+- [Readers and pagination](/api-sync/readers/): fetch root objects and their children.
+- [Loading and batching](/api-sync/loading/): start with the default loader.
 - [Schema DSL](/schema/dsl-reference/): table and view definitions.
-- [Scheduling and recovery](/ingestion/operations/#backfill-source-data): source rereads versus SQL backfills.
+- [Scheduling and recovery](/api-sync/operations/#backfill-source-data): source rereads versus SQL backfills.

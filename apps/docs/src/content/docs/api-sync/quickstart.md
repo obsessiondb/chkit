@@ -1,5 +1,5 @@
 ---
-title: Ingestion quickstart
+title: API sync quickstart
 description: Read a public API into a raw ClickHouse table and query it through a SQL view.
 ---
 
@@ -9,7 +9,7 @@ Ingest the small [JSONPlaceholder posts dataset](https://jsonplaceholder.typicod
 
 Use a TypeScript project, Bun, a direct ClickHouse connection, and a chkit release that includes `@chkit/plugin-ingest`. This example uses native JSON; use ClickHouse 25.3+ for production support of that type. See [compatibility](/guides/clickhouse-compatibility/).
 
-JSONPlaceholder is a public demonstration API with a small dataset, so use a full sync. For larger sources, add [pagination](/ingestion/readers/) and [incremental reads](/ingestion/incremental-syncs/) based on the provider API.
+JSONPlaceholder is a public demonstration API with a small dataset, so use a full sync. For larger sources, add [pagination](/api-sync/readers/) and [incremental reads](/api-sync/incremental-syncs/) based on the provider API.
 
 ## Install and configure
 
@@ -106,6 +106,6 @@ Keep a small first source in one entry file. As sources grow, move each provider
 
 ## Related pages
 
-- [Destinations and transformations](/ingestion/destinations/): choose the stored shape and where to map fields.
-- [Readers and pagination](/ingestion/readers/): fetch bounded pages with retries.
-- [Incremental syncs](/ingestion/incremental-syncs/): avoid rereading the whole source.
+- [Destinations and transformations](/api-sync/destinations/): choose the stored shape and where to map fields.
+- [Readers and pagination](/api-sync/readers/): fetch bounded pages with retries.
+- [Incremental syncs](/api-sync/incremental-syncs/): avoid rereading the whole source.

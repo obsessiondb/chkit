@@ -8,9 +8,9 @@
 
 chkit is an open-source CLI for ClickHouse. Review migration SQL before applying it. Keep table definitions and API readers in your repository, alongside the code that uses them. Run the CLI from the terminal or CI.
 
-**TypeScript:** schemas, migrations, and ingestion. **Python:** schemas and migrations through [chkit-py](https://chkit.obsessiondb.com/python/overview/).
+**TypeScript:** schemas, migrations, and API sync. **Python:** schemas and migrations through [chkit-py](https://chkit.obsessiondb.com/python/overview/).
 
-[Get started](https://chkit.obsessiondb.com/getting-started/) · [Build a data source](https://chkit.obsessiondb.com/ingestion/quickstart/) · [Documentation](https://chkit.obsessiondb.com)
+[Get started](https://chkit.obsessiondb.com/getting-started/) · [Build a data source](https://chkit.obsessiondb.com/api-sync/quickstart/) · [Documentation](https://chkit.obsessiondb.com)
 
 > **Beta:** the public API is still evolving. Keep the CLI, core, and plugins on matching versions.
 
@@ -117,7 +117,7 @@ export const content = definePipeline({ id: 'content', streams: [postStream] })
 bunx chkit ingest run --tag pipeline:content
 ```
 
-The default loader writes the rows. For production sources, add [pagination](https://chkit.obsessiondb.com/ingestion/readers/) and [incremental reads](https://chkit.obsessiondb.com/ingestion/incremental-syncs/) when the provider supports them.
+The default loader writes the rows. For production sources, add [pagination](https://chkit.obsessiondb.com/api-sync/readers/) and [incremental reads](https://chkit.obsessiondb.com/api-sync/incremental-syncs/) when the provider supports them.
 
 ### 4. Query through a view
 
@@ -149,7 +149,7 @@ Expected result for the demo dataset:
 | 2 | 10 |
 | 3 | 10 |
 
-If the final shape may change, [retain raw records and transform in ClickHouse](https://chkit.obsessiondb.com/ingestion/destinations/) instead of mapping every field up front.
+If the final shape may change, [retain raw records and transform in ClickHouse](https://chkit.obsessiondb.com/api-sync/destinations/) instead of mapping every field up front.
 
 ### 5. Evolve the model
 
@@ -177,7 +177,7 @@ bunx chkit ingest list
 bunx chkit ingest run --tag pipeline:content
 ```
 
-Use `check` in CI for migration state and schema drift. Schedule ingestion through cron, CI, or another job runner, with one ingestion process per target. Incremental sources resume from committed state; this full-sync demo reads the dataset again. See [scheduling and recovery](https://chkit.obsessiondb.com/ingestion/operations/).
+Use `check` in CI for migration state and schema drift. Schedule ingestion through cron, CI, or another job runner, with one ingestion process per target. Incremental sources resume from committed state; this full-sync demo reads the dataset again. See [scheduling and recovery](https://chkit.obsessiondb.com/api-sync/operations/).
 
 ## Set up chkit for your project
 
@@ -185,7 +185,7 @@ Use `check` in CI for migration state and schema drift. Schedule ingestion throu
 |---|---|
 | Manage a new schema | [Getting started](https://chkit.obsessiondb.com/getting-started/) |
 | Adopt an existing database | [Pull a live schema](https://chkit.obsessiondb.com/plugins/pull/) |
-| Implement an API source | [Ingestion quickstart](https://chkit.obsessiondb.com/ingestion/quickstart/) |
+| Implement an API source | [API sync quickstart](https://chkit.obsessiondb.com/api-sync/quickstart/) |
 | Generate application types | [TypeScript codegen](https://chkit.obsessiondb.com/plugins/codegen/) |
 | Recompute stored data | [SQL backfills](https://chkit.obsessiondb.com/plugins/backfill/) |
 | Work with a coding agent | [Agent skills](https://chkit.obsessiondb.com/ai-agents/) |
@@ -208,7 +208,7 @@ See the [CLI reference](https://chkit.obsessiondb.com/cli/overview/) for command
 
 ## Python
 
-Install [`chkit-py`](https://pypi.org/project/chkit-py/) (`pip install chkit-py`) to define schemas and run migrations, drift detection, and CI checks with Python config and schema files. API ingestion requires TypeScript. The Python source is in [`chkit_python/`](chkit_python).
+Install [`chkit-py`](https://pypi.org/project/chkit-py/) (`pip install chkit-py`) to define schemas and run migrations, drift detection, and CI checks with Python config and schema files. API sync requires TypeScript. The Python source is in [`chkit_python/`](chkit_python).
 
 ## Documentation
 

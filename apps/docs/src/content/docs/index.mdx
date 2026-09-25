@@ -1,5 +1,5 @@
 ---
-title: "chkit: ClickHouse schemas and API ingestion"
+title: "chkit: ClickHouse schemas and API sync"
 description: Define ClickHouse schemas, review migrations, and sync API data into your tables with chkit.
 template: splash
 prev: false
@@ -12,7 +12,7 @@ hero:
       link: /getting-started/
       icon: right-arrow
     - text: Sync API data
-      link: /ingestion/quickstart/
+      link: /api-sync/quickstart/
       variant: secondary
 ---
 
@@ -32,22 +32,22 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
     <a href="/plugins/backfill/">Explore backfills <span aria-hidden="true">↗</span></a>
   </div>
   <div>
-    <p className="home-label">03 / Ingestion</p>
+    <p className="home-label">03 / API Sync</p>
     <h2>Sync data from any source.</h2>
     <p>Build reliable syncs from HTTP APIs, databases, and other sources into ClickHouse.</p>
-    <a href="/ingestion/">Build a data source <span aria-hidden="true">↗</span></a>
+    <a href="/api-sync/">Build a data source <span aria-hidden="true">↗</span></a>
   </div>
 </div>
 
 <div className="home-journey">
 
-<p className="home-label">Schema and ingestion example</p>
+<p className="home-label">Schema and API sync example</p>
 
 ## From a schema to a working data sync
 
 Start with a table, load 100 demo API records, then query posts per author. Change the view later using the data already stored in ClickHouse.
 
-<p className="home-demo-setup"><a href="/ingestion/quickstart/#install-and-configure">Install the packages and configure a ClickHouse connection</a> before running the example. Add the TypeScript snippets to <code>src/chkit.ts</code>. For schema management without ingestion, use the <a href="/tutorials/first-schema/">schema tutorial</a>.</p>
+<p className="home-demo-setup"><a href="/api-sync/quickstart/#install-and-configure">Install the packages and configure a ClickHouse connection</a> before running the example. Add the TypeScript snippets to <code>src/chkit.ts</code>. For schema management without API sync, use the <a href="/tutorials/first-schema/">schema tutorial</a>.</p>
 
 <Tabs>
   <TabItem label="1. Define">
@@ -73,14 +73,14 @@ export const posts = table({
 })
 ```
 
-[Explore the schema DSL](/schema/dsl-reference/). Schema management is available in TypeScript and Python; this walkthrough uses TypeScript for ingestion.
+[Explore the schema DSL](/schema/dsl-reference/). Schema management is available in TypeScript and Python; this walkthrough uses TypeScript for API sync.
 
   </TabItem>
   <TabItem label="2. Migrate">
 
 ### Generate and review a migration
 
-Point the project config at `src/chkit.ts` and register `ingest()` when adding ingestion. With a ClickHouse connection configured, generate the migration and inspect it before applying.
+Point the project config at `src/chkit.ts` and register `ingest()` when adding API sync. With a ClickHouse connection configured, generate the migration and inspect it before applying.
 
 ```sh title="Terminal"
 bunx chkit generate --name create-posts
@@ -90,7 +90,7 @@ bunx chkit migrate
 bunx chkit migrate --apply
 ```
 
-Commit the schema, migration SQL, and snapshot together. The [setup guide](/ingestion/quickstart/#install-and-configure) includes the complete config and package installation.
+Commit the schema, migration SQL, and snapshot together. The [setup guide](/api-sync/quickstart/#install-and-configure) includes the complete config and package installation.
 
 <details>
 <summary>See the generated table SQL</summary>
@@ -140,7 +140,7 @@ const postStream = defineStream({
 export const content = definePipeline({ id: 'content', streams: [postStream] })
 ```
 
-Run `bunx chkit ingest run --tag pipeline:content`. This bounded demo reads all posts; add [pagination](/ingestion/readers/) and [incremental state](/ingestion/incremental-syncs/) when the source needs them.
+Run `bunx chkit ingest run --tag pipeline:content`. This bounded demo reads all posts; add [pagination](/api-sync/readers/) and [incremental state](/api-sync/incremental-syncs/) when the source needs them.
 
 <p className="home-demo-result"><strong>Result:</strong> 100 posts in <code>default.posts</code>, ready to query. This reader supplies the data; the default loader supplies batching and ingestion metadata.</p>
 
@@ -181,7 +181,7 @@ Expected result for the demo dataset:
 
 </div>
 
-If the final schema is still evolving, [retain raw objects and transform them in ClickHouse](/ingestion/destinations/) instead of mapping every field up front.
+If the final schema is still evolving, [retain raw objects and transform them in ClickHouse](/api-sync/destinations/) instead of mapping every field up front.
 
   </TabItem>
   <TabItem label="5. Evolve">
@@ -202,7 +202,7 @@ export const postsByAuthor = view({
 })
 ```
 
-Generate another migration, review it, and apply it. chkit recreates this ordinary view with the new SQL. [Learn about transformations](/ingestion/destinations/).
+Generate another migration, review it, and apply it. chkit recreates this ordinary view with the new SQL. [Learn about transformations](/api-sync/destinations/).
 
 <p className="home-demo-result">Query the new <code>matching_posts</code> measure over the records loaded in step 3. This view change requires no API re-fetch or table backfill.</p>
 
@@ -224,7 +224,7 @@ bunx chkit ingest list
 bunx chkit ingest run --tag pipeline:content
 ```
 
-Serialize ingestion processes per target. When using an incremental source, the next run starts from its committed state. See [scheduling and recovery](/ingestion/operations/) and [source testing](/ingestion/testing/).
+Serialize ingestion processes per target. When using an incremental source, the next run starts from its committed state. See [scheduling and recovery](/api-sync/operations/) and [source testing](/api-sync/testing/).
 
   </TabItem>
 </Tabs>
@@ -283,5 +283,5 @@ Serialize ingestion processes per target. When using an incremental source, the 
 
 <div className="home-next not-content">
   <h2>Set up chkit.</h2>
-  <p><a href="/getting-started/">Manage a schema →</a><a href="/ingestion/quickstart/">Sync your first source →</a></p>
+  <p><a href="/getting-started/">Manage a schema →</a><a href="/api-sync/quickstart/">Sync your first source →</a></p>
 </div>

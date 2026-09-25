@@ -17,15 +17,15 @@ Start with the default loader and a full sync for small datasets; add provider-s
 
 ## Read only the relevant docs
 
-Use local `apps/docs/src/content/docs/ingestion/` or these URLs. Match the installed version; inspect exported types if docs are unavailable.
+Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the installed version; inspect exported types if docs are unavailable.
 
-- [Quickstart](https://chkit.obsessiondb.com/ingestion/quickstart.md): complete config and first sync.
-- [Readers](https://chkit.obsessiondb.com/ingestion/readers.md): fetching, auth, pagination, SDKs.
-- [Destinations](https://chkit.obsessiondb.com/ingestion/destinations.md): raw or shaped rows, relationships, current state/history, tombstones.
-- [Incremental syncs](https://chkit.obsessiondb.com/ingestion/incremental-syncs.md): full, timestamp, cursor, custom strategies.
-- [Loading](https://chkit.obsessiondb.com/ingestion/loading.md): batching and custom loader contracts.
-- [Operations](https://chkit.obsessiondb.com/ingestion/operations.md): retries, scheduling, backfills, limits.
-- [Testing](https://chkit.obsessiondb.com/ingestion/testing.md): offline failure and replay checks.
+- [Quickstart](https://chkit.obsessiondb.com/api-sync/quickstart.md): complete config and first sync.
+- [Readers](https://chkit.obsessiondb.com/api-sync/readers.md): fetching, auth, pagination, SDKs.
+- [Destinations](https://chkit.obsessiondb.com/api-sync/destinations.md): raw or shaped rows, relationships, current state/history, tombstones.
+- [Incremental syncs](https://chkit.obsessiondb.com/api-sync/incremental-syncs.md): full, timestamp, cursor, custom strategies.
+- [Loading](https://chkit.obsessiondb.com/api-sync/loading.md): batching and custom loader contracts.
+- [Operations](https://chkit.obsessiondb.com/api-sync/operations.md): retries, scheduling, backfills, limits.
+- [Testing](https://chkit.obsessiondb.com/api-sync/testing.md): offline failure and replay checks.
 
 ## Preserve these contracts
 

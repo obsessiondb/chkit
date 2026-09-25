@@ -17,7 +17,7 @@ A few schema features depend on the ClickHouse version of your target:
 
 | Feature | Requirement |
 |---------|-------------|
-| Ingestion `rawTable` (native `JSON`) | Native JSON is production-ready on **25.3+**. For older targets, use a [custom destination](/ingestion/destinations/) with supported column types. See the [ClickHouse JSON reference](https://clickhouse.com/docs/reference/data-types/newjson). |
+| API sync `rawTable` (native `JSON`) | Native JSON is production-ready on **25.3+**. For older targets, use a [custom destination](/api-sync/destinations/) with supported column types. See the [ClickHouse JSON reference](https://clickhouse.com/docs/reference/data-types/newjson). |
 | [Refreshable materialized views](/schema/refreshable-views/) | Production-ready on **24.10+** (no flag). Experimental and flag-gated on 23.12–24.9. chkit targets 24.10+. |
 | `set` data-skipping index | **ClickHouse 26+** requires the `set(0)` form rather than a bare `set`; chkit emits `set(maxRows)` accordingly. See the [DSL reference](/schema/dsl-reference/). |
 | `uniqueKey` | Renders `UNIQUE KEY` DDL, which is supported on ObsessionDB / ClickHouse Cloud engines but rejected by vanilla `MergeTree`. |
