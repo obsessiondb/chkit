@@ -227,7 +227,7 @@ WHERE is_temporary = 0
 					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position FROM system.columns WHERE database IN (${quoted})`,
 				),
 				executor.query<SystemSkippingIndexRow>(
-					`SELECT database, \`table\`, name, expr, type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,
+					`SELECT database, \`table\`, name, expr, type_full AS type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,
 				),
 			])
 

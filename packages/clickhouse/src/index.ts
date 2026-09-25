@@ -887,7 +887,7 @@ FROM system.columns
 WHERE database IN (${quotedDatabases})`,
 			)
 			const indexes = await this.query<SystemSkippingIndexRow>(
-				`SELECT database, table, name, expr, type, granularity
+				`SELECT database, table, name, expr, type_full AS type, granularity
 FROM system.data_skipping_indices
 WHERE database IN (${quotedDatabases})`,
 			)
