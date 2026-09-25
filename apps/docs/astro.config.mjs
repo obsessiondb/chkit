@@ -75,27 +75,27 @@ export default defineConfig({
 					autogenerate: { directory: 'schema' },
 				},
 				{
-					label: 'Ingestion',
+					label: 'API Sync',
 					items: [
-						{ label: 'Overview', slug: 'ingestion' },
-						{ label: 'Quickstart', slug: 'ingestion/quickstart' },
-						{ label: 'Authoring skill', slug: 'ingestion/agent-skill' },
+						{ label: 'Overview', slug: 'api-sync' },
+						{ label: 'Quickstart', slug: 'api-sync/quickstart' },
+						{ label: 'Authoring skill', slug: 'api-sync/agent-skill' },
 						{
 							label: 'Build a source',
 							collapsed: true,
 							items: [
-								{ slug: 'ingestion/readers' },
-								{ slug: 'ingestion/destinations' },
-								{ slug: 'ingestion/incremental-syncs' },
-								{ slug: 'ingestion/loading' },
+								{ slug: 'api-sync/readers' },
+								{ slug: 'api-sync/destinations' },
+								{ slug: 'api-sync/incremental-syncs' },
+								{ slug: 'api-sync/loading' },
 							],
 						},
 						{
 							label: 'Run and verify',
 							collapsed: true,
 							items: [
-								{ slug: 'ingestion/operations' },
-								{ slug: 'ingestion/testing' },
+								{ slug: 'api-sync/operations' },
+								{ slug: 'api-sync/testing' },
 							],
 						},
 					],

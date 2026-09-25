@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { AstroIntegration } from 'astro';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
-const SITE_TAGLINE = 'ClickHouse schemas, migrations, and API ingestion in code. Schema workflows in TypeScript and Python; ingestion in TypeScript.';
+const SITE_TAGLINE = 'ClickHouse schemas, migrations, and API sync in code. Schema workflows in TypeScript and Python; API sync in TypeScript.';
 
 interface DocEntry {
 	slug: string;

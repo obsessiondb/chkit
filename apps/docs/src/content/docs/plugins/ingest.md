@@ -7,7 +7,7 @@ sidebar:
 
 Use `@chkit/plugin-ingest` to load application API data into tables defined in your chkit schema.
 
-Start with the [ingestion quickstart](/ingestion/quickstart/) for a complete first sync. Read the [ingestion guides](/ingestion/) for reader, storage, and checkpoint choices, or install the [authoring skill](/ingestion/agent-skill/) for a coding agent.
+Start with the [API sync quickstart](/api-sync/quickstart/) for a complete first sync. Read the [API sync guides](/api-sync/) for reader, storage, and checkpoint choices, or install the [authoring skill](/api-sync/agent-skill/) for a coding agent.
 
 ## Capabilities
 
@@ -129,7 +129,7 @@ const ticketStream = defineStream({
 })
 ```
 
-The raw table uses `ReplacingMergeTree` to retain the latest ingested version per `id`. Query with `FINAL` to resolve repeats before background merges finish. Changes to an ordinary view can use retained fields without re-fetching the source. A materialized view needs a backfill to update stored results; fields you did not retain require a source re-fetch. See [Destinations and transformations](/ingestion/destinations/).
+The raw table uses `ReplacingMergeTree` to retain the latest ingested version per `id`. Query with `FINAL` to resolve repeats before background merges finish. Changes to an ordinary view can use retained fields without re-fetching the source. A materialized view needs a backfill to update stored results; fields you did not retain require a source re-fetch. See [Destinations and transformations](/api-sync/destinations/).
 
 ## Progress and checkpoints
 
@@ -168,7 +168,7 @@ chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
 
 Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
 
-A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. Full-sync and cursor strategies do not interpret date bounds. See [Backfill source data](/ingestion/operations/#backfill-source-data).
+A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. Full-sync and cursor strategies do not interpret date bounds. See [Backfill source data](/api-sync/operations/#backfill-source-data).
 
 `chkit check` verifies that every stream destination carries the ingestion metadata columns.
 
@@ -192,6 +192,6 @@ Run at most one ingestion process per project and target at a time. Use your sch
 
 ## Related pages
 
-- [Destinations and transformations](/ingestion/destinations/): raw or shaped storage and where to map fields.
-- [Loading and batching](/ingestion/loading/): loader choices, insert sizing, and concurrency defaults.
-- [Scheduling and recovery](/ingestion/operations/): retry defaults, execution limits, and troubleshooting.
+- [Destinations and transformations](/api-sync/destinations/): raw or shaped storage and where to map fields.
+- [Loading and batching](/api-sync/loading/): loader choices, insert sizing, and concurrency defaults.
+- [Scheduling and recovery](/api-sync/operations/): retry defaults, execution limits, and troubleshooting.

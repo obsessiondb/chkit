@@ -7,7 +7,7 @@ A loader writes the rows yielded by the reader, whether they contain raw objects
 
 ## Start with the default loader
 
-Omit `loader` from the stream definition, as in the [quickstart](/ingestion/quickstart/). chkit uses `simpleLoader()` to insert rows and attach ingestion metadata. Use this for both raw and shaped storage, including rows with embedded children.
+Omit `loader` from the stream definition, as in the [quickstart](/api-sync/quickstart/). chkit uses `simpleLoader()` to insert rows and attach ingestion metadata. Use this for both raw and shaped storage, including rows with embedded children.
 
 `simpleLoader` is the only bundled loader. It makes direct, at-least-once inserts, adds ingestion metadata, and splits a load batch into deterministic write units with stable deduplication tokens. It does not stage data or replace a destination snapshot atomically.
 
@@ -76,6 +76,6 @@ The stream's `retry` policy controls source attempts and reader recovery. Load a
 
 ## Related pages
 
-- [Destinations and transformations](/ingestion/destinations/): map rows without replacing the loader.
-- [Incremental syncs](/ingestion/incremental-syncs/): when committed writes advance progress.
-- [Test a source](/ingestion/testing/): simulate a failed write and replay.
+- [Destinations and transformations](/api-sync/destinations/): map rows without replacing the loader.
+- [Incremental syncs](/api-sync/incremental-syncs/): when committed writes advance progress.
+- [Test a source](/api-sync/testing/): simulate a failed write and replay.

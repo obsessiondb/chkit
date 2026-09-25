@@ -4,9 +4,9 @@
 
 chkit is an open-source CLI for ClickHouse. Review migration SQL before applying it. Keep table definitions and TypeScript API readers in your repository, alongside the code that uses them. Run the CLI from the terminal or CI.
 
-Use [chkit-py](https://pypi.org/project/chkit-py/) for schema and migration workflows in Python. API ingestion requires TypeScript.
+Use [chkit-py](https://pypi.org/project/chkit-py/) for schema and migration workflows in Python. API sync requires TypeScript.
 
-[See the six-step walkthrough](https://chkit.obsessiondb.com/#from-a-schema-to-a-working-data-sync) · [Get started](https://chkit.obsessiondb.com/getting-started/) · [Build a source](https://chkit.obsessiondb.com/ingestion/quickstart/)
+[See the six-step walkthrough](https://chkit.obsessiondb.com/#from-a-schema-to-a-working-data-sync) · [Get started](https://chkit.obsessiondb.com/getting-started/) · [Build a source](https://chkit.obsessiondb.com/api-sync/quickstart/)
 
 ## Features
 
@@ -17,7 +17,7 @@ Use [chkit-py](https://pypi.org/project/chkit-py/) for schema and migration work
 - **CI gate** -- Run `chkit check` to fail builds on pending migrations, checksum mismatches, or schema drift
 - **TypeScript codegen** -- Generate row types and optional Zod schemas from your schema definitions (`@chkit/plugin-codegen`)
 - **Schema pulling** -- Introspect an existing ClickHouse database into local schema files (`@chkit/plugin-pull`)
-- **API ingestion** -- Define source readers against schema-managed tables, with batching, request retries, and journaled incremental checkpoints (`@chkit/plugin-ingest`)
+- **API sync** -- Define source readers against schema-managed tables, with batching, request retries, and journaled incremental checkpoints (`@chkit/plugin-ingest`)
 - **Data backfill** -- Time-windowed, checkpointed backfill operations with retry logic (`@chkit/plugin-backfill`)
 - **JSON output** -- Every command supports `--json` for scripting and automation
 
@@ -53,7 +53,7 @@ bunx chkit check
 
 All commands support `--json` for machine-readable output and `--config <path>` to specify a custom config file.
 
-## Add data ingestion
+## Add API sync
 
 Install `@chkit/plugin-ingest` at the same version as the CLI and core, register `ingest()` in the config, and export tables and pipelines from a TypeScript entry file. A stream pairs a destination table with an async reader. Keep raw objects for flexible SQL transformations, or map records into known columns.
 
@@ -63,7 +63,7 @@ bunx chkit ingest run --tag pipeline:content
 bunx chkit ingest status
 ```
 
-Runs are finite; use an external scheduler and serialize processes per target. The [ingestion quickstart](https://chkit.obsessiondb.com/ingestion/quickstart/) includes a complete public-API example and config.
+Runs are finite; use an external scheduler and serialize processes per target. The [API sync quickstart](https://chkit.obsessiondb.com/api-sync/quickstart/) includes a complete public-API example and config.
 
 ## Requirements
 
@@ -76,7 +76,7 @@ Runs are finite; use an external scheduler and serialize processes per target. T
 |--------|-------------|
 | [`@chkit/plugin-codegen`](https://www.npmjs.com/package/@chkit/plugin-codegen) | Generate TypeScript row types and Zod schemas |
 | [`@chkit/plugin-pull`](https://www.npmjs.com/package/@chkit/plugin-pull) | Pull schemas from a live ClickHouse instance |
-| [`@chkit/plugin-ingest`](https://www.npmjs.com/package/@chkit/plugin-ingest) | API ingestion with batching, retries, and journaled checkpoints |
+| [`@chkit/plugin-ingest`](https://www.npmjs.com/package/@chkit/plugin-ingest) | API sync with batching, retries, and journaled checkpoints |
 | [`@chkit/plugin-backfill`](https://www.npmjs.com/package/@chkit/plugin-backfill) | Time-windowed data backfill with checkpoints |
 | [`@chkit/plugin-obsessiondb`](https://www.npmjs.com/package/@chkit/plugin-obsessiondb) | Auto-rewrite Shared engines for ObsessionDB compatibility |
 

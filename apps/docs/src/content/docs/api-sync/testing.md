@@ -87,6 +87,6 @@ Start with `chkit ingest list` and `chkit check --offline` to verify exports and
 
 ## Related pages
 
-- [Readers and pagination](/ingestion/readers/): request and source contracts.
-- [Incremental syncs](/ingestion/incremental-syncs/): durable state boundaries.
-- [Scheduling and recovery](/ingestion/operations/): interpret production outcomes.
+- [Readers and pagination](/api-sync/readers/): request and source contracts.
+- [Incremental syncs](/api-sync/incremental-syncs/): durable state boundaries.
+- [Scheduling and recovery](/api-sync/operations/): interpret production outcomes.

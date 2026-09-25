@@ -7,7 +7,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Add plugins for code generation, schema imports, API ingestion, or SQL backfills. Install TypeScript plugins as npm packages. Python plugins ship inside `chkit-py`; ingestion requires TypeScript. Register plugins in your config:
+Add plugins for code generation, schema imports, API sync, or SQL backfills. Install TypeScript plugins as npm packages. Python plugins ship inside `chkit-py`; API sync requires TypeScript. Register plugins in your config:
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -62,4 +62,4 @@ For `@chkit/plugin-obsessiondb` (Python: `chkit_plugin_obsessiondb`), see the [O
 - [`@chkit/plugin-codegen`](/plugins/codegen/): TypeScript row types and optional Zod schemas (Python: Pydantic models), generated from your schema files.
 - [`@chkit/plugin-pull`](/plugins/pull/): introspect a live ClickHouse database into local schema files. Useful for adopting chkit on an existing database. Built into the Python CLI as `chkit pull`.
 - [`@chkit/plugin-backfill`](/plugins/backfill/): time-windowed data backfill with checkpoints, for materialized views and historical data loads.
-- [`@chkit/plugin-ingest`](/ingestion/): API ingestion with an external scheduler with journaled checkpoints (TypeScript only). The dedicated guides cover source readers, storage, checkpoints, loading, and an [installable skill](/ingestion/agent-skill/).
+- [`@chkit/plugin-ingest`](/api-sync/): API sync with an external scheduler with journaled checkpoints (TypeScript only). The dedicated guides cover source readers, storage, checkpoints, loading, and an [installable skill](/api-sync/agent-skill/).

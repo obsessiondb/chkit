@@ -19,9 +19,9 @@ export default defineConfig({
 chkit ingest run --tag schedule:1h
 ```
 
-Documentation: https://chkit.obsessiondb.com/ingestion/
+Documentation: https://chkit.obsessiondb.com/api-sync/
 
-For raw storage, typed rows, and where to map fields, see [Destinations and transformations](https://chkit.obsessiondb.com/ingestion/destinations/).
+For raw storage, typed rows, and where to map fields, see [Destinations and transformations](https://chkit.obsessiondb.com/api-sync/destinations/).
 
 Install the source-authoring skill for a coding agent:
 
