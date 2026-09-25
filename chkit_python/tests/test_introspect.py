@@ -29,6 +29,7 @@ from chkit.core.model import (
     SkipIndexMinmax,
     SkipIndexNgramBF,
     SkipIndexSet,
+    SkipIndexText,
     SkipIndexTokenBF,
 )
 
@@ -191,6 +192,27 @@ def test_normalize_index_ngrambf_v1() -> None:
     assert idx.ngram_size == 3
     assert idx.size_bytes == 256
     assert idx.hash_functions == 4
+
+
+def test_normalize_index_text_with_parameters_in_written_order() -> None:
+    row = SystemSkippingIndexRow(
+        database="db",
+        table="t",
+        name="idx",
+        expr="body",
+        type=(
+            "text(posting_list_codec = 'bitpacking', tokenizer = splitByString([', ', ';']), "
+            "dictionary_block_size = 512, preprocessor = lower(body))"
+        ),
+        granularity=100000000,
+    )
+    idx = normalize_index_from_system_row(row)
+    assert isinstance(idx, SkipIndexText)
+    assert idx.tokenizer == "splitByString([', ', ';'])"
+    assert idx.preprocessor == "lower(body)"
+    assert idx.dictionary_block_size == 512
+    assert idx.posting_list_codec == "bitpacking"
+    assert idx.support_phrase_search is None
 
 
 def test_normalize_index_set_with_max_rows() -> None:

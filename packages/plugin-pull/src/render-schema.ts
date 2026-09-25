@@ -237,6 +237,18 @@ function renderIndex(index: SkipIndexDefinition): string {
         `randomSeed: ${index.randomSeed}`
       )
       break
+    case 'text':
+      parts.push(`tokenizer: ${renderString(index.tokenizer)}`)
+      if (index.preprocessor !== undefined) parts.push(`preprocessor: ${renderString(index.preprocessor)}`)
+      if (index.postprocessor !== undefined) parts.push(`postprocessor: ${renderString(index.postprocessor)}`)
+      if (index.supportPhraseSearch !== undefined) parts.push(`supportPhraseSearch: ${index.supportPhraseSearch}`)
+      if (index.dictionaryBlockSize !== undefined) parts.push(`dictionaryBlockSize: ${index.dictionaryBlockSize}`)
+      if (index.dictionaryBlockFrontcodingCompression !== undefined) {
+        parts.push(`dictionaryBlockFrontcodingCompression: ${index.dictionaryBlockFrontcodingCompression}`)
+      }
+      if (index.postingListBlockSize !== undefined) parts.push(`postingListBlockSize: ${index.postingListBlockSize}`)
+      if (index.postingListCodec !== undefined) parts.push(`postingListCodec: ${renderString(index.postingListCodec)}`)
+      break
   }
   parts.push(`granularity: ${index.granularity}`)
   return `{ ${parts.join(', ')} }`

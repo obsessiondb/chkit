@@ -22,6 +22,7 @@ from chkit.core.model import (
     MaterializedViewRefresh,
     SkipIndexBloomFilter,
     SkipIndexMinmax,
+    SkipIndexText,
     TableRef,
 )
 
@@ -278,6 +279,32 @@ def test_render_indexes_include_bloom_filter_rate() -> None:
     output = render_schema_file([t])
     assert "SkipIndexBloomFilter" in output
     assert "false_positive_rate=0.01" in output
+
+
+def test_render_indexes_include_text_parameters() -> None:
+    t = table(
+        database="db",
+        name="t",
+        engine="MergeTree",
+        columns=[ColumnDefinition(name="body", type="String")],
+        primary_key=["body"],
+        order_by=["body"],
+        indexes=[
+            SkipIndexText(
+                name="idx",
+                expression="body",
+                granularity=100000000,
+                tokenizer="splitByString([', ', ';'])",
+                preprocessor="lower(body)",
+                dictionary_block_size=512,
+                posting_list_codec="bitpacking",
+            )
+        ],
+    )
+    output = render_schema_file([t])
+    namespace: dict[str, Any] = {}
+    exec(compile(output, "schema.py", "exec"), namespace)
+    assert namespace["definitions"][0].indexes == t.indexes
 
 
 # ---------- CLI: chkit pull (rejection paths) ----------

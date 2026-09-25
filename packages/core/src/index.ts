@@ -12,6 +12,7 @@ export { splitTopLevelComma } from './key-clause.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 export { renderDictionarySQL, toCreateSQL } from './sql.js'
+export { parseTextIndexParams, renderTextIndexType } from './text-index.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

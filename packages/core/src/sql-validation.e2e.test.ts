@@ -611,6 +611,17 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
         },
       },
       {
+        label: 'text',
+        idx: {
+          name: 'idx_text',
+          expression: 'lower(name)',
+          type: 'text',
+          tokenizer: 'ngrams(3)',
+          preprocessor: 'lower(name)',
+          granularity: 100000000,
+        },
+      },
+      {
         label: 'expression index',
         idx: { name: 'idx_lower', expression: 'lower(name)', type: 'bloom_filter', granularity: 1 },
       },
@@ -1126,6 +1137,17 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
           hashFunctions: 2,
           randomSeed: 0,
           granularity: 1,
+        },
+      },
+      {
+        label: 'text',
+        idx: {
+          name: 'idx_text',
+          expression: 'lower(name)',
+          type: 'text',
+          tokenizer: 'ngrams(3)',
+          preprocessor: 'lower(name)',
+          granularity: 100000000,
         },
       },
     ]

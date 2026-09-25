@@ -63,7 +63,14 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
 
 
 def _canonicalize_index(index: SkipIndexDefinition) -> SkipIndexDefinition:
-    return index.model_copy(update={"expression": normalize_sql_fragment(index.expression)})
+    update: dict[str, object] = {"expression": normalize_sql_fragment(index.expression)}
+    if index.type == "text":
+        update["tokenizer"] = normalize_sql_fragment(index.tokenizer)
+        for field in ("preprocessor", "postprocessor"):
+            value = getattr(index, field)
+            if value is not None:
+                update[field] = normalize_sql_fragment(value)
+    return index.model_copy(update=update)
 
 
 def _sorted_settings(

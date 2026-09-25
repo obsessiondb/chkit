@@ -47,6 +47,7 @@ from chkit.core.model import (
     SkipIndexMinmax,
     SkipIndexNgramBF,
     SkipIndexSet,
+    SkipIndexText,
     SkipIndexTokenBF,
 )
 
@@ -75,6 +76,7 @@ __all__ = [
     "SkipIndexMinmax",
     "SkipIndexNgramBF",
     "SkipIndexSet",
+    "SkipIndexText",
     "SkipIndexTokenBF",
     "TableDefinition",
     "TableRef",

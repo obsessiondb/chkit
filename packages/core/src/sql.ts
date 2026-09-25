@@ -13,6 +13,7 @@ import type {
 import { renderCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
+import { renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderDefault(value: string | number | boolean): string {
@@ -56,6 +57,8 @@ function renderIndexType(idx: SkipIndexDefinition): string {
       return `tokenbf_v1(${idx.sizeBytes}, ${idx.hashFunctions}, ${idx.randomSeed})`
     case 'ngrambf_v1':
       return `ngrambf_v1(${idx.ngramSize}, ${idx.sizeBytes}, ${idx.hashFunctions}, ${idx.randomSeed})`
+    case 'text':
+      return renderTextIndexType(idx)
   }
 }
 

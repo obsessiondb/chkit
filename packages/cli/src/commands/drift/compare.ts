@@ -3,6 +3,7 @@ import {
   isIndexProjection,
   normalizeProjectionIndex,
   normalizeSQLFragment,
+  renderTextIndexType,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
@@ -217,6 +218,8 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
       return `tokenbf_v1(${index.sizeBytes}, ${index.hashFunctions}, ${index.randomSeed})`
     case 'ngrambf_v1':
       return `ngrambf_v1(${index.ngramSize}, ${index.sizeBytes}, ${index.hashFunctions}, ${index.randomSeed})`
+    case 'text':
+      return renderTextIndexType(index)
   }
 }
 

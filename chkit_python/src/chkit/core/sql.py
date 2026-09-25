@@ -21,12 +21,14 @@ from chkit.core.model import (
     SkipIndexDefinition,
     SkipIndexMinmax,
     SkipIndexSet,
+    SkipIndexText,
     SkipIndexTokenBF,
     TableDefinition,
     TableRef,
     ViewDefinition,
 )
 from chkit.core.projection import render_projection_body
+from chkit.core.text_index import render_text_index_type
 from chkit.core.validate import assert_valid_definitions
 
 _COLUMN_ADAPTER: TypeAdapter[ColumnDefinition] = TypeAdapter(ColumnDefinition)
@@ -96,11 +98,12 @@ def _render_index_type(idx: SkipIndexDefinition) -> str:
     if isinstance(idx, SkipIndexSet):
         return f"set({idx.max_rows})"
     if isinstance(idx, SkipIndexBloomFilter):
-        if idx.false_positive_rate is not None:
-            return f"bloom_filter({idx.false_positive_rate})"
-        return "bloom_filter"
+        rate = idx.false_positive_rate
+        return "bloom_filter" if rate is None else f"bloom_filter({rate})"
     if isinstance(idx, SkipIndexTokenBF):
         return f"tokenbf_v1({idx.size_bytes}, {idx.hash_functions}, {idx.random_seed})"
+    if isinstance(idx, SkipIndexText):
+        return render_text_index_type(idx)
     # SkipIndexNgramBF is the only remaining variant in the discriminated union.
     return (
         f"ngrambf_v1({idx.ngram_size}, {idx.size_bytes}, {idx.hash_functions}, "

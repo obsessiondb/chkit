@@ -29,6 +29,7 @@ from chkit.core.model import (
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.text_index import render_text_index_type
 
 _MIN_QUOTED_LEN = 2
 
@@ -259,6 +260,8 @@ def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:
             f"tokenbf_v1({index.size_bytes}, "
             f"{index.hash_functions}, {index.random_seed})"
         )
+    if index.type == "text":
+        return render_text_index_type(index)
     return (
         f"ngrambf_v1({index.ngram_size}, {index.size_bytes}, "
         f"{index.hash_functions}, {index.random_seed})"

@@ -538,6 +538,17 @@ _INDEX_CASES: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
+        "text",
+        {
+            "name": "idx_text",
+            "expression": "lower(name)",
+            "type": "text",
+            "tokenizer": "ngrams(3)",
+            "preprocessor": "lower(name)",
+            "granularity": 100000000,
+        },
+    ),
+    (
         "expression index",
         {
             "name": "idx_lower",
@@ -976,6 +987,17 @@ _ALTER_ADD_INDEX_CASES: list[tuple[str, dict[str, Any]]] = [
             "hashFunctions": 2,
             "randomSeed": 0,
             "granularity": 1,
+        },
+    ),
+    (
+        "text",
+        {
+            "name": "idx_text",
+            "expression": "lower(name)",
+            "type": "text",
+            "tokenizer": "ngrams(3)",
+            "preprocessor": "lower(name)",
+            "granularity": 100000000,
         },
     ),
 ]
