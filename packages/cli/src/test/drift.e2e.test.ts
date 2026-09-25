@@ -25,6 +25,10 @@ function renderUniqueProjectionSchema(database: string, usersTableName: string):
   return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  uniqueKey: ['id'],\n  projections: [{ name: 'p_recent', query: 'SELECT id ORDER BY id DESC LIMIT 10' }],\n})\n\nexport default schema(users)\n`
 }
 
+function renderIndexedSchema(database: string, usersTableName: string): string {
+  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  indexes: [\n    { name: 'idx_set', expression: 'email', type: 'set', maxRows: 0, granularity: 1 },\n    { name: 'idx_bloom', expression: 'email', type: 'bloom_filter', falsePositiveRate: 0.01, granularity: 1 },\n    { name: 'idx_ngram', expression: 'lower(email)', type: 'ngrambf_v1', ngramSize: 3, sizeBytes: 4096, hashFunctions: 2, randomSeed: 0, granularity: 1 },\n  ],\n})\n\nexport default schema(users)\n`
+}
+
 interface E2EFixture {
   dir: string
   configPath: string
@@ -325,6 +329,54 @@ describe('@chkit/cli drift depth env e2e', () => {
         expect(checkPayload.drifted).toBe(true)
         expect(checkPayload.policy.failOnDrift).toBe(true)
         expect(checkPayload.failedChecks).toContain('schema_drift')
+      } finally {
+        await rm(fixture.dir, { recursive: true, force: true })
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+        await executor.close()
+      }
+    },
+    240_000
+  )
+
+  test(
+    'reports no drift for parameterised skipping indexes right after migrate',
+    async () => {
+      const executor = createLiveExecutor(liveEnv)
+      const database = liveEnv.clickhouseDatabase
+      const journalTable = createJournalTableName('drift_index_args')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+      const prefix = createPrefix('drift_index_args')
+      const usersTable = `${prefix}users`
+      const fixture = await createFixture({ database, usersTableName: usersTable })
+
+      try {
+        await writeFile(fixture.schemaPath, renderIndexedSchema(database, usersTable), 'utf8')
+        const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+        expect(generated.exitCode).toBe(0)
+
+        const executed = await runCliWithRetry(
+          fixture.dir,
+          ['migrate', '--config', fixture.configPath, '--execute', '--json'],
+          { extraEnv: cliEnv }
+        )
+        if (executed.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic('migrate --execute failed', executed))
+        }
+        await waitForTable(executor, database, usersTable)
+
+        const driftResult = runCli(
+          fixture.dir,
+          ['drift', '--config', fixture.configPath, '--table', `${database}.${usersTable}`, '--json'],
+          cliEnv
+        )
+        expect(driftResult.exitCode).toBe(0)
+        const driftPayload = JSON.parse(driftResult.stdout) as {
+          drifted: boolean
+          tableDrift: Array<{ table: string; reasonCodes: string[] }>
+        }
+        expect(driftPayload.tableDrift).toEqual([])
+        expect(driftPayload.drifted).toBe(false)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
         await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)

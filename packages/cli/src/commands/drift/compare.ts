@@ -220,9 +220,23 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   }
 }
 
+// chkit renders `INDEX name (expr)`, and ClickHouse keeps those parentheses in
+// system.data_skipping_indices.expr. Strip one pair only when it encloses the
+// whole expression, so `(a) + (b)` stays intact.
+function stripEnclosingParens(value: string): string {
+  if (!value.startsWith('(') || !value.endsWith(')')) return value
+  let depth = 0
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '(') depth++
+    else if (value[i] === ')') depth--
+    if (depth === 0 && i < value.length - 1) return value
+  }
+  return value.slice(1, -1).trim()
+}
+
 function normalizeIndexShape(index: SkipIndexDefinition): string {
   return [
-    `expr=${normalizeSQLFragment(index.expression)}`,
+    `expr=${stripEnclosingParens(normalizeSQLFragment(index.expression))}`,
     `type=${renderIndexTypeFingerprint(index)}`,
     `granularity=${index.granularity}`,
   ].join('|')
