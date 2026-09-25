@@ -249,6 +249,20 @@ def test_table_shape_detects_index_mismatch() -> None:
     assert "index_mismatch" in detail.reason_codes
 
 
+def test_table_shape_ignores_stored_enclosing_index_parens() -> None:
+    expected_idx = SkipIndexMinmax(name="idx_x", expression="lower(x)", granularity=1)
+    stored_idx = SkipIndexMinmax(name="idx_x", expression="(lower(x))", granularity=1)
+    assert compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[stored_idx])) is None
+
+
+def test_table_shape_keeps_parens_that_do_not_enclose_the_expression() -> None:
+    expected_idx = SkipIndexMinmax(name="idx_x", expression="a || b", granularity=1)
+    stored_idx = SkipIndexMinmax(name="idx_x", expression="(a) || (b)", granularity=1)
+    detail = compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[stored_idx]))
+    assert detail is not None
+    assert "index_mismatch" in detail.reason_codes
+
+
 def test_table_shape_detects_setting_mismatch() -> None:
     detail = compare_table_shape(
         _t(settings={"index_granularity": 8192}),

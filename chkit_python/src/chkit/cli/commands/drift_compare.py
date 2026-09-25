@@ -265,10 +265,29 @@ def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:
     )
 
 
+def _strip_enclosing_parens(value: str) -> str:
+    """Drop one pair of parentheses only when it encloses the whole value.
+
+    chkit renders ``INDEX name (expr)`` and ClickHouse keeps those parentheses
+    in ``system.data_skipping_indices.expr``; ``(a) || (b)`` stays as written.
+    """
+    if not (value.startswith("(") and value.endswith(")")):
+        return value
+    depth = 0
+    for i, ch in enumerate(value):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and i < len(value) - 1:
+            return value
+    return value[1:-1].strip()
+
+
 def _normalize_index_shape(index: SkipIndexDefinition) -> str:
     return "|".join(
         [
-            f"expr={normalize_sql_fragment(index.expression)}",
+            f"expr={_strip_enclosing_parens(normalize_sql_fragment(index.expression))}",
             f"type={_render_index_type_fingerprint(index)}",
             f"granularity={index.granularity}",
         ]
