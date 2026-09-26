@@ -370,7 +370,7 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
         f"FROM system.columns WHERE database IN ({quoted})"
     ).rows
     index_rows_raw = client.query(
-        f"SELECT database, table, name, expr, type, granularity "
+        f"SELECT database, table, name, expr, type_full AS type, granularity "
         f"FROM system.data_skipping_indices WHERE database IN ({quoted})"
     ).rows
 
