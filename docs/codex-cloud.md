@@ -109,15 +109,14 @@ Validate this environment without editing files or pushing changes.
 Run gh auth status, gh api repos/obsessiondb/chkit --jq .full_name,
 git ls-remote origin HEAD, and curl --noproxy '*' -fsS
 --user default:chkit-ci 'http://127.0.0.1:8123/?query=SELECT%201'.
-Then run bun run check:workspace-deps,
-bunx turbo run typecheck lint test build --concurrency=1,
-and bun run check:packed-deps.
+Then run bash scripts/codex-cloud-verify.sh.
 Report each result and any failures.
 ```
 
-Use the direct Turbo command here: `bun run verify` invokes Doppler. Running one
-package task at a time avoids contention with the CLI suite's 15-second test
-timeouts; the tests and their time limits are unchanged. The replicated
+Use this verification script here: `bun run verify` invokes Doppler. It runs one
+package task and one concurrent test per file at a time to reduce contention with
+the CLI suite's 15-second test timeouts. It runs all main CI checks with the
+existing tests, assertions, and time limits unchanged. The replicated
 cluster suites under `test/cluster/` are separate, opt-in tests outside the main CI
 check and are not provisioned by these scripts.
 
