@@ -13,6 +13,7 @@ import type {
 import { renderCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
+import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderDefault(value: string | number | boolean): string {
@@ -44,6 +45,8 @@ function renderKeyClauseColumns(columns: string[], columnNames: Set<string>): st
 
 function renderIndexType(idx: SkipIndexDefinition): string {
   switch (idx.type) {
+    case 'text':
+      return renderTextIndexType(idx)
     case 'minmax':
       return 'minmax'
     case 'set':
@@ -63,7 +66,7 @@ function renderTableSQL(def: TableDefinition): string {
   const columns = def.columns.map(renderColumn)
   const indexes = (def.indexes ?? []).map(
     (idx) =>
-      `INDEX \`${idx.name}\` (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.granularity}`
+      `INDEX \`${idx.name}\` (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.type === 'text' ? TEXT_INDEX_GRANULARITY : idx.granularity}`
   )
   const projections = (def.projections ?? []).map(
     (projection) => `PROJECTION \`${projection.name}\` ${renderProjectionBody(projection)}`
@@ -218,7 +221,7 @@ export function renderAlterRemoveCodec(def: TableDefinition, columnName: string)
 }
 
 export function renderAlterAddIndex(def: TableDefinition, index: SkipIndexDefinition): string {
-  return `ALTER TABLE ${def.database}.${def.name} ADD INDEX IF NOT EXISTS \`${index.name}\` (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${index.granularity};`
+  return `ALTER TABLE ${def.database}.${def.name} ADD INDEX IF NOT EXISTS \`${index.name}\` (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${index.type === 'text' ? TEXT_INDEX_GRANULARITY : index.granularity};`
 }
 
 export function renderAlterDropIndex(def: TableDefinition, indexName: string): string {

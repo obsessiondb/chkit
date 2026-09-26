@@ -209,12 +209,33 @@ class SkipIndexNgramBF(_SkipIndexBase):
     )
 
 
+class SkipIndexText(_SkipIndexBase):
+    """Full-text index (26.2+); ClickHouse fixes granularity per part."""
+
+    type: Literal["text"] = "text"
+    granularity: int = 100_000_000
+    tokenizer: str
+    preprocessor: str | None = None
+    postprocessor: str | None = None
+    support_phrase_search: bool | None = Field(default=None, alias="supportPhraseSearch")
+    dictionary_block_size: int | None = Field(default=None, alias="dictionaryBlockSize")
+    dictionary_block_frontcoding_compression: bool | None = Field(
+        default=None, alias="dictionaryBlockFrontcodingCompression"
+    )
+    posting_list_block_size: int | None = Field(default=None, alias="postingListBlockSize")
+    posting_list_codec: Literal["none", "bitpacking"] | None = Field(default=None, alias="postingListCodec")
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True,
+                             validate_assignment=True, populate_by_name=True)
+
+
 SkipIndexDefinition: TypeAlias = Annotated[
     SkipIndexMinmax
     | SkipIndexSet
     | SkipIndexBloomFilter
     | SkipIndexTokenBF
-    | SkipIndexNgramBF,
+    | SkipIndexNgramBF
+    | SkipIndexText,
     Field(discriminator="type"),
 ]
 
@@ -652,6 +673,7 @@ ValidationIssueCode: TypeAlias = Literal[
     "duplicate_object_name",
     "duplicate_column_name",
     "duplicate_index_name",
+    "text_index_invalid_parameters",
     "duplicate_projection_name",
     "projection_ambiguous_kind",
     "projection_empty_index",

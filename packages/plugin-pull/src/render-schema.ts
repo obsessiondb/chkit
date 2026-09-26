@@ -212,6 +212,13 @@ function renderIndex(index: SkipIndexDefinition): string {
     `type: ${renderString(index.type)}`,
   ]
   switch (index.type) {
+    case 'text':
+      for (const field of ['tokenizer', 'preprocessor', 'postprocessor', 'supportPhraseSearch',
+        'dictionaryBlockSize', 'dictionaryBlockFrontcodingCompression', 'postingListBlockSize', 'postingListCodec'] as const) {
+        const value = index[field]
+        if (value !== undefined) parts.push(`${field}: ${typeof value === 'string' ? renderString(value) : value}`)
+      }
+      break
     case 'minmax':
       break
     case 'set':
@@ -238,7 +245,7 @@ function renderIndex(index: SkipIndexDefinition): string {
       )
       break
   }
-  parts.push(`granularity: ${index.granularity}`)
+  if (index.type !== 'text') parts.push(`granularity: ${index.granularity}`)
   return `{ ${parts.join(', ')} }`
 }
 

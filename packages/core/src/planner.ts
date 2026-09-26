@@ -28,6 +28,7 @@ import {
   renderDictionarySQL,
   toCreateSQL,
 } from './sql.js'
+import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
@@ -414,7 +415,9 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.indexes ?? [],
     newDef.indexes ?? [],
     (index) => index.name,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    (left, right) => left.type === 'text' && right.type === 'text'
+      ? textIndexFingerprint(left) === textIndexFingerprint(right)
+      : JSON.stringify(left) === JSON.stringify(right)
   )
   for (const index of indexDiff.added) {
     ops.push( {

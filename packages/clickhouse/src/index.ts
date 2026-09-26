@@ -6,6 +6,8 @@ import {
 	type ProjectionDefinition,
 	parseCodec,
 	type SkipIndexDefinition,
+	parseTextIndexParams,
+	normalizeTextIndexSQL,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
@@ -205,6 +207,7 @@ export function normalizeColumnFromSystemRow(
 }
 
 type ParsedIndexShape =
+	| ({ type: 'text' } & ReturnType<typeof parseTextIndexParams>)
 	| { type: 'minmax' }
 	| { type: 'set'; maxRows: number }
 	| { type: 'bloom_filter'; falsePositiveRate?: number }
@@ -231,8 +234,9 @@ function splitArgs(args: string | undefined): number[] {
 }
 
 function parseIndexType(value: string): ParsedIndexShape {
-	const match = value.match(/^(\w+)\((.+)\)$/)
+	const match = value.match(/^(\w+)\((.*)\)$/s)
 	const baseName = match?.[1] ?? value
+	if (baseName === 'text') return { type: 'text', ...parseTextIndexParams(match?.[2] ?? '') }
 	const args = splitArgs(match?.[2])
 
 	switch (baseName) {
@@ -268,7 +272,7 @@ export function normalizeIndexFromSystemRow(
 	const parsed = parseIndexType(row.type)
 	return {
 		name: row.name,
-		expression: normalizeSQLFragment(row.expr),
+		expression: parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr),
 		granularity: row.granularity,
 		...parsed,
 	}

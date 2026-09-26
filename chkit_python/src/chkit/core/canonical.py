@@ -26,6 +26,7 @@ from chkit.core.model import (
 )
 from chkit.core.projection import canonicalize_projection
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.text_index import canonicalize_text_index
 
 _T = TypeVar("_T")
 
@@ -63,6 +64,8 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
 
 
 def _canonicalize_index(index: SkipIndexDefinition) -> SkipIndexDefinition:
+    if index.type == "text":
+        return canonicalize_text_index(index)
     return index.model_copy(update={"expression": normalize_sql_fragment(index.expression)})
 
 
