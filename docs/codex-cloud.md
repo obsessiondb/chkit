@@ -116,8 +116,10 @@ Report each result and any failures.
 Use this verification script here: `bun run verify` invokes Doppler. It runs one
 package task at a time and runs the complete CLI suite separately without Bun's
 parallel workers. This avoids the CLI timeout and Bun `epoll_ctl` errors observed
-in cloud verification. It runs all main CI checks with the existing tests,
-assertions, and time limits unchanged, including the CLI's 15-second timeout. The replicated
+in cloud verification; the latter matches this
+[upstream Bun issue](https://github.com/oven-sh/bun/issues/37968).
+It runs all main CI checks with the existing tests, assertions, and time limits
+unchanged, including the CLI's 15-second timeout. The replicated
 cluster suites under `test/cluster/` are separate, opt-in tests outside the main CI
 check and are not provisioned by these scripts.
 
@@ -138,8 +140,23 @@ Node.js 22, Bun 1.3.13, and ClickHouse 26.3.34.136:
   the existing test timeout and passed.
 
 GitHub token authentication was not exercised: no personal credentials were
-copied into the test container. The real cloud environment uses a different base
-image/architecture and still needs its own setup and authentication verification.
+copied into the test container.
+
+## Cloud validation
+
+Validated in the actual Codex Cloud environment on September 26, 2026, with
+Bun 1.3.13, Node.js 22.22.2, and ClickHouse 26.3.34.136:
+
+- Fresh setup and maintenance recovery after stopping ClickHouse passed. Both
+  chunking fixture tables were restored to 10,000 rows.
+- At commit `754f87d`, `bash scripts/codex-cloud-verify.sh` exited successfully:
+  all 31 build/lint/typecheck tasks and all 13 tasks in the non-CLI test invocation
+  passed. The complete CLI suite passed 281 tests across 52 files.
+- All 1,068 tests passed with zero failures. Both dependency checks passed for
+  all 10 publishable packages. No test timeout or assertion was changed.
+- Public Git remote access passed. Authenticated `gh` and Git push access could
+  not pass because the saved environment had no `GITHUB_TOKEN` secret. Save that
+  secret, reset the environment cache, and verify authentication in a fresh task.
 
 The Git authentication approach is adapted from the
 [community guide](https://community.openai.com/t/how-to-set-up-git-and-github-cli-gh-for-codex-web-cloud/1371830).
