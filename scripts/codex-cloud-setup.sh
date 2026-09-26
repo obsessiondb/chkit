@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Codex Cloud Setup script: bash scripts/codex-cloud-setup.sh
+# Codex Cloud setup: bash scripts/codex-cloud-setup.sh
 # Target: the Linux universal image, running as root at the repository root.
 set +x
 set -euo pipefail
+printf 'Codex Cloud setup\n'
 
 # Keep the token out of installer subprocess environments.
 chkit_github_token="${GITHUB_TOKEN:-}"
