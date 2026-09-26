@@ -114,9 +114,10 @@ Report each result and any failures.
 ```
 
 Use this verification script here: `bun run verify` invokes Doppler. It runs one
-package task and one concurrent test per file at a time to reduce contention with
-the CLI suite's 15-second test timeouts. It runs all main CI checks with the
-existing tests, assertions, and time limits unchanged. The replicated
+package task at a time and runs the complete CLI suite separately without Bun's
+parallel workers. This avoids the CLI timeout and Bun `epoll_ctl` errors observed
+in cloud verification. It runs all main CI checks with the existing tests,
+assertions, and time limits unchanged, including the CLI's 15-second timeout. The replicated
 cluster suites under `test/cluster/` are separate, opt-in tests outside the main CI
 check and are not provisioned by these scripts.
 
