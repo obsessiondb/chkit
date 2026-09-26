@@ -47,7 +47,11 @@ printf 'deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=%s] https
 apt-get update -qq
 chkit_clickhouse_version="$(apt-cache madison clickhouse-common-static | awk '$3 ~ /^26\.3\./ && !found { print $3; found = 1 }')"
 test -n "$chkit_clickhouse_version" || { echo 'ClickHouse 26.3 package not found.' >&2; exit 1; }
-apt-get install -y -qq \
+# The package installer interprets CLICKHOUSE_USER/GROUP as Unix service accounts.
+# Keep the database connection variables configured in Codex out of this process.
+env -u CLICKHOUSE_USER -u CLICKHOUSE_GROUP -u CLICKHOUSE_PASSWORD \
+  -u CLICKHOUSE_DB -u CLICKHOUSE_URL -u CLICKHOUSE_HOST \
+  apt-get install -y -qq \
   "clickhouse-common-static=$chkit_clickhouse_version" \
   "clickhouse-client=$chkit_clickhouse_version" \
   "clickhouse-server=$chkit_clickhouse_version"
