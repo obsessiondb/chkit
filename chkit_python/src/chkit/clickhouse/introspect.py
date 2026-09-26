@@ -45,9 +45,11 @@ from chkit.core.model import (
     SkipIndexMinmax,
     SkipIndexNgramBF,
     SkipIndexSet,
+    SkipIndexText,
     SkipIndexTokenBF,
 )
 from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.text_index import parse_text_index_params
 
 SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view", "dictionary"]
 
@@ -122,7 +124,7 @@ class IntrospectedTable:
 
 
 _NULLABLE_RE = re.compile(r"^Nullable\((.+)\)$")
-_INDEX_TYPE_RE = re.compile(r"^(\w+)\((.+)\)$")
+_INDEX_TYPE_RE = re.compile(r"^(\w+)\((.+)\)$", re.DOTALL)
 
 
 def infer_schema_kind_from_engine(engine: str) -> SchemaObjectKind | None:
@@ -214,6 +216,11 @@ def normalize_index_from_system_row(row: SystemSkippingIndexRow) -> SkipIndexDef
 
     if base_name == "minmax":
         return SkipIndexMinmax(**base_payload)
+
+    if base_name == "text":
+        return SkipIndexText.model_validate(
+            {**base_payload, **parse_text_index_params(args_str or "")}
+        )
 
     if base_name == "bloom_filter":
         floats = _split_float_args(args_str)
@@ -370,7 +377,7 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
         f"FROM system.columns WHERE database IN ({quoted})"
     ).rows
     index_rows_raw = client.query(
-        f"SELECT database, table, name, expr, type, granularity "
+        f"SELECT database, table, name, expr, type_full AS type, granularity "
         f"FROM system.data_skipping_indices WHERE database IN ({quoted})"
     ).rows
 

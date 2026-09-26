@@ -5,6 +5,7 @@ import {
 	normalizeSQLFragment,
 	type ProjectionDefinition,
 	parseCodec,
+	parseTextIndexParams,
 	type SkipIndexDefinition,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
@@ -221,6 +222,7 @@ type ParsedIndexShape =
 			hashFunctions: number
 			randomSeed: number
 	  }
+	| ({ type: 'text' } & ReturnType<typeof parseTextIndexParams>)
 
 function splitArgs(args: string | undefined): number[] {
 	if (args === undefined) return []
@@ -231,8 +233,11 @@ function splitArgs(args: string | undefined): number[] {
 }
 
 function parseIndexType(value: string): ParsedIndexShape {
-	const match = value.match(/^(\w+)\((.+)\)$/)
+	const match = value.match(/^(\w+)\((.+)\)$/s)
 	const baseName = match?.[1] ?? value
+	if (baseName === 'text') {
+		return { type: 'text', ...parseTextIndexParams(match?.[2] ?? '') }
+	}
 	const args = splitArgs(match?.[2])
 
 	switch (baseName) {
@@ -887,7 +892,7 @@ FROM system.columns
 WHERE database IN (${quotedDatabases})`,
 			)
 			const indexes = await this.query<SystemSkippingIndexRow>(
-				`SELECT database, table, name, expr, type, granularity
+				`SELECT database, table, name, expr, type_full AS type, granularity
 FROM system.data_skipping_indices
 WHERE database IN (${quotedDatabases})`,
 			)

@@ -3,6 +3,7 @@ import {
   isIndexProjection,
   normalizeProjectionIndex,
   normalizeSQLFragment,
+  renderTextIndexType,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
@@ -217,12 +218,28 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
       return `tokenbf_v1(${index.sizeBytes}, ${index.hashFunctions}, ${index.randomSeed})`
     case 'ngrambf_v1':
       return `ngrambf_v1(${index.ngramSize}, ${index.sizeBytes}, ${index.hashFunctions}, ${index.randomSeed})`
+    case 'text':
+      return renderTextIndexType(index)
   }
+}
+
+// chkit renders `INDEX name (expr)`, and ClickHouse keeps those parentheses in
+// system.data_skipping_indices.expr. Strip one pair only when it encloses the
+// whole expression, so `(a) + (b)` stays intact.
+function stripEnclosingParens(value: string): string {
+  if (!value.startsWith('(') || !value.endsWith(')')) return value
+  let depth = 0
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '(') depth++
+    else if (value[i] === ')') depth--
+    if (depth === 0 && i < value.length - 1) return value
+  }
+  return value.slice(1, -1).trim()
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition): string {
   return [
-    `expr=${normalizeSQLFragment(index.expression)}`,
+    `expr=${stripEnclosingParens(normalizeSQLFragment(index.expression))}`,
     `type=${renderIndexTypeFingerprint(index)}`,
     `granularity=${index.granularity}`,
   ].join('|')

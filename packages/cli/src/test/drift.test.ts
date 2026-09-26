@@ -245,6 +245,52 @@ describe('@chkit/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  // chkit renders `INDEX name (expr)` and ClickHouse keeps the parentheses in
+  // system.data_skipping_indices.expr, so a freshly applied index read back as
+  // drift.
+  test('treats a skip index as clean when ClickHouse keeps the enclosing parens', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'a', type: 'String' },
+        { name: 'b', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      indexes: [
+        { name: 'idx_lower', expression: 'lower(a)', type: 'ngrambf_v1', ngramSize: 3, sizeBytes: 4096, hashFunctions: 2, randomSeed: 0, granularity: 1 },
+        { name: 'idx_sum', expression: '(a) || (b)', type: 'set', maxRows: 0, granularity: 1 },
+      ],
+    })
+
+    const liveLower = { name: 'idx_lower', expression: '(lower(a))', type: 'ngrambf_v1' as const, ngramSize: 3, sizeBytes: 4096, hashFunctions: 2, randomSeed: 0, granularity: 1 }
+    const liveConcat = { name: 'idx_sum', expression: '((a) || (b))', type: 'set' as const, maxRows: 0, granularity: 1 }
+    const actual = {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'a', type: 'String' },
+        { name: 'b', type: 'String' },
+      ],
+      settings: {},
+      indexes: [liveLower, liveConcat],
+      projections: [],
+    }
+
+    expect(compareTableShape(expected, actual)).toBeNull()
+    expect(
+      compareTableShape(expected, {
+        ...actual,
+        indexes: [liveLower, { ...liveConcat, expression: '(a) || (b) || (a)' }],
+      })?.reasonCodes
+    ).toContain('index_mismatch')
+  })
+
   test('reports projection_mismatch when an index projection changes type', () => {
     const expected = table({
       database: 'app',

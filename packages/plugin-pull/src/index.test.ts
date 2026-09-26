@@ -244,6 +244,14 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
             randomSeed: 0,
             granularity: 1,
           },
+          {
+            name: 'idx_text',
+            expression: 'lower(body)',
+            type: 'text',
+            tokenizer: 'ngrams(3)',
+            postingListCodec: 'bitpacking',
+            granularity: 100000000,
+          },
         ],
       },
     ])
@@ -259,6 +267,9 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     )
     expect(content).toContain(
       'type: "ngrambf_v1", ngramSize: 3, sizeBytes: 256, hashFunctions: 2, randomSeed: 0, granularity: 1'
+    )
+    expect(content).toContain(
+      'type: "text", tokenizer: "ngrams(3)", postingListCodec: "bitpacking", granularity: 100000000'
     )
     expect(content).not.toContain('typeArgs')
   })

@@ -76,6 +76,8 @@ interface SkipIndexBase {
  * - `bloom_filter([false_positive_rate])` — optional float, default 0.025
  * - `tokenbf_v1(size_bytes, n_hash, seed)` — 3 required ints
  * - `ngrambf_v1(n, size_bytes, n_hash, seed)` — 4 required ints
+ * - `text(tokenizer = ..., ...)` — named parameters; `tokenizer` is required
+ *   (ClickHouse 26.2+)
  *
  * ClickHouse 26+ requires `set(0)` not bare `set`; `maxRows` is required
  * so this is encoded naturally.
@@ -97,6 +99,18 @@ export type SkipIndexDefinition = SkipIndexBase &
         sizeBytes: number
         hashFunctions: number
         randomSeed: number
+      }
+    | {
+        type: 'text'
+        /** e.g. `ngrams(3)`, `splitByNonAlpha`, `splitByString([', '])` */
+        tokenizer: string
+        preprocessor?: string
+        postprocessor?: string
+        supportPhraseSearch?: boolean
+        dictionaryBlockSize?: number
+        dictionaryBlockFrontcodingCompression?: boolean
+        postingListBlockSize?: number
+        postingListCodec?: 'none' | 'bitpacking'
       }
   )
 
@@ -376,6 +390,7 @@ export type ValidationIssueCode =
   | 'duplicate_object_name'
   | 'duplicate_column_name'
   | 'duplicate_index_name'
+  | 'text_index_missing_tokenizer'
   | 'duplicate_projection_name'
   | 'projection_ambiguous_kind'
   | 'projection_empty_index'

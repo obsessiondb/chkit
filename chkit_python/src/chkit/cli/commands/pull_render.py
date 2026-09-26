@@ -99,6 +99,7 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
                     "bloom_filter": "SkipIndexBloomFilter",
                     "tokenbf_v1": "SkipIndexTokenBF",
                     "ngrambf_v1": "SkipIndexNgramBF",
+                    "text": "SkipIndexText",
                 }[idx.type]
             )
 
@@ -245,6 +246,21 @@ def _render_index(index: SkipIndexDefinition) -> str:
         parts.append(f"size_bytes={index.size_bytes}")
         parts.append(f"hash_functions={index.hash_functions}")
         parts.append(f"random_seed={index.random_seed}")
+    elif index.type == "text":
+        parts.append(f"tokenizer={_render_string(index.tokenizer)}")
+        for field in ("preprocessor", "postprocessor", "posting_list_codec"):
+            value = getattr(index, field)
+            if value is not None:
+                parts.append(f"{field}={_render_string(value)}")
+        for field in (
+            "support_phrase_search",
+            "dictionary_block_size",
+            "dictionary_block_frontcoding_compression",
+            "posting_list_block_size",
+        ):
+            value = getattr(index, field)
+            if value is not None:
+                parts.append(f"{field}={value}")
     parts.append(f"granularity={index.granularity}")
     type_class = {
         "minmax": "SkipIndexMinmax",
@@ -252,6 +268,7 @@ def _render_index(index: SkipIndexDefinition) -> str:
         "bloom_filter": "SkipIndexBloomFilter",
         "tokenbf_v1": "SkipIndexTokenBF",
         "ngrambf_v1": "SkipIndexNgramBF",
+        "text": "SkipIndexText",
     }[index.type]
     return f"{type_class}({', '.join(parts)})"
 

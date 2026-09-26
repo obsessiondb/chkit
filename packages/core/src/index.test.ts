@@ -1124,6 +1124,56 @@ describe('@chkit/core planner v1', () => {
     expect(sql).toContain('TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1')
   })
 
+  test('renders text index parameters in a fixed order', () => {
+    const docs = table({
+      database: 'app',
+      name: 'docs',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'title', type: 'String' },
+        { name: 'body', type: 'String' },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      indexes: [
+        { name: 'idx_title', expression: 'lower(title)', type: 'text', tokenizer: 'ngrams(3)', granularity: 100000000 },
+        {
+          name: 'idx_body',
+          expression: 'body',
+          type: 'text',
+          postingListCodec: 'bitpacking',
+          preprocessor: 'lower(body)',
+          tokenizer: "splitByString([', ', ';'])",
+          dictionaryBlockSize: 512,
+          supportPhraseSearch: true,
+          granularity: 100000000,
+        },
+      ],
+    })
+
+    const sql = toCreateSQL(docs)
+    expect(sql).toContain('TYPE text(tokenizer = ngrams(3)) GRANULARITY 100000000')
+    expect(sql).toContain(
+      "TYPE text(tokenizer = splitByString([', ', ';']), preprocessor = lower(body), support_phrase_search = 1, dictionary_block_size = 512, posting_list_codec = 'bitpacking') GRANULARITY 100000000"
+    )
+  })
+
+  test('reports a text index without a tokenizer', () => {
+    const issues = validateDefinitions([
+      table({
+        database: 'app',
+        name: 'docs',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'body', type: 'String' }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [{ name: 'idx_body', expression: 'body', type: 'text', tokenizer: ' ', granularity: 1 }],
+      }),
+    ])
+    expect(issues.map((issue) => issue.code)).toContain('text_index_missing_tokenizer')
+  })
+
   test('renders structured index args in ALTER ADD INDEX', () => {
     const oldDefs = [
       table({

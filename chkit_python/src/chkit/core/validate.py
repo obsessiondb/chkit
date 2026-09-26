@@ -86,6 +86,29 @@ def _validate_column_codec(
         )
 
 
+def _validate_indexes(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
+    index_seen: set[str] = set()
+    for index in definition.indexes or []:
+        if index.name in index_seen:
+            _push(
+                issues,
+                definition,
+                "duplicate_index_name",
+                f'Table {definition.database}.{definition.name} '
+                f'has duplicate index name "{index.name}"',
+            )
+            continue
+        index_seen.add(index.name)
+        if index.type == "text" and index.tokenizer.strip() == "":
+            _push(
+                issues,
+                definition,
+                "text_index_missing_tokenizer",
+                f'Text index "{index.name}" on {definition.database}.{definition.name} '
+                f"requires a tokenizer",
+            )
+
+
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
     column_seen: set[str] = set()
     column_set: set[str] = set()
@@ -103,18 +126,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
         column_set.add(column.name)
         _validate_column_codec(definition, column, issues)
 
-    index_seen: set[str] = set()
-    for index in definition.indexes or []:
-        if index.name in index_seen:
-            _push(
-                issues,
-                definition,
-                "duplicate_index_name",
-                f'Table {definition.database}.{definition.name} '
-                f'has duplicate index name "{index.name}"',
-            )
-            continue
-        index_seen.add(index.name)
+    _validate_indexes(definition, issues)
 
     projection_seen: set[str] = set()
     for projection in definition.projections or []:

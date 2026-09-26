@@ -10,6 +10,7 @@ import {
   createStatelessClickHouseClient,
   formatConnectionError,
   inferSchemaKindFromEngine,
+  normalizeIndexFromSystemRow,
   parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
@@ -510,6 +511,47 @@ ORDER BY a`
     expect(parseTTLFromCreateTableQuery(query)).toBe('ts + toIntervalYear(1)')
     expect(parseOrderByFromCreateTableQuery(query)).toBe('id')
     expect(parseSettingsFromCreateTableQuery(query)).toEqual({ index_granularity: '8192' })
+  })
+})
+
+describe('normalizeIndexFromSystemRow', () => {
+  const row = (type: string) => ({
+    database: 'app',
+    table: 'docs',
+    name: 'idx',
+    expr: '(body)',
+    type,
+    granularity: 100000000,
+  })
+
+  test('parses text index parameters from type_full in any order', () => {
+    expect(
+      normalizeIndexFromSystemRow(
+        row(
+          "text(preprocessor = lower(body), tokenizer = splitByString([', ', ';']), posting_list_codec = 'bitpacking', dictionary_block_size = 512, support_phrase_search = 1)"
+        )
+      )
+    ).toEqual({
+      name: 'idx',
+      expression: '(body)',
+      granularity: 100000000,
+      type: 'text',
+      tokenizer: "splitByString([', ', ';'])",
+      preprocessor: 'lower(body)',
+      postingListCodec: 'bitpacking',
+      dictionaryBlockSize: 512,
+      supportPhraseSearch: true,
+    })
+  })
+
+  test('parses ngrambf_v1 arguments from type_full', () => {
+    expect(normalizeIndexFromSystemRow(row('ngrambf_v1(3, 4096, 2, 0)'))).toMatchObject({
+      type: 'ngrambf_v1',
+      ngramSize: 3,
+      sizeBytes: 4096,
+      hashFunctions: 2,
+      randomSeed: 0,
+    })
   })
 })
 

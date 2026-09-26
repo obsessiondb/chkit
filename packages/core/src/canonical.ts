@@ -38,9 +38,14 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
 }
 
 function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
+  const expression = normalizeSQLFragment(index.expression)
+  if (index.type !== 'text') return { ...index, expression }
   return {
     ...index,
-    expression: normalizeSQLFragment(index.expression),
+    expression,
+    tokenizer: normalizeSQLFragment(index.tokenizer),
+    preprocessor: index.preprocessor ? normalizeSQLFragment(index.preprocessor) : undefined,
+    postprocessor: index.postprocessor ? normalizeSQLFragment(index.postprocessor) : undefined,
   }
 }
 

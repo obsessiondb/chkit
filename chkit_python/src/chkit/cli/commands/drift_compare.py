@@ -29,6 +29,7 @@ from chkit.core.model import (
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.text_index import render_text_index_type
 
 _MIN_QUOTED_LEN = 2
 
@@ -259,16 +260,37 @@ def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:
             f"tokenbf_v1({index.size_bytes}, "
             f"{index.hash_functions}, {index.random_seed})"
         )
+    if index.type == "text":
+        return render_text_index_type(index)
     return (
         f"ngrambf_v1({index.ngram_size}, {index.size_bytes}, "
         f"{index.hash_functions}, {index.random_seed})"
     )
 
 
+def _strip_enclosing_parens(value: str) -> str:
+    """Drop one pair of parentheses only when it encloses the whole value.
+
+    chkit renders ``INDEX name (expr)`` and ClickHouse keeps those parentheses
+    in ``system.data_skipping_indices.expr``; ``(a) || (b)`` stays as written.
+    """
+    if not (value.startswith("(") and value.endswith(")")):
+        return value
+    depth = 0
+    for i, ch in enumerate(value):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and i < len(value) - 1:
+            return value
+    return value[1:-1].strip()
+
+
 def _normalize_index_shape(index: SkipIndexDefinition) -> str:
     return "|".join(
         [
-            f"expr={normalize_sql_fragment(index.expression)}",
+            f"expr={_strip_enclosing_parens(normalize_sql_fragment(index.expression))}",
             f"type={_render_index_type_fingerprint(index)}",
             f"granularity={index.granularity}",
         ]

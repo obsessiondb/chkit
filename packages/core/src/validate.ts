@@ -105,6 +105,14 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       continue
     }
     indexSeen.add(index.name)
+    if (index.type === 'text' && index.tokenizer.trim() === '') {
+      pushValidationIssue(
+        issues,
+        def,
+        'text_index_missing_tokenizer',
+        `Text index "${index.name}" on ${def.database}.${def.name} requires a tokenizer`
+      )
+    }
   }
 
   const projectionSeen = new Set<string>()

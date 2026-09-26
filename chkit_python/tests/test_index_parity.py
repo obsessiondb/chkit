@@ -1378,3 +1378,71 @@ def test_no_issue_when_target_table_is_external() -> None:
     assert "refresh_append_required_for_replicated_target" not in {
         i.code for i in issues
     }
+
+
+def _docs_table(indexes: list[dict[str, Any]]) -> Any:
+    return table(
+        database="app",
+        name="docs",
+        columns=[
+            {"name": "id", "type": "UInt64"},
+            {"name": "title", "type": "String"},
+            {"name": "body", "type": "String"},
+        ],
+        engine="MergeTree()",
+        primaryKey=["id"],
+        orderBy=["id"],
+        indexes=indexes,
+    )
+
+
+def test_renders_text_index_parameters_in_a_fixed_order() -> None:
+    sql = to_create_sql(
+        _docs_table(
+            [
+                {
+                    "name": "idx_title",
+                    "expression": "lower(title)",
+                    "type": "text",
+                    "tokenizer": "ngrams(3)",
+                    "granularity": 100000000,
+                },
+                {
+                    "name": "idx_body",
+                    "expression": "body",
+                    "type": "text",
+                    "postingListCodec": "bitpacking",
+                    "preprocessor": "lower(body)",
+                    "tokenizer": "splitByString([', ', ';'])",
+                    "dictionaryBlockSize": 512,
+                    "supportPhraseSearch": True,
+                    "granularity": 100000000,
+                },
+            ]
+        )
+    )
+    assert "TYPE text(tokenizer = ngrams(3)) GRANULARITY 100000000" in sql
+    assert (
+        "TYPE text(tokenizer = splitByString([', ', ';']), preprocessor = lower(body), "
+        "support_phrase_search = 1, dictionary_block_size = 512, "
+        "posting_list_codec = 'bitpacking') GRANULARITY 100000000"
+    ) in sql
+
+
+def test_reports_a_text_index_without_a_tokenizer() -> None:
+    issues = validate_definitions(
+        [
+            _docs_table(
+                [
+                    {
+                        "name": "idx_body",
+                        "expression": "body",
+                        "type": "text",
+                        "tokenizer": " ",
+                        "granularity": 1,
+                    }
+                ]
+            )
+        ]
+    )
+    assert "text_index_missing_tokenizer" in [issue.code for issue in issues]

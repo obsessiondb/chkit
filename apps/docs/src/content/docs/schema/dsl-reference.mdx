@@ -358,7 +358,7 @@ Each entry in the `indexes` array is a `SkipIndexDefinition`. The shared base fi
 |-------|------|-------------|
 | `name` | `string` | Index name |
 | `expression` | `string` | Indexed expression |
-| `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1'` | Index type |
+| `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1' \| 'text'` | Index type |
 | `granularity` | `number` | Index granularity |
 
 Type-specific fields:
@@ -370,6 +370,7 @@ Type-specific fields:
 | `bloom_filter` | — | `falsePositiveRate: number` | Defaults to `0.025` when omitted |
 | `tokenbf_v1` | `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `tokenbf_v1(size_bytes, n_hash, seed)` |
 | `ngrambf_v1` | `ngramSize`, `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `ngrambf_v1(n, size_bytes, n_hash, seed)` |
+| `text` | `tokenizer: string` (SQL, e.g. `'splitByNonAlpha'`, `'ngrams(3)'`) | `preprocessor`, `postprocessor` (SQL `string`); `supportPhraseSearch`, `dictionaryBlockFrontcodingCompression` (`boolean`); `dictionaryBlockSize`, `postingListBlockSize` (`number`); `postingListCodec: 'none' \| 'bitpacking'` | Maps to `text(tokenizer = …, …)` in a fixed parameter order. Needs ClickHouse 26.2 or newer; `supportPhraseSearch` also needs the MergeTree setting `allow_experimental_text_index_phrase_search` |
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
