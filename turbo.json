@@ -16,6 +16,7 @@
     },
     "test": {
       "dependsOn": ["^build"],
+      "cache": false,
       "passThroughEnv": [
         "CLICKHOUSE_DB",
         "CLICKHOUSE_HOST",

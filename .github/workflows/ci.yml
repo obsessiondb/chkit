@@ -9,9 +9,36 @@ on:
 jobs:
   verify:
     runs-on: blacksmith-8vcpu-ubuntu-2404
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.3
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: chkit-ci
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --password chkit-ci --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CLICKHOUSE_URL: http://127.0.0.1:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: chkit-ci
+      CLICKHOUSE_DB: default
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure local ClickHouse
+        env:
+          CLICKHOUSE_CONTAINER: ${{ job.services.clickhouse.id }}
+        run: |
+          docker cp test/ci/clickhouse.xml "$CLICKHOUSE_CONTAINER:/etc/clickhouse-server/config.d/chkit-ci.xml"
+          docker exec "$CLICKHOUSE_CONTAINER" clickhouse-client --password "$CLICKHOUSE_PASSWORD" --query 'SYSTEM RELOAD CONFIG'
 
       - name: Setup Bun
         uses: ./.github/actions/setup
@@ -35,21 +62,61 @@ jobs:
         with:
           sarif_file: fallow-results.sarif
 
+      - name: Build test fixture dependencies
+        run: bunx turbo run build --filter=@chkit/clickhouse...
+
+      - name: Seed chunking test fixtures
+        run: bun run packages/plugin-backfill/src/chunking/e2e/seed-datasets.script.ts
+
       - name: Verify
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
-          CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
         run: bunx turbo run typecheck lint test build
 
       - name: Check packed tarball deps
         run: bun run check:packed-deps
 
+  obsessiondb:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Fixture tables are shared on the managed test database. Let an active
+    # run finish before another run reseeds them.
+    concurrency:
+      group: obsessiondb-tests
+      cancel-in-progress: false
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check ObsessionDB test configuration
+        run: |
+          : "${CLICKHOUSE_HOST:?Set the CLICKHOUSE_HOST repository secret}"
+          : "${CLICKHOUSE_PASSWORD:?Set the CLICKHOUSE_PASSWORD repository secret}"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup
+
+      - name: Build test fixture dependencies
+        run: bunx turbo run build --filter=@chkit/clickhouse...
+
+      - name: Seed chunking test fixtures
+        run: bun run packages/plugin-backfill/src/chunking/e2e/seed-datasets.script.ts
+
+      - name: Test against ObsessionDB
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+        run: bunx turbo run test
+
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: verify
+    needs: [verify, obsessiondb]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout

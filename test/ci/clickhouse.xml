@@ -1,0 +1,19 @@
+<clickhouse>
+    <!-- Backfill status queries use clusterAllReplicas('cluster', ...).
+         A single local replica exercises the same queries without Keeper. -->
+    <remote_servers>
+        <cluster>
+            <shard>
+                <replica>
+                    <host>127.0.0.1</host>
+                    <port>9000</port>
+                    <user>default</user>
+                    <password>chkit-ci</password>
+                </replica>
+            </shard>
+        </cluster>
+    </remote_servers>
+    <query_log>
+        <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+    </query_log>
+</clickhouse>
