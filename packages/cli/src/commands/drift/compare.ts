@@ -6,6 +6,7 @@ import {
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
+  textIndexFingerprint,
   type TableDefinition,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
@@ -205,6 +206,8 @@ function normalizeColumnShape(column: ColumnDefinition): string {
 
 function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   switch (index.type) {
+    case 'text':
+      return textIndexFingerprint(index)
     case 'minmax':
       return 'minmax'
     case 'set':
@@ -235,6 +238,7 @@ function stripEnclosingParens(value: string): string {
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition): string {
+  if (index.type === 'text') return textIndexFingerprint(index)
   return [
     `expr=${stripEnclosingParens(normalizeSQLFragment(index.expression))}`,
     `type=${renderIndexTypeFingerprint(index)}`,

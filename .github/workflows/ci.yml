@@ -77,6 +77,48 @@ jobs:
       - name: Check packed tarball deps
         run: bun run check:packed-deps
 
+  text-index:
+    name: Text indexes (ClickHouse ${{ matrix.clickhouse }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        clickhouse: ['26.3', '26.8']
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:${{ matrix.clickhouse }}
+        env:
+          CLICKHOUSE_PASSWORD: chkit-ci
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --password chkit-ci --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CLICKHOUSE_URL: http://127.0.0.1:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: chkit-ci
+      CLICKHOUSE_DB: default
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build test dependencies
+        run: bunx turbo run build --filter=chkit... --filter=@chkit/plugin-pull...
+      - name: Test TypeScript text indexes
+        run: bun test packages/core/src/text-index.test.ts packages/cli/src/test/text-index.e2e.test.ts
+      - name: Install Python test dependencies
+        run: python -m pip install -e './chkit_python[dev]'
+      - name: Test Python text indexes
+        working-directory: chkit_python
+        run: python -m pytest tests/test_text_index.py tests/test_text_index_e2e.py -q
+
   obsessiondb:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: verify
@@ -116,7 +158,7 @@ jobs:
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [verify, obsessiondb]
+    needs: [verify, obsessiondb, text-index]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout

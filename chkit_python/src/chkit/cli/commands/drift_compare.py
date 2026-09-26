@@ -29,6 +29,7 @@ from chkit.core.model import (
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 
 _MIN_QUOTED_LEN = 2
 
@@ -244,6 +245,8 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
 
 
 def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:
+    if index.type == "text":
+        return render_text_index_type(index)
     if index.type == "minmax":
         return "minmax"
     if index.type == "set":
@@ -285,6 +288,8 @@ def _strip_enclosing_parens(value: str) -> str:
 
 
 def _normalize_index_shape(index: SkipIndexDefinition) -> str:
+    if index.type == "text":
+        return text_index_fingerprint(index)
     return "|".join(
         [
             f"expr={_strip_enclosing_parens(normalize_sql_fragment(index.expression))}",

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add `SkipIndexText` for full-text index generation, introspection, pull, and drift.
+  Preserve quoted SQL literals, normalize ClickHouse’s fixed granularity, and reject
+  malformed or unsupported metadata. Exercise adversarial round trips and actual
+  indexed search results on ClickHouse 26.3 and 26.8.
+
 ## 0.2.0 — 2026-08-10
 
 **Full parity with the TypeScript chkit.** Every remaining gap is closed;

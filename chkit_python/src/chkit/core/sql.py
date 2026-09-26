@@ -27,6 +27,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import render_projection_body
+from chkit.core.text_index import TEXT_INDEX_GRANULARITY, render_text_index_type
 from chkit.core.validate import assert_valid_definitions
 
 _COLUMN_ADAPTER: TypeAdapter[ColumnDefinition] = TypeAdapter(ColumnDefinition)
@@ -91,14 +92,15 @@ def _render_key_clause_columns(columns: list[str], column_names: set[str]) -> st
 
 
 def _render_index_type(idx: SkipIndexDefinition) -> str:
+    if idx.type == "text":
+        return render_text_index_type(idx)
     if isinstance(idx, SkipIndexMinmax):
         return "minmax"
     if isinstance(idx, SkipIndexSet):
         return f"set({idx.max_rows})"
     if isinstance(idx, SkipIndexBloomFilter):
-        if idx.false_positive_rate is not None:
-            return f"bloom_filter({idx.false_positive_rate})"
-        return "bloom_filter"
+        rate = idx.false_positive_rate
+        return "bloom_filter" if rate is None else f"bloom_filter({rate})"
     if isinstance(idx, SkipIndexTokenBF):
         return f"tokenbf_v1({idx.size_bytes}, {idx.hash_functions}, {idx.random_seed})"
     # SkipIndexNgramBF is the only remaining variant in the discriminated union.
@@ -126,7 +128,8 @@ def _render_projection(p: ProjectionDefinition) -> str:
 def _render_index_line(idx: SkipIndexDefinition) -> str:
     return (
         f"INDEX `{idx.name}` ({idx.expression}) "
-        f"TYPE {_render_index_type(idx)} GRANULARITY {idx.granularity}"
+        f"TYPE {_render_index_type(idx)} GRANULARITY "
+        f"{TEXT_INDEX_GRANULARITY if idx.type == 'text' else idx.granularity}"
     )
 
 
@@ -344,7 +347,8 @@ def render_alter_add_index(definition: TableDefinition, index: IndexInput) -> st
     return (
         f"ALTER TABLE {definition.database}.{definition.name} "
         f"ADD INDEX IF NOT EXISTS `{normalized.name}` ({normalized.expression}) "
-        f"TYPE {_render_index_type(normalized)} GRANULARITY {normalized.granularity};"
+        f"TYPE {_render_index_type(normalized)} GRANULARITY "
+        f"{TEXT_INDEX_GRANULARITY if normalized.type == 'text' else normalized.granularity};"
     )
 
 

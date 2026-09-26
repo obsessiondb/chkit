@@ -358,8 +358,8 @@ Each entry in the `indexes` array is a `SkipIndexDefinition`. The shared base fi
 |-------|------|-------------|
 | `name` | `string` | Index name |
 | `expression` | `string` | Indexed expression |
-| `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1'` | Index type |
-| `granularity` | `number` | Index granularity |
+| `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1' \| 'text'` | Index type |
+| `granularity` | `number` | Required for other indexes; optional and ignored for `text`, which always uses `100000000` |
 
 Type-specific fields:
 
@@ -370,6 +370,51 @@ Type-specific fields:
 | `bloom_filter` | — | `falsePositiveRate: number` | Defaults to `0.025` when omitted |
 | `tokenbf_v1` | `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `tokenbf_v1(size_bytes, n_hash, seed)` |
 | `ngrambf_v1` | `ngramSize`, `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `ngrambf_v1(n, size_bytes, n_hash, seed)` |
+
+### Full-text indexes
+
+Use `type: 'text'` on ClickHouse 26.2 or newer. `tokenizer` is a required SQL
+expression, such as `splitByNonAlpha`, `ngrams(3)`, or `splitByString(['  ', ';'])`.
+Quoted whitespace, Unicode, and escaped characters retain their meaning through
+generation, pull, and drift checks. Granularity is automatic: ClickHouse indexes
+an entire part and ignores any supplied granularity.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `tokenizer` | `string` | Required SQL tokenizer |
+| `preprocessor` | `string` | Optional SQL expression applied before tokenization |
+| `postprocessor` | `string` | Optional SQL expression applied to each token; requires server support |
+| `supportPhraseSearch` | `boolean` | Store token positions; requires server support and the table setting `allow_experimental_text_index_phrase_search: 1` |
+| `dictionaryBlockSize` | `number` | Positive integer dictionary block size |
+| `dictionaryBlockFrontcodingCompression` | `boolean` | Enable or disable dictionary front coding |
+| `postingListBlockSize` | `number` | Positive integer posting-list block size |
+| `postingListCodec` | `'none' \| 'bitpacking'` | Posting-list compression |
+
+```ts
+indexes: [{
+  name: 'idx_body',
+  expression: 'body',
+  type: 'text',
+  tokenizer: "splitByString(['  ', ';'])",
+  preprocessor: 'lower(body)',
+}]
+```
+
+Python accepts the same dictionary fields, or
+`SkipIndexText(name="idx_body", expression="body", tokenizer="splitByNonAlpha")`.
+Snake-case names such as `posting_list_codec` are also accepted.
+
+Basic text indexes and tuning options are tested against ClickHouse 26.3 and 26.8.
+The newer `postprocessor` and `supportPhraseSearch` options are exercised on 26.8;
+26.2 availability of the index does not imply availability of every later option.
+ClickHouse remains responsible for validating tokenizer/function availability and
+server-specific parameter limits. Pull fails with an explicit error for unknown
+text-index parameters instead of silently discarding them.
+
+Adding or changing an index does not automatically index historical parts. Run
+`ALTER TABLE database.table MATERIALIZE INDEX idx_body` when historical data must
+be indexed; materialization consumes database resources. Existing rows remain
+queryable before materialization.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -405,7 +450,7 @@ Type-specific fields:
         },
     ]
     ```
-    Model classes are importable when dicts feel too loose: `SkipIndexMinmax`, `SkipIndexSet`, `SkipIndexBloomFilter`, `SkipIndexTokenBF`, `SkipIndexNgramBF`.
+    Model classes are importable when dicts feel too loose: `SkipIndexMinmax`, `SkipIndexSet`, `SkipIndexBloomFilter`, `SkipIndexTokenBF`, `SkipIndexNgramBF`, `SkipIndexText`.
   </TabItem>
 </Tabs>
 

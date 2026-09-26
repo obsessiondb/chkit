@@ -99,6 +99,7 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
                     "bloom_filter": "SkipIndexBloomFilter",
                     "tokenbf_v1": "SkipIndexTokenBF",
                     "ngrambf_v1": "SkipIndexNgramBF",
+                    "text": "SkipIndexText",
                 }[idx.type]
             )
 
@@ -245,13 +246,23 @@ def _render_index(index: SkipIndexDefinition) -> str:
         parts.append(f"size_bytes={index.size_bytes}")
         parts.append(f"hash_functions={index.hash_functions}")
         parts.append(f"random_seed={index.random_seed}")
-    parts.append(f"granularity={index.granularity}")
+    elif index.type == "text":
+        for field in ("tokenizer", "preprocessor", "postprocessor", "support_phrase_search",
+                      "dictionary_block_size", "dictionary_block_frontcoding_compression",
+                      "posting_list_block_size", "posting_list_codec"):
+            value = getattr(index, field)
+            if value is not None:
+                rendered = _render_string(value) if isinstance(value, str) else str(value)
+                parts.append(f"{field}={rendered}")
+    if index.type != "text":
+        parts.append(f"granularity={index.granularity}")
     type_class = {
         "minmax": "SkipIndexMinmax",
         "set": "SkipIndexSet",
         "bloom_filter": "SkipIndexBloomFilter",
         "tokenbf_v1": "SkipIndexTokenBF",
         "ngrambf_v1": "SkipIndexNgramBF",
+        "text": "SkipIndexText",
     }[index.type]
     return f"{type_class}({', '.join(parts)})"
 

@@ -68,6 +68,22 @@ interface SkipIndexBase {
   granularity: number
 }
 
+/** Full-text index. ClickHouse ignores granularity and uses one index per part. */
+export interface TextSkipIndex extends Omit<SkipIndexBase, 'granularity'> {
+  type: 'text'
+  /** SQL tokenizer, e.g. splitByNonAlpha or splitByString(['  ', ';']). */
+  tokenizer: string
+  granularity?: number
+  preprocessor?: string
+  /** Requires a ClickHouse version that supports postprocessing. */
+  postprocessor?: string
+  supportPhraseSearch?: boolean
+  dictionaryBlockSize?: number
+  dictionaryBlockFrontcodingCompression?: boolean
+  postingListBlockSize?: number
+  postingListCodec?: 'none' | 'bitpacking'
+}
+
 /**
  * Skip index with structured, discriminated args per type. Arg signatures
  * come from ClickHouse MergeTree docs:
@@ -76,11 +92,12 @@ interface SkipIndexBase {
  * - `bloom_filter([false_positive_rate])` — optional float, default 0.025
  * - `tokenbf_v1(size_bytes, n_hash, seed)` — 3 required ints
  * - `ngrambf_v1(n, size_bytes, n_hash, seed)` — 4 required ints
+ * - `text(tokenizer = ..., ...)` — named parameters, automatic granularity
  *
  * ClickHouse 26+ requires `set(0)` not bare `set`; `maxRows` is required
  * so this is encoded naturally.
  */
-export type SkipIndexDefinition = SkipIndexBase &
+export type SkipIndexDefinition = TextSkipIndex | SkipIndexBase &
   (
     | { type: 'minmax' }
     | { type: 'set'; maxRows: number }
@@ -376,6 +393,7 @@ export type ValidationIssueCode =
   | 'duplicate_object_name'
   | 'duplicate_column_name'
   | 'duplicate_index_name'
+  | 'text_index_invalid_parameters'
   | 'duplicate_projection_name'
   | 'projection_ambiguous_kind'
   | 'projection_empty_index'

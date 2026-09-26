@@ -65,6 +65,7 @@ from chkit.core.model import (
     SkipIndexMinmax,
     SkipIndexNgramBF,
     SkipIndexSet,
+    SkipIndexText,
     SkipIndexTokenBF,
     TableDefinition,
     TableRef,
@@ -92,6 +93,7 @@ def _introspected_table_to_definition(
         | SkipIndexBloomFilter
         | SkipIndexTokenBF
         | SkipIndexNgramBF
+        | SkipIndexText
         | dict[str, object]
     ] = list(item.indexes)
 

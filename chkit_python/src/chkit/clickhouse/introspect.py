@@ -45,9 +45,12 @@ from chkit.core.model import (
     SkipIndexMinmax,
     SkipIndexNgramBF,
     SkipIndexSet,
+    SkipIndexText,
     SkipIndexTokenBF,
 )
 from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.text_index import parse_text_index_params
+from chkit.core.text_index_sql import normalize_text_index_sql
 
 SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view", "dictionary"]
 
@@ -122,7 +125,7 @@ class IntrospectedTable:
 
 
 _NULLABLE_RE = re.compile(r"^Nullable\((.+)\)$")
-_INDEX_TYPE_RE = re.compile(r"^(\w+)\((.+)\)$")
+_INDEX_TYPE_RE = re.compile(r"^(\w+)\((.*)\)$", re.DOTALL)
 
 
 def infer_schema_kind_from_engine(engine: str) -> SchemaObjectKind | None:
@@ -211,6 +214,12 @@ def normalize_index_from_system_row(row: SystemSkippingIndexRow) -> SkipIndexDef
     match = _INDEX_TYPE_RE.match(row.type)
     base_name = match.group(1) if match is not None else row.type
     args_str = match.group(2) if match is not None else None
+
+    if base_name == "text":
+        base_payload["expression"] = normalize_text_index_sql(row.expr)
+        return SkipIndexText.model_validate(
+            {**base_payload, **parse_text_index_params(args_str or "")}
+        )
 
     if base_name == "minmax":
         return SkipIndexMinmax(**base_payload)

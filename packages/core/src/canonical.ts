@@ -13,6 +13,7 @@ import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
 import { canonicalizeCodec } from './codec.js'
 import { canonicalizeProjection } from './projection.js'
+import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
@@ -38,6 +39,7 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
 }
 
 function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
+  if (index.type === 'text') return canonicalizeTextIndex(index)
   return {
     ...index,
     expression: normalizeSQLFragment(index.expression),

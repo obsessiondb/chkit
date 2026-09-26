@@ -8,6 +8,14 @@ export {
 } from './canonical.js'
 export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'
+export {
+  TEXT_INDEX_GRANULARITY,
+  canonicalizeTextIndex,
+  normalizeTextIndexSQL,
+  parseTextIndexParams,
+  renderTextIndexType,
+  textIndexFingerprint,
+} from './text-index.js'
 export { splitTopLevelComma } from './key-clause.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'

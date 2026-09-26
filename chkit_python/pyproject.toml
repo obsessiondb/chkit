@@ -124,6 +124,9 @@ ignore = [
 # dispatch and per-operation-type branches are clearer as flat code than as
 # data-driven dispatch tables. PERF401 prefers comprehensions over append loops
 # but the imperative style is explicit and intentional here.
+# Text-index lexical scanning uses byte values and explicit parser state.
+"src/chkit/core/text_index_sql.py" = ["PLR0912", "PLR0915", "PLR2004"]
+"src/chkit/core/text_index.py" = ["PLR0912", "PLR2004"]
 "src/chkit/core/codec.py" = ["PLR0911", "PLR0912", "PLR2004", "E501"]
 "src/chkit/core/planner.py" = ["PLR0911", "PLR0912", "PERF401"]
 "src/chkit/core/model.py" = ["E501", "PLC0415"]

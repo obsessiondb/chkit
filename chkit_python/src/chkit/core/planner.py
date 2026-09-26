@@ -38,6 +38,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
 
 
@@ -232,6 +233,8 @@ def _index_identity(index: SkipIndexDefinition) -> str:
 
 
 def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> bool:
+    if left.type == "text" and right.type == "text":
+        return text_index_fingerprint(left) == text_index_fingerprint(right)
     return _index_identity(left) == _index_identity(right)
 
 

@@ -1,3 +1,4 @@
+import { renderTextIndexType } from './text-index.js'
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
@@ -105,6 +106,14 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       continue
     }
     indexSeen.add(index.name)
+    if (index.type === 'text') {
+      try {
+        renderTextIndexType(index)
+      } catch (error) {
+        pushValidationIssue(issues, def, 'text_index_invalid_parameters',
+          `Text index "${index.name}": ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
   }
 
   const projectionSeen = new Set<string>()
