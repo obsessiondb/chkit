@@ -62,7 +62,7 @@ bun run lint         # lint all packages
 
 ### E2E Tests
 
-E2E tests run against a live ObsessionDB instance. They require these environment variables (hard-fail, never skip):
+E2E tests run against a live ClickHouse instance, either local ClickHouse or ObsessionDB. They require these environment variables (hard-fail, never skip):
 
 - `CLICKHOUSE_HOST` or `CLICKHOUSE_URL` — ClickHouse endpoint
 - `CLICKHOUSE_PASSWORD` — authentication
@@ -79,7 +79,13 @@ Key conventions:
 
 ### CI
 
-CI runs a single **verify** job that executes `turbo run typecheck lint test build`. ClickHouse secrets are passed as environment variables for E2E tests. `turbo.json` passes through `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task.
+CI runs **verify** on every pull request and push to `main`, using a disposable ClickHouse 26.3 service container with local test credentials. It seeds the chunking fixtures and executes `turbo run typecheck lint test build`, so fork PRs do not need database secrets.
+
+`test/ci/clickhouse.xml` configures a one-node `cluster` for the backfill status queries and a short query-log flush interval. The separate replicated clusters in `test/cluster/` remain opt-in.
+
+After **verify** passes on a push to `main`, **obsessiondb** seeds the same fixtures and runs `turbo run test` against the managed test database using the existing `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
+
+`turbo.json` passes through `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
 
 ## Release
 
