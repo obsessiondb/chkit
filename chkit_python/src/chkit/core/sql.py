@@ -58,7 +58,7 @@ def _normalize_projection(projection: ProjectionInput) -> ProjectionDefinition:
     return projection
 
 
-def _render_default(value: str | int | float | bool) -> str:
+def render_default(value: str | int | float | bool) -> str:
     if isinstance(value, str):
         if value.startswith("fn:"):
             return value[3:]
@@ -73,7 +73,7 @@ def _render_column(col: ColumnDefinition) -> str:
     type_text = f"Nullable({col.type})" if col.nullable else f"{col.type}"
     out = f"`{col.name}` {type_text}"
     if col.default is not None:
-        out += f" {col.default_kind or 'DEFAULT'} {_render_default(col.default)}"
+        out += f" {col.default_kind or 'DEFAULT'} {render_default(col.default)}"
     elif col.default_kind == "EPHEMERAL":
         out += " EPHEMERAL"
     if col.comment is not None and len(col.comment) > 0:
@@ -254,7 +254,7 @@ def _render_dictionary_attribute(attr: DictionaryAttribute) -> str:
     if attr.expression is not None:
         out += f" EXPRESSION {attr.expression}"
     elif attr.default is not None:
-        out += f" DEFAULT {_render_default(attr.default)}"
+        out += f" DEFAULT {render_default(attr.default)}"
     if attr.hierarchical:
         out += " HIERARCHICAL"
     if attr.bidirectional:

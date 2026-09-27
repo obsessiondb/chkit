@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import SchemaDefinition, TableDefinition
+from chkit.core.model import ColumnDefinition, SchemaDefinition, TableDefinition
 
 
 def reconcile_column_expressions(
@@ -35,7 +35,7 @@ def reconcile_column_expressions(
             raise ValueError(
                 f"Cannot reconcile {key}: table must exist in both the snapshot and schema."
             )
-        columns = []
+        columns: list[ColumnDefinition] = []
         for column in before.columns:
             updated = next((item for item in after.columns if item.name == column.name), None)
             columns.append(

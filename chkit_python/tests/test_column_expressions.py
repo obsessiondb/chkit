@@ -299,3 +299,12 @@ def test_backfill_live_safety_gate(rows: list[dict[str, object]], message: str) 
         assert_backfill_target_safe(
             database="default", table="events", query=lambda sql, settings: rows
         )
+
+
+def test_synthetic_ephemeral_default_escaped_type() -> None:
+    col = normalize_column_from_system_row(SystemColumnRow(
+        database="default", table="events", name="raw", type="Enum8('a\\b' = 1)",
+        position=1, default_kind="EPHEMERAL",
+        default_expression="defaultValueOfTypeName('Enum8(\\'a\\\\b\\' = 1)')",
+    ))
+    assert col.default is None

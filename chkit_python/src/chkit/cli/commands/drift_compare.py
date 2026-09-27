@@ -29,7 +29,7 @@ from chkit.core.model import (
     TableDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql import _render_default
+from chkit.core.sql import render_default
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.text_index_sql import text_expression_fingerprint, text_sql_fingerprint
@@ -220,7 +220,7 @@ def summarize_drift_reasons(
 def _normalize_column_shape(column: ColumnDefinition) -> str:
     normalized_default = (
         "" if column.default is None
-        else text_sql_fingerprint(text_expression_fingerprint(_render_default(column.default)))
+        else text_sql_fingerprint(text_expression_fingerprint(render_default(column.default)))
     )
 
     parts = [

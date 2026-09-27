@@ -48,5 +48,8 @@
   },
   "optionalDependencies": {
     "@chkit/plugin-obsessiondb": "workspace:*"
+  },
+  "devDependencies": {
+    "@clickhouse/client": "^1.11.0"
   }
 }

@@ -49,3 +49,10 @@ test('unknown expression kinds fail explicitly instead of losing metadata', () =
 		}),
 	).toThrow('Unsupported column default kind')
 })
+
+test('synthetic EPHEMERAL defaults compare SQL literals with quotes and backslashes', () => {
+  const type = "Enum8('a\\b' = 1)"
+  const expression = "defaultValueOfTypeName('Enum8(\\'a\\\\b\\' = 1)')"
+  const column = normalizeColumnFromSystemRow({ database: 'default', table: 'events', name: 'raw', type, position: 1, default_kind: 'EPHEMERAL', default_expression: expression })
+  expect(column.default).toBeUndefined()
+})

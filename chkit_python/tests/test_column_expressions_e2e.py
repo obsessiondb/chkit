@@ -21,6 +21,7 @@ from chkit.clickhouse.introspect import (
 )
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
+from chkit_plugin_backfill.planner import assert_backfill_target_safe
 from chkit_plugin_codegen import generate_type_artifacts
 from tests.e2e_testkit import get_required_env
 
@@ -71,6 +72,9 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:
             order_by="id",
         )
         assert compare_table_shape(definition, actual) is None
+        with pytest.raises(Exception, match="cannot reconstruct EPHEMERAL"):
+            assert_backfill_target_safe(database=database, table=name,
+                query=lambda sql, settings: list(client.query(sql).named_results()))
         pulled = _introspected_table_to_definition(actual)
         assert pulled is not None
         namespace: dict[str, Any] = {}

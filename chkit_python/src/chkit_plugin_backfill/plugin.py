@@ -154,6 +154,13 @@ class _ThreadLocalExecutor:
     def query(self, statement: str) -> object:
         return self._client().query(statement)
 
+    def query_rows(
+        self, statement: str, settings: QuerySettings | None = None,
+    ) -> list[dict[str, object]]:
+        return self._client().query(
+            statement, dict(settings) if settings is not None else None
+        ).rows
+
     def close(self) -> None:
         with self._clients_lock:
             clients = list(self._clients)
@@ -231,13 +238,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
 
     try:
         database, table = plan.target.split(".")
-        assert_backfill_target_safe(
-            database=database,
-            table=table,
-            query=lambda sql, settings: (
-                db._client().query(sql, dict(settings) if settings is not None else None).rows
-            ),
-        )
+        assert_backfill_target_safe(database=database, table=table, query=db.query_rows)
         run_state = BackfillRunState(
             plan_id=plan.plan_id,
             target=plan.target,

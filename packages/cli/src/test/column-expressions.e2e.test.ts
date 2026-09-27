@@ -15,6 +15,8 @@ import {
 	generateIngestArtifacts,
 } from '../../../plugin-codegen/src/index.js'
 import { createFixture, runCli } from './testkit.test.js'
+import { buildBackfillPlan } from '../../../plugin-backfill/src/planner.js'
+import { PlanSchema } from '../../../plugin-backfill/src/options.js'
 import { getRequiredEnv } from './e2e-testkit.js'
 
 test('column expressions survive create, pull, drift, inserts and ALTER on live ClickHouse', async () => {
@@ -87,6 +89,12 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 	try {
 		await client.command({ query: toCreateSQL(def) })
 		expect(compareTableShape(def, await actual())).toBeNull()
+        await expect(buildBackfillPlan({
+            opts: PlanSchema.parse({ target: `${def.database}.${name}` }),
+            configPath: join(dir, 'config.ts'),
+            config: { metaDir: join(dir, 'meta'), schema: [join(dir, 'missing.ts')] },
+            clickhouseQuery: query,
+        })).rejects.toThrow('cannot reconstruct EPHEMERAL inputs')
 		const pulled = {
 			...def,
 			columns: (await columns()).map((column) => ({

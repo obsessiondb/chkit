@@ -3,6 +3,8 @@ import {
 	type ChxConfig,
 	type ColumnDefinition,
 	normalizeSQLFragment,
+	renderDefault,
+	sqlExpressionFingerprint,
 	type ProjectionDefinition,
 	parseCodec,
 	type SkipIndexDefinition,
@@ -219,8 +221,11 @@ export function normalizeColumnFromSystemRow(
 		defaultValue = row.default_expression.trim()
 	}
 	// ClickHouse synthesizes this expression for a bare EPHEMERAL column.
-	const implicitEphemeralDefault = `defaultValueOfTypeName('${row.type.replace(/'/g, "\\'")}')`
-	if (defaultKind === 'EPHEMERAL' && defaultValue === implicitEphemeralDefault) {
+	if (
+		defaultKind === 'EPHEMERAL' && defaultValue !== undefined &&
+		sqlExpressionFingerprint(String(defaultValue)) ===
+			sqlExpressionFingerprint(`defaultValueOfTypeName(${renderDefault(row.type)})`)
+	) {
 		defaultValue = undefined
 	}
 	const codecSteps = parseCodec(row.compression_codec)
