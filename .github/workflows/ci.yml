@@ -118,6 +118,11 @@ jobs:
       - name: Test Python text indexes
         working-directory: chkit_python
         run: python -m pytest tests/test_text_index.py tests/test_text_index_e2e.py -q
+      - name: Test TypeScript column expressions
+        run: bun test packages/core/src/column-expressions.test.ts packages/clickhouse/src/column-expressions.test.ts packages/cli/src/test/column-expressions.e2e.test.ts
+      - name: Test Python column expressions
+        working-directory: chkit_python
+        run: python -m pytest tests/test_column_expressions.py tests/test_column_expressions_e2e.py -q
 
   obsessiondb:
     runs-on: blacksmith-8vcpu-ubuntu-2404
