@@ -159,6 +159,20 @@ export interface TableDefinition {
   plugins?: TablePlugins
 }
 
+/** Kafka queues do not have MergeTree sorting/storage clauses. */
+export type KafkaTableInput = Omit<TableDefinition,
+  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections'
+> & {
+  engine: 'Kafka' | `Kafka(${string})`
+  primaryKey?: never
+  orderBy?: never
+  partitionBy?: never
+  uniqueKey?: never
+  ttl?: never
+  indexes?: never
+  projections?: never
+}
+
 export interface ViewDefinition {
   kind: 'view'
   database: string
@@ -390,6 +404,11 @@ export interface MigrationPlan {
 }
 
 export type ValidationIssueCode =
+  | 'kafka_unsupported_clause'
+  | 'kafka_column_default'
+  | 'kafka_missing_setting'
+  | 'kafka_invalid_setting'
+  | 'kafka_change_requires_replacement'
   | 'duplicate_object_name'
   | 'duplicate_column_name'
   | 'duplicate_index_name'

@@ -13,6 +13,12 @@ The continuous test suite runs against ObsessionDB, so the `SharedMergeTree`/`Sh
 
 ## Version-gated features
 
+[Kafka engine tables](/schema/kafka/) support creation, pull, and schema drift,
+validated on self-hosted ClickHouse 25.3 and 26.3. Existing queue changes require
+explicit replacement; generic Kafka column/settings ALTERs are not generated.
+The server must provide the Kafka engine and broker connectivity. Distributed and
+other integration engines remain outside this support scope.
+
 A few schema features depend on the ClickHouse version of your target:
 
 | Feature | Requirement |

@@ -11,6 +11,7 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { renderCodec } from './codec.js'
+import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
@@ -76,8 +77,10 @@ function renderTableSQL(def: TableDefinition): string {
   const columnNames = new Set(def.columns.map((column) => column.name))
   const clauses: string[] = []
   if (def.partitionBy) clauses.push(`PARTITION BY ${def.partitionBy}`)
-  clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey, columnNames)})`)
-  clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy, columnNames)})`)
+  if (!isKafkaEngine(def.engine)) {
+    clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey, columnNames)})`)
+    clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy, columnNames)})`)
+  }
   if (def.uniqueKey && def.uniqueKey.length > 0) {
     clauses.push(`UNIQUE KEY (${renderKeyClauseColumns(def.uniqueKey, columnNames)})`)
   }
@@ -85,7 +88,7 @@ function renderTableSQL(def: TableDefinition): string {
   if (def.settings && Object.keys(def.settings).length > 0) {
     clauses.push(
       `SETTINGS ${Object.entries(def.settings)
-        .map(([k, v]) => `${k} = ${v}`)
+        .map(([k, v]) => `${k} = ${isKafkaEngine(def.engine) ? renderKafkaSetting(v) : v}`)
         .join(', ')}`
     )
   }

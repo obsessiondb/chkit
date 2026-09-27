@@ -3,6 +3,7 @@ import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
+import { isKafkaEngine } from './kafka.js'
 import type {
   ColumnDefinition,
   DictionaryDefinition,
@@ -77,6 +78,37 @@ function validateColumnCodec(
 }
 
 function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]): void {
+  if (isKafkaEngine(def.engine)) {
+    for (const field of ['primaryKey', 'orderBy', 'uniqueKey', 'partitionBy', 'ttl', 'indexes', 'projections'] as const) {
+      const value = def[field]
+      if (Array.isArray(value) ? value.length > 0 : Boolean(value)) {
+        pushValidationIssue(issues, def, 'kafka_unsupported_clause', `Kafka table ${def.database}.${def.name} does not support ${field}. Put storage clauses on the destination table.`)
+      }
+    }
+    for (const column of def.columns) {
+      if (column.default !== undefined) {
+        pushValidationIssue(issues, def, 'kafka_column_default', `Kafka table ${def.database}.${def.name} column "${column.name}" cannot have a DEFAULT. Compute defaults in the materialized view.`)
+      }
+    }
+    if (/^Kafka\s*(?:\(\s*\))?$/i.test(def.engine.trim())) {
+      for (const key of ['kafka_broker_list', 'kafka_topic_list', 'kafka_group_name', 'kafka_format']) {
+        if (typeof def.settings?.[key] !== 'string' || !String(def.settings[key]).trim()) {
+          pushValidationIssue(issues, def, 'kafka_missing_setting', `Kafka table ${def.database}.${def.name} requires a nonempty ${key} string (or engine arguments / a named collection).`)
+        }
+      }
+    }
+    for (const [key, value] of Object.entries(def.settings ?? {})) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || (typeof value === 'number' && !Number.isFinite(value))) {
+        pushValidationIssue(issues, def, 'kafka_invalid_setting', `Kafka table ${def.database}.${def.name} has an invalid setting key or value: ${key}.`)
+      }
+      if (key === 'kafka_auto_offset_reset') {
+        pushValidationIssue(issues, def, 'kafka_invalid_setting', 'kafka_auto_offset_reset is not a Kafka table setting on standard ClickHouse. Configure auto_offset_reset in the server Kafka configuration.')
+      }
+      if (/password|secret|token/i.test(key) && value === '[HIDDEN]') {
+        pushValidationIssue(issues, def, 'kafka_invalid_setting', `Kafka setting ${key} was redacted by ClickHouse. Restore the credential or use server-side configuration before generating migrations.`)
+      }
+    }
+  }
   const columnSeen = new Set<string>()
   const columnSet = new Set<string>()
   for (const column of def.columns) {

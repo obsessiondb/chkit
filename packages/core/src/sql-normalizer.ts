@@ -1,8 +1,11 @@
+import { isKafkaEngine, normalizeKafkaEngine } from './kafka.js'
+
 export function normalizeSQLFragment(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
 
 export function normalizeEngine(engine: string): string {
+  if (isKafkaEngine(engine)) return normalizeKafkaEngine(engine)
   let normalized = engine.trim().replace(/^Shared/, '')
   if (!normalized.includes('(')) {
     normalized += '()'
