@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import fixtures from '../../../test/fixtures/text-index.json'
+import identifiers from '../../../test/fixtures/text-index-identifiers.json'
 import {
   canonicalizeDefinitions,
   planDiff,
@@ -170,3 +171,42 @@ test('identifier quoting does not rebuild text indexes or conflate string litera
     planDiff([quoted], [docs(index({ preprocessor: "lower('body')" }))]).operations,
   ).toHaveLength(2)
 })
+
+test('text index SQL generation and planning work without the Node Buffer global', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'Buffer')
+  try {
+    Reflect.deleteProperty(globalThis, 'Buffer')
+    // Include both ordinary and escaped Unicode, as well as equivalent byte escapes.
+    const original = docs(index({ tokenizer: "splitByString(['é', '😀', '\\é', '\\😀'])" }))
+    const equivalent = docs(
+      index({
+        tokenizer: String.raw`splitByString(['\xc3\xa9', '\xf0\x9f\x98\x80', '\\\xc3\xa9', '\\\xf0\x9f\x98\x80'])`,
+      }),
+    )
+    expect(toCreateSQL(original)).toBe(toCreateSQL(equivalent))
+    expect(canonicalizeDefinitions([original])).toEqual(canonicalizeDefinitions([equivalent]))
+    expect(planDiff([original], [equivalent]).operations).toEqual([])
+    expect(
+      planDiff([original], [docs(index({ tokenizer: "splitByString([' '])" }))]).operations,
+    ).toHaveLength(2)
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'Buffer', descriptor)
+  }
+})
+
+for (const word of identifiers) {
+  test(`preserves meaningful identifier quotes: ${word}`, () => {
+    for (const name of [word, word.toUpperCase(), word[0]?.toUpperCase() + word.slice(1)]) {
+      for (const field of ['expression', 'preprocessor', 'postprocessor'] as const) {
+        const quoted = docs(index({ [field]: `toString(\`${name}\`)` }))
+        const doubleQuoted = docs(index({ [field]: `toString("${name}")` }))
+        const unquoted = docs(index({ [field]: `toString(${name})` }))
+        expect(planDiff([quoted], [doubleQuoted]).operations).toEqual([])
+        expect(planDiff([quoted], [unquoted]).operations.map((op) => op.type)).toEqual([
+          'alter_table_drop_index',
+          'alter_table_add_index',
+        ])
+      }
+    }
+  })
+}

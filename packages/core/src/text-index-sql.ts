@@ -11,6 +11,27 @@ const ESCAPES: Record<string, number> = {
   r: 13,
   e: 27,
 }
+const UTF8 = new TextEncoder()
+
+// Literal names and ambiguous keywords must remain identifiers when compared.
+// Match ClickHouse's writeProbablyQuotedStringImpl (src/IO/WriteHelpers.cpp),
+// including NULL, which its isValidIdentifier helper excludes separately.
+const QUOTED_IDENTIFIERS = new Set([
+  'null',
+  'true',
+  'false',
+  'inf',
+  'infinity',
+  'nan',
+  'distinct',
+  'all',
+  'some',
+  'table',
+  'select',
+  'from',
+  'top',
+  'values',
+])
 
 function stringLiteral(body: string): string {
   const bytes: number[] = []
@@ -34,12 +55,12 @@ function stringLiteral(body: string): string {
         }
         if (ESCAPES[next] === undefined && !["'", '"', '`', '\\', '/', '='].includes(next))
           bytes.push(92)
-        bytes.push(...(ESCAPES[next] !== undefined ? [ESCAPES[next] ?? 0] : Buffer.from(next)))
+        bytes.push(...(ESCAPES[next] !== undefined ? [ESCAPES[next] ?? 0] : UTF8.encode(next)))
         i += 1 + next.length
       }
     } else {
       const point = String.fromCodePoint(body.codePointAt(i) ?? 0)
-      bytes.push(...Buffer.from(point))
+      bytes.push(...UTF8.encode(point))
       i += point.length
     }
   }
@@ -151,6 +172,11 @@ export function textExpressionFingerprint(sql: string): string {
 // Compare redundant identifier quotes without removing them from generated SQL.
 export function textSQLFingerprint(sql: string): string {
   return JSON.stringify(
-    textSQLTokens(sql).map((token) => token.replace(/^([`"])([A-Za-z_][A-Za-z0-9_]*)\1$/, '$2')),
+    textSQLTokens(sql).map((token) => {
+      const identifier = token.match(/^([`"])([A-Za-z_][A-Za-z0-9_]*)\1$/)?.[2]
+      if (identifier === undefined) return token
+      // Backticks and double quotes name the same identifier; preserve its case.
+      return QUOTED_IDENTIFIERS.has(identifier.toLowerCase()) ? `\`${identifier}\`` : identifier
+    }),
   )
 }

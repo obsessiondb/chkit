@@ -7,6 +7,24 @@ import re
 _ESCAPES = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27}
 _WORD = re.compile(r"(?:\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|[\w$]+|->|<=|>=|!=|<>|\|\||::|==)")
 _CLOSE = {")": "(", "]": "[", "}": "{"}
+# Mirror ClickHouse's writeProbablyQuotedStringImpl (src/IO/WriteHelpers.cpp),
+# plus NULL, which its isValidIdentifier helper excludes separately.
+_QUOTED_IDENTIFIERS = {
+    "null",
+    "true",
+    "false",
+    "inf",
+    "infinity",
+    "nan",
+    "distinct",
+    "all",
+    "some",
+    "table",
+    "select",
+    "from",
+    "top",
+    "values",
+}
 
 
 def _string_literal(body: str) -> str:
@@ -146,9 +164,15 @@ def text_expression_fingerprint(sql: str) -> str:
 
 def text_sql_fingerprint(sql: str) -> list[str]:
     """Ignore redundant simple identifier quotes only for comparisons."""
-    return [
-        re.sub(r'([`"])([A-Za-z_][A-Za-z0-9_]*)\1$', r"\2", token)
-        if re.fullmatch(r'([`"])([A-Za-z_][A-Za-z0-9_]*)\1', token)
-        else token
-        for token in text_sql_tokens(sql)
-    ]
+    result = []
+    for token in text_sql_tokens(sql):
+        match = re.fullmatch(r'([`"])([A-Za-z_][A-Za-z0-9_]*)\1', token)
+        if match:
+            identifier = match[2]
+            # Normalize quote style without erasing meaningful quotes or case.
+            result.append(
+                f"`{identifier}`" if identifier.lower() in _QUOTED_IDENTIFIERS else identifier
+            )
+        else:
+            result.append(token)
+    return result

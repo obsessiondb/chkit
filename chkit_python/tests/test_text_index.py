@@ -23,6 +23,9 @@ from chkit.core.validate import validate_definitions
 CASES = json.loads(
     (Path(__file__).resolve().parents[2] / "test/fixtures/text-index.json").read_text()
 )
+IDENTIFIERS = json.loads(
+    (Path(__file__).resolve().parents[2] / "test/fixtures/text-index-identifiers.json").read_text()
+)
 
 
 def docs(index, name="docs", database="app"):
@@ -156,3 +159,18 @@ def test_identifier_quotes_do_not_rebuild_or_conflate_string_literals():
     literal = index.model_copy(update={"preprocessor": "lower('body')"})
     assert plan_diff([docs(index)], [docs(unquoted)]).operations == []
     assert len(plan_diff([docs(index)], [docs(literal)]).operations) == 2
+
+
+@pytest.mark.parametrize("word", IDENTIFIERS)
+def test_meaningful_identifier_quotes(word):
+    index = SkipIndexText(name="idx", expression="body", tokenizer="splitByNonAlpha")
+    for name in (word, word.upper(), word.capitalize()):
+        for field in ("expression", "preprocessor", "postprocessor"):
+            quoted = docs(index.model_copy(update={field: f"toString(`{name}`)"}))
+            double_quoted = docs(index.model_copy(update={field: f'toString("{name}")'}))
+            unquoted = docs(index.model_copy(update={field: f"toString({name})"}))
+            assert plan_diff([quoted], [double_quoted]).operations == []
+            assert [op.type for op in plan_diff([quoted], [unquoted]).operations] == [
+                "alter_table_drop_index",
+                "alter_table_add_index",
+            ]

@@ -411,6 +411,13 @@ ClickHouse remains responsible for validating tokenizer/function availability an
 server-specific parameter limits. Pull fails with an explicit error for unknown
 text-index parameters instead of silently discarding them.
 
+Avoid column names that are also SQL literals (`true`, `false`, `inf`, `infinity`,
+or `nan`) in text-index expressions on older servers. ClickHouse 26.3 can remove
+their required identifier quotes from index metadata, preventing a lossless pull.
+chkit treats meaningful quote differences as drift; it does not assume a column
+reference and a literal are equivalent. Ordinary identifier quoting and switching
+between backticks and double quotes do not require an index rebuild.
+
 Adding or changing an index does not automatically index historical parts. Run
 `ALTER TABLE database.table MATERIALIZE INDEX idx_body` when historical data must
 be indexed; materialization consumes database resources. Existing rows remain

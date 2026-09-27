@@ -15,6 +15,7 @@ from chkit.clickhouse.introspect import list_table_details
 from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
+from chkit.core.text_index import text_index_fingerprint
 from chkit.core.text_index_sql import normalize_text_index_sql
 from tests.e2e_testkit import create_prefix, get_required_env
 from tests.test_text_index import docs
@@ -174,3 +175,76 @@ def test_normalization_preserves_every_printable_clickhouse_escape(text_client):
             f"SELECT hex({sql}) AS original, hex({normalize_text_index_sql(sql)}) AS normalized"
         ).rows
         assert rows[0]["normalized"] == rows[0]["original"], repr(sql)
+
+
+def test_quoted_literal_names_remain_distinct_from_constants(text_client):
+    client, _ = text_client
+    for word in ("null", "true", "false", "inf", "infinity", "nan"):
+        for name in (word, word.upper(), word.capitalize()):
+            quoted, unquoted = f"toString(`{name}`)", f"toString({name})"
+            rows = client.query(
+                f"SELECT {quoted} AS quoted_value, {unquoted} AS literal_value "
+                f"FROM (SELECT 'sentinel' AS `{name}`)"
+            ).rows
+            assert rows[0]["quoted_value"] == "sentinel"
+            assert rows[0]["literal_value"] != "sentinel"
+            index = SkipIndexText(name="idx", expression=quoted, tokenizer="splitByNonAlpha")
+            assert text_index_fingerprint(index) != text_index_fingerprint(
+                index.model_copy(update={"expression": unquoted})
+            )
+
+
+def test_quoted_null_column_round_trips_and_literal_change_migrates(text_client):
+    client, database = text_client
+    name = create_prefix("py_text_keyword") + "docs"
+    full_name = f"{database}.{name}"
+    index = SkipIndexText(
+        name="idx",
+        tokenizer="splitByNonAlpha",
+        expression="concat(body, ifNull(\"NULL\", 'missing'))",
+    )
+    base = docs(index, name=name, database=database)
+    definition = type(base).model_validate(
+        {**base.model_dump(), "columns": [*base.columns, {"name": "NULL", "type": "String"}]}
+    )
+    changed_index = index.model_copy(update={"expression": "concat(body, ifNull(NULL, 'missing'))"})
+    changed = definition.model_copy(update={"indexes": [changed_index]})
+
+    def get_actual():
+        return next(item for item in list_table_details(client, [database]) if item.name == name)
+
+    def search(expression):
+        return client.query(
+            f"SELECT id FROM {full_name} WHERE hasAllTokens({expression}, ['alpha'])"
+        ).rows
+
+    try:
+        client.execute(to_create_sql(definition))
+        client.execute(f"INSERT INTO {full_name} VALUES (1, 'doc ', 'alpha')")
+        actual = get_actual()
+        assert compare_table_shape(definition, actual) is None
+        assert "index_mismatch" in compare_table_shape(changed, actual).reason_codes
+        namespace = {}
+        exec(
+            compile(
+                render_schema_file([definition.model_copy(update={"indexes": actual.indexes})]),
+                "schema.py",
+                "exec",
+            ),
+            namespace,
+        )
+        pulled = namespace["definitions"][0]
+        assert plan_diff([definition], [pulled]).operations == []
+        assert [int(row["id"]) for row in search(index.expression)] == [1]
+        plan = plan_diff([pulled], [changed])
+        assert [op.type for op in plan.operations] == [
+            "alter_table_drop_index",
+            "alter_table_add_index",
+        ]
+        for op in plan.operations:
+            client.execute(op.sql)
+        client.execute(f"ALTER TABLE {full_name} MATERIALIZE INDEX idx SETTINGS mutations_sync = 2")
+        assert compare_table_shape(changed, get_actual()) is None
+        assert search(changed_index.expression) == []
+    finally:
+        client.execute(f"DROP TABLE IF EXISTS {full_name} SYNC")

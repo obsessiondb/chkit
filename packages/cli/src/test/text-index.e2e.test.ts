@@ -6,6 +6,7 @@ import {
   canonicalizeDefinitions,
   planDiff,
   table,
+  textIndexFingerprint,
   toCreateSQL,
   type TableDefinition,
   type TextSkipIndex,
@@ -238,12 +239,103 @@ test('normalization preserves every printable ClickHouse string escape', async (
         expect(() => normalizeTextIndexSQL(sql)).toThrow('Invalid hexadecimal')
         continue
       }
-      const rows = await executor.query<{ original: string; normalized: string }>(
-        `SELECT hex(${sql}) AS original, hex(${normalizeTextIndexSQL(sql)}) AS normalized`,
-      )
+      const rows = await executor.query<{
+        original: string
+        normalized: string
+      }>(`SELECT hex(${sql}) AS original, hex(${normalizeTextIndexSQL(sql)}) AS normalized`)
       expect(rows[0]?.normalized, `escape ${JSON.stringify(sql)}`).toBe(rows[0]?.original)
     }
   } finally {
     await executor.close()
   }
 })
+
+test('quoted literal names remain distinct from constants in ClickHouse and planning', async () => {
+  const executor = createLiveExecutor(env)
+  try {
+    for (const word of ['null', 'true', 'false', 'inf', 'infinity', 'nan']) {
+      for (const name of [word, word.toUpperCase(), word[0]?.toUpperCase() + word.slice(1)]) {
+        const quoted = `toString(\`${name}\`)`
+        const unquoted = `toString(${name})`
+        const rows = await executor.query<{
+          quoted_value: string
+          literal_value: string | null
+        }>(
+          `SELECT ${quoted} AS quoted_value, ${unquoted} AS literal_value FROM (SELECT 'sentinel' AS \`${name}\`)`,
+        )
+        expect(rows[0]?.quoted_value).toBe('sentinel')
+        expect(rows[0]?.literal_value).not.toBe('sentinel')
+        const index: TextSkipIndex = {
+          name: 'idx',
+          type: 'text',
+          expression: quoted,
+          tokenizer: 'splitByNonAlpha',
+        }
+        expect(textIndexFingerprint(index)).not.toBe(
+          textIndexFingerprint({ ...index, expression: unquoted }),
+        )
+      }
+    }
+  } finally {
+    await executor.close()
+  }
+})
+
+test('quoted NULL column round-trips and changing it to a literal migrates the index', async () => {
+  const executor = createLiveExecutor(env)
+  const name = `${createPrefix('text_keyword')}docs`
+  const index: TextSkipIndex = {
+    name: 'idx',
+    type: 'text',
+    tokenizer: 'splitByNonAlpha',
+    expression: 'concat(body, ifNull("NULL", \'missing\'))',
+  }
+  const base = docs(name, index)
+  const definition = {
+    ...base,
+    columns: [...base.columns, { name: 'NULL', type: 'String' }],
+  }
+  const changedIndex = {
+    ...index,
+    expression: "concat(body, ifNull(NULL, 'missing'))",
+  }
+  const changed = { ...definition, indexes: [changedIndex] }
+  const fullName = `${definition.database}.${name}`
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-text-keyword-'))
+  try {
+    await executor.command(toCreateSQL(definition))
+    await executor.command(`INSERT INTO ${fullName} VALUES (1, 'doc ', 'alpha')`)
+    const getActual = async () => {
+      const actual = (await executor.listTableDetails([definition.database])).find(
+        (item) => item.name === name,
+      )
+      if (!actual) throw new Error('Missing test table')
+      return actual
+    }
+    const actual = await getActual()
+    expect(compareTableShape(definition, actual)).toBeNull()
+    expect(compareTableShape(changed, actual)?.reasonCodes).toContain('index_mismatch')
+    const pulled = await loadPulled({ ...definition, indexes: actual.indexes }, dir)
+    expect(planDiff([definition], [pulled]).operations).toEqual([])
+    const search = (expression: string) =>
+      executor.query<{ id: number }>(
+        `SELECT id FROM ${fullName} WHERE hasAllTokens(${expression}, ['alpha'])`,
+      )
+    expect((await search(index.expression)).map((row) => Number(row.id))).toEqual([1])
+    const plan = planDiff([pulled], [changed])
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_drop_index',
+      'alter_table_add_index',
+    ])
+    for (const op of plan.operations) await executor.command(op.sql)
+    await executor.command(
+      `ALTER TABLE ${fullName} MATERIALIZE INDEX idx SETTINGS mutations_sync = 2`,
+    )
+    expect(compareTableShape(changed, await getActual())).toBeNull()
+    expect(await search(changedIndex.expression)).toEqual([])
+  } finally {
+    await executor.command(`DROP TABLE IF EXISTS ${fullName} SYNC`)
+    await executor.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 60000)
