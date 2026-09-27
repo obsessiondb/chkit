@@ -12,5 +12,9 @@
     "@chkit/core": "0.1.2-beta.2",
     "@chkit/plugin-obsessiondb": "0.1.2-beta.2",
     "chkit": "0.1.2-beta.2"
+  },
+  "overrides": {
+    "@orpc/client": "1.15.4",
+    "@orpc/contract": "1.15.4"
   }
 }
