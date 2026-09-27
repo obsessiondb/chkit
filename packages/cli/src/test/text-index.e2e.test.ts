@@ -233,17 +233,27 @@ test('normalization preserves every printable ClickHouse string escape', async (
   const { normalizeTextIndexSQL } = await import('@chkit/core')
   const executor = createLiveExecutor(env)
   try {
+    const checks: string[] = []
     for (let code = 32; code < 127; code++) {
       const sql = `'\\${String.fromCharCode(code)}'`
       if (code === 120) {
         expect(() => normalizeTextIndexSQL(sql)).toThrow('Invalid hexadecimal')
         continue
       }
-      const rows = await executor.query<{
-        original: string
-        normalized: string
-      }>(`SELECT hex(${sql}) AS original, hex(${normalizeTextIndexSQL(sql)}) AS normalized`)
-      expect(rows[0]?.normalized, `escape ${JSON.stringify(sql)}`).toBe(rows[0]?.original)
+      checks.push(
+        `SELECT ${code} AS code, hex(${sql}) AS original, hex(${normalizeTextIndexSQL(sql)}) AS normalized`,
+      )
+    }
+    // Keep the live checks in one request so remote round trips don't exhaust the test timeout.
+    const rows = await executor.query<{
+      code: number
+      original: string
+      normalized: string
+    }>(checks.join('\nUNION ALL\n'))
+    expect(rows).toHaveLength(checks.length)
+    for (const { code, original, normalized } of rows) {
+      const sql = `'\\${String.fromCharCode(code)}'`
+      expect(normalized, `escape ${JSON.stringify(sql)}`).toBe(original)
     }
   } finally {
     await executor.close()
