@@ -9,7 +9,6 @@ import pytest
 
 from chkit import ColumnDefinition, table
 from chkit.cli.commands.drift_compare import compare_table_shape
-from chkit.cli.commands.generate_reconcile import reconcile_column_expressions
 from chkit.cli.commands.pull import _introspected_table_to_definition
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.clickhouse.introspect import (
@@ -135,11 +134,11 @@ def test_remove_expression_with_type_change(kind: str) -> None:
 
 
 @pytest.mark.parametrize("kind", ["ALIAS", "EPHEMERAL"])
-def test_storage_kind_changes_require_manual_migration(kind: str) -> None:
+def test_storage_kind_changes_are_rejected(kind: str) -> None:
     virtual = definition(default_kind=kind, default="fn:toDate(ts)")
-    with pytest.raises(ValueError, match="explicit manual migration"):
+    with pytest.raises(ValueError, match="storage-kind conversions involving ALIAS or EPHEMERAL are not supported"):
         plan_diff([definition()], [virtual])
-    with pytest.raises(ValueError, match="explicit manual migration"):
+    with pytest.raises(ValueError, match="storage-kind conversions involving ALIAS or EPHEMERAL are not supported"):
         plan_diff([virtual], [definition()])
 
 
@@ -253,25 +252,6 @@ def test_expression_comparison_preserves_literals(expected: Any, actual: Any, eq
         definition(default=expected), actual_table(definition(default=actual).columns)
     )
     assert (result is None) == equal
-
-
-def test_reconcile_only_selected_expression_metadata() -> None:
-
-    before = definition(default="fn:toDate(ts)")
-    after = definition(default="fn:toDate(ts)", default_kind="ALIAS")
-    unrelated = before.model_copy(update={"name": "other"})
-    reconciled = reconcile_column_expressions(
-        [before, unrelated],
-        [after, unrelated.model_copy(update={"engine": "Log"})],
-        ["default.events"],
-    )
-    assert plan_diff(reconciled, [after, unrelated]).operations == []
-    with pytest.raises(ValueError, match="only column expression/kind changes"):
-        reconcile_column_expressions(
-            [before], [after.model_copy(update={"engine": "Log"})], ["default.events"]
-        )
-    with pytest.raises(ValueError, match="both the snapshot and schema"):
-        reconcile_column_expressions([], [after], ["default.events"])
 
 
 def test_stored_expression_warning() -> None:

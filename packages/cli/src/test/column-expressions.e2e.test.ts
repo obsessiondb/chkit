@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClient } from '@clickhouse/client'
@@ -14,7 +14,6 @@ import {
 	generateTypeArtifacts,
 	generateIngestArtifacts,
 } from '../../../plugin-codegen/src/index.js'
-import { createFixture, runCli } from './testkit.test.js'
 import { buildBackfillPlan } from '../../../plugin-backfill/src/planner.js'
 import { PlanSchema } from '../../../plugin-backfill/src/options.js'
 import { getRequiredEnv } from './e2e-testkit.js'
@@ -276,75 +275,3 @@ test('generated ingest helpers use insert shapes, while rows exclude ephemeral i
 	expect(ingest).toContain('DefaultEventsRowInsertSchema.parse(row)')
 	expect(ingest).toContain('function ingestDefaultEvents(')
 })
-
-test('manual conversion reconciles only after live verification, then generate is a no-op', async () => {
-	const env = getRequiredEnv()
-	const client = createClient({
-		url: env.clickhouseUrl,
-		username: env.clickhouseUser,
-		password: env.clickhousePassword,
-		database: env.clickhouseDatabase,
-	})
-	const name = `reconcile_expr_${Date.now()}`
-	const before = table({
-		database: env.clickhouseDatabase,
-		name,
-		engine: 'MergeTree()',
-		primaryKey: ['id'],
-		orderBy: ['id'],
-		columns: [
-			{ name: 'id', type: 'UInt32' },
-			{ name: 'label', type: 'String', default: 'fn:toString(id)' },
-		],
-	})
-	const fixture = await createFixture(
-		`export default [${JSON.stringify(before)}]`,
-	)
-	const args = ['generate', '--config', fixture.configPath, '--json']
-	try {
-		await writeFile(
-			fixture.configPath,
-			`export default ${JSON.stringify({ schema: [fixture.schemaPath], metaDir: fixture.metaDir, migrationsDir: fixture.migrationsDir, clickhouse: { url: env.clickhouseUrl, username: env.clickhouseUser, password: env.clickhousePassword, database: env.clickhouseDatabase } })}`,
-		)
-		expect(runCli(args).exitCode).toBe(0)
-		await client.command({ query: toCreateSQL(before) })
-		const snapshotPath = join(fixture.metaDir, 'snapshot.json')
-		const oldSnapshot = await readFile(snapshotPath, 'utf8')
-		const after = {
-			...before,
-			columns: before.columns.map((col) =>
-				col.name === 'label' ? { ...col, defaultKind: 'ALIAS' } : col,
-			),
-		}
-		await writeFile(
-			fixture.schemaPath,
-			`export default [${JSON.stringify(after)}]`,
-		)
-		const reconcile = [
-			...args,
-			'--reconcile',
-			'--table',
-			`${before.database}.${name}`,
-		]
-		expect(runCli(reconcile).exitCode).not.toBe(0)
-		expect(await readFile(snapshotPath, 'utf8')).toBe(oldSnapshot)
-		await client.command({
-			query: `ALTER TABLE ${before.database}.${name} DROP COLUMN label, ADD COLUMN label String ALIAS toString(id)`,
-		})
-		const preview = runCli([...reconcile, '--dryrun'])
-		expect(preview.exitCode).toBe(0)
-		expect(await readFile(snapshotPath, 'utf8')).toBe(oldSnapshot)
-		const result = runCli(reconcile)
-		expect(result.exitCode).toBe(0)
-		expect(JSON.parse(result.stdout).verified).toBe(true)
-		const next = runCli([...args, '--dryrun'])
-		expect(next.exitCode).toBe(0)
-		expect(JSON.parse(next.stdout).operationCount).toBe(0)
-	} finally {
-		await client.command({
-			query: `DROP TABLE IF EXISTS ${before.database}.${name} SYNC`,
-		})
-		await client.close()
-		await rm(fixture.dir, { recursive: true, force: true })
-	}
-}, 30_000)

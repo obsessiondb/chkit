@@ -413,7 +413,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     const oldKind = oldItem.defaultKind ?? 'DEFAULT'
     const newKind = newItem.defaultKind ?? 'DEFAULT'
     if (oldKind !== newKind && [oldKind, newKind].some((kind) => kind === 'ALIAS' || kind === 'EPHEMERAL')) {
-      throw new Error(`Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; use an explicit manual migration for storage-kind changes, then run generate --reconcile --table ${newDef.database}.${newDef.name} after applying it`)
+      throw new Error(`Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; storage-kind conversions involving ALIAS or EPHEMERAL are not supported`)
     }
     const sql = isCodecRemoval(oldItem, newItem)
       ? renderAlterRemoveCodec(newDef, name)

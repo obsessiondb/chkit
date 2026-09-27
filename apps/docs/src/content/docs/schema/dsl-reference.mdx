@@ -334,9 +334,10 @@ COLUMN ...` only when you need that rewrite and the required inputs still exist.
 Values derived from discarded `EPHEMERAL` inputs cannot be reconstructed this way.
 Removing a `DEFAULT` or `MATERIALIZED` expression emits an explicit `REMOVE` clause.
 
-Automatic kind conversions involving `ALIAS` or `EPHEMERAL` are rejected. Use a
-[manual migration and verified snapshot reconciliation](/cli/generate/#reconcile-manual-column-changes).
-The planner never silently drops and recreates a column for these conversions.
+Converting an existing column to or from `ALIAS` or `EPHEMERAL` is not supported
+by the migration generator. This release does not provide snapshot adoption for
+manually applied conversions. The planner rejects these changes instead of dropping
+and recreating columns.
 
 Generated `Row` models describe the default `SELECT *` result, excluding
 `MATERIALIZED`, `ALIAS`, and `EPHEMERAL`. Tables using special kinds also get:

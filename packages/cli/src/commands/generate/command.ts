@@ -1,9 +1,5 @@
-import { writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { compareTableShape } from '../drift/compare.js'
-import { reconcileColumnExpressions } from './reconcile.js'
 import { generateArtifacts, generateEmptyMigration } from '@chkit/codegen'
-import { applyOnClusterToPlan, assertValidDefinitions, createSnapshot, ChxValidationError, planDiff } from '@chkit/core'
+import { applyOnClusterToPlan, ChxValidationError, planDiff } from '@chkit/core'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
@@ -54,7 +50,6 @@ const GENERATE_FLAGS = defineFlags([
   { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },
   { name: '--rename-dictionary', type: 'string[]', description: 'Explicit dictionary rename mapping', placeholder: '<mapping>' },
   { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
-  { name: '--reconcile', type: 'boolean', description: 'Verify live column expressions and update their snapshot after a manual migration (requires --table)' },
   { name: '--empty', type: 'boolean', description: 'Scaffold a blank manual migration (no schema diff, snapshot untouched)' },
 ] as const)
 
@@ -75,10 +70,6 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   const planMode = f['--dryrun'] === true
   const jsonMode = f['--json'] === true
   const emptyMode = f['--empty'] === true
-  const reconcileMode = f['--reconcile'] === true
-  if (reconcileMode && (!tableSelector || emptyMode || f['--rename-column'] || f['--rename-table'] || f['--rename-dictionary'])) {
-    throw new Error('--reconcile requires --table and cannot be combined with --empty or rename flags.')
-  }
 
   debug('generate', `flags: name=${migrationName ?? '(auto)'}, dryrun=${planMode}, json=${jsonMode}, empty=${emptyMode}`)
 
@@ -114,30 +105,6 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     jsonMode,
     definitions,
   })
-
-  if (reconcileMode) {
-    assertValidDefinitions(definitions)
-    const previous = await readSnapshot(dirs.metaDir)
-    if (!previous) throw new Error('Snapshot not found; reconciliation requires an existing snapshot.')
-    const scope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
-    if (!scope.matchCount) throw new Error('No tables matched --table; snapshot unchanged.')
-    const reconciled = reconcileColumnExpressions(previous.definitions, definitions, scope.matchedTables)
-    if (!ctx.pluginContext.hasExecutor) throw new Error('clickhouse config is required for --reconcile.')
-    const selected = definitions.filter((item) => item.kind === 'table' && scope.matchedTables.includes(`${item.database}.${item.name}`))
-    const actual = await ctx.pluginContext.executor.listTableDetails([...new Set(selected.map((item) => item.database))])
-    for (const expected of selected) {
-      if (expected.kind !== 'table') continue
-      const live = actual.find((item) => item.database === expected.database && item.name === expected.name)
-      if (!live || compareTableShape(expected, live)) {
-        throw new Error(`Live table ${expected.database}.${expected.name} does not match the schema; apply and verify the manual migration before --reconcile. Snapshot unchanged.`)
-      }
-    }
-    const snapshotFile = join(dirs.metaDir, 'snapshot.json')
-    if (!planMode) await writeFile(snapshotFile, `${JSON.stringify(createSnapshot(reconciled), null, 2)}\n`, 'utf8')
-    if (jsonMode) emitJson('generate', { mode: 'reconcile', verified: true, dryrun: planMode, snapshotFile, tables: scope.matchedTables })
-    else console.log(`${planMode ? 'Verified' : 'Reconciled'} column expressions for ${scope.matchedTables.join(', ')} against live ClickHouse. No migration generated.`)
-    return 0
-  }
 
   const renameTableValues = f['--rename-table'] ?? []
   const renameColumnValues = f['--rename-column'] ?? []

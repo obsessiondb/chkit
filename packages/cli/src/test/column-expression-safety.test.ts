@@ -1,7 +1,6 @@
 import { expect, test } from 'bun:test'
 import { planDiff, table } from '@chkit/core'
 import { compareTableShape } from '../commands/drift/compare.js'
-import { reconcileColumnExpressions } from '../commands/generate/reconcile.js'
 
 const definition = (value?: string | number | boolean) =>
 	table({
@@ -46,33 +45,6 @@ for (const [expected, actual, equal] of [
 		expect(result === null).toBe(equal)
 	})
 }
-
-test('reconciliation adopts only selected expression metadata and permits the next generate', () => {
-	const before = definition('fn:toString(id)')
-	const after = {
-		...before,
-		columns: before.columns.map((col) =>
-			col.name === 'value' ? { ...col, defaultKind: 'ALIAS' as const } : col,
-		),
-	}
-	const unrelated = { ...before, name: 'other' }
-	const reconciled = reconcileColumnExpressions(
-		[before, unrelated],
-		[after, { ...unrelated, comment: 'pending' }],
-		['default.events'],
-	)
-	expect(planDiff(reconciled, [after, unrelated]).operations).toEqual([])
-	expect(() =>
-		reconcileColumnExpressions(
-			[before],
-			[{ ...after, engine: 'Log' }],
-			['default.events'],
-		),
-	).toThrow('only column expression/kind changes')
-	expect(() =>
-		reconcileColumnExpressions([], [after], ['default.events']),
-	).toThrow('both the snapshot and schema')
-})
 
 test('stored expression changes warn about historical values; computed aliases do not', () => {
 	const before = definition('old')

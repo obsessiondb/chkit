@@ -427,7 +427,8 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                 sort_keys = output.plan.chunk_plan.table.sort_keys
                 primary_sort_key = sort_keys[0] if sort_keys else None
                 sort_key_label = (
-                    f", sort key: {primary_sort_key.name} ({primary_sort_key.category})"
+                    f", sort key: {primary_sort_key.name}"
+                    f" ({primary_sort_key.category})"
                     if primary_sort_key is not None
                     else ""
                 )
@@ -618,7 +619,8 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
             ChxPluginCommand(
                 name="plan",
                 description=(
-                    "Build a deterministic backfill plan and persist immutable plan state"
+                    "Build a deterministic backfill plan and persist immutable"
+                    " plan state"
                 ),
                 run=_guarded(_plan, "plan", "Backfill plan"),
                 flags=list(PLAN_FLAGS),
@@ -634,7 +636,10 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
             ),
             ChxPluginCommand(
                 name="run",
-                description=("Execute a planned backfill with async query submission and polling"),
+                description=(
+                    "Execute a planned backfill with async query submission"
+                    " and polling"
+                ),
                 run=_guarded(_run, "run", "Backfill run"),
                 flags=list(RUN_FLAGS),
             ),
@@ -653,7 +658,8 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
             ChxPluginCommand(
                 name="cancel",
                 description=(
-                    "Cancel an in-progress backfill run and prevent further chunk execution"
+                    "Cancel an in-progress backfill run and prevent further"
+                    " chunk execution"
                 ),
                 run=_guarded(_cancel, "cancel", "Backfill cancel"),
                 flags=list(PLAN_ID_FLAGS),
@@ -661,7 +667,8 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
             ChxPluginCommand(
                 name="doctor",
                 description=(
-                    "Provide actionable remediation steps for failed or pending backfill runs"
+                    "Provide actionable remediation steps for failed or pending"
+                    " backfill runs"
                 ),
                 run=_guarded(_doctor, "doctor", "Backfill doctor"),
                 flags=list(PLAN_ID_FLAGS),

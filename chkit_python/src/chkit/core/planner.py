@@ -81,7 +81,10 @@ def _push_drop(
                 type="drop_dictionary",
                 key=definition_key(definition),
                 risk=risk,
-                sql=(f"DROP DICTIONARY IF EXISTS {definition.database}.{definition.name};"),
+                sql=(
+                    f"DROP DICTIONARY IF EXISTS "
+                    f"{definition.database}.{definition.name};"
+                ),
             )
         )
         return
@@ -245,8 +248,13 @@ def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
     return _column_identity_without_codec(old) == _column_identity_without_codec(new)
 
 
-def _render_rename_column_suggestion_sql(table: TableDefinition, from_: str, to: str) -> str:
-    return f"ALTER TABLE {table.database}.{table.name} RENAME COLUMN `{from_}` TO `{to}`;"
+def _render_rename_column_suggestion_sql(
+    table: TableDefinition, from_: str, to: str
+) -> str:
+    return (
+        f"ALTER TABLE {table.database}.{table.name} "
+        f"RENAME COLUMN `{from_}` TO `{to}`;"
+    )
 
 
 def _infer_column_rename_suggestions(
@@ -438,8 +446,7 @@ def _diff_tables(
                 f"Cannot automatically change column {new.database}.{new.name}."
                 f"{column_change.name} "
                 f"from {old_kind} to {new_kind}; "
-                "use an explicit manual migration for storage-kind changes, then run "
-                f"generate --reconcile --table {new.database}.{new.name} after applying it"
+                "storage-kind conversions involving ALIAS or EPHEMERAL are not supported"
             )
         sql = (
             render_alter_remove_codec(new, column_change.name)
@@ -523,10 +530,10 @@ def _diff_tables(
         list(old.projections or []),
         list(new.projections or []),
         lambda p: p.name,
-        lambda left, right: (
-            json.dumps(left.model_dump(mode="json"), sort_keys=True, default=str)
-            == json.dumps(right.model_dump(mode="json"), sort_keys=True, default=str)
-        ),
+        lambda left, right: json.dumps(
+            left.model_dump(mode="json"), sort_keys=True, default=str
+        )
+        == json.dumps(right.model_dump(mode="json"), sort_keys=True, default=str),
     )
     for projection in projection_diff.added:
         ops.append(
@@ -541,7 +548,10 @@ def _diff_tables(
         ops.append(
             MigrationOperation(
                 type="alter_table_drop_projection",
-                key=(f"table:{new.database}.{new.name}:projection:{projection_change.name}"),
+                key=(
+                    f"table:{new.database}.{new.name}:projection:"
+                    f"{projection_change.name}"
+                ),
                 risk="caution",
                 sql=render_alter_drop_projection(new, projection_change.name),
             )
@@ -549,7 +559,10 @@ def _diff_tables(
         ops.append(
             MigrationOperation(
                 type="alter_table_add_projection",
-                key=(f"table:{new.database}.{new.name}:projection:{projection_change.name}"),
+                key=(
+                    f"table:{new.database}.{new.name}:projection:"
+                    f"{projection_change.name}"
+                ),
                 risk="caution",
                 sql=render_alter_add_projection(new, projection_change.new_item),
             )
@@ -570,7 +583,10 @@ def _diff_tables(
             ops.append(
                 MigrationOperation(
                     type="alter_table_reset_setting",
-                    key=(f"table:{new.database}.{new.name}:setting:{setting_change.key}"),
+                    key=(
+                        f"table:{new.database}.{new.name}:setting:"
+                        f"{setting_change.key}"
+                    ),
                     risk="caution",
                     sql=render_alter_reset_setting(new, setting_change.key),
                 )
@@ -579,9 +595,14 @@ def _diff_tables(
         ops.append(
             MigrationOperation(
                 type="alter_table_modify_setting",
-                key=(f"table:{new.database}.{new.name}:setting:{setting_change.key}"),
+                key=(
+                    f"table:{new.database}.{new.name}:setting:"
+                    f"{setting_change.key}"
+                ),
                 risk="caution",
-                sql=render_alter_modify_setting(new, setting_change.key, setting_change.value),
+                sql=render_alter_modify_setting(
+                    new, setting_change.key, setting_change.value
+                ),
             )
         )
 

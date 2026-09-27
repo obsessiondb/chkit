@@ -95,10 +95,10 @@ describe('column expressions', () => {
 		for (const defaultKind of ['ALIAS', 'EPHEMERAL'] as const) {
 			const virtual = definition({ defaultKind, default: 'fn:toDate(ts)' })
 			expect(() => planDiff([definition()], [virtual])).toThrow(
-				'explicit manual migration',
+				'storage-kind conversions involving ALIAS or EPHEMERAL are not supported',
 			)
 			expect(() => planDiff([virtual], [definition()])).toThrow(
-				'explicit manual migration',
+				'storage-kind conversions involving ALIAS or EPHEMERAL are not supported',
 			)
 		}
 	})
