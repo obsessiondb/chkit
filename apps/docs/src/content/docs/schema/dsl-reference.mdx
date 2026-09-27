@@ -281,6 +281,70 @@ Default value for the column.
   </TabItem>
 </Tabs>
 
+### `defaultKind` (optional)
+
+Choose `DEFAULT` (the implicit default), `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`.
+Python also accepts `default_kind`. The `default` field holds the value or expression
+for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions.
+
+| Kind | Behavior |
+| --- | --- |
+| `DEFAULT` | Stored; the expression applies when the insert omits the value. |
+| `MATERIALIZED` | Computed on insert and stored; cannot be supplied in a normal insert. |
+| `ALIAS` | Computed when explicitly selected; neither stored nor insertable. |
+| `EPHEMERAL` | Input for other column expressions; neither stored nor selectable. |
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    columns: [
+      { name: 'ts', type: 'DateTime' },
+      { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'fn:toDate(ts)' },
+      { name: 'label', type: 'String', defaultKind: 'ALIAS', default: 'fn:toString(day)' },
+      { name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' },
+      { name: 'size', type: 'UInt64', default: 'fn:length(raw)' },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    columns=[
+        {"name": "ts", "type": "DateTime"},
+        {"name": "day", "type": "Date", "default_kind": "MATERIALIZED", "default": "fn:toDate(ts)"},
+        {"name": "label", "type": "String", "default_kind": "ALIAS", "default": "fn:toString(day)"},
+        {"name": "raw", "type": "String", "default_kind": "EPHEMERAL"},
+        {"name": "size", "type": "UInt64", "default": "fn:length(raw)"},
+    ]
+    ```
+  </TabItem>
+</Tabs>
+
+`MATERIALIZED` and `ALIAS` require a value or expression. `EPHEMERAL` may omit it;
+supply these inputs with an explicit insert column list. ClickHouse normally
+excludes all three special kinds from `SELECT *`.
+
+`pull`, snapshots, and drift preserve the column kind. Omitted kind and explicit
+`DEFAULT` compare identically, so existing snapshots need no migration. Keep the
+base type in `type`; do not embed `MATERIALIZED ...` in the type string.
+
+Changing a stored expression emits `MODIFY COLUMN`, without rewriting historical
+values. Use a separately reviewed `ALTER TABLE ... MATERIALIZE COLUMN ...` if you
+need that rewrite. Removing a `DEFAULT` or `MATERIALIZED` expression emits an
+explicit `REMOVE` clause. Automatic kind conversions involving `ALIAS` or
+`EPHEMERAL` are rejected: use an [empty manual migration](/cli/generate/) and review
+the storage and insert behavior before updating the snapshot. The planner never
+silently drops and recreates a column to perform these conversions.
+
+Generated row models exclude `EPHEMERAL` columns. Tables using a special kind also
+get a separate `RowInsert` model that excludes `MATERIALIZED` and `ALIAS`; generated
+TypeScript ingest helpers use that model. Read models describe an explicit projection
+of all readable columns, rather than the default `SELECT *` result. Field requiredness
+is unchanged: insert models require their declared input fields, including defaults.
+
+Automatic backfill projections omit `MATERIALIZED` and `ALIAS` columns. Targets with
+`EPHEMERAL` columns require an explicit SQL insert with an input mapping, because
+these inputs cannot be recovered from stored rows.
+
 ### `comment` (string, optional)
 
 Column-level comment rendered in SQL.

@@ -93,7 +93,7 @@ def test_normalize_column_picks_up_default_when_kind_is_default() -> None:
     assert column.default == "now()"
 
 
-def test_normalize_column_ignores_default_when_kind_is_materialized() -> None:
+def test_normalize_column_preserves_materialized_expression() -> None:
     row = SystemColumnRow(
         database="db",
         table="t",
@@ -104,7 +104,8 @@ def test_normalize_column_ignores_default_when_kind_is_materialized() -> None:
         default_expression="now()",
     )
     column = normalize_column_from_system_row(row)
-    assert column.default is None
+    assert column.default == "now()"
+    assert column.default_kind == "MATERIALIZED"
 
 
 def test_normalize_column_preserves_comment_and_codec() -> None:

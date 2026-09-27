@@ -28,8 +28,10 @@ function sortKind(kind: SchemaDefinition['kind']): number {
 }
 
 function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
+  const { defaultKind, ...rest } = column
   return {
-    ...column,
+    ...rest,
+    defaultKind: defaultKind === 'DEFAULT' ? undefined : defaultKind,
     name: column.name.trim(),
     renamedFrom: column.renamedFrom?.trim(),
     type: typeof column.type === 'string' ? column.type.trim() : column.type,

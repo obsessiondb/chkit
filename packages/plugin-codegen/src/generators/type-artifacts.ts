@@ -17,7 +17,7 @@ import type {
 import { UnsupportedTypeError } from '../errors.js'
 import { normalizeCodegenOptions } from '../options.js'
 import { renderPropertyName, resolveTableNames } from '../naming.js'
-import { renderHeader } from './shared.js'
+import { insertTypeName, renderHeader } from './shared.js'
 
 const LARGE_INTEGER_TYPES = new Set([
   'Int64',
@@ -268,7 +268,18 @@ function renderTableInterface(
   interfaceName: string,
   options: Required<CodegenPluginOptions>
 ): { lines: string[]; findings: CodegenFinding[] } {
-  return renderFieldsInterface(table.columns, interfaceName, `${table.database}.${table.name}`, options)
+  const path = `${table.database}.${table.name}`
+  const read = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'EPHEMERAL'),
+    interfaceName, path, options
+  )
+  const insertName = insertTypeName(table, interfaceName)
+  if (insertName === interfaceName) return read
+  const insert = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'MATERIALIZED' && column.defaultKind !== 'ALIAS'),
+    insertName, path, options
+  )
+  return { lines: [...read.lines, '', ...insert.lines], findings: [...read.findings, ...insert.findings] }
 }
 
 function renderDictionaryInterface(

@@ -73,7 +73,9 @@ def _render_column(col: ColumnDefinition) -> str:
     type_text = f"Nullable({col.type})" if col.nullable else f"{col.type}"
     out = f"`{col.name}` {type_text}"
     if col.default is not None:
-        out += f" DEFAULT {_render_default(col.default)}"
+        out += f" {col.default_kind or 'DEFAULT'} {_render_default(col.default)}"
+    elif col.default_kind == "EPHEMERAL":
+        out += " EPHEMERAL"
     if col.comment is not None and len(col.comment) > 0:
         escaped = col.comment.replace("'", "''")
         out += f" COMMENT '{escaped}'"
@@ -330,11 +332,19 @@ def render_alter_add_column(definition: TableDefinition, column: ColumnInput) ->
     )
 
 
-def render_alter_modify_column(definition: TableDefinition, column: ColumnInput) -> str:
+def render_alter_modify_column(
+    definition: TableDefinition, column: ColumnInput, previous: ColumnDefinition | None = None
+) -> str:
     normalized = _normalize_column(column)
+    remove = ""
+    if (
+        previous is not None and previous.default is not None
+        and normalized.default is None and normalized.default_kind != "EPHEMERAL"
+    ):
+        remove = f", MODIFY COLUMN `{normalized.name}` REMOVE {previous.default_kind or 'DEFAULT'}"
     return (
         f"ALTER TABLE {definition.database}.{definition.name} "
-        f"MODIFY COLUMN {_render_column(normalized)};"
+        f"MODIFY COLUMN {_render_column(normalized)}{remove};"
     )
 
 

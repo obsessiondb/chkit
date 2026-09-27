@@ -439,10 +439,19 @@ def _diff_tables(
             )
         )
     for column_change in column_diff.changed:
+        old_kind = column_change.old_item.default_kind or "DEFAULT"
+        new_kind = column_change.new_item.default_kind or "DEFAULT"
+        if old_kind != new_kind and {old_kind, new_kind} & {"ALIAS", "EPHEMERAL"}:
+            raise ValueError(
+                f"Cannot automatically change column {new.database}.{new.name}."
+                f"{column_change.name} "
+                f"from {old_kind} to {new_kind}; "
+                "use an explicit manual migration for storage-kind changes"
+            )
         sql = (
             render_alter_remove_codec(new, column_change.name)
             if _is_codec_removal(column_change.old_item, column_change.new_item)
-            else render_alter_modify_column(new, column_change.new_item)
+            else render_alter_modify_column(new, column_change.new_item, column_change.old_item)
         )
         ops.append(
             MigrationOperation(

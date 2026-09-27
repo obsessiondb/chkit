@@ -240,6 +240,7 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         f"type={str(column.type).strip()}",
         f"nullable={'1' if column.nullable else '0'}",
         f"default={normalized_default}",
+        f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
     ]
     return "|".join(parts)

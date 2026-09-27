@@ -18,6 +18,11 @@
 - Preserve quoted clause names, delimiters, whitespace, and escaped trailing
   backslashes in table introspection and migration statement splitting.
 
+
+- Support `default_kind` / `defaultKind` for `DEFAULT`, `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns through SQL rendering, introspection, pull, snapshots, and drift. Existing defaults and snapshots remain compatible. Use `fn:` for SQL expressions; expressionless `EPHEMERAL` is supported.
+- Generate separate read/insert models for tables with special column kinds, and make backfill projections respect generated columns. Automatic backfills with ephemeral inputs require explicit SQL input mappings.
+- Emit explicit removal of stored column expressions; require manual migrations for kind conversions involving `ALIAS` or `EPHEMERAL`. Expression changes never automatically materialize historical data.
+
 ## 0.2.0 — 2026-08-10
 
 **Full parity with the TypeScript chkit.** Every remaining gap is closed;

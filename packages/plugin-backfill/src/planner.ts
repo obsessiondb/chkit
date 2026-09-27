@@ -38,7 +38,6 @@ async function detectBackfillStrategy(input: {
   try {
     const definitions = await loadSchemaDefinitions(input.schema, { cwd: input.configDir })
     const mvs = findMvsForTarget(definitions, input.database, input.table)
-    if (mvs.length === 0) return { mvs: [] }
 
     const tableDef = definitions.find(
       (definition) =>
@@ -46,12 +45,21 @@ async function detectBackfillStrategy(input: {
         definition.database === input.database &&
         definition.name === input.table
     )
+    if (tableDef?.kind === 'table' && tableDef.columns.some((column) => column.defaultKind === 'EPHEMERAL')) {
+      throw new BackfillConfigError('Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.')
+    }
+    if (mvs.length === 0) return { mvs: [] }
     return {
       mvs,
       mvReplayQueries: mvs.map((mv) => mv.as),
-      targetColumns: tableDef?.kind === 'table' ? tableDef.columns.map((column) => column.name) : undefined,
+      targetColumns: tableDef?.kind === 'table'
+        ? tableDef.columns
+          .filter((column) => !column.defaultKind || column.defaultKind === 'DEFAULT')
+          .map((column) => column.name)
+        : undefined,
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof BackfillConfigError) throw error
     // Schema load failed, fall back to direct copy.
     return { mvs: [] }
   }

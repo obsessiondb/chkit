@@ -219,6 +219,8 @@ def _render_column(column: ColumnDefinition) -> str:
     ]
     if column.nullable:
         parts.append("nullable=True")
+    if column.default_kind and column.default_kind != "DEFAULT":
+        parts.append(f"default_kind={_render_string(column.default_kind)}")
     if column.default is not None:
         parts.append(f"default={_render_literal(column.default)}")
     if column.comment:

@@ -124,6 +124,21 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     }
     columnSeen.add(column.name)
     columnSet.add(column.name)
+    const kind = column.defaultKind
+    if (kind !== undefined && !['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(kind)) {
+      pushValidationIssue(
+        issues, def, 'column_default_kind_invalid', `Invalid defaultKind on column "${column.name}"`
+      )
+    }
+    const missingExpression = (kind === 'MATERIALIZED' || kind === 'ALIAS') && column.default === undefined
+    const emptyExpression = typeof column.default === 'string'
+      && column.default.startsWith('fn:') && !column.default.slice(3).trim()
+    if (missingExpression || emptyExpression) {
+      pushValidationIssue(
+        issues, def, 'column_expression_required',
+        `Column "${column.name}" requires a non-empty expression; use fn: for SQL expressions`
+      )
+    }
     validateColumnCodec(def, column, issues)
   }
 

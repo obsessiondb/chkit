@@ -52,12 +52,16 @@ export type ColumnCodec = GeneralColumnCodec | PreprocessingColumnCodec | RawCol
 /** Single codec or a chain (preprocessors then exactly one general codec). */
 export type ColumnCodecSpec = ColumnCodec | ColumnCodec[]
 
+export type ColumnDefaultKind = 'DEFAULT' | 'MATERIALIZED' | 'ALIAS' | 'EPHEMERAL'
+
 export interface ColumnDefinition {
   name: string
   type: PrimitiveColumnType | string
   renamedFrom?: string
   nullable?: boolean
+  /** Strings are literals; prefix SQL expressions with `fn:`. */
   default?: string | number | boolean
+  defaultKind?: ColumnDefaultKind
   comment?: string
   codec?: ColumnCodecSpec
 }
@@ -426,6 +430,8 @@ export type ValidationIssueCode =
   | 'codec_chain_must_end_with_general'
   | 'codec_chain_multiple_general'
   | 'codec_chain_empty'
+  | 'column_default_kind_invalid'
+  | 'column_expression_required'
   | 'dictionary_missing_primary_key'
   | 'dictionary_primary_key_missing_attribute'
   | 'dictionary_missing_source'

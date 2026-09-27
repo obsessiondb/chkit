@@ -548,3 +548,33 @@ export const api_mv = {
     }
   })
 })
+
+test('MV replay omits computed columns and rejects unrecoverable ephemeral inputs', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-expressions-'))
+  try {
+    await writeFile(join(dir, 'schema.ts'), `
+      export const target = { kind: 'table', database: 'app', name: 'events_agg', engine: 'MergeTree()',
+        primaryKey: ['event_time'], orderBy: ['event_time'], columns: [
+          { name: 'event_time', type: 'DateTime' }, { name: 'count', type: 'UInt64' },
+          { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'fn:toDate(event_time)' },
+          { name: 'label', type: 'String', defaultKind: 'ALIAS', default: 'fn:toString(count)' }
+        ] }
+      export const mv = { kind: 'materialized_view', database: 'app', name: 'events_mv',
+        to: { database: 'app', name: 'events_agg' }, as: 'SELECT event_time, count() AS count FROM app.events GROUP BY event_time' }
+    `)
+    const output = await buildBackfillPlan({ opts: PlanSchema.parse({ target: 'app.events_agg' }),
+      configPath: join(dir, 'clickhouse.config.ts'), config: resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' }),
+      clickhouseQuery: createMockQuery(),
+    })
+    expect(output.plan.execution.targetColumns).toEqual(['event_time', 'count'])
+    const ephemeralPath = join(dir, 'ephemeral.ts')
+    const source = await readFile(join(dir, 'schema.ts'), 'utf8')
+    await writeFile(ephemeralPath, source.replace("{ name: 'count', type: 'UInt64' }", "{ name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' }"))
+    await expect(buildBackfillPlan({ opts: PlanSchema.parse({ target: 'app.events_agg' }),
+      configPath: join(dir, 'clickhouse.config.ts'), config: resolveConfig({ schema: './ephemeral.ts', metaDir: './chkit/meta' }),
+      clickhouseQuery: createMockQuery(),
+    })).rejects.toThrow('cannot reconstruct EPHEMERAL inputs')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -11,7 +11,7 @@ import type {
 } from '../types.js'
 import { normalizeCodegenOptions } from '../options.js'
 import { resolveTableNames } from '../naming.js'
-import { renderHeader } from './shared.js'
+import { insertTypeName, renderHeader } from './shared.js'
 
 function computeRelativeImportPath(fromFile: string, toFile: string): string {
   const fromDir = dirname(fromFile)
@@ -34,21 +34,22 @@ function renderIngestFunction(
 ): string[] {
   const funcName = `ingest${stripRowSuffix(interfaceName)}`
   const tableFqn = `${table.database}.${table.name}`
+  const inputType = insertTypeName(table, interfaceName)
   const lines: string[] = []
 
   if (emitZod) {
     lines.push(`export async function ${funcName}(`)
     lines.push(`  ingestor: Ingestor,`)
-    lines.push(`  rows: ${interfaceName}[],`)
+    lines.push(`  rows: ${inputType}[],`)
     lines.push(`  options?: IngestOptions`)
     lines.push(`): Promise<void> {`)
-    lines.push(`  const data = options?.validate ? rows.map(row => ${interfaceName}Schema.parse(row)) : rows`)
+    lines.push(`  const data = options?.validate ? rows.map(row => ${inputType}Schema.parse(row)) : rows`)
     lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: data, compressed: options?.compressed ?? true })`)
     lines.push(`}`)
   } else {
     lines.push(`export async function ${funcName}(`)
     lines.push(`  ingestor: Ingestor,`)
-    lines.push(`  rows: ${interfaceName}[],`)
+    lines.push(`  rows: ${inputType}[],`)
     lines.push(`  options?: IngestOptions`)
     lines.push(`): Promise<void> {`)
     lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: rows, compressed: options?.compressed ?? true })`)
@@ -76,9 +77,12 @@ export function generateIngestArtifacts(
   const typeImports: string[] = []
   const valueImports: string[] = []
   for (const entry of resolved) {
-    typeImports.push(entry.interfaceName)
+    const name = entry.definition.kind === 'table'
+      ? insertTypeName(entry.definition, entry.interfaceName)
+      : entry.interfaceName
+    typeImports.push(name)
     if (normalized.emitZod) {
-      valueImports.push(`${entry.interfaceName}Schema`)
+      valueImports.push(`${name}Schema`)
     }
   }
 

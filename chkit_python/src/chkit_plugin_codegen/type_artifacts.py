@@ -302,9 +302,22 @@ def _render_table_model(
     options: CodegenOptions,
 ) -> tuple[list[str], list[CodegenFinding], set[str]]:
     """Render the lines for a single table → Pydantic model."""
-    return _render_fields_model(
-        list(table.columns), class_name, f"{table.database}.{table.name}", options
+    lines, findings, imports = _render_fields_model(
+        [column for column in table.columns if column.default_kind != "EPHEMERAL"],
+        class_name, f"{table.database}.{table.name}", options
     )
+    if any(column.default_kind not in {None, "DEFAULT"} for column in table.columns):
+        insert_lines, insert_findings, insert_imports = _render_fields_model(
+            [
+                column for column in table.columns
+                if column.default_kind not in {"MATERIALIZED", "ALIAS"}
+            ],
+            f"{class_name}Insert", f"{table.database}.{table.name}", options
+        )
+        lines.extend(insert_lines)
+        findings.extend(insert_findings)
+        imports.update(insert_imports)
+    return lines, findings, imports
 
 
 def _render_dictionary_model(

@@ -71,8 +71,6 @@ def _detect_backfill_strategy(
     try:
         definitions = load_schema_definitions(schema, cwd=config_dir)
         mvs = find_mvs_for_target(definitions, database, table)
-        if len(mvs) == 0:
-            return _BackfillStrategy(mvs=[])
 
         table_def = next(
             (
@@ -84,15 +82,29 @@ def _detect_backfill_strategy(
             ),
             None,
         )
+        if table_def is not None and any(
+            column.default_kind == "EPHEMERAL" for column in table_def.columns
+        ):
+            raise BackfillConfigError(
+                "Automatic backfill cannot reconstruct EPHEMERAL inputs; "
+                "use an explicit INSERT with an input column mapping."
+            )
+        if len(mvs) == 0:
+            return _BackfillStrategy(mvs=[])
         return _BackfillStrategy(
             mvs=mvs,
             mv_replay_queries=[mv.as_ for mv in mvs],
             target_columns=(
-                [column.name for column in table_def.columns]
+                [
+                    column.name for column in table_def.columns
+                    if column.default_kind in {None, "DEFAULT"}
+                ]
                 if table_def is not None
                 else None
             ),
         )
+    except BackfillConfigError:
+        raise
     except Exception:
         # Schema load failed, fall back to direct copy.
         return _BackfillStrategy(mvs=[])

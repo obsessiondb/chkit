@@ -204,6 +204,7 @@ function normalizeColumnShape(column: ColumnDefinition): string {
     `type=${String(column.type).trim()}`,
     `nullable=${column.nullable ? '1' : '0'}`,
     `default=${normalizedDefault}`,
+    `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,
   ]
   return parts.join('|')

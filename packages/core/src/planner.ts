@@ -410,9 +410,14 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const { name, oldItem, newItem } of columnDiff.changed) {
+    const oldKind = oldItem.defaultKind ?? 'DEFAULT'
+    const newKind = newItem.defaultKind ?? 'DEFAULT'
+    if (oldKind !== newKind && [oldKind, newKind].some((kind) => kind === 'ALIAS' || kind === 'EPHEMERAL')) {
+      throw new Error(`Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; use an explicit manual migration for storage-kind changes`)
+    }
     const sql = isCodecRemoval(oldItem, newItem)
       ? renderAlterRemoveCodec(newDef, name)
-      : renderAlterModifyColumn(newDef, newItem)
+      : renderAlterModifyColumn(newDef, newItem, oldItem)
     ops.push( {
       type: 'alter_table_modify_column',
       key: `table:${newDef.database}.${newDef.name}:column:${name}`,

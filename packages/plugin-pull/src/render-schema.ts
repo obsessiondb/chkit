@@ -193,6 +193,7 @@ function renderColumn(column: ColumnDefinition): string {
     `type: ${renderString(column.type)}`,
   ]
   if (column.nullable) parts.push('nullable: true')
+  if (column.defaultKind && column.defaultKind !== 'DEFAULT') parts.push(`defaultKind: ${renderString(column.defaultKind)}`)
   if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
   if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
   if (column.codec) parts.push(`codec: ${renderCodecSource(column.codec)}`)
