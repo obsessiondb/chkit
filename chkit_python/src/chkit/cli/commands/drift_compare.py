@@ -21,6 +21,7 @@ from chkit.cli.commands.drift_diff import (
     diff_settings,
 )
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectKind
+from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
 from chkit.core.model import (
     ColumnDefinition,
     ProjectionDefinition,
@@ -344,7 +345,18 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     extra_columns = column_diff.extra
     changed_columns = column_diff.changed
 
-    setting_diffs = diff_settings(expected.settings or {}, actual.settings)
+    if is_kafka_engine(expected.engine):
+        expected_settings = {
+            key: kafka_setting_fingerprint(value)
+            for key, value in (expected.settings or {}).items()
+        }
+        actual_settings = {
+            key: kafka_setting_fingerprint(value)
+            for key, value in parse_kafka_settings(actual.settings).items()
+        }
+        setting_diffs = diff_settings(expected_settings, actual_settings)
+    else:
+        setting_diffs = diff_settings(expected.settings or {}, actual.settings)
 
     expected_indexes = {
         idx.name: _normalize_index_shape(idx) for idx in (expected.indexes or [])

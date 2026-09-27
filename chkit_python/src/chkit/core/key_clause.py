@@ -24,12 +24,19 @@ def split_top_level_comma(text: str) -> list[str]:
     current: list[str] = []
     depth = 0
     quote: str | None = None
+    skip_next = False
     for i, ch in enumerate(text):
-        prev = text[i - 1] if i > 0 else ""
+        if skip_next:
+            skip_next = False
+            continue
+        nxt = text[i + 1] if i + 1 < len(text) else ""
 
         if quote is not None:
             current.append(ch)
-            if ch == quote and prev != "\\":
+            if nxt and (ch == "\\" or ch == quote == nxt):
+                current.append(nxt)
+                skip_next = True
+            elif ch == quote:
                 quote = None
             continue
 

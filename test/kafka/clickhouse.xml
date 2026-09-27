@@ -1,0 +1,5 @@
+<clickhouse>
+  <!-- Match the default host port so HTTP dictionary tests can call this server from inside Docker. -->
+  <http_port>18203</http_port>
+  <kafka><consumer><auto_offset_reset>earliest</auto_offset_reset></consumer></kafka>
+</clickhouse>

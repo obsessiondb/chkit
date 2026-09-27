@@ -22,12 +22,17 @@ export function splitSqlStatements(sql: string): string[] {
 
     if (inSingleQuote) {
       current += ch
+      if (ch === '\\' && next) {
+        current += next
+        i += 1
+        continue
+      }
       if (ch === "'" && next === "'") {
         current += next
         i += 1
         continue
       }
-      if (ch === "'" && sql[i - 1] !== '\\') {
+      if (ch === "'") {
         inSingleQuote = false
       }
       continue
@@ -35,7 +40,12 @@ export function splitSqlStatements(sql: string): string[] {
 
     if (inDoubleQuote) {
       current += ch
-      if (ch === '"' && sql[i - 1] !== '\\') {
+      if (ch === '\\' && next) {
+        current += next
+        i += 1
+        continue
+      }
+      if (ch === '"') {
         inDoubleQuote = false
       }
       continue
@@ -125,12 +135,17 @@ export function extractExecutableStatements(sql: string): string[] {
 
     if (inSingleQuote) {
       stripped += ch
+      if (ch === '\\' && next) {
+        stripped += next
+        i += 1
+        continue
+      }
       if (ch === "'" && next === "'") {
         stripped += next
         i += 1
         continue
       }
-      if (ch === "'" && sql[i - 1] !== '\\') {
+      if (ch === "'") {
         inSingleQuote = false
       }
       continue
@@ -138,7 +153,12 @@ export function extractExecutableStatements(sql: string): string[] {
 
     if (inDoubleQuote) {
       stripped += ch
-      if (ch === '"' && sql[i - 1] !== '\\') {
+      if (ch === '\\' && next) {
+        stripped += next
+        i += 1
+        continue
+      }
+      if (ch === '"') {
         inDoubleQuote = false
       }
       continue

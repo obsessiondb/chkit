@@ -114,3 +114,12 @@ describe('extractExecutableStatements', () => {
     ])
   })
 })
+test('escaped trailing backslash closes a setting literal before the next statement', () => {
+  const sql = String.raw`CREATE TABLE q (id String) ENGINE = Kafka SETTINGS kafka_client_id = 'a;\\';
+-- next operation
+CREATE MATERIALIZED VIEW mv TO stored AS SELECT id FROM q;`
+  expect(extractExecutableStatements(sql)).toEqual([
+    String.raw`CREATE TABLE q (id String) ENGINE = Kafka SETTINGS kafka_client_id = 'a;\\';`,
+    'CREATE MATERIALIZED VIEW mv TO stored AS SELECT id FROM q;',
+  ])
+})

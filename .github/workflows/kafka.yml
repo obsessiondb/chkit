@@ -1,0 +1,48 @@
+name: Kafka integration
+
+on:
+  pull_request:
+    paths:
+      - 'packages/**'
+      - 'chkit_python/**'
+      - 'test/kafka/**'
+      - '.github/workflows/kafka.yml'
+      - 'bun.lock'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  kafka:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        clickhouse: ['25.3', '26.3']
+    env:
+      CLICKHOUSE_VERSION: ${{ matrix.clickhouse }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build TypeScript and install Python
+        run: |
+          bunx turbo run build --filter=chkit... --filter=@chkit/plugin-pull
+          python -m venv .venv
+          .venv/bin/pip install -e './chkit_python[dev]'
+      - name: Start Kafka and ClickHouse
+        run: docker compose -p chkit-issue203 -f test/kafka/docker-compose.yml up -d --wait
+      - name: TypeScript Kafka workflow
+        run: bun test test/kafka/kafka.e2e.test.ts
+      - name: Python Kafka workflow
+        run: .venv/bin/python -m pytest test/kafka/test_python_e2e.py -q
+      - name: Service logs
+        if: failure()
+        run: docker compose -p chkit-issue203 -f test/kafka/docker-compose.yml logs --tail=150
+      - name: Clean up
+        if: always()
+        run: docker compose -p chkit-issue203 -f test/kafka/docker-compose.yml down -v

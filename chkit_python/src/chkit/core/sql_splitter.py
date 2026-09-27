@@ -29,10 +29,14 @@ def _handle_in_block_comment(state: _SplitterState, ch: str, nxt: str) -> int:
     return 1
 
 
-def _handle_in_quote(state: _SplitterState, ch: str, prev: str) -> None:
+def _handle_in_quote(state: _SplitterState, ch: str, nxt: str) -> int:
     state.current.append(ch)
-    if ch == state.quote and prev != "\\":
+    if nxt and (ch == "\\" or ch == state.quote == nxt):
+        state.current.append(nxt)
+        return 2
+    if ch == state.quote:
         state.quote = None
+    return 1
 
 
 def _flush_statement(state: _SplitterState) -> None:
@@ -55,7 +59,6 @@ def split_sql_statements(text: str) -> list[str]:
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
-        prev = text[i - 1] if i > 0 else ""
 
         if state.in_line_comment:
             _handle_in_line_comment(state, ch)
@@ -65,8 +68,7 @@ def split_sql_statements(text: str) -> list[str]:
             i += _handle_in_block_comment(state, ch, nxt)
             continue
         if state.quote is not None:
-            _handle_in_quote(state, ch, prev)
-            i += 1
+            i += _handle_in_quote(state, ch, nxt)
             continue
         if ch == "-" and nxt == "-":
             state.current.append(ch)

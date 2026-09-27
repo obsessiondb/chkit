@@ -1,5 +1,6 @@
 import {
   canonicalizeDefinitions,
+  isKafkaEngine,
   isIndexProjection,
   isRawCodec,
   type ColumnCodec,
@@ -79,8 +80,10 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
     lines.push(`    ${renderColumn(column)},`)
   }
   lines.push('  ],')
-  lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
-  lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
+  if (!isKafkaEngine(definition.engine)) {
+    lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
+    lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
+  }
   if (definition.uniqueKey && definition.uniqueKey.length > 0) {
     lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
   }

@@ -314,7 +314,7 @@ export function buildIntrospectedTables(
 			return {
 				database: row.database,
 				name: row.name,
-				engine: parseEngineFromCreateTableQuery(row.create_table_query),
+					engine: parseEngineFromCreateTableQuery(row.create_table_query) ?? row.engine,
 				primaryKey: parsePrimaryKeyFromCreateTableQuery(row.create_table_query),
 				orderBy: parseOrderByFromCreateTableQuery(row.create_table_query),
 				uniqueKey: parseUniqueKeyFromCreateTableQuery(row.create_table_query),

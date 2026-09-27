@@ -168,6 +168,10 @@ Creates a table definition.
 
 ### Optional fields
 
+For [Kafka tables](/schema/kafka/), omit `primaryKey` and `orderBy`. Kafka also
+rejects storage clauses (`partitionBy`, `uniqueKey`, `ttl`, indexes, projections)
+and column defaults. Its setting strings are escaped SQL literals.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `partitionBy` | `string` | Partition expression, e.g. `'toYYYYMM(created_at)'` |
@@ -906,6 +910,9 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Dictionary bidirectional requires hierarchical** (`dictionary_bidirectional_requires_hierarchical`) -- an attribute sets `bidirectional` without `hierarchical`
 
 ## Structural vs. alterable properties
+
+The table rules below apply to MergeTree-family tables. Kafka changes require an
+[explicit replacement](/schema/kafka/#changing-a-queue); chkit refuses generic ALTERs.
 
 When a property changes, chkit determines whether the table can be altered in place or must be dropped and recreated.
 

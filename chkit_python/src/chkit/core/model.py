@@ -670,6 +670,11 @@ class MigrationPlan(_StrictModel):
 
 
 ValidationIssueCode: TypeAlias = Literal[
+    "kafka_unsupported_clause",
+    "kafka_column_default",
+    "kafka_missing_setting",
+    "kafka_invalid_setting",
+    "kafka_change_requires_replacement",
     "duplicate_object_name",
     "duplicate_column_name",
     "duplicate_index_name",
@@ -762,6 +767,11 @@ def table(
 ) -> TableDefinition:
     pk = primary_key if primary_key is not None else primaryKey
     ob = order_by if order_by is not None else orderBy
+    from chkit.core.kafka import is_kafka_engine
+
+    if is_kafka_engine(engine):
+        pk = pk or []
+        ob = ob or []
     if pk is None or ob is None:
         msg = "table() requires primary_key/primaryKey and order_by/orderBy"
         raise ValueError(msg)

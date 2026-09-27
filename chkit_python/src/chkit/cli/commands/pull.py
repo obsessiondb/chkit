@@ -55,6 +55,7 @@ from chkit.clickhouse.introspect import (
     list_schema_objects,
     list_table_details,
 )
+from chkit.core.kafka import is_kafka_engine, parse_kafka_settings
 from chkit.core.model import (
     ChxConfigEnv,
     DictionaryDefinition,
@@ -85,7 +86,12 @@ def _introspected_table_to_definition(
     if not item.columns:
         return None
 
-    settings = {k: _coerce_setting_value(v) for k, v in (item.settings or {}).items()}
+    kafka = is_kafka_engine(item.engine or "")
+    settings = (
+        parse_kafka_settings(item.settings or {})
+        if kafka
+        else {k: _coerce_setting_value(v) for k, v in (item.settings or {}).items()}
+    )
 
     indexes: list[
         SkipIndexMinmax
@@ -102,8 +108,8 @@ def _introspected_table_to_definition(
         name=item.name,
         engine=item.engine or "MergeTree",
         columns=list(item.columns),
-        primary_key=_split_clause(item.primary_key) or [item.columns[0].name],
-        order_by=_split_clause(item.order_by) or [item.columns[0].name],
+        primary_key=[] if kafka else _split_clause(item.primary_key) or [item.columns[0].name],
+        order_by=[] if kafka else _split_clause(item.order_by) or [item.columns[0].name],
         unique_key=_split_clause(item.unique_key) or None,
         partition_by=item.partition_by or None,
         ttl=item.ttl or None,
@@ -352,6 +358,24 @@ def _summarize_skipped_objects(
     )
 
 
+def _kafka_setting_warnings(definitions: Sequence[SchemaDefinition]) -> list[str]:
+    warnings: list[str] = []
+    for definition in definitions:
+        if not isinstance(definition, TableDefinition) or not is_kafka_engine(definition.engine):
+            continue
+        for key, value in (definition.settings or {}).items():
+            if re.search(r"password|secret|token", key, re.IGNORECASE):
+                label = f'Kafka table "{definition.database}.{definition.name}" setting {key}'
+                warnings.append(
+                    f"{label} was redacted by ClickHouse. Restore it or use server-side "
+                    "configuration before generating migrations."
+                    if value == "[HIDDEN]"
+                    else f"{label} contains a credential returned by ClickHouse and written "
+                    "into the schema file. Prefer server-side configuration."
+                )
+    return warnings
+
+
 def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None:
     if out_file.exists() and not overwrite:
         msg = (
@@ -459,6 +483,7 @@ def run(  # noqa: PLR0917
     )
 
     warnings = _dictionary_password_warnings(definitions)
+    warnings.extend(_kafka_setting_warnings(definitions))
 
     payload: dict[str, object] = {
         "command": "schema",

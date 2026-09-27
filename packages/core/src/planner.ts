@@ -30,6 +30,8 @@ import {
 } from './sql.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
+import { ChxValidationError } from './model.js'
+import { isKafkaEngine, kafkaSettingFingerprint } from './kafka.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -45,7 +47,7 @@ function pushDropOperation(
       type: 'drop_table',
       key: definitionKey(def),
       risk,
-      sql: `DROP TABLE IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP TABLE IF EXISTS ${def.database}.${def.name}${isKafkaEngine(def.engine) ? ' SYNC' : ''};`,
     })
     return
   }
@@ -354,6 +356,21 @@ function diffDictionary(
 }
 
 function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
+  if (isKafkaEngine(oldDef.engine) || isKafkaEngine(newDef.engine)) {
+    const settings = (def: TableDefinition) => Object.fromEntries(
+      Object.entries(def.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)])
+    )
+    if (requiresTableRecreate(oldDef, newDef)
+      || JSON.stringify(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== JSON.stringify(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
+      || diffSettings(settings(oldDef), settings(newDef)).changes.length > 0
+      || (oldDef.comment ?? '') !== (newDef.comment ?? '')) {
+      throw new ChxValidationError([{
+        code: 'kafka_change_requires_replacement', kind: 'table', database: newDef.database, name: newDef.name,
+        message: `Kafka table ${newDef.database}.${newDef.name} requires an explicit replacement; column, engine and setting ALTERs are not supported. Remove the queue and its consuming materialized views from the schema and generate a drop migration, then re-add the updated definitions and generate a create migration. Review both migrations and consumer-group/offset behavior before applying with --allow-destructive.`,
+      }])
+    }
+    return { operations: [], renameSuggestions: [] }
+  }
   if (requiresTableRecreate(oldDef, newDef)) {
     return {
       operations: [

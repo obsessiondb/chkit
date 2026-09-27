@@ -6,11 +6,14 @@ export function splitTopLevelComma(input: string): string[] {
 
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i] ?? ''
-    const prev = i > 0 ? input[i - 1] : ''
 
     if (quote) {
       current += char
-      if (char === quote && prev !== '\\') quote = null
+      if (char === '\\' && i + 1 < input.length) current += input[++i]
+      else if (char === quote) {
+        if (input[i + 1] === quote) current += input[++i]
+        else quote = null
+      }
       continue
     }
 

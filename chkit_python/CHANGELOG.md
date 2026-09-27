@@ -2,10 +2,21 @@
 
 ## Unreleased
 
+### Added
 - Add `SkipIndexText` for full-text index generation, introspection, pull, and drift.
   Preserve quoted SQL literals, normalize ClickHouse’s fixed granularity, and reject
   malformed or unsupported metadata. Exercise adversarial round trips and actual
   indexed search results on ClickHouse 26.3 and 26.8.
+- Native Kafka table definitions without sorting keys, escaped literal settings,
+  pull round trips, and normalized live drift/check comparisons.
+- Validation and migration guards reject unsupported Kafka changes before
+  writing artifacts. Offline drift/check report changes requiring replacement;
+  explicit drop/create migrations preserve the existing destructive-operation gate.
+- Kafka ingestion and replacement integration tests on ClickHouse 25.3 and 26.3.
+
+### Fixed
+- Preserve quoted clause names, delimiters, whitespace, and escaped trailing
+  backslashes in table introspection and migration statement splitting.
 
 ## 0.2.0 — 2026-08-10
 

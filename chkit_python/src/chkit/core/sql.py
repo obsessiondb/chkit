@@ -8,6 +8,7 @@ from typing import Any, TypeAlias
 from pydantic import TypeAdapter
 
 from chkit.core.codec import render_codec
+from chkit.core.kafka import is_kafka_engine, render_kafka_setting
 from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
     ColumnDefinition,
@@ -143,12 +144,13 @@ def _render_table_sql(definition: TableDefinition) -> str:
     clauses: list[str] = []
     if definition.partition_by is not None:
         clauses.append(f"PARTITION BY {definition.partition_by}")
-    clauses.append(
-        f"PRIMARY KEY ({_render_key_clause_columns(definition.primary_key, column_names)})"
-    )
-    clauses.append(
-        f"ORDER BY ({_render_key_clause_columns(definition.order_by, column_names)})"
-    )
+    if not is_kafka_engine(definition.engine):
+        clauses.append(
+            f"PRIMARY KEY ({_render_key_clause_columns(definition.primary_key, column_names)})"
+        )
+        clauses.append(
+            f"ORDER BY ({_render_key_clause_columns(definition.order_by, column_names)})"
+        )
     if definition.unique_key is not None and len(definition.unique_key) > 0:
         clauses.append(
             f"UNIQUE KEY ({_render_key_clause_columns(definition.unique_key, column_names)})"
@@ -156,7 +158,15 @@ def _render_table_sql(definition: TableDefinition) -> str:
     if definition.ttl is not None:
         clauses.append(f"TTL {definition.ttl}")
     if definition.settings is not None and len(definition.settings) > 0:
-        clauses.append(f"SETTINGS {_render_settings_clause(definition.settings)}")
+        rendered_settings = (
+            ", ".join(
+                f"{key} = {render_kafka_setting(value)}"
+                for key, value in definition.settings.items()
+            )
+            if is_kafka_engine(definition.engine)
+            else _render_settings_clause(definition.settings)
+        )
+        clauses.append(f"SETTINGS {rendered_settings}")
     if definition.comment is not None and len(definition.comment) > 0:
         escaped = definition.comment.replace("'", "''")
         clauses.append(f"COMMENT '{escaped}'")

@@ -1,4 +1,4 @@
-import { normalizeProjectionIndex, normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
+import { findTopLevelSQLPattern, normalizeProjectionIndex, normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
 
 type ProjectionDefinitionShape =
   | { name: string; query: string }
@@ -7,7 +7,8 @@ type ProjectionDefinitionShape =
 function parseClauseFromCreateTableQuery(
   createTableQuery: string | undefined,
   clausePattern: RegExp,
-  stopPattern: RegExp
+  stopPattern: RegExp,
+  preserveWhitespace = false
 ): string | undefined {
   if (!createTableQuery) return undefined
   // Table-level clauses (ENGINE, ORDER BY, PRIMARY KEY, ...) only appear after
@@ -15,13 +16,13 @@ function parseClauseFromCreateTableQuery(
   // body — e.g. the `ORDER BY` of a projection's SELECT — and swallow the real
   // clause plus everything up to the next stop keyword (issue #190).
   const options = extractTableOptions(createTableQuery)
-  const start = options.match(clausePattern)
-  if (!start || start.index === undefined) return undefined
-  const afterClause = options.slice(start.index + start[0].length)
-  const stop = afterClause.match(stopPattern)
+  const start = findTopLevelSQLPattern(options, clausePattern)
+  if (!start) return undefined
+  const afterClause = options.slice(start.index + start.length)
+  const stop = findTopLevelSQLPattern(afterClause, stopPattern)
   const raw = (stop ? afterClause.slice(0, stop.index) : afterClause).trim()
   if (!raw) return undefined
-  return normalizeSQLFragment(raw)
+  return preserveWhitespace ? raw : normalizeSQLFragment(raw)
 }
 
 /**
@@ -88,9 +89,12 @@ function extractTableOptions(createTableQuery: string): string {
 
 export function parseSettingsFromCreateTableQuery(createTableQuery: string | undefined): Record<string, string> {
   if (!createTableQuery) return {}
-  const settingsMatch = extractTableOptions(createTableQuery).match(/\bSETTINGS\b([\s\S]*?)(?:;|$)/i)
-  if (!settingsMatch?.[1]) return {}
-  const rawSettings = settingsMatch[1].trim()
+  const options = extractTableOptions(createTableQuery)
+  const start = findTopLevelSQLPattern(options, /\bSETTINGS\b/i)
+  if (!start) return {}
+  const tail = options.slice(start.index + start.length)
+  const stop = findTopLevelSQLPattern(tail, /\bCOMMENT\b|;/i)
+  const rawSettings = (stop ? tail.slice(0, stop.index) : tail).trim()
   if (!rawSettings) return {}
   const items = splitTopLevelComma(rawSettings)
   const out: Record<string, string> = {}
@@ -117,7 +121,8 @@ export function parseEngineFromCreateTableQuery(createTableQuery: string | undef
   return parseClauseFromCreateTableQuery(
     createTableQuery,
     /\bENGINE\s*=\s*/i,
-    /\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|;|$/i
+    /\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|\bCOMMENT\b|;|$/i,
+    true
   )
 }
 

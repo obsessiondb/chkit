@@ -22,6 +22,7 @@ import typer
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
+from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.migration_store import (
@@ -32,14 +33,12 @@ from chkit.cli.migration_store import (
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.table_scope import (
-    filter_plan_by_table_scope,
     resolve_table_scope,
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxConfigEnv
-from chkit.core.planner import plan_diff
 from chkit.core.validate import validate_definitions
 from chkit.plugins import ChxOnCheckContext, ChxPlugin
 
@@ -106,13 +105,11 @@ def run(  # noqa: PLR0912, PLR0915
 
     drift_ops: list[str] = []
     drift_reason_counts: dict[str, int] = {}
+    replacement_drift = False
     if snapshot is not None:
-        plan = plan_diff(snapshot_defs, schema_defs)
-        if table_scope.enabled:
-            filtered = filter_plan_by_table_scope(
-                plan, set(table_scope.matched_tables)
-            )
-            plan = filtered.plan
+        plan, replacement_issues = plan_snapshot_drift(snapshot_defs, schema_defs, table_scope)
+        replacement_drift = bool(replacement_issues)
+        issues.extend(issue.model_dump(mode="json") for issue in replacement_issues)
         drift_ops = [op.key for op in plan.operations]
 
     live_drifted = False
@@ -157,9 +154,7 @@ def run(  # noqa: PLR0912, PLR0915
         failed_checks.append("pending_migrations")
     if fail_on_mismatch and mismatches:
         failed_checks.append("checksum_mismatch")
-    drift_fired = (
-        bool(drift_ops) if not live else live_drifted or bool(drift_ops)
-    )
+    drift_fired = bool(drift_ops) or replacement_drift or (live and live_drifted)
     if fail_on_drift and drift_fired:
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")

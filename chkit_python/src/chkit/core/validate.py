@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 from typing import Final
 
 from chkit.core.canonical import definition_key
 from chkit.core.codec import canonicalize_codec, is_general_codec, is_raw_codec
+from chkit.core.kafka import is_kafka_engine
 from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
     ChxValidationError,
@@ -108,7 +110,78 @@ def _validate_indexes(definition: TableDefinition, issues: list[ValidationIssue]
                       f'Text index "{index.name}": {exc}')
 
 
+def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
+    if not is_kafka_engine(definition.engine):
+        return
+    label = f"Kafka table {definition.database}.{definition.name}"
+    clauses = {
+        "primaryKey": definition.primary_key,
+        "orderBy": definition.order_by,
+        "uniqueKey": definition.unique_key,
+        "partitionBy": definition.partition_by,
+        "ttl": definition.ttl,
+        "indexes": definition.indexes,
+        "projections": definition.projections,
+    }
+    for field, value in clauses.items():
+        if value:
+            _push(
+                issues,
+                definition,
+                "kafka_unsupported_clause",
+                f"{label} does not support {field}. Put storage clauses on the destination table.",
+            )
+    for column in definition.columns:
+        if column.default is not None:
+            _push(
+                issues,
+                definition,
+                "kafka_column_default",
+                f'{label} column "{column.name}" cannot have a DEFAULT. '
+                "Compute defaults in the materialized view.",
+            )
+    settings = definition.settings or {}
+    if re.fullmatch(r"Kafka\s*(?:\(\s*\))?", definition.engine.strip(), re.IGNORECASE):
+        for key in ("kafka_broker_list", "kafka_topic_list", "kafka_group_name", "kafka_format"):
+            setting = settings.get(key)
+            if not isinstance(setting, str) or not setting.strip():
+                _push(
+                    issues,
+                    definition,
+                    "kafka_missing_setting",
+                    f"{label} requires a nonempty {key} string "
+                    "(or engine arguments / a named collection).",
+                )
+    for key, setting in settings.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or (
+            isinstance(setting, float) and not math.isfinite(setting)
+        ):
+            _push(
+                issues,
+                definition,
+                "kafka_invalid_setting",
+                f"{label} has an invalid setting key or value: {key}.",
+            )
+        if key == "kafka_auto_offset_reset":
+            _push(
+                issues,
+                definition,
+                "kafka_invalid_setting",
+                "kafka_auto_offset_reset is not a Kafka table setting on standard ClickHouse. "
+                "Configure auto_offset_reset in the server Kafka configuration.",
+            )
+        if re.search(r"password|secret|token", key, re.IGNORECASE) and setting == "[HIDDEN]":
+            _push(
+                issues,
+                definition,
+                "kafka_invalid_setting",
+                f"Kafka setting {key} was redacted by ClickHouse. Restore the credential or "
+                "use server-side configuration before generating migrations.",
+            )
+
+
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
+    _validate_kafka_table(definition, issues)
     column_seen: set[str] = set()
     column_set: set[str] = set()
     for column in definition.columns:

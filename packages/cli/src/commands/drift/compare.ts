@@ -1,5 +1,8 @@
 import {
   normalizeEngine as coreNormalizeEngine,
+  isKafkaEngine,
+  parseKafkaSettings,
+  kafkaSettingFingerprint,
   isIndexProjection,
   normalizeProjectionIndex,
   normalizeSQLFragment,
@@ -279,7 +282,14 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   const extraColumns = columnDiff.extra
   const changedColumns = columnDiff.changed
 
-  const settingDiffs = diffSettings(expected.settings ?? {}, actual.settings)
+  const kafka = isKafkaEngine(expected.engine)
+  const expectedSettings = kafka
+    ? Object.fromEntries(Object.entries(expected.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
+    : expected.settings ?? {}
+  const actualSettings = kafka
+    ? Object.fromEntries(Object.entries(parseKafkaSettings(actual.settings)).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
+    : actual.settings
+  const settingDiffs = diffSettings(expectedSettings, actualSettings)
 
   const expectedIndexes = new Map(
     (expected.indexes ?? []).map((idx) => [idx.name, normalizeIndexShape(idx)])

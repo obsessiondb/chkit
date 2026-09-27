@@ -1,0 +1,33 @@
+services:
+  kafka:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.1
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=kafka:9092
+    healthcheck:
+      test: [CMD, rpk, cluster, info]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.3}
+    environment:
+      CLICKHOUSE_PASSWORD: chkit-kafka-test
+    ports:
+      - "127.0.0.1:${KAFKA_TEST_HTTP_PORT:-18203}:18203"
+    volumes:
+      - ./clickhouse.xml:/etc/clickhouse-server/config.d/chkit-kafka.xml:ro
+      - ../ci/clickhouse.xml:/etc/clickhouse-server/config.d/chkit-ci.xml:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, clickhouse-client, --password, chkit-kafka-test, --query, SELECT 1]
+      interval: 2s
+      timeout: 5s
+      retries: 40

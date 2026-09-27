@@ -16,6 +16,8 @@ import {
   type DictionaryDefinition,
   type FlagMapping,
   normalizeEngine,
+  isKafkaEngine,
+  parseKafkaSettings,
   type ResolvedChxConfig,
   type SafeParseable,
   type SchemaDefinition,
@@ -327,7 +329,15 @@ async function pullSchema(input: {
   const content = renderSchemaFile(definitions)
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
-  const warnings = dictionaryPasswordWarnings(definitions)
+  const warnings = [
+    ...dictionaryPasswordWarnings(definitions),
+    ...definitions.flatMap((def) => def.kind === 'table' && isKafkaEngine(def.engine)
+      ? Object.entries(def.settings ?? {}).filter(([key]) => /password|secret|token/i.test(key)).map(([key, value]) =>
+        value === '[HIDDEN]'
+          ? `Kafka table "${def.database}.${def.name}" setting ${key} was redacted by ClickHouse. Restore it or use server-side configuration before generating migrations.`
+          : `Kafka table "${def.database}.${def.name}" setting ${key} contains a credential returned by ClickHouse and written into the schema file. Prefer server-side configuration.`)
+      : []),
+  ]
 
   return {
     outFile,
@@ -367,7 +377,7 @@ function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefini
     ...(table.uniqueKey ? { uniqueKey: splitTopLevelCommaSeparated(table.uniqueKey) } : {}),
     ...(table.partitionBy ? { partitionBy: table.partitionBy } : {}),
     ...(table.ttl ? { ttl: table.ttl } : {}),
-    ...(Object.keys(table.settings).length > 0 ? { settings: table.settings } : {}),
+    ...(Object.keys(table.settings).length > 0 ? { settings: isKafkaEngine(table.engine ?? '') ? parseKafkaSettings(table.settings) : table.settings } : {}),
     ...(table.indexes.length > 0 ? { indexes: table.indexes } : {}),
     ...(table.projections.length > 0 ? { projections: table.projections } : {}),
   }
