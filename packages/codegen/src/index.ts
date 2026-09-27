@@ -126,7 +126,11 @@ function buildMigrationContent(input: {
   )
 
   const body = input.plan.operations
-    .map((op) => [`-- operation: ${op.type} key=${op.key} risk=${op.risk}`, op.sql].join('\n'))
+    .map((op) => [
+      `-- operation: ${op.type} key=${op.key} risk=${op.risk}`,
+      ...(op.warning ? [`-- Warning: ${op.warning.replace(/[\r\n]/g, ' ')}`] : []),
+      op.sql,
+    ].join('\n'))
     .join('\n\n')
 
   const withHints = [...header, ...renameHints]

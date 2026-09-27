@@ -110,6 +110,35 @@ def _detect_backfill_strategy(
         return _BackfillStrategy(mvs=[])
 
 
+def assert_backfill_target_safe(
+    *, database: str, table: str, query: PlannerQuery,
+    query_settings: QuerySettings | None = None,
+) -> None:
+    """Fail closed when live metadata cannot establish safe input semantics."""
+    def quote(value: str) -> str:
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    rows = query(
+        "SELECT name, default_kind FROM system.columns "
+        f"WHERE database = {quote(database)} AND table = {quote(table)} ORDER BY position",
+        query_settings,
+    )
+    if not rows or any(
+        not column.get("name")
+        or column.get("default_kind") not in {"", "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL"}
+        for column in rows
+    ):
+        raise BackfillConfigError(
+            "Cannot verify live target column kinds; automatic backfill is blocked. "
+            "Check metadata access and use an explicit INSERT if needed."
+        )
+    if any(column["default_kind"] == "EPHEMERAL" for column in rows):
+        raise BackfillConfigError(
+            "Automatic backfill cannot reconstruct EPHEMERAL inputs; "
+            "use an explicit INSERT with an input column mapping."
+        )
+
+
 @dataclass(frozen=True)
 class BuildBackfillPlanOutput:
     plan: BackfillPlanState
@@ -136,12 +165,15 @@ def build_backfill_plan(
     # backfill sizes its chunks against the MV *source* (the table its SELECT
     # reads), because the injected chunk conditions run against that source —
     # not the target, which is legitimately empty when bootstrapping an
-    # aggregate. Only the copy path introspects the target itself.
+    # aggregate. Target column safety is checked separately for both paths.
     strategy = _detect_backfill_strategy(
         schema=config.schema_,
         config_dir=Path(config_path).resolve().parent,
         database=database,
         table=table,
+    )
+    assert_backfill_target_safe(
+        database=database, table=table, query=clickhouse_query, query_settings=query_settings,
     )
     replay_source = (
         resolve_mv_replay_source(strategy.mvs)

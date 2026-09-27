@@ -413,7 +413,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     const oldKind = oldItem.defaultKind ?? 'DEFAULT'
     const newKind = newItem.defaultKind ?? 'DEFAULT'
     if (oldKind !== newKind && [oldKind, newKind].some((kind) => kind === 'ALIAS' || kind === 'EPHEMERAL')) {
-      throw new Error(`Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; use an explicit manual migration for storage-kind changes`)
+      throw new Error(`Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; use an explicit manual migration for storage-kind changes, then run generate --reconcile --table ${newDef.database}.${newDef.name} after applying it`)
     }
     const sql = isCodecRemoval(oldItem, newItem)
       ? renderAlterRemoveCodec(newDef, name)
@@ -423,6 +423,9 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       key: `table:${newDef.database}.${newDef.name}:column:${name}`,
       risk: 'caution',
       sql,
+      ...((oldKind === 'DEFAULT' || oldKind === 'MATERIALIZED' || newKind === 'DEFAULT' || newKind === 'MATERIALIZED') && (oldItem.default !== newItem.default || oldKind !== newKind)
+        ? { warning: `Changing the expression for ${newDef.database}.${newDef.name}.${name} does not rewrite stored historical values. Review a separate MATERIALIZE COLUMN migration if a rewrite is required; never reconstruct values from discarded EPHEMERAL inputs.` }
+        : {}),
     })
   }
   for (const column of columnDiff.removed) {

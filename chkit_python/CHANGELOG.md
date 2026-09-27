@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- Compare column defaults with quote-aware SQL tokens and correctly escape literal backslashes.
+- Generate separate `Row` (default `SELECT *`), `RowExplicit`, and `RowInsert` models.
+- Check live column metadata before backfill planning and local execution; block unknown metadata and unrecoverable `EPHEMERAL` inputs.
+- Warn about unchanged historical values in migration output and SQL. Support `generate --reconcile --table` to verify manually applied column expression/kind changes and adopt only those snapshot changes.
+
 - Add `SkipIndexText` for full-text index generation, introspection, pull, and drift.
   Preserve quoted SQL literals, normalize ClickHouse’s fixed granularity, and reject
   malformed or unsupported metadata. Exercise adversarial round trips and actual

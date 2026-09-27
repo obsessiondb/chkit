@@ -65,6 +65,26 @@ async function detectBackfillStrategy(input: {
   }
 }
 
+/** Missing, unreadable or unsupported metadata must never bypass the safety gate. */
+export async function assertBackfillTargetSafe(input: {
+  database: string
+  table: string
+  query: <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => Promise<T[]>
+  querySettings?: Record<string, string | number | boolean | undefined>
+}): Promise<void> {
+  const quote = (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+  const rows = await input.query<{ name: string; default_kind: string }>(
+    `SELECT name, default_kind FROM system.columns WHERE database = ${quote(input.database)} AND table = ${quote(input.table)} ORDER BY position`,
+    input.querySettings
+  )
+  if (!rows.length || rows.some((column) => !column.name || !['', 'DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(column.default_kind))) {
+    throw new BackfillConfigError('Cannot verify live target column kinds; automatic backfill is blocked. Check metadata access and use an explicit INSERT if needed.')
+  }
+  if (rows.some((column) => column.default_kind === 'EPHEMERAL')) {
+    throw new BackfillConfigError('Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.')
+  }
+}
+
 export async function buildBackfillPlan(input: {
   opts: PlanOptions
   configPath: string
@@ -82,13 +102,15 @@ export async function buildBackfillPlan(input: {
   // Detect the execution strategy before chunk planning: an mv_replay backfill
   // sizes its chunks against the MV *source* (the table its SELECT reads),
   // because the injected chunk conditions run against that source — not the
-  // target, which is legitimately empty when bootstrapping an aggregate. Only
-  // the copy path introspects the target itself.
+  // target, which is legitimately empty when bootstrapping an aggregate. Target column safety is checked separately for both paths.
   const strategy = await detectBackfillStrategy({
     schema: input.config.schema,
     configDir: dirname(input.configPath),
     database,
     table,
+  })
+  await assertBackfillTargetSafe({
+    database, table, query: input.clickhouseQuery, querySettings: input.querySettings,
   })
   const replaySource = strategy.mvReplayQueries ? resolveMvReplaySource(strategy.mvs) : undefined
   const chunkSource = replaySource ?? { database, table }

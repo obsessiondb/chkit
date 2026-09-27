@@ -18,10 +18,10 @@ import { renderProjectionBody } from './projection.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 
-function renderDefault(value: string | number | boolean): string {
+export function renderDefault(value: string | number | boolean): string {
   if (typeof value === 'string') {
     if (value.startsWith('fn:')) return value.slice(3)
-    return `'${value.replace(/'/g, "''")}'`
+    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`
   }
   return String(value)
 }

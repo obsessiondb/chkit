@@ -150,7 +150,9 @@ def _build_migration_content(
         for s in plan.rename_suggestions
     ]
     body_blocks = [
-        f"-- operation: {op.type} key={op.key} risk={op.risk}\n{op.sql}"
+        f"-- operation: {op.type} key={op.key} risk={op.risk}\n"
+        + ("-- Warning: " + " ".join(op.warning.splitlines()) + "\n" if op.warning else "")
+        + op.sql
         for op in plan.operations
     ]
     body = "\n\n".join(body_blocks)

@@ -26,8 +26,8 @@ export {
   unquoteIdentifiers,
 } from './identifier.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
-export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
-export { renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
+export { normalizeEngine, normalizeSQLFragment, sqlExpressionFingerprint } from './sql-normalizer.js'
+export { renderDefault, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

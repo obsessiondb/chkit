@@ -79,6 +79,8 @@ def _create_mock_query(
 
     def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
         _ = settings
+        if "SELECT name, default_kind" in sql:
+            return [{"name": "id", "default_kind": ""}]
         if "SELECT 1 FROM" in sql:
             return [{"ok": 1}]
         if "FROM system.parts" in sql:
@@ -124,6 +126,8 @@ def _create_source_scoped_mock_query(
 
     def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
         _ = settings
+        if "SELECT name, default_kind" in sql:
+            return [{"name": "id", "default_kind": ""}]
         if "SELECT 1 FROM" in sql:
             return [{"ok": 1}]
         if "FROM system.parts" in sql and f"table = '{source_table}'" in sql:

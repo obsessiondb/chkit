@@ -23,6 +23,7 @@ from chkit import __version__
 from chkit.cli.commands.dictionary_password_warnings import (
     detect_dictionary_password_warnings,
 )
+from chkit.cli.commands.drift_compare import compare_table_shape
 from chkit.cli.commands.generate_plan_pipeline import (
     apply_explicit_dictionary_renames,
     apply_explicit_table_renames,
@@ -30,6 +31,7 @@ from chkit.cli.commands.generate_plan_pipeline import (
     assert_cli_column_mappings_resolvable,
     build_explicit_column_rename_suggestions,
 )
+from chkit.cli.commands.generate_reconcile import reconcile_column_expressions
 from chkit.cli.commands.generate_rename_mappings import (
     ColumnRenameMapping,
     DictionaryRenameMapping,
@@ -66,8 +68,16 @@ from chkit.cli.table_scope import (
     resolve_table_scope,
     table_keys_from_definitions,
 )
+from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.introspect import list_table_details
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, ChxValidationError, SchemaDefinition
+from chkit.core.model import (
+    ChxConfigEnv,
+    ChxResolvedConfig,
+    ChxValidationError,
+    SchemaDefinition,
+    TableDefinition,
+)
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
@@ -132,10 +142,7 @@ def _run_codegen_integration(
     )
     exit_code = plugin_runtime.run_plugin_command("codegen", "codegen", ctx)
     if exit_code != 0:
-        msg = (
-            f'Plugin "codegen" failed in generate integration with exit '
-            f"code {exit_code}."
-        )
+        msg = f'Plugin "codegen" failed in generate integration with exit code {exit_code}.'
         raise typer.Exit(code=1) from RuntimeError(msg)
 
 
@@ -242,20 +249,14 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         list[str] | None,
         typer.Option(
             "--rename-table",
-            help=(
-                "Explicit table rename mapping old_db.old_table=new_db.new_table. "
-                "Repeatable."
-            ),
+            help=("Explicit table rename mapping old_db.old_table=new_db.new_table. Repeatable."),
         ),
     ] = None,
     rename_column: Annotated[
         list[str] | None,
         typer.Option(
             "--rename-column",
-            help=(
-                "Explicit column rename mapping db.table.old_column=new_column. "
-                "Repeatable."
-            ),
+            help=("Explicit column rename mapping db.table.old_column=new_column. Repeatable."),
         ),
     ] = None,
     rename_dictionary: Annotated[
@@ -263,11 +264,18 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         typer.Option(
             "--rename-dictionary",
             help=(
-                "Explicit dictionary rename mapping old_db.old_dict=new_db.new_dict. "
-                "Repeatable."
+                "Explicit dictionary rename mapping old_db.old_dict=new_db.new_dict. Repeatable."
             ),
         ),
     ] = None,
+    reconcile: Annotated[
+        bool,
+        typer.Option(
+            "--reconcile",
+            help=("Verify live column expressions and update their snapshot "
+                  "after a manual migration (requires --table)."),
+        ),
+    ] = False,
     dryrun: Annotated[
         bool,
         typer.Option("--dryrun", help="Print plan without writing artifacts."),
@@ -277,6 +285,10 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
 ) -> None:
+    if reconcile and (not table_selector or rename_column or rename_table or rename_dictionary):
+        raise typer.BadParameter(
+            "--reconcile requires --table and cannot be combined with rename flags."
+        )
     config = load_config(config_path, ChxConfigEnv(command="generate"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -330,6 +342,62 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
     previous = read_snapshot(meta_dir)
     old_defs = list(previous.definitions) if previous is not None else []
 
+    if reconcile:
+        if previous is None:
+            raise typer.BadParameter(
+                "Snapshot not found; reconciliation requires an existing snapshot."
+            )
+        scope = resolve_table_scope(table_selector, table_keys_from_definitions(canonical))
+        if not scope.match_count:
+            raise typer.BadParameter("No tables matched --table; snapshot unchanged.")
+        reconciled = reconcile_column_expressions(old_defs, canonical, list(scope.matched_tables))
+        if config.clickhouse is None:
+            raise typer.BadParameter("clickhouse config is required for --reconcile.")
+        selected = [
+            item
+            for item in canonical
+            if isinstance(item, TableDefinition)
+            and f"{item.database}.{item.name}" in scope.matched_tables
+        ]
+        with ClickHouseClient.connect(config.clickhouse) as client:
+            actual = list_table_details(client, sorted({item.database for item in selected}))
+        for expected in selected:
+            live = next(
+                (
+                    item
+                    for item in actual
+                    if item.database == expected.database and item.name == expected.name
+                ),
+                None,
+            )
+            if live is None or compare_table_shape(expected, live):
+                raise typer.BadParameter(
+                    f"Live table {expected.database}.{expected.name} does not match the schema; "
+                    "apply and verify the manual migration before --reconcile. Snapshot unchanged."
+                )
+        snapshot_path = meta_dir / "snapshot.json"
+        if not dryrun:
+            write_snapshot(meta_dir, create_snapshot(reconciled))
+        if output_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "mode": "reconcile",
+                        "verified": True,
+                        "dryrun": dryrun,
+                        "snapshotFile": str(snapshot_path),
+                        "tables": scope.matched_tables,
+                    }
+                )
+            )
+        else:
+            typer.echo(
+                f"{'Verified' if dryrun else 'Reconciled'} column expressions "
+                "against live ClickHouse. "
+                "No migration generated."
+            )
+        return
+
     (
         remapped_old_defs,
         active_table_mappings,
@@ -350,9 +418,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
     )
     table_scope = resolve_table_scope(table_selector, available_keys)
     if table_scope.enabled and table_scope.match_count == 0:
-        warning = (
-            f'No tables matched selector "{table_scope.selector or ""}". No changes planned.'
-        )
+        warning = f'No tables matched selector "{table_scope.selector or ""}". No changes planned.'
         if output_json:
             typer.echo(
                 json.dumps(
@@ -425,11 +491,11 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
     # filtering) — so plugin-injected SQL is also covered. ``migrate`` never
     # re-runs this: the clause is baked into the migration file at generate
     # time and applied verbatim.
-    plan = apply_on_cluster_to_plan(
-        plan, config.clickhouse.cluster if config.clickhouse else None
-    )
+    plan = apply_on_cluster_to_plan(plan, config.clickhouse.cluster if config.clickhouse else None)
 
-    dictionary_password_warnings = detect_dictionary_password_warnings(plan)
+    dictionary_password_warnings = detect_dictionary_password_warnings(plan) + [
+        op.warning for op in plan.operations if op.warning
+    ]
 
     if not plan.operations:
         if output_json:

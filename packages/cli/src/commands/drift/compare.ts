@@ -6,7 +6,9 @@ import {
   isIndexProjection,
   normalizeProjectionIndex,
   normalizeSQLFragment,
+  renderDefault,
   renderKeyClauseColumns,
+  sqlExpressionFingerprint,
   unquoteIdentifiers,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -187,19 +189,9 @@ export function summarizeDriftReasons(input: {
 }
 
 function normalizeColumnShape(column: ColumnDefinition): string {
-  const normalizeDefaultValue = (value: string): string => {
-    const normalized = normalizeSQLFragment(value)
-    const quoted = normalized.match(/^'(.*)'$/)
-    if (!quoted) return normalized
-    return (quoted[1] ?? '').replace(/''/g, "'")
-  }
-
-  const normalizedDefault = (() => {
-    if (column.default === undefined) return ''
-    const asString = String(column.default)
-    if (asString.startsWith('fn:')) return normalizeDefaultValue(asString.slice(3))
-    return normalizeDefaultValue(asString)
-  })()
+  const normalizedDefault = column.default === undefined
+    ? ''
+    : sqlExpressionFingerprint(renderDefault(column.default))
   const parts = [
     `type=${String(column.type).trim()}`,
     `nullable=${column.nullable ? '1' : '0'}`,
@@ -279,7 +271,13 @@ function normalizeEngine(value: string | undefined): string {
 export function compareTableShape(expected: TableDefinition, actual: ActualTableShape): TableDriftDetail | null {
   const columnDiff = diffByName(
     expected.columns,
-    actual.columns,
+    // system.columns stores SQL, whereas schema strings are literals unless fn:-prefixed.
+    actual.columns.map((column) => ({
+      ...column,
+      default: typeof column.default === 'string' && !column.default.startsWith('fn:')
+        ? `fn:${column.default}`
+        : column.default,
+    })),
     (column: ColumnDefinition) => column.name,
     normalizeColumnShape
   )

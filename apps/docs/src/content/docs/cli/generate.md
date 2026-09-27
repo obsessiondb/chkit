@@ -24,6 +24,7 @@ chkit generate [flags]
 | `--rename-dictionary <mapping>` | string | — | Explicit dictionary rename: `old_db.old_dict=new_db.new_dict` |
 | `--table <selector>` | string | — | Scope operations to matching tables |
 | `--dryrun` | boolean | `false` | Print the plan without writing any files |
+| `--reconcile` | boolean | `false` | Verify live column expressions and reconcile their snapshot; requires `--table` |
 | `--empty` | boolean | `false` | Scaffold a blank manual migration without diffing the schema |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -93,6 +94,39 @@ With `--empty`, the command skips the schema diff entirely and writes a blank, t
 The stub carries the standard migration header (with `operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. The `--name` and `--migration-id` flags apply; without `--name`, the file defaults to `manual`. Schema-diff flags (`--table`, `--rename-table`, `--rename-column`, `--rename-dictionary`, `--dryrun`) are not used in empty mode.
 
 `chkit migrate` picks the file up like any other migration and applies it in filename order. Write your SQL into the stub *before* applying it — editing a migration after it has run triggers a checksum mismatch.
+
+### Reconcile manual column changes
+
+When changing a column to or from `ALIAS` or `EPHEMERAL`, write and review an explicit
+migration that handles the storage change. Preserve any stored values you need
+before converting a column to a non-stored kind.
+
+1. Update the column's expression/kind in the schema. Keep other edits to that table
+   for a separate migration.
+2. Create a manual SQL file in the configured `migrationsDir`. In TypeScript,
+   `chkit generate --empty --name convert_column` creates the stub. In Python,
+   create a timestamped `.sql` file there directly. Include any cluster clauses
+   required by your deployment; manual SQL runs verbatim.
+3. Review and apply the migration through `chkit migrate --apply`.
+4. Preview snapshot reconciliation with
+   `chkit generate --reconcile --table analytics.events --dryrun`.
+5. Run `chkit generate --reconcile --table analytics.events`, then regenerate models
+   with `chkit codegen` if you use the codegen plugin. Commit the schema, migration,
+   snapshot, and regenerated models together.
+
+`--reconcile` works in both languages and requires a live ClickHouse connection,
+`--table`, and an existing snapshot. It verifies the selected tables against the
+current schema before writing anything. Only column expression/kind metadata is
+adopted: other schema changes are rejected, and unselected snapshot objects are
+preserved. It generates no SQL and cannot be combined with rename flags or
+`--empty`. `--dryrun` verifies the live schema without updating the snapshot.
+
+A missing table, metadata query failure, or schema mismatch leaves the snapshot
+unchanged. After successful reconciliation, another `generate --dryrun` should show
+no operations for the converted column. This verifies schema metadata, not the
+correctness or completeness of your data conversion; verify the data before
+reconciling. Run reconciliation against the intended migration environment and
+avoid concurrent DDL during the check.
 
 ### Codegen integration
 

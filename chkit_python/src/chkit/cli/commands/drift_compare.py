@@ -29,8 +29,10 @@ from chkit.core.model import (
     TableDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
+from chkit.core.sql import _render_default
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
+from chkit.core.text_index_sql import text_expression_fingerprint, text_sql_fingerprint
 
 _MIN_QUOTED_LEN = 2
 
@@ -216,25 +218,10 @@ def summarize_drift_reasons(
 
 
 def _normalize_column_shape(column: ColumnDefinition) -> str:
-    def _normalize_default_value(value: str) -> str:
-        normalized = normalize_sql_fragment(value)
-        if (
-            len(normalized) >= _MIN_QUOTED_LEN
-            and normalized[0] == "'"
-            and normalized[-1] == "'"
-        ):
-            inner = normalized[1:-1]
-            return inner.replace("''", "'")
-        return normalized
-
-    if column.default is None:
-        normalized_default = ""
-    else:
-        as_string = str(column.default)
-        if as_string.startswith("fn:"):
-            normalized_default = _normalize_default_value(as_string[3:])
-        else:
-            normalized_default = _normalize_default_value(as_string)
+    normalized_default = (
+        "" if column.default is None
+        else text_sql_fingerprint(text_expression_fingerprint(_render_default(column.default)))
+    )
 
     parts = [
         f"type={str(column.type).strip()}",
@@ -338,7 +325,12 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     """Compare every shape-bearing field on the table. Returns None if identical."""
     column_diff = diff_by_name(
         expected.columns,
-        actual.columns,
+        [
+            column.model_copy(update={"default": f"fn:{column.default}"})
+            if isinstance(column.default, str) and not column.default.startswith("fn:")
+            else column
+            for column in actual.columns
+        ],
         lambda c: c.name,
         _normalize_column_shape,
     )

@@ -62,7 +62,7 @@ def _render_default(value: str | int | float | bool) -> str:
     if isinstance(value, str):
         if value.startswith("fn:"):
             return value[3:]
-        escaped = value.replace("'", "''")
+        escaped = value.replace("\\", "\\\\").replace("'", "''")
         return f"'{escaped}'"
     if isinstance(value, bool):
         return "true" if value else "false"

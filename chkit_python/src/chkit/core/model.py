@@ -628,6 +628,7 @@ class MigrationOperation(_StrictModel):
     key: str
     risk: RiskLevel
     sql: str
+    warning: str | None = None
 
 
 class ColumnRenameSuggestion(_StrictModel):

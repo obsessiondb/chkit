@@ -386,6 +386,7 @@ export interface MigrationOperation {
   key: string
   risk: RiskLevel
   sql: string
+  warning?: string
 }
 
 export interface ColumnRenameSuggestion {

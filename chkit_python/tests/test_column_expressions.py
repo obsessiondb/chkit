@@ -9,6 +9,7 @@ import pytest
 
 from chkit import ColumnDefinition, table
 from chkit.cli.commands.drift_compare import compare_table_shape
+from chkit.cli.commands.generate_reconcile import reconcile_column_expressions
 from chkit.cli.commands.pull import _introspected_table_to_definition
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.clickhouse.introspect import (
@@ -21,7 +22,7 @@ from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
 from chkit.core.validate import validate_definitions
-from chkit_plugin_backfill.planner import _detect_backfill_strategy
+from chkit_plugin_backfill.planner import _detect_backfill_strategy, assert_backfill_target_safe
 from chkit_plugin_codegen import generate_type_artifacts
 
 
@@ -177,7 +178,10 @@ def test_codegen_read_and_insert_models() -> None:
     models = [value for key, value in namespace.items() if key.endswith(("Row", "RowInsert"))]
     read = next(model for model in models if model.__name__.endswith("Row"))
     insert = next(model for model in models if model.__name__.endswith("RowInsert"))
-    assert set(read.model_fields) == {"ts", "day", "label"}
+    assert set(read.model_fields) == {"ts"}
+    explicit = namespace[read.__name__ + "Explicit"]
+    assert set(explicit.model_fields) == {"ts", "day", "label"}
+    read.model_validate({"ts": "2026-01-01 00:00:00"})
     assert set(insert.model_fields) == {"ts", "raw"}
 
 
@@ -223,3 +227,75 @@ def test_introspection_preserves_sql_literal_whitespace() -> None:
         )
     )
     assert column.default == "concat('a  b', toString(id))"
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "equal"),
+    [
+        ("fn:concat('a  b', toString(ts))", "concat('a b', toString(ts))", False),
+        ("fn:toString(ts+1)", "toString(ts + 1)", True),
+        ("toString(ts)", "toString(ts)", False),
+        ("toString(ts)", "'toString(ts)'", True),
+        (" a  b ", "' a  b '", True),
+        ("O'Reilly", "'O\\'Reilly'", True),
+        ("\\n", "'\\\\n'", True),
+        ("\\n", "'\\n'", False),
+        ("", None, False),
+        (False, "false", True),
+        (0, "0", True),
+        ("fn:concat('a', `ts`)", "concat('a', ts)", True),
+        ("fn:toString(ts /* comment */ +1)", "toString(ts + 1)", True),
+        ("fn:concat('/* a */', ts)", "concat('/* b */', ts)", False),
+    ],
+)
+def test_expression_comparison_preserves_literals(expected: Any, actual: Any, equal: bool) -> None:
+    result = compare_table_shape(
+        definition(default=expected), actual_table(definition(default=actual).columns)
+    )
+    assert (result is None) == equal
+
+
+def test_reconcile_only_selected_expression_metadata() -> None:
+
+    before = definition(default="fn:toDate(ts)")
+    after = definition(default="fn:toDate(ts)", default_kind="ALIAS")
+    unrelated = before.model_copy(update={"name": "other"})
+    reconciled = reconcile_column_expressions(
+        [before, unrelated],
+        [after, unrelated.model_copy(update={"engine": "Log"})],
+        ["default.events"],
+    )
+    assert plan_diff(reconciled, [after, unrelated]).operations == []
+    with pytest.raises(ValueError, match="only column expression/kind changes"):
+        reconcile_column_expressions(
+            [before], [after.model_copy(update={"engine": "Log"})], ["default.events"]
+        )
+    with pytest.raises(ValueError, match="both the snapshot and schema"):
+        reconcile_column_expressions([], [after], ["default.events"])
+
+
+def test_stored_expression_warning() -> None:
+    plan = plan_diff([definition(default="fn:toDate(ts)")], [definition(default="fn:today()")])
+    assert "does not rewrite stored historical values" in (plan.operations[0].warning or "")
+    plan = plan_diff(
+        [definition(default="fn:toDate(ts)", default_kind="ALIAS")],
+        [definition(default="fn:today()", default_kind="ALIAS")],
+    )
+    assert plan.operations[0].warning is None
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([{"name": "raw", "default_kind": "EPHEMERAL"}], "cannot reconstruct EPHEMERAL"),
+        ([], "Cannot verify live target column kinds"),
+        ([{"name": "raw"}], "Cannot verify live target column kinds"),
+        ([{"name": "raw", "default_kind": "FUTURE"}], "Cannot verify live target column kinds"),
+    ],
+)
+def test_backfill_live_safety_gate(rows: list[dict[str, object]], message: str) -> None:
+
+    with pytest.raises(Exception, match=message):
+        assert_backfill_target_safe(
+            database="default", table="events", query=lambda sql, settings: rows
+        )

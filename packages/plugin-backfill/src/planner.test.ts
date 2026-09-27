@@ -37,6 +37,7 @@ function createMockQuery(opts: {
   const columnRows = opts.columnRows ?? [{ name: 'event_time', type: 'DateTime' }]
 
   return async <T>(sql: string) => {
+    if (sql.includes('SELECT name, default_kind')) return [{ name: 'id', default_kind: '' }] as T[]
     if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }] as T[]
     if (sql.includes('FROM system.parts')) return partitions as T[]
     if (sql.includes('FROM system.tables')) return [{ sorting_key: sortingKey }] as T[]
@@ -79,6 +80,7 @@ function createSourceScopedMockQuery(opts: {
   const table = opts.sourceTable
 
   return async <T>(sql: string) => {
+    if (sql.includes('SELECT name, default_kind')) return [{ name: 'id', default_kind: '' }] as T[]
     if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }] as T[]
     if (sql.includes('FROM system.parts')) {
       return (sql.includes(`table = '${table}'`) ? partitions : []) as T[]
@@ -578,3 +580,22 @@ test('MV replay omits computed columns and rejects unrecoverable ephemeral input
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+for (const [rows, message] of [
+  [[{ name: 'raw', default_kind: 'EPHEMERAL' }], 'cannot reconstruct EPHEMERAL'],
+  [[], 'Cannot verify live target column kinds'],
+  [[{ name: 'raw' }], 'Cannot verify live target column kinds'],
+  [[{ name: 'raw', default_kind: 'FUTURE' }], 'Cannot verify live target column kinds'],
+] as const) {
+  test(`live target metadata blocks unsafe schema fallback: ${JSON.stringify(rows)}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-unsafe-'))
+    try {
+      await expect(buildBackfillPlan({
+        opts: PlanSchema.parse({ target: 'app.events' }),
+        configPath: join(dir, 'config.ts'),
+        config: { metaDir: join(dir, 'meta'), schema: [join(dir, 'missing.ts')] },
+        clickhouseQuery: async <T>() => [...rows] as T[],
+      })).rejects.toThrow(message)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+}

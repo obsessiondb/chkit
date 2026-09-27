@@ -270,7 +270,7 @@ function renderTableInterface(
 ): { lines: string[]; findings: CodegenFinding[] } {
   const path = `${table.database}.${table.name}`
   const read = renderFieldsInterface(
-    table.columns.filter((column) => column.defaultKind !== 'EPHEMERAL'),
+    table.columns.filter((column) => !column.defaultKind || column.defaultKind === 'DEFAULT'),
     interfaceName, path, options
   )
   const insertName = insertTypeName(table, interfaceName)
@@ -279,7 +279,14 @@ function renderTableInterface(
     table.columns.filter((column) => column.defaultKind !== 'MATERIALIZED' && column.defaultKind !== 'ALIAS'),
     insertName, path, options
   )
-  return { lines: [...read.lines, '', ...insert.lines], findings: [...read.findings, ...insert.findings] }
+  const explicit = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'EPHEMERAL'),
+    `${interfaceName}Explicit`, path, options
+  )
+  return {
+    lines: [...read.lines, '', ...explicit.lines, '', ...insert.lines],
+    findings: [...read.findings, ...explicit.findings, ...insert.findings],
+  }
 }
 
 function renderDictionaryInterface(
