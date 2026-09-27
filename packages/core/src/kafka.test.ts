@@ -147,6 +147,7 @@ describe('Kafka tables', () => {
       { ...original, settings: { ...original.settings, kafka_num_consumers: 2 } },
       { ...original, settings: { ...original.settings, kafka_group_name: 'new-group' } },
       { ...original, columns: [...original.columns, { name: 'extra', type: 'String' }] },
+      { ...original, columns: [{ name: 'renamed', type: 'String' }] },
       { ...original, engine: 'MergeTree', primaryKey: ['id'], orderBy: ['id'] },
     ])
       expect(() => planDiff([original], [updated])).toThrow('Schema validation failed')

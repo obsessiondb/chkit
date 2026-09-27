@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.projection import normalize_projection_index
 from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_scan import find_top_level_sql_pattern
 
 __all__ = [
     "ProjectionDefinitionShape",
@@ -44,14 +45,15 @@ class ProjectionDefinitionShape:
     type: str | None = None
 
 
-_SETTINGS_RE = re.compile(r"\bSETTINGS\b(.*?)(?:;|$)", re.IGNORECASE | re.DOTALL)
+_SETTINGS_RE = re.compile(r"\bSETTINGS\b", re.IGNORECASE)
+_SETTINGS_STOP = re.compile(r"\bCOMMENT\b|;", re.IGNORECASE)
 _TTL_RE = re.compile(r"\bTTL\b(.*?)(?:\bSETTINGS\b|;|$)", re.IGNORECASE | re.DOTALL)
 _BODY_ENGINE_RE = re.compile(r"\)\s*ENGINE\s*=", re.IGNORECASE)
 
 _ENGINE_START = re.compile(r"\bENGINE\s*=\s*", re.IGNORECASE)
 _ENGINE_STOP = re.compile(
     r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b"
-    r"|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|;|$",
+    r"|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|\bCOMMENT\b|;|$",
     re.IGNORECASE,
 )
 
@@ -98,7 +100,10 @@ _INDEX_PROJECTION_RE = re.compile(
 
 
 def _parse_clause(
-    query: str | None, start_pattern: re.Pattern[str], stop_pattern: re.Pattern[str]
+    query: str | None,
+    start_pattern: re.Pattern[str],
+    stop_pattern: re.Pattern[str],
+    preserve_whitespace: bool = False,
 ) -> str | None:
     """Slice between ``start_pattern`` and the first ``stop_pattern`` hit."""
     if not query:
@@ -109,16 +114,16 @@ def _parse_clause(
     # swallow the real clause plus everything up to the next stop keyword
     # (issue #190).
     options = _extract_table_options(query)
-    start = start_pattern.search(options)
+    start = find_top_level_sql_pattern(options, start_pattern)
     if start is None:
         return None
     after = options[start.end() :]
-    stop = stop_pattern.search(after)
+    stop = find_top_level_sql_pattern(after, stop_pattern)
     raw = after[: stop.start()] if stop is not None else after
     raw = raw.strip()
     if not raw:
         return None
-    return normalize_sql_fragment(raw)
+    return raw if preserve_whitespace else normalize_sql_fragment(raw)
 
 
 def _find_column_list_bounds(query: str) -> tuple[int, int] | None:
@@ -188,10 +193,13 @@ def parse_settings_from_create_table_query(query: str | None) -> dict[str, str]:
     """Extract ``SETTINGS k=v, k=v`` as a dict (last write wins)."""
     if not query:
         return {}
-    match = _SETTINGS_RE.search(_extract_table_options(query))
+    options = _extract_table_options(query)
+    match = find_top_level_sql_pattern(options, _SETTINGS_RE)
     if match is None:
         return {}
-    raw = match.group(1).strip()
+    tail = options[match.end() :]
+    stop = find_top_level_sql_pattern(tail, _SETTINGS_STOP)
+    raw = (tail[: stop.start()] if stop is not None else tail).strip()
     if not raw:
         return {}
     out: dict[str, str] = {}
@@ -220,7 +228,7 @@ def parse_ttl_from_create_table_query(query: str | None) -> str | None:
 
 
 def parse_engine_from_create_table_query(query: str | None) -> str | None:
-    return _parse_clause(query, _ENGINE_START, _ENGINE_STOP)
+    return _parse_clause(query, _ENGINE_START, _ENGINE_STOP, preserve_whitespace=True)
 
 
 def parse_primary_key_from_create_table_query(query: str | None) -> str | None:

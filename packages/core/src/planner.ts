@@ -361,7 +361,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       Object.entries(def.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)])
     )
     if (requiresTableRecreate(oldDef, newDef)
-      || JSON.stringify(oldDef.columns.map(normalizeColumn)) !== JSON.stringify(newDef.columns.map(normalizeColumn))
+      || JSON.stringify(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== JSON.stringify(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
       || diffSettings(settings(oldDef), settings(newDef)).changes.length > 0
       || (oldDef.comment ?? '') !== (newDef.comment ?? '')) {
       throw new ChxValidationError([{

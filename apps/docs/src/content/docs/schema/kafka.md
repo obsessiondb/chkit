@@ -44,6 +44,37 @@ const consumer = materializedView({
 export default schema(queue, events, consumer)
 ```
 
+The Python DSL supports the same pipeline natively:
+
+```python
+from chkit import materialized_view, schema, table
+
+columns = [{"name": "id", "type": "String"},
+           {"name": "event_time", "type": "DateTime64(3)"}]
+queue = table(
+    database="analytics", name="events_queue", engine="Kafka", columns=columns,
+    settings={
+        "kafka_broker_list": "kafka01:9092,kafka02:9092",
+        "kafka_topic_list": "events",
+        "kafka_group_name": "analytics_events",
+        "kafka_format": "JSONEachRow",
+        "kafka_num_consumers": 1,
+        "input_format_skip_unknown_fields": True,
+    },
+)
+events = table(
+    database="analytics", name="events", engine="MergeTree", columns=columns,
+    primary_key=["event_time", "id"], order_by=["event_time", "id"],
+    partition_by="toYYYYMM(event_time)",
+)
+consumer = materialized_view(
+    database="analytics", name="events_consumer",
+    to={"database": "analytics", "name": "events"},
+    as_="SELECT id, event_time FROM analytics.events_queue",
+)
+definitions = schema(queue, events, consumer)
+```
+
 Run `chkit generate`, review the SQL, then `chkit migrate --apply`. Tables are
 created before materialized views. Attaching the view starts background consumption.
 The Kafka engine must be available on the target server, which must be able to
@@ -106,6 +137,11 @@ queue so the snapshot follows the change.
 settings into literal values. `drift` and `check` compare the engine, columns, and
 settings declared in the snapshot. Numeric/boolean metadata and SQL string quoting
 are normalized without removing meaningful whitespace from strings.
+
+In Python, use `chkit pull --database analytics --out-file schema.py`,
+`chkit drift --live`, and `chkit check --live`. Python's default drift/check also
+inspect local schema changes against the snapshot and report Kafka changes that
+require replacement, including when scoped with `--table`.
 
 Consumer offsets, lag, assignments, topic contents, and server configuration or
 named-collection contents are runtime/external state, outside schema drift. Server

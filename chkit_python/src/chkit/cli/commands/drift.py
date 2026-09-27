@@ -1,9 +1,7 @@
-"""`chkit drift` — compare the on-disk snapshot against the current schema.
+"""`chkit drift` — compare the snapshot against the current schema or live DB.
 
-Mirrors the TypeScript ``driftCommand`` for the snapshot-vs-schema check.
-The TS port also reaches into ClickHouse to compare against the live database;
-that full DB-side introspection is not in this first-base Python port, so the
-command focuses on the snapshot/schema diff produced by ``plan_diff``.
+The default inspects local schema changes; ``--live`` compares the snapshot
+against ClickHouse, matching the TypeScript command's default behavior.
 
 Output (human):
 
@@ -31,18 +29,17 @@ from typing import Annotated
 import typer
 
 from chkit.cli.commands.drift_payload import build_drift_payload
+from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.migration_store import read_snapshot
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.table_scope import (
-    filter_plan_by_table_scope,
     resolve_table_scope,
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxConfigEnv
-from chkit.core.planner import plan_diff
 
 
 def run(  # noqa: PLR0912, PLR0915
@@ -148,20 +145,18 @@ def run(  # noqa: PLR0912, PLR0915
                 typer.echo(f"- {detail.table}: {', '.join(detail.reason_codes)}")
         return
 
-    plan = plan_diff(snapshot_defs, schema_defs)
-    if table_scope.enabled:
-        filtered = filter_plan_by_table_scope(plan, set(table_scope.matched_tables))
-        plan = filtered.plan
+    plan, issues = plan_snapshot_drift(snapshot_defs, schema_defs, table_scope)
+    drifted = bool(plan.operations or issues)
     snapshot_file = meta_dir / "snapshot.json"
 
     payload = {
         "snapshotFile": str(snapshot_file),
-        "drifted": bool(plan.operations),
+        "drifted": drifted,
         "operations": [op.model_dump(by_alias=True) for op in plan.operations],
-        "renameSuggestions": [
-            s.model_dump(by_alias=True) for s in plan.rename_suggestions
-        ],
+        "renameSuggestions": [s.model_dump(by_alias=True) for s in plan.rename_suggestions],
     }
+    if issues:
+        payload["issues"] = [issue.model_dump(mode="json") for issue in issues]
 
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
@@ -169,7 +164,9 @@ def run(  # noqa: PLR0912, PLR0915
 
     typer.echo(f"Snapshot file:       {snapshot_file}")
     typer.echo(f"Expected operations: {len(plan.operations)}")
-    typer.echo(f"Drifted:             {'yes' if plan.operations else 'no'}")
+    typer.echo(f"Drifted:             {'yes' if drifted else 'no'}")
+    for issue in issues:
+        typer.echo(f"- [{issue.code}] {issue.message}")
     if plan.operations:
         typer.echo("")
         typer.echo("Operations:")

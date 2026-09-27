@@ -295,7 +295,7 @@ def build_introspected_tables(
                 name=table_row.name,
                 engine=parse_engine_from_create_table_query(
                     table_row.create_table_query
-                ),
+                ) or table_row.engine,
                 primary_key=parse_primary_key_from_create_table_query(
                     table_row.create_table_query
                 ),

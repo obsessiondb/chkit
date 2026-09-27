@@ -7,7 +7,9 @@ import re
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
+from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
 from chkit.core.model import (
+    ChxValidationError,
     ColumnDefinition,
     ColumnRenameSuggestion,
     DictionaryDefinition,
@@ -19,6 +21,7 @@ from chkit.core.model import (
     SchemaDefinition,
     SkipIndexDefinition,
     TableDefinition,
+    ValidationIssue,
     ViewDefinition,
     _RiskSummary,
 )
@@ -57,7 +60,8 @@ def _push_drop(
                 type="drop_table",
                 key=definition_key(definition),
                 risk=risk,
-                sql=f"DROP TABLE IF EXISTS {definition.database}.{definition.name};",
+                sql=f"DROP TABLE IF EXISTS {definition.database}.{definition.name}"
+                + (" SYNC;" if is_kafka_engine(definition.engine) else ";"),
             )
         )
         return
@@ -364,6 +368,39 @@ def _diff_materialized_view(
 def _diff_tables(
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
+    if is_kafka_engine(old.engine) or is_kafka_engine(new.engine):
+        old_settings = {
+            key: kafka_setting_fingerprint(value) for key, value in (old.settings or {}).items()
+        }
+        new_settings = {
+            key: kafka_setting_fingerprint(value) for key, value in (new.settings or {}).items()
+        }
+        old_columns = [(column.name, _column_identity(column)) for column in old.columns]
+        new_columns = [(column.name, _column_identity(column)) for column in new.columns]
+        if (
+            _requires_table_recreate(old, new)
+            or old_columns != new_columns
+            or old_settings != new_settings
+            or (old.comment or "") != (new.comment or "")
+        ):
+            raise ChxValidationError(
+                [
+                    ValidationIssue(
+                        code="kafka_change_requires_replacement",
+                        kind="table",
+                        database=new.database,
+                        name=new.name,
+                        message=f"Kafka table {new.database}.{new.name} requires an explicit "
+                        "replacement; column, engine and setting ALTERs are not supported. "
+                        "Remove the queue and its consuming materialized views from the "
+                        "schema and generate a drop migration, then re-add the updated "
+                        "definitions and generate a create migration. Review "
+                        "both migrations and consumer-group/offset behavior before applying with "
+                        "--allow-destructive.",
+                    )
+                ]
+            )
+        return [], []
     if _requires_table_recreate(old, new):
         return (
             [
