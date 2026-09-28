@@ -62,6 +62,8 @@ export interface ClickHouseJsonQueryResult<
 	query_id?: string
 }
 
+export type ObservableSystemTable = 'processes' | 'query_log'
+
 export interface ClickHouseExecutor {
 	command(sql: string): Promise<void>
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
@@ -92,7 +94,23 @@ export interface ClickHouseExecutor {
 		options?: { afterTime?: string },
 	): Promise<QueryStatus>
 
+	/** Optional capability: FROM-clause source for cluster-aware system table polling.
+	 *  Native executors return `clusterAllReplicas(...)` when `clickhouse.cluster` is set.
+	 *  Remote / ObsessionDB executors may omit this and keep local `system.*` tables. */
+	systemTableSource?(table: ObservableSystemTable): string
+
 	close(): Promise<void>
+}
+
+/**
+ * Resolve the system table expression used for async query observation.
+ * Prefers `executor.systemTableSource` when present; otherwise local `system.<table>`.
+ */
+export function observableSystemTable(
+	executor: Pick<ClickHouseExecutor, 'systemTableSource'>,
+	table: ObservableSystemTable,
+): string {
+	return executor.systemTableSource?.(table) ?? `system.${table}`
 }
 
 export interface SchemaObjectRef {
@@ -767,13 +785,23 @@ export function createExecutorWithClient(
 			}
 			return id
 		},
+		systemTableSource(table: ObservableSystemTable): string {
+			// `config.cluster` is validated at resolveConfig (assertValidClusterName), so it is
+			// safe to interpolate into the single-quoted clusterAllReplicas argument — same
+			// contract as onClusterClause. Never guess a default name like 'cluster'.
+			if (config.cluster) {
+				return `clusterAllReplicas('${config.cluster}', system.${table})`
+			}
+			return `system.${table}`
+		},
 		async queryStatus(
 			queryId: string,
 			options?: { afterTime?: string },
 		): Promise<QueryStatus> {
 			try {
+				const processesFrom = observableSystemTable(this, 'processes')
 				const running = await client.query({
-					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('cluster', system.processes) WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
 					query_params: { qid: queryId },
 					format: 'JSONEachRow',
 				})
@@ -797,9 +825,10 @@ export function createExecutorWithClient(
 				}
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
+				const queryLogFrom = observableSystemTable(this, 'query_log')
 				const log = await client.query({
 					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
-FROM clusterAllReplicas('cluster', system.query_log)
+FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
