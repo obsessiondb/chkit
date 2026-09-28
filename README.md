@@ -12,6 +12,8 @@ chkit is an open-source CLI for ClickHouse. Review migration SQL before applying
 
 [Get started](https://chkit.obsessiondb.com/getting-started/) · [Build a data source](https://chkit.obsessiondb.com/api-sync/quickstart/) · [Documentation](https://chkit.obsessiondb.com)
 
+New to chkit? Scaffold the small [hello example](examples/hello) with `bun create chkit@latest my-app --example hello`, or clone that folder and follow its README. The heavier ClickBench load stays at [`examples/clickbench`](examples/clickbench).
+
 > **Beta:** the public API is still evolving. Keep the CLI, core, and plugins on matching versions.
 
 ## Why chkit
