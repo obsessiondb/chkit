@@ -76,7 +76,7 @@ It guides decisions about raw versus shaped data, transformations, pagination, i
 bun create chkit@latest my-chkit-app --example hello
 ```
 
-`hello` is the small default schema (two tables, one migration). Pass `--example clickbench` for the full ClickBench dataset load.
+`hello` is two tables and one migration. Pass `--example hello` as shown: the published interactive prompt still preselects `clickbench` until `create-chkit` is republished. Pass `--example clickbench` for the full ClickBench dataset load.
 
 It then runs the same connect flow as `chkit init` (Step 4). Drive it non-interactively with `--connect <choice>` (and `--email` for the claim path), or `--skip-onboarding` to scaffold only.
 
