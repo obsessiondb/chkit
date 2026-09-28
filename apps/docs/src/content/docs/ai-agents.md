@@ -73,8 +73,10 @@ It guides decisions about raw versus shaped data, transformations, pagination, i
 `create-chkit` downloads a curated example and wires it to the user's package manager. Pass a target directory and an example to skip the prompts:
 
 ```sh
-bun create chkit@latest my-chkit-app --example clickbench
+bun create chkit@latest my-chkit-app --example hello
 ```
+
+`hello` is the small default schema (two tables, one migration). Pass `--example clickbench` for the full ClickBench dataset load.
 
 It then runs the same connect flow as `chkit init` (Step 4). Drive it non-interactively with `--connect <choice>` (and `--email` for the claim path), or `--skip-onboarding` to scaffold only.
 
