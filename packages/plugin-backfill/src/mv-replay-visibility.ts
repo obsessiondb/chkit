@@ -1,5 +1,6 @@
-// Visibility policy for the mv_replay empty-target e2e. Production backfill does
-// not read system.replicas; this module stays out of the package build.
+// Visibility policy for live backfill e2e tests (mv_replay and executeBackfill).
+// Production backfill does not read system.replicas; this module stays out of
+// the package build.
 
 const ACCESS_DENIED_CODE = '497'
 
