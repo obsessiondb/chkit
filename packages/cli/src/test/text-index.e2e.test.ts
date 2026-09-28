@@ -248,7 +248,8 @@ test('normalization preserves every printable ClickHouse string escape', async (
   } finally {
     await executor.close()
   }
-})
+  // Suite default is 15s; ~94 sequential remote queries routinely exceed that on ObsessionDB.
+}, 120_000)
 
 test('quoted literal names remain distinct from constants in ClickHouse and planning', async () => {
   const executor = createLiveExecutor(env)
@@ -279,7 +280,8 @@ test('quoted literal names remain distinct from constants in ClickHouse and plan
   } finally {
     await executor.close()
   }
-})
+  // Suite default is 15s; many sequential remote queries need headroom under parallel load.
+}, 60_000)
 
 test('quoted NULL column round-trips and changing it to a literal migrates the index', async () => {
   const executor = createLiveExecutor(env)

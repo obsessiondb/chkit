@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { IngestConfigError } from './errors.js'
 import type { CheckpointEnvelope, CommittedCheckpoint, Journal, JournalEvent } from './types.js'
@@ -57,6 +57,9 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
   return {
     async ensure() {
       await options.executor.command(journalTableSql(qualified))
+      // Managed ClickHouse (ObsessionDB SharedMergeTree) can acknowledge CREATE
+      // before the table is visible on the replica that serves the next query.
+      await waitForTable(options.executor, options.database, table)
     },
 
     async append(event) {

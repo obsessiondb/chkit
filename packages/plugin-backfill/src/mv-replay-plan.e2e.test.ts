@@ -10,6 +10,7 @@ import {
   createPrefix,
   createStatelessLiveExecutor,
   getRequiredEnv,
+  waitForRows,
   waitForTable,
 } from '@chkit/clickhouse/e2e-testkit'
 
@@ -210,9 +211,20 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
     expect(result.completed).toBe(plan.chunkPlan.chunks.length)
 
     // Per-bucket values must match a forward run of the MV over the whole source.
+    // Poll: SharedMergeTree can report QueryFinish before every partition is
+    // visible to a subsequent SELECT, even with select_sequential_consistency.
     const expected = await aggregateByBucket(sourceFqn, 'sum(id)')
-    const actual = await aggregateByBucket(targetFqn, 'sum(total)')
     expect(expected).toHaveLength(BUCKETS)
+    const actual = await waitForRows<{ bucket: string; total: string }>(
+      ddl,
+      `SELECT toString(bucket) AS bucket, toString(sum(total)) AS total
+       FROM ${targetFqn}
+       GROUP BY bucket
+       ORDER BY bucket
+       SETTINGS select_sequential_consistency = 1`,
+      (rows) => rows.length === BUCKETS,
+      'mv_replay target buckets visible',
+    )
     expect(actual).toEqual(expected)
   }, 180_000)
 })

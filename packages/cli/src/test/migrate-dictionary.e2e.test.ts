@@ -14,6 +14,7 @@ import {
   runCli,
   runCliWithRetry,
   waitForDictionary,
+  waitForRows,
   waitForTable,
 } from './e2e-testkit.js'
 
@@ -150,9 +151,16 @@ describe('@chkit/cli migrate dictionary e2e', () => {
         await executor.command(
           `INSERT INTO ${quoteIdent(database)}.${quoteIdent(tableName)} (id, name) VALUES (1, 'Alice')`
         )
-
-        const seeded = await executor.query<{ name: string }>(
-          `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`
+        // Dictionary may have finished its initial HTTP load against the empty
+        // source; reload and poll until seed data is visible via dictGet.
+        await executor.command(
+          `SYSTEM RELOAD DICTIONARY ${quoteIdent(database)}.${quoteIdent(dictName)}`
+        )
+        const seeded = await waitForRows<{ name: string }>(
+          executor,
+          `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`,
+          (rows) => rows[0]?.name === 'Alice',
+          'dictionary seeded Alice',
         )
         expect(seeded[0]?.name).toBe('Alice')
 
@@ -178,9 +186,14 @@ describe('@chkit/cli migrate dictionary e2e', () => {
           throw new Error(formatTestDiagnostic('migrate --execute (replace) failed', migrateReplace))
         }
         await waitForDictionary(executor, database, dictName)
-
-        const afterReplace = await executor.query<{ name: string }>(
-          `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`
+        await executor.command(
+          `SYSTEM RELOAD DICTIONARY ${quoteIdent(database)}.${quoteIdent(dictName)}`
+        )
+        const afterReplace = await waitForRows<{ name: string }>(
+          executor,
+          `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`,
+          (rows) => rows[0]?.name === 'Alice',
+          'dictionary still serves Alice after replace',
         )
         expect(afterReplace[0]?.name).toBe('Alice')
 
