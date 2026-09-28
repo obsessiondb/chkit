@@ -10,6 +10,7 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getRequiredEnv,
+  pollUntil,
   quoteIdent,
   runCli,
   runCliWithRetry,
@@ -35,7 +36,9 @@ function renderSchema(input: {
   lifetime: string
 }): string {
   const query = `SELECT id, name FROM ${input.database}.${input.tableName} FORMAT JSONEachRow`
-  const sourceUrl = `${input.clickhouseUrl}/?query=${encodeURIComponent(query)}&user=${encodeURIComponent(input.clickhouseUser)}&password=${encodeURIComponent(input.clickhousePassword)}`
+  // Each load is a fresh HTTP request that any replica may serve; sequential
+  // consistency makes that replica catch up with the seed INSERT before reading.
+  const sourceUrl = `${input.clickhouseUrl}/?query=${encodeURIComponent(query)}&select_sequential_consistency=1&user=${encodeURIComponent(input.clickhouseUser)}&password=${encodeURIComponent(input.clickhousePassword)}`
 
   return (
     `import { schema, table, dictionary } from '${CORE_ENTRY}'\n\n` +
@@ -151,10 +154,16 @@ describe('@chkit/cli migrate dictionary e2e', () => {
           `INSERT INTO ${quoteIdent(database)}.${quoteIdent(tableName)} (id, name) VALUES (1, 'Alice')`
         )
 
-        const seeded = await executor.query<{ name: string }>(
-          `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`
-        )
-        expect(seeded[0]?.name).toBe('Alice')
+        // The dictionary may already have loaded the still-empty source and
+        // cached that for its whole lifetime, so reload before every read.
+        const reloadAndLookup = async () => {
+          await executor.command(`SYSTEM RELOAD DICTIONARY ${quoteIdent(database)}.${quoteIdent(dictName)}`)
+          const rows = await executor.query<{ name: string }>(
+            `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`
+          )
+          return rows[0]?.name
+        }
+        expect(await pollUntil(reloadAndLookup, (name) => name === 'Alice')).toBe('Alice')
 
         // 2. a structural change (lifetime) regenerates as a single CREATE OR
         // REPLACE DICTIONARY; the dictionary keeps serving correct data after.
@@ -178,11 +187,7 @@ describe('@chkit/cli migrate dictionary e2e', () => {
           throw new Error(formatTestDiagnostic('migrate --execute (replace) failed', migrateReplace))
         }
         await waitForDictionary(executor, database, dictName)
-
-        const afterReplace = await executor.query<{ name: string }>(
-          `SELECT dictGet('${database}.${dictName}', 'name', toUInt64(1)) AS name`
-        )
-        expect(afterReplace[0]?.name).toBe('Alice')
+        expect(await pollUntil(reloadAndLookup, (name) => name === 'Alice')).toBe('Alice')
 
         // 3. drift is clean immediately after apply; existence-drift (the MV
         // precedent — dictionaries are not deep-shape-compared) is detected
