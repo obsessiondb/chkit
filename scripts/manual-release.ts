@@ -158,7 +158,7 @@ function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 
 	if (result.invalidEntries.length > 0) {
 		fail(
-			`Only patch changesets are allowed for this phase. Found non-patch entries:\n${result.invalidEntries.join('\n')}`,
+			`Only patch and minor changesets are allowed for this phase. Found disallowed entries:\n${result.invalidEntries.join('\n')}`,
 		)
 	}
 
@@ -271,7 +271,8 @@ function collectChangesetValidation(): ChangesetValidationResult {
 				continue
 			}
 
-			if (entry.bumpType !== 'patch') {
+			// Beta phase: allow feature minors alongside patches; still refuse majors.
+			if (entry.bumpType === 'major') {
 				invalidEntries.push(
 					`${file}: ${entry.packageName} -> ${entry.bumpType}`,
 				)
