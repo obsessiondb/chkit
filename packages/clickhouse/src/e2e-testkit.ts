@@ -5,6 +5,8 @@
  * Uses ClickHouseExecutor so any package that depends on @chkit/clickhouse can import this.
  */
 
+import { setTimeout as sleep } from 'node:timers/promises'
+
 import {
   createClickHouseExecutor,
   createStatelessClickHouseExecutor,
@@ -99,8 +101,47 @@ export function createJournalTableName(label: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// State-based polling (re-exported from ddl-propagation for test convenience)
+// State-based polling
 // ---------------------------------------------------------------------------
+
+export interface PollUntilOptions {
+  timeoutMs?: number
+  intervalMs?: number
+}
+
+/**
+ * Re-reads `read()` until `predicate` accepts its value or `timeoutMs` elapses.
+ * Unlike `waitForRows`, running out of time returns the last observed value
+ * instead of throwing, so the caller's own `expect` reports the real diff.
+ * A read that keeps throwing until the deadline rethrows its last error.
+ *
+ * Put the whole observation inside `read` (e.g. `SYSTEM RELOAD DICTIONARY`
+ * followed by `dictGet`): on multi-replica services each attempt may land on a
+ * different replica, so a one-off preparation step can't be relied on.
+ */
+export async function pollUntil<T>(
+  read: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  options: PollUntilOptions = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    let value: T
+    try {
+      value = await read()
+    } catch (error) {
+      if (Date.now() >= deadline) throw error
+      await sleep(intervalMs)
+      continue
+    }
+    if (predicate(value) || Date.now() >= deadline) return value
+    await sleep(intervalMs)
+  }
+}
+
+// Re-exported from ddl-propagation for test convenience.
 
 export {
   waitForTable,
