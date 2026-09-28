@@ -19,6 +19,11 @@ import {
 import { executeBackfill, type BackfillResult } from './async-backfill.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
+import {
+  resolveReplicaVisibility,
+  syncReplicaUnlessDenied,
+  type ReplicaVisibility,
+} from './mv-replay-visibility.js'
 import { PlanSchema } from './options.js'
 import { buildBackfillPlan } from './planner.js'
 import type { Chunk, PlannerQuery } from './chunking/types.js'
@@ -50,10 +55,10 @@ let runExecutor: ClickHouseExecutor
 let plannerQuery: PlannerQuery
 let liveEnv: LiveEnv
 let db: string
-// Plain MergeTree has one copy of the data. Replicated/Shared engines need
-// every active replica to attach the source parts before a chunk reads them.
-let syncSourceReplica = false
-let sourceReplicas = 1
+// Plain MergeTree has one copy of the data. Replicated/Shared engines sync
+// each sampled replica before a chunk reads it, when those commands are granted.
+let replicaVisibility: ReplicaVisibility = { kind: 'single-node', samples: 1 }
+let syncReplicaDenied = false
 let sourceTable: string
 let targetTable: string
 let sourceFqn: string
@@ -76,17 +81,23 @@ async function aggregateByBucket(fqn: string, valueExpr: string): Promise<Array<
 // select_sequential_consistency does not fetch parts that were never quorum
 // commits; it only hides or rejects blocks the quorum has not confirmed. A
 // replica that has not attached the partition therefore finishes the INSERT
-// with 0 written rows. Sample a fresh session per replica, and on
+// with 0 written rows. Sample a fresh session per active replica, and on
 // replicated/shared engines sync that session's replica before counting.
+// When system.replicas (or SYSTEM SYNC REPLICA) is not granted, this wait
+// only proves one session can see the source. enable_parallel_replicas = 0
+// and the empty-chunk replay below still cover a replica this wait missed.
 async function waitUntilSourceVisible(): Promise<void> {
   let readySamples = 0
   const ready = await pollUntil(async () => {
     const session = createLiveExecutor(liveEnv)
     try {
-      if (syncSourceReplica) {
-        await session.command(
-          `SYSTEM SYNC REPLICA ${quoteIdent(db)}.${quoteIdent(sourceTable)} LIGHTWEIGHT`,
+      if (replicaVisibility.kind !== 'single-node' && !syncReplicaDenied) {
+        const sync = await syncReplicaUnlessDenied(() =>
+          session.command(
+            `SYSTEM SYNC REPLICA ${quoteIdent(db)}.${quoteIdent(sourceTable)} LIGHTWEIGHT`,
+          ),
         )
+        if (sync === 'denied') syncReplicaDenied = true
       }
       const [row] = await session.query<{ cnt: string }>(
         `SELECT toString(count()) AS cnt FROM ${sourceFqn} SETTINGS select_sequential_consistency = 1`,
@@ -96,8 +107,8 @@ async function waitUntilSourceVisible(): Promise<void> {
     } finally {
       await session.close()
     }
-  }, (samples) => samples >= sourceReplicas, { timeoutMs: 45_000, intervalMs: 250 })
-  expect(ready, `replicas that can see all ${SOURCE_ROWS} source rows`).toBeGreaterThanOrEqual(sourceReplicas)
+  }, (samples) => samples >= replicaVisibility.samples, { timeoutMs: 45_000, intervalMs: 250 })
+  expect(ready, `replicas that can see all ${SOURCE_ROWS} source rows (${replicaVisibility.kind})`).toBeGreaterThanOrEqual(replicaVisibility.samples)
 }
 
 function chunkExecutionSql(planId: string, chunk: Chunk, plan: BackfillPlanState): string {
@@ -195,15 +206,14 @@ beforeAll(async () => {
   const [engineRow] = await ddl.query<{ engine: string }>(
     `SELECT engine FROM system.tables WHERE database = '${db}' AND name = '${sourceTable}'`,
   )
-  syncSourceReplica = /Shared|Replicated/.test(engineRow?.engine ?? '')
-  if (syncSourceReplica) {
+  replicaVisibility = await resolveReplicaVisibility(engineRow?.engine, async () => {
     const [replicaRow] = await ddl.query<{ active: string }>(
       `SELECT toString(active_replicas) AS active
        FROM system.replicas
        WHERE database = '${db}' AND table = '${sourceTable}'`,
     )
-    sourceReplicas = Math.max(1, Number(replicaRow?.active ?? 0))
-  }
+    return Number(replicaRow?.active ?? 0)
+  })
 
   const rows = Array.from({ length: SOURCE_ROWS }, (_, i) => ({
     id: i,
@@ -312,6 +322,9 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
       () => aggregateByBucket(targetFqn, 'sum(total)'),
       (rows) => Bun.deepEquals(rows, expected),
     )
-    expect(actual, `rows written per chunk attempt: ${JSON.stringify(writtenAttempts)}`).toEqual(expected)
+    expect(
+      actual,
+      `rows written per chunk attempt: ${JSON.stringify(writtenAttempts)} (${replicaVisibility.kind}, syncDenied=${syncReplicaDenied})`,
+    ).toEqual(expected)
   }, 240_000)
 })
