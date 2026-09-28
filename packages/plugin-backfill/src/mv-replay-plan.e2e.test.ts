@@ -10,6 +10,7 @@ import {
   createPrefix,
   createStatelessLiveExecutor,
   getRequiredEnv,
+  pollUntil,
   waitForTable,
 } from '@chkit/clickhouse/e2e-testkit'
 
@@ -189,7 +190,10 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
       buildQuery: ({ id }) => {
         const planChunk = plan.chunkPlan.chunks.find((candidate) => candidate.id === id)
         if (!planChunk) throw new Error(`Chunk ${id} not found in plan`)
-        return buildChunkExecutionSql({
+        // The source rows were inserted moments ago and each chunk may run on
+        // any replica: a lagging one would replay an empty partition and
+        // "finish" with nothing written. The generated SQL ends in its SETTINGS clause.
+        return `${buildChunkExecutionSql({
           planId: plan.planId,
           chunk: planChunk,
           target: plan.target,
@@ -200,7 +204,7 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
           idempotencyToken: plan.execution.requireIdempotencyToken
             ? generateIdempotencyToken(plan.planId, planChunk.id)
             : '',
-        })
+        })}, select_sequential_consistency = 1`
       },
       concurrency: 3,
       pollIntervalMs: 1500,
@@ -211,8 +215,17 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
 
     // Per-bucket values must match a forward run of the MV over the whole source.
     const expected = await aggregateByBucket(sourceFqn, 'sum(id)')
-    const actual = await aggregateByBucket(targetFqn, 'sum(total)')
     expect(expected).toHaveLength(BUCKETS)
-    expect(actual).toEqual(expected)
+    // Poll the target read too: a finished INSERT's parts can still be
+    // settling on the replica serving the SELECT. Data that never landed
+    // still fails the diff below instead of being waited away.
+    const actual = await pollUntil(
+      () => aggregateByBucket(targetFqn, 'sum(total)'),
+      (rows) => Bun.deepEquals(rows, expected),
+    )
+    const writtenRowsByChunk = Object.fromEntries(
+      Object.entries(result.progress).map(([id, chunk]) => [id, chunk.writtenRows]),
+    )
+    expect(actual, `rows written per chunk: ${JSON.stringify(writtenRowsByChunk)}`).toEqual(expected)
   }, 180_000)
 })

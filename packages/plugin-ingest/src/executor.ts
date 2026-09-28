@@ -34,7 +34,7 @@ const DEFAULT_PREFETCH_BATCHES = 1
 const DEFAULT_MAX_DURATION_MS = 60 * 60_000
 const LOAD_ATTEMPTS = 3
 const JOURNAL_APPEND_ATTEMPTS = 4
-// Terminal facts get a bounded chance to land even after the execution is cancelled.
+// Terminal facts get a bounded chance to land even after the execution is interrupted.
 const TERMINAL_JOURNAL_TIMEOUT_MS = 5000
 const DEFAULT_MAX_CHUNK_ROWS = 100_000
 // How long a failed stream waits for an uncooperative reader before abandoning it.
@@ -118,13 +118,11 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
     span.setAttribute('chkit.ingest.stream_ids', streamIds)
     try {
       await abortable(() => env.journal.ensure(), env.signal)
-      await abortable(() => env.journal.append(
-        runEvent(1, 'run_started', runId, '', {
-          streamIds,
-          cutoff: cutoff.toISOString(),
-          backfill: request.backfill?.id,
-        })
-      ), env.signal)
+      await appendRunEvent(env, runEvent(1, 'run_started', runId, '', {
+        streamIds,
+        cutoff: cutoff.toISOString(),
+        backfill: request.backfill?.id,
+      }), env.signal)
 
       const permits = new Map<string, PipelinePermits>()
       const streams = await Promise.all(
@@ -134,11 +132,9 @@ export async function runIngestion(request: ExecutionRequest, input: ExecutionEn
       )
 
       const ok = streams.every((stream) => stream.outcome === 'succeeded')
-      await abortable(() => env.journal.append(
-        runEvent(2, 'run_finished', runId, ok ? 'succeeded' : 'failed', {
-          outcomes: Object.fromEntries(streams.map((stream) => [stream.namespaceId, stream.outcome])),
-        })
-      ), AbortSignal.timeout(TERMINAL_JOURNAL_TIMEOUT_MS))
+      await appendRunEvent(env, runEvent(2, 'run_finished', runId, ok ? 'succeeded' : 'failed', {
+        outcomes: Object.fromEntries(streams.map((stream) => [stream.namespaceId, stream.outcome])),
+      }), terminalSignal(env.signal))
       if (!ok) span.setStatus({ code: SpanStatusCode.ERROR })
       return { runId, cutoff: cutoff.toISOString(), streams, ok }
     } finally {
@@ -508,7 +504,7 @@ function append(
   fields: Partial<Omit<JournalEvent, 'namespaceId' | 'eventSeq' | 'eventKind' | 'runId'>>
 ): Promise<void> {
   const { progress, env } = input
-  const signal = eventKind === 'work_finished' ? AbortSignal.timeout(TERMINAL_JOURNAL_TIMEOUT_MS) : env.signal
+  const signal = eventKind === 'work_finished' ? terminalSignal(env.signal) : env.signal
   const write = progress.appendChain.then(async () => {
     signal.throwIfAborted()
     const event: JournalEvent = {
@@ -540,6 +536,28 @@ function append(
   progress.appendChain = write
   write.catch(() => undefined)
   return abortable(() => write, signal)
+}
+
+// Run facts are deterministic too, so they get the same bounded retry as
+// namespace appends instead of failing the whole run on one transient error.
+function appendRunEvent(env: ResolvedEnv, event: JournalEvent, signal: AbortSignal): Promise<void> {
+  return abortable(() => pRetry(() => abortable(() => env.journal.append(event), signal), {
+    retries: JOURNAL_APPEND_ATTEMPTS - 1,
+    minTimeout: 250,
+    signal,
+  }), signal)
+}
+
+// A live run bounds terminal facts by its own deadline, not by a fixed window
+// that a slow but healthy journal write can outlast. Only once the run has
+// been interrupted does the fixed grace period apply.
+function terminalSignal(runSignal: AbortSignal): AbortSignal {
+  if (runSignal.aborted) return AbortSignal.timeout(TERMINAL_JOURNAL_TIMEOUT_MS)
+  const grace = new AbortController()
+  void graceAfterAbort(runSignal, TERMINAL_JOURNAL_TIMEOUT_MS).then(() => {
+    grace.abort(new DOMException('The operation timed out.', 'TimeoutError'))
+  })
+  return grace.signal
 }
 
 function runEvent(seq: number, eventKind: 'run_started' | 'run_finished', runId: string, workState: JournalEvent['workState'], detail: Record<string, unknown>): JournalEvent {

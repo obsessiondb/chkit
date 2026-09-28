@@ -233,53 +233,71 @@ test('normalization preserves every printable ClickHouse string escape', async (
   const { normalizeTextIndexSQL } = await import('@chkit/core')
   const executor = createLiveExecutor(env)
   try {
+    const escapeSql = (code: number) => `'\\${String.fromCharCode(code)}'`
+    const checks: string[] = []
     for (let code = 32; code < 127; code++) {
-      const sql = `'\\${String.fromCharCode(code)}'`
+      const sql = escapeSql(code)
       if (code === 120) {
         expect(() => normalizeTextIndexSQL(sql)).toThrow('Invalid hexadecimal')
         continue
       }
-      const rows = await executor.query<{
-        original: string
-        normalized: string
-      }>(`SELECT hex(${sql}) AS original, hex(${normalizeTextIndexSQL(sql)}) AS normalized`)
-      expect(rows[0]?.normalized, `escape ${JSON.stringify(sql)}`).toBe(rows[0]?.original)
+      checks.push(
+        `SELECT ${code} AS code, hex(${sql}) AS original, hex(${normalizeTextIndexSQL(sql)}) AS normalized`,
+      )
+    }
+    // One request instead of ~94 sequential round trips to a remote service.
+    const rows = await executor.query<{ code: number; original: string; normalized: string }>(
+      checks.join('\nUNION ALL\n'),
+    )
+    expect(rows).toHaveLength(checks.length)
+    for (const { code, original, normalized } of rows) {
+      expect(normalized, `escape ${JSON.stringify(escapeSql(Number(code)))}`).toBe(original)
     }
   } finally {
     await executor.close()
   }
-})
+}, 60000)
 
 test('quoted literal names remain distinct from constants in ClickHouse and planning', async () => {
   const executor = createLiveExecutor(env)
   try {
-    for (const word of ['null', 'true', 'false', 'inf', 'infinity', 'nan']) {
-      for (const name of [word, word.toUpperCase(), word[0]?.toUpperCase() + word.slice(1)]) {
-        const quoted = `toString(\`${name}\`)`
-        const unquoted = `toString(${name})`
-        const rows = await executor.query<{
-          quoted_value: string
-          literal_value: string | null
-        }>(
-          `SELECT ${quoted} AS quoted_value, ${unquoted} AS literal_value FROM (SELECT 'sentinel' AS \`${name}\`)`,
-        )
-        expect(rows[0]?.quoted_value).toBe('sentinel')
-        expect(rows[0]?.literal_value).not.toBe('sentinel')
-        const index: TextSkipIndex = {
-          name: 'idx',
-          type: 'text',
-          expression: quoted,
-          tokenizer: 'splitByNonAlpha',
-        }
-        expect(textIndexFingerprint(index)).not.toBe(
-          textIndexFingerprint({ ...index, expression: unquoted }),
-        )
+    const names = ['null', 'true', 'false', 'inf', 'infinity', 'nan'].flatMap((word) => [
+      word,
+      word.toUpperCase(),
+      word[0]?.toUpperCase() + word.slice(1),
+    ])
+    const checks: string[] = []
+    for (const name of names) {
+      const quoted = `toString(\`${name}\`)`
+      const unquoted = `toString(${name})`
+      checks.push(
+        `SELECT '${name}' AS name, ${quoted} AS quoted_value, ${unquoted} AS literal_value FROM (SELECT 'sentinel' AS \`${name}\`)`,
+      )
+      const index: TextSkipIndex = {
+        name: 'idx',
+        type: 'text',
+        expression: quoted,
+        tokenizer: 'splitByNonAlpha',
       }
+      expect(textIndexFingerprint(index)).not.toBe(
+        textIndexFingerprint({ ...index, expression: unquoted }),
+      )
+    }
+    // One request instead of a sequential round trip per name.
+    const rows = await executor.query<{
+      name: string
+      quoted_value: string
+      literal_value: string | null
+    }>(checks.join('\nUNION ALL\n'))
+    expect(rows.map((row) => row.name).sort()).toEqual([...names].sort())
+    for (const row of rows) {
+      expect(row.quoted_value, row.name).toBe('sentinel')
+      expect(row.literal_value, row.name).not.toBe('sentinel')
     }
   } finally {
     await executor.close()
   }
-})
+}, 60000)
 
 test('quoted NULL column round-trips and changing it to a literal migrates the index', async () => {
   const executor = createLiveExecutor(env)

@@ -21,6 +21,7 @@ export {
   waitForColumn,
   waitForDictionary,
   waitForRows,
+  pollUntil,
 } from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')

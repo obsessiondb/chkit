@@ -52,7 +52,10 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     await waitForTable(executor, database, landing.name)
     await executor.command(toCreateSQL(integers))
     await waitForTable(executor, database, integers.name)
-  })
+    // Create the journal through the product path during setup, like every
+    // other table here, instead of racing its propagation inside the first run.
+    await createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable }).ensure()
+  }, 60_000)
 
   afterAll(async () => {
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(destinationTable.name)}`)
@@ -60,7 +63,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(integers.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
     await executor.close()
-  })
+  }, 60_000)
 
   test('a lost acknowledgement replays from the journaled checkpoint without skipping or duplicating rows', async () => {
     const source = Array.from({ length: 3 }, (_, page) => [0, 1].map((offset) => ({ id: page * 2 + offset, label: `row-${page * 2 + offset}` })))

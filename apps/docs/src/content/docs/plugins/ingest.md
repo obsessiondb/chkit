@@ -178,7 +178,7 @@ Ingestion is at-least-once. The loader inserts batches with stable `insert_dedup
 
 Successful syncs start a new batch identity cycle, recorded by the existing journal. Failed or interrupted syncs retain their cycle for replay. This also applies to full syncs, which have no incremental bookmark.
 
-The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle; each terminal journal append has a separate five-second limit. Interrupted writes never count as successful ingestion.
+The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle. Terminal journal appends are bounded by the duration budget while the run is live. After cancellation or budget exhaustion, each one gets a separate five-second limit. Interrupted writes never count as successful ingestion.
 
 Run at most one ingestion process per project and target at a time. Use your scheduler's concurrency control (for example a GitHub Actions concurrency group) to enforce it.
 

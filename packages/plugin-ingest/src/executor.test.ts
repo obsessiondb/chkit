@@ -492,6 +492,37 @@ describe('runtime contracts', () => {
     else expect((await execution).ok).toBe(false)
   }, 8000)
 
+  test.each(['work_finished', 'run_finished'])('a slow terminal journal %s still lands while the run is live', async (stage) => {
+    const journal = createMemoryJournal()
+    const append = journal.append.bind(journal)
+    journal.append = async (event) => {
+      if (event.eventKind === stage) await sleep(5500)
+      await append(event)
+    }
+    const stream = defineStream({ id: 'app.slow_terminal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    expect(result.ok).toBe(true)
+    expect(journal.events.map((event) => event.eventKind)).toContain(stage)
+  }, 10_000)
+
+  test.each(['run_started', 'run_finished'])('a transient %s append failure retries the same run fact', async (stage) => {
+    const journal = createMemoryJournal()
+    const append = journal.append.bind(journal)
+    let failures = 0
+    journal.append = async (event) => {
+      if (event.eventKind === stage && failures === 0) {
+        failures += 1
+        throw new Error('UNKNOWN_TABLE on a lagging replica')
+      }
+      await append(event)
+    }
+    const stream = defineStream({ id: 'app.transient_run_fact', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    expect(result.ok).toBe(true)
+    expect(failures).toBe(1)
+    expect(journal.events.filter((event) => event.eventKind === stage)).toHaveLength(1)
+  })
+
   test('a throwing loader factory releases its permit for sibling streams', async () => {
     const failed = defineStream({
       id: 'app.factory', destination: events, retry: { retries: 0 },
