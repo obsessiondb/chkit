@@ -10,6 +10,7 @@ import {
   createStatelessClickHouseClient,
   formatConnectionError,
   inferSchemaKindFromEngine,
+  observableSystemTable,
   parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
@@ -703,5 +704,132 @@ RANGE(MIN start_date MAX end_date)`
     expect(parseSourceFromCreateDictionaryQuery(shadowedRangeQuery)).toBe(
       "HTTP(url 'http://example.com/rates' format 'TSV')"
     )
+  })
+})
+
+
+describe('systemTableSource / observableSystemTable', () => {
+  test('named cluster uses clusterAllReplicas with that name', () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: 'moebel_cluster',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe(
+      "clusterAllReplicas('moebel_cluster', system.processes)",
+    )
+    expect(executor.systemTableSource?.('query_log')).toBe(
+      "clusterAllReplicas('moebel_cluster', system.query_log)",
+    )
+    expect(observableSystemTable(executor, 'processes')).toBe(
+      "clusterAllReplicas('moebel_cluster', system.processes)",
+    )
+  })
+
+  test('no cluster uses local system tables (does not emit literal cluster)', () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe('system.processes')
+    expect(executor.systemTableSource?.('query_log')).toBe('system.query_log')
+    expect(observableSystemTable(executor, 'processes')).toBe('system.processes')
+    expect(executor.systemTableSource?.('processes')).not.toContain("'cluster'")
+    expect(observableSystemTable(executor, 'query_log')).not.toContain(
+      "clusterAllReplicas('cluster'",
+    )
+  })
+
+  test('macro {cluster} is preserved in clusterAllReplicas', () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: '{cluster}',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe(
+      "clusterAllReplicas('{cluster}', system.processes)",
+    )
+  })
+
+  test("literal name 'cluster' still works when configured as such", () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: 'cluster',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe(
+      "clusterAllReplicas('cluster', system.processes)",
+    )
+  })
+
+  test('observableSystemTable falls back to local tables when capability is absent', () => {
+    expect(observableSystemTable({}, 'processes')).toBe('system.processes')
+    expect(observableSystemTable({}, 'query_log')).toBe('system.query_log')
+  })
+
+  test('queryStatus SQL uses configured cluster (and local tables when unset)', async () => {
+    const queries: string[] = []
+    const capturingClient = {
+      async command() {
+        return { query_id: 'cmd', response_headers: {} }
+      },
+      async query(params: { query: string }) {
+        queries.push(params.query)
+        return {
+          query_id: 'q',
+          response_headers: {},
+          async json() {
+            return []
+          },
+        }
+      },
+      async insert() {
+        return { query_id: 'i', response_headers: {} }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+
+    const clustered = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: 'moebel_cluster',
+      },
+      capturingClient,
+    )
+    await clustered.queryStatus('qid-1')
+    expect(queries[0]).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
+    expect(queries[1]).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
+    expect(queries.join('\n')).not.toContain("clusterAllReplicas('cluster'")
+
+    queries.length = 0
+    const local = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+      },
+      capturingClient,
+    )
+    await local.queryStatus('qid-2')
+    expect(queries[0]).toContain('FROM system.processes')
+    expect(queries[0]).not.toContain('clusterAllReplicas')
+    expect(queries[1]).toContain('FROM system.query_log')
+    expect(queries[1]).not.toContain('clusterAllReplicas')
   })
 })
