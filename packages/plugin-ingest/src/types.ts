@@ -231,7 +231,11 @@ export interface CommittedCheckpoint {
 /** Authoritative append-only control state. Checkpoints are projections of it. */
 export interface Journal {
   ensure(): Promise<void>
-  append(event: JournalEvent): Promise<void>
+  /**
+   * Appends facts atomically: all land or none do. Facts that are always written
+   * together share one insert, so the journal insert rate tracks the batch rate.
+   */
+  append(events: readonly JournalEvent[]): Promise<void>
   readCheckpoint(namespaceId: string): Promise<CommittedCheckpoint>
 }
 

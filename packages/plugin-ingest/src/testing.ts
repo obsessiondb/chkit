@@ -20,9 +20,9 @@ export function createMemoryJournal(): MemoryJournal {
     events,
     rows,
     async ensure() {},
-    async append(event) {
-      events.push(event)
-      rows.push(toJournalRow(event, 'memory', new Date(0)))
+    async append(appended) {
+      events.push(...appended)
+      rows.push(...appended.map((event) => toJournalRow(event, 'memory', new Date(0))))
     },
     async readCheckpoint(namespaceId): Promise<CommittedCheckpoint> {
       const scoped = events.filter((event) => event.namespaceId === namespaceId)

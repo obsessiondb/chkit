@@ -62,14 +62,19 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
       await waitForTable(options.executor, options.database, table)
     },
 
-    async append(event) {
-      const row = toJournalRow(event, options.targetId, now())
+    async append(events) {
+      const at = now()
+      const rows = events.map((event) => toJournalRow(event, options.targetId, at))
+      // One insert block into one monthly partition (a shared event_at) is atomic.
+      // A retried append of the same deterministic facts is suppressed while the
+      // deduplication window lasts; readers canonicalize by event_id anyway.
+      const [first, ...rest] = rows
+      if (!first) return
+      const token = rest.length === 0 ? first.event_id : digest(rows.map((row) => row.event_id))
       await options.executor.insert({
         table: `${options.database}.${table}`,
-        values: [row],
-        // A retried append of the same deterministic fact is suppressed while
-        // the deduplication window lasts; readers canonicalize by event_id anyway.
-        settings: { insert_deduplication_token: row.event_id, async_insert: 0 },
+        values: rows,
+        settings: { insert_deduplication_token: token, async_insert: 0 },
       })
     },
 
