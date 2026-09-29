@@ -1,5 +1,18 @@
 # create-chkit
 
+## 0.2.0-beta.8
+
+### Patch Changes
+
+- 4ded781: Print the "Next steps" block once and with the correct runner for the selected package manager. `create-chkit` previously printed it twice — once package-manager-aware and once from onboarding with a hardcoded `bunx` — so `--package-manager npm` users were told to run `bunx chkit …`. Onboarding now derives the runner (`npx` / `pnpm dlx` / `yarn dlx` / `bunx`) from the package manager, and `create-chkit` only prints its own next-steps when onboarding is skipped, removing the duplicate.
+- Updated dependencies [3f9a246]
+- Updated dependencies [4ded781]
+- Updated dependencies [75d15e9]
+- Updated dependencies [4ded781]
+- Updated dependencies [4ded781]
+- Updated dependencies [3cc768d]
+  - @chkit/plugin-obsessiondb@0.2.0-beta.8
+
 ## 0.1.2-beta.7
 
 ### Patch Changes

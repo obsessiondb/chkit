@@ -47,7 +47,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -65,7 +65,7 @@
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.18.0",
@@ -75,14 +75,14 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "fast-glob": "^3.3.2",
         "jiti": "^2.7.0",
@@ -93,7 +93,7 @@
     },
     "packages/create-chkit": {
       "name": "create-chkit",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "bin": {
         "create-chkit": "./dist/bin/create-chkit.js",
       },
@@ -110,7 +110,7 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -121,7 +121,7 @@
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
@@ -134,7 +134,7 @@
     },
     "packages/plugin-ingest": {
       "name": "@chkit/plugin-ingest",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -146,7 +146,7 @@
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -159,7 +159,7 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.1.2-beta.7",
+      "version": "0.2.0-beta.8",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
