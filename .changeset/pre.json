@@ -11,17 +11,33 @@
     "@chkit/plugin-backfill": "0.1.1",
     "@chkit/plugin-codegen": "0.1.1",
     "@chkit/plugin-obsessiondb": "0.1.1",
-    "@chkit/plugin-pull": "0.1.1"
+    "@chkit/plugin-pull": "0.1.1",
+    "@chkit/plugin-ingest": "0.1.2-beta.7"
   },
   "changesets": [
+    "api-sync-docs-rename",
     "backfill-mv-replay-empty-target",
     "backfill-replay-all-mvs",
     "backfill-sql-scanner",
+    "cli-skills-proxy",
+    "create-chkit-next-steps-dedup",
     "dictionary-schema-primitive",
+    "drift-index-arguments",
     "generate-empty-migration",
     "index-only-projections",
+    "ingest-journal-replica-resilience",
+    "ingest-run-namespace",
+    "ingestion-runtime",
+    "init-connect-runbook-consistency",
+    "kafka-table-engine",
     "key-clause-function-expressions",
+    "migrate-async-poll-resilience",
+    "obsessiondb-json-no-bare-string",
+    "obsessiondb-logout-no-session",
+    "orpc-deserialization-security",
     "pull-clause-and-derived-primary-key",
-    "shared-plugin-command-runner"
+    "pull-route-through-executor",
+    "shared-plugin-command-runner",
+    "text-index-round-trips"
   ]
 }

@@ -1,5 +1,31 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.8
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 4ded781: Print the "Next steps" block once and with the correct runner for the selected package manager. `create-chkit` previously printed it twice — once package-manager-aware and once from onboarding with a hardcoded `bunx` — so `--package-manager npm` users were told to run `bunx chkit …`. Onboarding now derives the runner (`npx` / `pnpm dlx` / `yarn dlx` / `bunx`) from the package manager, and `create-chkit` only prints its own next-steps when onboarding is skipped, removing the duplicate.
+- 75d15e9: Stop `chkit drift` from reporting `index_mismatch` for skip indexes it just created. Introspection read `system.data_skipping_indices.type`, which holds only the index name (`ngrambf_v1`), so every argument parsed as 0; it now reads `type_full` (`ngrambf_v1(3, 4096, 2, 0)`). chkit renders `INDEX name (expr)` and ClickHouse keeps those parentheses in `expr`, so the comparison now drops one pair when it encloses the whole expression. chkit-py introspection reads `type_full` as well.
+- 4ded781: Make `--json` always emit a JSON object, never a bare JSON-encoded string. `printOutput` now wraps any plain string printed under `--json` in `{ schemaVersion, message }`, closing the whole class of bug at the serializer so no command can leak a bare string. `chkit obsessiondb whoami` gains a structured envelope (`status: logged_in | not_logged_in | session_expired`), and `chkit obsessiondb service list` emits a single object with a `services[]` array instead of one JSON line per service (which was not valid single-JSON). Previously these commands `JSON.stringify`'d a prose string (e.g. `"Not logged in…"`), breaking any pipe to `jq`. Text-mode output is unchanged. Note: this changes the `--json` output shape of `whoami` and `service list` from a string to an object.
+- 4ded781: `chkit obsessiondb logout` now reports "No active session." when there are no stored credentials, instead of always printing "Logged out." (which implied it had ended a session that never existed). Logout stays idempotent and exits 0 either way; only the message changes.
+- 3cc768d: Pin `@orpc/client` and `@orpc/contract` to 1.15.4 to fix prototype pollution (CVE-2026-28794) and include the subsequent deserializer validation fix (GHSA-4p2c-m292-ghmh). Keep exact versions and align the oRPC dependency family.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [65c90d6]
+- Updated dependencies [75d15e9]
+- Updated dependencies [3f1db03]
+- Updated dependencies [f8238db]
+- Updated dependencies [fedbf56]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+- Updated dependencies [256ec62]
+  - @chkit/plugin-backfill@0.2.0-beta.8
+  - @chkit/core@0.2.0-beta.8
+  - @chkit/clickhouse@0.2.0-beta.8
+
 ## 0.1.2-beta.7
 
 ### Patch Changes

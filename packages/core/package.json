@@ -1,6 +1,6 @@
 {
   "name": "@chkit/core",
-  "version": "0.1.2-beta.7",
+  "version": "0.2.0-beta.8",
   "description": "Schema DSL, config, diff engine, and migration planner for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
