@@ -1,5 +1,6 @@
 import type {
 	ClickHouseExecutor,
+	ClickHouseInsertParams,
 	ClickHouseJsonQueryResult,
 	ClickHouseSettings,
 	QueryStatus,
@@ -108,11 +109,9 @@ export function createRemoteExecutor(deps: {
 			return normalizeQueryJsonResult<T>(res)
 		},
 
-		async insert<T extends Record<string, unknown>>(params: {
-			table: string
-			values: T[]
-			compressed?: boolean
-		}) {
+		async insert<T extends Record<string, unknown>>(
+			params: ClickHouseInsertParams<T>,
+		) {
 			if (params.values.length === 0) return
 			const [firstValue] = params.values
 			if (!firstValue) return
@@ -130,9 +129,15 @@ export function createRemoteExecutor(deps: {
 							.join(', ')})`,
 				)
 				.join(', ')
-			await executor.command(
-				`INSERT INTO ${params.table} (${columns.join(', ')}) VALUES ${rows}`,
-			)
+			// Per-insert settings such as insert_deduplication_token must reach
+			// ClickHouse, so this cannot go through command(), which sends none.
+			const apiSettings = toApiSettings(params.settings)
+			const res = await client.workbench.query.execute({
+				serviceSlug,
+				query: `INSERT INTO ${params.table} (${columns.join(', ')}) VALUES ${rows}`,
+				...(apiSettings ? { settings: apiSettings } : {}),
+			})
+			throwIfError(res)
 		},
 
 		async submit(sql, queryId?) {
