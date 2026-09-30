@@ -2,6 +2,8 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
+import { spawnWithTimeout } from './spawn-cli.js'
+
 export const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')
 export const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 export const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/index.ts')
@@ -21,20 +23,13 @@ export const PULL_PLUGIN_ENTRY = join(
 export function runCli(
 	args: string[],
 	env?: Record<string, string | undefined>,
+	{ timeoutMs }: { timeoutMs?: number } = {},
 ): { exitCode: number; stdout: string; stderr: string } {
-	const result = Bun.spawnSync({
-		cmd: ['bun', './packages/cli/src/bin/chkit.ts', ...args],
+	return spawnWithTimeout(['bun', './packages/cli/src/bin/chkit.ts', ...args], {
 		cwd: WORKSPACE_ROOT,
-		stdout: 'pipe',
-		stderr: 'pipe',
-		env: { ...process.env, ...env },
+		env,
+		timeoutMs,
 	})
-
-	return {
-		exitCode: result.exitCode,
-		stdout: new TextDecoder().decode(result.stdout),
-		stderr: new TextDecoder().decode(result.stderr),
-	}
 }
 
 export function renderUsersSchema(input?: {
