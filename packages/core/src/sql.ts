@@ -11,6 +11,7 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { renderCodec } from './codec.js'
+import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
@@ -26,20 +27,23 @@ function renderDefault(value: string | number | boolean): string {
 }
 
 function renderColumn(col: ColumnDefinition): string {
-  let out = `\`${col.name}\` ${col.nullable ? `Nullable(${col.type})` : col.type}`
+  let out = `${quoteIdentifier(col.name)} ${col.nullable ? `Nullable(${col.type})` : col.type}`
   if (col.default !== undefined) out += ` DEFAULT ${renderDefault(col.default)}`
   if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
   if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
 }
 
-function renderKeyClauseColumns(columns: string[], columnNames: Set<string>): string {
-  return normalizeKeyColumns(columns)
+export function renderKeyClauseColumns(
+  columns: string[],
+  columnNames: ReadonlySet<string>
+): string {
+  return normalizeKeyColumns(columns, columnNames)
     .map((column) =>
       // Quote a token when it names a declared column (including names that
       // need quoting like `user-id`) or is a bare identifier. Only true
       // expressions (e.g. `toStartOfHour(ts)`) are emitted verbatim.
-      columnNames.has(column) || isPlainColumnReference(column) ? `\`${column}\`` : column
+      columnNames.has(column) || isPlainColumnReference(column) ? quoteIdentifier(column) : column
     )
     .join(', ')
 }
@@ -67,10 +71,10 @@ function renderTableSQL(def: TableDefinition): string {
   const columns = def.columns.map(renderColumn)
   const indexes = (def.indexes ?? []).map(
     (idx) =>
-      `INDEX \`${idx.name}\` (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.type === 'text' ? TEXT_INDEX_GRANULARITY : idx.granularity}`
+      `INDEX ${quoteIdentifier(idx.name)} (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.type === 'text' ? TEXT_INDEX_GRANULARITY : idx.granularity}`
   )
   const projections = (def.projections ?? []).map(
-    (projection) => `PROJECTION \`${projection.name}\` ${renderProjectionBody(projection)}`
+    (projection) => `PROJECTION ${quoteIdentifier(projection.name)} ${renderProjectionBody(projection)}`
   )
   const body = [...columns, ...indexes, ...projections].join(',\n  ')
 
@@ -94,11 +98,11 @@ function renderTableSQL(def: TableDefinition): string {
   }
   if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
 
-  return `CREATE TABLE IF NOT EXISTS ${def.database}.${def.name}\n(\n  ${body}\n) ENGINE = ${def.engine}\n${clauses.join('\n')};`
+  return `CREATE TABLE IF NOT EXISTS ${renderQualifiedName(def.database, def.name)}\n(\n  ${body}\n) ENGINE = ${def.engine}\n${clauses.join('\n')};`
 }
 
 function renderViewSQL(def: ViewDefinition): string {
-  return `CREATE VIEW IF NOT EXISTS ${def.database}.${def.name} AS\n${def.as};`
+  return `CREATE VIEW IF NOT EXISTS ${renderQualifiedName(def.database, def.name)} AS\n${def.as};`
 }
 
 function renderRefreshSettings(settings: Record<string, string | number>): string {
@@ -108,7 +112,7 @@ function renderRefreshSettings(settings: Record<string, string | number>): strin
 }
 
 function renderDependsOn(dependsOn: Array<{ database: string; name: string }>): string {
-  return dependsOn.map((dep) => `${dep.database}.${dep.name}`).join(', ')
+  return dependsOn.map((dep) => renderQualifiedName(dep.database, dep.name)).join(', ')
 }
 
 /**
@@ -134,9 +138,9 @@ function renderRefreshClause(refresh: MaterializedViewRefresh): string {
 }
 
 function renderMaterializedViewSQL(def: MaterializedViewDefinition): string {
-  const header = `CREATE MATERIALIZED VIEW IF NOT EXISTS ${def.database}.${def.name}`
+  const header = `CREATE MATERIALIZED VIEW IF NOT EXISTS ${renderQualifiedName(def.database, def.name)}`
   const refreshBlock = def.refresh ? `\n${renderRefreshClause(def.refresh)}` : ''
-  const toClause = ` TO ${def.to.database}.${def.to.name}`
+  const toClause = ` TO ${renderQualifiedName(def.to.database, def.to.name)}`
   const emptyClause = def.refresh?.empty ? ' EMPTY' : ''
   return `${header}${refreshBlock}${toClause}${emptyClause} AS\n${def.as};`
 }
@@ -152,11 +156,11 @@ export function renderAlterModifyRefresh(def: MaterializedViewDefinition): strin
       `Cannot render MODIFY REFRESH for ${def.database}.${def.name}: refresh is not set`
     )
   }
-  return `ALTER TABLE ${def.database}.${def.name} MODIFY ${renderRefreshClause(def.refresh)};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY ${renderRefreshClause(def.refresh)};`
 }
 
 function renderDictionaryAttribute(attr: DictionaryAttribute): string {
-  let out = `\`${attr.name}\` ${attr.type}`
+  let out = `${quoteIdentifier(attr.name)} ${attr.type}`
   if (attr.expression !== undefined) out += ` EXPRESSION ${attr.expression}`
   else if (attr.default !== undefined) out += ` DEFAULT ${renderDefault(attr.default)}`
   if (attr.hierarchical) out += ' HIERARCHICAL'
@@ -166,8 +170,8 @@ function renderDictionaryAttribute(attr: DictionaryAttribute): string {
   return out
 }
 
-function renderDictionaryRangeColumn(column: string, columnNames: Set<string>): string {
-  return columnNames.has(column) || isPlainColumnReference(column) ? `\`${column}\`` : column
+function renderDictionaryRangeColumn(column: string, columnNames: ReadonlySet<string>): string {
+  return columnNames.has(column) || isPlainColumnReference(column) ? quoteIdentifier(column) : column
 }
 
 function renderDictionarySettings(settings: Record<string, string | number>): string {
@@ -196,7 +200,7 @@ export function renderDictionarySQL(def: DictionaryDefinition, replace = false):
     clauses.push(`SETTINGS(${renderDictionarySettings(def.settings)})`)
   }
   if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
-  return `${verb} ${def.database}.${def.name}\n(\n  ${attrs}\n)\n${clauses.join('\n')};`
+  return `${verb} ${renderQualifiedName(def.database, def.name)}\n(\n  ${attrs}\n)\n${clauses.join('\n')};`
 }
 
 export function toCreateSQL(def: SchemaDefinition): string {
@@ -208,38 +212,38 @@ export function toCreateSQL(def: SchemaDefinition): string {
 }
 
 export function renderAlterAddColumn(def: TableDefinition, column: ColumnDefinition): string {
-  return `ALTER TABLE ${def.database}.${def.name} ADD COLUMN IF NOT EXISTS ${renderColumn(column)};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD COLUMN IF NOT EXISTS ${renderColumn(column)};`
 }
 
 export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefinition): string {
-  return `ALTER TABLE ${def.database}.${def.name} MODIFY COLUMN ${renderColumn(column)};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)};`
 }
 
 export function renderAlterDropColumn(def: TableDefinition, columnName: string): string {
-  return `ALTER TABLE ${def.database}.${def.name} DROP COLUMN IF EXISTS \`${columnName}\`;`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} DROP COLUMN IF EXISTS ${quoteIdentifier(columnName)};`
 }
 
 export function renderAlterRemoveCodec(def: TableDefinition, columnName: string): string {
-  return `ALTER TABLE ${def.database}.${def.name} MODIFY COLUMN \`${columnName}\` REMOVE CODEC;`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${quoteIdentifier(columnName)} REMOVE CODEC;`
 }
 
 export function renderAlterAddIndex(def: TableDefinition, index: SkipIndexDefinition): string {
-  return `ALTER TABLE ${def.database}.${def.name} ADD INDEX IF NOT EXISTS \`${index.name}\` (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${index.type === 'text' ? TEXT_INDEX_GRANULARITY : index.granularity};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD INDEX IF NOT EXISTS ${quoteIdentifier(index.name)} (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${index.type === 'text' ? TEXT_INDEX_GRANULARITY : index.granularity};`
 }
 
 export function renderAlterDropIndex(def: TableDefinition, indexName: string): string {
-  return `ALTER TABLE ${def.database}.${def.name} DROP INDEX IF EXISTS \`${indexName}\`;`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} DROP INDEX IF EXISTS ${quoteIdentifier(indexName)};`
 }
 
 export function renderAlterAddProjection(
   def: TableDefinition,
   projection: ProjectionDefinition
 ): string {
-  return `ALTER TABLE ${def.database}.${def.name} ADD PROJECTION IF NOT EXISTS \`${projection.name}\` ${renderProjectionBody(projection)};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD PROJECTION IF NOT EXISTS ${quoteIdentifier(projection.name)} ${renderProjectionBody(projection)};`
 }
 
 export function renderAlterDropProjection(def: TableDefinition, projectionName: string): string {
-  return `ALTER TABLE ${def.database}.${def.name} DROP PROJECTION IF EXISTS \`${projectionName}\`;`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} DROP PROJECTION IF EXISTS ${quoteIdentifier(projectionName)};`
 }
 
 export function renderAlterModifySetting(
@@ -247,16 +251,16 @@ export function renderAlterModifySetting(
   key: string,
   value: string | number | boolean
 ): string {
-  return `ALTER TABLE ${def.database}.${def.name} MODIFY SETTING ${key} = ${value};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY SETTING ${key} = ${value};`
 }
 
 export function renderAlterResetSetting(def: TableDefinition, key: string): string {
-  return `ALTER TABLE ${def.database}.${def.name} RESET SETTING ${key};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} RESET SETTING ${key};`
 }
 
 export function renderAlterModifyTTL(def: TableDefinition, ttl: string | undefined): string {
   if (ttl === undefined) {
-    return `ALTER TABLE ${def.database}.${def.name} REMOVE TTL;`
+    return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} REMOVE TTL;`
   }
-  return `ALTER TABLE ${def.database}.${def.name} MODIFY TTL ${ttl};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY TTL ${ttl};`
 }

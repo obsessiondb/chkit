@@ -1,6 +1,7 @@
 import { renderTextIndexType } from './text-index.js'
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
+import { describeInvalidIdentifier } from './identifier.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 import { isKafkaEngine } from './kafka.js'
@@ -183,7 +184,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     }
   }
 
-  for (const column of normalizeKeyColumns(def.primaryKey)) {
+  for (const column of normalizeKeyColumns(def.primaryKey, columnSet)) {
     if (isPlainColumnReference(column) && !columnSet.has(column)) {
       pushValidationIssue(
         issues,
@@ -194,7 +195,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     }
   }
 
-  for (const column of normalizeKeyColumns(def.orderBy)) {
+  for (const column of normalizeKeyColumns(def.orderBy, columnSet)) {
     if (isPlainColumnReference(column) && !columnSet.has(column)) {
       pushValidationIssue(
         issues,
@@ -382,6 +383,45 @@ function validateDictionaryDefinition(def: DictionaryDefinition, issues: Validat
   }
 }
 
+function collectIdentifiers(def: SchemaDefinition): Array<{ label: string; name: string }> {
+  const identifiers = [
+    { label: 'database name', name: def.database },
+    { label: 'name', name: def.name },
+  ]
+  if (def.kind === 'table') {
+    for (const column of def.columns) identifiers.push({ label: 'column name', name: column.name })
+    for (const index of def.indexes ?? []) identifiers.push({ label: 'index name', name: index.name })
+    for (const projection of def.projections ?? []) {
+      identifiers.push({ label: 'projection name', name: projection.name })
+    }
+  } else if (def.kind === 'dictionary') {
+    for (const attribute of def.attributes) {
+      identifiers.push({ label: 'attribute name', name: attribute.name })
+    }
+  } else if (def.kind === 'materialized_view') {
+    identifiers.push({ label: 'target database name', name: def.to.database })
+    identifiers.push({ label: 'target name', name: def.to.name })
+  }
+  return identifiers
+}
+
+// Names are quoted and escaped when rendered, so any character is safe except
+// those ClickHouse cannot store in a name. Catching them here gives a clear
+// error instead of a server-side failure (e.g. names from a CDC source catalog).
+function validateIdentifiers(def: SchemaDefinition, issues: ValidationIssue[]): void {
+  for (const { label, name } of collectIdentifiers(def)) {
+    const problem = describeInvalidIdentifier(name)
+    if (problem) {
+      pushValidationIssue(
+        issues,
+        def,
+        'invalid_identifier',
+        `${def.kind} ${JSON.stringify(def.database)}.${JSON.stringify(def.name)} ${label} ${JSON.stringify(name)} ${problem}`
+      )
+    }
+  }
+}
+
 export function validateDefinitions(definitions: SchemaDefinition[]): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   const objectKeys = new Set<string>()
@@ -398,6 +438,7 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
     }
     objectKeys.add(key)
 
+    validateIdentifiers(def, issues)
     if (def.kind === 'table') {
       validateTableDefinition(def, issues)
     } else if (def.kind === 'materialized_view') {

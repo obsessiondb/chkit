@@ -1,4 +1,10 @@
-import { findTopLevelSQLPattern, normalizeProjectionIndex, normalizeSQLFragment, splitTopLevelComma } from '@chkit/core'
+import {
+  findTopLevelSQLPattern,
+  normalizeProjectionIndex,
+  normalizeSQLFragment,
+  splitTopLevelComma,
+  unquoteIdentifiers,
+} from '@chkit/core'
 
 type ProjectionDefinitionShape =
   | { name: string; query: string }
@@ -28,41 +34,42 @@ function parseClauseFromCreateTableQuery(
 /**
  * Positions of the parens that open and close the column list — the close being
  * the one right before the table-level `ENGINE =`. Returns undefined when there
- * is no balanced column list (e.g. a view, or a query we can't parse).
+ * is no balanced column list (e.g. a view, or a query we can't parse). Quoted
+ * strings and identifiers are skipped, so parens or commas inside a quoted
+ * table or column name never count.
  */
 function findColumnListBounds(
   createTableQuery: string
 ): { open: number; close: number } | undefined {
-  const engineMatch = /\)\s*ENGINE\s*=/i.exec(createTableQuery)
-  if (!engineMatch || engineMatch.index === undefined) return undefined
-  const left = createTableQuery.slice(0, engineMatch.index + 1)
-  const openIndex = left.indexOf('(')
-  if (openIndex === -1) return undefined
-
   let depth = 0
-  let inString = false
-  let stringQuote = "'"
-  for (let i = openIndex; i < left.length; i += 1) {
-    const char = left[i]
-    if (!char) continue
-    if (inString) {
-      if (char === stringQuote && left[i - 1] !== '\\') {
-        inString = false
+  let openIndex = -1
+  let quote: string | undefined
+  for (let i = 0; i < createTableQuery.length; i += 1) {
+    const char = createTableQuery[i]
+    if (quote) {
+      if (char === '\\') i += 1
+      else if (char === quote) {
+        if (createTableQuery[i + 1] === quote) i += 1
+        else quote = undefined
       }
       continue
     }
-    if (char === "'" || char === '"') {
-      inString = true
-      stringQuote = char
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
       continue
     }
     if (char === '(') {
+      if (depth === 0) openIndex = i
       depth += 1
       continue
     }
     if (char === ')') {
       depth -= 1
-      if (depth === 0) return { open: openIndex, close: i }
+      if (depth === 0) {
+        return /^\s*ENGINE\s*=/i.test(createTableQuery.slice(i + 1))
+          ? { open: openIndex, close: i }
+          : undefined
+      }
     }
   }
 
@@ -175,23 +182,23 @@ export function parseProjectionsFromCreateTableQuery(
     // Index-only projections have no SELECT body, so they must be matched
     // before the parenthesized SELECT form.
     const indexMatch = part.match(
-      /^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+INDEX\s+([\s\S]+?)\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/i
+      /^\s*PROJECTION\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s+INDEX\s+([\s\S]+?)\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/i
     )
     if (indexMatch) {
-      const name = (indexMatch[1] ?? indexMatch[2] ?? '').trim()
-      const index = normalizeProjectionIndex(indexMatch[3] ?? '')
-      const type = (indexMatch[4] ?? '').trim()
+      const name = unquoteIdentifiers(indexMatch[1] ?? '').trim()
+      const index = normalizeProjectionIndex(indexMatch[2] ?? '')
+      const type = (indexMatch[3] ?? '').trim()
       if (!name || !index || !type) continue
       projections.push({ name, index, type })
       continue
     }
 
     const match = part.match(
-      /^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\(([\s\S]*)\)\s*$/i
+      /^\s*PROJECTION\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*$/i
     )
     if (!match) continue
-    const name = (match[1] ?? match[2] ?? '').trim()
-    const query = normalizeSQLFragment((match[3] ?? '').trim())
+    const name = unquoteIdentifiers(match[1] ?? '').trim()
+    const query = normalizeSQLFragment((match[2] ?? '').trim())
     if (!name || !query) continue
     projections.push({ name, query })
   }

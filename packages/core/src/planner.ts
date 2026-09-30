@@ -30,6 +30,7 @@ import {
 } from './sql.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
+import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
 import { ChxValidationError } from './model.js'
 import { isKafkaEngine, kafkaSettingFingerprint } from './kafka.js'
 
@@ -47,7 +48,7 @@ function pushDropOperation(
       type: 'drop_table',
       key: definitionKey(def),
       risk,
-      sql: `DROP TABLE IF EXISTS ${def.database}.${def.name}${isKafkaEngine(def.engine) ? ' SYNC' : ''};`,
+      sql: `DROP TABLE IF EXISTS ${renderQualifiedName(def.database, def.name)}${isKafkaEngine(def.engine) ? ' SYNC' : ''};`,
     })
     return
   }
@@ -56,7 +57,7 @@ function pushDropOperation(
       type: 'drop_view',
       key: definitionKey(def),
       risk,
-      sql: `DROP VIEW IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP VIEW IF EXISTS ${renderQualifiedName(def.database, def.name)};`,
     })
     return
   }
@@ -65,7 +66,7 @@ function pushDropOperation(
       type: 'drop_dictionary',
       key: definitionKey(def),
       risk,
-      sql: `DROP DICTIONARY IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP DICTIONARY IF EXISTS ${renderQualifiedName(def.database, def.name)};`,
     })
     return
   }
@@ -73,7 +74,7 @@ function pushDropOperation(
     type: 'drop_materialized_view',
     key: definitionKey(def),
     risk,
-    sql: `DROP TABLE IF EXISTS ${def.database}.${def.name} SYNC;`,
+    sql: `DROP TABLE IF EXISTS ${renderQualifiedName(def.database, def.name)} SYNC;`,
   })
 }
 
@@ -126,7 +127,7 @@ function pushCreateDatabaseOperation(
     type: 'create_database',
     key: `database:${database}`,
     risk,
-    sql: `CREATE DATABASE IF NOT EXISTS ${database};`,
+    sql: `CREATE DATABASE IF NOT EXISTS ${renderIdentifier(database)};`,
   })
 }
 
@@ -213,7 +214,7 @@ function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, t
   // IF EXISTS makes the rename idempotent: once it has run (the `from` column is
   // gone), a replay after a partial migration failure is a safe no-op rather
   // than an "unknown identifier" brick. ClickHouse supports the clause.
-  return `ALTER TABLE ${table.database}.${table.name} RENAME COLUMN IF EXISTS \`${from}\` TO \`${to}\`;`
+  return `ALTER TABLE ${renderQualifiedName(table.database, table.name)} RENAME COLUMN IF EXISTS ${quoteIdentifier(from)} TO ${quoteIdentifier(to)};`
 }
 
 function inferColumnRenameSuggestions(
@@ -294,7 +295,7 @@ function diffMaterializedView(
         type: 'drop_materialized_view',
         key: definitionKey(newDef),
         risk: 'caution',
-        sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name} SYNC;`,
+        sql: `DROP TABLE IF EXISTS ${renderQualifiedName(newDef.database, newDef.name)} SYNC;`,
       },
       {
         type: 'create_materialized_view',
@@ -378,7 +379,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
           type: 'drop_table',
           key: definitionKey(newDef),
           risk: 'danger',
-          sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name};`,
+          sql: `DROP TABLE IF EXISTS ${renderQualifiedName(newDef.database, newDef.name)};`,
         },
         {
           type: 'create_table',
