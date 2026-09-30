@@ -54,6 +54,31 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
   const qualified = `\`${options.database}\`.\`${table}\``
   const now = options.now ?? (() => new Date())
 
+  // Two runs that claimed the same sequence numbers each wrote a history that is
+  // valid on its own. The run that started first keeps its facts; every later
+  // run's facts are removed, and the next run resumes from the survivor's
+  // checkpoint. Rows the removed runs loaded stay in the destination
+  // (at-least-once), so the resumed run may duplicate them.
+  async function conflictRepair(namespaceId: string): Promise<string> {
+    const scope = `target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)}`
+    const runs = await options.executor.query<{ run_id: string }>(
+      `SELECT run_id
+FROM ${qualified}
+WHERE ${scope} AND run_id IN (
+  SELECT run_id FROM ${qualified}
+  WHERE ${scope} AND event_seq IN (
+    SELECT event_seq FROM ${qualified} WHERE ${scope} GROUP BY event_seq HAVING uniqExact(event_id) > 1
+  )
+)
+GROUP BY run_id
+ORDER BY min(event_at) ASC, run_id ASC`,
+      { select_sequential_consistency: '1' }
+    )
+    const [kept, ...removed] = runs.map((run) => run.run_id)
+    if (!kept || removed.length === 0) return ''
+    return ` To repair it, keep run ${kept} (the first to start) and delete the facts of the later run(s) with:\n  DELETE FROM ${qualified} WHERE ${scope} AND run_id IN (${removed.map(sqlString).join(', ')});\nThe next run resumes from the kept run's checkpoint; rows the deleted runs loaded stay in the destination and may be loaded again.`
+  }
+
   return {
     async ensure() {
       await options.executor.command(journalTableSql(qualified))
@@ -148,8 +173,9 @@ FROM (
         Number(transitions[0]?.invalid ?? 0) > 0 ? `${transitions[0]?.invalid} invalid checkpoint transition(s)` : '',
       ].filter((problem) => problem !== '')
       if (problems.length > 0) {
+        const repair = Number(row.conflicting_owners) > 0 ? await conflictRepair(namespaceId) : ''
         throw new Error(
-          `Ingestion journal for "${namespaceId}" is not a valid history: ${problems.join('; ')}. Refusing to project a checkpoint from it; more than one executor process may have been active.`
+          `Ingestion journal for "${namespaceId}" is not a valid history: ${problems.join('; ')}. Refusing to project a checkpoint from it; more than one executor process may have been active, or a restarted run read a stale journal.${repair}`
         )
       }
       return {
