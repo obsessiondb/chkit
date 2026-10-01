@@ -54,6 +54,34 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
   const qualified = `\`${options.database}\`.\`${table}\``
   const now = options.now ?? (() => new Date())
 
+  // Two runs that claimed the same sequence numbers each wrote a history that is
+  // valid on its own. Runs that resumed from the same checkpoint derive the same
+  // event ids, so the collision shows up as drifting payloads rather than
+  // conflicting owners; both are detected by more than one run per sequence.
+  // valid on its own. The run that started first keeps its facts; every later
+  // run's facts are removed, and the next run resumes from the survivor's
+  // checkpoint. Rows the removed runs loaded stay in the destination
+  // (at-least-once), so the resumed run may duplicate them.
+  async function conflictRepair(namespaceId: string): Promise<string> {
+    const scope = `target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)}`
+    const runs = await options.executor.query<{ run_id: string }>(
+      `SELECT run_id
+FROM ${qualified}
+WHERE ${scope} AND run_id IN (
+  SELECT run_id FROM ${qualified}
+  WHERE ${scope} AND event_seq IN (
+    SELECT event_seq FROM ${qualified} WHERE ${scope} GROUP BY event_seq HAVING uniqExact(run_id) > 1
+  )
+)
+GROUP BY run_id
+ORDER BY min(event_at) ASC, run_id ASC`,
+      { select_sequential_consistency: '1' }
+    )
+    const [kept, ...removed] = runs.map((run) => run.run_id)
+    if (!kept || removed.length === 0) return ''
+    return ` To repair it, keep run ${kept} (the first to start) and delete the facts of the later run(s) with:\n  DELETE FROM ${qualified} WHERE ${scope} AND run_id IN (${removed.map(sqlString).join(', ')});\nThe next run resumes from the kept run's checkpoint; rows the deleted runs loaded stay in the destination and may be loaded again.`
+  }
+
   return {
     async ensure() {
       await options.executor.command(journalTableSql(qualified))
@@ -62,14 +90,19 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
       await waitForTable(options.executor, options.database, table)
     },
 
-    async append(event) {
-      const row = toJournalRow(event, options.targetId, now())
+    async append(events) {
+      const at = now()
+      const rows = events.map((event) => toJournalRow(event, options.targetId, at))
+      // One insert block into one monthly partition (a shared event_at) is atomic.
+      // A retried append of the same deterministic facts is suppressed while the
+      // deduplication window lasts; readers canonicalize by event_id anyway.
+      const [first, ...rest] = rows
+      if (!first) return
+      const token = rest.length === 0 ? first.event_id : digest(rows.map((row) => row.event_id))
       await options.executor.insert({
         table: `${options.database}.${table}`,
-        values: [row],
-        // A retried append of the same deterministic fact is suppressed while
-        // the deduplication window lasts; readers canonicalize by event_id anyway.
-        settings: { insert_deduplication_token: row.event_id, async_insert: 0 },
+        values: rows,
+        settings: { insert_deduplication_token: token, async_insert: 0 },
       })
     },
 
@@ -81,6 +114,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
     event_seq,
     uniqExact(event_id) AS owners,
     uniqExact(payload_hash) AS payloads,
+    uniqExact(run_id) AS runs,
     any(event_kind) AS fact_kind,
     any(work_state) AS fact_work_state,
     any(expected_checkpoint_version) AS fact_expected,
@@ -97,6 +131,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
           sequences: string
           conflicting_owners: string
           drifted: string
+          conflicting_runs: string
           checkpoint_version: string
           checkpoint_json: string
         }>(
@@ -106,6 +141,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
   count() AS sequences,
   countIf(owners > 1) AS conflicting_owners,
   countIf(payloads > 1) AS drifted,
+  countIf(runs > 1) AS conflicting_runs,
   argMaxIf(fact_version, event_seq, fact_kind = 'batch_committed') AS checkpoint_version,
   argMaxIf(fact_checkpoint, event_seq, fact_kind = 'batch_committed') AS checkpoint_json
 FROM (${facts})`,
@@ -143,8 +179,9 @@ FROM (
         Number(transitions[0]?.invalid ?? 0) > 0 ? `${transitions[0]?.invalid} invalid checkpoint transition(s)` : '',
       ].filter((problem) => problem !== '')
       if (problems.length > 0) {
+        const repair = Number(row.conflicting_runs) > 0 ? await conflictRepair(namespaceId) : ''
         throw new Error(
-          `Ingestion journal for "${namespaceId}" is not a valid history: ${problems.join('; ')}. Refusing to project a checkpoint from it; more than one executor process may have been active.`
+          `Ingestion journal for "${namespaceId}" is not a valid history: ${problems.join('; ')}. Refusing to project a checkpoint from it; more than one executor process may have been active, or a restarted run read a stale journal.${repair}`
         )
       }
       return {

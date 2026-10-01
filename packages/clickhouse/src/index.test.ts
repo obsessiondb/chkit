@@ -833,3 +833,21 @@ describe('systemTableSource / observableSystemTable', () => {
     expect(queries[1]).not.toContain('clusterAllReplicas')
   })
 })
+
+describe('create table parser with quoted identifiers', () => {
+  // Verbatim system.tables.create_table_query from ClickHouse 26.3.
+  const query =
+    'CREATE TABLE default.`we\\`ird(x) na,me` (`id` UInt64, `a b` String, `c\\`d` String, `e,f)` UInt8, INDEX `i x` `a b` TYPE minmax GRANULARITY 1, PROJECTION `p\\`q` (SELECT `a b` ORDER BY `c\\`d`)) ENGINE = MergeTree PRIMARY KEY (id, `a b`) ORDER BY (id, `a b`, `e,f)`) SETTINGS index_granularity = 8192'
+
+  test('locates table clauses despite parens and commas inside quoted names', () => {
+    expect(parseEngineFromCreateTableQuery(query)).toBe('MergeTree')
+    expect(parsePrimaryKeyFromCreateTableQuery(query)).toBe('(id, `a b`)')
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('(id, `a b`, `e,f)`)')
+  })
+
+  test('parses projection names with escaped backticks', () => {
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p`q', query: 'SELECT `a b` ORDER BY `c\\`d`' },
+    ])
+  })
+})

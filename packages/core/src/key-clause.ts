@@ -51,8 +51,18 @@ export function splitTopLevelComma(input: string): string[] {
   return out
 }
 
-export function normalizeKeyColumns(values: string[] | undefined): string[] {
-  return (values ?? []).flatMap((value) => splitTopLevelComma(value.trim()))
+/**
+ * Flattens key entries into one token per key part. An entry may hold several
+ * comma-separated parts (`'id, toDate(ts)'`), but one that exactly names a
+ * declared column is kept whole, since the name itself may contain a comma.
+ */
+export function normalizeKeyColumns(
+  values: string[] | undefined,
+  declaredColumns: ReadonlySet<string> = new Set()
+): string[] {
+  return (values ?? []).flatMap((value) =>
+    declaredColumns.has(value.trim()) ? [value.trim()] : splitTopLevelComma(value.trim())
+  )
 }
 
 const PLAIN_COLUMN_REFERENCE = /^[A-Za-z_][A-Za-z0-9_]*$/

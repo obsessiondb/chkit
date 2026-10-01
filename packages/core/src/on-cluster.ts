@@ -67,6 +67,11 @@ export function onClusterClause(cluster: string | undefined): string {
 // the object, never after the guard.
 const OBJECT_GUARD = /^IF\s+(?:NOT\s+)?EXISTS\s+/i
 
+// One identifier part: backtick-quoted (backslash-escaped or doubled backticks)
+// or a bare run up to the next space, `;`, `(`, or `.`.
+const IDENTIFIER_PART = /(?:`(?:[^`\\]|\\.|``)*`|[^\s;(.`]+)/.source
+const OBJECT_REFERENCE = new RegExp(`^${IDENTIFIER_PART}(?:\\.${IDENTIFIER_PART})*`)
+
 // Idempotency is checked positionally — an `ON CLUSTER` clause sitting exactly
 // where injection would place it — never by scanning the whole statement, so
 // user-authored content (a column COMMENT, a view's SELECT body) containing the
@@ -91,9 +96,9 @@ function injectOnClusterClause(sql: string, clause: string): string {
     // after the object reference regardless of whether the statement carries it.
     const guard = rest.match(OBJECT_GUARD)?.[0] ?? ''
     const afterGuard = rest.slice(guard.length)
-    // The object reference (`db.name` or `db`) is the run of characters up to
-    // the next space, `;`, or `(` — `ON CLUSTER` slots in right after it.
-    const ref = afterGuard.match(/^[^\s;(]+/)?.[0]
+    // The object reference (`db.name` or `db`), where each part may be a
+    // backtick-quoted identifier containing spaces, dots or escaped backticks.
+    const ref = afterGuard.match(OBJECT_REFERENCE)?.[0]
     if (!ref) return sql
     const afterRef = afterGuard.slice(ref.length)
     // Idempotent: never double-inject into a statement that already carries the

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { loadConfig } from '../../runtime/config.js'
+import { spawnWithTimeout } from '../spawn-cli.js'
 
 const CLI_ENTRY = join(import.meta.dir, '../../bin/chkit.ts')
 
@@ -34,21 +35,10 @@ const PROJECT_CONFIG = `export default { schema: ['./schema/*.ts'], outDir: './c
 const PROFILE_CONFIG = `export default { schema: [], plugins: [] }`
 
 function runCli(sandbox: Sandbox, args: string[]) {
-  const result = Bun.spawnSync({
-    cmd: ['bun', CLI_ENTRY, ...args],
+  return spawnWithTimeout(['bun', CLI_ENTRY, ...args], {
     cwd: sandbox.cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: {
-      ...process.env,
-      XDG_CONFIG_HOME: join(sandbox.root, 'xdg'),
-    },
+    env: { XDG_CONFIG_HOME: join(sandbox.root, 'xdg') },
   })
-  return {
-    exitCode: result.exitCode,
-    stdout: new TextDecoder().decode(result.stdout),
-    stderr: new TextDecoder().decode(result.stderr),
-  }
 }
 
 describe('loadConfig fallback', () => {

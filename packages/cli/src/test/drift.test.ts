@@ -507,3 +507,45 @@ describe('@chkit/cli drift comparer', () => {
     expect(result.partitionByMismatch).toBe(true)
   })
 })
+
+describe('@chkit/cli drift comparer with quoted identifiers', () => {
+  const expected = table({
+    database: 'app',
+    name: 'events',
+    engine: 'MergeTree()',
+    columns: [
+      { name: 'id', type: 'UInt64' },
+      { name: 'a b', type: 'String' },
+      { name: 'c`d', type: 'String' },
+      { name: 'e,f)', type: 'UInt8' },
+    ],
+    primaryKey: ['id', 'a b'],
+    orderBy: ['id', 'a b', 'c`d', 'e,f)'],
+  })
+
+  function actualShape(orderBy: string) {
+    return {
+      engine: 'MergeTree',
+      primaryKey: '(id, `a b`)',
+      orderBy,
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'a b', type: 'String' },
+        { name: 'c`d', type: 'String' },
+        { name: 'e,f)', type: 'UInt8' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    }
+  }
+
+  test('reports no drift when ClickHouse quotes and escapes key columns', () => {
+    expect(compareTableShape(expected, actualShape('(id, `a b`, `c\\`d`, `e,f)`)'))).toBeNull()
+  })
+
+  test('still reports order_by_mismatch when the key really differs', () => {
+    const result = compareTableShape(expected, actualShape('(id, `a b`, `e,f)`, `c\\`d`)'))
+    expect(result?.reasonCodes).toEqual(['order_by_mismatch'])
+  })
+})

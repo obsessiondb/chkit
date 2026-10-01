@@ -7,6 +7,8 @@
 
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import { quoteIdentifier } from '@chkit/core'
+
 import {
   createClickHouseExecutor,
   createStatelessClickHouseExecutor,
@@ -78,7 +80,7 @@ export function createStatelessLiveExecutor(env: LiveEnv): ClickHouseExecutor {
 }
 
 export function quoteIdent(value: string): string {
-  return `\`${value.replace(/`/g, '``')}\``
+  return quoteIdentifier(value)
 }
 
 // ---------------------------------------------------------------------------

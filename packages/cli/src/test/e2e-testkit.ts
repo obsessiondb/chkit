@@ -8,6 +8,8 @@
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import { spawnWithTimeout } from './spawn-cli.js'
+
 // Re-export all shared utilities so CLI tests only need one import
 export {
   getRequiredEnv,
@@ -41,21 +43,10 @@ export interface CliResult {
 export function runCli(
   cwd: string,
   args: string[],
-  extraEnv: Record<string, string> = {}
+  extraEnv: Record<string, string> = {},
+  { timeoutMs }: { timeoutMs?: number } = {}
 ): CliResult {
-  const result = Bun.spawnSync({
-    cmd: ['bun', CLI_ENTRY, ...args],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: { ...process.env, ...extraEnv },
-  })
-
-  return {
-    exitCode: result.exitCode,
-    stdout: new TextDecoder().decode(result.stdout),
-    stderr: new TextDecoder().decode(result.stderr),
-  }
+  return spawnWithTimeout(['bun', CLI_ENTRY, ...args], { cwd, env: extraEnv, timeoutMs })
 }
 
 function isValidJson(str: string): boolean {
@@ -74,16 +65,22 @@ export async function runCliWithRetry(
     maxAttempts = 5,
     delayMs = 2000,
     extraEnv = {},
-  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
+    timeoutMs,
+  }: {
+    maxAttempts?: number
+    delayMs?: number
+    extraEnv?: Record<string, string>
+    timeoutMs?: number
+  } = {}
 ): Promise<CliResult> {
   const expectJson = args.includes('--json')
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = runCli(cwd, args, extraEnv)
+    const result = runCli(cwd, args, extraEnv, { timeoutMs })
     if (result.exitCode === 0 && (!expectJson || isValidJson(result.stdout))) return result
     if (attempt === maxAttempts) return result
     await sleep(delayMs)
   }
-  return runCli(cwd, args, extraEnv)
+  return runCli(cwd, args, extraEnv, { timeoutMs })
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +99,16 @@ export async function waitForCliJson<T>(
     maxAttempts = 10,
     delayMs = 1000,
     extraEnv = {},
-  }: { maxAttempts?: number; delayMs?: number; extraEnv?: Record<string, string> } = {}
+    timeoutMs,
+  }: {
+    maxAttempts?: number
+    delayMs?: number
+    extraEnv?: Record<string, string>
+    timeoutMs?: number
+  } = {}
 ): Promise<{ result: CliResult; payload: T }> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = runCli(cwd, args, extraEnv)
+    const result = runCli(cwd, args, extraEnv, { timeoutMs })
     if (result.exitCode === 0 && isValidJson(result.stdout)) {
       const payload = JSON.parse(result.stdout) as T
       if (predicate(payload)) return { result, payload }

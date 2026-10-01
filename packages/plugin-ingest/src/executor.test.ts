@@ -48,9 +48,9 @@ describe('runIngestion', () => {
     })
     const pipeline = definePipeline({ id: 'app', streams: [stream] })
     const append = journal.append.bind(journal)
-    journal.append = async (event) => {
-      if (event.eventKind === 'batch_committed') order.push('commit')
-      await append(event)
+    journal.append = async (appended) => {
+      if (appended.some((event) => event.eventKind === 'batch_committed')) order.push('commit')
+      await append(appended)
     }
 
     const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: observed })
@@ -465,7 +465,7 @@ describe('runtime contracts', () => {
       journal.readCheckpoint = (namespace) => (
         stage === 'stream_read' && !namespace.startsWith('@run:') ? hung() : read(namespace)
       )
-      journal.append = (event) => event.eventKind === stage ? hung() : append(event)
+      journal.append = (appended) => appended.some((event) => event.eventKind === stage) ? hung() : append(appended)
       const stream = defineStream({ id: 'app.journal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
       const execution = run(definePipeline({ id: 'app', streams: [stream] }), {
         journal, destination: createMemoryDestination(), maxDurationMs: 20,
@@ -483,7 +483,7 @@ describe('runtime contracts', () => {
   test.each(['work_finished', 'run_finished'])('a hung terminal journal %s has bounded cleanup', async (stage) => {
     const journal = createMemoryJournal()
     const append = journal.append.bind(journal)
-    journal.append = (event) => event.eventKind === stage ? new Promise(() => undefined) : append(event)
+    journal.append = (appended) => appended.some((event) => event.eventKind === stage) ? new Promise(() => undefined) : append(appended)
     const stream = defineStream({ id: 'app.terminal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
     const execution = run(definePipeline({ id: 'app', streams: [stream] }), {
       journal, destination: createMemoryDestination(), maxDurationMs: 100,
@@ -495,9 +495,9 @@ describe('runtime contracts', () => {
   test.each(['work_finished', 'run_finished'])('a slow terminal journal %s still lands while the run is live', async (stage) => {
     const journal = createMemoryJournal()
     const append = journal.append.bind(journal)
-    journal.append = async (event) => {
-      if (event.eventKind === stage) await sleep(5500)
-      await append(event)
+    journal.append = async (appended) => {
+      if (appended.some((event) => event.eventKind === stage)) await sleep(5500)
+      await append(appended)
     }
     const stream = defineStream({ id: 'app.slow_terminal', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
@@ -509,12 +509,12 @@ describe('runtime contracts', () => {
     const journal = createMemoryJournal()
     const append = journal.append.bind(journal)
     let failures = 0
-    journal.append = async (event) => {
-      if (event.eventKind === stage && failures === 0) {
+    journal.append = async (appended) => {
+      if (appended.some((event) => event.eventKind === stage) && failures === 0) {
         failures += 1
         throw new Error('UNKNOWN_TABLE on a lagging replica')
       }
-      await append(event)
+      await append(appended)
     }
     const stream = defineStream({ id: 'app.transient_run_fact', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
@@ -613,18 +613,36 @@ describe('runtime contracts', () => {
     const journal = createMemoryJournal()
     const append = journal.append.bind(journal)
     let failures = 0
-    journal.append = async (event) => {
-      if (event.eventKind === 'batch_committed' && failures === 0) {
+    journal.append = async (appended) => {
+      if (appended.some((event) => event.eventKind === 'batch_committed') && failures === 0) {
         failures += 1
         throw new Error('acknowledgement lost')
       }
-      await append(event)
+      await append(appended)
     }
     const stream = defineStream({ id: 'app.events', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
 
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
 
     expect(result.ok).toBe(true)
+    const sequences = journal.events.filter((event) => event.namespaceId === 'app.events').map((event) => event.eventSeq)
+    expect(sequences).toEqual([1, 2, 3, 4])
+  })
+
+  test('a planned unit of work and its first attempt share one journal insert', async () => {
+    const journal = createMemoryJournal()
+    const append = journal.append.bind(journal)
+    const inserts: string[][] = []
+    journal.append = async (appended) => {
+      if (appended.every((event) => event.namespaceId === 'app.events')) inserts.push(appended.map((event) => event.eventKind))
+      await append(appended)
+    }
+    const stream = defineStream({ id: 'app.events', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+
+    expect(result.ok).toBe(true)
+    expect(inserts).toEqual([['work_planned', 'attempt_started'], ['batch_committed'], ['work_finished']])
     const sequences = journal.events.filter((event) => event.namespaceId === 'app.events').map((event) => event.eventSeq)
     expect(sequences).toEqual([1, 2, 3, 4])
   })
@@ -727,9 +745,9 @@ describe('pipeline concurrency and retries', () => {
     const append = journal.append.bind(journal)
     let committed: () => void = () => undefined
     const saved = new Promise<void>((resolve) => { committed = resolve })
-    journal.append = async (event) => {
-      await append(event)
-      if (event.eventKind === 'batch_committed') committed()
+    journal.append = async (appended) => {
+      await append(appended)
+      if (appended.some((event) => event.eventKind === 'batch_committed')) committed()
     }
     const selections: Array<number | undefined> = []
     let sourceCalls = 0

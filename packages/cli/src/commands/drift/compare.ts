@@ -6,6 +6,8 @@ import {
   isIndexProjection,
   normalizeProjectionIndex,
   normalizeSQLFragment,
+  renderKeyClauseColumns,
+  unquoteIdentifiers,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
@@ -261,7 +263,9 @@ function normalizeProjectionShape(projection: ProjectionDefinition): string {
 
 function normalizeClause(value: string | undefined): string {
   if (!value) return ''
-  const normalized = normalizeSQLFragment(value).replace(/`/g, '')
+  // Compare raw names: ClickHouse re-renders identifiers with its own quoting
+  // and escaping, so the quotes themselves are not meaningful.
+  const normalized = normalizeSQLFragment(unquoteIdentifiers(value))
   const wrapped = normalized.match(/^\((.*)\)$/)
   return wrapped?.[1] ? normalizeSQLFragment(wrapped[1]) : normalized
 }
@@ -306,15 +310,23 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   // it from SHOW CREATE — so a table with only ORDER BY reports no primary key.
   // Mirror that on both sides (as canonical.ts does for the schema), else every
   // such table drifts forever (#194).
+  // Render expected keys as chkit emits them so declared column names (which may
+  // contain commas or backticks) are compared as single identifiers.
+  const columnNames = new Set(expected.columns.map((column) => column.name))
   const expectedPrimaryKey = normalizeClause(
-    (expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy).join(', ')
+    renderKeyClauseColumns(
+      expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy,
+      columnNames
+    )
   )
   const actualPrimaryKey = normalizeClause(actual.primaryKey ?? actual.orderBy)
   const primaryKeyMismatch = expectedPrimaryKey !== actualPrimaryKey
-  const expectedOrderBy = normalizeClause(expected.orderBy.join(', '))
+  const expectedOrderBy = normalizeClause(renderKeyClauseColumns(expected.orderBy, columnNames))
   const actualOrderBy = normalizeClause(actual.orderBy)
   const orderByMismatch = expectedOrderBy !== actualOrderBy
-  const expectedUniqueKey = normalizeClause((expected.uniqueKey ?? []).join(', '))
+  const expectedUniqueKey = normalizeClause(
+    renderKeyClauseColumns(expected.uniqueKey ?? [], columnNames)
+  )
   const actualUniqueKey = normalizeClause(actual.uniqueKey)
   const uniqueKeyMismatch = expectedUniqueKey !== actualUniqueKey
   const expectedPartitionBy = normalizeClause(expected.partitionBy)

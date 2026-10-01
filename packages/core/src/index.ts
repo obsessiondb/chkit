@@ -19,9 +19,15 @@ export {
   textIndexFingerprint,
 } from './text-index.js'
 export { splitTopLevelComma } from './key-clause.js'
+export {
+  quoteIdentifier,
+  renderIdentifier,
+  renderQualifiedName,
+  unquoteIdentifiers,
+} from './identifier.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
-export { renderDictionarySQL, toCreateSQL } from './sql.js'
+export { renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

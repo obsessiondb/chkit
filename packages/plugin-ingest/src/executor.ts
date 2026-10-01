@@ -99,6 +99,9 @@ interface StreamProgress {
   chunks: number
 }
 
+type AppendInput = { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv }
+type FactFields = Partial<Omit<JournalEvent, 'namespaceId' | 'eventSeq' | 'eventKind' | 'runId'>>
+
 /**
  * One transient execution context for one exact stream selection. The run id
  * correlates journal and telemetry evidence only: every stream plans and
@@ -227,11 +230,13 @@ async function executeStream(input: {
         range: input.backfill ? { from: input.backfill.from, to: input.backfill.to } : undefined,
       })
       const nextWorkId = digest([namespaceId, String(progress.lastSuccessSeq), String(progress.version), canonicalJson(selection)]).slice(0, 24)
-      if (nextWorkId !== workId) {
-        workId = nextWorkId
-        await append(input, 'work_planned', { workId, workState: 'planned', detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } })
-      }
-      await append(input, 'attempt_started', { workId, attemptNo, workState: 'running' })
+      // A newly planned unit of work and its first attempt share one insert.
+      const planned = nextWorkId === workId ? [] : [{
+        eventKind: 'work_planned' as const,
+        fields: { workId: nextWorkId, workState: 'planned' as const, detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } },
+      }]
+      workId = nextWorkId
+      await appendFacts(input, [...planned, { eventKind: 'attempt_started', fields: { workId, attemptNo, workState: 'running' } }])
       return readAndLoad({ ...input, workId, attemptNo, state, selection, retry })
     }, {
       ...retry,
@@ -495,21 +500,22 @@ function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope 
   return stream.incremental.parseState(envelope.state)
 }
 
-// Appends for one namespace are serialized and the sequence number is taken
-// only when the write starts, so a fact that never lands cannot leave a gap.
-// An ambiguous failure retries the exact same deterministic fact.
-function append(
-  input: { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv },
-  eventKind: JournalEvent['eventKind'],
-  fields: Partial<Omit<JournalEvent, 'namespaceId' | 'eventSeq' | 'eventKind' | 'runId'>>
-): Promise<void> {
+function append(input: AppendInput, eventKind: JournalEvent['eventKind'], fields: FactFields): Promise<void> {
+  return appendFacts(input, [{ eventKind, fields }])
+}
+
+// Appends for one namespace are serialized and sequence numbers are taken only
+// when the write starts, so facts that never land cannot leave a gap. Facts
+// passed together share one atomic insert. An ambiguous failure retries the
+// exact same deterministic facts.
+function appendFacts(input: AppendInput, facts: ReadonlyArray<{ eventKind: JournalEvent['eventKind']; fields: FactFields }>): Promise<void> {
   const { progress, env } = input
-  const signal = eventKind === 'work_finished' ? terminalSignal(env.signal) : env.signal
+  const signal = facts.some((fact) => fact.eventKind === 'work_finished') ? terminalSignal(env.signal) : env.signal
   const write = progress.appendChain.then(async () => {
     signal.throwIfAborted()
-    const event: JournalEvent = {
+    const events = facts.map(({ eventKind, fields }, index): JournalEvent => ({
       namespaceId: input.namespaceId,
-      eventSeq: progress.seq + 1,
+      eventSeq: progress.seq + 1 + index,
       eventKind,
       runId: input.runId,
       workId: fields.workId ?? '',
@@ -523,13 +529,13 @@ function append(
       retryAt: fields.retryAt,
       errorClass: fields.errorClass ?? '',
       detail: fields.detail ?? {},
-    }
-    await pRetry(() => abortable(() => env.journal.append(event), signal), {
+    }))
+    await pRetry(() => abortable(() => env.journal.append(events), signal), {
       retries: JOURNAL_APPEND_ATTEMPTS - 1,
       minTimeout: 250,
       signal,
     })
-    progress.seq = event.eventSeq
+    progress.seq += events.length
   })
   // A fact that could not be confirmed poisons the chain: a later append must
   // not reuse its sequence number, because the unconfirmed write may have landed.
@@ -541,7 +547,7 @@ function append(
 // Run facts are deterministic too, so they get the same bounded retry as
 // namespace appends instead of failing the whole run on one transient error.
 function appendRunEvent(env: ResolvedEnv, event: JournalEvent, signal: AbortSignal): Promise<void> {
-  return abortable(() => pRetry(() => abortable(() => env.journal.append(event), signal), {
+  return abortable(() => pRetry(() => abortable(() => env.journal.append([event]), signal), {
     retries: JOURNAL_APPEND_ATTEMPTS - 1,
     minTimeout: 250,
     signal,
