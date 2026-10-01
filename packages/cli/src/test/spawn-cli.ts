@@ -7,7 +7,7 @@
  * run silently. Every CLI invocation from tests goes through here.
  */
 
-export const DEFAULT_CLI_TIMEOUT_MS = 120_000
+const DEFAULT_CLI_TIMEOUT_MS = 120_000
 
 export interface SpawnResult {
   exitCode: number
