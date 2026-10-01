@@ -106,6 +106,7 @@ chkit ingest status --tag pipeline:helpdesk --json
 | Incompatible checkpoint | Strategy ID/version or state format changed |
 | Direct connection required | Configure `clickhouse`; workbench authentication alone is insufficient |
 | Authentication failure | Correct provider credentials/scopes before rerunning |
+| Journal is not a valid history | Two runs claimed the same sequence numbers (concurrent processes, or a restart that read a stale journal). Run the `DELETE` printed in the error to keep the first run's facts, then rerun |
 
 Retry with `ingest run` after fixing the error; the journal supplies committed state. Keep the stream ID to preserve its checkpoint history. Changing the ID starts a new history.
 
