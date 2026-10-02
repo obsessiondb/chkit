@@ -2,9 +2,10 @@ import { renderTextIndexType } from './text-index.js'
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import { describeInvalidIdentifier } from './identifier.js'
-import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
-import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
+import { isPlainColumnReference, normalizeKeyColumns, splitTopLevelComma } from './key-clause.js'
+import { isIndexProjection, normalizeProjectionIndex, stripWrappingParens } from './projection.js'
 import { isKafkaEngine } from './kafka.js'
+import { textSQLTokens } from './text-index-sql.js'
 import type {
   ColumnDefinition,
   DictionaryDefinition,
@@ -139,6 +140,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
         `Column "${column.name}" requires a non-empty expression; use fn: for SQL expressions`
       )
     }
+    validateColumnKind(def, column, issues)
     validateColumnCodec(def, column, issues)
   }
 
@@ -220,6 +222,92 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       )
     }
   }
+
+  validateUnstoredColumnReferences(def, columnSet, issues)
+}
+
+function validateColumnKind(def: TableDefinition, column: ColumnDefinition, issues: ValidationIssue[]): void {
+  const kind = column.defaultKind
+  if ((kind === 'MATERIALIZED' || kind === 'ALIAS') && typeof column.default === 'string' && !column.default.startsWith('fn:')) {
+    pushValidationIssue(
+      issues, def, 'column_expression_requires_fn',
+      `Column "${column.name}" is ${kind} with a plain string default, which ClickHouse would store as the text '${column.default}'. Prefix SQL expressions with fn: (for example fn:toDate(ts)); write fn:'<text>' for a constant string.`
+    )
+  }
+  // A bare `EPHEMERAL CODEC(...)` parses the codec as the default expression.
+  // After an EPHEMERAL default or comment ClickHouse accepts the codec.
+  const bareEphemeral = kind === 'EPHEMERAL' && column.default === undefined && !column.comment
+  if (column.codec && (kind === 'ALIAS' || bareEphemeral)) {
+    pushValidationIssue(
+      issues, def, 'column_kind_codec_unsupported',
+      `Column "${column.name}" is ${kind} and cannot have a codec; ClickHouse stores no data for it.`
+    )
+  }
+}
+
+/**
+ * Flags ALIAS and EPHEMERAL columns named directly where ClickHouse needs a
+ * stored column. References inside larger expressions (`toStartOfDay(day)`,
+ * TTL) are left for ClickHouse to report at migrate time.
+ */
+function validateUnstoredColumnReferences(
+  def: TableDefinition,
+  columnSet: ReadonlySet<string>,
+  issues: ValidationIssue[]
+): void {
+  const unstored = new Map(def.columns.flatMap((column) =>
+    column.defaultKind === 'ALIAS' || column.defaultKind === 'EPHEMERAL' ? [[column.name, column.defaultKind] as const] : []
+  ))
+  if (unstored.size === 0) return
+  const check = (field: string, parts: string[], kinds = ['ALIAS', 'EPHEMERAL']) => {
+    for (const part of parts) {
+      const name = unquoteColumnName(part)
+      const kind = unstored.get(name)
+      if (kind && kinds.includes(kind)) {
+        pushValidationIssue(
+          issues, def, 'column_kind_not_stored',
+          `Table ${def.database}.${def.name} ${field} references ${kind} column "${name}", which ClickHouse does not store; use a MATERIALIZED column instead.`
+        )
+      }
+    }
+  }
+  check('orderBy', normalizeKeyColumns(def.orderBy, columnSet))
+  check('primaryKey', normalizeKeyColumns(def.primaryKey, columnSet))
+  check('partitionBy', splitTopLevelComma(stripWrappingParens(def.partitionBy?.trim() ?? '')))
+  check('engine', engineArguments(def.engine))
+  // ClickHouse indexes an ALIAS column by its expression, but not an EPHEMERAL one.
+  for (const index of def.indexes ?? []) check(`index "${index.name}"`, [index.expression], ['EPHEMERAL'])
+
+  for (const projection of def.projections ?? []) {
+    let tokens: string[]
+    try {
+      tokens = textSQLTokens(isIndexProjection(projection) ? projection.index : projection.query)
+    } catch {
+      continue
+    }
+    // A token followed by `(` is a function that merely shares the column's name.
+    const names = tokens.map(unquoteColumnName)
+    const read = new Set(names.filter((name, i) => unstored.get(name) === 'EPHEMERAL' && tokens[i + 1] !== '('))
+    for (const name of read) {
+      pushValidationIssue(
+        issues, def, 'column_ephemeral_in_projection',
+        `Table ${def.database}.${def.name} projection "${projection.name}" reads EPHEMERAL column "${name}", which ClickHouse does not store, so the table is rejected or every INSERT fails. Use a MATERIALIZED column instead.`
+      )
+    }
+  }
+}
+
+/** Bare engine arguments, with one tuple level flattened: `SummingMergeTree((a, b))`. */
+function engineArguments(engine: string): string[] {
+  const args = /^\s*\w+\s*\(([\s\S]*)\)\s*$/.exec(engine)?.[1] ?? ''
+  return splitTopLevelComma(args)
+    .flatMap((arg) => splitTopLevelComma(stripWrappingParens(arg)))
+    .filter((arg) => !arg.startsWith("'"))
+}
+
+function unquoteColumnName(token: string): string {
+  const trimmed = token.trim()
+  return trimmed.length > 1 && trimmed.startsWith('`') && trimmed.endsWith('`') ? trimmed.slice(1, -1) : trimmed
 }
 
 const INTERVAL_PATTERN =

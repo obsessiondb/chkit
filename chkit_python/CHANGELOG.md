@@ -36,6 +36,11 @@
 - `pull` writes introspected defaults as `fn:` expressions.
 - `generate` prints validation issues as `- [code] message` lines and exits 1
   instead of raising a traceback.
+- Validation flags column kinds ClickHouse cannot honor: plain-string `MATERIALIZED`
+  or `ALIAS` defaults, `ALIAS`/`EPHEMERAL` columns named in keys, `partition_by` or
+  engine arguments, `EPHEMERAL` columns in skip indexes or projections, and codecs on
+  `ALIAS` or bare `EPHEMERAL` columns. Removing a default while changing the type runs
+  `REMOVE` first as its own operation.
 
 ## 0.2.0 — 2026-08-10
 

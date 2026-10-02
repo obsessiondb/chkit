@@ -126,11 +126,12 @@ def test_remove_expression_with_type_change(kind: str) -> None:
     operations = plan_diff(
         [definition(default_kind=kind, default="fn:toDate(ts)")], [definition(type="Date32")]
     ).operations
-    assert len(operations) == 1
-    assert (
-        operations[0].sql
-        == f"ALTER TABLE default.events MODIFY COLUMN `day` Date32, MODIFY COLUMN `day` REMOVE {kind};"
-    )
+    # REMOVE runs first on its own: ClickHouse checks the old default against the new type.
+    assert [(operation.key, operation.sql) for operation in operations] == [
+        ("table:default.events:column:day", f"ALTER TABLE default.events MODIFY COLUMN `day` REMOVE {kind};"),
+        ("table:default.events:column:day", "ALTER TABLE default.events MODIFY COLUMN `day` Date32;"),
+    ]
+    assert [operation.warning is None for operation in operations] == [True, False]
 
 
 @pytest.mark.parametrize("kind", ["ALIAS", "EPHEMERAL"])
@@ -328,3 +329,118 @@ def test_synthetic_ephemeral_default_escaped_type() -> None:
         default_expression="defaultValueOfTypeName('Enum8(\\'a\\\\b\\' = 1)')",
     ))
     assert col.default is None
+
+
+def kind_table(**overrides: Any) -> TableDefinition:
+    columns: list[dict[str, Any]] = [
+        {"name": "id", "type": "UInt64"},
+        {"name": "day", "type": "Date", "default_kind": "ALIAS", "default": "fn:toDate(id)"},
+        {"name": "raw", "type": "String", "default_kind": "EPHEMERAL"},
+        {"name": "size", "type": "UInt64", "default_kind": "MATERIALIZED", "default": "fn:length(raw)"},
+    ]
+    return table(**{"database": "default", "name": "events", "engine": "MergeTree()",
+                    "primary_key": ["id"], "order_by": ["id"], "columns": columns, **overrides})
+
+
+def issue_messages(definition: TableDefinition, code: str) -> list[str]:
+    return [issue.message for issue in validate_definitions([definition]) if issue.code == code]
+
+
+@pytest.mark.parametrize(
+    ("kind", "default", "flagged"),
+    [
+        ("MATERIALIZED", "toDate(ts)", True),
+        ("ALIAS", "label", True),
+        ("ALIAS", "fn:'label'", False),
+        ("MATERIALIZED", 7, False),
+        ("ALIAS", True, False),
+        ("DEFAULT", "label", False),
+        ("EPHEMERAL", "label", False),
+    ],
+)
+def test_expression_kinds_reject_plain_string_defaults(kind: str, default: Any, flagged: bool) -> None:
+    messages = issue_messages(definition(default_kind=kind, default=default), "column_expression_requires_fn")
+    expected = (
+        f'Column "day" is {kind} with a plain string default, which ClickHouse would store as the '
+        f"text '{default}'. Prefix SQL expressions with fn: (for example fn:toDate(ts)); "
+        "write fn:'<text>' for a constant string."
+    )
+    assert messages == ([expected] if flagged else [])
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field", "kind", "column"),
+    [
+        ({"order_by": ["day"]}, "orderBy", "ALIAS", "day"),
+        ({"order_by": ["id", "`raw`"]}, "orderBy", "EPHEMERAL", "raw"),
+        ({"primary_key": ["id, day"]}, "primaryKey", "ALIAS", "day"),
+        ({"partition_by": "(day, id)"}, "partitionBy", "ALIAS", "day"),
+        ({"engine": "SummingMergeTree((id, day))"}, "engine", "ALIAS", "day"),
+        ({"engine": "ReplacingMergeTree(raw)"}, "engine", "EPHEMERAL", "raw"),
+        ({"indexes": [{"name": "i", "expression": "raw", "type": "minmax", "granularity": 1}]},
+         'index "i"', "EPHEMERAL", "raw"),
+    ],
+)
+def test_unstored_columns_named_where_clickhouse_needs_stored_data(
+    overrides: dict[str, Any], field: str, kind: str, column: str
+) -> None:
+    assert issue_messages(kind_table(**overrides), "column_kind_not_stored") == [
+        f'Table default.events {field} references {kind} column "{column}", which ClickHouse '
+        "does not store; use a MATERIALIZED column instead."
+    ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"order_by": ["size"], "partition_by": "size", "engine": "SummingMergeTree(size)"},
+        {"order_by": ["toStartOfMonth(day)"], "partition_by": "toYYYYMM(day)"},
+        {"engine": "ReplicatedMergeTree('day', 'raw')", "ttl": "day + INTERVAL 1 DAY"},
+        {"indexes": [{"name": "i", "expression": "day", "type": "minmax", "granularity": 1}]},
+    ],
+)
+def test_stored_columns_and_nested_references_are_not_flagged(overrides: dict[str, Any]) -> None:
+    assert issue_messages(kind_table(**overrides), "column_kind_not_stored") == []
+
+
+@pytest.mark.parametrize(
+    ("projection", "flagged"),
+    [
+        ({"name": "p", "query": "SELECT id, length(raw), raw ORDER BY id"}, True),
+        ({"name": "p", "query": "SELECT `raw`, id ORDER BY id"}, True),
+        ({"name": "p", "index": "raw", "type": "basic"}, True),
+        ({"name": "p", "query": "SELECT id, lower(toString(id)), 'raw', day ORDER BY id"}, False),
+        ({"name": "p", "query": "SELECT (raw"}, False),
+    ],
+)
+def test_projections_reading_ephemeral_columns(projection: dict[str, Any], flagged: bool) -> None:
+    columns = [*kind_table().columns, {"name": "lower", "type": "String", "default_kind": "EPHEMERAL"}]
+    definition = kind_table(columns=columns, projections=[projection])
+    assert issue_messages(definition, "column_ephemeral_in_projection") == (
+        [
+            'Table default.events projection "p" reads EPHEMERAL column "raw", which ClickHouse '
+            "does not store, so the table is rejected or every INSERT fails. "
+            "Use a MATERIALIZED column instead."
+        ]
+        if flagged
+        else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "flagged"),
+    [
+        ({"default_kind": "ALIAS", "default": "fn:toDate(ts)"}, True),
+        ({"default_kind": "EPHEMERAL"}, True),
+        ({"default_kind": "EPHEMERAL", "default": "fn:today()"}, False),
+        ({"default_kind": "EPHEMERAL", "comment": "input"}, False),
+        ({"default_kind": "MATERIALIZED", "default": "fn:toDate(ts)"}, False),
+    ],
+)
+def test_codecs_on_columns_without_storage(column: dict[str, Any], flagged: bool) -> None:
+    messages = issue_messages(definition(codec={"kind": "LZ4"}, **column), "column_kind_codec_unsupported")
+    assert messages == (
+        [f'Column "day" is {column["default_kind"]} and cannot have a codec; ClickHouse stores no data for it.']
+        if flagged
+        else []
+    )

@@ -332,19 +332,27 @@ def render_alter_add_column(definition: TableDefinition, column: ColumnInput) ->
     )
 
 
-def render_alter_modify_column(
-    definition: TableDefinition, column: ColumnInput, previous: ColumnDefinition | None = None
-) -> str:
+def render_alter_modify_column(definition: TableDefinition, column: ColumnInput) -> str:
     normalized = _normalize_column(column)
-    remove = ""
-    if (
-        previous is not None and previous.default is not None
-        and normalized.default is None and normalized.default_kind != "EPHEMERAL"
-    ):
-        remove = f", MODIFY COLUMN `{normalized.name}` REMOVE {previous.default_kind or 'DEFAULT'}"
     return (
         f"ALTER TABLE {definition.database}.{definition.name} "
-        f"MODIFY COLUMN {_render_column(normalized)}{remove};"
+        f"MODIFY COLUMN {_render_column(normalized)};"
+    )
+
+
+def render_alter_remove_column_expression(
+    definition: TableDefinition, column: ColumnDefinition, previous: ColumnDefinition
+) -> str | None:
+    """MODIFY COLUMN without an expression keeps the old one, so dropping it needs a REMOVE.
+
+    It must run before the MODIFY: in one statement ClickHouse casts the retained
+    default to the new type first, so ``'abc'`` -> UInt64 fails.
+    """
+    if previous.default is None or column.default is not None or column.default_kind == "EPHEMERAL":
+        return None
+    return (
+        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"MODIFY COLUMN `{column.name}` REMOVE {previous.default_kind or 'DEFAULT'};"
     )
 
 

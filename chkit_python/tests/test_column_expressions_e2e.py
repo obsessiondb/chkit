@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from chkit import table
+from chkit import ColumnDefinition, table
 from chkit.cli.commands.drift_compare import compare_table_shape
 from chkit.cli.commands.pull import _introspected_table_to_definition
 from chkit.cli.commands.pull_render import render_schema_file
@@ -20,11 +20,12 @@ from chkit.clickhouse.introspect import (
 from chkit.core.model import TableDefinition
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
+from chkit.core.validate import validate_definitions
 from chkit_plugin_backfill.planner import assert_backfill_target_safe
 from chkit_plugin_codegen import generate_type_artifacts
 
 
-def test_expression_column_lifecycle(ch_client: Any) -> None:
+def test_expression_column_lifecycle(ch_client: Any) -> None:  # noqa: PLR0915 — mirrors the TS lifecycle test
     client = ch_client._client
     name = f"column_expr_py_{uuid4().hex}"
     database = client.database
@@ -111,8 +112,33 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:
         for operation in plan_diff([changed], [plain]).operations:
             client.command(operation.sql)
         assert compare_table_shape(plain, _settled_shape(client, plain)) is None
+        # In one ALTER, ClickHouse casts the retained 'abc' to UInt64 before the REMOVE.
+        coded = plain.model_copy(update={"name": f"{name}_code", "columns": [
+            ColumnDefinition(name="id", type="UInt32"),
+            ColumnDefinition(name="code", type="String", default="abc"),
+        ]})
+        retyped = coded.model_copy(
+            update={"columns": [coded.columns[0], ColumnDefinition(name="code", type="UInt64")]}
+        )
+        client.command(to_create_sql(coded))
+        assert compare_table_shape(coded, _settled_shape(client, coded)) is None
+        client.command(f"INSERT INTO {target}_code (id, code) VALUES (1, '42')")
+        for operation in plan_diff([coded], [retyped]).operations:
+            client.command(operation.sql)
+        assert compare_table_shape(retyped, _settled_shape(client, retyped)) is None
+        assert client.query(f"SELECT code FROM {target}_code").result_rows == [(42,)]
+        keyed = plain.model_copy(update={"order_by": ["id", "k"], "columns": [
+            ColumnDefinition(name="id", type="UInt32"),
+            ColumnDefinition(name="k", type="UInt32", default_kind="ALIAS", default="fn:id"),
+        ]})
+        assert [issue.code for issue in validate_definitions([keyed])] == ["column_kind_not_stored"]
+        create = f"CREATE TABLE {target}_keyed (id UInt32, k UInt32 {{}} id) ENGINE = MergeTree ORDER BY (id, k)"
+        with pytest.raises(Exception, match="UNKNOWN_IDENTIFIER"):
+            client.command(create.format("ALIAS"))
+        client.command(create.format("MATERIALIZED"))
     finally:
-        client.command(f"DROP TABLE IF EXISTS {target} SYNC")
+        for suffix in ("", "_code", "_keyed"):
+            client.command(f"DROP TABLE IF EXISTS {target}{suffix} SYNC")
 
 
 def test_hand_written_heredoc_and_alias_typed_ephemeral_columns_show_no_drift(

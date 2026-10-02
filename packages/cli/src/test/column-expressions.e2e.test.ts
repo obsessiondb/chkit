@@ -3,7 +3,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClient } from '@clickhouse/client'
-import { planDiff, table, toCreateSQL, type TableDefinition } from '@chkit/core'
+import {
+	planDiff,
+	table,
+	toCreateSQL,
+	validateDefinitions,
+	type TableDefinition,
+} from '@chkit/core'
 import {
 	normalizeColumnFromSystemRow,
 	type SystemColumnRow,
@@ -34,6 +40,8 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 	})
 	const dir = await mkdtemp(join(tmpdir(), 'chkit-expression-pull-'))
 	const name = `column_expr_${Date.now()}_${Math.random().toString(16).slice(2)}`
+	const keyed = `${name}_keyed`
+	const coded = `${name}_code`
 	let def = table({
 		database: env.clickhouseDatabase,
 		name,
@@ -74,7 +82,7 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 	const columns = async () =>
 		(
 			await query<SystemColumnRow>(
-				`SELECT database, table, name, type, position, default_kind, default_expression FROM system.columns WHERE database='${def.database}' AND table='${name}' ORDER BY position`,
+				`SELECT database, table, name, type, position, default_kind, default_expression FROM system.columns WHERE database='${def.database}' AND table='${def.name}' ORDER BY position`,
 			)
 		).map(normalizeColumnFromSystemRow)
 	const actual = async () => ({
@@ -233,10 +241,49 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 				column.name === 'raw' ? { ...column, default: undefined } : column,
 			),
 		})
-	} finally {
-		await client.command({
-			query: `DROP TABLE IF EXISTS ${def.database}.${name} SYNC`,
+		// In one ALTER, ClickHouse casts the retained 'abc' to UInt64 before the REMOVE.
+		// A fresh single-part table: merging older parts that lack `code` would store 'abc'.
+		def = table({
+			...def,
+			name: coded,
+			columns: [{ name: 'id', type: 'UInt32' }, { name: 'code', type: 'String', default: 'abc' }],
 		})
+		await client.command({ query: toCreateSQL(def) })
+		expect(compareTableShape(def, await settledShape())).toBeNull()
+		await client.command({
+			query: `INSERT INTO ${def.database}.${coded} (id, code) VALUES (1, '42')`,
+		})
+		await migrate({ ...def, columns: [{ name: 'id', type: 'UInt32' }, { name: 'code', type: 'UInt64' }] })
+		expect(
+			await query(`SELECT toString(code) AS code FROM ${def.database}.${coded}`),
+		).toEqual([{ code: '42' }])
+
+		const keyedSQL = (kind: string) =>
+			`CREATE TABLE ${def.database}.${keyed} (id UInt32, k UInt32 ${kind} id) ENGINE = MergeTree ORDER BY (id, k)`
+		const aliasKeyed = table({
+			database: def.database,
+			name: keyed,
+			engine: 'MergeTree()',
+			primaryKey: ['id'],
+			orderBy: ['id', 'k'],
+			columns: [
+				{ name: 'id', type: 'UInt32' },
+				{ name: 'k', type: 'UInt32', defaultKind: 'ALIAS', default: 'fn:id' },
+			],
+		})
+		expect(validateDefinitions([aliasKeyed]).map((issue) => issue.code)).toEqual([
+			'column_kind_not_stored',
+		])
+		await expect(client.command({ query: keyedSQL('ALIAS') })).rejects.toMatchObject({
+			type: 'UNKNOWN_IDENTIFIER',
+		})
+		await client.command({ query: keyedSQL('MATERIALIZED') })
+	} finally {
+		for (const tableName of [name, coded, keyed]) {
+			await client.command({
+				query: `DROP TABLE IF EXISTS ${def.database}.${tableName} SYNC`,
+			})
+		}
 		await client.close()
 		await rm(dir, { recursive: true, force: true })
 	}

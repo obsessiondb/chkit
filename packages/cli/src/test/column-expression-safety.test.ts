@@ -47,8 +47,8 @@ for (const [expected, actual, equal] of [
 }
 
 test('stored expression changes warn about historical values; computed aliases do not', () => {
-	const before = definition('old')
-	const after = definition('new')
+	const before = definition("fn:'old'")
+	const after = definition("fn:'new'")
 	expect(planDiff([before], [after]).operations[0]?.warning).toContain(
 		'does not rewrite stored historical values',
 	)

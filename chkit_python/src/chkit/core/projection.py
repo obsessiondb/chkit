@@ -14,7 +14,7 @@ def is_index_projection(projection: ProjectionDefinition) -> bool:
     return projection.index is not None
 
 
-def _strip_wrapping_parens(text: str) -> str:
+def strip_wrapping_parens(text: str) -> str:
     if not (text.startswith("(") and text.endswith(")")):
         return text
 
@@ -88,10 +88,10 @@ def normalize_projection_index(index: str) -> str:
     # Peel every redundant layer, not just one: ClickHouse reports `((a, b))`
     # back as `(a, b)`.
     expression = normalize_sql_fragment(index)
-    stripped = _strip_wrapping_parens(expression)
+    stripped = strip_wrapping_parens(expression)
     while stripped != expression:
         expression = stripped
-        stripped = _strip_wrapping_parens(expression)
+        stripped = strip_wrapping_parens(expression)
 
     parts = split_top_level_comma(expression)
     if len(parts) == 0:
