@@ -35,9 +35,32 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 1. Loads your config and schema definitions
 2. Reads the previous snapshot from `metaDir/snapshot.json`
 3. Computes a diff between old and new definitions using `planDiff()` from `@chkit/core`
-4. Produces an ordered list of SQL operations
+4. Produces an ordered list of SQL operations (see [Operation order](/cli/generate/#operation-order))
 
 If there are no differences, no migration file is created.
+
+### Operation order
+
+Operations run in groups. Without a rename, the order is drops, then `ALTER` statements, then `CREATE DATABASE`, then creates. When a rename is applied (a `--rename-*` flag or `renamedFrom`), the order is drops, then `CREATE DATABASE`, then table and dictionary renames, then the other `ALTER` statements (column renames included), then creates. Creates run tables first, then views, then dictionaries and materialized views; drops run one object type at a time. Each group is sorted by name. Statements for the same column keep their planned order: removing a column's expression (`REMOVE DEFAULT` or `REMOVE MATERIALIZED`) runs right before the column's `MODIFY COLUMN`.
+
+`generate` then reorders creates and drops by the dependencies between the objects in the migration: an object is created after every object it reads and dropped before them. A view that reads another view, a materialized view, or a dictionary is created after it, even when its name sorts first. Dependencies come from:
+
+- `database.name` references in a view or materialized view query, including subqueries, joins, and `IN` clauses
+- unqualified names directly after `FROM` or `JOIN`, resolved against the view's own database (CTE names are skipped)
+- the name argument of `dictGet` and its variants, `dictHas`, `dictIsIn`, `joinGet`, and the `dictionary()` table function, as a string (`'analytics.users_dict'`) or a name (`analytics.users_dict`, `users_dict`); either form without a database resolves against the object's own database
+- a materialized view's `to` table and `refresh.dependsOn` views
+- the column expressions (`DEFAULT`, `MATERIALIZED`, `ALIAS`, and `EPHEMERAL`) of a table that is created or dropped, such as a default that calls `dictGet`
+- a dictionary's `CLICKHOUSE` source, as `TABLE`/`DB` or `QUERY`
+
+Apart from those name arguments and source parameters, names inside string literals and comments are ignored. Objects with no dependency inside the migration keep the kind-then-name order, and objects that reference each other in a cycle keep that order among themselves. Only dependencies inside the migration count: a refreshable materialized view whose `DEPENDS ON` target already exists is ordered like any other object.
+
+`ALTER` statements are not reordered. A migration that adds or modifies a column whose expression calls `dictGet` on a dictionary created in the same migration fails, because the `ALTER` runs before the dictionary exists. A migration that drops a dictionary and also drops or changes the column expression that calls it fails too, because the dictionary drop runs first. Split such a change into two migrations: create the dictionary first, or change the column first.
+
+Qualify names in view SQL (`analytics.events`, not `events`). ClickHouse resolves an unqualified name against the session's current database, which `generate` can't see, so `generate` assumes the view's own database.
+
+:::caution[chkit-py]
+chkit-py still orders creates and drops by kind and name. Order dependent objects by hand, or generate the migration with the TypeScript CLI.
+:::
 
 ### Risk levels
 
@@ -84,7 +107,7 @@ The one exception: a dictionary whose `source` still carries ClickHouse's `[HIDD
 
 With `--dryrun`, the command prints the migration plan (operations with risk levels and SQL) without writing any files. Useful for previewing changes before committing.
 
-Plans for objects in a database lead with a `create_database` operation (`CREATE DATABASE IF NOT EXISTS`, risk `safe`), so a single new table reports `operationCount: 2` — the `create_database` plus the `create_table`. The `CREATE DATABASE` is idempotent and a no-op if the database already exists.
+Plans for objects in a database include a `create_database` operation (`CREATE DATABASE IF NOT EXISTS`, risk `safe`), so a single new table reports `operationCount: 2` — the `create_database` plus the `create_table`. The `CREATE DATABASE` is idempotent and a no-op if the database already exists.
 
 ### Empty mode
 

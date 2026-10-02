@@ -619,6 +619,8 @@ Creates a view definition.
   </TabItem>
 </Tabs>
 
+A view can read tables, other views, materialized views, and dictionaries. `chkit generate` creates a view after the objects it reads and drops it before them, whatever their names; chkit-py still orders by kind and name. Write qualified names (`app.users`) in `as` so every reference is detected. See [Operation order](/cli/generate/#operation-order).
+
 ## `materializedView()`
 
 Creates a materialized view definition. In Python the factory is `materialized_view()`.

@@ -97,6 +97,8 @@ const activeUsers = view({
 })
 ```
 
+Write fully qualified `db.name` references in view SQL (`app.users`, not `users`): ClickHouse resolves an unqualified name against the session's current database. chkit newer than 0.2.0-beta.8 also reads these references to create a view after the views, materialized views, and dictionaries it uses.
+
 ### Materialized views
 
 ```ts
