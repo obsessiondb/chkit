@@ -108,6 +108,28 @@ def test_normalize_column_preserves_materialized_expression() -> None:
     assert column.default_kind == "MATERIALIZED"
 
 
+def test_normalize_column_drops_synthetic_ephemeral_default_for_type_aliases() -> None:
+    def default(type_: str, kind: str, expression: str) -> object:
+        row = SystemColumnRow(
+            database="db", table="t", name="raw", type=type_, position=1,
+            default_kind=kind, default_expression=expression,
+        )
+        return normalize_column_from_system_row(row).default
+
+    # system.columns pairs the canonical type with the DDL spelling (ClickHouse 26.3).
+    for type_, written in [
+        ("Int64", "BIGINT"),
+        ("String", "TEXT"),
+        ("Decimal(9, 2)", "Decimal32(2)"),
+        ("Nullable(Int64)", "Nullable(BIGINT)"),
+    ]:
+        assert default(type_, "EPHEMERAL", f"defaultValueOfTypeName('{written}')") is None
+    expression = "defaultValueOfTypeName('String') || 'x'"
+    assert default("String", "EPHEMERAL", expression) == expression
+    synthetic = "defaultValueOfTypeName('BIGINT')"
+    assert default("Int64", "MATERIALIZED", synthetic) == synthetic
+
+
 def test_normalize_column_preserves_comment_and_codec() -> None:
     row = SystemColumnRow(
         database="db",

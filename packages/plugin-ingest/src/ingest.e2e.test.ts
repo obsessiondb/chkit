@@ -41,6 +41,20 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     engine: 'MergeTree()',
     orderBy: ['id'],
   })
+  const ephemeral = table({
+    database,
+    name: `${prefix}ephemeral`,
+    columns: [
+      { name: 'id', type: 'UInt64' },
+      { name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' },
+      { name: 'raw length', type: 'UInt64', default: 'fn:length(raw)' },
+      { name: 'shout', type: 'String', defaultKind: 'MATERIALIZED', default: 'fn:upper(raw)' },
+      { name: 'items', type: 'Nested(sku String, qty UInt32)' },
+      ...ingestionColumns,
+    ],
+    engine: 'MergeTree()',
+    orderBy: ['id'],
+  })
   let executor: ClickHouseExecutor
 
   beforeAll(async () => {
@@ -52,6 +66,8 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     await waitForTable(executor, database, landing.name)
     await executor.command(toCreateSQL(integers))
     await waitForTable(executor, database, integers.name)
+    await executor.command(toCreateSQL(ephemeral))
+    await waitForTable(executor, database, ephemeral.name)
     // Create the journal through the product path during setup, like every
     // other table here, instead of racing its propagation inside the first run.
     await createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable }).ensure()
@@ -61,6 +77,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(destinationTable.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(landing.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(integers.name)}`)
+    await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(ephemeral.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
     await executor.close()
   }, 60_000)
@@ -166,5 +183,28 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     )
     expect(rows).toEqual([{ id: row.id.toString(), signed: row.signed.toString(), values: row.values.map(String) }])
     expect(typeof row.id).toBe('bigint')
+  }, 120_000)
+
+  test('EPHEMERAL inputs and flattened Nested fields reach the expressions of the destination', async () => {
+    const stream = defineStream({
+      id: `${prefix}ephemeral`, destination: ephemeral,
+      async *read() { yield { rows: [{ id: 1, raw: 'abcd', 'items.sku': ['a'], 'items.qty': [2] }, { id: 2, raw: 'hello', 'raw length': 9 }] } },
+    })
+    const result = await runIngestion({
+      selected: selectStreams([definePipeline({ id: `${prefix}ephemeral_pipeline`, streams: [stream] })], []),
+      backfill: undefined,
+    }, {
+      journal: createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable }),
+      destination: createClickHouseDestination(executor),
+    })
+    expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', rows: 2, error: undefined })
+    const rows = await executor.query<{ id: string; raw_length: string; shout: string; skus: string[] }>(
+      `SELECT id, \`raw length\` AS raw_length, shout, items.sku AS skus FROM ${quoteIdent(database)}.${quoteIdent(ephemeral.name)} ORDER BY id`,
+      { select_sequential_consistency: '1', output_format_json_quote_64bit_integers: '1' }
+    )
+    expect(rows).toEqual([
+      { id: '1', raw_length: '4', shout: 'ABCD', skus: ['a'] },
+      { id: '2', raw_length: '9', shout: 'HELLO', skus: [] },
+    ])
   }, 120_000)
 })

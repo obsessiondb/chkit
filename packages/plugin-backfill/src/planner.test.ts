@@ -8,7 +8,7 @@ import { resolveConfig } from '@chkit/core'
 import { buildChunkExecutionSql, rewriteSelectColumns } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { PlanSchema } from './options.js'
-import { buildBackfillPlan } from './planner.js'
+import { assertBackfillTargetSafe, buildBackfillPlan } from './planner.js'
 import { backfillPaths, computeBackfillStateDir, readPlan } from './state.js'
 
 function createMockQuery(opts: {
@@ -22,6 +22,7 @@ function createMockQuery(opts: {
   }>
   sortingKey?: string
   columnRows?: Array<{ name: string; type: string }>
+  liveColumns?: Array<{ name: string; default_kind: string }>
 } = {}): <T>(sql: string) => Promise<T[]> {
   const partitions = opts.partitions ?? [
     {
@@ -35,9 +36,10 @@ function createMockQuery(opts: {
   ]
   const sortingKey = opts.sortingKey ?? 'event_time'
   const columnRows = opts.columnRows ?? [{ name: 'event_time', type: 'DateTime' }]
+  const liveColumns = opts.liveColumns ?? [{ name: 'id', default_kind: '' }]
 
   return async <T>(sql: string) => {
-    if (sql.includes('SELECT name, default_kind')) return [{ name: 'id', default_kind: '' }] as T[]
+    if (sql.includes('SELECT name, default_kind')) return liveColumns as T[]
     if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }] as T[]
     if (sql.includes('FROM system.parts')) return partitions as T[]
     if (sql.includes('FROM system.tables')) return [{ sorting_key: sortingKey }] as T[]
@@ -569,6 +571,10 @@ test('MV replay omits computed columns and rejects unrecoverable ephemeral input
       clickhouseQuery: createMockQuery(),
     })
     expect(output.plan.execution.targetColumns).toEqual(['event_time', 'count'])
+    await expect(buildBackfillPlan({ opts: PlanSchema.parse({ target: 'app.events_agg' }),
+      configPath: join(dir, 'clickhouse.config.ts'), config: resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' }),
+      clickhouseQuery: createMockQuery({ liveColumns: [{ name: 'raw', default_kind: 'EPHEMERAL' }, { name: 'size', default_kind: 'DEFAULT' }] }),
+    })).rejects.toThrow('cannot reconstruct EPHEMERAL inputs')
     const ephemeralPath = join(dir, 'ephemeral.ts')
     const source = await readFile(join(dir, 'schema.ts'), 'utf8')
     await writeFile(ephemeralPath, source.replace("{ name: 'count', type: 'UInt64' }", "{ name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' }"))
@@ -582,8 +588,9 @@ test('MV replay omits computed columns and rejects unrecoverable ephemeral input
 })
 
 for (const [rows, message] of [
-  [[{ name: 'raw', default_kind: 'EPHEMERAL' }], 'cannot reconstruct EPHEMERAL'],
-  [[], 'Cannot verify live target column kinds'],
+  [[{ name: 'raw', default_kind: 'EPHEMERAL' }, { name: 'day', default_kind: 'MATERIALIZED' }],
+    'copying app.events recomputes MATERIALIZED column(s) day, which may read EPHEMERAL column(s) raw'],
+  [[], 'Backfill target app.events does not exist or is not visible yet'],
   [[{ name: 'raw' }], 'Cannot verify live target column kinds'],
   [[{ name: 'raw', default_kind: 'FUTURE' }], 'Cannot verify live target column kinds'],
 ] as const) {
@@ -599,3 +606,32 @@ for (const [rows, message] of [
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 }
+
+test('copy mode plans a target whose EPHEMERAL inputs only feed DEFAULT columns', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-copy-ephemeral-'))
+  try {
+    // No MV feeds the target, so the schema's EPHEMERAL input does not block copy mode.
+    await writeFile(join(dir, 'schema.ts'), `
+      export const events = { kind: 'table', database: 'app', name: 'events', engine: 'MergeTree()',
+        primaryKey: ['ts'], orderBy: ['ts'], columns: [
+          { name: 'ts', type: 'DateTime' }, { name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' },
+          { name: 'size', type: 'UInt64', default: 'fn:length(raw)' }
+        ] }
+    `)
+    const output = await buildBackfillPlan({ opts: PlanSchema.parse({ target: 'app.events' }),
+      configPath: join(dir, 'clickhouse.config.ts'), config: resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' }),
+      clickhouseQuery: createMockQuery({ liveColumns: [
+        { name: 'ts', default_kind: '' }, { name: 'raw', default_kind: 'EPHEMERAL' }, { name: 'size', default_kind: 'DEFAULT' },
+      ] }),
+    })
+    expect(output.plan.execution.mode).toBe('copy')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a listed target without readable columns cannot be verified', async () => {
+  const query = async <T>(sql: string) => (sql.includes('FROM system.tables') ? [{ name: 'events' }] : []) as T[]
+  await expect(assertBackfillTargetSafe({ database: 'app', table: 'events', mode: 'copy', query }))
+    .rejects.toThrow('Cannot verify live target column kinds')
+})

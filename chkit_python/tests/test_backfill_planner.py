@@ -25,7 +25,7 @@ from chkit_plugin_backfill.chunking.types import PlannerQuery, QuerySettings
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PlanOptions
-from chkit_plugin_backfill.planner import build_backfill_plan
+from chkit_plugin_backfill.planner import assert_backfill_target_safe, build_backfill_plan
 from chkit_plugin_backfill.state import (
     backfill_paths,
     compute_backfill_state_dir,
@@ -56,6 +56,7 @@ def _create_mock_query(
     partitions: list[dict[str, str]] | None = None,
     sorting_key: str = "event_time",
     column_rows: list[dict[str, str]] | None = None,
+    live_columns: list[dict[str, str]] | None = None,
 ) -> PlannerQuery:
     resolved_partitions = (
         partitions
@@ -76,11 +77,12 @@ def _create_mock_query(
         if column_rows is not None
         else [{"name": "event_time", "type": "DateTime"}]
     )
+    resolved_live_columns = live_columns or [{"name": "id", "default_kind": ""}]
 
     def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
         _ = settings
         if "SELECT name, default_kind" in sql:
-            return [{"name": "id", "default_kind": ""}]
+            return [dict(row) for row in resolved_live_columns]
         if "SELECT 1 FROM" in sql:
             return [{"ok": 1}]
         if "FROM system.parts" in sql:
@@ -577,3 +579,57 @@ def test_rejects_persisted_legacy_plans_with_an_actionable_error(
 
     with pytest.raises(BackfillConfigError, match="uses a previous chunking format"):
         read_plan(plan_id=plan_id, config_path=config_path, config=config)
+
+
+def test_copy_mode_plans_a_target_whose_ephemeral_inputs_only_feed_default_columns(
+    tmp_path: Path,
+) -> None:
+    # No MV feeds the target, so the schema's EPHEMERAL input does not block copy mode.
+    (tmp_path / "schema.py").write_text(
+        """
+from chkit import table
+
+events = table(database="app", name="events", engine="MergeTree()",
+    primary_key=["ts"], order_by=["ts"], columns=[
+        {"name": "ts", "type": "DateTime"},
+        {"name": "raw", "type": "String", "default_kind": "EPHEMERAL"},
+        {"name": "size", "type": "UInt64", "default": "fn:length(raw)"},
+    ])
+""",
+        encoding="utf-8",
+    )
+    output = build_backfill_plan(
+        opts=PlanOptions.model_validate({"target": "app.events"}),
+        config_path=tmp_path / "clickhouse.config.py",
+        config=_resolve_config(),
+        clickhouse_query=_create_mock_query(
+            live_columns=[
+                {"name": "ts", "default_kind": ""},
+                {"name": "raw", "default_kind": "EPHEMERAL"},
+                {"name": "size", "default_kind": "DEFAULT"},
+            ]
+        ),
+    )
+    assert output.plan.execution.mode == "copy"
+
+
+def test_mv_replay_refuses_a_live_ephemeral_input_that_only_feeds_a_default_column(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "schema.py").write_text(MV_REPLAY_SCHEMA, encoding="utf-8")
+    live = [{"name": "raw", "default_kind": "EPHEMERAL"}, {"name": "size", "default_kind": "DEFAULT"}]
+    with pytest.raises(BackfillConfigError, match="cannot reconstruct EPHEMERAL inputs"):
+        build_backfill_plan(
+            opts=PlanOptions.model_validate({"target": "app.events_agg"}),
+            config_path=tmp_path / "clickhouse.config.py",
+            config=_resolve_config(),
+            clickhouse_query=_create_mock_query(live_columns=live),
+        )
+
+
+def test_a_listed_target_without_readable_columns_cannot_be_verified() -> None:
+    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+        return [{"name": "events"}] if "FROM system.tables" in sql else []
+
+    with pytest.raises(BackfillConfigError, match="Cannot verify live target column kinds"):
+        assert_backfill_target_safe(database="app", table="events", mode="copy", query=query)

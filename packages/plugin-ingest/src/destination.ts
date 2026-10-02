@@ -1,5 +1,5 @@
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import { table, type ColumnDefinition, type TableDefinition } from '@chkit/core'
+import { insertColumnList, table, type ColumnDefinition, type TableDefinition } from '@chkit/core'
 
 import type { DestinationAdapter, Row } from './types.js'
 
@@ -58,9 +58,11 @@ export function createClickHouseDestination(executor: ClickHouseExecutor): Desti
   return {
     async insert({ table, rows, token }) {
       if (rows.length === 0) return
+      const columns = insertColumnList(table)
       await executor.insert({
         table: `${table.database}.${table.name}`,
         values: toJsonRows(rows),
+        ...(columns ? { columns } : {}),
         settings: {
           insert_deduplication_token: token,
           wait_for_async_insert: 1,

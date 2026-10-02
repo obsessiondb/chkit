@@ -11,6 +11,7 @@ import type {
   RiskLevel,
   SchemaDefinition,
   TableDefinition,
+  ValidationIssue,
 } from './model.js'
 import {
   renderAlterAddColumn,
@@ -401,6 +402,17 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   )
   const addedColumns = columnDiff.added
   const droppedColumns = columnDiff.removed
+  // Report every blocked column of the table at once, not one per generate run.
+  const kindChangeIssues = columnDiff.changed.flatMap(({ name, oldItem, newItem }): ValidationIssue[] => {
+    const oldKind = oldItem.defaultKind ?? 'DEFAULT'
+    const newKind = newItem.defaultKind ?? 'DEFAULT'
+    if (oldKind === newKind || ![oldKind, newKind].some((kind) => kind === 'ALIAS' || kind === 'EPHEMERAL')) return []
+    return [{
+      code: 'column_kind_change_unsupported', kind: 'table', database: newDef.database, name: newDef.name,
+      message: `Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; storage-kind conversions involving ALIAS or EPHEMERAL are not supported. Keep the column declared as ${oldKind} in the schema.`,
+    }]
+  })
+  if (kindChangeIssues.length > 0) throw new ChxValidationError(kindChangeIssues)
   for (const column of columnDiff.added) {
     ops.push( {
       type: 'alter_table_add_column',
@@ -412,9 +424,6 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   for (const { name, oldItem, newItem } of columnDiff.changed) {
     const oldKind = oldItem.defaultKind ?? 'DEFAULT'
     const newKind = newItem.defaultKind ?? 'DEFAULT'
-    if (oldKind !== newKind && [oldKind, newKind].some((kind) => kind === 'ALIAS' || kind === 'EPHEMERAL')) {
-      throw new Error(`Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; storage-kind conversions involving ALIAS or EPHEMERAL are not supported`)
-    }
     const sql = isCodecRemoval(oldItem, newItem)
       ? renderAlterRemoveCodec(newDef, name)
       : renderAlterModifyColumn(newDef, newItem, oldItem)

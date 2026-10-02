@@ -238,7 +238,9 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
 
     try:
         database, table = plan.target.split(".")
-        assert_backfill_target_safe(database=database, table=table, query=db.query_rows)
+        assert_backfill_target_safe(
+            database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+        )
         run_state = BackfillRunState(
             plan_id=plan.plan_id,
             target=plan.target,

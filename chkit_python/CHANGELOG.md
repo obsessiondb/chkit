@@ -3,11 +3,6 @@
 ## Unreleased
 
 ### Added
-- Compare column defaults with quote-aware SQL tokens and correctly escape literal backslashes.
-- Generate separate `Row` (default `SELECT *`), `RowExplicit`, and `RowInsert` models.
-- Check live column metadata before backfill planning and local execution; block unknown metadata and unrecoverable `EPHEMERAL` inputs.
-- Warn about unchanged historical values in migration output and SQL.
-
 - Add `SkipIndexText` for full-text index generation, introspection, pull, and drift.
   Preserve quoted SQL literals, normalize ClickHouse’s fixed granularity, and reject
   malformed or unsupported metadata. Exercise adversarial round trips and actual
@@ -18,15 +13,29 @@
   writing artifacts. Offline drift/check report changes requiring replacement;
   explicit drop/create migrations preserve the existing destructive-operation gate.
 - Kafka ingestion and replacement integration tests on ClickHouse 25.3 and 26.3.
+- `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns via `default_kind` (alias
+  `defaultKind`), kept through SQL rendering, introspection, pull, snapshots, and
+  drift. Validation reports `column_expression_required`; an unknown kind is
+  rejected when the column is constructed.
+- `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning
+  that stored values are not rewritten; removed expressions emit `REMOVE DEFAULT`
+  or `REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail with
+  `column_kind_change_unsupported`.
+- Codegen emits `Row`, `RowExplicit`, and `RowInsert` models for these tables.
+- Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live
+  column kinds first: a copy is blocked only when the target has both
+  `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column,
+  and a missing target fails with "does not exist or is not visible yet".
+- Live drift compares defaults token by token. Write expressions in the
+  canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
 - Preserve quoted clause names, delimiters, whitespace, and escaped trailing
   backslashes in table introspection and migration statement splitting.
-
-
-- Support `default_kind` / `defaultKind` for `DEFAULT`, `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns through SQL rendering, introspection, pull, snapshots, and drift. Existing defaults and snapshots remain compatible. Use `fn:` for SQL expressions; expressionless `EPHEMERAL` is supported.
-- Generate separate read/insert models for tables with special column kinds, and make backfill projections respect generated columns. Automatic backfills with ephemeral inputs require explicit SQL input mappings.
-- Emit explicit removal of stored column expressions; reject automatic kind conversions involving `ALIAS` or `EPHEMERAL`. Expression changes never automatically materialize historical data.
+- Escape backslashes in string defaults: `C:\temp` renders as `DEFAULT 'C:\\temp'`.
+- `pull` writes introspected defaults as `fn:` expressions.
+- `generate` prints validation issues as `- [code] message` lines and exits 1
+  instead of raising a traceback.
 
 ## 0.2.0 — 2026-08-10
 

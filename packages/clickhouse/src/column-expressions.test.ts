@@ -56,3 +56,20 @@ test('synthetic EPHEMERAL defaults compare SQL literals with quotes and backslas
   const column = normalizeColumnFromSystemRow({ database: 'default', table: 'events', name: 'raw', type, position: 1, default_kind: 'EPHEMERAL', default_expression: expression })
   expect(column.default).toBeUndefined()
 })
+
+test('bare EPHEMERAL columns written with type aliases introspect without a synthetic default', () => {
+	const normalize = (type: string, default_kind: string, default_expression: string) =>
+		normalizeColumnFromSystemRow({ database: 'default', table: 'events', name: 'raw', type, position: 1, default_kind, default_expression })
+	// system.columns pairs the canonical type with the DDL spelling (ClickHouse 26.3).
+	for (const [type, written] of [
+		['Int64', 'BIGINT'],
+		['String', 'TEXT'],
+		['Decimal(9, 2)', 'Decimal32(2)'],
+		['Nullable(Int64)', 'Nullable(BIGINT)'],
+	]) {
+		expect(normalize(type, 'EPHEMERAL', `defaultValueOfTypeName('${written}')`).default).toBeUndefined()
+	}
+	const expression = "defaultValueOfTypeName('String') || 'x'"
+	expect(normalize('String', 'EPHEMERAL', expression).default).toBe(expression)
+	expect(normalize('Int64', 'MATERIALIZED', "defaultValueOfTypeName('BIGINT')").default).toBe("defaultValueOfTypeName('BIGINT')")
+})

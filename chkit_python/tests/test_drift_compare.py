@@ -313,3 +313,27 @@ def test_table_shape_detects_select_vs_index_projection_mismatch() -> None:
     )
     assert detail is not None
     assert "projection_mismatch" in detail.reason_codes
+
+
+# ---------- column expressions ----------
+
+
+def _changed_columns(expected: ColumnDefinition, actual: ColumnDefinition) -> list[str] | None:
+    id_ = ColumnDefinition(name="id", type="UInt64")
+    detail = compare_table_shape(_t(columns=[id_, expected]), _it(columns=[id_, actual]))
+    return None if detail is None else detail.changed_columns
+
+
+def test_table_shape_compares_an_unlexable_default_instead_of_raising() -> None:
+    msg = ColumnDefinition(name="msg", type="String", default="fn:concat(a)")
+    assert _changed_columns(msg.model_copy(update={"default": "fn:concat(a"}), msg) == ["msg"]
+
+
+def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ephemeral() -> None:
+    raw = ColumnDefinition(name="raw", type="Int64", default_kind="EPHEMERAL")
+    for literal in ["Int64", "BIGINT"]:
+        explicit = raw.model_copy(update={"default": f"fn:defaultValueOfTypeName( '{literal}' )"})
+        assert _changed_columns(explicit, raw) is None
+    zero = ColumnDefinition(name="zero", type="Int64", default_kind="MATERIALIZED")
+    materialized = zero.model_copy(update={"default": "fn:defaultValueOfTypeName('Int64')"})
+    assert _changed_columns(materialized, zero) == ["zero"]

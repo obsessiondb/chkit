@@ -414,6 +414,7 @@ export type ValidationIssueCode =
   | 'kafka_missing_setting'
   | 'kafka_invalid_setting'
   | 'kafka_change_requires_replacement'
+  | 'column_kind_change_unsupported'
   | 'duplicate_object_name'
   | 'duplicate_column_name'
   | 'duplicate_index_name'

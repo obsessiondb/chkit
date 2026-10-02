@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+	ChxValidationError,
 	createSnapshot,
 	planDiff,
 	table,
@@ -94,13 +95,35 @@ describe('column expressions', () => {
 	test('rejects automatic storage-kind changes in both directions', () => {
 		for (const defaultKind of ['ALIAS', 'EPHEMERAL'] as const) {
 			const virtual = definition({ defaultKind, default: 'fn:toDate(ts)' })
-			expect(() => planDiff([definition()], [virtual])).toThrow(
-				'storage-kind conversions involving ALIAS or EPHEMERAL are not supported',
-			)
-			expect(() => planDiff([virtual], [definition()])).toThrow(
-				'storage-kind conversions involving ALIAS or EPHEMERAL are not supported',
-			)
+			expect(() => planDiff([definition()], [virtual])).toThrow(ChxValidationError)
+			expect(() => planDiff([virtual], [definition()])).toThrow(ChxValidationError)
 		}
+	})
+
+	test('reports every blocked storage-kind change of a table at once', () => {
+		const events = (day: ColumnDefinition['defaultKind'], label: ColumnDefinition['defaultKind']) =>
+			table({
+				database: 'default',
+				name: 'events',
+				engine: 'MergeTree()',
+				primaryKey: ['ts'],
+				orderBy: ['ts'],
+				columns: [
+					{ name: 'ts', type: 'DateTime' },
+					{ name: 'day', type: 'Date', defaultKind: day, default: 'fn:toDate(ts)' },
+					{ name: 'label', type: 'String', defaultKind: label, default: 'fn:toString(ts)' },
+				],
+			})
+		const issue = (name: string, from: string, to: string) => ({
+			code: 'column_kind_change_unsupported',
+			kind: 'table',
+			database: 'default',
+			name: 'events',
+			message: `Cannot automatically change column default.events.${name} from ${from} to ${to}; storage-kind conversions involving ALIAS or EPHEMERAL are not supported. Keep the column declared as ${from} in the schema.`,
+		})
+		expect(() => planDiff([events('DEFAULT', 'ALIAS')], [events('EPHEMERAL', 'DEFAULT')])).toThrow(
+			expect.objectContaining({ issues: [issue('day', 'DEFAULT', 'EPHEMERAL'), issue('label', 'ALIAS', 'DEFAULT')] }),
+		)
 	})
 
 	test('validates kind and missing/empty expressions', () => {

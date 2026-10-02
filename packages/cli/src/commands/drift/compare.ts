@@ -4,6 +4,7 @@ import {
   parseKafkaSettings,
   kafkaSettingFingerprint,
   isIndexProjection,
+  isSyntheticEphemeralDefault,
   normalizeProjectionIndex,
   normalizeSQLFragment,
   renderDefault,
@@ -189,9 +190,14 @@ export function summarizeDriftReasons(input: {
 }
 
 function normalizeColumnShape(column: ColumnDefinition): string {
-  const normalizedDefault = column.default === undefined
-    ? ''
-    : sqlExpressionFingerprint(renderDefault(column.default))
+  const rendered = column.default === undefined ? undefined : renderDefault(column.default)
+  // ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
+  // which introspection reads back as no expression; an explicit one matches it.
+  const normalizedDefault =
+    rendered === undefined ||
+    (column.defaultKind === 'EPHEMERAL' && isSyntheticEphemeralDefault(rendered))
+      ? ''
+      : sqlExpressionFingerprint(rendered)
   const parts = [
     `type=${String(column.type).trim()}`,
     `nullable=${column.nullable ? '1' : '0'}`,

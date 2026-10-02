@@ -2,9 +2,8 @@ import { createRequire } from 'node:module'
 import {
 	type ChxConfig,
 	type ColumnDefinition,
+	isSyntheticEphemeralDefault,
 	normalizeSQLFragment,
-	renderDefault,
-	sqlExpressionFingerprint,
 	type ProjectionDefinition,
 	parseCodec,
 	type SkipIndexDefinition,
@@ -48,6 +47,12 @@ export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
 	compressed?: boolean
 	/** Per-insert settings, e.g. a stable `insert_deduplication_token`. */
 	settings?: ClickHouseSettings
+	/**
+	 * Explicit INSERT column list as SQL identifiers (quote names that need it).
+	 * Required to supply EPHEMERAL inputs: without it ClickHouse treats their
+	 * keys as unknown fields and silently drops them.
+	 */
+	columns?: string[]
 }
 
 export interface ClickHouseJsonQueryResult<
@@ -220,12 +225,8 @@ export function normalizeColumnFromSystemRow(
 		// Preserve whitespace inside SQL string literals when pulling expressions.
 		defaultValue = row.default_expression.trim()
 	}
-	// ClickHouse synthesizes this expression for a bare EPHEMERAL column.
-	if (
-		defaultKind === 'EPHEMERAL' && defaultValue !== undefined &&
-		sqlExpressionFingerprint(String(defaultValue)) ===
-			sqlExpressionFingerprint(`defaultValueOfTypeName(${renderDefault(row.type)})`)
-	) {
+	// A bare EPHEMERAL column reads back as its synthesized default.
+	if (defaultKind === 'EPHEMERAL' && defaultValue !== undefined && isSyntheticEphemeralDefault(String(defaultValue))) {
 		defaultValue = undefined
 	}
 	const codecSteps = parseCodec(row.compression_codec)
@@ -777,6 +778,7 @@ export function createExecutorWithClient(
 					table: params.table,
 					values: params.values,
 					format: 'JSONEachRow',
+					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
 					...(params.settings ? { clickhouse_settings: params.settings } : {}),
 				})
 				assertStreamedQuerySucceeded({
@@ -986,4 +988,9 @@ export function createStatelessClickHouseExecutor(
 				}),
 		},
 	)
+}
+
+// @clickhouse/client only accepts a non-empty column list.
+function isNonEmpty<T>(values: T[] | undefined): values is [T, ...T[]] {
+	return values !== undefined && values.length > 0
 }

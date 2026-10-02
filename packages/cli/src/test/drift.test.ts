@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { table } from '@chkit/core'
+import { type ColumnDefinition, table } from '@chkit/core'
 
 import { compareSchemaObjects, compareTableShape, summarizeDriftReasons } from '../commands/drift/compare.js'
 
@@ -547,5 +547,42 @@ describe('@chkit/cli drift comparer with quoted identifiers', () => {
   test('still reports order_by_mismatch when the key really differs', () => {
     const result = compareTableShape(expected, actualShape('(id, `a b`, `e,f)`, `c\\`d`)'))
     expect(result?.reasonCodes).toEqual(['order_by_mismatch'])
+  })
+})
+
+describe('@chkit/cli drift comparer with column expressions', () => {
+  const compareColumn = (expected: ColumnDefinition, actual: ColumnDefinition) =>
+    compareTableShape(
+      table({
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [{ name: 'id', type: 'UInt32' }, expected],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+      {
+        engine: 'MergeTree()',
+        primaryKey: 'id',
+        orderBy: 'id',
+        columns: [{ name: 'id', type: 'UInt32' }, actual],
+        settings: {},
+        indexes: [],
+        projections: [],
+      }
+    )
+
+  test('an unlexable default is compared instead of throwing', () => {
+    const msg: ColumnDefinition = { name: 'msg', type: 'String', default: 'fn:concat(a)' }
+    expect(compareColumn({ ...msg, default: 'fn:concat(a' }, msg)?.changedColumns).toEqual(['msg'])
+  })
+
+  test('defaultValueOfTypeName matches an expressionless column only when EPHEMERAL', () => {
+    const raw: ColumnDefinition = { name: 'raw', type: 'Int64', defaultKind: 'EPHEMERAL' }
+    for (const literal of ['Int64', 'BIGINT']) {
+      expect(compareColumn({ ...raw, default: `fn:defaultValueOfTypeName( '${literal}' )` }, raw)).toBeNull()
+    }
+    const zero: ColumnDefinition = { name: 'zero', type: 'Int64', defaultKind: 'MATERIALIZED' }
+    expect(compareColumn({ ...zero, default: "fn:defaultValueOfTypeName('Int64')" }, zero)?.changedColumns).toEqual(['zero'])
   })
 })

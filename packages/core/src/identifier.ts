@@ -68,7 +68,7 @@ export function unquoteIdentifiers(sql: string): string {
 
 // Index of the quote closing the one at `start`; honours backslash escapes and
 // doubled quotes. Unterminated input runs to the end of the string.
-function findQuoteEnd(sql: string, start: number, quote: string): number {
+export function findQuoteEnd(sql: string, start: number, quote: string): number {
   for (let i = start + 1; i < sql.length; i += 1) {
     if (sql[i] === '\\') i += 1
     else if (sql[i] === quote) {
@@ -79,6 +79,6 @@ function findQuoteEnd(sql: string, start: number, quote: string): number {
   return sql.length
 }
 
-function unescapeQuoted(body: string): string {
-  return body.replace(/\\(.)|``/g, (_match, escaped: string | undefined) => escaped ?? '`')
+export function unescapeQuoted(body: string, quote = '`'): string {
+  return body.replace(new RegExp(`\\\\(.)|${quote}${quote}`, 'g'), (_match, escaped: string | undefined) => escaped ?? quote)
 }

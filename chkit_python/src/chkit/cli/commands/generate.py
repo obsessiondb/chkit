@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 
@@ -137,6 +137,23 @@ def _run_codegen_integration(
             f"code {exit_code}."
         )
         raise typer.Exit(code=1) from RuntimeError(msg)
+
+
+def _exit_validation_failed(error: ChxValidationError, *, output_json: bool) -> NoReturn:
+    if output_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "error": "validation_failed",
+                    "issues": [i.model_dump(mode="json") for i in error.issues],
+                },
+                indent=2,
+            )
+        )
+    else:
+        details = "\n".join(f"- [{issue.code}] {issue.message}" for issue in error.issues)
+        typer.echo(f"{error}\n{details}", err=True)
+    raise typer.Exit(code=1) from error
 
 
 def _scope_to_payload(scope: TableScope) -> dict[str, object]:
@@ -311,18 +328,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
 
     issues = validate_definitions(canonical)
     if issues:
-        if output_json:
-            typer.echo(
-                json.dumps(
-                    {
-                        "error": "validation_failed",
-                        "issues": [i.model_dump(mode="json") for i in issues],
-                    },
-                    indent=2,
-                )
-            )
-            raise typer.Exit(code=1)
-        raise ChxValidationError(issues)
+        _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
 
     meta_dir = Path(config.meta_dir)
     migrations_dir = Path(config.migrations_dir)
@@ -373,9 +379,9 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         return
 
     # Mirror TS ``generate.command``: surface validation failures as a
-    # structured JSON envelope rather than letting them escape as a stack
-    # trace. ``plan_diff`` itself may raise a ChxValidationError if the
-    # post-rename canonical state still has invariant violations.
+    # structured JSON envelope (or an issue list in human mode) rather than
+    # letting them escape as a stack trace. ``plan_diff`` itself may raise a
+    # ChxValidationError for invariant violations or unsupported changes.
     try:
         plan = plan_diff(remapped_old_defs, canonical)
         plan = apply_explicit_table_renames(plan, active_table_mappings)
@@ -386,18 +392,7 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
             build_explicit_column_rename_suggestions(plan, column_mappings),
         )
     except ChxValidationError as error:
-        if output_json:
-            typer.echo(
-                json.dumps(
-                    {
-                        "error": "validation_failed",
-                        "issues": [i.model_dump(mode="json") for i in error.issues],
-                    },
-                    indent=2,
-                )
-            )
-            raise typer.Exit(code=1) from error
-        raise
+        _exit_validation_failed(error, output_json=output_json)
 
     if table_scope.enabled:
         # TableRenameMapping is structurally compatible with table_scope's

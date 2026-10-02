@@ -118,7 +118,7 @@ async function runBackfill(input: {
   try {
     const [database, table] = plan.target.split('.')
     if (!database || !table) throw new BackfillConfigError('Invalid backfill target.')
-    await assertBackfillTargetSafe({ database, table, query: (sql, settings) => db.query(sql, settings) })
+    await assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) })
     const runState: BackfillRunState = {
       planId: plan.planId,
       target: plan.target,

@@ -7,11 +7,12 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-This document covers practical usage of the optional `codegen` plugin. In TypeScript it emits row types (plus optional Zod schemas, ingest helpers, and a runtime migration module); in Python it emits one Pydantic model per table and dictionary — Pydantic covers both static typing and runtime validation, so there is no separate Zod-style output.
+This document covers practical usage of the optional `codegen` plugin. In TypeScript it emits row types (plus optional Zod schemas, ingest helpers, and a runtime migration module); in Python it emits Pydantic models for every table and dictionary — Pydantic covers both static typing and runtime validation, so there is no separate Zod-style output.
 
 ## What it does
 
 - Generates deterministic row types from chkit schema definitions — TypeScript interfaces, or Pydantic models in Python.
+- Generates separate read and insert types for [tables with generated columns](#tables-with-generated-columns).
 - Generates a typed interface (and optional Zod schema) for each `dictionary()` from its `attributes` — dictionaries are always included, regardless of `includeViews`.
 - Optionally generates Zod schemas from the same definitions.
 - Optionally generates typed ingestion functions for inserting rows into ClickHouse tables. Generated ingest helpers gzip-compress request bodies by default and can opt out per call.
@@ -98,7 +99,7 @@ Register `codegen(...)` in your config's `plugins` array.
     )
     ```
 
-    The output is a single module with one Pydantic model per table and dictionary. The `emitZod` / `emitIngest` / `emitMigrations` emitters are TypeScript-only by design — Pydantic already provides runtime validation, and the ingest/migration-module emitters target JS runtimes.
+    The output is a single module with Pydantic models for every table and dictionary. The `emitZod` / `emitIngest` / `emitMigrations` emitters are TypeScript-only by design — Pydantic already provides runtime validation, and the ingest/migration-module emitters target JS runtimes.
   </TabItem>
 </Tabs>
 
@@ -145,6 +146,18 @@ Useful flags:
 - `--bigint-mode <string|bigint>`
 - `--include-views`
 
+## Tables with generated columns
+
+A table with [`MATERIALIZED`, `ALIAS`, or `EPHEMERAL`](/schema/dsl-reference/#defaultkind-optional) columns gets three types instead of one, plus matching Zod schemas with `emitZod`. Python emits the same three as Pydantic models.
+
+| Type | Columns | Use for |
+|------|---------|---------|
+| `Row` | Ordinary and `DEFAULT` columns | `SELECT *` results |
+| `RowExplicit` | Every column except `EPHEMERAL` | Queries that name `MATERIALIZED` or `ALIAS` columns |
+| `RowInsert` | Every column except `MATERIALIZED` and `ALIAS` | Inserts, including `EPHEMERAL` inputs |
+
+The names extend the table's type name, for example `DefaultEventsRowInsert`. `Row` assumes the default `SELECT *`; with `asterisk_include_materialized_columns` or `asterisk_include_alias_columns`, name the columns and use `RowExplicit`.
+
 ## Generated ingest helpers
 
 When `emitIngest` is enabled, generated ingest helpers accept runtime options. Request-body compression is enabled by default for these helpers:
@@ -164,6 +177,10 @@ When `emitZod` is enabled, the same options object also controls validation:
 ```ts
 await ingestDefaultUsers(db, rows, { validate: true })
 ```
+
+### Ingesting into tables with generated columns
+
+Ingest helpers take `RowInsert[]` for these tables. ClickHouse drops `EPHEMERAL` values unless the `INSERT` names its columns, so for a table with `EPHEMERAL` columns the helper passes `columns` to `ingestor.insert`, and the generated `Ingestor` interface gains `columns?: string[]`. The `@chkit/clickhouse` executor sends it as the `INSERT` column list; a custom `Ingestor` must do the same (`@clickhouse/client` takes it as the `columns` option of `insert()`). The list comes from the schema, so apply pending migrations before ingesting.
 
 ## CI / check integration
 

@@ -16,7 +16,13 @@ import {
 } from '../../../plugin-codegen/src/index.js'
 import { buildBackfillPlan } from '../../../plugin-backfill/src/planner.js'
 import { PlanSchema } from '../../../plugin-backfill/src/options.js'
-import { getRequiredEnv } from './e2e-testkit.js'
+import {
+	createLiveExecutor,
+	createPrefix,
+	getRequiredEnv,
+	pollUntil,
+	quoteIdent,
+} from './e2e-testkit.js'
 
 test('column expressions survive create, pull, drift, inserts and ALTER on live ClickHouse', async () => {
 	const env = getRequiredEnv()
@@ -76,6 +82,10 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 		primaryKey: 'id',
 		orderBy: 'id',
 	})
+	// DDL is eventually consistent on managed ClickHouse (e.g. ObsessionDB): re-read
+	// system.columns until it reflects the definition before comparing.
+	const settledShape = () =>
+		pollUntil(actual, (shape) => compareTableShape(def, shape) === null)
 	const migrate = async (next: TableDefinition) => {
 		const plan = planDiff([def], [next])
 		for (const operation of plan.operations) {
@@ -83,17 +93,20 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 			await client.command({ query: operation.sql })
 		}
 		def = next
-		expect(compareTableShape(def, await actual())).toBeNull()
+		expect(compareTableShape(def, await settledShape())).toBeNull()
 	}
 	try {
 		await client.command({ query: toCreateSQL(def) })
-		expect(compareTableShape(def, await actual())).toBeNull()
-        await expect(buildBackfillPlan({
-            opts: PlanSchema.parse({ target: `${def.database}.${name}` }),
-            configPath: join(dir, 'config.ts'),
-            config: { metaDir: join(dir, 'meta'), schema: [join(dir, 'missing.ts')] },
-            clickhouseQuery: query,
-        })).rejects.toThrow('cannot reconstruct EPHEMERAL inputs')
+		expect(compareTableShape(def, await settledShape())).toBeNull()
+		const backfill = (target: string) =>
+			buildBackfillPlan({
+				opts: PlanSchema.parse({ target: `${def.database}.${target}` }),
+				configPath: join(dir, 'config.ts'),
+				config: { metaDir: join(dir, 'meta'), schema: [join(dir, 'missing.ts')] },
+				clickhouseQuery: query,
+			})
+		await expect(backfill(name)).rejects.toThrow('cannot reconstruct EPHEMERAL inputs')
+		await expect(backfill(`${name}_missing`)).rejects.toThrow('does not exist or is not visible yet')
 		const pulled = {
 			...def,
 			columns: (await columns()).map((column) => ({
@@ -221,7 +234,44 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 		await client.close()
 		await rm(dir, { recursive: true, force: true })
 	}
-}, 30_000)
+}, 120_000)
+
+test('hand-written heredoc defaults and alias-typed EPHEMERAL columns show no drift', async () => {
+	const env = getRequiredEnv()
+	const executor = createLiveExecutor(env)
+	const def = table({
+		database: env.clickhouseDatabase,
+		name: `${createPrefix('expr_drift')}events`,
+		engine: 'MergeTree()',
+		primaryKey: ['id'],
+		orderBy: ['id'],
+		columns: [
+			{ name: 'id', type: 'UInt32' },
+			{ name: 'msg', type: 'String', default: "fn:$$it's$$" },
+			{ name: 'wrapped', type: 'String', default: "fn:concat($$(x$$, 'y')" },
+			{ name: 'big', type: 'Int64', defaultKind: 'EPHEMERAL' },
+			{ name: 'dec', type: 'Decimal(9, 2)', defaultKind: 'EPHEMERAL' },
+			{ name: 'opt', type: 'Int64', nullable: true, defaultKind: 'EPHEMERAL' },
+			{ name: 'explicit', type: 'String', defaultKind: 'EPHEMERAL', default: "fn:defaultValueOfTypeName('String')" },
+		],
+	})
+	const fqn = `${quoteIdent(def.database)}.${quoteIdent(def.name)}`
+	try {
+		// ClickHouse stores heredocs as quoted literals and canonicalizes alias types,
+		// but keeps the written spelling in the synthesized EPHEMERAL default.
+		await executor.command(
+			`CREATE TABLE ${fqn} (id UInt32, msg String DEFAULT $$it's$$, wrapped String DEFAULT concat($$(x$$, 'y'), big BIGINT EPHEMERAL, dec Decimal32(2) EPHEMERAL, opt Nullable(BIGINT) EPHEMERAL, explicit String EPHEMERAL defaultValueOfTypeName('String')) ENGINE = MergeTree ORDER BY id`,
+		)
+		const shape = await pollUntil(
+			async () => (await executor.listTableDetails([def.database])).find((item) => item.name === def.name),
+			(item) => item?.columns.length === def.columns.length,
+		)
+		expect(shape && compareTableShape(def, shape)).toBeNull()
+	} finally {
+		await executor.command(`DROP TABLE IF EXISTS ${fqn}`)
+		await executor.close()
+	}
+}, 60_000)
 
 test('generated ingest helpers use insert shapes, while rows exclude ephemeral inputs', () => {
 	const def = table({

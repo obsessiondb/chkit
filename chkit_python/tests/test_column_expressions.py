@@ -16,7 +16,7 @@ from chkit.clickhouse.introspect import (
     SystemColumnRow,
     normalize_column_from_system_row,
 )
-from chkit.core.model import Snapshot, TableDefinition
+from chkit.core.model import ChxValidationError, Snapshot, TableDefinition
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
@@ -136,10 +136,49 @@ def test_remove_expression_with_type_change(kind: str) -> None:
 @pytest.mark.parametrize("kind", ["ALIAS", "EPHEMERAL"])
 def test_storage_kind_changes_are_rejected(kind: str) -> None:
     virtual = definition(default_kind=kind, default="fn:toDate(ts)")
-    with pytest.raises(ValueError, match="storage-kind conversions involving ALIAS or EPHEMERAL are not supported"):
+    with pytest.raises(ChxValidationError):
         plan_diff([definition()], [virtual])
-    with pytest.raises(ValueError, match="storage-kind conversions involving ALIAS or EPHEMERAL are not supported"):
+    with pytest.raises(ChxValidationError):
         plan_diff([virtual], [definition()])
+
+
+def test_every_blocked_storage_kind_change_of_a_table_is_reported_at_once() -> None:
+    def events(day: str, label: str) -> TableDefinition:
+        return table(
+            database="default",
+            name="events",
+            engine="MergeTree()",
+            primary_key=["ts"],
+            order_by=["ts"],
+            columns=[
+                {"name": "ts", "type": "DateTime"},
+                {"name": "day", "type": "Date", "default_kind": day, "default": "fn:toDate(ts)"},
+                {"name": "label", "type": "String", "default_kind": label, "default": "fn:toString(ts)"},
+            ],
+        )
+
+    with pytest.raises(ChxValidationError) as excinfo:
+        plan_diff([events("DEFAULT", "ALIAS")], [events("EPHEMERAL", "DEFAULT")])
+    assert [issue.model_dump() for issue in excinfo.value.issues] == [
+        {
+            "code": "column_kind_change_unsupported",
+            "kind": "table",
+            "database": "default",
+            "name": "events",
+            "message": f"Cannot automatically change column default.events.{name} from {old} to "
+            f"{new}; storage-kind conversions involving ALIAS or EPHEMERAL are not supported. "
+            f"Keep the column declared as {old} in the schema.",
+        }
+        for name, old, new in [("day", "DEFAULT", "EPHEMERAL"), ("label", "ALIAS", "DEFAULT")]
+    ]
+
+
+@pytest.mark.parametrize(("before", "after"), [(0, False), (True, 1)])
+def test_historical_value_warning_treats_booleans_and_numbers_as_distinct(
+    before: int | bool, after: int | bool
+) -> None:
+    plan = plan_diff([definition(type="UInt8", default=before)], [definition(type="UInt8", default=after)])
+    assert "does not rewrite stored historical values" in (plan.operations[0].warning or "")
 
 
 def test_validation_and_alias() -> None:
@@ -267,8 +306,9 @@ def test_stored_expression_warning() -> None:
 @pytest.mark.parametrize(
     ("rows", "message"),
     [
-        ([{"name": "raw", "default_kind": "EPHEMERAL"}], "cannot reconstruct EPHEMERAL"),
-        ([], "Cannot verify live target column kinds"),
+        ([{"name": "raw", "default_kind": "EPHEMERAL"}, {"name": "day", "default_kind": "MATERIALIZED"}],
+         r"recomputes MATERIALIZED column\(s\) day, which may read EPHEMERAL column\(s\) raw"),
+        ([], "does not exist or is not visible yet"),
         ([{"name": "raw"}], "Cannot verify live target column kinds"),
         ([{"name": "raw", "default_kind": "FUTURE"}], "Cannot verify live target column kinds"),
     ],
@@ -277,7 +317,7 @@ def test_backfill_live_safety_gate(rows: list[dict[str, object]], message: str) 
 
     with pytest.raises(Exception, match=message):
         assert_backfill_target_safe(
-            database="default", table="events", query=lambda sql, settings: rows
+            database="default", table="events", mode="copy", query=lambda sql, settings: rows
         )
 
 

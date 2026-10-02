@@ -48,10 +48,9 @@ from chkit.core.model import (
     SkipIndexText,
     SkipIndexTokenBF,
 )
-from chkit.core.sql import render_default
-from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
 from chkit.core.text_index import parse_text_index_params
-from chkit.core.text_index_sql import normalize_text_index_sql, text_sql_fingerprint
+from chkit.core.text_index_sql import normalize_text_index_sql
 
 SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view", "dictionary"]
 
@@ -156,9 +155,12 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
         # Preserve whitespace inside SQL string literals when pulling expressions.
         default_value = row.default_expression.strip()
 
-    if kind == "EPHEMERAL" and default_value is not None and (
-        text_sql_fingerprint(str(default_value))
-        == text_sql_fingerprint(f"defaultValueOfTypeName({render_default(row.type)})")
+    # ClickHouse synthesizes defaultValueOfTypeName('<type as written>') for a
+    # bare EPHEMERAL column, keeping alias spellings such as BIGINT or TEXT.
+    if (
+        kind == "EPHEMERAL"
+        and default_value is not None
+        and is_synthetic_ephemeral_default(default_value)
     ):
         default_value = None
     codec_steps = parse_codec(row.compression_codec)

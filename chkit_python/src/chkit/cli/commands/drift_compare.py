@@ -30,9 +30,13 @@ from chkit.core.model import (
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.sql import render_default
-from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.sql_normalizer import (
+    is_synthetic_ephemeral_default,
+    normalize_engine,
+    normalize_sql_fragment,
+    sql_expression_fingerprint,
+)
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
-from chkit.core.text_index_sql import text_expression_fingerprint, text_sql_fingerprint
 
 _MIN_QUOTED_LEN = 2
 
@@ -218,9 +222,14 @@ def summarize_drift_reasons(
 
 
 def _normalize_column_shape(column: ColumnDefinition) -> str:
+    rendered = None if column.default is None else render_default(column.default)
+    # ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
+    # which introspection reads back as no expression; an explicit one matches it.
     normalized_default = (
-        "" if column.default is None
-        else text_sql_fingerprint(text_expression_fingerprint(render_default(column.default)))
+        ""
+        if rendered is None
+        or (column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered))
+        else sql_expression_fingerprint(rendered)
     )
 
     parts = [

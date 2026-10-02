@@ -262,7 +262,7 @@ When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL.
 
 Default value for the column.
 
-- **String** values are single-quoted in SQL: `default: 'pending'` produces `DEFAULT 'pending'`
+- **String** values are single-quoted in SQL, with quotes and backslashes escaped: `default: 'pending'` produces `DEFAULT 'pending'`
 - **Number/boolean** values are rendered literally: `default: 0` produces `DEFAULT 0`
 - **`fn:` prefix** -- for function-call defaults, prefix the string with `fn:` to emit a raw SQL expression:
 
@@ -280,6 +280,12 @@ Default value for the column.
     ```
   </TabItem>
 </Tabs>
+
+[`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, comments, outer parentheses, and quotes around plain identifiers. A string without `fn:` stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
+
+:::caution
+ClickHouse stores some expressions in a canonical form, such as `CAST(ts, 'String')` for `cast(ts as String)` or `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. Write the stored form after `fn:` to avoid permanent drift; `chkit pull` and `system.columns` show it.
+:::
 
 ### `defaultKind` (optional)
 
@@ -319,45 +325,21 @@ for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions
   </TabItem>
 </Tabs>
 
-`MATERIALIZED` and `ALIAS` require a value or expression. `EPHEMERAL` may omit it;
-supply these inputs with an explicit insert column list. ClickHouse normally
-excludes all three special kinds from `SELECT *`.
+`MATERIALIZED` and `ALIAS` require a value or expression; `EPHEMERAL` may omit it.
+ClickHouse normally excludes all three from `SELECT *` and accepts `EPHEMERAL` values
+only through an explicit insert column list. Keep the base type in `type`; do not
+embed `MATERIALIZED ...` in the type string.
 
-`pull`, snapshots, and drift preserve the column kind. Omitted kind and explicit
-`DEFAULT` compare identically, so existing snapshots need no migration. Keep the
-base type in `type`; do not embed `MATERIALIZED ...` in the type string.
+Changing a `DEFAULT` or `MATERIALIZED` expression, or switching between those two
+kinds, emits `MODIFY COLUMN` with a warning that stored values are not rewritten.
+Removing an expression emits `REMOVE DEFAULT` or `REMOVE MATERIALIZED`. Converting
+a column to or from `ALIAS` or `EPHEMERAL` fails `chkit generate` with
+`column_kind_change_unsupported` instead of dropping and recreating the column.
 
-Changing a stored expression emits `MODIFY COLUMN`, without rewriting historical
-values. The planner reports this explicitly in human and JSON output and includes
-the warning in migration SQL. Use a separately reviewed `ALTER TABLE ... MATERIALIZE
-COLUMN ...` only when you need that rewrite and the required inputs still exist.
-Values derived from discarded `EPHEMERAL` inputs cannot be reconstructed this way.
-Removing a `DEFAULT` or `MATERIALIZED` expression emits an explicit `REMOVE` clause.
-
-Converting an existing column to or from `ALIAS` or `EPHEMERAL` is not supported
-by the migration generator. This release does not provide snapshot adoption for
-manually applied conversions. The planner rejects these changes instead of dropping
-and recreating columns.
-
-Generated `Row` models describe the default `SELECT *` result, excluding
-`MATERIALIZED`, `ALIAS`, and `EPHEMERAL`. Tables using special kinds also get:
-
-- `RowExplicit`, containing all readable columns, for queries that name those columns explicitly.
-- `RowInsert`, excluding `MATERIALIZED` and `ALIAS` and including `EPHEMERAL` inputs.
-
-These names are suffixes: for example, `DefaultEventsRow`, `DefaultEventsRowExplicit`,
-and `DefaultEventsRowInsert`. TypeScript emits matching Zod schemas when enabled;
-Python emits Pydantic models. Generated TypeScript ingest helpers use `RowInsert`.
-Field requiredness is unchanged: insert models require their declared input fields,
-including defaults. Non-default `asterisk_include_materialized_columns` or
-`asterisk_include_alias_columns` settings change the result shape; use an explicit
-projection and its model when selecting those columns.
-
-Automatic backfill projections omit `MATERIALIZED` and `ALIAS` columns. Planning
-and local execution both check live target column kinds, including when the local
-schema is missing or cannot load. Missing, unknown, or unreadable metadata blocks
-the backfill. Targets with `EPHEMERAL` columns require explicit SQL with an input
-mapping because these inputs cannot be recovered from stored rows.
+Codegen emits separate read and insert types for these tables (see
+[Tables with generated columns](/plugins/codegen/#tables-with-generated-columns)),
+and the backfill plugin checks the target's column kinds before an automatic
+backfill (see [Target safety checks](/plugins/backfill/#target-safety-checks)).
 
 ### `comment` (string, optional)
 
@@ -980,6 +962,8 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
 - **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)
+- **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` is `fn:` with an empty expression
+- **Invalid column kind** (`column_default_kind_invalid`) -- `defaultKind` is not `DEFAULT`, `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` (Python rejects it when the column is constructed)
 - **Dictionary missing primary key** (`dictionary_missing_primary_key`) -- a dictionary's `primaryKey` is empty
 - **Dictionary primary key references missing attribute** (`dictionary_primary_key_missing_attribute`) -- a `primaryKey` entry doesn't name a declared attribute
 - **Dictionary missing source/layout/lifetime** (`dictionary_missing_source`, `dictionary_missing_layout`, `dictionary_missing_lifetime`) -- one of these raw-string fields is empty

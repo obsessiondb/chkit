@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from chkit.clickhouse.introspect import (
     SystemColumnRow,
     normalize_column_from_system_row,
 )
+from chkit.core.model import TableDefinition
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 from chkit_plugin_backfill.planner import assert_backfill_target_safe
@@ -52,24 +54,13 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:
     target = f"{database}.{name}"
     try:
         client.command(to_create_sql(definition))
-        rows = client.query(
-            f"SELECT database, table, name, type, position, default_kind, default_expression FROM system.columns WHERE database='{database}' AND table='{name}' ORDER BY position"
-        ).named_results()
-        columns = [normalize_column_from_system_row(SystemColumnRow(**row)) for row in rows]
-        actual = IntrospectedTable(
-            database=database,
-            name=name,
-            columns=columns,
-            settings={},
-            indexes=[],
-            projections=[],
-            engine="MergeTree()",
-            primary_key="id",
-            order_by="id",
-        )
+        actual = _settled_shape(client, definition)
         assert compare_table_shape(definition, actual) is None
         with pytest.raises(Exception, match="cannot reconstruct EPHEMERAL"):
-            assert_backfill_target_safe(database=database, table=name,
+            assert_backfill_target_safe(database=database, table=name, mode="copy",
+                query=lambda sql, settings: list(client.query(sql).named_results()))
+        with pytest.raises(Exception, match="does not exist or is not visible yet"):
+            assert_backfill_target_safe(database=database, table=f"{name}_missing", mode="copy",
                 query=lambda sql, settings: list(client.query(sql).named_results()))
         pulled = _introspected_table_to_definition(actual)
         assert pulled is not None
@@ -103,6 +94,7 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:
         for operation in plan_diff([definition], [changed]).operations:
             assert "MATERIALIZE COLUMN" not in operation.sql
             client.command(operation.sql)
+        assert compare_table_shape(changed, _settled_shape(client, changed)) is None
         assert client.query(f"SELECT size FROM {target}").result_rows == [(3,)]
         client.command(f"INSERT INTO {target} (id, raw) VALUES (2, 'abcd')")
         assert client.query(f"SELECT size FROM {target} ORDER BY id").result_rows == [(3,), (7,)]
@@ -118,8 +110,80 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:
         )
         for operation in plan_diff([changed], [plain]).operations:
             client.command(operation.sql)
-        assert client.query(
-            f"SELECT default_kind FROM system.columns WHERE database='{database}' AND table='{name}' AND name='size'"
-        ).result_rows == [("",)]
+        assert compare_table_shape(plain, _settled_shape(client, plain)) is None
     finally:
         client.command(f"DROP TABLE IF EXISTS {target} SYNC")
+
+
+def test_hand_written_heredoc_and_alias_typed_ephemeral_columns_show_no_drift(
+    ch_client: Any,
+) -> None:
+    client = ch_client._client
+    definition = table(
+        database=client.database,
+        name=f"expr_drift_py_{uuid4().hex}",
+        engine="MergeTree()",
+        order_by=["id"],
+        primary_key=["id"],
+        columns=[
+            {"name": "id", "type": "UInt32"},
+            {"name": "msg", "type": "String", "default": "fn:$$it's$$"},
+            {"name": "wrapped", "type": "String", "default": "fn:concat($$(x$$, 'y')"},
+            {"name": "big", "type": "Int64", "default_kind": "EPHEMERAL"},
+            {"name": "dec", "type": "Decimal(9, 2)", "default_kind": "EPHEMERAL"},
+            {"name": "opt", "type": "Int64", "nullable": True, "default_kind": "EPHEMERAL"},
+            {
+                "name": "explicit",
+                "type": "String",
+                "default_kind": "EPHEMERAL",
+                "default": "fn:defaultValueOfTypeName('String')",
+            },
+        ],
+    )
+    target = f"{definition.database}.{definition.name}"
+    try:
+        # ClickHouse stores heredocs as quoted literals and canonicalizes alias types,
+        # but keeps the written spelling in the synthesized EPHEMERAL default.
+        client.command(
+            f"CREATE TABLE {target} (id UInt32, msg String DEFAULT $$it's$$, "
+            "wrapped String DEFAULT concat($$(x$$, 'y'), big BIGINT EPHEMERAL, "
+            "dec Decimal32(2) EPHEMERAL, opt Nullable(BIGINT) EPHEMERAL, "
+            "explicit String EPHEMERAL defaultValueOfTypeName('String')) "
+            "ENGINE = MergeTree ORDER BY id"
+        )
+        assert compare_table_shape(definition, _settled_shape(client, definition)) is None
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {target} SYNC")
+
+
+def _settled_shape(client: Any, definition: TableDefinition) -> IntrospectedTable:
+    """Re-read ``system.columns`` until it matches ``definition``.
+
+    DDL is eventually consistent on managed ClickHouse (e.g. ObsessionDB). Running
+    out of time returns the last observation so the caller's assert shows it.
+    """
+    for _ in range(60):
+        shape = _read_shape(client, definition)
+        if compare_table_shape(definition, shape) is None:
+            break
+        time.sleep(0.5)
+    return shape
+
+
+def _read_shape(client: Any, definition: TableDefinition) -> IntrospectedTable:
+    rows = client.query(
+        "SELECT database, table, name, type, position, default_kind, default_expression "
+        f"FROM system.columns WHERE database='{definition.database}' "
+        f"AND table='{definition.name}' ORDER BY position"
+    ).named_results()
+    return IntrospectedTable(
+        database=definition.database,
+        name=definition.name,
+        columns=[normalize_column_from_system_row(SystemColumnRow(**row)) for row in rows],
+        settings={},
+        indexes=[],
+        projections=[],
+        engine="MergeTree()",
+        primary_key="id",
+        order_by="id",
+    )

@@ -1,4 +1,4 @@
-"""Inspect local drift without turning unsupported Kafka changes into SQL."""
+"""Inspect local drift without turning unsupported changes into SQL."""
 
 from chkit.cli.table_scope import TableScope, filter_plan_by_table_scope
 from chkit.core.model import (
@@ -9,13 +9,16 @@ from chkit.core.model import (
 )
 from chkit.core.planner import plan_diff
 
+# Changes the planner refuses to turn into SQL for a whole object.
+_BLOCKING_CODES = frozenset({"kafka_change_requires_replacement", "column_kind_change_unsupported"})
+
 
 def plan_snapshot_drift(
     previous: list[SchemaDefinition],
     current: list[SchemaDefinition],
     scope: TableScope,
 ) -> tuple[MigrationPlan, list[ValidationIssue]]:
-    """Report blocked replacements alongside the remaining, plannable changes.
+    """Report blocked changes alongside the remaining, plannable changes.
 
     Migration generation still fails on these issues. Read-only checks can
     report them and continue inspecting other tables, including scoped checks.
@@ -26,9 +29,7 @@ def plan_snapshot_drift(
             plan = plan_diff(previous, current)
             break
         except ChxValidationError as error:
-            if not error.issues or any(
-                issue.code != "kafka_change_requires_replacement" for issue in error.issues
-            ):
+            if not error.issues or any(issue.code not in _BLOCKING_CODES for issue in error.issues):
                 raise
             blocked = {(issue.kind, issue.database, issue.name) for issue in error.issues}
             issues.extend(
