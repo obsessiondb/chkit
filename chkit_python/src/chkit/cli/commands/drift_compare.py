@@ -29,7 +29,13 @@ from chkit.core.model import (
     TableDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.sql import render_default
+from chkit.core.sql_normalizer import (
+    is_synthetic_ephemeral_default,
+    normalize_engine,
+    normalize_sql_fragment,
+    sql_expression_fingerprint,
+)
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 
 _MIN_QUOTED_LEN = 2
@@ -216,30 +222,21 @@ def summarize_drift_reasons(
 
 
 def _normalize_column_shape(column: ColumnDefinition) -> str:
-    def _normalize_default_value(value: str) -> str:
-        normalized = normalize_sql_fragment(value)
-        if (
-            len(normalized) >= _MIN_QUOTED_LEN
-            and normalized[0] == "'"
-            and normalized[-1] == "'"
-        ):
-            inner = normalized[1:-1]
-            return inner.replace("''", "'")
-        return normalized
-
-    if column.default is None:
-        normalized_default = ""
-    else:
-        as_string = str(column.default)
-        if as_string.startswith("fn:"):
-            normalized_default = _normalize_default_value(as_string[3:])
-        else:
-            normalized_default = _normalize_default_value(as_string)
+    rendered = None if column.default is None else render_default(column.default)
+    # ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
+    # which introspection reads back as no expression; an explicit one matches it.
+    normalized_default = (
+        ""
+        if rendered is None
+        or (column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered))
+        else sql_expression_fingerprint(rendered)
+    )
 
     parts = [
         f"type={str(column.type).strip()}",
         f"nullable={'1' if column.nullable else '0'}",
         f"default={normalized_default}",
+        f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
     ]
     return "|".join(parts)
@@ -337,7 +334,12 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     """Compare every shape-bearing field on the table. Returns None if identical."""
     column_diff = diff_by_name(
         expected.columns,
-        actual.columns,
+        [
+            column.model_copy(update={"default": f"fn:{column.default}"})
+            if isinstance(column.default, str) and not column.default.startswith("fn:")
+            else column
+            for column in actual.columns
+        ],
         lambda c: c.name,
         _normalize_column_shape,
     )

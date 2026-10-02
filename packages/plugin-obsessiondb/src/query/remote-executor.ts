@@ -13,6 +13,7 @@ import {
 	type SystemSkippingIndexRow,
 	type SystemTableRow,
 } from '@chkit/clickhouse'
+import { unquoteIdentifiers } from '@chkit/core'
 import type { Credentials } from '../auth/index.js'
 import { type ApiClient, createApiClient } from '../client.js'
 
@@ -71,6 +72,37 @@ export function normalizeQueryJsonResult<T extends Record<string, unknown>>(
 	return out
 }
 
+/**
+ * The `INSERT ... VALUES` statement for an insert, or undefined when there are no
+ * rows. An explicit column list (required to supply EPHEMERAL inputs) takes
+ * precedence over the first row's keys. A field a row omits takes the column's
+ * DEFAULT; an explicit null is sent as NULL.
+ */
+export function renderValuesInsert<T extends Record<string, unknown>>(
+	params: ClickHouseInsertParams<T>,
+): string | undefined {
+	const [firstValue] = params.values
+	if (!firstValue) return undefined
+	const columns = params.columns?.length
+		? params.columns.map((sql) => ({ sql, key: unquoteIdentifiers(sql) }))
+		: Object.keys(firstValue).map((key) => ({ sql: key, key }))
+	const rows = params.values
+		.map(
+			(row) =>
+				`(${columns
+					.map(({ key }) => {
+						const val = row[key]
+						if (val === undefined) return 'DEFAULT'
+						if (val === null) return 'NULL'
+						if (typeof val === 'number') return String(val)
+						return `'${String(val).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
+					})
+					.join(', ')})`,
+		)
+		.join(', ')
+	return `INSERT INTO ${params.table} (${columns.map(({ sql }) => sql).join(', ')}) VALUES ${rows}`
+}
+
 export function createRemoteExecutor(deps: {
 	credentials: Credentials
 	serviceSlug: string
@@ -112,29 +144,14 @@ export function createRemoteExecutor(deps: {
 		async insert<T extends Record<string, unknown>>(
 			params: ClickHouseInsertParams<T>,
 		) {
-			if (params.values.length === 0) return
-			const [firstValue] = params.values
-			if (!firstValue) return
-			const columns = Object.keys(firstValue)
-			const rows = params.values
-				.map(
-					(row) =>
-						`(${columns
-							.map((col) => {
-								const val = row[col]
-								if (val === null || val === undefined) return 'NULL'
-								if (typeof val === 'number') return String(val)
-								return `'${String(val).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
-							})
-							.join(', ')})`,
-				)
-				.join(', ')
+			const query = renderValuesInsert(params)
+			if (!query) return
 			// Per-insert settings such as insert_deduplication_token must reach
 			// ClickHouse, so this cannot go through command(), which sends none.
 			const apiSettings = toApiSettings(params.settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
-				query: `INSERT INTO ${params.table} (${columns.join(', ')}) VALUES ${rows}`,
+				query,
 				...(apiSettings ? { settings: apiSettings } : {}),
 			})
 			throwIfError(res)

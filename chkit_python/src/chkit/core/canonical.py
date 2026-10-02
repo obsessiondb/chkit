@@ -52,6 +52,7 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
     canon_type = type_value.strip() if isinstance(type_value, str) else type_value
     return column.model_copy(
         update={
+            "default_kind": None if column.default_kind == "DEFAULT" else column.default_kind,
             "name": column.name.strip(),
             "renamed_from": column.renamed_from.strip()
             if column.renamed_from is not None

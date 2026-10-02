@@ -53,7 +53,7 @@ from chkit_plugin_backfill.payload import (
     plan_payload,
     status_payload,
 )
-from chkit_plugin_backfill.planner import build_backfill_plan
+from chkit_plugin_backfill.planner import assert_backfill_target_safe, build_backfill_plan
 from chkit_plugin_backfill.queries import (
     cancel_backfill_run,
     get_backfill_doctor_report,
@@ -154,6 +154,13 @@ class _ThreadLocalExecutor:
     def query(self, statement: str) -> object:
         return self._client().query(statement)
 
+    def query_rows(
+        self, statement: str, settings: QuerySettings | None = None,
+    ) -> list[dict[str, object]]:
+        return self._client().query(
+            statement, dict(settings) if settings is not None else None
+        ).rows
+
     def close(self) -> None:
         with self._clients_lock:
             clients = list(self._clients)
@@ -230,6 +237,10 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
     db = _ThreadLocalExecutor(clickhouse)
 
     try:
+        database, table = plan.target.split(".")
+        assert_backfill_target_safe(
+            database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+        )
         run_state = BackfillRunState(
             plan_id=plan.plan_id,
             target=plan.target,

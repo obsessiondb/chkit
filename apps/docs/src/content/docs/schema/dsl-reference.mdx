@@ -262,7 +262,7 @@ When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL.
 
 Default value for the column.
 
-- **String** values are single-quoted in SQL: `default: 'pending'` produces `DEFAULT 'pending'`
+- **String** values are single-quoted in SQL, with quotes and backslashes escaped: `default: 'pending'` produces `DEFAULT 'pending'`
 - **Number/boolean** values are rendered literally: `default: 0` produces `DEFAULT 0`
 - **`fn:` prefix** -- for function-call defaults, prefix the string with `fn:` to emit a raw SQL expression:
 
@@ -280,6 +280,66 @@ Default value for the column.
     ```
   </TabItem>
 </Tabs>
+
+[`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, comments, outer parentheses, and quotes around plain identifiers. A string without `fn:` stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
+
+:::caution
+ClickHouse stores some expressions in a canonical form, such as `CAST(ts, 'String')` for `cast(ts as String)` or `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. Write the stored form after `fn:` to avoid permanent drift; `chkit pull` and `system.columns` show it.
+:::
+
+### `defaultKind` (optional)
+
+Choose `DEFAULT` (the implicit default), `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`.
+Python also accepts `default_kind`. The `default` field holds the value or expression
+for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions.
+
+| Kind | Behavior |
+| --- | --- |
+| `DEFAULT` | Stored; the expression applies when the insert omits the value. |
+| `MATERIALIZED` | Computed on insert and stored; cannot be supplied in a normal insert. |
+| `ALIAS` | Computed when explicitly selected; neither stored nor insertable. |
+| `EPHEMERAL` | Input for other column expressions; neither stored nor selectable. |
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    columns: [
+      { name: 'ts', type: 'DateTime' },
+      { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'fn:toDate(ts)' },
+      { name: 'label', type: 'String', defaultKind: 'ALIAS', default: 'fn:toString(day)' },
+      { name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' },
+      { name: 'size', type: 'UInt64', default: 'fn:length(raw)' },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    columns=[
+        {"name": "ts", "type": "DateTime"},
+        {"name": "day", "type": "Date", "default_kind": "MATERIALIZED", "default": "fn:toDate(ts)"},
+        {"name": "label", "type": "String", "default_kind": "ALIAS", "default": "fn:toString(day)"},
+        {"name": "raw", "type": "String", "default_kind": "EPHEMERAL"},
+        {"name": "size", "type": "UInt64", "default": "fn:length(raw)"},
+    ]
+    ```
+  </TabItem>
+</Tabs>
+
+`MATERIALIZED` and `ALIAS` require a value or expression; `EPHEMERAL` may omit it.
+ClickHouse normally excludes all three from `SELECT *` and accepts `EPHEMERAL` values
+only through an explicit insert column list. Keep the base type in `type`; do not
+embed `MATERIALIZED ...` in the type string.
+
+Changing a `DEFAULT` or `MATERIALIZED` expression, or switching between those two
+kinds, emits `MODIFY COLUMN` with a warning that stored values are not rewritten.
+Removing an expression emits `REMOVE DEFAULT` or `REMOVE MATERIALIZED`. Converting
+a column to or from `ALIAS` or `EPHEMERAL` fails `chkit generate` with
+`column_kind_change_unsupported` instead of dropping and recreating the column.
+
+Codegen emits separate read and insert types for these tables (see
+[Tables with generated columns](/plugins/codegen/#tables-with-generated-columns)),
+and the backfill plugin checks the target's column kinds before an automatic
+backfill (see [Target safety checks](/plugins/backfill/#target-safety-checks)).
 
 ### `comment` (string, optional)
 
@@ -902,6 +962,8 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
 - **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)
+- **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` is `fn:` with an empty expression
+- **Invalid column kind** (`column_default_kind_invalid`) -- `defaultKind` is not `DEFAULT`, `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` (Python rejects it when the column is constructed)
 - **Dictionary missing primary key** (`dictionary_missing_primary_key`) -- a dictionary's `primaryKey` is empty
 - **Dictionary primary key references missing attribute** (`dictionary_primary_key_missing_attribute`) -- a `primaryKey` entry doesn't name a declared attribute
 - **Dictionary missing source/layout/lifetime** (`dictionary_missing_source`, `dictionary_missing_layout`, `dictionary_missing_lifetime`) -- one of these raw-string fields is empty

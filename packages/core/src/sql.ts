@@ -18,17 +18,18 @@ import { renderProjectionBody } from './projection.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 
-function renderDefault(value: string | number | boolean): string {
+export function renderDefault(value: string | number | boolean): string {
   if (typeof value === 'string') {
     if (value.startsWith('fn:')) return value.slice(3)
-    return `'${value.replace(/'/g, "''")}'`
+    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`
   }
   return String(value)
 }
 
 function renderColumn(col: ColumnDefinition): string {
   let out = `${quoteIdentifier(col.name)} ${col.nullable ? `Nullable(${col.type})` : col.type}`
-  if (col.default !== undefined) out += ` DEFAULT ${renderDefault(col.default)}`
+  if (col.default !== undefined) out += ` ${col.defaultKind ?? 'DEFAULT'} ${renderDefault(col.default)}`
+  else if (col.defaultKind === 'EPHEMERAL') out += ' EPHEMERAL'
   if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
   if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
@@ -215,8 +216,15 @@ export function renderAlterAddColumn(def: TableDefinition, column: ColumnDefinit
   return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD COLUMN IF NOT EXISTS ${renderColumn(column)};`
 }
 
-export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefinition): string {
-  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)};`
+export function renderAlterModifyColumn(
+  def: TableDefinition,
+  column: ColumnDefinition,
+  previous?: ColumnDefinition
+): string {
+  const remove = previous?.default !== undefined && column.default === undefined && column.defaultKind !== 'EPHEMERAL'
+    ? `, MODIFY COLUMN ${quoteIdentifier(column.name)} REMOVE ${previous.defaultKind ?? 'DEFAULT'}`
+    : ''
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)}${remove};`
 }
 
 export function renderAlterDropColumn(def: TableDefinition, columnName: string): string {

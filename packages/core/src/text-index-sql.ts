@@ -64,9 +64,13 @@ function stringLiteral(body: string): string {
       i += point.length
     }
   }
+  return literalFromBytes(bytes)
+}
+
+function literalFromBytes(bytes: Iterable<number>): string {
   return (
     "'" +
-    bytes
+    Array.from(bytes)
       .map((byte) => {
         if (byte === 39) return "\\'"
         if (byte === 92) return '\\\\'
@@ -119,6 +123,16 @@ export function textSQLTokens(sql: string): string[] {
       const raw = sql.slice(start, i)
       tokens.push(char === "'" ? stringLiteral(raw.slice(1, -1)) : raw)
       continue
+    }
+    if (char === '$') {
+      // ClickHouse reads $tag$...$tag$ as a raw string and stores it as '...'.
+      const tag = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i))?.[0]
+      const end = tag === undefined ? -1 : sql.indexOf(tag, i + tag.length)
+      if (tag !== undefined && end >= 0) {
+        tokens.push(literalFromBytes(UTF8.encode(sql.slice(i + tag.length, end))))
+        i = end + tag.length
+        continue
+      }
     }
     if (char === ';') throw new Error('Expected a SQL expression, not a statement')
     if ('([{'.includes(char)) brackets.push(char)

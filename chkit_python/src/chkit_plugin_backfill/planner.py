@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from chkit.core.model import (
     MaterializedViewDefinition,
@@ -84,18 +84,84 @@ def _detect_backfill_strategy(
             ),
             None,
         )
+        if table_def is not None and any(
+            column.default_kind == "EPHEMERAL" for column in table_def.columns
+        ):
+            raise BackfillConfigError(
+                "Automatic backfill cannot reconstruct EPHEMERAL inputs; "
+                "use an explicit INSERT with an input column mapping."
+            )
         return _BackfillStrategy(
             mvs=mvs,
             mv_replay_queries=[mv.as_ for mv in mvs],
             target_columns=(
-                [column.name for column in table_def.columns]
+                [
+                    column.name for column in table_def.columns
+                    if column.default_kind in {None, "DEFAULT"}
+                ]
                 if table_def is not None
                 else None
             ),
         )
+    except BackfillConfigError:
+        raise
     except Exception:
         # Schema load failed, fall back to direct copy.
         return _BackfillStrategy(mvs=[])
+
+
+def assert_backfill_target_safe(
+    *, database: str, table: str, mode: Literal["copy", "mv_replay"], query: PlannerQuery,
+    query_settings: QuerySettings | None = None,
+) -> None:
+    """Fail closed when live metadata cannot establish safe input semantics.
+
+    Copy mode re-inserts ``SELECT *``, which keeps stored DEFAULT values but
+    recomputes MATERIALIZED ones. Expressions are not parsed, so a copy is
+    refused whenever a MATERIALIZED column could read an EPHEMERAL input.
+    """
+    def quote(value: str) -> str:
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    target = f"{database}.{table}"
+    rows = query(
+        "SELECT name, default_kind FROM system.columns "
+        f"WHERE database = {quote(database)} AND table = {quote(table)} ORDER BY position",
+        query_settings,
+    )
+    if not rows and not query(
+        "SELECT name FROM system.tables "
+        f"WHERE database = {quote(database)} AND name = {quote(table)}",
+        query_settings,
+    ):
+        raise BackfillConfigError(
+            f"Backfill target {target} does not exist or is not visible yet. "
+            "DDL may still be propagating on managed ClickHouse (e.g. ObsessionDB); "
+            "check the name and retry."
+        )
+    if not rows or any(
+        not column.get("name")
+        or column.get("default_kind") not in {"", "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL"}
+        for column in rows
+    ):
+        raise BackfillConfigError(
+            "Cannot verify live target column kinds; automatic backfill is blocked. "
+            "Check metadata access and use an explicit INSERT if needed."
+        )
+    ephemeral = [str(c["name"]) for c in rows if c["default_kind"] == "EPHEMERAL"]
+    materialized = [str(c["name"]) for c in rows if c["default_kind"] == "MATERIALIZED"]
+    if ephemeral and mode == "mv_replay":
+        raise BackfillConfigError(
+            "Automatic backfill cannot reconstruct EPHEMERAL inputs; "
+            "use an explicit INSERT with an input column mapping."
+        )
+    if ephemeral and materialized:
+        raise BackfillConfigError(
+            f"Automatic backfill cannot reconstruct EPHEMERAL inputs; copying {target} "
+            f"recomputes MATERIALIZED column(s) {', '.join(materialized)}, which may read "
+            f"EPHEMERAL column(s) {', '.join(ephemeral)}. "
+            "Use an explicit INSERT with an input column mapping."
+        )
 
 
 @dataclass(frozen=True)
@@ -124,12 +190,16 @@ def build_backfill_plan(
     # backfill sizes its chunks against the MV *source* (the table its SELECT
     # reads), because the injected chunk conditions run against that source —
     # not the target, which is legitimately empty when bootstrapping an
-    # aggregate. Only the copy path introspects the target itself.
+    # aggregate. Target column safety is checked separately for both paths.
     strategy = _detect_backfill_strategy(
         schema=config.schema_,
         config_dir=Path(config_path).resolve().parent,
         database=database,
         table=table,
+    )
+    assert_backfill_target_safe(
+        database=database, table=table, query=clickhouse_query, query_settings=query_settings,
+        mode="mv_replay" if strategy.mv_replay_queries is not None else "copy",
     )
     replay_source = (
         resolve_mv_replay_source(strategy.mvs)

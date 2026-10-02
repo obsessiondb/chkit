@@ -17,7 +17,7 @@ import type {
 import { UnsupportedTypeError } from '../errors.js'
 import { normalizeCodegenOptions } from '../options.js'
 import { renderPropertyName, resolveTableNames } from '../naming.js'
-import { renderHeader } from './shared.js'
+import { insertTypeName, renderHeader } from './shared.js'
 
 const LARGE_INTEGER_TYPES = new Set([
   'Int64',
@@ -268,7 +268,36 @@ function renderTableInterface(
   interfaceName: string,
   options: Required<CodegenPluginOptions>
 ): { lines: string[]; findings: CodegenFinding[] } {
-  return renderFieldsInterface(table.columns, interfaceName, `${table.database}.${table.name}`, options)
+  const path = `${table.database}.${table.name}`
+  const read = renderFieldsInterface(
+    table.columns.filter((column) => !column.defaultKind || column.defaultKind === 'DEFAULT'),
+    interfaceName, path, options
+  )
+  const insertName = insertTypeName(table, interfaceName)
+  if (insertName === interfaceName) return read
+  const insert = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'MATERIALIZED' && column.defaultKind !== 'ALIAS'),
+    insertName, path, options
+  )
+  const explicit = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'EPHEMERAL'),
+    `${interfaceName}Explicit`, path, options
+  )
+  return {
+    lines: [...read.lines, '', ...explicit.lines, '', ...insert.lines],
+    // Ordinary columns appear in all three shapes; report each defect once.
+    findings: uniqueFindings([...read.findings, ...explicit.findings, ...insert.findings]),
+  }
+}
+
+function uniqueFindings(findings: CodegenFinding[]): CodegenFinding[] {
+  const seen = new Set<string>()
+  return findings.filter((finding) => {
+    const key = `${finding.code}\u0000${finding.path}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function renderDictionaryInterface(

@@ -49,7 +49,7 @@ When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This pre
 |------|---------|
 | `missing_column` | Column in snapshot not found in live table |
 | `extra_column` | Column in live table not in snapshot |
-| `changed_column` | Column exists but type or default differs |
+| `changed_column` | Column exists but type, default, or column kind differs |
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |

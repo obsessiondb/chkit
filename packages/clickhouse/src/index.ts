@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import {
 	type ChxConfig,
 	type ColumnDefinition,
+	isSyntheticEphemeralDefault,
 	normalizeSQLFragment,
 	type ProjectionDefinition,
 	parseCodec,
@@ -46,6 +47,12 @@ export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
 	compressed?: boolean
 	/** Per-insert settings, e.g. a stable `insert_deduplication_token`. */
 	settings?: ClickHouseSettings
+	/**
+	 * Explicit INSERT column list as SQL identifiers (quote names that need it).
+	 * Required to supply EPHEMERAL inputs: without it ClickHouse treats their
+	 * keys as unknown fields and silently drops them.
+	 */
+	columns?: string[]
 }
 
 export interface ClickHouseJsonQueryResult<
@@ -210,8 +217,17 @@ export function normalizeColumnFromSystemRow(
 	const type = nullableMatch?.[1] ? nullableMatch[1] : row.type
 	const nullable = Boolean(nullableMatch?.[1])
 	let defaultValue: ColumnDefinition['default'] | undefined
-	if (row.default_expression && row.default_kind === 'DEFAULT') {
-		defaultValue = normalizeSQLFragment(row.default_expression)
+	const defaultKind = row.default_kind
+	if (defaultKind && !['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(defaultKind)) {
+		throw new Error(`Unsupported column default kind: ${defaultKind}`)
+	}
+	if (row.default_expression && defaultKind) {
+		// Preserve whitespace inside SQL string literals when pulling expressions.
+		defaultValue = row.default_expression.trim()
+	}
+	// A bare EPHEMERAL column reads back as its synthesized default.
+	if (defaultKind === 'EPHEMERAL' && defaultValue !== undefined && isSyntheticEphemeralDefault(String(defaultValue))) {
+		defaultValue = undefined
 	}
 	const codecSteps = parseCodec(row.compression_codec)
 	return {
@@ -219,6 +235,9 @@ export function normalizeColumnFromSystemRow(
 		type,
 		nullable: nullable || undefined,
 		default: defaultValue,
+		defaultKind: defaultKind && defaultKind !== 'DEFAULT'
+			? defaultKind as ColumnDefinition['defaultKind']
+			: undefined,
 		comment: row.comment?.trim() || undefined,
 		codec: codecSteps,
 	}
@@ -759,6 +778,7 @@ export function createExecutorWithClient(
 					table: params.table,
 					values: params.values,
 					format: 'JSONEachRow',
+					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
 					...(params.settings ? { clickhouse_settings: params.settings } : {}),
 				})
 				assertStreamedQuerySucceeded({
@@ -968,4 +988,9 @@ export function createStatelessClickHouseExecutor(
 				}),
 		},
 	)
+}
+
+// @clickhouse/client only accepts a non-empty column list.
+function isNonEmpty<T>(values: T[] | undefined): values is [T, ...T[]] {
+	return values !== undefined && values.length > 0
 }

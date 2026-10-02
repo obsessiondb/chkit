@@ -204,7 +204,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   // post-pass, after all plan transforms (renames, plugins, scope filtering).
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
-  const dictionaryPasswordWarnings = detectDictionaryPasswordWarnings(plan)
+  const dictionaryPasswordWarnings = [
+    ...detectDictionaryPasswordWarnings(plan),
+    ...plan.operations.flatMap((operation) => operation.warning ? [operation.warning] : []),
+  ]
 
   if (planMode) {
     emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)

@@ -91,6 +91,11 @@ describe('Kafka tables', () => {
         { ...queue(), columns: [{ name: 'id', type: 'String', default: '' }] },
       ])[0]?.code,
     ).toBe('kafka_column_default')
+    expect(
+      validateDefinitions([
+        { ...queue(), columns: [{ name: 'id', type: 'String', defaultKind: 'EPHEMERAL' }] },
+      ])[0]?.code,
+    ).toBe('kafka_column_default')
     expect(validateDefinitions([{ ...queue(), settings: {} }])).toHaveLength(4)
     expect(
       validateDefinitions([

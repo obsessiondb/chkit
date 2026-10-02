@@ -33,6 +33,7 @@ type InsertCall = {
   client: string
   table: string
   values: Array<Record<string, unknown>>
+  columns?: string[]
 }
 
 type MockClientOptions = {
@@ -62,8 +63,8 @@ function createMockClient(
         },
       }
     },
-    async insert(params: { table: string; values: Array<Record<string, unknown>> }) {
-      calls.push({ client: name, table: params.table, values: params.values })
+    async insert(params: { table: string; values: Array<Record<string, unknown>>; columns?: string[] }) {
+      calls.push({ client: name, table: params.table, values: params.values, columns: params.columns })
       return {
         query_id: `${name}-insert`,
         response_headers: opts.insertHeaders ?? {},
@@ -160,6 +161,21 @@ describe('@chkit/clickhouse smoke', () => {
       { client: 'plain', table: 'default.users', values: [{ id: 1 }] },
       { client: 'plain', table: 'default.users', values: [{ id: 2 }] },
     ])
+    await executor.close()
+  })
+
+  test('forwards a non-empty insert column list', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'default', secure: false },
+      createMockClient('plain', calls),
+    )
+
+    await executor.insert({ table: 'app.events', values: [{ id: 1 }], columns: ['id', '`raw length`'] })
+    // @clickhouse/client rejects an empty list, so it is omitted like an absent one.
+    await executor.insert({ table: 'app.events', values: [{ id: 2 }], columns: [] })
+
+    expect(calls.map((call) => call.columns)).toEqual([['id', '`raw length`'], undefined])
     await executor.close()
   })
 

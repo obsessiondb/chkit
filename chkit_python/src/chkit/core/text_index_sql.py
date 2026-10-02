@@ -7,6 +7,7 @@ import re
 _ESCAPES = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27}
 _WORD = re.compile(r"(?:\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|[\w$]+|->|<=|>=|!=|<>|\|\||::|==)")
 _CLOSE = {")": "(", "]": "[", "}": "{"}
+_HEREDOC_TAG = re.compile(r"\$[A-Za-z0-9_]*\$")
 # Mirror ClickHouse's writeProbablyQuotedStringImpl (src/IO/WriteHelpers.cpp),
 # plus NULL, which its isValidIdentifier helper excludes separately.
 _QUOTED_IDENTIFIERS = {
@@ -57,6 +58,10 @@ def _string_literal(body: str) -> str:
         else:
             data.extend(char.encode())
             i += 1
+    return _literal_from_bytes(data)
+
+
+def _literal_from_bytes(data: bytes | bytearray) -> str:
     parts = []
     for byte in data:
         if byte == 39:
@@ -110,6 +115,14 @@ def text_sql_tokens(sql: str) -> list[str]:
             raw = sql[start:i]
             tokens.append(_string_literal(raw[1:-1]) if char == "'" else raw)
             continue
+        if char == "$":
+            # ClickHouse reads $tag$...$tag$ as a raw string and stores it as '...'.
+            tag = _HEREDOC_TAG.match(sql, i)
+            end = -1 if tag is None else sql.find(tag.group(), tag.end())
+            if tag is not None and end >= 0:
+                tokens.append(_literal_from_bytes(sql[tag.end() : end].encode()))
+                i = end + len(tag.group())
+                continue
         if char == ";":
             raise ValueError("Expected a SQL expression, not a statement")
         if char in "([{":

@@ -158,6 +158,8 @@ export default schema(app_events, app_events_view, app_events_mv)
 
 Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projections` when present in the source metadata.
 
+Pull writes column defaults as `fn:` expressions in the form ClickHouse stores them, and keeps the [`defaultKind`](/schema/dsl-reference/#defaultkind-optional) of `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns.
+
 ## Credential handling (`[HIDDEN]` passwords)
 
 By default, ClickHouse redacts inline `SOURCE(...)` passwords to `[HIDDEN]` on introspection (`system.tables.create_table_query`, `SHOW CREATE DICTIONARY`), and chkit does not attempt to work around that. When a pulled dictionary's `source` contains `[HIDDEN]`, `chkit pull` prints a console warning (and includes it in a `warnings` array in `--json` output), and the generated file emits the source verbatim with a leading comment:

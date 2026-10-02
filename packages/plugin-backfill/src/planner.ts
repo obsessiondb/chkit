@@ -46,14 +46,64 @@ async function detectBackfillStrategy(input: {
         definition.database === input.database &&
         definition.name === input.table
     )
+    if (tableDef?.kind === 'table' && tableDef.columns.some((column) => column.defaultKind === 'EPHEMERAL')) {
+      throw new BackfillConfigError('Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.')
+    }
     return {
       mvs,
       mvReplayQueries: mvs.map((mv) => mv.as),
-      targetColumns: tableDef?.kind === 'table' ? tableDef.columns.map((column) => column.name) : undefined,
+      targetColumns: tableDef?.kind === 'table'
+        ? tableDef.columns
+          .filter((column) => !column.defaultKind || column.defaultKind === 'DEFAULT')
+          .map((column) => column.name)
+        : undefined,
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof BackfillConfigError) throw error
     // Schema load failed, fall back to direct copy.
     return { mvs: [] }
+  }
+}
+
+/**
+ * Missing, unreadable or unsupported metadata must never bypass the safety gate.
+ * Copy mode re-inserts `SELECT *`, which keeps stored DEFAULT values but
+ * recomputes MATERIALIZED ones. Expressions are not parsed, so a copy is refused
+ * whenever a MATERIALIZED column could read an EPHEMERAL input.
+ */
+export async function assertBackfillTargetSafe(input: {
+  database: string
+  table: string
+  mode: 'copy' | 'mv_replay'
+  query: <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => Promise<T[]>
+  querySettings?: Record<string, string | number | boolean | undefined>
+}): Promise<void> {
+  const quote = (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+  const target = `${input.database}.${input.table}`
+  const rows = await input.query<{ name: string; default_kind: string }>(
+    `SELECT name, default_kind FROM system.columns WHERE database = ${quote(input.database)} AND table = ${quote(input.table)} ORDER BY position`,
+    input.querySettings
+  )
+  if (!rows.length) {
+    const tables = await input.query<{ name: string }>(
+      `SELECT name FROM system.tables WHERE database = ${quote(input.database)} AND name = ${quote(input.table)}`,
+      input.querySettings
+    )
+    if (!tables.length) {
+      throw new BackfillConfigError(`Backfill target ${target} does not exist or is not visible yet. DDL may still be propagating on managed ClickHouse (e.g. ObsessionDB); check the name and retry.`)
+    }
+  }
+  if (!rows.length || rows.some((column) => !column.name || !['', 'DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(column.default_kind))) {
+    throw new BackfillConfigError('Cannot verify live target column kinds; automatic backfill is blocked. Check metadata access and use an explicit INSERT if needed.')
+  }
+  const namesOf = (kind: string) => rows.filter((column) => column.default_kind === kind).map((column) => column.name)
+  const ephemeral = namesOf('EPHEMERAL')
+  const materialized = namesOf('MATERIALIZED')
+  if (ephemeral.length && input.mode === 'mv_replay') {
+    throw new BackfillConfigError('Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.')
+  }
+  if (ephemeral.length && materialized.length) {
+    throw new BackfillConfigError(`Automatic backfill cannot reconstruct EPHEMERAL inputs; copying ${target} recomputes MATERIALIZED column(s) ${materialized.join(', ')}, which may read EPHEMERAL column(s) ${ephemeral.join(', ')}. Use an explicit INSERT with an input column mapping.`)
   }
 }
 
@@ -74,13 +124,16 @@ export async function buildBackfillPlan(input: {
   // Detect the execution strategy before chunk planning: an mv_replay backfill
   // sizes its chunks against the MV *source* (the table its SELECT reads),
   // because the injected chunk conditions run against that source — not the
-  // target, which is legitimately empty when bootstrapping an aggregate. Only
-  // the copy path introspects the target itself.
+  // target, which is legitimately empty when bootstrapping an aggregate. Target column safety is checked separately for both paths.
   const strategy = await detectBackfillStrategy({
     schema: input.config.schema,
     configDir: dirname(input.configPath),
     database,
     table,
+  })
+  await assertBackfillTargetSafe({
+    database, table, mode: strategy.mvReplayQueries ? 'mv_replay' : 'copy',
+    query: input.clickhouseQuery, querySettings: input.querySettings,
   })
   const replaySource = strategy.mvReplayQueries ? resolveMvReplaySource(strategy.mvs) : undefined
   const chunkSource = replaySource ?? { database, table }

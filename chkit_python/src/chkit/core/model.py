@@ -124,12 +124,16 @@ ColumnCodecSpec: TypeAlias = ColumnCodec | list[ColumnCodec]
 ColumnType: TypeAlias = PrimitiveColumnType | str
 
 
+ColumnDefaultKind: TypeAlias = Literal["DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL"]
+
+
 class ColumnDefinition(_StrictModel):
     name: str
     type: ColumnType
     renamed_from: str | None = Field(default=None, alias="renamedFrom")
     nullable: bool | None = None
     default: str | int | float | bool | None = None
+    default_kind: ColumnDefaultKind | None = Field(default=None, alias="defaultKind")
     comment: str | None = None
     codec: ColumnCodecSpec | None = None
 
@@ -624,6 +628,7 @@ class MigrationOperation(_StrictModel):
     key: str
     risk: RiskLevel
     sql: str
+    warning: str | None = None
 
 
 class ColumnRenameSuggestion(_StrictModel):
@@ -675,6 +680,7 @@ ValidationIssueCode: TypeAlias = Literal[
     "kafka_missing_setting",
     "kafka_invalid_setting",
     "kafka_change_requires_replacement",
+    "column_kind_change_unsupported",
     "duplicate_object_name",
     "duplicate_column_name",
     "duplicate_index_name",
@@ -692,6 +698,8 @@ ValidationIssueCode: TypeAlias = Literal[
     "codec_chain_must_end_with_general",
     "codec_chain_multiple_general",
     "codec_chain_empty",
+    "column_default_kind_invalid",
+    "column_expression_required",
     "dictionary_missing_primary_key",
     "dictionary_primary_key_missing_attribute",
     "dictionary_missing_source",

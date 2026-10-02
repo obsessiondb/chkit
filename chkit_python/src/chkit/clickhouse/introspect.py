@@ -48,7 +48,7 @@ from chkit.core.model import (
     SkipIndexText,
     SkipIndexTokenBF,
 )
-from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
 from chkit.core.text_index import parse_text_index_params
 from chkit.core.text_index_sql import normalize_text_index_sql
 
@@ -148,20 +148,33 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
     nullable = bool(inner)
 
     default_value: str | None = None
-    if row.default_expression and row.default_kind == "DEFAULT":
-        default_value = normalize_sql_fragment(row.default_expression)
+    kind = row.default_kind
+    if kind and kind not in {"DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL"}:
+        raise ValueError(f"Unsupported column default kind: {kind}")
+    if row.default_expression and kind:
+        # Preserve whitespace inside SQL string literals when pulling expressions.
+        default_value = row.default_expression.strip()
 
+    # ClickHouse synthesizes defaultValueOfTypeName('<type as written>') for a
+    # bare EPHEMERAL column, keeping alias spellings such as BIGINT or TEXT.
+    if (
+        kind == "EPHEMERAL"
+        and default_value is not None
+        and is_synthetic_ephemeral_default(default_value)
+    ):
+        default_value = None
     codec_steps = parse_codec(row.compression_codec)
     comment = row.comment.strip() if row.comment is not None else None
 
-    return ColumnDefinition(
-        name=row.name,
-        type=type_,
-        nullable=nullable or None,
-        default=default_value,
-        comment=comment or None,
-        codec=codec_steps,
-    )
+    return ColumnDefinition.model_validate({
+        "name": row.name,
+        "type": type_,
+        "nullable": nullable or None,
+        "default": default_value,
+        "defaultKind": kind if kind and kind != "DEFAULT" else None,
+        "comment": comment or None,
+        "codec": codec_steps,
+    })
 
 
 def _split_int_args(args: str | None) -> list[int]:

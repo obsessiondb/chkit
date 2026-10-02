@@ -302,9 +302,42 @@ def _render_table_model(
     options: CodegenOptions,
 ) -> tuple[list[str], list[CodegenFinding], set[str]]:
     """Render the lines for a single table → Pydantic model."""
-    return _render_fields_model(
-        list(table.columns), class_name, f"{table.database}.{table.name}", options
+    lines, findings, imports = _render_fields_model(
+        [column for column in table.columns if column.default_kind in {None, "DEFAULT"}],
+        class_name, f"{table.database}.{table.name}", options
     )
+    if any(column.default_kind not in {None, "DEFAULT"} for column in table.columns):
+        explicit_lines, explicit_findings, explicit_imports = _render_fields_model(
+            [column for column in table.columns if column.default_kind != "EPHEMERAL"],
+            f"{class_name}Explicit", f"{table.database}.{table.name}", options
+        )
+        lines.extend(explicit_lines)
+        findings.extend(explicit_findings)
+        imports.update(explicit_imports)
+        insert_lines, insert_findings, insert_imports = _render_fields_model(
+            [
+                column for column in table.columns
+                if column.default_kind not in {"MATERIALIZED", "ALIAS"}
+            ],
+            f"{class_name}Insert", f"{table.database}.{table.name}", options
+        )
+        lines.extend(insert_lines)
+        findings.extend(insert_findings)
+        imports.update(insert_imports)
+        # Ordinary columns appear in all three models; report each defect once.
+        findings = _unique_findings(findings)
+    return lines, findings, imports
+
+
+def _unique_findings(findings: list[CodegenFinding]) -> list[CodegenFinding]:
+    seen: set[tuple[str, str | None]] = set()
+    unique: list[CodegenFinding] = []
+    for finding in findings:
+        key = (finding.code, finding.path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(finding)
+    return unique
 
 
 def _render_dictionary_model(

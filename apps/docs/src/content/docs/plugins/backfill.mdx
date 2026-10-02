@@ -130,6 +130,17 @@ The plugin supports two strategies for backfilling data, chosen automatically ba
 
 **Materialized view replay** (`mv_replay` strategy): When the target is the `to` table of one or more materialized views, the plugin replays each view's aggregation query over every chunk window, re-materializing the aggregation for that window and ensuring correctness for aggregate backfills. A target fed by several materialized views replays them all in a single `INSERT … SELECT … UNION ALL …` per chunk, so no view's rows are missed. Because the chunks are sized from the view's **source** table (the one it reads `FROM`) rather than the target, a from-scratch **empty** aggregate target is fine — it's the case being bootstrapped. Requires `requireIdempotencyToken: true` for safe resumable retries.
 
+## Target safety checks
+
+Automatic backfills omit [`MATERIALIZED` and `ALIAS`](/schema/dsl-reference/#defaultkind-optional) columns from the insert and cannot supply `EPHEMERAL` inputs. Before writing, `plan`, `submit`, `run`, and `resume` read the live target's column kinds and stop when:
+
+- a table copy targets a table with both `EPHEMERAL` and `MATERIALIZED` columns, because recomputed `MATERIALIZED` values may read the `EPHEMERAL` inputs;
+- a materialized view replay targets a table with any `EPHEMERAL` column;
+- the column metadata is unreadable or reports an unknown kind;
+- the target does not exist, failing with `Backfill target <db.table> does not exist or is not visible yet`. On managed ClickHouse (e.g. ObsessionDB), DDL may still be propagating; retry shortly.
+
+Backfill a blocked target with an explicit `INSERT` that maps the source data to the `EPHEMERAL` inputs.
+
 ## Time column resolution
 
 The backfill plugin needs a time column to build WHERE clauses for each chunk. It resolves the column through a layered fallback chain:

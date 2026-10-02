@@ -102,6 +102,8 @@ export const demo = definePipeline({ id: 'demo', streams: [ticketsSource] })
 
 Add `ingestionColumns` to custom destinations. The default loader supplies batch/run IDs and ClickHouse supplies ingestion time. Migrations create the tables before ingestion runs. Query this current-state table with `FINAL`, or expose a view that does so.
 
+Leave [`MATERIALIZED` and `ALIAS`](/schema/dsl-reference/#defaultkind-optional) fields out of yielded rows. For a table with `EPHEMERAL` columns, the destination lists the insertable columns from its table definition in the `INSERT`, so `EPHEMERAL` values reach the expressions that read them; apply migrations before ingesting.
+
 Changing the mapping affects future writes. Updating older rows requires replaying retained raw data or refetching the source. Fields discarded before storage cannot be reconstructed by changing a view.
 
 ## Root objects and related tables

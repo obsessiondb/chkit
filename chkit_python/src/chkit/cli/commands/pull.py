@@ -107,7 +107,11 @@ def _introspected_table_to_definition(
         database=item.database,
         name=item.name,
         engine=item.engine or "MergeTree",
-        columns=list(item.columns),
+        columns=[
+            column.model_copy(update={"default": f"fn:{column.default}"})
+            if isinstance(column.default, str) else column
+            for column in item.columns
+        ],
         primary_key=[] if kafka else _split_clause(item.primary_key) or [item.columns[0].name],
         order_by=[] if kafka else _split_clause(item.order_by) or [item.columns[0].name],
         unique_key=_split_clause(item.unique_key) or None,

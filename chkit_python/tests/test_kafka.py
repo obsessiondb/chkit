@@ -59,6 +59,11 @@ def test_queue_sql_and_validation():
         validate_definitions([queue().model_copy(update={"columns": [default]})])[0].code
         == "kafka_column_default"
     )
+    ephemeral = queue().columns[0].model_copy(update={"default_kind": "EPHEMERAL"})
+    assert (
+        validate_definitions([queue().model_copy(update={"columns": [ephemeral]})])[0].code
+        == "kafka_column_default"
+    )
     with pytest.raises(ValueError, match="requires primary_key"):
         table(database="app", name="stored", engine="MergeTree", columns=[])
 

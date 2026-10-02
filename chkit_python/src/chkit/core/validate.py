@@ -132,13 +132,13 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
                 f"{label} does not support {field}. Put storage clauses on the destination table.",
             )
     for column in definition.columns:
-        if column.default is not None:
+        if column.default is not None or (column.default_kind or "DEFAULT") != "DEFAULT":
             _push(
                 issues,
                 definition,
                 "kafka_column_default",
-                f'{label} column "{column.name}" cannot have a DEFAULT. '
-                "Compute defaults in the materialized view.",
+                f'{label} column "{column.name}" cannot have a DEFAULT, MATERIALIZED, '
+                "ALIAS, or EPHEMERAL definition. Compute values in the materialized view.",
             )
     settings = definition.settings or {}
     if re.fullmatch(r"Kafka\s*(?:\(\s*\))?", definition.engine.strip(), re.IGNORECASE):
@@ -180,6 +180,25 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
             )
 
 
+def _validate_column_expression(
+    definition: TableDefinition, column: ColumnDefinition, issues: list[ValidationIssue]
+) -> None:
+    if (
+        column.default_kind in {"MATERIALIZED", "ALIAS"} and column.default is None
+    ) or (
+        isinstance(column.default, str)
+        and column.default.startswith("fn:")
+        and not column.default[3:].strip()
+    ):
+        _push(
+            issues,
+            definition,
+            "column_expression_required",
+            f'Column "{column.name}" requires a non-empty expression; '
+            "use fn: for SQL expressions",
+        )
+
+
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
     _validate_kafka_table(definition, issues)
     column_seen: set[str] = set()
@@ -196,6 +215,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
             continue
         column_seen.add(column.name)
         column_set.add(column.name)
+        _validate_column_expression(definition, column, issues)
         _validate_column_codec(definition, column, issues)
 
     _validate_indexes(definition, issues)
