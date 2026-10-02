@@ -87,8 +87,8 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       }
     }
     for (const column of def.columns) {
-      if (column.default !== undefined) {
-        pushValidationIssue(issues, def, 'kafka_column_default', `Kafka table ${def.database}.${def.name} column "${column.name}" cannot have a DEFAULT. Compute defaults in the materialized view.`)
+      if (column.default !== undefined || (column.defaultKind ?? 'DEFAULT') !== 'DEFAULT') {
+        pushValidationIssue(issues, def, 'kafka_column_default', `Kafka table ${def.database}.${def.name} column "${column.name}" cannot have a DEFAULT, MATERIALIZED, ALIAS, or EPHEMERAL definition. Compute values in the materialized view.`)
       }
     }
     if (/^Kafka\s*(?:\(\s*\))?$/i.test(def.engine.trim())) {

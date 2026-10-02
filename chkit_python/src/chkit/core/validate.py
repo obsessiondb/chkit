@@ -132,13 +132,13 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
                 f"{label} does not support {field}. Put storage clauses on the destination table.",
             )
     for column in definition.columns:
-        if column.default is not None:
+        if column.default is not None or (column.default_kind or "DEFAULT") != "DEFAULT":
             _push(
                 issues,
                 definition,
                 "kafka_column_default",
-                f'{label} column "{column.name}" cannot have a DEFAULT. '
-                "Compute defaults in the materialized view.",
+                f'{label} column "{column.name}" cannot have a DEFAULT, MATERIALIZED, '
+                "ALIAS, or EPHEMERAL definition. Compute values in the materialized view.",
             )
     settings = definition.settings or {}
     if re.fullmatch(r"Kafka\s*(?:\(\s*\))?", definition.engine.strip(), re.IGNORECASE):
