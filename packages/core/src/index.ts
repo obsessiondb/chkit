@@ -26,6 +26,7 @@ export {
   renderQualifiedName,
   unquoteIdentifiers,
 } from './identifier.js'
+export { parseColumnDefault, renderDefault, type ParsedColumnDefault } from './column-default.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export {
   isSyntheticEphemeralDefault,
@@ -33,7 +34,7 @@ export {
   normalizeSQLFragment,
   sqlExpressionFingerprint,
 } from './sql-normalizer.js'
-export { renderDefault, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
+export { renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

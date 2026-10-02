@@ -59,7 +59,7 @@ const events = table({
     { name: 'org_id', type: 'String' },
     { name: 'source', type: 'LowCardinality(String)' },
     { name: 'payload', type: 'String', nullable: true },
-    { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+    { name: 'received_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
     { name: 'status', type: 'String', default: 'pending', comment: 'Processing status' },
   ],
   engine: 'MergeTree()',
@@ -81,9 +81,12 @@ Optional: `partitionBy`, `uniqueKey`, `ttl`, `settings`, `indexes`, `projections
 
 ### Column defaults
 
-- String values are single-quoted: `default: 'pending'` → `DEFAULT 'pending'`
-- Numbers are literal: `default: 0` → `DEFAULT 0`
-- Function calls use `fn:` prefix: `default: 'fn:now64(3)'` → `DEFAULT now64(3)`
+- Strings are literals, single-quoted: `default: 'pending'` → `DEFAULT 'pending'`
+- Numbers and booleans are literals: `default: 0` → `DEFAULT 0`
+- SQL expressions use `{ expression }`: `default: { expression: 'now64(3)' }` → `DEFAULT now64(3)`. Comments in the expression are dropped from the rendered SQL
+- Never write a function call as a plain string: `default: 'now64(3)'` is the literal text `now64(3)`, which ClickHouse rejects for a DateTime64 column (and stores as NULL in a Nullable one). chkit newer than 0.2.0-beta.8 rejects it at `generate` when it is the `DEFAULT` or `EPHEMERAL` default of a non-string column (`column_default_looks_like_expression`), and rejects every plain string on a `MATERIALIZED` or `ALIAS` column (`column_expression_requires_fn`)
+- `default: 'fn:now64(3)'` is the legacy, equivalent spelling, and the only one chkit 0.2.0-beta.8 and older understand: they render `{ expression }` as `DEFAULT [object Object]`. If the generated migration shows that, use `fn:`
+- `defaultKind` picks the clause (`DEFAULT`, `MATERIALIZED`, `ALIAS`, `EPHEMERAL`); `default` keeps the same forms for every kind: `{ name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } }` → `` `day` Date MATERIALIZED toDate(ts) ``. `MATERIALIZED` and `ALIAS` need a `default`, written as `{ expression }` (a constant string is `{ expression: "'text'" }`); `EPHEMERAL` may omit it
 
 ### Views
 

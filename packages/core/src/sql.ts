@@ -11,20 +11,13 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { renderCodec } from './codec.js'
+import { renderDefault } from './column-default.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
-
-export function renderDefault(value: string | number | boolean): string {
-  if (typeof value === 'string') {
-    if (value.startsWith('fn:')) return value.slice(3)
-    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`
-  }
-  return String(value)
-}
 
 function renderColumn(col: ColumnDefinition): string {
   let out = `${quoteIdentifier(col.name)} ${col.nullable ? `Nullable(${col.type})` : col.type}`

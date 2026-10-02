@@ -24,7 +24,7 @@ const events = table({
   columns: [
     { name: 'id', type: 'UInt64' },
     { name: 'source', type: 'String' },
-    { name: 'ingested_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+    { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
   ],
   primaryKey: ['id'],
   orderBy: ['id'],

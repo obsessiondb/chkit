@@ -84,6 +84,8 @@ Exit codes: 0 (success), 1 (runtime error), 2 (config error).
 
 The output is a schema module that imports the chkit builders and exports the pulled definitions.
 
+Column defaults come back as the SQL that ClickHouse stores, written as an expression (`{ expression: "now64(3)" }`), so a string default keeps its SQL quotes: `{ expression: "'web'" }`. Pull keeps the [`defaultKind`](/schema/dsl-reference/#defaultkind-optional) of `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns next to it: `{ defaultKind: "MATERIALIZED", default: { expression: "toDate(ts)" } }`. A pulled default works like a hand-written one; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional). Upgrade `chkit` together with `@chkit/plugin-pull`: chkit 0.2.0-beta.8 and older cannot read the `{ expression }` form.
+
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
@@ -97,7 +99,7 @@ const app_events = table({
   engine: "MergeTree()",
   columns: [
     { name: "id", type: "UInt64" },
-    { name: "received_at", type: "DateTime64(3)", default: "fn:now64(3)" },
+    { name: "received_at", type: "DateTime64(3)", default: { expression: "now64(3)" } },
   ],
   primaryKey: ["id"],
   orderBy: ["id"],
@@ -153,12 +155,11 @@ export default schema(app_events, app_events_view, app_events_mv)
 
     definitions = schema(app_events, app_events_view, app_events_mv)
     ```
+    chkit-py does not support the `{ expression }` form, so it writes the same defaults with the `fn:` prefix: `default="fn:now64(3)"`.
   </TabItem>
 </Tabs>
 
 Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projections` when present in the source metadata.
-
-Pull writes column defaults as `fn:` expressions in the form ClickHouse stores them, and keeps the [`defaultKind`](/schema/dsl-reference/#defaultkind-optional) of `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns.
 
 ## Credential handling (`[HIDDEN]` passwords)
 

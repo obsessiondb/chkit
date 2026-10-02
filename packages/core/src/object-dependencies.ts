@@ -1,4 +1,5 @@
 import { definitionKey } from './canonical.js'
+import { parseColumnDefault } from './column-default.js'
 import type { DictionaryDefinition, SchemaDefinition, TableDefinition } from './model.js'
 import { identifierName, isTrivia, stringLiteralValue, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
@@ -136,13 +137,13 @@ function definitionReferences(def: SchemaDefinition): ObjectReference[] {
   return dictionarySourceReferences(def)
 }
 
-// Column default expressions, such as `fn:dictGet('db.dict', 'name', id)`.
+// Column default expressions, such as `{ expression: "dictGet('db.dict', 'name', id)" }`.
 function tableReferences(def: TableDefinition): ObjectReference[] {
-  return def.columns.flatMap((column) =>
-    typeof column.default === 'string' && column.default.startsWith('fn:')
-      ? sqlReferences(column.default.slice(3), def.database)
-      : []
-  )
+  return def.columns.flatMap((column) => {
+    if (column.default === undefined) return []
+    const parsed = parseColumnDefault(column.default)
+    return parsed.kind === 'expression' ? sqlReferences(parsed.sql, def.database) : []
+  })
 }
 
 // SOURCE(CLICKHOUSE(... TABLE 't' DB 'd' ...)) or SOURCE(CLICKHOUSE(... QUERY '...' ...)).

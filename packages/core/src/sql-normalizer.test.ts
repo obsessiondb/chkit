@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
 import { isTrivia, tokenizeSQL } from './sql-lexer.js'
-import { isSyntheticEphemeralDefault, normalizeSQLFragment, sqlExpressionFingerprint } from './sql-normalizer.js'
+import {
+  isSyntheticEphemeralDefault,
+  normalizeSQLFragment,
+  sqlExpressionFingerprint,
+  stripSQLComments,
+} from './sql-normalizer.js'
 
 // The view SQL from issue #232: a `--` comment with an apostrophe between CTEs.
 const ISSUE_AS = [
@@ -179,6 +184,62 @@ test('isSyntheticEphemeralDefault accepts one defaultValueOfTypeName literal', (
   for (const expression of ["defaultValueOfTypeName('String') || 'x'", "defaultValueOfTypeName('a', 'b')"]) {
     expect(isSyntheticEphemeralDefault(expression)).toBe(false)
   }
+})
+
+// Column default expressions (#234): comments go, everything else stays.
+const STRIP_CASES: Array<{ name: string; input: string; expected: string }> = [
+  { name: 'a trailing -- comment', input: 'now() -- set on insert', expected: 'now()' },
+  { name: 'a nested block comment', input: 'now() /* a /* nested */ b */ + 1', expected: 'now() + 1' },
+  { name: 'a # comment', input: 'toUInt8(1) # one', expected: 'toUInt8(1)' },
+  { name: '#! and // comments before a newline', input: 'x #! note\n+ y // more\n+ 1', expected: 'x + y + 1' },
+  {
+    name: 'comment markers inside literals, quoted identifiers and heredocs',
+    input: "concat('a -- b', `c--d`, \"#e\", $$ /* f */ $$)",
+    expected: "concat('a -- b', `c--d`, \"#e\", $$ /* f */ $$)",
+  },
+  { name: 'whitespace inside literals', input: "concat('x  y', 'a\n  b')", expected: "concat('x  y', 'a\n  b')" },
+  {
+    name: 'whitespace outside literals that holds no comment',
+    input: 'multiIf(\n  a = 1, 2, -- one\n  3)',
+    expected: 'multiIf(\n  a = 1, 2, 3)',
+  },
+  { name: 'tokens around a comment stay apart', input: '1 -/**/-1', expected: '1 - -1' },
+  { name: 'a stray # before a comment keeps its error', input: '#/* c */x', expected: '#\nx' },
+  // Whatever chkit renders after the expression must not turn the # into a `# ` comment.
+  { name: 'a stray # at the end keeps its error', input: 'now() #', expected: 'now() #\n' },
+  { name: 'a stray # before a final comment keeps its error', input: 'now() #\t-- c', expected: 'now() #\n' },
+  { name: 'a stray # before trailing Unicode whitespace keeps its error', input: 'now() #\u00a0', expected: 'now() #\n' },
+  { name: 'an unterminated block comment', input: 'now() /* oops', expected: 'now() /* oops' },
+  { name: 'only comments', input: ' -- nothing\n/* here */ ', expected: '' },
+]
+
+describe('stripSQLComments', () => {
+  for (const { name, input, expected } of STRIP_CASES) {
+    test(name, () => {
+      expect(stripSQLComments(input)).toBe(expected)
+    })
+  }
+
+  test('never drops SQL text, leaves no comment behind, and is idempotent', () => {
+    const generated = randomInputs(20_000, 234)
+    expect(new Set(generated).size).toBeGreaterThan(15_000)
+    const inputs = [...STRIP_CASES.map((c) => c.input), ...generated]
+    const damaged = inputs.filter((input) => {
+      const stripped = stripSQLComments(input)
+      return (
+        significantText(stripped) !== significantText(input) ||
+        hasClosedComment(stripped) ||
+        stripSQLComments(stripped) !== stripped
+      )
+    })
+    expect(damaged).toEqual([])
+  })
+
+  test('only trims SQL without comments', () => {
+    const generated = commentFreeInputs(5_000, 34)
+    expect(new Set(generated).size).toBeGreaterThan(4_000)
+    expect(generated.filter((input) => stripSQLComments(input) !== input.trim())).toEqual([])
+  })
 })
 
 // Seeded so a failure reproduces. mulberry32 keeps its state in 32-bit integer

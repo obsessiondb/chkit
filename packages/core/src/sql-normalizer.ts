@@ -68,6 +68,44 @@ export function normalizeSQLFragment(value: string): string {
   return out.trim()
 }
 
+/**
+ * SQL text without its comments, trimmed. Unlike normalizeSQLFragment, all
+ * other text stays as written, including whitespace inside string literals.
+ * chkit renders a column default expression on one line of a CREATE or ALTER
+ * statement, where a `--` comment would swallow the `,`, `COMMENT`, `CODEC` or
+ * `;` after it (#234).
+ *
+ * A run of whitespace and comments that holds a comment becomes one space, so
+ * the tokens around it never fuse, or a newline after a stray `#`, for the
+ * reason normalizeSQLFragment gives. A stray `#` at the end is followed by a
+ * newline too: the ` COMMENT` or ` CODEC` rendered after it would otherwise
+ * turn it into a `# ` comment that hides them. An unterminated block comment
+ * or string is kept as written for ClickHouse to report.
+ */
+export function stripSQLComments(value: string): string {
+  let out = ''
+  let gap = ''
+  let gapHasComment = false
+  let afterBareHash = false
+  let endsWithBareHash = false
+  for (const token of tokenizeSQL(value)) {
+    const comment = isClosedComment(token)
+    if (comment || token.kind === 'whitespace') {
+      gap += token.text
+      gapHasComment = gapHasComment || comment
+      continue
+    }
+    out += gapHasComment ? (afterBareHash ? '\n' : ' ') : gap
+    out += token.text
+    gap = ''
+    gapHasComment = false
+    afterBareHash = token.kind === 'punctuation' && token.text === '#'
+    // trim() also drops Unicode whitespace, which the lexer reads as punctuation.
+    if (!/^\s$/.test(token.text)) endsWithBareHash = afterBareHash
+  }
+  return endsWithBareHash ? `${out.trim()}\n` : out.trim()
+}
+
 export function normalizeEngine(engine: string): string {
   if (isKafkaEngine(engine)) return normalizeKafkaEngine(engine)
   let normalized = engine.trim().replace(/^Shared/, '')
@@ -84,4 +122,8 @@ function separatesTokens(token: SQLToken): boolean {
   if (token.kind === 'whitespace') return true
   if (token.kind === 'line_comment' || token.kind === 'block_comment') return token.terminated
   return token.kind === 'punctuation' && /^\s$/.test(token.text)
+}
+
+function isClosedComment(token: SQLToken): boolean {
+  return (token.kind === 'line_comment' || token.kind === 'block_comment') && token.terminated
 }

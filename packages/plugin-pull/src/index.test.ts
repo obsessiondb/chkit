@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+import type { ColumnDefinition } from '@chkit/core'
+
 import { __testUtils, createPullPlugin, PullSchema, renderSchemaFile } from './index.js'
 
 describe('@chkit/plugin-pull options', () => {
@@ -97,7 +99,7 @@ const app_events = table({
   engine: "MergeTree()",
   columns: [
     { name: "id", type: "UInt64", codec: { kind: "ZSTD", level: 3 } },
-    { name: "received_at", type: "DateTime64(3)", default: "fn:now64(3)" },
+    { name: "received_at", type: "DateTime64(3)", default: { expression: "now64(3)" } },
     { name: "source", type: "String", nullable: true, comment: "origin" },
     { name: "payload", type: "String", codec: [{ kind: "Delta", size: 4 }, codec.raw("LZ4"), { kind: "ZSTD", level: 1 }] },
   ],
@@ -166,8 +168,58 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
 
     expect(content).toContain("import { schema, table } from '@chkit/core'")
     expect(content).toContain('const app_events = table({')
-    expect(content).toContain('default: "fn:now64(3)"')
+    expect(content).toContain('default: { expression: "now64(3)" }')
     expect(content).toContain("export default schema(app_events)")
+  })
+
+  // #234: canonical definitions carry fn: strings; pulled files show the
+  // documented { expression } form.
+  test('renders expression defaults as { expression } in either spelling, and literals as literals', () => {
+    const render = (receivedAt: ColumnDefinition['default']) =>
+      renderSchemaFile([
+        {
+          kind: 'table',
+          database: 'app',
+          name: 'events',
+          engine: 'MergeTree()',
+          columns: [
+            { name: 'id', type: 'UInt64' },
+            { name: 'received_at', type: 'DateTime64(3)', default: receivedAt },
+            { name: 'status', type: 'String', default: 'pending' },
+            { name: 'n', type: 'UInt8', default: 0 },
+          ],
+          primaryKey: ['id'],
+          orderBy: ['id'],
+        },
+      ])
+
+    const fromLegacy = render('fn:now64(3)')
+    expect(fromLegacy).toContain('{ name: "received_at", type: "DateTime64(3)", default: { expression: "now64(3)" } },')
+    expect(fromLegacy).toContain('{ name: "status", type: "String", default: "pending" },')
+    expect(fromLegacy).toContain('{ name: "n", type: "UInt8", default: 0 },')
+    expect(render({ expression: 'now64(3)' })).toBe(fromLegacy)
+  })
+
+  test('renders defaultKind next to an { expression } default', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [
+          { name: 'ts', type: 'DateTime' },
+          { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'fn:toDate(ts)' },
+          { name: 'label', type: 'String', defaultKind: 'ALIAS', default: { expression: 'toString(day)' } },
+          { name: 'tag', type: 'String', defaultKind: 'EPHEMERAL', default: 'none' },
+        ],
+        primaryKey: ['ts'],
+        orderBy: ['ts'],
+      },
+    ])
+    expect(content).toContain('{ name: "day", type: "Date", defaultKind: "MATERIALIZED", default: { expression: "toDate(ts)" } },')
+    expect(content).toContain('{ name: "label", type: "String", defaultKind: "ALIAS", default: { expression: "toString(day)" } },')
+    expect(content).toContain('{ name: "tag", type: "String", defaultKind: "EPHEMERAL", default: "none" },')
   })
 
   test('renders an index-only projection pulled from a live table', () => {
@@ -393,6 +445,8 @@ describe('@chkit/plugin-pull schema command', () => {
           columns: [
             { name: 'id', type: 'UInt64' },
             { name: 'email', type: 'String', default: "''" },
+            { name: 'domain', type: 'String', defaultKind: 'MATERIALIZED', default: 'domain(email)' },
+            { name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' },
           ],
           settings: {},
           indexes: [],
@@ -449,7 +503,13 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.definitionCount).toBe(1)
     expect(payload.tableCount).toBe(1)
     expect(payload.content).toContain('const app_users = table({')
-    expect(payload.content).toContain('default: "fn:\'\'"')
+    expect(payload.content).toContain(`default: { expression: "''" }`)
+    // Introspected expressions of every kind keep their defaultKind (#216) and
+    // are written in the { expression } form (#234).
+    expect(payload.content).toContain(
+      '{ name: "domain", type: "String", defaultKind: "MATERIALIZED", default: { expression: "domain(email)" } },'
+    )
+    expect(payload.content).toContain('{ name: "raw", type: "String", defaultKind: "EPHEMERAL" },')
   })
 
   test('supports introspected view and materialized_view objects', async () => {

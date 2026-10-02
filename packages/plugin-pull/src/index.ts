@@ -11,6 +11,7 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  type ColumnDefaultValue,
   createPluginRunner,
   defineFlags,
   type DictionaryDefinition,
@@ -421,12 +422,12 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
   return mapIntrospectedTableToDefinition(introspected)
 }
 
-function normalizeDefault(value: TableDefinition['columns'][number]['default']):
-  | TableDefinition['columns'][number]['default']
-  | undefined {
-  if (value === undefined) return undefined
-  if (typeof value === 'number' || typeof value === 'boolean') return value
-  return `fn:${value}`
+// Introspection returns the SQL that ClickHouse stores for a default
+// (`now64(3)`, `'web'`, `0`), so every string is an expression, never a
+// literal to quote again.
+function normalizeDefault(value: ColumnDefaultValue | undefined): ColumnDefaultValue | undefined {
+  if (typeof value === 'string') return { expression: value }
+  return value
 }
 
 function summarizeSkippedObjects(

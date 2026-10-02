@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { rm, writeFile } from 'node:fs/promises'
-import { basename } from 'node:path'
+import { existsSync } from 'node:fs'
+import { readFile, rm, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 
+import { INIT_SCHEMA_TEMPLATE } from '../commands/init.js'
 import { CORE_ENTRY, createFixture, renderScopedSchema, runCli, sortedKeys } from './testkit.test'
 
 describe('@chkit/cli generate e2e', () => {
@@ -629,4 +631,86 @@ describe('@chkit/cli generate e2e', () => {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
+})
+
+function renderDefaultSchema(defaultSource: string): string {
+  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst events = table({\n  database: 'app',\n  name: 'events',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'updated_at', type: "DateTime64(3, 'UTC')", default: ${defaultSource} },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(events)\n`
+}
+
+interface SnapshotFile {
+  definitions: Array<{ columns: Array<{ name: string; default?: unknown }> }>
+}
+
+// Each case shells out to the CLI; give it room when the package script runs
+// every test in this file concurrently.
+describe('@chkit/cli generate expression defaults (#234)', () => {
+  test('rejects a function call written as a plain string default and writes nothing', async () => {
+    const fixture = await createFixture(renderDefaultSchema("'now64(3)'"))
+    try {
+      const json = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(json.exitCode).toBe(1)
+      const payload = JSON.parse(json.stdout) as {
+        error: string
+        issues: Array<{ code: string; message: string }>
+      }
+      expect(payload.error).toBe('validation_failed')
+      expect(payload.issues.map((issue) => issue.code)).toEqual(['column_default_looks_like_expression'])
+      expect(payload.issues[0]?.message).toContain('Use default: { expression: "now64(3)" } to render DEFAULT now64(3).')
+      // Keeping the quoted text is only for a type chkit misjudged: ClickHouse rejects it here.
+      expect(payload.issues[0]?.message).toContain(
+        `If chkit misjudged the type and the column should store this text, use default: { expression: "'now64(3)'" }.`
+      )
+      expect(existsSync(fixture.migrationsDir)).toBe(false)
+      expect(existsSync(join(fixture.metaDir, 'snapshot.json'))).toBe(false)
+
+      const text = runCli(['generate', '--config', fixture.configPath])
+      expect(text.exitCode).toBe(1)
+      expect(text.stderr).toContain('[column_default_looks_like_expression]')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('switching a default between { expression } and fn: generates nothing', async () => {
+    const fixture = await createFixture(renderDefaultSchema("{ expression: 'now64(3)' }"))
+    try {
+      const first = runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'])
+      expect(first.exitCode).toBe(0)
+      const { migrationFile } = JSON.parse(first.stdout) as { migrationFile: string | null }
+      expect(migrationFile).toBeTruthy()
+      expect(await readFile(String(migrationFile), 'utf8')).toContain(
+        "`updated_at` DateTime64(3, 'UTC') DEFAULT now64(3)"
+      )
+      const snapshotPath = join(fixture.metaDir, 'snapshot.json')
+      const before = JSON.parse(await readFile(snapshotPath, 'utf8')) as SnapshotFile
+      const updatedAt = before.definitions[0]?.columns.find((column) => column.name === 'updated_at')
+      expect(updatedAt?.default).toBe('fn:now64(3)')
+
+      await writeFile(fixture.schemaPath, renderDefaultSchema("'fn: now64(3)'"), 'utf8')
+      const second = runCli(['generate', '--config', fixture.configPath, '--json'])
+      expect(second.exitCode).toBe(0)
+      const secondPayload = JSON.parse(second.stdout) as { migrationFile: string | null; operationCount: number }
+      expect(secondPayload.operationCount).toBe(0)
+      expect(secondPayload.migrationFile).toBeNull()
+      const after = JSON.parse(await readFile(snapshotPath, 'utf8')) as SnapshotFile
+      expect(after.definitions).toEqual(before.definitions)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('plans the chkit init example schema with an expression default', async () => {
+    // The fn: spelling renders the same SQL; the tutorial shows { expression }.
+    expect(INIT_SCHEMA_TEMPLATE).toContain("default: { expression: 'now64(3)' }")
+    const fixture = await createFixture(INIT_SCHEMA_TEMPLATE.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)))
+    try {
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { operations: Array<{ type: string; sql: string }> }
+      const createTable = payload.operations.find((operation) => operation.type === 'create_table')
+      expect(createTable?.sql).toContain('`ingested_at` DateTime64(3) DEFAULT now64(3)')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
 })

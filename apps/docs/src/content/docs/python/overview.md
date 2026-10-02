@@ -41,7 +41,7 @@ Both implementations produce the same artifacts, so a project (or a team) can mi
 
 - **Snapshots**: models serialize with the same camelCase JSON field names as `@chkit/core`, so `chkit/meta/snapshot.json` is readable by either implementation.
 - **Journal**: migrations are recorded in the same ClickHouse `_chkit_migrations` table with the same schema and checksums.
-- **SQL**: the planner and renderer emit the same DDL statements for the same schema, including `ON CLUSTER` stamping when `clickhouse.cluster` is set. The statement order can differ when objects in a migration depend on each other, and the SQL differs when a SQL fragment contains comments (see below).
+- **SQL**: the planner and renderer emit the same DDL statements for the same schema, including `ON CLUSTER` stamping when `clickhouse.cluster` is set. The statement order can differ when objects in a migration depend on each other, and the SQL differs when a SQL fragment or an expression default contains comments (see below).
 
 ## Differences from the TypeScript version
 
@@ -52,6 +52,7 @@ The schema/migration CLI and backfill engine share the TypeScript workflow. The 
 - [`@chkit/plugin-ingest`](/api-sync/) and the project `entry` module: API sync source authoring requires TypeScript.
 - Dependency-ordered migrations: chkit-py orders creates and drops by kind and name, so a view that reads another view, a materialized view, or a dictionary can be created before it. See [Operation order](/cli/generate/#operation-order).
 - Comments in SQL fragments: chkit-py keeps comments when it puts a view query or another SQL fragment on one line, so a `--`, `//`, or `#` comment swallows the rest of the statement. Keep comments out of these fields with chkit-py. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
+- Expression column defaults: chkit-py accepts only the `fn:` spelling (`"default": "fn:now64(3)"`), not `{"expression": ...}`, and does not run the `column_default_looks_like_expression` and `column_default_invalid` checks, so a function call written as the plain string default of a `DEFAULT` or `EPHEMERAL` column reaches ClickHouse as a quoted literal. It also keeps comments in an expression default when it renders it. Snapshots stay compatible: TypeScript chkit stores `{ expression }` defaults as `fn:` strings. See [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
 - Failed-migration recovery: chkit-py records the progress of async statements only. Re-running a failed migration runs its other statements again from statement 1, including those that completed, and an edited file is refused once one of its async statements was attempted. chkit-py has no `migrate --retry` or `--abandon`, records a migration file without executable statements as applied, and sends a statement made only of comments to ClickHouse, which rejects it. Its async status polling can mistake an earlier attempt with the same query id for the current one, and in `--json` mode it drops async progress lines instead of writing them to stderr. See [failed migrations](/cli/migrate/#failed-migrations).
 
 ## These pages

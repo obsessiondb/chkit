@@ -125,7 +125,7 @@ If the codegen plugin is configured with `runOnGenerate: true` (the default), `c
 
 ### Validation errors
 
-Schema validation issues (such as invalid definitions) produce a `validation_failed` error with structured issue codes and messages. The process exits with code 1.
+Schema validation issues (such as invalid definitions) produce a `validation_failed` error with structured issue codes and messages. The process exits with code 1 and writes no migration or snapshot. For example, a function call written as the plain string `DEFAULT` of a column that cannot hold a string (`default: 'now64(3)'` on a `DateTime64` column) fails with `column_default_looks_like_expression` instead of producing a migration that ClickHouse rejects. See [Validation rules](/schema/dsl-reference/#validation-rules) for every code.
 
 ## Examples
 
@@ -233,7 +233,15 @@ chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
   "command": "generate",
   "schemaVersion": 1,
   "error": "validation_failed",
-  "issues": [{ "code": "...", "message": "..." }]
+  "issues": [
+    {
+      "code": "column_default_looks_like_expression",
+      "kind": "table",
+      "database": "analytics",
+      "name": "events",
+      "message": "Table analytics.events column \"updated_at\" has default \"now64(3)\", a plain string that looks like a SQL function call. Plain strings render as quoted literals (DEFAULT 'now64(3)'), which ClickHouse rejects for type DateTime64(3, 'UTC'). Use default: { expression: \"now64(3)\" } to render DEFAULT now64(3). If chkit misjudged the type and the column should store this text, use default: { expression: \"'now64(3)'\" }."
+    }
+  ]
 }
 ```
 

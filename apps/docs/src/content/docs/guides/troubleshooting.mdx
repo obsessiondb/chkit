@@ -17,6 +17,7 @@ A reference for the errors you are most likely to hit when running chkit, what c
 | `Could not connect to ClickHouse at ... (connection refused)` | Nothing listening at the URL | Confirm the server is running and `CLICKHOUSE_URL` host/port are correct |
 | `Could not connect to ClickHouse at ... (host not found)` | Typo'd or unresolvable host | Check the host in `CLICKHOUSE_URL` |
 | `Unknown data type family: ...` | A migration references an invalid ClickHouse type | Fix the column type in the schema/migration and regenerate |
+| `default expression and column type are incompatible` | A function call written as a plain string default (`default: 'now64(3)'`), which renders as a quoted literal | Write it as `{ expression: 'now64(3)' }`, remove the quotes in the failed migration, and re-run it (see below) |
 | `Syntax error: failed at position` or `Unknown expression identifier` on a generated view | The view's query has a SQL comment that an older chkit kept when it wrote the query on one line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)) | Upgrade chkit, then fix the comment in the failed migration and re-run it ([see below](#syntax-error-or-unknown-expression-identifier-on-a-generated-view)) |
 | `Blocked destructive migration execution` (exit code 3) | A `risk=danger` operation in non-interactive mode | Review, then re-run with `--allow-destructive` |
 | `Checksum mismatch detected on applied migrations` (exit code 1) | A migration file was edited after being applied | Restore the original file, or apply a new forward migration |
@@ -87,6 +88,24 @@ If `CLICKHOUSE_URL` is unset, chkit falls back to `http://localhost:8123`; the m
 ### `Unknown data type family: <type>`
 
 ClickHouse rejected a statement because a column type is not valid (for example a typo like `NotARealType`). Fix the type in the schema definition, regenerate the migration, and re-apply.
+
+### `default expression and column type are incompatible`
+
+ClickHouse could not convert a column's default to the column type. The usual cause is a function call written as a plain string default, such as `default: 'now64(3)'` on a `DateTime64` column. A plain string is a literal, so the migration holds `DEFAULT 'now64(3)'`: the text, not the current time. chkit newer than 0.2.0-beta.8 refuses to generate it: it reports `column_default_looks_like_expression` for a `DEFAULT` or `EPHEMERAL` column, and `column_expression_requires_fn` for any plain string on a `MATERIALIZED` or `ALIAS` column; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
+
+To recover from a migration that failed this way:
+
+1. Write the default as an expression in the schema: `default: { expression: 'now64(3)' }`.
+2. In the failed migration file, change `DEFAULT 'now64(3)'` to `DEFAULT now64(3)`, or remove the quotes the same way after `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`.
+3. Re-run the migration. When the failed statement was the first in the file, `chkit migrate --apply` runs the edited file. Otherwise resume after the statements that completed:
+
+   ```sh
+   chkit migrate --apply --retry 20261002051452_add_events.sql
+   ```
+
+4. Run `chkit generate`. `chkit/meta/snapshot.json` still holds the quoted literal, so it plans one `MODIFY COLUMN ... DEFAULT now64(3)` that sets the default the column already has. For a `DEFAULT` or `MATERIALIZED` column it carries the usual warning that stored values are not rewritten. Apply it with `chkit migrate --apply`.
+
+On a `Nullable` number, date, time, UUID, or IP address column, ClickHouse accepted the quoted literal instead of failing, and every row inserted without the column got `NULL`. Fix the schema, run `chkit generate`, and apply the planned `MODIFY COLUMN` with `chkit migrate --apply`. Rows inserted after that get the expression's value; rows inserted earlier keep their `NULL`, except in an `ALIAS` column, which ClickHouse computes on every read.
 
 ### `Syntax error` or `Unknown expression identifier` on a generated view
 

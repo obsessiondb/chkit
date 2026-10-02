@@ -1,13 +1,26 @@
 import { renderTextIndexType } from './text-index.js'
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
+import {
+  LEGACY_EXPRESSION_PREFIX,
+  columnTypeAcceptsStringLiteral,
+  isSQLExpression,
+  parseColumnDefault,
+  readsUnparsableEphemeralLiteralAsNull,
+  renderDefault,
+  startsWithFunctionCall,
+  storesUnparsableLiteralAsNull,
+  trimExpression,
+} from './column-default.js'
 import { describeInvalidIdentifier } from './identifier.js'
 import { isPlainColumnReference, normalizeKeyColumns, splitTopLevelComma } from './key-clause.js'
 import { isIndexProjection, normalizeProjectionIndex, stripWrappingParens } from './projection.js'
 import { isKafkaEngine } from './kafka.js'
+import { type SQLToken, tokenizeSQL } from './sql-lexer.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
 import { textSQLTokens } from './text-index-sql.js'
 import type {
+  ColumnDefaultKind,
   ColumnDefinition,
   DictionaryDefinition,
   MaterializedViewDefinition,
@@ -80,8 +93,172 @@ function validateColumnCodec(
   }
 }
 
+const COLUMN_DEFAULT_KINDS: ReadonlySet<string> = new Set(['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'])
+
+// Runs on raw definitions (toCreateSQL) and canonical ones (planDiff), where
+// `{ expression }` is already the `fn:` string; parseColumnDefault reads both.
+function validateColumnDefault(
+  def: TableDefinition,
+  column: ColumnDefinition,
+  issues: ValidationIssue[]
+): void {
+  const subject = `Table ${def.database}.${def.name} column "${column.name}"`
+  const kind = column.defaultKind ?? 'DEFAULT'
+  const value = column.default
+  if (value === undefined) {
+    if (kind === 'MATERIALIZED' || kind === 'ALIAS') {
+      pushValidationIssue(issues, def, 'column_expression_required',
+        `${subject} is ${kind} and requires a non-empty expression. Set default: { expression: "<sql>" }.`)
+    }
+    return
+  }
+  if (value === null) return
+  if (typeof value === 'object' && !isSQLExpression(value)) {
+    pushValidationIssue(issues, def, 'column_default_invalid',
+      `${subject} has an unsupported default value. Use a string, number, or boolean literal, or { expression: "<sql>" } for a SQL expression.`)
+    return
+  }
+  const parsed = parseColumnDefault(value)
+  if (parsed.kind === 'expression') {
+    validateDefaultExpression(def, subject, kind, parsed.sql, issues)
+    return
+  }
+  if (typeof parsed.value !== 'string') return
+  // A string renders as a quoted literal for every kind. MATERIALIZED and ALIAS
+  // compute their value, so there it is almost always SQL written without
+  // { expression }; a constant string is spelled { expression: "'text'" }.
+  if (kind === 'MATERIALIZED' || kind === 'ALIAS') {
+    pushValidationIssue(issues, def, 'column_expression_requires_fn',
+      describePlainStringExpression(subject, kind, parsed.value))
+    return
+  }
+  // DEFAULT and EPHEMERAL keep a string as a literal. On a column that cannot
+  // hold a string, one that starts with a function call is SQL written without
+  // { expression }: ClickHouse rejects the literal, or reads it as NULL (#234).
+  if ((kind !== 'DEFAULT' && kind !== 'EPHEMERAL') || !startsWithFunctionCall(parsed.value)) return
+  const type = typeof column.type === 'string' ? column.type.trim() : ''
+  if (columnTypeAcceptsStringLiteral(type)) return
+  pushValidationIssue(issues, def, 'column_default_looks_like_expression',
+    describeQuotedFunctionDefault(subject, kind, column.nullable ? `Nullable(${type})` : type, parsed.value))
+}
+
+function validateDefaultExpression(
+  def: TableDefinition,
+  subject: string,
+  kind: ColumnDefaultKind,
+  sql: string,
+  issues: ValidationIssue[]
+): void {
+  const rendered = renderDefault({ expression: sql })
+  if (rendered === '') {
+    const removable = kind !== 'MATERIALIZED' && kind !== 'ALIAS'
+    pushValidationIssue(issues, def, 'column_expression_required',
+      `${subject} has an empty default expression. Put the SQL in default: { expression: "<sql>" }${removable ? ', or remove default' : ''}.`)
+    return
+  }
+  // The expression is rendered mid-statement, so an open string, quoted
+  // identifier or block comment would swallow the SQL after it, the next
+  // statements of the migration file included.
+  const tokens = tokenizeSQL(sql)
+  const unterminated = tokens.find((token) => !token.terminated)
+  if (unterminated !== undefined) {
+    pushValidationIssue(issues, def, 'column_default_invalid',
+      `${subject} has default expression ${JSON.stringify(sql)} with an unterminated ${describeOpenToken(unterminated)}, which would swallow the rest of the generated SQL. Close it or remove it.`)
+  }
+  // ClickHouse reads `#` as a comment only before a space or `!`; any other
+  // `#` is a syntax error. Report it here instead of at migrate: at the end of
+  // an expression it used to turn the ` COMMENT` or ` CODEC` rendered after it
+  // into a comment, and the statement applied without them.
+  if (tokens.some(isStrayHash)) {
+    pushValidationIssue(issues, def, 'column_default_invalid',
+      `${subject} has default expression ${JSON.stringify(sql)} with a # that starts no comment, which ClickHouse rejects. Remove it, or put a space after it to start a comment: "# note".`)
+  }
+  // The prefix only marks a plain string as SQL. Inside an expression it is
+  // text: `{ expression: 'fn:now()' }` would render `DEFAULT fn:now()`.
+  if (keepsLegacyPrefix(rendered)) {
+    const unprefixed = rendered.slice(LEGACY_EXPRESSION_PREFIX.length).trim()
+    pushValidationIssue(issues, def, 'column_default_invalid',
+      `${subject} has default expression ${JSON.stringify(rendered)}, which keeps the legacy fn: prefix and would render ${kind} ${rendered}, a syntax error. Remove the prefix: default: { expression: ${JSON.stringify(unprefixed)} }.`)
+  }
+}
+
+// Whether validateDefaultExpression accepts `sql`, so that a message can
+// suggest it as the fix.
+function passesExpressionChecks(sql: string): boolean {
+  const rendered = renderDefault({ expression: sql })
+  return (
+    rendered !== '' &&
+    !keepsLegacyPrefix(rendered) &&
+    tokenizeSQL(sql).every((token) => token.terminated && !isStrayHash(token))
+  )
+}
+
+// `fn::String` is not a leftover prefix: it casts a column named fn.
+function keepsLegacyPrefix(sql: string): boolean {
+  return sql.startsWith(LEGACY_EXPRESSION_PREFIX) && sql[LEGACY_EXPRESSION_PREFIX.length] !== ':'
+}
+
+function isStrayHash(token: SQLToken): boolean {
+  return token.kind === 'punctuation' && token.text === '#'
+}
+
+// The lexer leaves only strings, quoted identifiers and block comments open.
+function describeOpenToken(token: SQLToken): string {
+  if (token.kind === 'block_comment') return 'block comment'
+  if (token.kind === 'quoted_identifier') return 'quoted identifier'
+  return 'string literal'
+}
+
+function describePlainStringExpression(subject: string, kind: 'MATERIALIZED' | 'ALIAS', value: string): string {
+  const literal = renderDefault(value)
+  const fix = suggestedExpression(value)
+  const asSQL = fix === undefined
+    ? 'default: { expression: "<sql>" } for a SQL expression'
+    : `default: { expression: ${JSON.stringify(fix.expression)} } to render ${kind} ${fix.rendered} (legacy spelling: ${JSON.stringify(`${LEGACY_EXPRESSION_PREFIX}${fix.expression}`)})`
+  return `${subject} is ${kind} with plain string default ${JSON.stringify(value)}, which renders as the quoted literal ${literal} instead of SQL. Use ${asSQL}, or default: { expression: ${JSON.stringify(literal)} } for a constant string.`
+}
+
+// `effectiveType` is the type as rendered, with `nullable: true` applied. The
+// quoted-text option is for a type chkit misreads, such as a string type it
+// does not know: on the types it recognizes, that literal is what fails.
+function describeQuotedFunctionDefault(
+  subject: string,
+  kind: 'DEFAULT' | 'EPHEMERAL',
+  effectiveType: string,
+  value: string
+): string {
+  const literal = renderDefault(value)
+  const fix = suggestedExpression(value)
+  const readsNull = kind === 'EPHEMERAL'
+    ? readsUnparsableEphemeralLiteralAsNull(effectiveType)
+    : storesUnparsableLiteralAsNull(effectiveType)
+  const outcome = readsNull
+    ? `which ClickHouse accepts for type ${effectiveType} but ${kind === 'EPHEMERAL' ? 'reads' : 'stores'} as NULL`
+    : `which ClickHouse rejects for type ${effectiveType}`
+  const asSQL = fix === undefined
+    ? 'Use default: { expression: "<sql>" } for a SQL expression.'
+    : `Use default: { expression: ${JSON.stringify(fix.expression)} } to render ${kind} ${fix.rendered}.`
+  return `${subject} has default ${JSON.stringify(value)}, a plain string that looks like a SQL function call. Plain strings render as quoted literals (${kind} ${literal}), ${outcome}. ${asSQL} If chkit misjudged the type and the column should ${kind === 'EPHEMERAL' ? 'hold' : 'store'} this text, use default: { expression: ${JSON.stringify(literal)} }.`
+}
+
+/**
+ * The plain string as the `{ expression }` a message suggests, with the SQL it
+ * renders on one line, or undefined when validation would reject that
+ * expression too (no SQL, a leftover `fn:` prefix, an unterminated token or a
+ * stray `#`).
+ */
+function suggestedExpression(value: string): { expression: string; rendered: string } | undefined {
+  const expression = trimExpression(value)
+  if (!passesExpressionChecks(expression)) return undefined
+  const rendered = tokenizeSQL(renderDefault({ expression }))
+    .map((token) => (token.kind === 'whitespace' ? ' ' : token.text))
+    .join('')
+  return { expression, rendered }
+}
+
 function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]): void {
-  if (isKafkaEngine(def.engine)) {
+  const kafka = isKafkaEngine(def.engine)
+  if (kafka) {
     for (const field of ['primaryKey', 'orderBy', 'uniqueKey', 'partitionBy', 'ttl', 'indexes', 'projections'] as const) {
       const value = def[field]
       if (Array.isArray(value) ? value.length > 0 : Boolean(value)) {
@@ -126,23 +303,17 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
     }
     columnSeen.add(column.name)
     columnSet.add(column.name)
-    const kind = column.defaultKind
-    if (kind !== undefined && !['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(kind)) {
+    if (column.defaultKind !== undefined && !COLUMN_DEFAULT_KINDS.has(column.defaultKind)) {
       pushValidationIssue(
         issues, def, 'column_default_kind_invalid', `Invalid defaultKind on column "${column.name}"`
       )
     }
-    const missingExpression = (kind === 'MATERIALIZED' || kind === 'ALIAS') && column.default === undefined
-    const emptyExpression = typeof column.default === 'string'
-      && column.default.startsWith('fn:') && !column.default.slice(3).trim()
-    if (missingExpression || emptyExpression) {
-      pushValidationIssue(
-        issues, def, 'column_expression_required',
-        `Column "${column.name}" requires a non-empty expression; use fn: for SQL expressions`
-      )
-    }
-    validateColumnKind(def, column, issues)
+    // Kafka already rejects every default and column kind (kafka_column_default),
+    // which also covers the codec of an ALIAS or EPHEMERAL column; one error per
+    // mistake.
+    if (!kafka) validateUnstoredColumnCodec(def, column, issues)
     validateColumnCodec(def, column, issues)
+    if (!kafka) validateColumnDefault(def, column, issues)
   }
 
   const indexSeen = new Set<string>()
@@ -227,14 +398,8 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
   validateUnstoredColumnReferences(def, columnSet, issues)
 }
 
-function validateColumnKind(def: TableDefinition, column: ColumnDefinition, issues: ValidationIssue[]): void {
+function validateUnstoredColumnCodec(def: TableDefinition, column: ColumnDefinition, issues: ValidationIssue[]): void {
   const kind = column.defaultKind
-  if ((kind === 'MATERIALIZED' || kind === 'ALIAS') && typeof column.default === 'string' && !column.default.startsWith('fn:')) {
-    pushValidationIssue(
-      issues, def, 'column_expression_requires_fn',
-      `Column "${column.name}" is ${kind} with a plain string default, which ClickHouse would store as the text '${column.default}'. Prefix SQL expressions with fn: (for example fn:toDate(ts)); write fn:'<text>' for a constant string.`
-    )
-  }
   // A bare `EPHEMERAL CODEC(...)` parses the codec as the default expression.
   // After an EPHEMERAL default or comment ClickHouse accepts the codec.
   const bareEphemeral = kind === 'EPHEMERAL' && column.default === undefined && !column.comment
