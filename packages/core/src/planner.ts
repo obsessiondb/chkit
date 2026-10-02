@@ -25,6 +25,7 @@ import {
   renderAlterModifySetting,
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
+  renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
   toCreateSQL,
@@ -424,12 +425,16 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   for (const { name, oldItem, newItem } of columnDiff.changed) {
     const oldKind = oldItem.defaultKind ?? 'DEFAULT'
     const newKind = newItem.defaultKind ?? 'DEFAULT'
+    const key = `table:${newDef.database}.${newDef.name}:column:${name}`
+    const removeExpression = renderAlterRemoveColumnExpression(newDef, newItem, oldItem)
+    // Its own operation: migrate pairs each `-- operation:` marker with exactly one statement.
+    if (removeExpression) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: removeExpression })
     const sql = isCodecRemoval(oldItem, newItem)
       ? renderAlterRemoveCodec(newDef, name)
-      : renderAlterModifyColumn(newDef, newItem, oldItem)
+      : renderAlterModifyColumn(newDef, newItem)
     ops.push( {
       type: 'alter_table_modify_column',
-      key: `table:${newDef.database}.${newDef.name}:column:${name}`,
+      key,
       risk: 'caution',
       sql,
       ...((oldKind === 'DEFAULT' || oldKind === 'MATERIALIZED' || newKind === 'DEFAULT' || newKind === 'MATERIALIZED') && (oldItem.default !== newItem.default || oldKind !== newKind)

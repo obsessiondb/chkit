@@ -8,7 +8,7 @@ export function isIndexProjection(
   return 'index' in projection
 }
 
-function stripWrappingParens(input: string): string {
+export function stripWrappingParens(input: string): string {
   if (!input.startsWith('(') || !input.endsWith(')')) return input
 
   // Only strip when the leading paren closes at the very end, so `(a), (b)`

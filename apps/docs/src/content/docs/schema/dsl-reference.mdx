@@ -326,15 +326,31 @@ for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions
 </Tabs>
 
 `MATERIALIZED` and `ALIAS` require a value or expression; `EPHEMERAL` may omit it.
+A plain string for `MATERIALIZED` or `ALIAS` fails with `column_expression_requires_fn`,
+since ClickHouse would store the text itself: write `fn:toDate(ts)`, or `fn:'text'` for
+a constant string.
 ClickHouse normally excludes all three from `SELECT *` and accepts `EPHEMERAL` values
 only through an explicit insert column list. Keep the base type in `type`; do not
 embed `MATERIALIZED ...` in the type string.
 
 Changing a `DEFAULT` or `MATERIALIZED` expression, or switching between those two
 kinds, emits `MODIFY COLUMN` with a warning that stored values are not rewritten.
-Removing an expression emits `REMOVE DEFAULT` or `REMOVE MATERIALIZED`. Converting
+Removing an expression emits `REMOVE DEFAULT` or `REMOVE MATERIALIZED` as its own
+statement, before any type change in the same migration. Converting
 a column to or from `ALIAS` or `EPHEMERAL` fails `chkit generate` with
 `column_kind_change_unsupported` instead of dropping and recreating the column.
+
+ClickHouse stores no data for `ALIAS` and `EPHEMERAL` columns, so validation rejects
+them where a stored column is required. Use a `MATERIALIZED` column instead.
+
+| Code | Rejected use |
+| --- | --- |
+| `column_kind_not_stored` | Named directly in `orderBy`, `primaryKey`, `partitionBy`, or an engine argument such as `ReplacingMergeTree(ver)`; for `EPHEMERAL`, also a skip index on the bare column. |
+| `column_ephemeral_in_projection` | An `EPHEMERAL` column read by a projection. ClickHouse can accept the table and then fail every insert. |
+| `column_kind_codec_unsupported` | A `codec` on an `ALIAS` column, or on an `EPHEMERAL` column without a value or comment. |
+
+References inside expressions, such as `toStartOfDay(day)` or a TTL, are left to
+ClickHouse to report at migrate time.
 
 Codegen emits separate read and insert types for these tables (see
 [Tables with generated columns](/plugins/codegen/#tables-with-generated-columns)),
@@ -964,6 +980,10 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)
 - **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` is `fn:` with an empty expression
 - **Invalid column kind** (`column_default_kind_invalid`) -- `defaultKind` is not `DEFAULT`, `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` (Python rejects it when the column is constructed)
+- **Expression without `fn:`** (`column_expression_requires_fn`) -- a `MATERIALIZED` or `ALIAS` column has a plain string `default`, which ClickHouse would store as text
+- **Unstored column in a key** (`column_kind_not_stored`) -- an `ALIAS` or `EPHEMERAL` column is named directly in `orderBy`, `primaryKey`, `partitionBy` or an engine argument, or an `EPHEMERAL` column is a skip index expression
+- **EPHEMERAL column in a projection** (`column_ephemeral_in_projection`) -- a projection reads an `EPHEMERAL` column
+- **Codec on an unstored column** (`column_kind_codec_unsupported`) -- an `ALIAS` column, or an `EPHEMERAL` column without a default or comment, has a `codec`
 - **Dictionary missing primary key** (`dictionary_missing_primary_key`) -- a dictionary's `primaryKey` is empty
 - **Dictionary primary key references missing attribute** (`dictionary_primary_key_missing_attribute`) -- a `primaryKey` entry doesn't name a declared attribute
 - **Dictionary missing source/layout/lifetime** (`dictionary_missing_source`, `dictionary_missing_layout`, `dictionary_missing_lifetime`) -- one of these raw-string fields is empty

@@ -10,7 +10,11 @@ from typing import Final
 from chkit.core.canonical import definition_key
 from chkit.core.codec import canonicalize_codec, is_general_codec, is_raw_codec
 from chkit.core.kafka import is_kafka_engine
-from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
+from chkit.core.key_clause import (
+    is_plain_column_reference,
+    normalize_key_columns,
+    split_top_level_comma,
+)
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefinition,
@@ -21,8 +25,13 @@ from chkit.core.model import (
     ValidationIssue,
     ValidationIssueCode,
 )
-from chkit.core.projection import is_index_projection, normalize_projection_index
+from chkit.core.projection import (
+    is_index_projection,
+    normalize_projection_index,
+    strip_wrapping_parens,
+)
 from chkit.core.text_index import render_text_index_type
+from chkit.core.text_index_sql import text_sql_tokens
 
 
 def _push(
@@ -197,6 +206,87 @@ def _validate_column_expression(
             f'Column "{column.name}" requires a non-empty expression; '
             "use fn: for SQL expressions",
         )
+    kind = column.default_kind
+    if kind in {"MATERIALIZED", "ALIAS"} and isinstance(column.default, str) and (
+        not column.default.startswith("fn:")
+    ):
+        _push(issues, definition, "column_expression_requires_fn",
+              f'Column "{column.name}" is {kind} with a plain string default, which ClickHouse '
+              f"would store as the text '{column.default}'. Prefix SQL expressions with fn: "
+              "(for example fn:toDate(ts)); write fn:'<text>' for a constant string.")
+    # A bare `EPHEMERAL CODEC(...)` parses the codec as the default expression;
+    # after an EPHEMERAL default or comment ClickHouse accepts the codec.
+    bare_ephemeral = kind == "EPHEMERAL" and column.default is None and not column.comment
+    if column.codec is not None and (kind == "ALIAS" or bare_ephemeral):
+        _push(issues, definition, "column_kind_codec_unsupported",
+              f'Column "{column.name}" is {kind} and cannot have a codec; '
+              "ClickHouse stores no data for it.")
+
+
+def _validate_unstored_column_references(
+    definition: TableDefinition, issues: list[ValidationIssue]
+) -> None:
+    """Flag ALIAS/EPHEMERAL columns named directly where ClickHouse needs a stored column.
+
+    References inside larger expressions (``toStartOfDay(day)``, TTL) are left for
+    ClickHouse to report at migrate time.
+    """
+    unstored = {c.name: c.default_kind for c in definition.columns
+                if c.default_kind in {"ALIAS", "EPHEMERAL"}}
+    if not unstored:
+        return
+    label = f"Table {definition.database}.{definition.name}"
+    partition = strip_wrapping_parens((definition.partition_by or "").strip())
+    references = [
+        *(("orderBy", part) for part in normalize_key_columns(definition.order_by)),
+        *(("primaryKey", part) for part in normalize_key_columns(definition.primary_key)),
+        *(("partitionBy", part) for part in split_top_level_comma(partition)),
+        *(("engine", part) for part in _engine_arguments(definition.engine)),
+        *((f'index "{index.name}"', index.expression) for index in definition.indexes or []),
+    ]
+    for field, part in references:
+        name = _unquote(part)
+        kind = unstored.get(name)
+        # ClickHouse indexes an ALIAS column by its expression, but not an EPHEMERAL one.
+        if kind is not None and (kind == "EPHEMERAL" or not field.startswith("index")):
+            _push(issues, definition, "column_kind_not_stored",
+                  f'{label} {field} references {kind} column "{name}", which ClickHouse '
+                  "does not store; use a MATERIALIZED column instead.")
+    for projection in definition.projections or []:
+        try:
+            tokens = text_sql_tokens(
+                projection.index if projection.index is not None else projection.query or ""
+            )
+        except (ValueError, IndexError):
+            continue
+        # A token followed by `(` is a function that merely shares the column's name,
+        # and one after AS names an output alias.
+        names = [_unquote(token) for token in tokens]
+        before, after = ["", *tokens[:-1]], [*tokens[1:], ""]
+        for name in dict.fromkeys(
+            name
+            for name, prev, nxt in zip(names, before, after, strict=True)
+            if unstored.get(name) == "EPHEMERAL" and nxt != "(" and prev.upper() != "AS"
+        ):
+            _push(issues, definition, "column_ephemeral_in_projection",
+                  f'{label} projection "{projection.name}" reads EPHEMERAL column "{name}", '
+                  "which ClickHouse does not store, so the table is rejected or every INSERT "
+                  "fails. Use a MATERIALIZED column instead.")
+
+
+def _engine_arguments(engine: str) -> list[str]:
+    """Bare engine arguments, with one tuple level flattened: ``SummingMergeTree((a, b))``."""
+    # Only MergeTree-family parameters name columns; e.g. Distributed takes a cluster name.
+    match = re.fullmatch(r"\s*\w*MergeTree\s*\((.*)\)\s*", engine, re.DOTALL)
+    arguments = split_top_level_comma(match.group(1)) if match else []
+    parts = [p for arg in arguments for p in split_top_level_comma(strip_wrapping_parens(arg))]
+    return [part for part in parts if not part.startswith("'")]
+
+
+def _unquote(name: str) -> str:
+    """A column name with its backtick or double-quote identifier quotes removed."""
+    name = name.strip()
+    return name[1:-1] if len(name) > 1 and name[0] == name[-1] and name[0] in "`\"" else name
 
 
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
@@ -279,6 +369,8 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f"Table {definition.database}.{definition.name} orderBy "
                 f'references missing column "{col}"',
             )
+
+    _validate_unstored_column_references(definition, issues)
 
 
 _INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(

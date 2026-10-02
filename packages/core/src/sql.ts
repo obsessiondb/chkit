@@ -216,15 +216,22 @@ export function renderAlterAddColumn(def: TableDefinition, column: ColumnDefinit
   return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD COLUMN IF NOT EXISTS ${renderColumn(column)};`
 }
 
-export function renderAlterModifyColumn(
+export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)};`
+}
+
+/**
+ * MODIFY COLUMN without an expression keeps the old one, so dropping it needs an
+ * explicit REMOVE. It must run before the MODIFY: in one statement ClickHouse
+ * casts the retained default to the new type first, so `'abc'` -> UInt64 fails.
+ */
+export function renderAlterRemoveColumnExpression(
   def: TableDefinition,
   column: ColumnDefinition,
-  previous?: ColumnDefinition
-): string {
-  const remove = previous?.default !== undefined && column.default === undefined && column.defaultKind !== 'EPHEMERAL'
-    ? `, MODIFY COLUMN ${quoteIdentifier(column.name)} REMOVE ${previous.defaultKind ?? 'DEFAULT'}`
-    : ''
-  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)}${remove};`
+  previous: ColumnDefinition
+): string | undefined {
+  if (previous.default === undefined || column.default !== undefined || column.defaultKind === 'EPHEMERAL') return undefined
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${quoteIdentifier(column.name)} REMOVE ${previous.defaultKind ?? 'DEFAULT'};`
 }
 
 export function renderAlterDropColumn(def: TableDefinition, columnName: string): string {

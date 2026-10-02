@@ -37,6 +37,7 @@ from chkit.core.sql import (
     render_alter_modify_setting,
     render_alter_modify_ttl,
     render_alter_remove_codec,
+    render_alter_remove_column_expression,
     render_alter_reset_setting,
     render_dictionary_sql,
     to_create_sql,
@@ -468,15 +469,26 @@ def _diff_tables(
     for column_change in column_diff.changed:
         old_kind = column_change.old_item.default_kind or "DEFAULT"
         new_kind = column_change.new_item.default_kind or "DEFAULT"
+        key = f"table:{new.database}.{new.name}:column:{column_change.name}"
+        remove_expression = render_alter_remove_column_expression(
+            new, column_change.new_item, column_change.old_item
+        )
+        # Its own operation: migrate pairs each `-- operation:` marker with exactly one statement.
+        if remove_expression is not None:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column", key=key, risk="caution", sql=remove_expression
+                )
+            )
         sql = (
             render_alter_remove_codec(new, column_change.name)
             if _is_codec_removal(column_change.old_item, column_change.new_item)
-            else render_alter_modify_column(new, column_change.new_item, column_change.old_item)
+            else render_alter_modify_column(new, column_change.new_item)
         )
         ops.append(
             MigrationOperation(
                 type="alter_table_modify_column",
-                key=f"table:{new.database}.{new.name}:column:{column_change.name}",
+                key=key,
                 risk="caution",
                 sql=sql,
                 warning=(
