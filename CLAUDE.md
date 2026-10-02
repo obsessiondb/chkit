@@ -85,7 +85,9 @@ CI runs **verify** on every pull request and push to `main`, using a disposable 
 
 After **verify** passes on a push to `main`, **obsessiondb** seeds the same fixtures and runs `turbo run test` against the managed test database using the existing `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
 
-`turbo.json` passes through `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
+The **obsessiondb** job also sets `CHKIT_E2E_TARGET=obsessiondb`. A test may skip itself on that target only for a known ObsessionDB limitation with a linked issue, and must still run in **verify**.
+
+`turbo.json` passes through `CHKIT_E2E_TARGET`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
 
 ## Release
 
