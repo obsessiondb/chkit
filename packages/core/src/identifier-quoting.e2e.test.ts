@@ -70,8 +70,11 @@ async function readColumnNames(): Promise<string[]> {
 
 // ObsessionDB DDL is eventually consistent: re-read until the expected shape
 // appears, then let the caller's expect report the real diff on timeout.
+// Each test outlives its polls, so bun's 5s default never cuts one short.
+const POLL_DEADLINE_MS = 30_000
+const POLL_TEST_TIMEOUT_MS = POLL_DEADLINE_MS + 15_000
 async function pollColumnNames(expected: string[]): Promise<string[]> {
-  const deadline = Date.now() + 30_000
+  const deadline = Date.now() + POLL_DEADLINE_MS
   for (;;) {
     const names = await readColumnNames()
     if (JSON.stringify(names) === JSON.stringify(expected) || Date.now() >= deadline) return names
@@ -93,7 +96,7 @@ describe('identifier quoting round-trips through live ClickHouse', () => {
   test('CREATE TABLE preserves table and column names verbatim', async () => {
     await exec(toCreateSQL(def).replace(/;$/, ''))
     expect(await pollColumnNames(['id', evilColumn, 'a.b'])).toEqual(['id', evilColumn, 'a.b'])
-  })
+  }, POLL_TEST_TIMEOUT_MS)
 
   test('ADD COLUMN and DROP COLUMN target the exact names', async () => {
     const added = 'new`col\\with slash'
@@ -107,5 +110,5 @@ describe('identifier quoting round-trips through live ClickHouse', () => {
 
     await exec(renderAlterDropColumn(def, evilColumn).replace(/;$/, ''))
     expect(await pollColumnNames(['id', 'a.b', added])).toEqual(['id', 'a.b', added])
-  })
+  }, 2 * POLL_TEST_TIMEOUT_MS)
 })
