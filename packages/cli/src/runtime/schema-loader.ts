@@ -18,8 +18,9 @@ export interface LoadSchemaDefinitionsWithHooksInput {
 /**
  * Load schema definitions the way `chkit generate` does: the `onConfigLoaded`
  * hooks, the schema files, then the `onSchemaLoaded` hooks (which may rewrite
- * definitions, e.g. the ObsessionDB engine rewrite). `chkit snapshot rebuild`
- * uses the same pipeline so it writes exactly the snapshot `generate` would.
+ * definitions, e.g. the ObsessionDB plugin strips storage_policy for a
+ * non-ObsessionDB target). `chkit snapshot rebuild` uses the same pipeline so
+ * it writes exactly the snapshot `generate` would.
  */
 export async function loadSchemaDefinitionsWithHooks(
   input: LoadSchemaDefinitionsWithHooksInput,

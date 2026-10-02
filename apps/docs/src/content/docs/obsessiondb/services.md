@@ -77,5 +77,5 @@ See [`chkit query`](/cli/query/) for the command reference, including the `--ser
 ## Related
 
 - [`chkit query`](/cli/query/) — ad-hoc SQL execution against the selected service.
-- [Engine Rewriting](/obsessiondb/engine-rewriting/) — how `Shared*` engines are handled depending on the active target.
+- [Engine Rewriting](/obsessiondb/engine-rewriting/) — how `Shared*` engines and `storage_policy` are handled for ObsessionDB and regular ClickHouse targets.
 - [Backfill Jobs](/obsessiondb/backfills/) — submit backfills as managed jobs to the selected service.

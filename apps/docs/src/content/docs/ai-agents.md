@@ -115,7 +115,7 @@ chkit obsessiondb signup --email <you@example.com> --code <CODE>
 chkit obsessiondb service claim                      # provisions the free dev instance
 ```
 
-Keep `obsessiondb()` registered in `clickhouse.config.ts` for connected paths. Claiming and account login use its remote executor. The plugin rewrites `Shared` engines for non-ObsessionDB ClickHouse targets.
+Keep `obsessiondb()` registered in `clickhouse.config.ts` for connected paths. Claiming and account login use its remote executor. For non-ObsessionDB ClickHouse targets, the plugin strips the `storage_policy` table setting, since ObsessionDB's storage policies don't exist there.
 
 ## Step 5: Pull existing tables (only if the user has a populated database)
 
@@ -151,7 +151,7 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 | Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Time-windowed loads with checkpoints, for large or resumable backfills. |
 | **Ingest application API data** into ClickHouse | [`@chkit/plugin-ingest`](/api-sync/) | TypeScript only; finite pulls with journaled checkpoints and an external scheduler. |
-| Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and engine configuration; rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse. |
+| Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and service selection; strips the `storage_policy` table setting when targeting non-ObsessionDB ClickHouse. |
 
 Install plugins for the project's stated requirements.
 

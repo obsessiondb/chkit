@@ -2,7 +2,11 @@ import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ResolvedChxConfig, SchemaDefinition } from '@chkit/core'
+import {
+	parseFlags,
+	type ResolvedChxConfig,
+	type SchemaDefinition,
+} from '@chkit/core'
 
 import { saveCredentials } from './auth/credentials'
 import {
@@ -250,14 +254,14 @@ describe('rewriteSharedEngines', () => {
 describe('resolveStripBehavior', () => {
 	test('--force-shared-engines prevents stripping', () => {
 		const config = makeConfig('http://localhost:8123')
-		expect(resolveStripBehavior(config, { 'force-shared-engines': true })).toBe(
+		expect(resolveStripBehavior(config, { '--force-shared-engines': true })).toBe(
 			false,
 		)
 	})
 
 	test('--no-shared-engines forces stripping', () => {
 		const config = makeConfig('https://my-cluster.obsessiondb.com:8443')
-		expect(resolveStripBehavior(config, { 'no-shared-engines': true })).toBe(
+		expect(resolveStripBehavior(config, { '--no-shared-engines': true })).toBe(
 			true,
 		)
 	})
@@ -266,10 +270,30 @@ describe('resolveStripBehavior', () => {
 		const config = makeConfig('http://localhost:8123')
 		expect(
 			resolveStripBehavior(config, {
-				'force-shared-engines': true,
-				'no-shared-engines': true,
+				'--force-shared-engines': true,
+				'--no-shared-engines': true,
 			}),
 		).toBe(false)
+	})
+
+	test('reads the overrides under the keys the CLI flag parser produces', () => {
+		// The CLI parses argv with the flag definitions the plugin registers, so
+		// resolve through that parser rather than hand-written keys: the plugin
+		// once read `flags['force-shared-engines']` and both overrides were ignored.
+		const flagDefs = obsessiondb().plugin.extendCommands[0]?.flags ?? []
+
+		expect(
+			resolveStripBehavior(
+				makeConfig('http://localhost:8123'),
+				parseFlags(['--force-shared-engines'], flagDefs),
+			),
+		).toBe(false)
+		expect(
+			resolveStripBehavior(
+				makeConfig('https://my-cluster.obsessiondb.com:8443'),
+				parseFlags(['--no-shared-engines'], flagDefs),
+			),
+		).toBe(true)
 	})
 
 	test('auto-detects ObsessionDB host and keeps Shared engines', () => {
@@ -298,7 +322,7 @@ describe('obsessiondb plugin', () => {
 		expect(registration.plugin.manifest.apiVersion).toBe(1)
 	})
 
-	test('registers extendCommands for generate, migrate, status, drift, check', () => {
+	test('registers extendCommands for generate, migrate, status, drift, check, snapshot', () => {
 		const registration = obsessiondb()
 		const ext = registration.plugin.extendCommands[0]
 
@@ -308,10 +332,26 @@ describe('obsessiondb plugin', () => {
 			'status',
 			'drift',
 			'check',
+			'snapshot',
 		])
 		expect(ext?.flags).toHaveLength(2)
 		expect(ext?.flags[0]?.name).toBe('--force-shared-engines')
 		expect(ext?.flags[1]?.name).toBe('--no-shared-engines')
+	})
+
+	test('describes the override flags by the setting they control and where they apply', () => {
+		// Core canonicalization writes the standard engine name for every target,
+		// so the flags only decide whether storage_policy is stripped, and only
+		// generate and snapshot rebuild run that rewrite. The help once claimed
+		// --force-shared-engines kept Shared engines.
+		const flags = obsessiondb().plugin.extendCommands[0]?.flags ?? []
+
+		expect(flags).toHaveLength(2)
+		for (const flag of flags) {
+			expect(flag.description).toContain('storage_policy')
+			expect(flag.description).toContain('generate and snapshot rebuild')
+			expect(flag.description).not.toMatch(/Shared engine/i)
+		}
 	})
 
 	test('onSchemaLoaded strips Shared engines for regular ClickHouse', () => {
@@ -335,6 +375,30 @@ describe('obsessiondb plugin', () => {
 		)
 		expect((result?.[1] as { engine: string }).engine).toBe('MergeTree')
 		expect(result?.[2]).toEqual(makeView('events_view'))
+	})
+
+	test('onSchemaLoaded honors parsed override flags for storage_policy', () => {
+		const registration = obsessiondb()
+		const flagDefs = registration.plugin.extendCommands[0]?.flags ?? []
+		const definitions: SchemaDefinition[] = [
+			makeTable('events', 'MergeTree', { storage_policy: "'s3'" }),
+		]
+
+		const kept = registration.plugin.hooks.onSchemaLoaded({
+			config: makeConfig('http://localhost:8123'),
+			flags: parseFlags(['--force-shared-engines'], flagDefs),
+			definitions,
+		})
+		expect(kept).toBeUndefined()
+
+		const stripped = registration.plugin.hooks.onSchemaLoaded({
+			config: makeConfig('https://my-cluster.obsessiondb.com:8443'),
+			flags: parseFlags(['--no-shared-engines'], flagDefs),
+			definitions,
+		})
+		expect(
+			(stripped?.[0] as { settings?: Record<string, unknown> }).settings,
+		).toBeUndefined()
 	})
 
 	test('onSchemaLoaded is a no-op for ObsessionDB hosts', () => {
