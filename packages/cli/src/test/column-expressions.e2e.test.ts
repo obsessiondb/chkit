@@ -32,11 +32,15 @@ import {
 
 test('column expressions survive create, pull, drift, inserts and ALTER on live ClickHouse', async () => {
 	const env = getRequiredEnv()
+	// One session pins every request to one replica, so an INSERT after an ALTER
+	// sees the expression the shape poll just confirmed (ObsessionDB replicas lag).
+	// Requests must stay sequential: a session runs one query at a time.
 	const client = createClient({
 		url: env.clickhouseUrl,
 		username: env.clickhouseUser,
 		password: env.clickhousePassword,
 		database: env.clickhouseDatabase,
+		session_id: crypto.randomUUID(),
 	})
 	const dir = await mkdtemp(join(tmpdir(), 'chkit-expression-pull-'))
 	const name = `column_expr_${Date.now()}_${Math.random().toString(16).slice(2)}`
