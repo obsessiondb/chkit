@@ -67,6 +67,10 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 				clickhouse_settings: { output_format_json_quote_64bit_integers: 1 },
 			})
 		).json<T>()
+	// Inserted rows can reach replicas at different times on managed ClickHouse
+	// (e.g. ObsessionDB): re-read until the expected rows are visible.
+	const settledRows = <T>(sql: string, count: number) =>
+		pollUntil(() => query<T>(sql), (rows) => rows.length === count)
 	const columns = async () =>
 		(
 			await query<SystemColumnRow>(
@@ -134,8 +138,9 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 			query: `INSERT INTO ${def.database}.${name} (id, ts, raw) VALUES (1, '2026-01-01 12:00:00', 'abc')`,
 		})
 		expect(
-			await query(
+			await settledRows(
 				`SELECT day, label, toString(size) AS size FROM ${def.database}.${name}`,
+				1,
 			),
 		).toEqual([{ day: '2026-01-01', label: '2026-01-01', size: '3' }])
 		const generatedPath = join(dir, 'types.ts')
@@ -154,10 +159,11 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 				Object.keys(models).find((key) => key.endsWith('RowExplicitSchema')) ??
 					''
 			]
-		const star = (await query(`SELECT * FROM ${def.database}.${name}`))[0]
+		const star = (await settledRows(`SELECT * FROM ${def.database}.${name}`, 1))[0]
 		const full = (
-			await query(
+			await settledRows(
 				`SELECT id, ts, day, label, size FROM ${def.database}.${name}`,
+				1,
 			)
 		)[0]
 		expect(readSchema.parse(star)).toBeDefined()
@@ -181,13 +187,13 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 			),
 		})
 		expect(
-			await query(`SELECT day FROM ${def.database}.${name} WHERE id=1`),
+			await settledRows(`SELECT day FROM ${def.database}.${name} WHERE id=1`, 1),
 		).toEqual([{ day: '2026-01-01' }])
 		await client.command({
 			query: `INSERT INTO ${def.database}.${name} (id, ts, raw) VALUES (2, '2026-01-01 12:00:00', 'abcd')`,
 		})
 		expect(
-			await query(`SELECT day FROM ${def.database}.${name} WHERE id=2`),
+			await settledRows(`SELECT day FROM ${def.database}.${name} WHERE id=2`, 1),
 		).toEqual([{ day: '2026-01-02' }])
 		await migrate({
 			...def,
