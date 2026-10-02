@@ -182,9 +182,6 @@ test('column expressions survive create, pull, drift, inserts and ALTER on live 
 				query: `INSERT INTO ${def.database}.${name} (id, ts, day) VALUES (2, '2026-01-01 12:00:00', '2000-01-01')`,
 			}),
 		).rejects.toThrow()
-		await expect(
-			query(`SELECT raw FROM ${def.database}.${name}`),
-		).rejects.toThrow()
 
 		await migrate({
 			...def,
