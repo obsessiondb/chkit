@@ -373,6 +373,7 @@ def test_expression_kinds_reject_plain_string_defaults(kind: str, default: Any, 
     [
         ({"order_by": ["day"]}, "orderBy", "ALIAS", "day"),
         ({"order_by": ["id", "`raw`"]}, "orderBy", "EPHEMERAL", "raw"),
+        ({"order_by": ["id", '"raw"']}, "orderBy", "EPHEMERAL", "raw"),
         ({"primary_key": ["id, day"]}, "primaryKey", "ALIAS", "day"),
         ({"partition_by": "(day, id)"}, "partitionBy", "ALIAS", "day"),
         ({"engine": "SummingMergeTree((id, day))"}, "engine", "ALIAS", "day"),
@@ -411,6 +412,7 @@ def test_stored_columns_and_nested_references_are_not_flagged(overrides: dict[st
         ({"name": "p", "index": "raw", "type": "basic"}, True),
         ({"name": "p", "query": "SELECT id, lower(toString(id)), 'raw', day ORDER BY id"}, False),
         ({"name": "p", "query": "SELECT (raw"}, False),
+        ({"name": "p", "query": "SELECT id AS raw ORDER BY id"}, False),
     ],
 )
 def test_projections_reading_ephemeral_columns(projection: dict[str, Any], flagged: bool) -> None:

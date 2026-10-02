@@ -259,11 +259,14 @@ def _validate_unstored_column_references(
             )
         except (ValueError, IndexError):
             continue
-        # A token followed by `(` is a function that merely shares the column's name.
+        # A token followed by `(` is a function that merely shares the column's name,
+        # and one after AS names an output alias.
         names = [_unquote(token) for token in tokens]
+        before, after = ["", *tokens[:-1]], [*tokens[1:], ""]
         for name in dict.fromkeys(
-            name for name, after in zip(names, [*tokens[1:], ""], strict=True)
-            if unstored.get(name) == "EPHEMERAL" and after != "("
+            name
+            for name, prev, nxt in zip(names, before, after, strict=True)
+            if unstored.get(name) == "EPHEMERAL" and nxt != "(" and prev.upper() != "AS"
         ):
             _push(issues, definition, "column_ephemeral_in_projection",
                   f'{label} projection "{projection.name}" reads EPHEMERAL column "{name}", '
@@ -280,8 +283,9 @@ def _engine_arguments(engine: str) -> list[str]:
 
 
 def _unquote(name: str) -> str:
+    """A column name with its backtick or double-quote identifier quotes removed."""
     name = name.strip()
-    return name[1:-1] if len(name) > 1 and name[0] == name[-1] == "`" else name
+    return name[1:-1] if len(name) > 1 and name[0] == name[-1] and name[0] in "`\"" else name
 
 
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:

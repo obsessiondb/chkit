@@ -189,6 +189,7 @@ describe('column expressions', () => {
 	const placements: Array<[string, Partial<TableDefinition>]> = [
 		['orderBy', { orderBy: ['ts', 'day'] }],
 		['orderBy', { orderBy: ['ts, `day`'] }],
+		['orderBy', { orderBy: ['ts', '"day"'] }],
 		['primaryKey', { primaryKey: ['day'] }],
 		['partitionBy', { partitionBy: '(ts, day)' }],
 		['engine', { engine: 'ReplacingMergeTree(day)' }],
@@ -237,6 +238,7 @@ describe('column expressions', () => {
 				{ name: 'p_sum', query: 'SELECT ts, count(`day`) GROUP BY ts' },
 				{ name: 'p_idx', index: 'day', type: 'basic' },
 				{ name: 'p_fn', query: "SELECT ts, day(ts), 'day' GROUP BY ts" },
+				{ name: 'p_alias', query: 'SELECT ts AS day ORDER BY ts' },
 				{ name: 'p_bad', query: "SELECT 'day" },
 			],
 		}

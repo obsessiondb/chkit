@@ -285,9 +285,12 @@ function validateUnstoredColumnReferences(
     } catch {
       continue
     }
-    // A token followed by `(` is a function that merely shares the column's name.
+    // A token followed by `(` is a function that merely shares the column's name,
+    // and one after AS names an output alias.
     const names = tokens.map(unquoteColumnName)
-    const read = new Set(names.filter((name, i) => unstored.get(name) === 'EPHEMERAL' && tokens[i + 1] !== '('))
+    const read = new Set(names.filter((name, i) =>
+      unstored.get(name) === 'EPHEMERAL' && tokens[i + 1] !== '(' && tokens[i - 1]?.toUpperCase() !== 'AS'
+    ))
     for (const name of read) {
       pushValidationIssue(
         issues, def, 'column_ephemeral_in_projection',
@@ -305,9 +308,11 @@ function engineArguments(engine: string): string[] {
     .filter((arg) => !arg.startsWith("'"))
 }
 
+/** A column name with its backtick or double-quote identifier quotes removed. */
 function unquoteColumnName(token: string): string {
   const trimmed = token.trim()
-  return trimmed.length > 1 && trimmed.startsWith('`') && trimmed.endsWith('`') ? trimmed.slice(1, -1) : trimmed
+  const quote = trimmed.charAt(0)
+  return trimmed.length > 1 && (quote === '`' || quote === '"') && trimmed.endsWith(quote) ? trimmed.slice(1, -1) : trimmed
 }
 
 const INTERVAL_PATTERN =
