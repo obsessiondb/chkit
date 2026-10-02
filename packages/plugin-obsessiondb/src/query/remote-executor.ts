@@ -75,7 +75,8 @@ export function normalizeQueryJsonResult<T extends Record<string, unknown>>(
 /**
  * The `INSERT ... VALUES` statement for an insert, or undefined when there are no
  * rows. An explicit column list (required to supply EPHEMERAL inputs) takes
- * precedence over the first row's keys; missing values are sent as NULL.
+ * precedence over the first row's keys. A field a row omits takes the column's
+ * DEFAULT; an explicit null is sent as NULL.
  */
 export function renderValuesInsert<T extends Record<string, unknown>>(
 	params: ClickHouseInsertParams<T>,
@@ -91,7 +92,8 @@ export function renderValuesInsert<T extends Record<string, unknown>>(
 				`(${columns
 					.map(({ key }) => {
 						const val = row[key]
-						if (val === null || val === undefined) return 'NULL'
+						if (val === undefined) return 'DEFAULT'
+						if (val === null) return 'NULL'
 						if (typeof val === 'number') return String(val)
 						return `'${String(val).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
 					})

@@ -80,7 +80,13 @@ describe('renderValuesInsert', () => {
 				values: [{ id: 1 }, { id: 2, 'raw input': 'abc' }],
 				columns: ['id', '`raw input`'],
 			}),
-		).toBe("INSERT INTO app.t (id, `raw input`) VALUES (1, NULL), (2, 'abc')")
+		).toBe("INSERT INTO app.t (id, `raw input`) VALUES (1, DEFAULT), (2, 'abc')")
+	})
+
+	test('keeps an explicit null as NULL', () => {
+		expect(
+			renderValuesInsert({ table: 'app.t', values: [{ id: 1, note: null }] }),
+		).toBe('INSERT INTO app.t (id, note) VALUES (1, NULL)')
 	})
 
 	test('returns undefined for an empty insert', () => {
