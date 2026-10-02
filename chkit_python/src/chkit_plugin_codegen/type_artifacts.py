@@ -324,7 +324,20 @@ def _render_table_model(
         lines.extend(insert_lines)
         findings.extend(insert_findings)
         imports.update(insert_imports)
+        # Ordinary columns appear in all three models; report each defect once.
+        findings = _unique_findings(findings)
     return lines, findings, imports
+
+
+def _unique_findings(findings: list[CodegenFinding]) -> list[CodegenFinding]:
+    seen: set[tuple[str, str | None]] = set()
+    unique: list[CodegenFinding] = []
+    for finding in findings:
+        key = (finding.code, finding.path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(finding)
+    return unique
 
 
 def _render_dictionary_model(

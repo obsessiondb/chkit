@@ -240,6 +240,20 @@ def test_map_column_nullable_flag_wins_when_resolved_not_nullable() -> None:
 # ---------- generator ----------
 
 
+def test_generate_type_artifacts_reports_unsupported_type_once_across_models() -> None:
+    columns = [
+        _col("id", "UInt64"),
+        _col("shape", "Polygon"),
+        ColumnDefinition(name="day", type="Date", default="fn:today()", default_kind="MATERIALIZED"),
+    ]
+    out = generate_type_artifacts(
+        definitions=[_t(columns=columns)], options={"fail_on_unsupported_type": False}
+    )
+    assert "class DbTRowExplicit(BaseModel):" in out.content
+    assert "class DbTRowInsert(BaseModel):" in out.content
+    assert [(f.code, f.path) for f in out.findings] == [("codegen_unsupported_type", "db.t.shape")]
+
+
 def test_generate_type_artifacts_emits_header_and_class() -> None:
     table_def = _t(columns=[_col("id", "UInt64"), _col("name", "String")])
     out = generate_type_artifacts(definitions=[table_def])

@@ -285,8 +285,19 @@ function renderTableInterface(
   )
   return {
     lines: [...read.lines, '', ...explicit.lines, '', ...insert.lines],
-    findings: [...read.findings, ...explicit.findings, ...insert.findings],
+    // Ordinary columns appear in all three shapes; report each defect once.
+    findings: uniqueFindings([...read.findings, ...explicit.findings, ...insert.findings]),
   }
+}
+
+function uniqueFindings(findings: CodegenFinding[]): CodegenFinding[] {
+  const seen = new Set<string>()
+  return findings.filter((finding) => {
+    const key = `${finding.code}\u0000${finding.path}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function renderDictionaryInterface(

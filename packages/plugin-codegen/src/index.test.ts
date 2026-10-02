@@ -294,6 +294,36 @@ describe('@chkit/plugin-codegen generation', () => {
     expect(result.declarationCount).toBe(1)
   })
 
+  test('reports an unsupported column type once across row shapes', () => {
+    const definitions = schema(
+      table({
+        database: 'app',
+        name: 'shapes',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'shape', type: 'Polygon' },
+          { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'fn:today()' },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+    )
+
+    const result = generateTypeArtifacts({
+      definitions,
+      options: { failOnUnsupportedType: false },
+      now: new Date('2026-01-01T00:00:00.000Z'),
+      toolVersion: '0.1.0',
+    })
+
+    expect(result.content).toContain('export type AppShapesRowExplicit = {')
+    expect(result.content).toContain('export type AppShapesRowInsert = {')
+    expect(result.findings.map((finding) => [finding.code, finding.path])).toEqual([
+      ['codegen_unsupported_type', 'app.shapes.shape'],
+    ])
+  })
+
   test('header is stable across generation times', () => {
     const definitions = schema(
       table({
