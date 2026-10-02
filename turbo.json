@@ -18,6 +18,7 @@
       "dependsOn": ["^build"],
       "cache": false,
       "passThroughEnv": [
+        "CHKIT_E2E_TARGET",
         "CLICKHOUSE_DB",
         "CLICKHOUSE_HOST",
         "CLICKHOUSE_PASSWORD",
