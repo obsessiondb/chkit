@@ -397,6 +397,7 @@ def test_unstored_columns_named_where_clickhouse_needs_stored_data(
         {"order_by": ["size"], "partition_by": "size", "engine": "SummingMergeTree(size)"},
         {"order_by": ["toStartOfMonth(day)"], "partition_by": "toYYYYMM(day)"},
         {"engine": "ReplicatedMergeTree('day', 'raw')", "ttl": "day + INTERVAL 1 DAY"},
+        {"engine": "Distributed(day, default, source, rand())"},
         {"indexes": [{"name": "i", "expression": "day", "type": "minmax", "granularity": 1}]},
     ],
 )

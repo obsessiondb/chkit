@@ -302,7 +302,8 @@ function validateUnstoredColumnReferences(
 
 /** Bare engine arguments, with one tuple level flattened: `SummingMergeTree((a, b))`. */
 function engineArguments(engine: string): string[] {
-  const args = /^\s*\w+\s*\(([\s\S]*)\)\s*$/.exec(engine)?.[1] ?? ''
+  // Only MergeTree-family parameters name columns; e.g. Distributed takes a cluster name.
+  const args = /^\s*\w*MergeTree\s*\(([\s\S]*)\)\s*$/.exec(engine)?.[1] ?? ''
   return splitTopLevelComma(args)
     .flatMap((arg) => splitTopLevelComma(stripWrappingParens(arg)))
     .filter((arg) => !arg.startsWith("'"))

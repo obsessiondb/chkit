@@ -276,7 +276,8 @@ def _validate_unstored_column_references(
 
 def _engine_arguments(engine: str) -> list[str]:
     """Bare engine arguments, with one tuple level flattened: ``SummingMergeTree((a, b))``."""
-    match = re.fullmatch(r"\s*\w+\s*\((.*)\)\s*", engine, re.DOTALL)
+    # Only MergeTree-family parameters name columns; e.g. Distributed takes a cluster name.
+    match = re.fullmatch(r"\s*\w*MergeTree\s*\((.*)\)\s*", engine, re.DOTALL)
     arguments = split_top_level_comma(match.group(1)) if match else []
     parts = [p for arg in arguments for p in split_top_level_comma(strip_wrapping_parens(arg))]
     return [part for part in parts if not part.startswith("'")]

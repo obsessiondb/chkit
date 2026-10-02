@@ -216,6 +216,7 @@ describe('column expressions', () => {
 			{ partitionBy: 'toYYYYMM(day)' },
 			{ engine: "ReplicatedMergeTree('/t/day', 'day')" },
 			{ ttl: 'day + INTERVAL 1 DAY' },
+			{ engine: 'Distributed(day, default, source, rand())' },
 		]) {
 			expect(messages(kinded('ALIAS', overrides))).toEqual([])
 		}
