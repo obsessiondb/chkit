@@ -123,3 +123,87 @@ CREATE MATERIALIZED VIEW mv TO stored AS SELECT id FROM q;`
     'CREATE MATERIALIZED VIEW mv TO stored AS SELECT id FROM q;',
   ])
 })
+
+// ClickHouse rejects a query made only of comments with "Empty query" (#233),
+// so such a piece is never an executable statement.
+describe('extractExecutableStatements with comment-only statements', () => {
+  test('splitSqlStatements still returns a comment-only piece', () => {
+    expect(splitSqlStatements('/* only a comment */;')).toEqual(['/* only a comment */;'])
+  })
+
+  test('drops a statement made only of a block comment', () => {
+    expect(extractExecutableStatements('/* only a comment */;')).toEqual([])
+  })
+
+  test('drops a block comment after the last statement', () => {
+    expect(
+      extractExecutableStatements('CREATE TABLE t (id UInt64) ENGINE = Memory;\n/* TODO */\n'),
+    ).toEqual(['CREATE TABLE t (id UInt64) ENGINE = Memory;'])
+  })
+
+  test('returns nothing for a file of line and block comments', () => {
+    expect(extractExecutableStatements('-- header\n/* block; with semicolon */\n-- more\n')).toEqual([])
+  })
+
+  test('drops a comment-only statement between two statements', () => {
+    expect(extractExecutableStatements('SELECT 1;\n/* a */ /* b */;\nSELECT 2;')).toEqual([
+      'SELECT 1;',
+      'SELECT 2;',
+    ])
+  })
+
+  test('drops every ClickHouse comment form', () => {
+    expect(extractExecutableStatements('# note\n;')).toEqual([])
+    expect(extractExecutableStatements('#! shebang\n')).toEqual([])
+    expect(extractExecutableStatements('// note\n;')).toEqual([])
+    expect(extractExecutableStatements('/* a /* nested */ b */;')).toEqual([])
+    expect(extractExecutableStatements('SELECT 1;\n// trailing note')).toEqual(['SELECT 1;'])
+  })
+
+  test('keeps comment markers inside strings and quoted identifiers', () => {
+    expect(extractExecutableStatements("SELECT '/* not a comment */';")).toEqual([
+      "SELECT '/* not a comment */';",
+    ])
+    expect(extractExecutableStatements('SELECT `/*x*/` FROM t;')).toEqual(['SELECT `/*x*/` FROM t;'])
+    expect(extractExecutableStatements("SELECT '# a; b';\n/* end */")).toEqual(["SELECT '# a; b';"])
+  })
+
+  test('keeps text ClickHouse rejects so it reports the error', () => {
+    // `#x` is not a comment (ClickHouse needs `# ` or `#!`).
+    expect(extractExecutableStatements('#x;')).toEqual(['#x;'])
+    expect(extractExecutableStatements('SELECT 1;\n/* never closed')).toEqual([
+      'SELECT 1;',
+      '/* never closed;',
+    ])
+  })
+
+  test('keeps a `#` or `//` comment that holds a semicolon, so the text after it never runs alone', () => {
+    // ClickHouse reads the whole line as one comment; the splitter cuts it at the `;`.
+    expect(extractExecutableStatements('// DROP TABLE a; DROP TABLE b;\nSELECT 1;')).toEqual([
+      '// DROP TABLE a;',
+      'DROP TABLE b;',
+      'SELECT 1;',
+    ])
+    expect(extractExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([
+      '# old: DROP TABLE a;',
+      'DROP TABLE b;',
+    ])
+  })
+
+  test('returns nothing for a generate --empty scaffold', () => {
+    const scaffold = [
+      '-- chkit-migration-format: v1',
+      '-- generated-at: 2026-01-01T00:00:00.000Z',
+      '-- cli-version: 0.2.0',
+      '-- definition-count: 0',
+      '-- operation-count: 0',
+      '-- rename-suggestion-count: 0',
+      '-- risk-summary: safe=0, caution=0, danger=0',
+      '',
+      '-- Empty migration scaffold. Write your SQL statements below.',
+      '-- Statements run in order and are separated by semicolons.',
+      '',
+    ].join('\n')
+    expect(extractExecutableStatements(scaffold)).toEqual([])
+  })
+})

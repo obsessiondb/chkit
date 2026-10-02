@@ -17,9 +17,12 @@ A reference for the errors you are most likely to hit when running chkit, what c
 | `Could not connect to ClickHouse at ... (connection refused)` | Nothing listening at the URL | Confirm the server is running and `CLICKHOUSE_URL` host/port are correct |
 | `Could not connect to ClickHouse at ... (host not found)` | Typo'd or unresolvable host | Check the host in `CLICKHOUSE_URL` |
 | `Unknown data type family: ...` | A migration references an invalid ClickHouse type | Fix the column type in the schema/migration and regenerate |
-| `Syntax error: failed at position ... (end of query)` on a generated view | The view's query has a SQL comment that an older chkit kept when it wrote the query on one line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)) | Upgrade chkit, then regenerate the migration |
+| `Syntax error: failed at position` or `Unknown expression identifier` on a generated view | The view's query has a SQL comment that an older chkit kept when it wrote the query on one line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)) | Upgrade chkit, then fix the comment in the failed migration and re-run it ([see below](#syntax-error-or-unknown-expression-identifier-on-a-generated-view)) |
 | `Blocked destructive migration execution` (exit code 3) | A `risk=danger` operation in non-interactive mode | Review, then re-run with `--allow-destructive` |
 | `Checksum mismatch detected on applied migrations` (exit code 1) | A migration file was edited after being applied | Restore the original file, or apply a new forward migration |
+| `failed at statement N of M` | ClickHouse rejected a statement; the migration stays in progress | Fix the cause and re-run `chkit migrate --apply`, or edit the file and re-run it |
+| `has in-progress journal state for checksum` | A migration that failed part-way was edited after some of its statements ran | `chkit migrate --apply --retry <file>`, or `chkit migrate --abandon <file> --apply` |
+| `contain no executable statements` | A pending migration holds only comments, such as an unfinished `generate --empty` stub | Add SQL to the file or delete it |
 | `extra_object` entries in `drift` / `check` | Tables chkit does not manage exist in the database | Expected on shared databases; only fails CI if you opt into `check.failOnExtraObjects` |
 
 ## Project loading
@@ -85,6 +88,28 @@ If `CLICKHOUSE_URL` is unset, chkit falls back to `http://localhost:8123`; the m
 
 ClickHouse rejected a statement because a column type is not valid (for example a typo like `NotARealType`). Fix the type in the schema definition, regenerate the migration, and re-apply.
 
+### `Syntax error` or `Unknown expression identifier` on a generated view
+
+chkit 0.2.0-beta.8 and older kept the SQL comments of a view query when they wrote it on one line, so a `--`, `//`, or `#` comment swallows the rest of that line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)). ClickHouse then reports `Syntax error: failed at position ...`, or `Unknown expression identifier` when the comment swallowed the `FROM` clause. A `--` comment also swallows the `;`, so the view runs together with the next statement, and the error quotes that statement. In the migration file, the comment sits in the middle of the view's query:
+
+```sql
+CREATE VIEW IF NOT EXISTS analytics.meetings AS
+SELECT id, -- the meeting id name FROM analytics.events;
+```
+
+Upgrading chkit does not repair this migration: it stays in progress, and `chkit migrate --apply` runs the same statement again. After you upgrade:
+
+1. In the failed migration file, delete the comment from the view's query and keep the SQL after it: `SELECT id, name FROM analytics.events;`.
+2. Re-run the migration. When the view was the first statement in the file, `chkit migrate --apply` runs the edited file. Otherwise resume after the statements that completed:
+
+   ```sh
+   chkit migrate --apply --retry 20260929001110_add_meetings.sql
+   ```
+
+3. Run `chkit generate`. `chkit/meta/snapshot.json` still holds the query with its comment, so it plans a migration that drops the view and creates it again with the same query. Apply it with `chkit migrate --apply`.
+
+Regenerating the failed migration from a restored `snapshot.json` instead loses an existing view whose query changed only by the comment: the upgraded chkit plans no change for that view, while the failed migration already dropped it.
+
 ### `Blocked destructive migration execution` (exit code 3)
 
 A migration contains a destructive operation (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DETACH`, …) and you are running non-interactively without approval. After reviewing the plan, re-run with `--allow-destructive` (or set `safety.allowDestructive: true` in config). See [`chkit migrate`](/cli/migrate/#destructive-operation-safety).
@@ -92,6 +117,36 @@ A migration contains a destructive operation (`DROP TABLE`, `DROP COLUMN`, `TRUN
 ### `Checksum mismatch detected on applied migrations` (exit code 1)
 
 A migration file changed on disk after it was already applied — chkit verifies SHA-256 checksums before applying. Restore the original file content, or, if the change is intentional, write a new forward migration instead of editing history.
+
+chkit 0.2.0-beta.8 and older recorded a `chkit generate --empty` stub without SQL as applied when it was pending during `chkit migrate --apply`. SQL added to that stub later causes this error. Delete the stub file and put its SQL in a new migration. chkit ignores the journal row of an applied migration whose file is gone, so this works both where the empty stub was recorded and where it never ran. If an environment already applied the stub with its SQL, make the new migration safe to run there again, for example with `IF NOT EXISTS`. Do not restore the stub's empty content instead: every environment that has not applied it would then hold an [empty pending migration](/cli/migrate/#empty-migrations), and `chkit migrate --apply` refuses to run there.
+
+### `Migration <file> failed at statement N of M`
+
+ClickHouse rejected a statement in the middle of a migration. The statements before it stay applied, and chkit records the migration as in progress rather than applied. When the cause is outside the file (a missing table, a permission, a transient error), fix it and re-run `chkit migrate --apply`: completed statements are skipped and the failed one runs again.
+
+When the file itself is wrong, edit it and re-run `chkit migrate --apply`. If no statement is recorded as completed, the edited file runs again from statement 1. Otherwise chkit stops with the error in the next entry.
+
+### `has in-progress journal state for checksum <a>, but the current file checksum is <b>`
+
+The migration failed part-way, and its file changed after some of its statements ran. chkit does not continue on its own, because those statements came from the old file. Resume with the edited file, skipping the statements that completed. They must keep their position and `-- operation:` marker. A completed `REMOVE DEFAULT` or `REMOVE MATERIALIZED` stays in the file too, even when only the `MODIFY COLUMN` after it needs the edit:
+
+```sh
+chkit migrate --apply --retry 20260929001110_funnel-model.sql
+```
+
+Or discard the partial run, so that the next apply runs the edited file from statement 1. The statements that completed stay applied and run again, so they must be safe to run twice. A completed `REMOVE DEFAULT` or `REMOVE MATERIALIZED` is not: ClickHouse rejects it once the column has no such expression, so delete it from the file first:
+
+```sh
+chkit migrate --abandon 20260929001110_funnel-model.sql           # preview
+chkit migrate --abandon 20260929001110_funnel-model.sql --apply
+chkit migrate --apply
+```
+
+Neither path needs edits to the `_chkit_migrations` journal table. See [failed migrations](/cli/migrate/#failed-migrations).
+
+### `contain no executable statements`
+
+A pending migration file holds only comments or whitespace, typically a `chkit generate --empty` stub committed before its SQL was written. `chkit migrate --apply` refuses to run rather than record an empty migration as applied. Add the SQL to the file, or delete it. See [empty migrations](/cli/migrate/#empty-migrations).
 
 ### `extra_object` reported by `drift` / `check`
 

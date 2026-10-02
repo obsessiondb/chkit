@@ -52,6 +52,7 @@ The schema/migration CLI and backfill engine share the TypeScript workflow. The 
 - [`@chkit/plugin-ingest`](/api-sync/) and the project `entry` module: API sync source authoring requires TypeScript.
 - Dependency-ordered migrations: chkit-py orders creates and drops by kind and name, so a view that reads another view, a materialized view, or a dictionary can be created before it. See [Operation order](/cli/generate/#operation-order).
 - Comments in SQL fragments: chkit-py keeps comments when it puts a view query or another SQL fragment on one line, so a `--`, `//`, or `#` comment swallows the rest of the statement. Keep comments out of these fields with chkit-py. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
+- Failed-migration recovery: chkit-py records the progress of async statements only. Re-running a failed migration runs its other statements again from statement 1, including those that completed, and an edited file is refused once one of its async statements was attempted. chkit-py has no `migrate --retry` or `--abandon`, records a migration file without executable statements as applied, and sends a statement made only of comments to ClickHouse, which rejects it. Its async status polling can mistake an earlier attempt with the same query id for the current one, and in `--json` mode it drops async progress lines instead of writing them to stderr. See [failed migrations](/cli/migrate/#failed-migrations).
 
 ## These pages
 

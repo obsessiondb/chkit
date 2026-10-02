@@ -161,6 +161,7 @@ chkit applies DDL to real databases. Treat the following as hard rules unless th
 
 :::caution
 - **`migrate` does not apply changes without `--apply`.** Run `chkit migrate` first to plan, show the user the pending SQL, and only then run `chkit migrate --apply`.
+- **Recover a failed migration with the CLI, not by editing the journal.** `chkit migrate --retry <file>` and `chkit migrate --abandon <file>` also change nothing without `--apply`: run them without it, show the user the preview, and add `--apply` once they confirm. Never delete rows from the `_chkit_migrations` table. See [failed migrations](/cli/migrate/#failed-migrations).
 - **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it.
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.
 - **Never auto-apply against a production endpoint** without explicit user confirmation. Connection details come from the environment: confirm which database the env points at before `--apply`.

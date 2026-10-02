@@ -117,7 +117,7 @@ With `--empty`, the command skips the schema diff entirely and writes a blank, t
 
 The stub carries the standard migration header (with `operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. The `--name` and `--migration-id` flags apply; without `--name`, the file defaults to `manual`. Schema-diff flags (`--table`, `--rename-table`, `--rename-column`, `--rename-dictionary`, `--dryrun`) are not used in empty mode.
 
-`chkit migrate` picks the file up like any other migration and applies it in filename order. Write your SQL into the stub *before* applying it — editing a migration after it has run triggers a checksum mismatch.
+`chkit migrate` picks the file up like any other migration and applies it in filename order. Until the stub contains at least one SQL statement, `chkit migrate --apply` refuses to run and lists it (see [empty migrations](/cli/migrate/#empty-migrations)), so an unfinished stub is never recorded as applied. Editing a migration after it has run triggers a checksum mismatch.
 
 ### Codegen integration
 

@@ -22,6 +22,10 @@ function makeJournalStore(): JournalStore {
 function makeDb(sequence: Array<QueryStatus | 'throw524'>): ClickHouseExecutor {
   let i = 0
   return {
+    async query() {
+      // Server clock reads, before the in-flight check and before each submission.
+      return [{ now_ms: 0 }]
+    },
     async submit() {
       return 'submitted'
     },

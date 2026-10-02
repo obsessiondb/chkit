@@ -77,12 +77,12 @@ Nothing in this loop asks a developer to generate against a live ClickHouse. Doi
 The same committed migration files flow through every environment: `test`, then `stage`, then `prod`. Each has its own `_chkit_migrations` journal, so `migrate` applies only what an environment is missing and skips what it already has. Promotion is running `chkit migrate --apply` against the next environment with the same commit checked out.
 
 :::caution
-Once a migration is applied, do not edit its `.sql` file. `migrate` checksums every applied file and aborts if one changed since it ran. This catches an already-shipped migration being rewritten instead of superseded by a new one. To change course, add a new migration.
+Once a migration is applied, do not edit its `.sql` file. `migrate` checksums every applied file and aborts if one changed since it ran. This catches an already-shipped migration being rewritten instead of superseded by a new one. To change course, add a new migration. A migration that failed part-way is not applied yet, so its file can still be fixed: see [failed migrations](/cli/migrate/#failed-migrations).
 :::
 
 ## Hand-written migrations
 
-A migration does not have to come from `generate`. Because deploy replays committed `.sql` files, `migrate` applies any `.sql` file in the migrations directory that is not yet in the journal, whether chkit wrote it or not. There is no scaffold command for a blank migration, and none is required.
+A migration does not have to come from `generate`. Because deploy replays committed `.sql` files, `migrate` applies any `.sql` file in the migrations directory that is not yet in the journal, whether chkit wrote it or not. [`chkit generate --empty`](/cli/generate/#empty-mode) scaffolds a blank file with the standard header, or create the file by hand.
 
 To add custom SQL such as a data seed or a backfill, create a file in `chkit/migrations/` following the `<timestamp>_<name>.sql` naming convention so it orders correctly alongside generated ones:
 
@@ -97,6 +97,7 @@ INSERT INTO default.regions (id, name) VALUES
 Run `chkit migrate` and it is picked up like any generated migration, applied in timestamp order and recorded in the journal. A few things carry over from generated migrations:
 
 - **It is immutable once applied.** The checksum gate blocks edits afterward, the same as for generated files.
+- **It needs at least one statement.** `migrate` refuses a pending file that holds only comments, so an unfinished stub is never recorded as applied. See [empty migrations](/cli/migrate/#empty-migrations).
 - **Destructive statements** (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, …) require `--allow-destructive` in CI, even when hand-written. See [destructive operation safety](/cli/migrate/#destructive-operation-safety).
 - **Large data loads**, such as a multi-minute `INSERT ... SELECT` or a backfill, can be marked `mode=async` so chkit submits the query without blocking on the HTTP response and polls for progress. See [async operations](/cli/migrate/#async-operations-modeasync).
 
