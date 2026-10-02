@@ -21,13 +21,11 @@ chkit skills add obsessiondb/chkit --skill chkit-ingestion
 
 Choose the agent in the installer. Install `@chkit/plugin-ingest` and configure credentials through the [quickstart](/api-sync/quickstart/) before running a sync. The separate `chkit` skill covers schema and migration workflows.
 
-For a local checkout containing the skill, use:
+To test unpublished changes to the skill, install it from a local checkout of the chkit repository:
 
 ```sh
 npx skills add ./skills/chkit-ingestion
 ```
-
-Use the repository install command after the skill reaches the default branch. Use the local command to install from an unpublished checkout.
 
 ## Use it
 

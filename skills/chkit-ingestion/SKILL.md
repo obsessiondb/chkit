@@ -33,6 +33,7 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 - Stream IDs own checkpoints: keep them stable and account-scoped. Pipelines group streams without dependency ordering.
 - Use `context.attempt`/`paginate`, forward cancellation, and throw `HttpError.fromResponse` for HTTP failures. Yield bounded chunks.
 - Enforce both time bounds. Persist only provider-guaranteed, complete resume state after all preceding rows are represented; the executor commits it after writes.
+- Size `overlapMs` to the latest arrival: minutes for indexing delay, days when records or children appear long after their timestamp (recordings, transcripts). Newest-first pages have no safe intermediate `state`; resume only from a completed window.
 - Custom tables need `ingestionColumns`. Prefer `simpleLoader`; custom loaders must preserve write identity and acknowledge publication before returning receipts.
 - Delivery is at-least-once: choose reconciliation keys/versioning. Declare chunk `id` only for stable logical intervals; avoid volatile mapped fields.
 - Prefer tombstones for logical deletion. Fetch deletion signals explicitly; full sync does not reconcile missing IDs. Never infer deletions from partial scans. Complete required child reads before yielding a root.
