@@ -506,6 +506,176 @@ describe('@chkit/cli drift comparer', () => {
     expect(result.reasonCodes).toContain('partition_by_mismatch')
     expect(result.partitionByMismatch).toBe(true)
   })
+
+  // #232: comment markers inside a literal default are text, not comments.
+  test('compares literal defaults as values, so comment markers inside them are not drift', () => {
+    const expected = table({
+      database: 'app',
+      name: 'notes',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'note', type: 'String', default: 'a -- b' },
+        { name: 'tag', type: 'String', default: '# x' },
+        { name: 'link', type: 'String', default: 'http://x' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'note', type: 'String', default: "'a -- b'" },
+        { name: 'tag', type: 'String', default: "'# x'" },
+        { name: 'link', type: 'String', default: "'http://x'" },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  // #232: ClickHouse stores no comments, so commented schema SQL must compare
+  // equal to what it reports back.
+  test('ignores comments in expression defaults, TTL, partition, index and projection SQL', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+        { name: 'ts', type: 'DateTime', default: 'fn:now() /* server time */' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      partitionBy: 'toYYYYMM(ts) -- monthly',
+      ttl: 'ts + toIntervalDay(30) // retention',
+      indexes: [{ name: 'idx_name', expression: 'lower(name) -- case-insensitive', type: 'bloom_filter', granularity: 1 }],
+      projections: [{ name: 'p_recent', query: 'SELECT id, ts # newest first\nORDER BY ts' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      partitionBy: 'toYYYYMM(ts)',
+      ttl: 'ts + toIntervalDay(30)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+        { name: 'ts', type: 'DateTime', default: 'now()' },
+      ],
+      settings: {},
+      indexes: [{ name: 'idx_name', expression: 'lower(name)', type: 'bloom_filter', granularity: 1 }],
+      projections: [{ name: 'p_recent', query: 'SELECT id, ts ORDER BY ts' }],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  // #232: chkit backticks key columns in the DDL, so `--`, `#` or `//` in a key
+  // column's name is part of the name. ClickHouse reports the key backticked.
+  for (const column of ['user--id', '# visits', 'a//b']) {
+    test(`compares the key column ${column} as a name, not as a comment`, () => {
+      const expected = table({
+        database: 'app',
+        name: 'visits',
+        engine: 'MergeTree()',
+        columns: [{ name: column, type: 'UInt64' }],
+        primaryKey: [column],
+        orderBy: [column],
+        uniqueKey: [column],
+      })
+
+      const result = compareTableShape(expected, {
+        engine: 'MergeTree',
+        primaryKey: undefined,
+        orderBy: `\`${column}\``,
+        uniqueKey: `\`${column}\``,
+        columns: [{ name: column, type: 'UInt64' }],
+        settings: {},
+        indexes: [],
+        projections: [],
+      })
+
+      expect(result).toBeNull()
+    })
+  }
+
+  // Unquoted, `user--id` would comment out the rest of the key: the schema's
+  // `user--id, ts` would read as `user` and the live `(user--id, ts)` as `(user`.
+  test('compares the key columns after one whose name holds a comment marker', () => {
+    const expected = table({
+      database: 'app',
+      name: 'visits',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'user--id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime' },
+        { name: 'received_at', type: 'DateTime' },
+      ],
+      primaryKey: ['user--id'],
+      orderBy: ['user--id', 'ts'],
+    })
+    const live = (orderBy: string) =>
+      compareTableShape(expected, {
+        engine: 'MergeTree',
+        primaryKey: '`user--id`',
+        orderBy,
+        columns: [
+          { name: 'user--id', type: 'UInt64' },
+          { name: 'ts', type: 'DateTime' },
+          { name: 'received_at', type: 'DateTime' },
+        ],
+        settings: {},
+        indexes: [],
+        projections: [],
+      })
+
+    expect(live('(`user--id`, ts)')).toBeNull()
+    expect(live('(`user--id`, `received_at`)')?.reasonCodes).toEqual(['order_by_mismatch'])
+  })
+
+  // The live clause loses its backticks before its parentheses are unwrapped;
+  // the rest must not be read as SQL again, where `--` would start a comment.
+  test('compares a parenthesized partition clause past a quoted name that holds --', () => {
+    const expected = table({
+      database: 'app',
+      name: 'visits',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'user--id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      primaryKey: ['user--id'],
+      orderBy: ['user--id'],
+      partitionBy: '(toYYYYMM(ts), `user--id` % 4)',
+    })
+    const live = (partitionBy: string) =>
+      compareTableShape(expected, {
+        engine: 'MergeTree',
+        primaryKey: undefined,
+        orderBy: '`user--id`',
+        partitionBy,
+        columns: [
+          { name: 'user--id', type: 'UInt64' },
+          { name: 'ts', type: 'DateTime' },
+        ],
+        settings: {},
+        indexes: [],
+        projections: [],
+      })
+
+    expect(live('(toYYYYMM(ts), `user--id` % 4)')).toBeNull()
+    expect(live('(toYYYYMM(ts), `user--id` % 8)')?.reasonCodes).toEqual(['partition_by_mismatch'])
+  })
 })
 
 describe('@chkit/cli drift comparer with quoted identifiers', () => {

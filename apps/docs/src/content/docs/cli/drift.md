@@ -33,6 +33,10 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
+### SQL comments
+
+ClickHouse does not store SQL comments. chkit removes them from TTL, partition, skip index, and projection expressions before comparing them with the live table, so a comment that whitespace separates from the rest of the clause, such as one at the end of a line, does not read as drift. Comment markers inside a literal column default (`default: 'a -- b'`) are part of the value. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
+
 ### Drift reason codes
 
 **Object-level drift:**

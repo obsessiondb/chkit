@@ -5,6 +5,7 @@ import { describeInvalidIdentifier } from './identifier.js'
 import { isPlainColumnReference, normalizeKeyColumns, splitTopLevelComma } from './key-clause.js'
 import { isIndexProjection, normalizeProjectionIndex, stripWrappingParens } from './projection.js'
 import { isKafkaEngine } from './kafka.js'
+import { normalizeSQLFragment } from './sql-normalizer.js'
 import { textSQLTokens } from './text-index-sql.js'
 import type {
   ColumnDefinition,
@@ -273,15 +274,20 @@ function validateUnstoredColumnReferences(
   }
   check('orderBy', normalizeKeyColumns(def.orderBy, columnSet))
   check('primaryKey', normalizeKeyColumns(def.primaryKey, columnSet))
-  check('partitionBy', splitTopLevelComma(stripWrappingParens(def.partitionBy?.trim() ?? '')))
+  // Fragments are read without their comments, as canonicalization stores them
+  // (#232), so raw definitions (toCreateSQL) and canonical ones (planDiff)
+  // check the same fragment text.
+  check('partitionBy', splitTopLevelComma(stripWrappingParens(normalizeSQLFragment(def.partitionBy ?? ''))))
   check('engine', engineArguments(def.engine))
   // ClickHouse indexes an ALIAS column by its expression, but not an EPHEMERAL one.
-  for (const index of def.indexes ?? []) check(`index "${index.name}"`, [index.expression], ['EPHEMERAL'])
+  for (const index of def.indexes ?? []) {
+    check(`index "${index.name}"`, [normalizeSQLFragment(index.expression)], ['EPHEMERAL'])
+  }
 
   for (const projection of def.projections ?? []) {
     let tokens: string[]
     try {
-      tokens = textSQLTokens(isIndexProjection(projection) ? projection.index : projection.query)
+      tokens = textSQLTokens(normalizeSQLFragment(isIndexProjection(projection) ? projection.index : projection.query))
     } catch {
       continue
     }

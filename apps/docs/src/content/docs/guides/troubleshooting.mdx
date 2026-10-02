@@ -17,6 +17,7 @@ A reference for the errors you are most likely to hit when running chkit, what c
 | `Could not connect to ClickHouse at ... (connection refused)` | Nothing listening at the URL | Confirm the server is running and `CLICKHOUSE_URL` host/port are correct |
 | `Could not connect to ClickHouse at ... (host not found)` | Typo'd or unresolvable host | Check the host in `CLICKHOUSE_URL` |
 | `Unknown data type family: ...` | A migration references an invalid ClickHouse type | Fix the column type in the schema/migration and regenerate |
+| `Syntax error: failed at position ... (end of query)` on a generated view | The view's query has a SQL comment that an older chkit kept when it wrote the query on one line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)) | Upgrade chkit, then regenerate the migration |
 | `Blocked destructive migration execution` (exit code 3) | A `risk=danger` operation in non-interactive mode | Review, then re-run with `--allow-destructive` |
 | `Checksum mismatch detected on applied migrations` (exit code 1) | A migration file was edited after being applied | Restore the original file, or apply a new forward migration |
 | `extra_object` entries in `drift` / `check` | Tables chkit does not manage exist in the database | Expected on shared databases; only fails CI if you opt into `check.failOnExtraObjects` |

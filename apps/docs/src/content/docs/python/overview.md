@@ -41,7 +41,7 @@ Both implementations produce the same artifacts, so a project (or a team) can mi
 
 - **Snapshots**: models serialize with the same camelCase JSON field names as `@chkit/core`, so `chkit/meta/snapshot.json` is readable by either implementation.
 - **Journal**: migrations are recorded in the same ClickHouse `_chkit_migrations` table with the same schema and checksums.
-- **SQL**: the planner and renderer emit the same DDL statements for the same schema, including `ON CLUSTER` stamping when `clickhouse.cluster` is set. The statement order can differ when objects in a migration depend on each other (see below).
+- **SQL**: the planner and renderer emit the same DDL statements for the same schema, including `ON CLUSTER` stamping when `clickhouse.cluster` is set. The statement order can differ when objects in a migration depend on each other, and the SQL differs when a SQL fragment contains comments (see below).
 
 ## Differences from the TypeScript version
 
@@ -51,6 +51,7 @@ The schema/migration CLI and backfill engine share the TypeScript workflow. The 
 - `deps.ts`-style dependency auto-install: install packages explicitly with `pip`.
 - [`@chkit/plugin-ingest`](/api-sync/) and the project `entry` module: API sync source authoring requires TypeScript.
 - Dependency-ordered migrations: chkit-py orders creates and drops by kind and name, so a view that reads another view, a materialized view, or a dictionary can be created before it. See [Operation order](/cli/generate/#operation-order).
+- Comments in SQL fragments: chkit-py keeps comments when it puts a view query or another SQL fragment on one line, so a `--`, `//`, or `#` comment swallows the rest of the statement. Keep comments out of these fields with chkit-py. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
 
 ## These pages
 

@@ -99,6 +99,8 @@ const activeUsers = view({
 
 Write fully qualified `db.name` references in view SQL (`app.users`, not `users`): ClickHouse resolves an unqualified name against the session's current database. chkit newer than 0.2.0-beta.8 also reads these references to create a view after the views, materialized views, and dictionaries it uses.
 
+With chkit newer than 0.2.0-beta.8, `as` may span lines and contain SQL comments, as may the other SQL fields (materialized view `as`, `partitionBy`, `ttl`, index and projection SQL, dictionary `source`/`layout`/`lifetime`): chkit removes the comments before it writes the query on one line. Full-text (`type: 'text'`) index expressions are the exception: they only drop `--` and non-nested `/* */` comments. Check the generated migration: if a `--`, `//`, or `#` comment outside a string literal is still inside a one-line statement (a `CREATE VIEW`, or the TTL or PARTITION BY of a `CREATE TABLE`), the installed chkit does not strip comments and the comment swallows the rest of the statement. Upgrade chkit, or use `/* */` comments.
+
 ### Materialized views
 
 ```ts

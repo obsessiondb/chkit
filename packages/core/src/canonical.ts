@@ -48,6 +48,13 @@ function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
   }
 }
 
+// A clause that is only comments is no clause: `ttl: '-- ts + INTERVAL 1 DAY'`
+// must render `REMOVE TTL`, not `MODIFY TTL ;`.
+function normalizeOptionalClause(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  return normalizeSQLFragment(value) || undefined
+}
+
 function canonicalizeTable(def: TableDefinition): TableDefinition {
   const settings = def.settings
     ? Object.fromEntries(
@@ -82,8 +89,8 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     primaryKey: primaryKey.length > 0 ? primaryKey : orderBy,
     orderBy,
     uniqueKey: def.uniqueKey ? normalizeKeyColumns(def.uniqueKey, columnNames) : undefined,
-    partitionBy: def.partitionBy ? normalizeSQLFragment(def.partitionBy) : undefined,
-    ttl: def.ttl ? normalizeSQLFragment(def.ttl) : undefined,
+    partitionBy: normalizeOptionalClause(def.partitionBy),
+    ttl: normalizeOptionalClause(def.ttl),
     settings,
     indexes,
     projections,

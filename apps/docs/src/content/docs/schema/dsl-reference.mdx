@@ -281,7 +281,7 @@ Default value for the column.
   </TabItem>
 </Tabs>
 
-[`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, comments, outer parentheses, and quotes around plain identifiers. A string without `fn:` stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
+[`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, `--` and non-nested `/* */` comments, outer parentheses, and quotes around plain identifiers. A string without `fn:` stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
 
 :::caution
 ClickHouse stores some expressions in a canonical form, such as `CAST(ts, 'String')` for `cast(ts as String)` or `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. Write the stored form after `fn:` to avoid permanent drift; `chkit pull` and `system.columns` show it.
@@ -591,7 +591,7 @@ Creates a view definition.
 |-------|------|----------|-------------|
 | `database` | `string` | yes | Database name |
 | `name` | `string` | yes | View name |
-| `as` | `string` | yes | SELECT query |
+| `as` | `string` | yes | SELECT query; may span lines and contain comments (see [SQL fragments](#sql-fragments)) |
 | `comment` | `string` | no | View comment |
 
 <Tabs syncKey="lang">
@@ -631,7 +631,7 @@ Creates a materialized view definition. In Python the factory is `materialized_v
 | `name` | `string` | yes | Materialized view name |
 | `to` | `{ database: string; name: string }` | yes | Target table for the view |
 | `refresh` | `MaterializedViewRefresh` | no | Refresh schedule — see [Refreshable materialized views](/schema/refreshable-views/) |
-| `as` | `string` | yes | SELECT query |
+| `as` | `string` | yes | SELECT query; may span lines and contain comments (see [SQL fragments](#sql-fragments)) |
 | `comment` | `string` | no | View comment |
 
 <Tabs syncKey="lang">
@@ -764,7 +764,7 @@ Creates a [ClickHouse dictionary](https://clickhouse.com/docs/sql-reference/dict
 | `renamedFrom` | `{ database?: string; name: string }` | Previous identity for rename tracking |
 
 :::note
-`source`, `layout`, and `lifetime` are **raw strings**, not a typed sub-DSL — chkit passes them through to ClickHouse verbatim inside `SOURCE(...)`, `LAYOUT(...)`, and `LIFETIME(...)` respectively. There is no key/layout coupling validation or required-parameter checking (e.g. `size_in_cells` for `HASHED`); ClickHouse validates the DDL when it's applied.
+`source`, `layout`, and `lifetime` are **raw strings**, not a typed sub-DSL — chkit passes them to ClickHouse inside `SOURCE(...)`, `LAYOUT(...)`, and `LIFETIME(...)` respectively, after removing comments and collapsing whitespace (see [SQL fragments](#sql-fragments)). There is no key/layout coupling validation or required-parameter checking (e.g. `size_in_cells` for `HASHED`); ClickHouse validates the DDL when it's applied.
 :::
 
 ### Dictionary attributes
@@ -804,6 +804,37 @@ ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW C
 ### No `ALTER DICTIONARY`
 
 ClickHouse has no `ALTER DICTIONARY` — every structural change to a dictionary is rendered as a single `CREATE OR REPLACE DICTIONARY` statement (atomic, dependency-safe). See [Structural vs. alterable properties](#structural-vs-alterable-properties). A pure rename (`renamedFrom` with no other change) is the one exception — it renders as `RENAME DICTIONARY`, not a replace; see [Dictionary rename](#dictionary-rename).
+
+## SQL fragments
+
+Several fields hold ClickHouse SQL that chkit copies into the DDL it generates: `as` on views and materialized views, `partitionBy` and `ttl` on tables, skip index `expression`, projection `query` and `index`, and dictionary `source`, `layout`, and `lifetime`. These fields accept SQL that spans several lines and contains comments:
+
+```ts
+import { view } from '@chkit/core'
+
+const meetingCompany = view({
+  database: 'crm',
+  name: 'meeting_company',
+  as: `
+    WITH people_by_email AS (
+      SELECT person_id, company_id, arrayJoin(emails) AS email FROM crm.person_identity
+    )
+    -- The attendee's company, through their person record.
+    SELECT email, company_id /* one row per address */
+    FROM people_by_email
+  `,
+})
+```
+
+Before chkit compares a fragment, stores it in `snapshot.json`, or writes it into a migration, it removes the comments and collapses each run of whitespace to one space, so the generated `CREATE VIEW` holds the query on one line. Comment syntax follows ClickHouse: `--`, `//`, `#!`, and `#` followed by a space start a comment that runs to the end of the line, and `/* */` comments can nest. Comment markers inside string literals (`'--'`) and quoted identifiers are text and stay in place. An unterminated block comment or string literal is left as written, so ClickHouse reports it when the migration runs.
+
+Editing the text of a comment does not produce a migration, and neither does adding or removing a comment that whitespace separates from the rest of the SQL. Whitespace inside string literals collapses too: each run of spaces, tabs, or newlines inside a literal becomes one space.
+
+Full-text indexes (`type: 'text'`) are the exception: chkit reads their SQL with a separate parser that keeps whitespace inside string literals and recognizes only `--` and non-nested `/* */` comments.
+
+:::caution[chkit-py]
+chkit-py does not remove comments from these fields yet: it collapses the fragment onto one line with its comments, so a line comment swallows the rest of the query. With chkit-py, keep comments out of SQL fragments.
+:::
 
 ## Type system reference
 

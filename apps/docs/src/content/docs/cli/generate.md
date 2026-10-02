@@ -37,6 +37,8 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 3. Computes a diff between old and new definitions using `planDiff()` from `@chkit/core`
 4. Produces an ordered list of SQL operations (see [Operation order](/cli/generate/#operation-order))
 
+Definitions are compared in canonical form. SQL fragments such as a view's `as` lose their comments and have each run of whitespace collapsed to one space, so editing a comment or re-indenting a query does not produce a migration. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
+
 If there are no differences, no migration file is created.
 
 ### Operation order

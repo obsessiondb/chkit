@@ -260,13 +260,18 @@ function normalizeProjectionShape(projection: ProjectionDefinition): string {
   return `query=${normalizeSQLFragment(projection.query)}`
 }
 
+// Key and partition clauses are compared as SQL: the schema's keys as chkit
+// renders them, the live clauses as ClickHouse reports them. Comments are
+// removed while quoted names still carry their backticks. Then the names are
+// unquoted, since ClickHouse re-renders identifiers with its own quoting and
+// escaping, and one pair of parentheses around the whole clause is dropped.
+// From there on only whitespace is collapsed: unquoted, `user--id` would read
+// as `user` followed by a comment.
 function normalizeClause(value: string | undefined): string {
   if (!value) return ''
-  // Compare raw names: ClickHouse re-renders identifiers with its own quoting
-  // and escaping, so the quotes themselves are not meaningful.
-  const normalized = normalizeSQLFragment(unquoteIdentifiers(value))
-  const wrapped = normalized.match(/^\((.*)\)$/)
-  return wrapped?.[1] ? normalizeSQLFragment(wrapped[1]) : normalized
+  const unquoted = unquoteIdentifiers(normalizeSQLFragment(value)).replace(/\s+/g, ' ').trim()
+  const wrapped = unquoted.match(/^\((.*)\)$/)
+  return wrapped?.[1] ? wrapped[1].trim() : unquoted
 }
 
 function normalizeEngine(value: string | undefined): string {
