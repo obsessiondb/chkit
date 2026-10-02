@@ -44,7 +44,7 @@ The `examples/` directory holds curated starter projects scaffolded by `create-c
 
 ## CLI Commands
 
-`init`, `generate`, `migrate`, `status`, `drift`, `check`, `codegen`, `pull`, `plugin`
+`init`, `generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen`, `pull`, `plugin`
 
 All commands support `--json` for machine-readable output and `--config <path>` for custom config files.
 

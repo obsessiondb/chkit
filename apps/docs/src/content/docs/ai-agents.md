@@ -165,6 +165,7 @@ chkit applies DDL to real databases. Treat the following as hard rules unless th
 - **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it.
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.
 - **Never auto-apply against a production endpoint** without explicit user confirmation. Connection details come from the environment: confirm which database the env points at before `--apply`.
+- **Never resolve a `snapshot.json` merge conflict by taking one side or by editing it by hand.** Resolve the schema files and run `chkit snapshot rebuild`. A conflicted file cannot be compared before the rebuild, so show the user `git diff HEAD -- chkit/meta/snapshot.json` and the same diff against `MERGE_HEAD` (merge) or `REBASE_HEAD` (rebase), and stage the file only once they confirm; until then, `git checkout -m -- chkit/meta/snapshot.json` brings the conflict back. Rebuild only when every schema change has a migration file (`chkit generate --dryrun` reported 0 operations on each branch before the merge); after a chkit upgrade, run `chkit generate` first. Check [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
 :::
 
 ## Machine-readable output

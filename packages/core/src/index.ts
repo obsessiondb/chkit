@@ -3,10 +3,12 @@ export * from './model.js'
 export { isKafkaEngine, parseKafkaSettings, kafkaSettingFingerprint } from './kafka.js'
 export { findTopLevelSQLPattern } from './sql-scan.js'
 export { SYNTHESIZED_CONFIG_PATH, isSynthesizedConfigPath } from './config-path.js'
+export { hasConflictMarkers } from './conflict-markers.js'
 export {
   canonicalizeDefinition,
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
+  definitionKey,
 } from './canonical.js'
 export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'

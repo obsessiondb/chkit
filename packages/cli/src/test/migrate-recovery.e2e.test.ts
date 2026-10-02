@@ -260,7 +260,7 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
       // A plain migrate cannot read the conflicted snapshot.
       const blocked = migrate(project, ['--json'])
       expect(blocked.exitCode).toBe(1)
-      expect(errorOf(blocked).message).toContain('Invalid snapshot JSON')
+      expect(errorOf(blocked).message).toContain('contains unresolved merge conflict markers')
 
       const preview = migrate(project, ['--abandon', M])
       expect(preview.exitCode, formatTestDiagnostic('abandon preview', preview)).toBe(0)

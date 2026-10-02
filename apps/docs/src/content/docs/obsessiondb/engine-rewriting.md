@@ -9,6 +9,8 @@ ObsessionDB uses `Shared` engine variants — `SharedMergeTree`, `SharedReplacin
 
 The plugin intercepts schema definitions before diff and planning, strips the `Shared` prefix when the target is not ObsessionDB, and leaves it intact when the target is ObsessionDB. One set of schema files works against both.
 
+[`chkit snapshot rebuild`](/cli/snapshot/) applies the same rewrite, so a rebuilt `snapshot.json` matches the one `chkit generate` writes for the same target.
+
 ## Auto-detection
 
 By default the plugin inspects `clickhouse.url`. If the host ends with `.obsessiondb.com`, `Shared` engines are preserved. Otherwise, the `Shared` prefix is stripped.

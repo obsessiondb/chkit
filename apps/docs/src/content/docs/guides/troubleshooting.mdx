@@ -13,6 +13,9 @@ A reference for the errors you are most likely to hit when running chkit, what c
 |------------------------|-------|-----|
 | `could not load its dependencies: cannot find "@chkit/core"` | Dependencies not installed yet | Run `bun install` (or `npm`/`pnpm install`) in the project |
 | `Unknown file extension ".ts"` | Old chkit that could not load `.ts` configs under Node | Upgrade chkit — recent versions bundle a TypeScript loader |
+| `Failed to load schema file ...` | A schema file does not parse or throws when imported, for example because a merge left conflict markers in it | Fix the file the message names, then run the command again |
+| `Snapshot ... contains unresolved merge conflict markers` | Two branches each ran `generate`, and git could not merge `snapshot.json` | Resolve your schema files, then run `chkit snapshot rebuild` |
+| `Invalid snapshot JSON at ...` | `snapshot.json` is empty or not valid JSON | Restore it from git, or run `chkit snapshot rebuild` |
 | `Authentication failed for user "..."` | Wrong `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | Check the credentials in your environment |
 | `Could not connect to ClickHouse at ... (connection refused)` | Nothing listening at the URL | Confirm the server is running and `CLICKHOUSE_URL` host/port are correct |
 | `Could not connect to ClickHouse at ... (host not found)` | Typo'd or unresolvable host | Check the host in `CLICKHOUSE_URL` |
@@ -66,6 +69,14 @@ Older chkit versions could not load a TypeScript config under plain Node. Recent
     This error is TypeScript-specific; Python configs (`clickhouse.config.py`) are plain modules and never hit it.
   </TabItem>
 </Tabs>
+
+### `Snapshot ... contains unresolved merge conflict markers`
+
+Two branches each ran `chkit generate`, and git could not merge `chkit/meta/snapshot.json`. Taking either side drops the other branch's entries. Resolve the conflicts in your schema files, then rewrite the snapshot from them with [`chkit snapshot rebuild`](/cli/snapshot/) and review its report before committing. Rebuild only when every schema change has a migration file: `chkit generate --dryrun` reported 0 operations on each branch before the merge. After upgrading chkit, run `chkit generate` before you rebuild. See [Working on parallel branches](/guides/migration-workflow/#working-on-parallel-branches) and [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
+
+### `Invalid snapshot JSON at <file>`
+
+`snapshot.json` is empty or not valid JSON. If the file is committed and no merge or rebase is in progress, restore it with `git checkout HEAD -- chkit/meta/snapshot.json`. Otherwise, including during a merge or rebase (where `HEAD` holds only one side of the conflict), rewrite it from your schema definitions with [`chkit snapshot rebuild`](/cli/snapshot/), after checking [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
 
 ## Connecting to ClickHouse
 

@@ -68,12 +68,14 @@ Plugins are registered inline in the `plugins` array of your config:
 Plugins can register hooks that run at various points in the CLI lifecycle:
 
 - `onConfigLoaded` — after config is parsed
-- `onSchemaLoaded` — after schema definitions are loaded (can modify definitions)
+- `onSchemaLoaded` — after schema definitions are loaded (can modify definitions); runs for `generate` and `snapshot rebuild`, so both write the same snapshot
 - `onPlanCreated` — after migration plan is computed (can modify the plan)
 - `onBeforeApply` — before migration SQL is executed (can transform statements)
 - `onAfterApply` — after migration SQL is executed
 - `onCheck` — during `chkit check` evaluation
 - `onCheckReport` — for custom check result formatting
+
+`onConfigLoaded` and `onSchemaLoaded` receive the running command as `context.command`. During [`chkit snapshot rebuild`](/cli/snapshot/) it is `snapshot`; a hook that rewrites definitions only when the command is `generate` makes the rebuilt snapshot differ from the one `generate` writes.
 
 ## Examples
 

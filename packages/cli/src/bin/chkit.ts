@@ -28,6 +28,7 @@ const PROJECT_ONLY_COMMANDS = new Set([
   'status',
   'drift',
   'check',
+  'snapshot',
   'codegen',
   'pull',
 ])

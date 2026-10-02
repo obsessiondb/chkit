@@ -48,6 +48,7 @@ Both implementations produce the same artifacts, so a project (or a team) can mi
 The schema/migration CLI and backfill engine share the TypeScript workflow. The following features are TypeScript-only:
 
 - `chkit skills` proxy and the `create-chkit` scaffolder: use `chkit init` instead.
+- [`chkit snapshot rebuild`](/cli/snapshot/): chkit-py cannot rewrite a conflicted `snapshot.json` from the schema definitions yet, and reports conflict markers as a JSON parse error.
 - `deps.ts`-style dependency auto-install: install packages explicitly with `pip`.
 - [`@chkit/plugin-ingest`](/api-sync/) and the project `entry` module: API sync source authoring requires TypeScript.
 - Dependency-ordered migrations: chkit-py orders creates and drops by kind and name, so a view that reads another view, a materialized view, or a dictionary can be created before it. See [Operation order](/cli/generate/#operation-order).

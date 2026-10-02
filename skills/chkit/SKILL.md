@@ -198,6 +198,17 @@ chkit check --json       # Machine-readable output
 
 Evaluates: pending migrations, checksum mismatches, schema drift, plugin checks. Exit code 1 on failure.
 
+### snapshot: Repair snapshot.json after parallel branches
+
+Requires chkit newer than 0.2.0-beta.8.
+
+```sh
+chkit snapshot rebuild --dryrun   # Report the entries that differ from the current snapshot.json
+chkit snapshot rebuild            # Rewrite chkit/meta/snapshot.json from the schema definitions
+```
+
+Use when `snapshot.json` has merge conflict markers after merging or rebasing two branches that each ran `generate`. Resolve schema file conflicts first. Never take one side of the conflict or edit the file by hand: that drops the other branch's entries. A conflicted file cannot be compared, so review the rebuilt file before staging it: `git diff HEAD -- chkit/meta/snapshot.json`, then the same diff against `MERGE_HEAD` during a merge or `REBASE_HEAD` during a rebase. A rebuild records every definition as migrated, so rebuild only when every schema change has a migration file (`chkit generate --dryrun` reported 0 operations on each branch); after upgrading chkit, run `chkit generate` first. Restore the snapshot from git instead of rebuilding when the file is damaged but committed and no merge or rebase is in progress (`git checkout HEAD -- chkit/meta/snapshot.json`), or after abandoning a failed migration to generate it again. `--table` is not supported. If both branches changed the same table or view, add a migration that applies it again: https://chkit.obsessiondb.com/cli/snapshot/
+
 ### query: Run SQL against the configured target
 
 ```sh

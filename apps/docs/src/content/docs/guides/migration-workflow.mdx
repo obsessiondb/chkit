@@ -72,6 +72,35 @@ This is the workflow for a team where only some developers can reach production.
 
 Nothing in this loop asks a developer to generate against a live ClickHouse. Doing so would tie a migration's correctness to that instance matching prod; diffing against the committed snapshot removes that dependency.
 
+## Working on parallel branches
+
+`snapshot.json` is one file that every `chkit generate` rewrites in full, so two branches that each generate a migration both change it. The branch that merges or rebases second conflicts on it, at least on the `generatedAt` line, even when the branches changed unrelated objects. Both branches' migration files and the merged schema files are already correct; only the snapshot has to catch up.
+
+Before you merge or rebase, check that each branch is fully generated: `chkit generate --dryrun` reports 0 operations on it. After upgrading chkit, run `chkit generate` and commit any migration it writes before you rebuild.
+
+While `snapshot.json` has conflict markers, every command that reads it stops with `contains unresolved merge conflict markers`. Resolve the conflict with [`chkit snapshot rebuild`](/cli/snapshot/) (TypeScript only; [chkit-py](/python/overview/#differences-from-the-typescript-version) does not have it yet):
+
+1. Resolve the conflicts in your schema files first. The snapshot is rebuilt from them, and a schema file that still has conflict markers stops the rebuild.
+2. Rebuild the snapshot and compare it with both sides. A conflicted `snapshot.json` cannot be compared entry by entry, so the review happens on the rebuilt file. During a merge the other branch is `MERGE_HEAD`; during a rebase the commit being replayed is `REBASE_HEAD`.
+
+   ```sh
+   chkit snapshot rebuild
+   git diff HEAD -- chkit/meta/snapshot.json
+   git diff MERGE_HEAD -- chkit/meta/snapshot.json    # during a merge
+   git diff REBASE_HEAD -- chkit/meta/snapshot.json   # during a rebase
+   ```
+
+   Every entry that differs from one side must come from a migration file of the other side.
+
+3. Stage the file and finish the rebase or the merge:
+
+   ```sh
+   git add chkit/meta/snapshot.json
+   git rebase --continue    # or, for a merge: git commit --no-edit
+   ```
+
+Do not resolve the conflict by taking one side: that drops the other branch's entries, and the next `generate` writes a duplicate migration for them. A rebuild records every schema definition as migrated, so check [when not to rebuild](/cli/snapshot/#when-not-to-rebuild) first. If both branches changed the same table or view, read [When both branches change the same object](/cli/snapshot/#when-both-branches-change-the-same-object) before you commit.
+
 ## Promoting across environments
 
 The same committed migration files flow through every environment: `test`, then `stage`, then `prod`. Each has its own `_chkit_migrations` journal, so `migrate` applies only what an environment is missing and skips what it already has. Promotion is running `chkit migrate --apply` against the next environment with the same commit checked out.
@@ -111,3 +140,4 @@ For structural changes that must preserve data, the common pattern is a hand-wri
 - [`chkit pull`](/cli/pull/) — introspect an existing database to seed a project
 - [CI/CD integration](/guides/ci-cd/) — running `generate`, `migrate`, and `check` in a pipeline
 - [Configuration](/configuration/overview/) — `outDir`, `migrationsDir`, and `metaDir`
+- [`chkit snapshot`](/cli/snapshot/) — rebuild `snapshot.json` after two branches conflict on it

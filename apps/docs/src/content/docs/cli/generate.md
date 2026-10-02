@@ -251,3 +251,4 @@ chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
 - [`chkit init`](/cli/init/) — scaffold a project before your first generate
 - [`chkit migrate`](/cli/migrate/) — apply generated migrations to ClickHouse
 - [`chkit codegen`](/cli/codegen/) — manually trigger type generation
+- [`chkit snapshot`](/cli/snapshot/) — rebuild `snapshot.json` after two branches conflict on it
