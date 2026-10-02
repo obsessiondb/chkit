@@ -1,10 +1,10 @@
 ---
-"@chkit/core": minor
+"@chkit/core": patch
 "@chkit/codegen": patch
-"@chkit/clickhouse": minor
-"chkit": minor
-"@chkit/plugin-pull": minor
-"@chkit/plugin-codegen": minor
+"@chkit/clickhouse": patch
+"chkit": patch
+"@chkit/plugin-pull": patch
+"@chkit/plugin-codegen": patch
 "@chkit/plugin-backfill": patch
 ---
 
