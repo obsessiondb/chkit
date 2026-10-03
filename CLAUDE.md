@@ -91,6 +91,8 @@ Turbo orchestrates; GitHub Actions only checks out, installs and calls one scrip
 
 After **verify** passes on a push to `main`, **obsessiondb** runs `bun run test:obsessiondb` against the managed test database using the `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
 
+After **verify** passes on a same-repository pull request, **deploy** builds and uploads a Cloudflare Pages preview when the PR changes `apps/docs/`, the root package manifest or lockfile, `turbo.json`, or the CI/setup workflow. The preview uses branch `pr-<number>` and has a stable URL at `https://pr-<number>.chkit-docs.pages.dev`, linked in GitHub Deployments and the deploy job summary. Fork and Dependabot PRs do not deploy because they cannot access the Cloudflare repository secrets. Production deployment still runs only on pushes to `main` after both test jobs pass.
+
 A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known ObsessionDB limitation with a linked issue, and must still run in **verify**.
 
 `turbo.json` passes through `CHKIT_E2E_TARGET`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.

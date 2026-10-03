@@ -74,16 +74,76 @@ jobs:
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [verify, obsessiondb]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # ObsessionDB tests run only on main. PR previews need verify to pass,
+    # while production still requires both test jobs to succeed.
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+        needs.obsessiondb.result == 'success') ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.actor != 'dependabot[bot]'))
+    permissions:
+      contents: read
+      deployments: write
+    concurrency:
+      group: docs-deploy-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for docs changes
+        id: docs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = 'push' ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            changed_files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- \
+              apps/docs/ package.json bun.lock turbo.json \
+              .github/workflows/ci.yml .github/actions/setup/)"
+            if [ -n "$changed_files" ]; then
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
       - name: Setup Bun
+        if: steps.docs.outputs.changed == 'true'
         uses: ./.github/actions/setup
 
-      - name: Deploy
+      - name: Deploy production
+        if: github.event_name == 'push'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: bun run deploy
+
+      - name: Build docs preview
+        if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        run: bun run docs:build
+
+      - name: Deploy docs preview
+        id: preview
+        if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/docs
+          packageManager: bun
+          command: pages deploy dist --project-name=chkit-docs --branch=pr-${{ github.event.pull_request.number }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show docs preview URL
+        if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.pages-deployment-alias-url }}
+          DEPLOYMENT_URL: ${{ steps.preview.outputs.deployment-url }}
+        run: |
+          echo "[Open docs preview](${PREVIEW_URL:-$DEPLOYMENT_URL})" >> "$GITHUB_STEP_SUMMARY"
