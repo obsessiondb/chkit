@@ -1,5 +1,7 @@
 # build output
 dist/
+# generated registry artifacts
+public/r/
 # generated types
 .astro/
 

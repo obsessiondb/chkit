@@ -1,0 +1,440 @@
+---
+title: Integrating ClickHouse with Attio
+description: Sync Attio CRM records, custom objects, lists, notes, tasks, and workspace members into ClickHouse with editable readers and SQL views.
+sidebar:
+  label: Attio
+  order: 2
+---
+
+Sync Attio into ClickHouse to query CRM records, relationships, list membership, notes, and tasks alongside product or business data.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+<img src="/logos/attio.svg" alt="Attio logo" width="37" height="30" style="box-sizing: content-box; padding: 12px; background: white; border-radius: 8px;" />
+
+The [app registry](/integrations/) installs the Attio integration as editable TypeScript source. It includes nine raw tables, nine full-read streams, and three SQL views for people, companies, and deals. Each run reads the selected resources through the Attio REST API and updates their latest observed versions in ClickHouse.
+
+<RegistryReference name="attio" section="overview" />
+
+## Install the Attio integration
+
+Run these commands in a TypeScript project with a `package.json`. Use a chkit release that includes the registry and ingestion plugin; the examples use the beta release.
+
+```sh
+bun add -d chkit@beta
+bunx chkit registry inspect attio
+bunx chkit add attio --dry-run
+bunx chkit add attio
+```
+
+The installer copies the provider source, installs compatible dependencies, registers the ingestion plugin, and connects the exported schemas and pipeline to the project's config. An existing project's schema definitions and connection settings remain in place. See [installation behavior](/cli/add/) for supported config shapes and conflicts.
+
+`add` prepares the project. Migrations create the ClickHouse objects, and `ingest run` performs the API calls. The registry is only used to obtain source files; subsequent syncs execute the installed code.
+
+### Configure the ClickHouse connection
+
+For a new project, the generated `clickhouse.config.ts` has this shape:
+
+```ts
+import { defineConfig } from '@chkit/core'
+import { ingest } from '@chkit/plugin-ingest'
+
+export default defineConfig({
+  entry: './src/integrations/attio/index.ts',
+  plugins: [ingest()],
+  clickhouse: {
+    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
+    username: process.env.CLICKHOUSE_USER ?? 'default',
+    password: process.env.CLICKHOUSE_PASSWORD ?? '',
+    database: process.env.CLICKHOUSE_DB ?? 'default',
+  },
+})
+```
+
+Set the connection variables for the intended target. Keep the existing entry, schema paths, and plugins when adapting an existing project. Ingestion requires a direct connection; workbench-only authentication does not provide an ingestion destination.
+
+The copied `config.ts` separately controls the database of the Attio tables and views. Set its `database` to the intended destination too; changing `CLICKHOUSE_DB` alone does not rename those schema objects.
+
+## Create an Attio API key
+
+A workspace admin creates a single-workspace access token in Attio. The following steps use Attio's [API-key setup instructions](https://attio.com/help/reference/apps/generating-an-api-key):
+
+<RegistryReference name="attio" section="authentication" />
+
+Grant read access to the categories required by the enabled streams. The full default integration uses all the scopes below. No write scopes are needed.
+
+<RegistryReference name="attio" section="scopes" />
+
+### Configure the token in the project and scheduler
+
+Set the copied token in the project's `.env`, replacing the placeholder:
+
+```sh
+ATTIO_API_TOKEN=replace-with-the-access-token-from-attio
+```
+
+Bun loads the project's `.env`; a scheduler must supply `ATTIO_API_TOKEN` through its own secret or environment configuration, together with the ClickHouse connection variables. The installer writes required names to `.env.example`, which does not load credentials. Keep real tokens out of source control.
+
+The reader sends the token in an `Authorization: Bearer` header when a request runs. Schema inspection, migration generation, and `ingest list` do not need an Attio token. An existing OAuth access token also works, but this integration does not obtain or refresh OAuth tokens; see [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
+
+A token's permissions also determine which data the API returns. A `401` or `403` fails the affected stream with a diagnostic; the reader does not turn a permission error into an empty result.
+
+## Choose objects, lists, and destination names
+
+The installed `src/integrations/attio/config.ts` starts with:
+
+```ts
+export interface AttioConfig {
+  sourceId: string
+  database: string
+  tablePrefix: string
+  objects: readonly string[] | undefined
+  lists: readonly string[] | undefined
+  pageSize: number
+  notesPageSize: number
+}
+
+export const attioConfig: AttioConfig = {
+  sourceId: 'attio.primary',
+  database: 'default',
+  tablePrefix: 'attio',
+  objects: undefined,
+  lists: undefined,
+  pageSize: 500,
+  notesPageSize: 50,
+}
+```
+
+| Setting | Effect |
+|---|---|
+| `sourceId` | Stable, non-secret identity used in stream IDs and row IDs |
+| `database` | Database containing the nine raw tables and three views |
+| `tablePrefix` | Prefix used before `_records_raw`, `_people`, and the other suffixes |
+| `objects` | Object API slugs or UUIDs; `undefined` discovers all accessible objects; `[]` selects none |
+| `lists` | List API slugs or UUIDs; `undefined` discovers all accessible lists; `[]` selects none |
+| `pageSize` | Positive integer, default `500`, for attributes, records, entries, and tasks |
+| `notesPageSize` | Positive integer up to `50`, default `50`, for notes |
+
+For example, set `objects: ['people', 'companies']` to restrict object metadata, object attributes, and records. List selection similarly controls lists, list attributes, and entries. An unknown or inaccessible configured slug or ID fails visibly. Notes, tasks, and members remain workspace-wide; their readers need separate changes to narrow their coverage.
+
+Keep `sourceId` stable after ingestion starts. For a second workspace, use a distinct source identity and a separate table prefix or database. Copying the directory alone does not isolate pipeline IDs or destination tables.
+
+## Create tables and run the first sync
+
+```sh
+bunx chkit check
+bunx chkit ingest list --tag provider:attio
+bunx chkit generate --name add-attio
+bunx chkit migrate
+```
+
+Review the generated SQL, then apply it and run ingestion:
+
+```sh
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:attio
+bunx chkit query "SELECT count() FROM default.attio_records_raw FINAL"
+bunx chkit query "SELECT name, domains FROM default.attio_companies LIMIT 10"
+```
+
+Queries in this guide use the default database and prefix. Substitute the configured names when these differ.
+
+## All synced resources and records
+
+Each resource has its own stream and raw table. This table lists the returned entity data retained in `raw.data`; the complete API entity is preserved, including additional fields returned by Attio. Fields may be absent or null depending on the resource and workspace configuration.
+
+<RegistryReference name="attio" section="resources" />
+
+The records stream discovers objects through the [objects API](https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects). It is not restricted to the three objects with packaged views. People, companies, deals, and custom objects all land in the same records table when accessible and selected. A `users` object, when present, contains CRM records; workspace members are collected separately.
+
+Record and entry attributes remain arrays, including multivalued custom fields and relationship references. Returned attribute values keep their accompanying metadata. The integration does not issue separate requests for historical attribute values, select-option catalogs, or status catalogs. See the [record API](https://docs.attio.com/rest-api/endpoint-reference/records/list-records), [entry API](https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries), and [attribute API](https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes) for the provider's response shapes.
+
+Notes retain the content and references in the [notes response](https://docs.attio.com/rest-api/endpoint-reference/notes/list-notes); a meeting reference does not fetch the meeting itself. Task links and assignees remain in the [task payload](https://docs.attio.com/rest-api/endpoint-reference/tasks/list-tasks). Member identity fields come from the [workspace members endpoint](https://docs.attio.com/rest-api/endpoint-reference/workspace-members/list-workspace-members).
+
+### API requests and pagination
+
+Every API path in the resource table is relative to `https://api.attio.com/v2`. Object and list placeholders are resolved to IDs by discovery before the child request runs.
+
+| Resource | Pagination and filters |
+|---|---|
+| `objects` | Single collection request, then configured object selection |
+| `object_attributes` | `limit` and `offset` query parameters; `show_archived=true` |
+| `records` | `limit` and `offset` in JSON body; no record filter or custom sort |
+| `lists` | Single collection request, then configured list selection |
+| `list_attributes` | `limit` and `offset` query parameters; `show_archived=true` |
+| `entries` | `limit` and `offset` in JSON body; no entry filter or custom sort |
+| `notes` | `limit` and `offset` query parameters; no parent filter |
+| `tasks` | `limit` and `offset` query parameters; `sort=created_at:asc`; no completion filter |
+| `members` | Single collection request |
+
+Paginated reads start at offset zero, advance by the number of returned entities, and stop when a page is shorter than the requested limit. Each stream discovers its own parents, so running records alone does not depend on the objects stream having run first. The pipeline's stream array does not establish dependencies.
+
+## How the sync works
+
+<RegistryReference name="attio" section="sync" />
+
+1. The CLI loads the installed pipeline and selects streams by their tags.
+2. Each reader discovers accessible parents where needed, applies the configured selection, and fetches the collection pages.
+3. The client validates the response's `data` array and required entity IDs. Record `values` and entry `entry_values` must contain arrays.
+4. The reader wraps each entity with its source identity and relevant parent slug, then assigns a stable composite row ID.
+5. The runtime batches rows and writes them to ClickHouse. The journal records execution and load progress.
+6. SQL views project the raw records and reconcile repeated row IDs at query time with `FINAL`.
+
+### Full reads and freshness
+
+All nine streams use full sync. Every run reads from the beginning, including a rerun after failure. The readers do not save pagination offsets or use an incremental modification cursor. A successful run can therefore show no checkpoint in `ingest status`; use the run outcome and destination queries to verify success.
+
+The destination stores the latest **observed** entity. New observations replace earlier observations for the same row identity when ClickHouse reconciles versions. Freshness depends on the external schedule, scan duration, and successful API responses. There are no webhooks or continuous change capture in this integration.
+
+### Batching, retries, and failures
+
+| Control | Attio integration default |
+|---|---|
+| Active streams, fetches, and loads | One of each per pipeline within a run |
+| Destination batch threshold | `500` rows; pages are accumulated without splitting a source chunk |
+| HTTP request timeout | `30` seconds |
+| Delay before a request | `25` ms; `125` ms for notes |
+| Source retry budget | Five retries after the initial attempt |
+| Backoff | Exponential, starting at `1` second, capped at `30` seconds, with jitter |
+| Retry time budget | `10` minutes per retry boundary, subject to the overall execution budget |
+| Default run duration | `3600` seconds; override with `--max-duration` |
+
+HTTP `429` responses honor `Retry-After`. Network failures and HTTP `408`, `425`, and `5xx` responses are retried within the budget. Other `4xx` responses, invalid configuration, invalid JSON, and invalid entity shapes fail without retries. Exhausting a page request's retries fails the stream; restarting the reader does not multiply that request's retry budget.
+
+The request delays keep the default serial pipeline below 40 requests per second and notes below 8 requests per second, before network time. Attio can apply lower limits, including query-complexity limits; repeatedly expensive record or entry queries may require simpler filters or sorts after customization. See [Attio rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
+
+Destination writes have a separate retry policy and reuse an insert deduplication token. Physical duplicate suppression depends on ClickHouse's deduplication settings and window. The logical row identity and `FINAL` queries reconcile repeated observations; this is not an exactly-once delivery guarantee.
+
+Writes become visible batch by batch. A failed or interrupted run can leave already loaded pages visible, with no rollback to the previous complete workspace snapshot. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed; an incomplete execution exits with `1`.
+
+## Raw tables and record identity
+
+Every raw table uses the same five columns:
+
+| Column | ClickHouse type | Meaning |
+|---|---|---|
+| `id` | `String` | JSON-encoded composite identity for the source, resource, and entity IDs |
+| `raw` | `JSON` | Envelope containing `source_id`, optional parent slug, and the complete entity under `data` |
+| `_chkit_batch_id` | `String` | Runtime batch identity |
+| `_chkit_run_id` | `String` | Ingestion run identity |
+| `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
+
+Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as both the primary key and ordering key. Later ingestion time wins during replacement; the integration does not order rows by an Attio source version. Physical rows can include earlier observations until merges occur. Use `FINAL` when directly querying raw tables for the reconciled result.
+
+Each ID is built as `JSON.stringify([sourceId, resource, ...entityIds])`. The resource names and entity ID fields are:
+
+| Resource | Entity ID fields, in order | Extra envelope field |
+|---|---|---|
+| `objects` | `workspace_id`, `object_id` | None |
+| `object_attributes` | `workspace_id`, `object_id`, `attribute_id` | `object_slug` |
+| `records` | `workspace_id`, `object_id`, `record_id` | `object_slug` |
+| `lists` | `workspace_id`, `list_id` | None |
+| `list_attributes` | `workspace_id`, `object_id`, `attribute_id` | `list_slug` |
+| `entries` | `workspace_id`, `list_id`, `entry_id` | `list_slug` |
+| `notes` | `workspace_id`, `note_id` | None |
+| `tasks` | `workspace_id`, `task_id` | None |
+| `members` | `workspace_id`, `workspace_member_id` | None |
+
+Attio's shared attribute response calls the parent list's ID `object_id`; the list-attribute key follows that response shape. Names, email addresses, and domains are never row keys. The resource name is part of `id`, not an additional field in `raw`.
+
+A record envelope has this shape, with illustrative IDs:
+
+```json
+{
+  "source_id": "attio.primary",
+  "object_slug": "people",
+  "data": {
+    "id": {
+      "workspace_id": "workspace-id",
+      "object_id": "people-object-id",
+      "record_id": "person-record-id"
+    },
+    "created_at": "2026-01-01T00:00:00Z",
+    "web_url": "https://app.attio.com/example/person/person-record-id",
+    "values": {
+      "name": [{ "full_name": "Ada Example" }],
+      "email_addresses": [{ "email_address": "ada@example.test" }]
+    }
+  }
+}
+```
+
+The original entity lives under `data`, so custom provider fields cannot overwrite chkit's envelope metadata. Nested arrays and fields omitted from the packaged views remain available for new SQL projections.
+
+## Included people, company, and deal views
+
+The integration creates ordinary SQL views over `attio_records_raw FINAL`, filtered by `object_slug`. These views reuse the records stream; they do not make additional API requests.
+
+<RegistryReference name="attio" section="views" />
+
+Each view shares these columns:
+
+| Column | Meaning |
+|---|---|
+| `id` | Stable composite raw row ID |
+| `source_id` | Configured source identity |
+| `workspace_id` | Attio workspace ID |
+| `object_id` | Attio object ID |
+| `record_id` | Attio record ID |
+| `created_at` | Source creation time parsed as a nullable UTC timestamp with microsecond precision |
+| `web_url` | Record URL in Attio |
+| `_chkit_ingested_at` | Time this observation was published to ClickHouse |
+
+The additional projections use these paths relative to `raw.data.values`. `[1]` means the first array element, following ClickHouse indexing.
+
+| View | Column | Source value |
+|---|---|---|
+| `attio_people` | `name` | `name[1].full_name` |
+| `attio_people` | `email_addresses` | All `email_addresses[].email_address` values |
+| `attio_people` | `company_record_ids` | All `company[].target_record_id` values |
+| `attio_companies` | `name` | `name[1].value` |
+| `attio_companies` | `domains` | All `domains[].domain` values |
+| `attio_companies` | `description` | `description[1].value` |
+| `attio_deals` | `name` | `name[1].value` |
+| `attio_deals` | `stage` | `stage[1].status.title` |
+| `attio_deals` | `value` | `value[1].currency_value`, parsed as `Nullable(Float64)` |
+| `attio_deals` | `currency_code` | `value[1].currency_code` |
+| `attio_deals` | `company_record_ids` | All `associated_company[].target_record_id` values |
+| `attio_deals` | `people_record_ids` | All `associated_people[].target_record_id` values |
+
+Missing optional strings become empty strings; absent arrays become empty arrays. Missing or unparseable dates and amounts become null. On an initial sync without a selected `deals` object, the deals view is empty. Deselecting an object later leaves previously observed rows intact. Custom object records remain in the raw table and do not receive automatic typed views.
+
+### Query Attio records in ClickHouse
+
+**Count the latest observed records by object:**
+
+```sql
+SELECT
+  JSONExtractString(toJSONString(raw), 'object_slug') AS object_slug,
+  count() AS records,
+  max(_chkit_ingested_at) AS last_observed_at
+FROM default.attio_records_raw FINAL
+GROUP BY object_slug
+ORDER BY records DESC;
+```
+
+**Aggregate deal value by stage and currency:**
+
+```sql
+SELECT
+  stage,
+  currency_code,
+  count() AS deals,
+  sum(value) AS total_value
+FROM default.attio_deals
+GROUP BY stage, currency_code
+ORDER BY currency_code, total_value DESC;
+```
+
+Grouping by currency avoids combining amounts from different currencies. The packaged amount is a floating-point projection; edit it to use a suitable decimal representation when exact monetary arithmetic is required.
+
+**Inspect list membership and retain custom entry attributes:**
+
+```sql
+WITH toJSONString(raw) AS payload
+SELECT
+  JSONExtractString(payload, 'list_slug') AS list_slug,
+  JSONExtractString(payload, 'data', 'id', 'entry_id') AS entry_id,
+  JSONExtractString(payload, 'data', 'parent_object') AS parent_object,
+  JSONExtractString(payload, 'data', 'parent_record_id') AS parent_record_id,
+  JSONExtractRaw(payload, 'data', 'entry_values') AS entry_values
+FROM default.attio_entries_raw FINAL
+LIMIT 20;
+```
+
+**Project a custom company field:**
+
+```sql
+WITH toJSONString(raw) AS payload
+SELECT
+  JSONExtractString(payload, 'data', 'id', 'record_id') AS record_id,
+  JSONExtractString(payload, 'data', 'values', 'name', 1, 'value') AS company,
+  JSONExtractString(payload, 'data', 'values', 'customer_tier', 1, 'value') AS customer_tier
+FROM default.attio_records_raw FINAL
+WHERE JSONExtractString(payload, 'object_slug') = 'companies';
+```
+
+The last example assumes a text attribute with API slug `customer_tier`. Adapt the slug and value shape to the attribute definitions in `attio_object_attributes_raw`. Preserve `source_id` and `workspace_id` when joining records across sources, and use the provider's record IDs for relationships.
+
+## Scheduling, verification, and recovery
+
+After the first successful run, schedule this finite command through cron, CI, or a job runner:
+
+```sh
+bunx chkit ingest run --tag provider:attio --max-duration 3600 --json
+```
+
+The scheduler supplies the project directory, credentials, runtime, cadence, and concurrency control. Run at most one ingestion process per project and ClickHouse target at a time, including runs that select different tags. Pipeline limits apply within one process and do not lock out another process.
+
+For a narrower run, select the records stream:
+
+```sh
+bunx chkit ingest list --tag provider:attio --tag resource:records
+bunx chkit ingest run --tag provider:attio --tag resource:records --json
+bunx chkit ingest status --tag provider:attio --json
+```
+
+Repeated tags use AND matching. With the default source ID, `--tag stream:attio.primary.records` selects the same records stream; a custom `sourceId` changes that derived tag.
+
+Inspect the run's per-stream outcomes and error messages. `status` reports committed checkpoints rather than complete run history; full reads have no incremental bookmark. Keep the ingestion journal as durable operational state. After fixing a token, permission, or destination issue, rerun `ingest run`; the Attio reader starts its collection scan again.
+
+Verify a known Attio record against its retained `raw.data`, update that record in a test workspace, rerun the sync, and confirm its view reflects the new observation. A row count alone does not establish full API coverage. Date-range backfill flags do not turn these full-read readers into historical or incremental readers; implementing those behaviors requires a source-specific strategy.
+
+## Coverage and consistency limits
+
+| Situation | Current behavior |
+|---|---|
+| Source record deleted or merged | Previously observed row remains; no deletion or merge reconciliation |
+| Token loses access or a parent is deselected | Existing rows remain in ClickHouse |
+| Source changes during offset pagination | A scan may miss or repeat entities; it is not a provider snapshot |
+| Run stops after some batches | Loaded batches remain visible; the next run scans again |
+| Older source data loaded later | Later ingestion time wins; no source-version ordering |
+| Complete change history needed | Raw tables reconcile observations and do not form a permanent change log |
+| Meetings, call recordings, transcripts, emails, files, comments, or sequences needed | No readers are included for these resources |
+| Historical attribute values or separate option/status catalogs needed | No separate requests are made for these resources |
+| Continuous sync or OAuth lifecycle needed | Supply scheduling or authentication lifecycle outside this integration |
+
+Deleting or deselecting a source entity does not remove it from a view. Applications requiring an exact current snapshot must add a deliberate reconciliation process. A failed or permission-limited scan must not be used as evidence that unseen source records were deleted.
+
+## Customize the installed integration
+
+| File | Responsibility |
+|---|---|
+| `config.ts` | Source identity, destination names, parent selection, page sizes |
+| `client.ts` | Authentication, response validation, pagination, row identity, request pacing |
+| `sources/objects.ts`, `sources/object-attributes.ts` | Object and attribute readers with their raw table schemas |
+| `sources/records.ts` | Record reader, raw records table, people/company/deal views |
+| `sources/lists.ts`, `sources/list-attributes.ts`, `sources/entries.ts` | List resource readers with their raw table schemas |
+| `sources/notes.ts`, `sources/tasks.ts`, `sources/members.ts` | One reader and raw table schema per resource |
+| `tests/attio.test.ts`, `tests/fixtures.ts` | Optional installed tests and mocked API responses |
+| `pipeline.ts` | Enabled streams, resource tags, retries, batching, concurrency |
+| `index.ts` | Exports that make the pipeline and schema objects discoverable |
+
+Remove a stream entry from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve existing tables under migration management. Removing a schema export changes the desired database schema and can generate a drop operation; review that migration separately.
+
+Edit the view SQL in `sources/records.ts` to expose custom fields, then generate and apply a reviewed migration. Existing raw payloads support new projections without another API fetch. Reader changes apply to subsequent ingestion runs. Revisit pacing when raising concurrency, and test modified readers with fixtures before scheduling them.
+
+Installed files belong to the project. Reinstalling does not overwrite local edits or automatically merge a newer integration version. See [provider templates](/api-sync/templates/) for version pinning and updates.
+
+### Install and run the fixture tests
+
+Include the integration's tests when installing it:
+
+```sh
+bunx chkit add attio --with-tests
+bun test src/integrations/attio/tests/attio.test.ts
+```
+
+The tests use fixture responses, a mocked HTTP client, and an in-memory destination. They exercise reader behavior without Attio credentials or a ClickHouse server. Edit the fixtures and assertions alongside customized readers. With `--path`, adjust the test command to the chosen installation directory.
+
+Repository-only packaging and live-database tests remain outside the installed test set. The manifest selects the portable tests explicitly.
+
+## Related pages
+
+- [Integration list](/integrations/): available apps with dedicated ClickHouse integration guides.
+- [`chkit registry`](/cli/registry/): discover and inspect installable apps.
+- [`chkit add`](/cli/add/): installation flags, project wiring, and ownership.
+- [`chkit ingest`](/cli/ingest/): stream selection, outcomes, and execution budgets.
+- [Destinations and transformations](/api-sync/destinations/): raw JSON, replacement semantics, and deletion handling.
+- [Scheduling and recovery](/api-sync/operations/): operational limits and retry behavior.
+- [Test a source](/api-sync/testing/): fixture-based checks for customized readers.

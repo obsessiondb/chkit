@@ -1,0 +1,51 @@
+---
+title: Apps & integrations
+description: Browse the chkit app registry for ClickHouse integrations, synced records, setup guides, and editable API sync templates.
+sidebar:
+  label: Integration list
+  order: 1
+---
+
+The chkit app registry provides installable ClickHouse integrations with editable schemas, API readers, and sync pipelines.
+
+import RegistryApps from '../../../components/RegistryApps.astro';
+
+## Available integrations
+
+Choose an app to see its setup guide, every resource it syncs, required permissions, and how data reaches ClickHouse. These integrations copy TypeScript source into the project, where the readers and schemas remain editable.
+
+<RegistryApps />
+
+## Find and install an app
+
+Browse the same registry from the CLI without a ClickHouse connection:
+
+```sh
+bunx chkit registry list
+bunx chkit registry inspect attio
+bunx chkit add attio --dry-run
+bunx chkit add attio --with-tests
+```
+
+`registry list --json` exposes resource coverage and documentation links for scripts and agents. `registry inspect` includes API endpoints and scopes, destination tables, derived views, credential setup instructions, sync limitations, dependencies, and the files to install. `--with-tests` copies the app's portable fixture tests alongside its source.
+
+Installation adds source files, registers schemas and ingestion, and installs dependencies. Configure the app credentials and ClickHouse connection, then follow the integration guide to generate and review migrations before the first sync. Schedule recurring runs through cron, CI, or an existing scheduler.
+
+## What each integration guide covers
+
+- **Setup:** requirements, where to create source-system credentials, authentication scopes, installation, schema migrations, and the first run.
+- **Records:** every included resource, its destination table, stored fields, and query views.
+- **Sync behavior:** discovery, pagination, retries, repeat runs, and failed runs.
+- **Coverage limits:** unsupported resources, deletion behavior, and permissions.
+- **Customization:** select resources, change projections, and operate the copied source.
+
+## Add another app
+
+Build readers for an API using the [source authoring guide](/api-sync/readers/), then [publish a registry item](/api-sync/registry-authoring/). Each app in the official catalog ships with its own integration guide; the catalog, CLI, and search metadata use the same registry manifest.
+
+## Related pages
+
+- [Provider templates](/api-sync/templates/): installation, source ownership, and updates.
+- [`chkit registry`](/cli/registry/): list, inspect, and build commands.
+- [`chkit add`](/cli/add/): installation flags and conflict handling.
+- [API sync](/api-sync/): build and operate custom sources.

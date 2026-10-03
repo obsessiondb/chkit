@@ -7,6 +7,7 @@ import sitemap from '@astrojs/sitemap';
 import rawMarkdown from './src/integrations/raw-markdown';
 
 const isDev = process.argv.includes('dev');
+const enableAgentation = isDev || process.env.PUBLIC_AGENTATION_ENABLED === 'true';
 
 // https://astro.build/config
 export default defineConfig({
@@ -75,10 +76,15 @@ export default defineConfig({
 					autogenerate: { directory: 'schema' },
 				},
 				{
+					label: 'Apps & integrations',
+					autogenerate: { directory: 'integrations' },
+				},
+				{
 					label: 'API Sync',
 					items: [
 						{ label: 'Overview', slug: 'api-sync' },
 						{ label: 'Quickstart', slug: 'api-sync/quickstart' },
+						{ label: 'Provider templates', slug: 'api-sync/templates' },
 						{ label: 'Authoring skill', slug: 'api-sync/agent-skill' },
 						{
 							label: 'Build a source',
@@ -88,6 +94,7 @@ export default defineConfig({
 								{ slug: 'api-sync/destinations' },
 								{ slug: 'api-sync/incremental-syncs' },
 								{ slug: 'api-sync/loading' },
+								{ slug: 'api-sync/registry-authoring' },
 							],
 						},
 						{
@@ -119,7 +126,7 @@ export default defineConfig({
 			],
 		}),
 		sitemap(),
-		...(isDev ? [react()] : []),
+		...(enableAgentation ? [react()] : []),
 		rawMarkdown(),
 	],
 });

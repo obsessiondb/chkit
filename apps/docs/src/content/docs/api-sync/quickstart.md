@@ -80,7 +80,6 @@ export const demo = definePipeline({ id: 'demo', streams: [postStream] })
 
 ```sh
 bunx chkit ingest list
-bunx chkit check --offline
 bunx chkit generate --name add-posts-ingestion
 bunx chkit migrate
 ```
@@ -98,7 +97,7 @@ The demonstration dataset contains 100 posts. Run ingestion again and query the 
 
 ## Existing projects
 
-Keep the current connection and plugin registrations; add `ingest()` to them. When switching from `schema` globs to `entry`, remove `schema` and re-export **all existing schema definitions** from the entry module alongside the new tables and pipelines. This preserves the schema input to migration generation.
+Keep the current connection and plugin registrations; add `ingest()` to them. With `schema` globs, add the provider's entry module to the existing schema paths so its pipeline and table exports are loaded. With `entry`, re-export the new tables and pipelines from that entry. If switching from `schema` to `entry`, remove `schema` and re-export **all existing schema definitions** to preserve the schema input to migration generation.
 
 Only exported pipelines are active. Importing a source module for side effects does not activate it, and a table referenced by a stream must still be exported to participate in schema migrations. Inspect the generated SQL for unintended removals before applying it.
 
@@ -106,6 +105,7 @@ Keep a small first source in one entry file. As sources grow, move each provider
 
 ## Related pages
 
+- [Provider templates](/api-sync/templates/): copy a complete provider into an existing project.
 - [Destinations and transformations](/api-sync/destinations/): choose the stored shape and where to map fields.
 - [Readers and pagination](/api-sync/readers/): fetch bounded pages with retries.
 - [Incremental syncs](/api-sync/incremental-syncs/): avoid rereading the whole source.

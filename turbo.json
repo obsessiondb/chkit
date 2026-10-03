@@ -4,6 +4,16 @@
     "teamId": "team_VzYIrbcT25TaqBtYUgI4t5Du"
   },
   "tasks": {
+    "@chkit/registry#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@chkit/docs#build": {
+      "dependsOn": ["^build"],
+      "env": ["PUBLIC_AGENTATION_ENABLED"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/registry/**", "$TURBO_ROOT$/scripts/build-registry.ts", "$TURBO_ROOT$/scripts/registry-catalog.ts", "$TURBO_ROOT$/scripts/check-registry-docs.ts", "$TURBO_ROOT$/packages/cli/src/registry/**"],
+      "outputs": ["dist/**", "public/r/**"]
+    },
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]

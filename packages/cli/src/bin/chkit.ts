@@ -158,6 +158,13 @@ async function run(): Promise<void> {
     return
   }
 
+  // Registry discovery and bootstrapping work before a project config exists.
+  if (commandName === 'add' || commandName === 'registry') {
+    const { cmdRegistry } = await import('../commands/registry.js')
+    await cmdRegistry(commandName, argv.slice(1))
+    return
+  }
+
   const configPathArg = extractConfigPath(argv)
   const env = { command: commandName, mode: process.env.NODE_ENV }
   const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {

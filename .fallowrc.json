@@ -4,7 +4,7 @@
     "conditions": ["source", "bun"]
   },
   "ignorePatterns": ["examples/**"],
-  "entry": ["apps/docs/src/components/*.astro"],
+  "entry": ["apps/docs/src/components/*.astro", "registry/*/index.ts"],
   "duplicates": {
     "ignore": [
       "packages/**/*.test.ts",

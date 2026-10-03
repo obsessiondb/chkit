@@ -1,0 +1,49 @@
+---
+import { registryApps } from '../data/registry';
+---
+
+<ul class="registry-apps not-content" aria-label="Available ClickHouse integrations">
+	{registryApps.map((app) => (
+		<li>
+			<article>
+				<div class="app-heading">
+					<div class="app-logo">{app.logo ? <img src={app.logo} alt={`${app.title} logo`} width="37" height="30" loading="lazy" /> : <span aria-hidden="true">{app.title.slice(0, 1)}</span>}</div>
+					<div>
+						<h3><a href={app.href}>{app.title}</a></h3>
+						<p class="app-meta">{app.resources.length} resources · {app.strategies.map((strategy) => strategy === 'full' ? 'Full reads' : strategy).join(', ')} · {app.language === 'typescript' ? 'TypeScript' : app.language}</p>
+					</div>
+					<span class="app-version">v{app.version}</span>
+				</div>
+				<p class="app-description">{app.description}</p>
+				<ul class="app-resources" aria-label={`${app.title} resources`}>
+					{app.resources.map((resource) => <li title={resource.description}>{resource.title ?? resource.name.replaceAll('_', ' ')}</li>)}
+				</ul>
+				<p class="app-description">{app.authentication?.method}{app.authentication && ' · '}{app.views?.length ?? 0} derived views</p>
+				<div class="app-install"><code>bunx chkit add {app.name}</code></div>
+				<a class="app-guide" href={app.href}>Integrating ClickHouse with {app.title} <span aria-hidden="true">→</span></a>
+			</article>
+		</li>
+	))}
+</ul>
+
+<style>
+	.registry-apps { list-style: none; padding: 0; display: grid; gap: 1rem; }
+	article { border: 1px solid var(--line-2); background: var(--bg-2); padding: clamp(1rem, 3vw, 1.75rem); }
+	.app-heading { display: flex; align-items: center; gap: 1rem; }
+	.app-logo { display: grid; place-items: center; flex-shrink: 0; width: 3.5rem; height: 3.5rem; background: #fff; border: 1px solid #e5e5e5; }
+	.app-logo img { display: block; object-fit: contain; }
+	.app-logo span { color: #000; font-size: 1.5rem; }
+	h3 { margin: 0; font-size: 1.35rem; }
+	h3 a { color: var(--ink); text-decoration: none; }
+	h3 a:hover { color: var(--accent); }
+	.app-meta { margin: 0.25rem 0 0; color: var(--ink-2); font-size: 0.8rem; }
+	.app-version { margin-left: auto; color: var(--ink-2); font: 0.75rem 'Geist Mono', monospace; }
+	.app-description { color: var(--ink-2); margin: 1.25rem 0; }
+	.app-resources { list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0; }
+	.app-resources li { padding: 0.2rem 0.5rem; border: 1px solid var(--line-2); color: var(--ink-2); font-size: 0.75rem; }
+	.app-install { margin: 1.25rem 0; padding: 0.8rem 1rem; border-left: 2px solid var(--accent); background: var(--snippet-bg); overflow-x: auto; }
+	.app-install code { color: var(--cmd-text); font: 0.8rem 'Geist Mono', monospace; white-space: nowrap; }
+	.app-guide { color: var(--accent); font-size: 0.9rem; text-underline-offset: 0.25em; }
+	.app-guide span { margin-left: 0.35rem; }
+	@media (max-width: 420px) { .app-version { display: none; } }
+</style>
