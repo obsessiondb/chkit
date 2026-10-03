@@ -240,6 +240,20 @@ describe('SQL validation via EXPLAIN AST', () => {
         label: 'fn: toDate(now())',
         col: { name: 'created_date', type: 'Date', default: 'fn:toDate(now())' },
       },
+      {
+        label: 'expression object now64(3)',
+        col: { name: 'updated_at', type: "DateTime64(3, 'UTC')", default: { expression: 'now64(3)' } },
+      },
+      {
+        label: 'MATERIALIZED expression object with a comment',
+        col: {
+          name: 'created_date',
+          type: 'Date',
+          defaultKind: 'MATERIALIZED',
+          default: { expression: 'toDate(now()) -- day of insert' },
+          comment: 'insert day',
+        },
+      },
     ]
 
     for (const { label, col } of defaults) {
@@ -250,6 +264,19 @@ describe('SQL validation via EXPLAIN AST', () => {
         await assertValidSQL(client, toCreateSQL(def))
       })
     }
+
+    // #234: rendered as written, the `--` comment would swallow the comma
+    // before the next column.
+    test('default: expression with a line comment before another column', async () => {
+      const def = baseTable({
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'ts', type: 'DateTime', default: { expression: 'now() -- set on insert' } },
+          { name: 'n', type: 'UInt8' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
   })
 
   // =========================================================================
@@ -1021,6 +1048,11 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       { label: 'nullable', col: { name: 'email', type: 'String', nullable: true } },
       { label: 'with default', col: { name: 'score', type: 'Float64', default: 0 } },
       { label: 'with fn default', col: { name: 'ts', type: 'DateTime', default: 'fn:now()' } },
+      { label: 'with expression default', col: { name: 'ts', type: 'DateTime', default: { expression: 'now()' } } },
+      {
+        label: 'with commented expression default and a comment',
+        col: { name: 'ts', type: 'DateTime', default: { expression: 'now() -- set on insert' }, comment: 'insert time' },
+      },
       { label: 'with comment', col: { name: 'notes', type: 'String', comment: 'User notes' } },
       { label: 'complex type', col: { name: 'tags', type: 'Array(String)' } },
     ]

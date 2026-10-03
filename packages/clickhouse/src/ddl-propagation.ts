@@ -1,7 +1,27 @@
+import type { MigrationOperationType } from '@chkit/core'
 import pRetry from 'p-retry'
 import type { ClickHouseExecutor } from './index.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
+
+// What each ALTER or rename appends to the `<kind>:<database>.<name>` key of the
+// object it changes. Creates and drops use the bare key.
+const KEY_SUFFIXES: ReadonlyMap<string, string> = new Map<MigrationOperationType, string>([
+  ['alter_materialized_view_modify_refresh', ':refresh'],
+  ['alter_table_add_column', ':column:'],
+  ['alter_table_modify_column', ':column:'],
+  ['alter_table_drop_column', ':column:'],
+  ['alter_table_rename_column', ':column_rename:'],
+  ['alter_table_add_index', ':index:'],
+  ['alter_table_drop_index', ':index:'],
+  ['alter_table_add_projection', ':projection:'],
+  ['alter_table_drop_projection', ':projection:'],
+  ['alter_table_modify_setting', ':setting:'],
+  ['alter_table_reset_setting', ':setting:'],
+  ['alter_table_modify_ttl', ':ttl'],
+  ['alter_table_rename_table', ':rename_table'],
+  ['rename_dictionary', ':rename_dictionary'],
+])
 
 export async function waitForTable(
   executor: ClickHouseExecutor,
@@ -10,7 +30,7 @@ export async function waitForTable(
 ): Promise<void> {
   await pRetry(async () => {
     const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = '${database}' AND name = '${tableName}'`,
+      `SELECT 1 AS x FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)}`,
     )
     if (rows.length === 0) {
       throw new Error(`waitForTable: ${database}.${tableName} not yet visible`)
@@ -25,7 +45,7 @@ export async function waitForView(
 ): Promise<void> {
   await pRetry(async () => {
     const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = '${database}' AND name = '${viewName}' AND engine LIKE '%View%'`,
+      `SELECT 1 AS x FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(viewName)} AND engine LIKE '%View%'`,
     )
     if (rows.length === 0) {
       throw new Error(`waitForView: ${database}.${viewName} not yet visible`)
@@ -40,7 +60,7 @@ export async function waitForDictionary(
 ): Promise<void> {
   await pRetry(async () => {
     const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.dictionaries WHERE database = '${database}' AND name = '${dictionaryName}'`,
+      `SELECT 1 AS x FROM system.dictionaries WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)}`,
     )
     if (rows.length === 0) {
       throw new Error(`waitForDictionary: ${database}.${dictionaryName} not yet visible`)
@@ -56,7 +76,7 @@ export async function waitForColumn(
 ): Promise<void> {
   await pRetry(async () => {
     const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.columns WHERE database = '${database}' AND table = '${tableName}' AND name = '${columnName}'`,
+      `SELECT 1 AS x FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name = ${stringLiteral(columnName)}`,
     )
     if (rows.length === 0) {
       throw new Error(
@@ -93,7 +113,7 @@ export async function waitForTableAbsent(
 ): Promise<void> {
   await pRetry(async () => {
     const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = '${database}' AND name = '${tableName}'`,
+      `SELECT 1 AS x FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)}`,
     )
     if (rows.length > 0) {
       throw new Error(
@@ -105,24 +125,38 @@ export async function waitForTableAbsent(
 
 /**
  * Parses an operation key like "table:app.users", "table:app.users:column:name",
- * or "dictionary:app.users_dict" into its components.
+ * "dictionary:app.users_dict", "view:app.active_users" or
+ * "materialized_view:app.events_mv:refresh" into its components. `table` is the
+ * object's name in system.tables, which lists views and dictionaries too.
+ *
+ * Names may contain ':', so the object's name runs to the last occurrence of the
+ * suffix its operation type appends; without a known suffix the rest of the key
+ * is the name. The database runs to the first '.': the key cannot tell a '.'
+ * inside a database name from the separator, so objects in such a database are
+ * not found.
  */
-function parseOperationKey(key: string):
+function parseOperationKey(
+  operationType: string,
+  key: string,
+):
   | {
       database: string
       table: string
       column: string | undefined
     }
   | undefined {
-  const tableMatch = key.match(/^(?:table|dictionary):([^.]+)\.([^:]+)/)
-  if (!tableMatch) return undefined
+  const keyMatch = key.match(/^(?:table|dictionary|view|materialized_view):([^.]+)\.(.+)$/)
+  if (!keyMatch) return undefined
   // biome-ignore lint/style/noNonNullAssertion: capture groups guaranteed by regex match
-  const database = tableMatch[1]!
+  const database = keyMatch[1]!
   // biome-ignore lint/style/noNonNullAssertion: capture groups guaranteed by regex match
-  const table = tableMatch[2]!
+  const rest = keyMatch[2]!
 
-  const columnMatch = key.match(/:column:([^:]+)/)
-  return { database, table, column: columnMatch?.[1] }
+  const suffix = KEY_SUFFIXES.get(operationType)
+  const at = suffix === undefined ? -1 : rest.lastIndexOf(suffix)
+  if (suffix === undefined || at < 1) return { database, table: rest, column: undefined }
+  const column = suffix === ':column:' ? rest.slice(at + suffix.length) : undefined
+  return { database, table: rest.slice(0, at), column }
 }
 
 /**
@@ -134,7 +168,7 @@ export async function waitForDDLPropagation(
   operationType: string,
   operationKey: string,
 ): Promise<void> {
-  const parsed = parseOperationKey(operationKey)
+  const parsed = parseOperationKey(operationType, operationKey)
   if (!parsed) return // database-level ops or unrecognized keys — no wait needed
 
   switch (operationType) {
@@ -171,8 +205,15 @@ export async function waitForDDLPropagation(
       )
 
     default:
-      // alter_table_add_index, alter_table_modify_setting, etc.
+      // alter_table_add_index, alter_table_modify_setting,
+      // alter_materialized_view_modify_refresh, etc.
       // Wait for the table to exist as a basic sanity check.
       return waitForTable(executor, parsed.database, parsed.table)
   }
+}
+
+// Object names may contain quotes and backslashes (DDL backtick-quotes them),
+// so the names compared against system tables are escaped string literals.
+function stringLiteral(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }

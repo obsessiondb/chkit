@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+	canonicalizeDefinitions,
 	ChxValidationError,
 	createSnapshot,
 	planDiff,
@@ -164,21 +165,51 @@ describe('column expressions', () => {
 		...overrides,
 	})
 
-	test('requires fn: for MATERIALIZED and ALIAS string expressions', () => {
+	test('requires { expression } for MATERIALIZED and ALIAS string expressions', () => {
 		for (const defaultKind of ['MATERIALIZED', 'ALIAS'] as const) {
+			const plain = definition({ defaultKind, default: 'toDate(ts)' })
+			const issue = {
+				code: 'column_expression_requires_fn',
+				kind: 'table',
+				database: 'default',
+				name: 'events',
+				message: `Table default.events column "day" is ${defaultKind} with plain string default "toDate(ts)", which renders as the quoted literal 'toDate(ts)' instead of SQL. Use default: { expression: "toDate(ts)" } to render ${defaultKind} toDate(ts) (legacy spelling: "fn:toDate(ts)"), or default: { expression: "'toDate(ts)'" } for a constant string.`,
+			}
+			expect(validateDefinitions([plain])).toEqual([issue])
+			expect(validateDefinitions(canonicalizeDefinitions([plain]))).toEqual([issue])
+			expect(() => toCreateSQL(plain)).toThrow(ChxValidationError)
+			expect(() => planDiff([], [plain])).toThrow(ChxValidationError)
+			// The suggested expression renders without its comments.
 			expect(
-				validateDefinitions([definition({ defaultKind, default: 'toDate(ts)' })]),
+				messages(definition({ defaultKind, default: 'toDate(ts) -- the day' })),
 			).toEqual([
-				{
-					code: 'column_expression_requires_fn',
-					kind: 'table',
-					database: 'default',
-					name: 'events',
-					message: `Column "day" is ${defaultKind} with a plain string default, which ClickHouse would store as the text 'toDate(ts)'. Prefix SQL expressions with fn: (for example fn:toDate(ts)); write fn:'<text>' for a constant string.`,
-				},
+				`Table default.events column "day" is ${defaultKind} with plain string default "toDate(ts) -- the day", which renders as the quoted literal 'toDate(ts) -- the day' instead of SQL. Use default: { expression: "toDate(ts) -- the day" } to render ${defaultKind} toDate(ts) (legacy spelling: "fn:toDate(ts) -- the day"), or default: { expression: "'toDate(ts) -- the day'" } for a constant string.`,
 			])
-			for (const value of ["fn:'text'", 1, true]) {
-				expect(messages(definition({ defaultKind, default: value }))).toEqual([])
+			expect(messages(definition({ defaultKind, default: ' ' }))).toEqual([
+				`Table default.events column "day" is ${defaultKind} with plain string default " ", which renders as the quoted literal ' ' instead of SQL. Use default: { expression: "<sql>" } for a SQL expression, or default: { expression: "' '" } for a constant string.`,
+			])
+			// No suggestion that validation rejects in turn: a leftover fn: prefix
+			// (the space hides it from the legacy spelling), a stray #, an open string.
+			expect(messages(definition({ defaultKind, default: ' fn:toDate(ts)' }))).toEqual([
+				`Table default.events column "day" is ${defaultKind} with plain string default " fn:toDate(ts)", which renders as the quoted literal ' fn:toDate(ts)' instead of SQL. Use default: { expression: "<sql>" } for a SQL expression, or default: { expression: "' fn:toDate(ts)'" } for a constant string.`,
+			])
+			for (const value of ['toDate(ts) #', "concat('a"]) {
+				const [message] = messages(definition({ defaultKind, default: value }))
+				expect(message).toContain('Use default: { expression: "<sql>" } for a SQL expression, or')
+				expect(message).not.toContain('\n')
+			}
+			// Raw definitions (toCreateSQL) keep { expression }; canonical ones
+			// (planDiff, snapshot rebuild) hold it as the fn: string.
+			for (const value of [
+				"fn:'text'",
+				{ expression: 'toDate(ts)' },
+				{ expression: "'text'" },
+				1,
+				true,
+			]) {
+				const def = definition({ defaultKind, default: value })
+				expect(messages(def)).toEqual([])
+				expect(validateDefinitions(canonicalizeDefinitions([def]))).toEqual([])
 			}
 		}
 		for (const defaultKind of ['DEFAULT', 'EPHEMERAL'] as const) {
@@ -260,12 +291,22 @@ describe('column expressions', () => {
 		expect(messages(definition({ defaultKind: 'EPHEMERAL', codec }))).toEqual([
 			'Column "day" is EPHEMERAL and cannot have a codec; ClickHouse stores no data for it.',
 		])
+		expect(
+			messages(definition({ defaultKind: 'ALIAS', default: { expression: 'toDate(ts)' }, codec })),
+		).toEqual(['Column "day" is ALIAS and cannot have a codec; ClickHouse stores no data for it.'])
 		for (const column of [
 			{ defaultKind: 'EPHEMERAL', default: 'fn:toDate(ts)' },
+			{ defaultKind: 'EPHEMERAL', default: { expression: 'toDate(ts) -- parsed input' } },
 			{ defaultKind: 'EPHEMERAL', comment: 'raw input' },
 			{ defaultKind: 'MATERIALIZED', default: 'fn:toDate(ts)' },
 		] as const) {
 			expect(messages(definition({ ...column, codec }))).toEqual([])
 		}
+		// An expression of only comments renders empty, which is its own mistake.
+		expect(
+			validateDefinitions([
+				definition({ defaultKind: 'EPHEMERAL', default: { expression: '-- todo' }, codec }),
+			]).map((issue) => issue.code),
+		).toEqual(['column_expression_required'])
 	})
 })

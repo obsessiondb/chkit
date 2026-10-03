@@ -59,7 +59,7 @@ const events = table({
     { name: 'org_id', type: 'String' },
     { name: 'source', type: 'LowCardinality(String)' },
     { name: 'payload', type: 'String', nullable: true },
-    { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+    { name: 'received_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
     { name: 'status', type: 'String', default: 'pending', comment: 'Processing status' },
   ],
   engine: 'MergeTree()',
@@ -81,9 +81,12 @@ Optional: `partitionBy`, `uniqueKey`, `ttl`, `settings`, `indexes`, `projections
 
 ### Column defaults
 
-- String values are single-quoted: `default: 'pending'` → `DEFAULT 'pending'`
-- Numbers are literal: `default: 0` → `DEFAULT 0`
-- Function calls use `fn:` prefix: `default: 'fn:now64(3)'` → `DEFAULT now64(3)`
+- Strings are literals, single-quoted: `default: 'pending'` → `DEFAULT 'pending'`
+- Numbers and booleans are literals: `default: 0` → `DEFAULT 0`
+- SQL expressions use `{ expression }`: `default: { expression: 'now64(3)' }` → `DEFAULT now64(3)`. Comments in the expression are dropped from the rendered SQL
+- Never write a function call as a plain string: `default: 'now64(3)'` is the literal text `now64(3)`, which ClickHouse rejects for a DateTime64 column (and stores as NULL in a Nullable one). chkit newer than 0.2.0-beta.8 rejects it at `generate` when it is the `DEFAULT` or `EPHEMERAL` default of a non-string column (`column_default_looks_like_expression`), and rejects every plain string on a `MATERIALIZED` or `ALIAS` column (`column_expression_requires_fn`)
+- `default: 'fn:now64(3)'` is the legacy, equivalent spelling, and the only one chkit 0.2.0-beta.8 and older understand: they render `{ expression }` as `DEFAULT [object Object]`. If the generated migration shows that, use `fn:`
+- `defaultKind` picks the clause (`DEFAULT`, `MATERIALIZED`, `ALIAS`, `EPHEMERAL`); `default` keeps the same forms for every kind: `{ name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } }` → `` `day` Date MATERIALIZED toDate(ts) ``. `MATERIALIZED` and `ALIAS` need a `default`, written as `{ expression }` (a constant string is `{ expression: "'text'" }`); `EPHEMERAL` may omit it
 
 ### Views
 
@@ -96,6 +99,10 @@ const activeUsers = view({
   as: 'SELECT id, email FROM app.users WHERE active = 1',
 })
 ```
+
+Write fully qualified `db.name` references in view SQL (`app.users`, not `users`): ClickHouse resolves an unqualified name against the session's current database. chkit newer than 0.2.0-beta.8 also reads these references to create a view after the views, materialized views, and dictionaries it uses.
+
+With chkit newer than 0.2.0-beta.8, `as` may span lines and contain SQL comments, as may the other SQL fields (materialized view `as`, `partitionBy`, `ttl`, index and projection SQL, dictionary `source`/`layout`/`lifetime`): chkit removes the comments before it writes the query on one line. Full-text (`type: 'text'`) index expressions are the exception: they only drop `--` and non-nested `/* */` comments. Check the generated migration: if a `--`, `//`, or `#` comment outside a string literal is still inside a one-line statement (a `CREATE VIEW`, or the TTL or PARTITION BY of a `CREATE TABLE`), the installed chkit does not strip comments and the comment swallows the rest of the statement. Upgrade chkit, or use `/* */` comments.
 
 ### Materialized views
 
@@ -155,9 +162,13 @@ chkit migrate                  # Preview pending
 chkit migrate --apply          # Apply all pending
 chkit migrate --apply --allow-destructive   # Allow danger operations
 chkit migrate --apply --table analytics.events
+chkit migrate --apply --retry <file>        # Resume a failed migration after editing its file
+chkit migrate --abandon <file> --apply      # Reset a failed migration so the next apply starts it over
 ```
 
 Verifies checksums before applying. Destructive operations require explicit `--allow-destructive` in CI.
+
+A migration that fails part-way stays in progress, and `--apply` resumes it, skipping completed statements. With chkit newer than 0.2.0-beta.8, after an edit to its file `--apply` runs it from statement 1 if no statement is recorded as completed; otherwise use `--retry` or `--abandon`, which preview without `--apply`. Never edit the `_chkit_migrations` journal by hand. These versions also refuse to apply pending files without executable statements, such as an unfilled `generate --empty` stub.
 
 ### status: Migration state
 
@@ -186,6 +197,17 @@ chkit check --json       # Machine-readable output
 ```
 
 Evaluates: pending migrations, checksum mismatches, schema drift, plugin checks. Exit code 1 on failure.
+
+### snapshot: Repair snapshot.json after parallel branches
+
+Requires chkit newer than 0.2.0-beta.8.
+
+```sh
+chkit snapshot rebuild --dryrun   # Report the entries that differ from the current snapshot.json
+chkit snapshot rebuild            # Rewrite chkit/meta/snapshot.json from the schema definitions
+```
+
+Use when `snapshot.json` has merge conflict markers after merging or rebasing two branches that each ran `generate`. Resolve schema file conflicts first. Never take one side of the conflict or edit the file by hand: that drops the other branch's entries. A conflicted file cannot be compared, so review the rebuilt file before staging it: `git diff HEAD -- chkit/meta/snapshot.json`, then the same diff against `MERGE_HEAD` during a merge or `REBASE_HEAD` during a rebase. A rebuild records every definition as migrated, so rebuild only when every schema change has a migration file (`chkit generate --dryrun` reported 0 operations on each branch); after upgrading chkit, run `chkit generate` first. Restore the snapshot from git instead of rebuilding when the file is damaged but committed and no merge or rebase is in progress (`git checkout HEAD -- chkit/meta/snapshot.json`), or after abandoning a failed migration to generate it again. `--table` is not supported. If both branches changed the same table or view, add a migration that applies it again: https://chkit.obsessiondb.com/cli/snapshot/
 
 ### query: Run SQL against the configured target
 

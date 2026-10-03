@@ -105,7 +105,7 @@ Creates a table definition.
         { name: 'org_id', type: 'String' },
         { name: 'source', type: 'LowCardinality(String)' },
         { name: 'payload', type: 'String', nullable: true },
-        { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+        { name: 'received_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
         { name: 'status', type: 'String', default: 'pending', comment: 'Event processing status' },
       ],
       engine: 'MergeTree',
@@ -258,40 +258,70 @@ When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL.
   </TabItem>
 </Tabs>
 
-### `default` (string | number | boolean, optional)
+### `default` (string | number | boolean | SQLExpression, optional)
 
-Default value for the column.
+The value of the column's `DEFAULT` clause, or of the clause that [`defaultKind`](#defaultkind-optional) names: a literal value, or a SQL expression that ClickHouse evaluates for each row.
 
-- **String** values are single-quoted in SQL, with quotes and backslashes escaped: `default: 'pending'` produces `DEFAULT 'pending'`
-- **Number/boolean** values are rendered literally: `default: 0` produces `DEFAULT 0`
-- **`fn:` prefix** -- for function-call defaults, prefix the string with `fn:` to emit a raw SQL expression:
+| Value | Meaning | Example | Renders |
+|-------|---------|---------|---------|
+| `string` | Literal, single-quoted, with quotes and backslashes escaped | `default: 'pending'` | `DEFAULT 'pending'` |
+| `number` / `boolean` | Literal, as written | `default: 0` | `DEFAULT 0` |
+| `{ expression: string }` | SQL expression | `default: { expression: 'now64(3)' }` | `DEFAULT now64(3)` |
+
+Use `{ expression }` for anything ClickHouse evaluates: function calls, arithmetic, casts, and references to other columns.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
-    { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' }
-    // SQL: `received_at` DateTime64(3) DEFAULT now64(3)
+    columns: [
+      { name: 'status', type: 'String', default: 'pending' },
+      // SQL: `status` String DEFAULT 'pending'
+      { name: 'received_at', type: "DateTime64(3, 'UTC')", default: { expression: 'now64(3)' } },
+      // SQL: `received_at` DateTime64(3, 'UTC') DEFAULT now64(3)
+    ]
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    {"name": "received_at", "type": "DateTime64(3)", "default": "fn:now64(3)"}
-    # SQL: `received_at` DateTime64(3) DEFAULT now64(3)
+    columns=[
+        {"name": "status", "type": "String", "default": "pending"},
+        # SQL: `status` String DEFAULT 'pending'
+        {"name": "received_at", "type": "DateTime64(3, 'UTC')", "default": "fn:now64(3)"},
+        # SQL: `received_at` DateTime64(3, 'UTC') DEFAULT now64(3)
+    ]
     ```
+    chkit-py does not accept the `{"expression": ...}` form or run the `column_default_looks_like_expression` and `column_default_invalid` checks yet. Write expression defaults with the `fn:` prefix.
   </TabItem>
 </Tabs>
 
-[`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, comments, outer parentheses, and quotes around plain identifiers. A string without `fn:` stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
+An expression may span lines and contain SQL comments. chkit removes the comments when it writes the clause, so a `--` comment cannot hide the rest of the column definition, and keeps the rest of the text as written. An unterminated string, quoted identifier, or block comment would swallow the rest of the migration, so `chkit generate` rejects it with `column_default_invalid`, as it does a `#` that is not followed by a space or `!`, which ClickHouse cannot parse. `chkit/meta/snapshot.json` stores the expression with its comments, so editing only a comment plans a `MODIFY COLUMN` that sets the same default.
+
+[`chkit drift`](/cli/drift/#expression-defaults) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, comments, outer parentheses, and quotes around plain identifiers. A string stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
 
 :::caution
-ClickHouse stores some expressions in a canonical form, such as `CAST(ts, 'String')` for `cast(ts as String)` or `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. Write the stored form after `fn:` to avoid permanent drift; `chkit pull` and `system.columns` show it.
+ClickHouse stores some expressions in a canonical form, such as `now()` for `NOW()`, `CAST(ts, 'String')` for `cast(ts as String)` or `ts::String`, and `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. Write the stored form in `{ expression }` to avoid permanent drift; `chkit pull` and `system.columns` show it.
+:::
+
+**The `fn:` prefix.** A string that starts with `fn:` is the original spelling of an expression default and keeps working: `default: 'fn:now64(3)'` is equivalent to `default: { expression: 'now64(3)' }`. `chkit/meta/snapshot.json` stores both as `"fn:now64(3)"`, so switching between them generates no migration. Because of the prefix, a string literal cannot start with `fn:`; to store such a value, write the quoted literal as an expression: `default: { expression: "'fn:abc'" }`.
+
+:::note
+`{ expression }` needs chkit newer than 0.2.0-beta.8. Older versions render it as `DEFAULT [object Object]`; use the `fn:` prefix with them.
+:::
+
+:::caution[A function call in a plain string is a literal]
+`default: 'now64(3)'` renders `DEFAULT 'now64(3)'`: the text `now64(3)`, not the current time. ClickHouse rejects that literal for a `DateTime64` column. On a `Nullable` number, date, time, UUID, or IP address column it accepts the literal but stores `NULL`. `chkit generate` therefore fails with `column_default_looks_like_expression` when the plain string default of a `DEFAULT` column starts with a function call and the column type cannot hold a string. An `EPHEMERAL` column gets the same check, because a plain string there renders the same quoted literal, such as `EPHEMERAL 'now64(3)'`. `MATERIALIZED` and `ALIAS` columns reject every plain string with `column_expression_requires_fn` (see [`defaultKind`](#defaultkind-optional)).
+
+Columns that store text are exempt, because there the text is a valid value: `String` and its SQL aliases (`TEXT`, `VARCHAR`, ...), `FixedString`, `Enum`, `Enum8`/`Enum16`, `Dynamic`, a `Variant` with a string member, and any of these inside `Nullable(...)`, `LowCardinality(...)`, or `SimpleAggregateFunction(...)`. To keep the quoted text on a column that holds a string chkit does not recognize, write it as an expression: `default: { expression: "'now()'" }`.
+
+If a migration that an older chkit generated already failed this way, see [Troubleshooting](/guides/troubleshooting/#default-expression-and-column-type-are-incompatible).
 :::
 
 ### `defaultKind` (optional)
 
 Choose `DEFAULT` (the implicit default), `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`.
-Python also accepts `default_kind`. The `default` field holds the value or expression
-for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions.
+Python also accepts `default_kind`. The [`default`](#default-string--number--boolean--sqlexpression-optional)
+field holds the value or expression for every kind: strings remain SQL literals, and
+`{ expression }` marks a SQL expression (`fn:` in chkit-py).
 
 | Kind | Behavior |
 | --- | --- |
@@ -305,10 +335,10 @@ for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions
     ```ts
     columns: [
       { name: 'ts', type: 'DateTime' },
-      { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'fn:toDate(ts)' },
-      { name: 'label', type: 'String', defaultKind: 'ALIAS', default: 'fn:toString(day)' },
+      { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } },
+      { name: 'label', type: 'String', defaultKind: 'ALIAS', default: { expression: 'toString(day)' } },
       { name: 'raw', type: 'String', defaultKind: 'EPHEMERAL' },
-      { name: 'size', type: 'UInt64', default: 'fn:length(raw)' },
+      { name: 'size', type: 'UInt64', default: { expression: 'length(raw)' } },
     ]
     ```
   </TabItem>
@@ -325,10 +355,13 @@ for every kind: strings remain SQL literals, and `fn:` marks raw SQL expressions
   </TabItem>
 </Tabs>
 
-`MATERIALIZED` and `ALIAS` require a value or expression; `EPHEMERAL` may omit it.
-A plain string for `MATERIALIZED` or `ALIAS` fails with `column_expression_requires_fn`,
-since ClickHouse would store the text itself: write `fn:toDate(ts)`, or `fn:'text'` for
-a constant string.
+`MATERIALIZED` and `ALIAS` compute their value, so they require a `default`, and a
+plain string fails with `column_expression_requires_fn`: `default: 'toDate(ts)'` would
+render the quoted literal `MATERIALIZED 'toDate(ts)'` instead of SQL. Write
+`{ expression: 'toDate(ts)' }`, or `{ expression: "'text'" }` for a constant string
+(`fn:toDate(ts)` and `fn:'text'` in the legacy spelling, which chkit-py uses). Numbers
+and booleans render as written. `EPHEMERAL` may omit `default` and keeps a plain string
+as a literal.
 ClickHouse normally excludes all three from `SELECT *` and accepts `EPHEMERAL` values
 only through an explicit insert column list. Keep the base type in `type`; do not
 embed `MATERIALIZED ...` in the type string.
@@ -591,7 +624,7 @@ Creates a view definition.
 |-------|------|----------|-------------|
 | `database` | `string` | yes | Database name |
 | `name` | `string` | yes | View name |
-| `as` | `string` | yes | SELECT query |
+| `as` | `string` | yes | SELECT query; may span lines and contain comments (see [SQL fragments](#sql-fragments)) |
 | `comment` | `string` | no | View comment |
 
 <Tabs syncKey="lang">
@@ -619,6 +652,8 @@ Creates a view definition.
   </TabItem>
 </Tabs>
 
+A view can read tables, other views, materialized views, and dictionaries. `chkit generate` creates a view after the objects it reads and drops it before them, whatever their names; chkit-py still orders by kind and name. Write qualified names (`app.users`) in `as` so every reference is detected. See [Operation order](/cli/generate/#operation-order).
+
 ## `materializedView()`
 
 Creates a materialized view definition. In Python the factory is `materialized_view()`.
@@ -629,7 +664,7 @@ Creates a materialized view definition. In Python the factory is `materialized_v
 | `name` | `string` | yes | Materialized view name |
 | `to` | `{ database: string; name: string }` | yes | Target table for the view |
 | `refresh` | `MaterializedViewRefresh` | no | Refresh schedule — see [Refreshable materialized views](/schema/refreshable-views/) |
-| `as` | `string` | yes | SELECT query |
+| `as` | `string` | yes | SELECT query; may span lines and contain comments (see [SQL fragments](#sql-fragments)) |
 | `comment` | `string` | no | View comment |
 
 <Tabs syncKey="lang">
@@ -762,7 +797,7 @@ Creates a [ClickHouse dictionary](https://clickhouse.com/docs/sql-reference/dict
 | `renamedFrom` | `{ database?: string; name: string }` | Previous identity for rename tracking |
 
 :::note
-`source`, `layout`, and `lifetime` are **raw strings**, not a typed sub-DSL — chkit passes them through to ClickHouse verbatim inside `SOURCE(...)`, `LAYOUT(...)`, and `LIFETIME(...)` respectively. There is no key/layout coupling validation or required-parameter checking (e.g. `size_in_cells` for `HASHED`); ClickHouse validates the DDL when it's applied.
+`source`, `layout`, and `lifetime` are **raw strings**, not a typed sub-DSL — chkit passes them to ClickHouse inside `SOURCE(...)`, `LAYOUT(...)`, and `LIFETIME(...)` respectively, after removing comments and collapsing whitespace (see [SQL fragments](#sql-fragments)). There is no key/layout coupling validation or required-parameter checking (e.g. `size_in_cells` for `HASHED`); ClickHouse validates the DDL when it's applied.
 :::
 
 ### Dictionary attributes
@@ -773,7 +808,7 @@ Each entry in the `attributes` array is a `DictionaryAttribute`.
 |-------|------|-------------|
 | `name` | `string` | Attribute name |
 | `type` | `string` | ClickHouse type |
-| `default` | `string \| number \| boolean` | `DEFAULT` value for missing keys. Mutually exclusive with `expression` |
+| `default` | `string \| number \| boolean` | `DEFAULT` value for missing keys. A literal: ClickHouse accepts no expression here. Mutually exclusive with `expression` |
 | `expression` | `string` | `EXPRESSION` computed from source columns. Mutually exclusive with `default` |
 | `hierarchical` | `boolean` | Marks the attribute `HIERARCHICAL` |
 | `bidirectional` | `boolean` | Marks the attribute `BIDIRECTIONAL` — enables parent/child lookups in both directions. Only valid alongside `hierarchical` |
@@ -802,6 +837,37 @@ ClickHouse redacts inline passwords back to `[HIDDEN]` on introspection (`SHOW C
 ### No `ALTER DICTIONARY`
 
 ClickHouse has no `ALTER DICTIONARY` — every structural change to a dictionary is rendered as a single `CREATE OR REPLACE DICTIONARY` statement (atomic, dependency-safe). See [Structural vs. alterable properties](#structural-vs-alterable-properties). A pure rename (`renamedFrom` with no other change) is the one exception — it renders as `RENAME DICTIONARY`, not a replace; see [Dictionary rename](#dictionary-rename).
+
+## SQL fragments
+
+Several fields hold ClickHouse SQL that chkit copies into the DDL it generates: `as` on views and materialized views, `partitionBy` and `ttl` on tables, skip index `expression`, projection `query` and `index`, and dictionary `source`, `layout`, and `lifetime`. These fields accept SQL that spans several lines and contains comments:
+
+```ts
+import { view } from '@chkit/core'
+
+const meetingCompany = view({
+  database: 'crm',
+  name: 'meeting_company',
+  as: `
+    WITH people_by_email AS (
+      SELECT person_id, company_id, arrayJoin(emails) AS email FROM crm.person_identity
+    )
+    -- The attendee's company, through their person record.
+    SELECT email, company_id /* one row per address */
+    FROM people_by_email
+  `,
+})
+```
+
+Before chkit compares a fragment, stores it in `snapshot.json`, or writes it into a migration, it removes the comments and collapses each run of whitespace to one space, so the generated `CREATE VIEW` holds the query on one line. Comment syntax follows ClickHouse: `--`, `//`, `#!`, and `#` followed by a space start a comment that runs to the end of the line, and `/* */` comments can nest. Comment markers inside string literals (`'--'`) and quoted identifiers are text and stay in place. An unterminated block comment or string literal is left as written, so ClickHouse reports it when the migration runs.
+
+Editing the text of a comment does not produce a migration, and neither does adding or removing a comment that whitespace separates from the rest of the SQL. Whitespace inside string literals collapses too: each run of spaces, tabs, or newlines inside a literal becomes one space.
+
+Full-text indexes (`type: 'text'`) are the exception: chkit reads their SQL with a separate parser that keeps whitespace inside string literals and recognizes only `--` and non-nested `/* */` comments.
+
+:::caution[chkit-py]
+chkit-py does not remove comments from these fields yet: it collapses the fragment onto one line with its comments, so a line comment swallows the rest of the query. With chkit-py, keep comments out of SQL fragments.
+:::
 
 ## Type system reference
 
@@ -978,9 +1044,11 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
 - **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `GCD`, `ALP`)
-- **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` is `fn:` with an empty expression
+- **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` expression is empty: `{ expression: '' }`, an expression made only of comments, or a bare `'fn:'`
 - **Invalid column kind** (`column_default_kind_invalid`) -- `defaultKind` is not `DEFAULT`, `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` (Python rejects it when the column is constructed)
-- **Expression without `fn:`** (`column_expression_requires_fn`) -- a `MATERIALIZED` or `ALIAS` column has a plain string `default`, which ClickHouse would store as text
+- **Default looks like an expression** (`column_default_looks_like_expression`) -- the plain string default of a `DEFAULT` or `EPHEMERAL` column starts with a function call, such as `'now64(3)'`, and the column type cannot hold a string; use `{ expression: 'now64(3)' }` (see [`default`](#default-string--number--boolean--sqlexpression-optional))
+- **Plain string expression** (`column_expression_requires_fn`) -- a `MATERIALIZED` or `ALIAS` column has a plain string `default`, which renders as a quoted literal instead of SQL; use `{ expression: 'toDate(ts)' }`, or `{ expression: "'text'" }` for a constant string (see [`defaultKind`](#defaultkind-optional))
+- **Invalid default** (`column_default_invalid`) -- `default` is an object other than `{ expression: string }`, an expression that keeps the legacy prefix, such as `{ expression: 'fn:now()' }`, or an expression with an unterminated string, quoted identifier, or block comment, such as `{ expression: 'now() /* set on insert' }`, or with a `#` that starts no comment, such as `{ expression: 'now() #' }`
 - **Unstored column in a key** (`column_kind_not_stored`) -- an `ALIAS` or `EPHEMERAL` column is named directly in `orderBy`, `primaryKey`, `partitionBy` or an engine argument, or an `EPHEMERAL` column is a skip index expression
 - **EPHEMERAL column in a projection** (`column_ephemeral_in_projection`) -- a projection reads an `EPHEMERAL` column
 - **Codec on an unstored column** (`column_kind_codec_unsupported`) -- an `ALIAS` column, or an `EPHEMERAL` column without a default or comment, has a `codec`

@@ -115,7 +115,7 @@ chkit obsessiondb signup --email <you@example.com> --code <CODE>
 chkit obsessiondb service claim                      # provisions the free dev instance
 ```
 
-Keep `obsessiondb()` registered in `clickhouse.config.ts` for connected paths. Claiming and account login use its remote executor. The plugin rewrites `Shared` engines for non-ObsessionDB ClickHouse targets.
+Keep `obsessiondb()` registered in `clickhouse.config.ts` for connected paths. Claiming and account login use its remote executor. For non-ObsessionDB ClickHouse targets, the plugin strips the `storage_policy` table setting, since ObsessionDB's storage policies don't exist there.
 
 ## Step 5: Pull existing tables (only if the user has a populated database)
 
@@ -151,7 +151,7 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 | Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Time-windowed loads with checkpoints, for large or resumable backfills. |
 | **Ingest application API data** into ClickHouse | [`@chkit/plugin-ingest`](/api-sync/) | TypeScript only; finite pulls with journaled checkpoints and an external scheduler. |
-| Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and engine configuration; rewrites `Shared` engines when targeting non-ObsessionDB ClickHouse. |
+| Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and service selection; strips the `storage_policy` table setting when targeting non-ObsessionDB ClickHouse. |
 
 Install plugins for the project's stated requirements.
 
@@ -161,9 +161,11 @@ chkit applies DDL to real databases. Treat the following as hard rules unless th
 
 :::caution
 - **`migrate` does not apply changes without `--apply`.** Run `chkit migrate` first to plan, show the user the pending SQL, and only then run `chkit migrate --apply`.
+- **Recover a failed migration with the CLI, not by editing the journal.** `chkit migrate --retry <file>` and `chkit migrate --abandon <file>` also change nothing without `--apply`: run them without it, show the user the preview, and add `--apply` once they confirm. Never delete rows from the `_chkit_migrations` table. See [failed migrations](/cli/migrate/#failed-migrations).
 - **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it.
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.
 - **Never auto-apply against a production endpoint** without explicit user confirmation. Connection details come from the environment: confirm which database the env points at before `--apply`.
+- **Never resolve a `snapshot.json` merge conflict by taking one side or by editing it by hand.** Resolve the schema files and run `chkit snapshot rebuild`. A conflicted file cannot be compared before the rebuild, so show the user `git diff HEAD -- chkit/meta/snapshot.json` and the same diff against `MERGE_HEAD` (merge) or `REBASE_HEAD` (rebase), and stage the file only once they confirm; until then, `git checkout -m -- chkit/meta/snapshot.json` brings the conflict back. Rebuild only when every schema change has a migration file (`chkit generate --dryrun` reported 0 operations on each branch before the merge); after a chkit upgrade, run `chkit generate` first. Check [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
 :::
 
 ## Machine-readable output

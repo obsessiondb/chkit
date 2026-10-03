@@ -3,10 +3,12 @@ export * from './model.js'
 export { isKafkaEngine, parseKafkaSettings, kafkaSettingFingerprint } from './kafka.js'
 export { findTopLevelSQLPattern } from './sql-scan.js'
 export { SYNTHESIZED_CONFIG_PATH, isSynthesizedConfigPath } from './config-path.js'
+export { hasConflictMarkers } from './conflict-markers.js'
 export {
   canonicalizeDefinition,
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
+  definitionKey,
 } from './canonical.js'
 export { planDiff } from './planner.js'
 export { createSnapshot } from './snapshot.js'
@@ -26,6 +28,7 @@ export {
   renderQualifiedName,
   unquoteIdentifiers,
 } from './identifier.js'
+export { parseColumnDefault, renderDefault, type ParsedColumnDefault } from './column-default.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export {
   isSyntheticEphemeralDefault,
@@ -33,7 +36,7 @@ export {
   normalizeSQLFragment,
   sqlExpressionFingerprint,
 } from './sql-normalizer.js'
-export { renderDefault, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
+export { renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

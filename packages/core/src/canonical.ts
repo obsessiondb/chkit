@@ -12,6 +12,7 @@ import type {
 import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
 import { canonicalizeCodec } from './codec.js'
+import { canonicalizeColumnDefault } from './column-default.js'
 import { canonicalizeProjection } from './projection.js'
 import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
@@ -37,6 +38,11 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
     type: typeof column.type === 'string' ? column.type.trim() : column.type,
     comment: column.comment?.trim(),
     codec: column.codec ? canonicalizeCodec(column.codec) : undefined,
+    // `{ expression }` becomes the legacy `fn:` string, so snapshots, plans,
+    // drift and chkit-py share one representation (#234). A column without a
+    // default gains no key, and an overwritten key keeps the position the
+    // spread gave it, so JSON-based column comparisons are unchanged.
+    ...(column.default !== undefined ? { default: canonicalizeColumnDefault(column.default) } : {}),
   }
 }
 
@@ -46,6 +52,13 @@ function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
     ...index,
     expression: normalizeSQLFragment(index.expression),
   }
+}
+
+// A clause that is only comments is no clause: `ttl: '-- ts + INTERVAL 1 DAY'`
+// must render `REMOVE TTL`, not `MODIFY TTL ;`.
+function normalizeOptionalClause(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  return normalizeSQLFragment(value) || undefined
 }
 
 function canonicalizeTable(def: TableDefinition): TableDefinition {
@@ -82,8 +95,8 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     primaryKey: primaryKey.length > 0 ? primaryKey : orderBy,
     orderBy,
     uniqueKey: def.uniqueKey ? normalizeKeyColumns(def.uniqueKey, columnNames) : undefined,
-    partitionBy: def.partitionBy ? normalizeSQLFragment(def.partitionBy) : undefined,
-    ttl: def.ttl ? normalizeSQLFragment(def.ttl) : undefined,
+    partitionBy: normalizeOptionalClause(def.partitionBy),
+    ttl: normalizeOptionalClause(def.ttl),
     settings,
     indexes,
     projections,

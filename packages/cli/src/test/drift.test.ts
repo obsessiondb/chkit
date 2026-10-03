@@ -389,6 +389,158 @@ describe('@chkit/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  // #234: snapshot columns hold the fn: string; a raw { expression } must
+  // compare the same way, never as the text "[object Object]".
+  test('compares { expression } and fn: defaults with the introspected expression', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'updated_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
+        { name: 'created_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+        { name: 'seen_at', type: 'DateTime', default: { expression: 'now() -- set on insert' } },
+        { name: 'note', type: 'String', default: 'a -- b' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'updated_at', type: 'DateTime64(3)', default: 'now64(3)' },
+        { name: 'created_at', type: 'DateTime64(3)', default: 'now64(3)' },
+        { name: 'seen_at', type: 'DateTime', default: 'now()' },
+        { name: 'note', type: 'String', default: "'a -- b'" },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  test('reports changed_column when an { expression } default differs from the live one', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'updated_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'updated_at', type: 'DateTime64(3)', default: 'now()' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result?.reasonCodes).toEqual(['changed_column'])
+    expect(result?.changedColumns).toEqual(['updated_at'])
+  })
+
+  // Pins the comparison documented under `default` in the DSL reference and in
+  // cli/drift.md: tokens, with comments, whitespace and outer parentheses
+  // ignored, against the formatting ClickHouse stores. Update those docs
+  // together with this test when the comparison changes.
+  test('compares expression defaults token by token with the formatting ClickHouse stores', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'label', type: 'String', default: { expression: "concat('id-',\n  toString(id))" } },
+        { name: 'kind', type: 'String', default: { expression: "multiIf(\n  id = 1, 'first',\n  'other')" } },
+        { name: 'next_id', type: 'UInt64', default: { expression: 'id+1' } },
+        { name: 'upper_now', type: 'DateTime', default: { expression: 'NOW()' } },
+        { name: 'id_text', type: 'String', default: { expression: 'id::String' } },
+        { name: 'later', type: 'DateTime', default: { expression: 'now() + INTERVAL 1 DAY' } },
+        { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: { expression: 'toDate(upper_now)' } },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    // system.columns.default_expression for these defaults on ClickHouse 26.3.
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'label', type: 'String', default: "concat('id-', toString(id))" },
+        { name: 'kind', type: 'String', default: "multiIf(id = 1, 'first', 'other')" },
+        { name: 'next_id', type: 'UInt64', default: 'id + 1' },
+        { name: 'upper_now', type: 'DateTime', default: 'now()' },
+        { name: 'id_text', type: 'String', default: "CAST(id, 'String')" },
+        { name: 'later', type: 'DateTime', default: 'now() + toIntervalDay(1)' },
+        { name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: 'toDate(upper_now)' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    // Whitespace and line breaks match; ClickHouse's canonical spellings do not.
+    expect(result?.changedColumns).toEqual(['id_text', 'later', 'upper_now'])
+  })
+
+  // The shared SQL lexer strips every comment ClickHouse accepts before the
+  // comparison, so a comment the fingerprint alone cannot skip (`#`, `//`,
+  // nested `/* */`, an apostrophe inside one) does not read as drift.
+  test('ignores every kind of comment in an expression default', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'hash', type: 'DateTime', default: { expression: "now() # it's the insert time" } },
+        { name: 'bang', type: 'DateTime', default: 'fn:now() #! server clock' },
+        { name: 'slashes', type: 'Date', default: { expression: 'today() // server date' } },
+        { name: 'nested', type: 'DateTime', default: 'fn:now() /* a /* nested */ comment */' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'hash', type: 'DateTime', default: 'now()' },
+        { name: 'bang', type: 'DateTime', default: 'now()' },
+        { name: 'slashes', type: 'Date', default: 'today()' },
+        { name: 'nested', type: 'DateTime', default: 'now()' },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result).toBeNull()
+  })
+
   test('treats SharedMergeTree and MergeTree as equivalent engine families', () => {
     const expected = table({
       database: 'app',
@@ -505,6 +657,176 @@ describe('@chkit/cli drift comparer', () => {
     if (!result) return
     expect(result.reasonCodes).toContain('partition_by_mismatch')
     expect(result.partitionByMismatch).toBe(true)
+  })
+
+  // #232: comment markers inside a literal default are text, not comments.
+  test('compares literal defaults as values, so comment markers inside them are not drift', () => {
+    const expected = table({
+      database: 'app',
+      name: 'notes',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'note', type: 'String', default: 'a -- b' },
+        { name: 'tag', type: 'String', default: '# x' },
+        { name: 'link', type: 'String', default: 'http://x' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'note', type: 'String', default: "'a -- b'" },
+        { name: 'tag', type: 'String', default: "'# x'" },
+        { name: 'link', type: 'String', default: "'http://x'" },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  // #232: ClickHouse stores no comments, so commented schema SQL must compare
+  // equal to what it reports back.
+  test('ignores comments in expression defaults, TTL, partition, index and projection SQL', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+        { name: 'ts', type: 'DateTime', default: 'fn:now() /* server time */' },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      partitionBy: 'toYYYYMM(ts) -- monthly',
+      ttl: 'ts + toIntervalDay(30) // retention',
+      indexes: [{ name: 'idx_name', expression: 'lower(name) -- case-insensitive', type: 'bloom_filter', granularity: 1 }],
+      projections: [{ name: 'p_recent', query: 'SELECT id, ts # newest first\nORDER BY ts' }],
+    })
+
+    const result = compareTableShape(expected, {
+      engine: 'MergeTree',
+      primaryKey: undefined,
+      orderBy: 'id',
+      partitionBy: 'toYYYYMM(ts)',
+      ttl: 'ts + toIntervalDay(30)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+        { name: 'ts', type: 'DateTime', default: 'now()' },
+      ],
+      settings: {},
+      indexes: [{ name: 'idx_name', expression: 'lower(name)', type: 'bloom_filter', granularity: 1 }],
+      projections: [{ name: 'p_recent', query: 'SELECT id, ts ORDER BY ts' }],
+    })
+
+    expect(result).toBeNull()
+  })
+
+  // #232: chkit backticks key columns in the DDL, so `--`, `#` or `//` in a key
+  // column's name is part of the name. ClickHouse reports the key backticked.
+  for (const column of ['user--id', '# visits', 'a//b']) {
+    test(`compares the key column ${column} as a name, not as a comment`, () => {
+      const expected = table({
+        database: 'app',
+        name: 'visits',
+        engine: 'MergeTree()',
+        columns: [{ name: column, type: 'UInt64' }],
+        primaryKey: [column],
+        orderBy: [column],
+        uniqueKey: [column],
+      })
+
+      const result = compareTableShape(expected, {
+        engine: 'MergeTree',
+        primaryKey: undefined,
+        orderBy: `\`${column}\``,
+        uniqueKey: `\`${column}\``,
+        columns: [{ name: column, type: 'UInt64' }],
+        settings: {},
+        indexes: [],
+        projections: [],
+      })
+
+      expect(result).toBeNull()
+    })
+  }
+
+  // Unquoted, `user--id` would comment out the rest of the key: the schema's
+  // `user--id, ts` would read as `user` and the live `(user--id, ts)` as `(user`.
+  test('compares the key columns after one whose name holds a comment marker', () => {
+    const expected = table({
+      database: 'app',
+      name: 'visits',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'user--id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime' },
+        { name: 'received_at', type: 'DateTime' },
+      ],
+      primaryKey: ['user--id'],
+      orderBy: ['user--id', 'ts'],
+    })
+    const live = (orderBy: string) =>
+      compareTableShape(expected, {
+        engine: 'MergeTree',
+        primaryKey: '`user--id`',
+        orderBy,
+        columns: [
+          { name: 'user--id', type: 'UInt64' },
+          { name: 'ts', type: 'DateTime' },
+          { name: 'received_at', type: 'DateTime' },
+        ],
+        settings: {},
+        indexes: [],
+        projections: [],
+      })
+
+    expect(live('(`user--id`, ts)')).toBeNull()
+    expect(live('(`user--id`, `received_at`)')?.reasonCodes).toEqual(['order_by_mismatch'])
+  })
+
+  // The live clause loses its backticks before its parentheses are unwrapped;
+  // the rest must not be read as SQL again, where `--` would start a comment.
+  test('compares a parenthesized partition clause past a quoted name that holds --', () => {
+    const expected = table({
+      database: 'app',
+      name: 'visits',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'user--id', type: 'UInt64' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      primaryKey: ['user--id'],
+      orderBy: ['user--id'],
+      partitionBy: '(toYYYYMM(ts), `user--id` % 4)',
+    })
+    const live = (partitionBy: string) =>
+      compareTableShape(expected, {
+        engine: 'MergeTree',
+        primaryKey: undefined,
+        orderBy: '`user--id`',
+        partitionBy,
+        columns: [
+          { name: 'user--id', type: 'UInt64' },
+          { name: 'ts', type: 'DateTime' },
+        ],
+        settings: {},
+        indexes: [],
+        projections: [],
+      })
+
+    expect(live('(toYYYYMM(ts), `user--id` % 4)')).toBeNull()
+    expect(live('(toYYYYMM(ts), `user--id` % 8)')?.reasonCodes).toEqual(['partition_by_mismatch'])
   })
 })
 

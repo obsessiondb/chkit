@@ -143,6 +143,22 @@ describe('extractExecutableStatements', () => {
     expect(ops[0]?.mode).toBe('sync')
   })
 
+  test('extractMigrationOperationSummaries keeps a key with spaces, so later operations stay aligned', () => {
+    const sql = `
+      -- operation: create_table key=table:app.my events risk=safe
+      CREATE TABLE app.\`my events\` (id UInt64) ENGINE = MergeTree() ORDER BY id;
+      -- operation: create_view key=view:app.v1 risk=safe
+      CREATE VIEW app.v1 AS SELECT id FROM app.\`my events\`;
+    `
+
+    // migrate pairs the n-th summary with the n-th statement; a summary lost to
+    // the space would make it wait for v1 right after creating the table.
+    expect(extractMigrationOperationSummaries(sql).map((op) => `${op.type} ${op.key} ${op.risk}`)).toEqual([
+      'create_table table:app.my events safe',
+      'create_view view:app.v1 safe',
+    ])
+  })
+
   test('ignores full-line comments while preserving executable statements', () => {
     const sql = `
       -- operation: alter_table_drop_column key=table:app.events:column:old_col risk=danger

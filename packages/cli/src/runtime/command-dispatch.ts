@@ -157,6 +157,10 @@ async function resolvePluginTableScope(input: {
 	schemaGlobs: string | string[]
 	tableSelector: string | undefined
 }) {
+	// Without --table the scope is unfiltered whatever the schema holds. Skip the
+	// import: a load error swallowed here would hide the command's own, and Bun
+	// never settles a second import() of a file that failed to parse.
+	if (!input.tableSelector) return resolveTableScope(undefined, [])
 	try {
 		const definitions = await loadSchemaDefinitions(input.schemaGlobs)
 		return resolveTableScope(

@@ -4,6 +4,7 @@ type Command =
   | 'status'
   | 'drift'
   | 'check'
+  | 'snapshot'
   | 'plugin'
   | 'query'
 

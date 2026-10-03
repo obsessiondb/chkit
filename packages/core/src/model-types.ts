@@ -54,13 +54,47 @@ export type ColumnCodecSpec = ColumnCodec | ColumnCodec[]
 
 export type ColumnDefaultKind = 'DEFAULT' | 'MATERIALIZED' | 'ALIAS' | 'EPHEMERAL'
 
+/**
+ * Raw ClickHouse SQL, rendered unquoted (trimmed, with SQL comments removed)
+ * where chkit would otherwise render a literal: a column
+ * `default: { expression: 'now64(3)' }` renders `DEFAULT now64(3)`.
+ */
+export interface SQLExpression {
+  expression: string
+}
+
+/**
+ * A column default: a literal (strings are single-quoted, numbers and booleans
+ * render as written) or a {@link SQLExpression} rendered as SQL.
+ */
+export type ColumnDefaultValue = string | number | boolean | SQLExpression
+
 export interface ColumnDefinition {
   name: string
   type: PrimitiveColumnType | string
   renamedFrom?: string
   nullable?: boolean
-  /** Strings are literals; prefix SQL expressions with `fn:`. */
-  default?: string | number | boolean
+  /**
+   * Value of the column's `defaultKind` clause (`DEFAULT` unless set).
+   * - `'pending'` → `DEFAULT 'pending'` (a string is always a literal)
+   * - `0` / `false` → `DEFAULT 0` / `DEFAULT false`
+   * - `{ expression: 'now64(3)' }` → `DEFAULT now64(3)` (SQL; comments are
+   *   dropped when rendered)
+   *
+   * `'fn:now64(3)'` is the legacy spelling of `{ expression: 'now64(3)' }`;
+   * snapshots store both as the `fn:` string. `generate` rejects a plain string
+   * that starts with a function call as the `DEFAULT` of a column that cannot
+   * hold a string (`column_default_looks_like_expression`), and any plain
+   * string on a `MATERIALIZED` or `ALIAS` column (`column_expression_requires_fn`).
+   */
+  default?: ColumnDefaultValue
+  /**
+   * How ClickHouse uses `default`: `DEFAULT` (the implicit kind),
+   * `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`. The literal and `{ expression }`
+   * forms of `default` work for every kind:
+   * `{ defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } }`
+   * renders `MATERIALIZED toDate(ts)`.
+   */
   defaultKind?: ColumnDefaultKind
   comment?: string
   codec?: ColumnCodecSpec
@@ -209,7 +243,7 @@ export interface MaterializedViewDefinition {
 export interface DictionaryAttribute {
   name: string
   type: PrimitiveColumnType | string
-  /** DEFAULT / null_value for missing keys. */
+  /** DEFAULT / null_value for missing keys. A literal: ClickHouse accepts no expression here. */
   default?: string | number | boolean
   /** EXPRESSION — computed from source columns. Mutually exclusive with default. */
   expression?: string
@@ -438,6 +472,8 @@ export type ValidationIssueCode =
   | 'column_kind_not_stored'
   | 'column_ephemeral_in_projection'
   | 'column_kind_codec_unsupported'
+  | 'column_default_looks_like_expression'
+  | 'column_default_invalid'
   | 'dictionary_missing_primary_key'
   | 'dictionary_primary_key_missing_attribute'
   | 'dictionary_missing_source'

@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os'
 
 import { describe, expect, test } from 'bun:test'
 
-import { planDiff, table } from '@chkit/core'
+import { canonicalizeDefinitions, planDiff, table, view, type Snapshot } from '@chkit/core'
 
-import { generateArtifacts, generateEmptyMigration } from './index'
+import { generateArtifacts, generateEmptyMigration, serializeSnapshot, writeSnapshot } from './index'
 
 describe('@chkit/codegen smoke', () => {
   test('writes migration and snapshot artifacts', async () => {
@@ -228,6 +228,56 @@ describe('@chkit/codegen smoke', () => {
       )
       expect(migrationFile).toContain('-- operation: alter_table_rename_table')
       expect(migrationFile).toContain('-- operation: alter_table_rename_column')
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('snapshot writer', () => {
+  const usersTable = table({
+    database: 'app',
+    name: 'users',
+    columns: [{ name: 'id', type: 'UInt64' }],
+    engine: 'MergeTree()',
+    primaryKey: ['id'],
+    orderBy: ['id'],
+  })
+  const usersView = view({ database: 'app', name: 'users_view', as: 'SELECT  id\n  FROM app.users' })
+
+  test('serializeSnapshot renders 2-space JSON with a trailing newline', () => {
+    const snapshot: Snapshot = { version: 1, generatedAt: '2026-01-02T03:04:05.678Z', definitions: [usersTable] }
+
+    expect(serializeSnapshot(snapshot)).toBe(`${JSON.stringify(snapshot, null, 2)}\n`)
+  })
+
+  test('writeSnapshot creates metaDir and writes canonical definitions', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+    try {
+      const metaDir = join(workdir, 'nested', 'meta')
+
+      const result = await writeSnapshot({ metaDir, definitions: [usersView, usersTable] })
+
+      expect(result.snapshotFile).toBe(join(metaDir, 'snapshot.json'))
+      expect(result.snapshot.definitions).toEqual(canonicalizeDefinitions([usersTable, usersView]))
+      expect(result.snapshot.definitions.map((definition) => definition.kind)).toEqual(['table', 'view'])
+      expect(await readFile(result.snapshotFile, 'utf8')).toBe(serializeSnapshot(result.snapshot))
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+
+  test('generateArtifacts writes the snapshot through the shared writer format', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+    try {
+      const result = await generateArtifacts({
+        definitions: [usersTable],
+        plan: planDiff([], [usersTable]),
+        migrationsDir: join(workdir, 'migrations'),
+        metaDir: join(workdir, 'meta'),
+      })
+
+      expect(await readFile(result.snapshotFile, 'utf8')).toBe(serializeSnapshot(result.snapshot))
     } finally {
       await rm(workdir, { recursive: true, force: true })
     }

@@ -9,8 +9,24 @@ import type {
   MigrationRowState,
   OperationState,
 } from '../../runtime/journal-store.js'
+import { inProgressChecksumMismatchError } from './errors.js'
+import { hasStatementProgress } from './recovery.js'
 
 const POLL_INTERVAL_MS = 5_000
+// The query id is deterministic, so system.query_log can still hold entries of
+// an earlier attempt of the same statement (one that was abandoned, or retried
+// after an edit). A new submission only trusts entries of queries that started
+// after it, and an attach only those of queries that started no earlier than
+// the attempt it attaches to: query_log is flushed on a timer, so right after
+// that attempt ends the newest flushed entry can still be an earlier
+// attempt's. The bound comes from the server clock, which also stamps
+// query_log, minus a margin for clock skew between replicas. queryStatus
+// compares whole seconds, so the margin stays more than a second below
+// POLL_INTERVAL_MS: an earlier attempt that a previous run polled to its end
+// started at least one poll interval ago and always falls before the bound.
+const QUERY_LOG_SKEW_MARGIN_MS = 2_000
+// queryStatus's own default: every query_log entry for the id counts.
+const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // A poll request can fail transiently (gateway 504/524, network blip) while the
 // server-side async query keeps running. Tolerate a bounded number of these so a
 // momentary timeout doesn't abort a long-running load; only give up after the budget.
@@ -63,16 +79,11 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
   )
 
-  const initialMigrationState = await journalStore.readMigrationState(migrationName)
-  if (
-    initialMigrationState !== null &&
-    !initialMigrationState.migrationCompleted &&
-    initialMigrationState.checksum !== migrationChecksum
-  ) {
-    throw new Error(
-      `Migration ${migrationName} has in-progress async journal state for checksum ${initialMigrationState.checksum}, but the current file checksum is ${migrationChecksum}. Restore the original migration file or clear the in-progress journal state before retrying.`,
-    )
-  }
+  const initialMigrationState = acceptChangedChecksum(
+    await journalStore.readMigrationState(migrationName),
+    migrationName,
+    migrationChecksum,
+  )
   const priorOpState = initialMigrationState?.operations.find(
     (op) => op.operationIndex === statementIndex,
   )
@@ -85,7 +96,10 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     return { kind: 'skipped', operation: priorOpState }
   }
 
-  // 2. Currently in flight on the server → attach
+  // 2. Currently in flight on the server → attach. The server clock is read
+  // before the check, so the start derived from it and the attempt's elapsed
+  // time never falls after the start that query_log records for the attempt.
+  const serverNowMs = await readServerNowMs(db)
   const inFlight = await db.queryStatus(queryId)
   if (inFlight.status === 'running') {
     log(
@@ -101,7 +115,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       operationType,
       operationKey,
       queryId,
-      pollAfterTime: '1970-01-01 00:00:00',
+      pollAfterTime: attachLowerBound(serverNowMs, inFlight.elapsedMs),
       log,
       pollIntervalMs,
       sleep,
@@ -132,8 +146,6 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     log(`  ${operationType}: submitting async (query_id=${queryId})`)
   }
 
-  const submitAfterTime =
-    priorOpState === undefined ? undefined : isoWithoutZone(new Date(now() - 60_000))
   const startedAt = isoWithoutZone(new Date(now()))
 
   // Persist the "started" intent BEFORE submitting, so a crash between here
@@ -159,6 +171,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // subsequent ReplacingMergeTree writes during polling).
   const stateAfterStart = await journalStore.readMigrationState(migrationName)
 
+  const pollAfterTime = await readSubmissionLowerBound(db)
   const submitPromise = db.submit(sql, queryId)
 
   return await pollUntilTerminal({
@@ -171,7 +184,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     operationType,
     operationKey,
     queryId,
-    pollAfterTime: submitAfterTime,
+    pollAfterTime,
     log,
     pollIntervalMs,
     sleep,
@@ -191,7 +204,8 @@ interface PollUntilTerminalInput {
   operationType: string
   operationKey: string
   queryId: string
-  pollAfterTime: string | undefined
+  /** Only query_log entries of queries started at or after this time count. */
+  pollAfterTime: string
   log: (line: string) => void
   pollIntervalMs: number
   sleep: (ms: number) => Promise<void>
@@ -237,10 +251,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       await sleep(pollIntervalMs)
       let status: QueryStatus
       try {
-        status = await db.queryStatus(
-          queryId,
-          pollAfterTime === undefined ? undefined : { afterTime: pollAfterTime },
-        )
+        status = await db.queryStatus(queryId, { afterTime: pollAfterTime })
         transientPollErrors = 0
       } catch (pollError) {
         // The poll request itself failed (e.g. HTTP 524 gateway timeout). The async
@@ -311,9 +322,22 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
 
       // status === 'unknown'
       // If submit has already rejected, the query never made it server-side
-      // (e.g. SQL parse error) — surface that error. Otherwise it's a
-      // transient gap (just-submitted or just-finished); loop.
+      // (e.g. SQL parse error) — record the attempt as failed and surface that
+      // error. Otherwise it's a transient gap (just-submitted or just-finished); loop.
       if (submitError) {
+        const failedOp: OperationState = {
+          operationIndex: statementIndex,
+          operationKey,
+          operationType,
+          queryId,
+          status: 'failed',
+          startedAt,
+          finishedAt: isoWithoutZone(new Date(now())),
+          lastError: describeError(submitError),
+        }
+        const baseState =
+          migrationState ?? freshMigrationState(migrationName, migrationChecksum)
+        await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
         throw submitError
       }
       log(
@@ -325,6 +349,54 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       await submitPromiseGuarded.catch(() => {})
     }
   }
+}
+
+// applyMigration re-keys an edited in-progress state before any statement
+// runs; this is defense in depth. A state whose checksum still differs is
+// accepted only when no statement is recorded as completed or started (#233),
+// and the writes that follow carry the new checksum.
+function acceptChangedChecksum(
+  state: MigrationRowState | null,
+  migrationName: string,
+  migrationChecksum: string,
+): MigrationRowState | null {
+  if (state === null || state.migrationCompleted || state.checksum === migrationChecksum) return state
+  if (hasStatementProgress(state)) {
+    throw inProgressChecksumMismatchError({
+      migration: migrationName,
+      journalChecksum: state.checksum,
+      fileChecksum: migrationChecksum,
+      async: true,
+    })
+  }
+  return { ...state, checksum: migrationChecksum }
+}
+
+// Read just before a submission, as an ISO UTC string for queryStatus.
+async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string> {
+  return queryLogLowerBound(await readServerNowMs(db), 0)
+}
+
+// The attached attempt had run for elapsedMs when the in-flight check, which
+// followed the serverNowMs reading, saw it. Without an elapsed time its start
+// is unknown, and only the unbounded lookup still finds its entry.
+function attachLowerBound(serverNowMs: number, elapsedMs: number | undefined): string {
+  return elapsedMs === undefined ? UNBOUNDED_POLL_AFTER_TIME : queryLogLowerBound(serverNowMs, elapsedMs)
+}
+
+function queryLogLowerBound(serverNowMs: number, startedMsAgo: number): string {
+  return new Date(serverNowMs - startedMsAgo - QUERY_LOG_SKEW_MARGIN_MS).toISOString()
+}
+
+async function readServerNowMs(db: ClickHouseExecutor): Promise<number> {
+  const [row] = await db.query<{ now_ms: number | string }>(
+    'SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms',
+  )
+  const serverNowMs = Number(row?.now_ms)
+  if (!Number.isFinite(serverNowMs)) {
+    throw new Error('Could not read the ClickHouse server time for an async statement.')
+  }
+  return serverNowMs
 }
 
 export function upsertOperation(

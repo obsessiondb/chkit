@@ -93,7 +93,7 @@ A single row back means you're connected.
       columns: [
         { name: 'id', type: 'UInt64' },
         { name: 'source', type: 'String' },
-        { name: 'ingested_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+        { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
       ],
       primaryKey: ['id'],
       orderBy: ['id'],
@@ -127,7 +127,7 @@ A single row back means you're connected.
   </TabItem>
 </Tabs>
 
-A `table()` definition maps directly to a ClickHouse `CREATE TABLE`: a `MergeTree` engine, three columns, ordered by `id`, and partitioned by month. `ingested_at` carries `default: 'fn:now64(3)'`, so the database fills it in automatically. The types here (`UInt64`, `String`, `DateTime64(3)`) are ClickHouse-native; see the [Schema DSL reference](/schema/dsl-reference/) for the full type system and table options.
+A `table()` definition maps directly to a ClickHouse `CREATE TABLE`: a `MergeTree` engine, three columns, ordered by `id`, and partitioned by month. `ingested_at` has an expression default, `now64(3)`, so the database fills it in automatically (see [literal and expression defaults](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional)). The types here (`UInt64`, `String`, `DateTime64(3)`) are ClickHouse-native; see the [Schema DSL reference](/schema/dsl-reference/) for the full type system and table options.
 
 Use it as-is for now — you'll change it later.
 
@@ -254,7 +254,7 @@ Schemas change. Add a `level` column to the `events` table:
         { name: 'id', type: 'UInt64' },
         { name: 'source', type: 'String' },
         { name: 'level', type: 'String' },
-        { name: 'ingested_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+        { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
       ],
     ```
   </TabItem>

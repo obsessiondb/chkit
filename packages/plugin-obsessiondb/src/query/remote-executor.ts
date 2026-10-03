@@ -95,7 +95,7 @@ export function renderValuesInsert<T extends Record<string, unknown>>(
 						if (val === undefined) return 'DEFAULT'
 						if (val === null) return 'NULL'
 						if (typeof val === 'number') return String(val)
-						return `'${String(val).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
+						return quoteString(String(val))
 					})
 					.join(', ')})`,
 		)
@@ -168,14 +168,26 @@ export function createRemoteExecutor(deps: {
 		},
 
 		async queryStatus(queryId, options?) {
+			// afterTime bounds the query's start, as in the native executor. A
+			// string compared with a DateTime column may carry neither fractional
+			// seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
+			// '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
 			const afterFilter = options?.afterTime
-				? `AND event_time >= '${options.afterTime}'`
+				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
 				: ''
 
-			const running = await executor.query<{ query_id: string }>(
-				`SELECT query_id FROM system.processes WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1`,
+			// migrate bounds an attach by how long the running attempt has run.
+			// The API returns every cell as a string.
+			const running = await executor.query<{ elapsed: string }>(
+				`SELECT elapsed FROM system.processes WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1`,
 			)
-			if (running.length > 0) return { status: 'running' as const }
+			const [proc] = running
+			if (proc) {
+				return {
+					status: 'running' as const,
+					elapsedMs: Math.round(Number(proc.elapsed) * 1000),
+				}
+			}
 
 			const log = await executor.query<{
 				type: string
@@ -260,4 +272,8 @@ WHERE is_temporary = 0
 	}
 
 	return executor
+}
+
+function quoteString(value: string): string {
+	return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }

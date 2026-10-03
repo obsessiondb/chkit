@@ -35,6 +35,12 @@ import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
 import { ChxValidationError } from './model.js'
 import { isKafkaEngine, kafkaSettingFingerprint } from './kafka.js'
+import {
+  buildDependencyGraph,
+  invertDependencyGraph,
+  orderByDependencies,
+  type DependencyGraph,
+} from './object-dependencies.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -561,49 +567,6 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   }
 }
 
-/**
- * Creation depth of each refreshable materialized view, derived from its
- * `refresh.dependsOn` edges (#41). A view declared `DEPENDS ON other_mv` must
- * be created AFTER `other_mv` exists, so ordering create operations by
- * ascending depth puts every dependency before the views that depend on it.
- * Names alone are unsafe: a dependent MV whose name sorts first would otherwise
- * be created first and fail.
- */
-function materializedViewCreationDepth(
-  definitions: SchemaDefinition[],
-  byKey: Map<string, SchemaDefinition>
-): Map<string, number> {
-  const depth = new Map<string, number>()
-  const visiting = new Set<string>()
-
-  const compute = (key: string): number => {
-    const cached = depth.get(key)
-    if (cached !== undefined) return cached
-    // A dependency cycle has no valid creation order; stop recursing and let
-    // the alphabetical tiebreak apply rather than looping forever.
-    if (visiting.has(key)) return 0
-    const def = byKey.get(key)
-    if (!def || def.kind !== 'materialized_view') {
-      depth.set(key, 0)
-      return 0
-    }
-    visiting.add(key)
-    let result = 0
-    for (const dep of def.refresh?.dependsOn ?? []) {
-      const depKey = `materialized_view:${dep.database}.${dep.name}`
-      if (byKey.has(depKey)) result = Math.max(result, 1 + compute(depKey))
-    }
-    visiting.delete(key)
-    depth.set(key, result)
-    return result
-  }
-
-  for (const def of definitions) {
-    if (def.kind === 'materialized_view') compute(definitionKey(def))
-  }
-  return depth
-}
-
 export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
   const oldCanonical = canonicalizeDefinitions(oldDefinitions)
   const newCanonical = canonicalizeDefinitions(newDefinitions)
@@ -672,35 +635,18 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
-  const mvCreationDepth = materializedViewCreationDepth(newCanonical, newMap)
-  operations.sort((a, b) => {
-    const rank = (op: MigrationOperation): number => {
-      if (op.type.startsWith('drop_')) return 0
-      if (op.type === 'alter_materialized_view_modify_refresh') return 1
-      if (op.type.startsWith('alter_')) return 1
-      if (op.type === 'create_database') return 2
-      if (op.type === 'create_table') return 3
-      if (op.type === 'create_view') return 4
-      return 5
-    }
-    const rankOrder = rank(a) - rank(b)
-    if (rankOrder !== 0) return rankOrder
-    // Within materialized-view creates, order a DEPENDS ON target before the
-    // view that depends on it (#41), then fall back to a stable name order.
-    if (a.type === 'create_materialized_view' && b.type === 'create_materialized_view') {
-      const depthOrder = (mvCreationDepth.get(a.key) ?? 0) - (mvCreationDepth.get(b.key) ?? 0)
-      if (depthOrder !== 0) return depthOrder
-    }
-    return a.key.localeCompare(b.key)
+  const ordered = orderOperations(operations.sort(compareOperations), {
+    drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
+    create: buildDependencyGraph(newCanonical),
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
-  for (const operation of operations) {
+  for (const operation of ordered) {
     riskSummary[operation.risk] = (riskSummary[operation.risk] ?? 0) + 1
   }
 
   return {
-    operations,
+    operations: ordered,
     riskSummary,
     renameSuggestions: renameSuggestions.sort((a, b) => {
       const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
@@ -710,4 +656,39 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
       return a.to.localeCompare(b.to)
     }),
   }
+}
+
+// drop_* 0, alter_* 1, create_database 2, create_table 3, create_view 4, other creates 5.
+function operationRank(op: MigrationOperation): number {
+  if (op.type.startsWith('drop_')) return 0
+  if (op.type.startsWith('alter_')) return 1
+  if (op.type === 'create_database') return 2
+  if (op.type === 'create_table') return 3
+  if (op.type === 'create_view') return 4
+  return 5
+}
+
+// The sort is stable, so operations that share a key keep the order diffTables
+// pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
+function compareOperations(a: MigrationOperation, b: MigrationOperation): number {
+  return operationRank(a) - operationRank(b) || a.key.localeCompare(b.key)
+}
+
+/**
+ * Reorders the drop and create segments of a (rank, key)-sorted plan by object
+ * dependencies (#231): drops run dependents first, creates run dependencies
+ * first. Alters and create_database keep their place.
+ */
+function orderOperations(
+  sorted: MigrationOperation[],
+  prerequisites: { drop: DependencyGraph; create: DependencyGraph }
+): MigrationOperation[] {
+  const drops = sorted.filter((op) => operationRank(op) === 0)
+  const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
+  const creates = sorted.filter((op) => operationRank(op) >= 3)
+  return [
+    ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
+    ...middle,
+    ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
+  ]
 }

@@ -78,7 +78,7 @@ Runs are finite; use an external scheduler and serialize processes per target. T
 | [`@chkit/plugin-pull`](https://www.npmjs.com/package/@chkit/plugin-pull) | Pull schemas from a live ClickHouse instance |
 | [`@chkit/plugin-ingest`](https://www.npmjs.com/package/@chkit/plugin-ingest) | API sync with batching, retries, and journaled checkpoints |
 | [`@chkit/plugin-backfill`](https://www.npmjs.com/package/@chkit/plugin-backfill) | Time-windowed data backfill with checkpoints |
-| [`@chkit/plugin-obsessiondb`](https://www.npmjs.com/package/@chkit/plugin-obsessiondb) | Auto-rewrite Shared engines for ObsessionDB compatibility |
+| [`@chkit/plugin-obsessiondb`](https://www.npmjs.com/package/@chkit/plugin-obsessiondb) | ObsessionDB login, service selection, and remote execution; strips `storage_policy` for regular ClickHouse targets |
 
 ## AI Agent Skill
 

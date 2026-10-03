@@ -6,7 +6,7 @@ import { resolveDirs } from '../../runtime/config.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
-import { loadSchemaDefinitions } from '../../runtime/schema-loader.js'
+import { loadSchemaDefinitionsWithHooks } from '../../runtime/schema-loader.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import {
   buildScopedSnapshotDefinitions,
@@ -88,23 +88,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     return 0
   }
 
-  await pluginRuntime.runOnConfigLoaded({
-    command: 'generate',
-    config,
-    configPath,
-    tableScope: resolveTableScope(tableSelector, []),
-    flags,
-  })
-
-  let definitions = await loadSchemaDefinitions(config.schema)
-  definitions = await pluginRuntime.runOnSchemaLoaded({
-    command: 'generate',
-    config,
-    tableScope: resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions)),
-    flags,
-    jsonMode,
-    definitions,
-  })
+  const definitions = await loadSchemaDefinitionsWithHooks(
+    { command: 'generate', config, configPath, flags, jsonMode, tableSelector },
+    { pluginRuntime },
+  )
 
   const renameTableValues = f['--rename-table'] ?? []
   const renameColumnValues = f['--rename-column'] ?? []

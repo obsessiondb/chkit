@@ -284,7 +284,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
         expect(pulledSchema).toContain(`database: "${targetDatabase}"`)
         expect(pulledSchema).toContain(`name: "${eventsTable}"`)
         expect(pulledSchema).toContain(`name: "${accountsTable}"`)
-        expect(pulledSchema).toContain('default: "fn:now64(3)"')
+        expect(pulledSchema).toContain('default: { expression: "now64(3)" }')
         expect(pulledSchema).toContain('nullable: true')
         expect(pulledSchema).toContain('partitionBy: "toYYYYMM(received_at)"')
         expect(pulledSchema).toContain(`name: "${eventsView}"`)
@@ -302,6 +302,25 @@ describe('@chkit/plugin-pull live env e2e', () => {
         // Codec column — assert structured codec is emitted and round-trips
         expect(pulledSchema).toContain('codec: [{ kind: "Delta"')
         expect(pulledSchema).toContain('{ kind: "ZSTD"')
+
+        // #234: the pulled { expression } defaults load back as the canonical
+        // fn: strings earlier pulls produced, and render as SQL.
+        const modulePath = join(dir, 'importable.ts')
+        await writeFile(modulePath, pulledSchema.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)), 'utf8')
+        const pulledDefinitions = collectDefinitionsFromModule(await import(modulePath))
+        const pulledTable = (name: string): TableDefinition => {
+          const definition = pulledDefinitions.find(
+            (candidate): candidate is TableDefinition => candidate.kind === 'table' && candidate.name === name
+          )
+          if (!definition) throw new Error(`pulled table ${name} missing`)
+          return definition
+        }
+        const events = pulledTable(eventsTable)
+        expect(events.columns.find((column) => column.name === 'received_at')?.default).toBe('fn:now64(3)')
+        expect(toCreateSQL(events)).toContain('`received_at` DateTime64(3) DEFAULT now64(3)')
+        const accounts = pulledTable(accountsTable)
+        expect(accounts.columns.find((column) => column.name === 'updated_at')?.default).toBe('fn:now()')
+        expect(toCreateSQL(accounts)).toContain('`updated_at` DateTime DEFAULT now()')
       } finally {
         await rm(dir, { recursive: true, force: true })
       }

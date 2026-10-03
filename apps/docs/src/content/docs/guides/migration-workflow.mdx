@@ -72,17 +72,46 @@ This is the workflow for a team where only some developers can reach production.
 
 Nothing in this loop asks a developer to generate against a live ClickHouse. Doing so would tie a migration's correctness to that instance matching prod; diffing against the committed snapshot removes that dependency.
 
+## Working on parallel branches
+
+`snapshot.json` is one file that every `chkit generate` rewrites in full, so two branches that each generate a migration both change it. The branch that merges or rebases second conflicts on it, at least on the `generatedAt` line, even when the branches changed unrelated objects. Both branches' migration files and the merged schema files are already correct; only the snapshot has to catch up.
+
+Before you merge or rebase, check that each branch is fully generated: `chkit generate --dryrun` reports 0 operations on it. After upgrading chkit, run `chkit generate` and commit any migration it writes before you rebuild.
+
+While `snapshot.json` has conflict markers, every command that reads it stops with `contains unresolved merge conflict markers`. Resolve the conflict with [`chkit snapshot rebuild`](/cli/snapshot/) (TypeScript only; [chkit-py](/python/overview/#differences-from-the-typescript-version) does not have it yet):
+
+1. Resolve the conflicts in your schema files first. The snapshot is rebuilt from them, and a schema file that still has conflict markers stops the rebuild.
+2. Rebuild the snapshot and compare it with both sides. A conflicted `snapshot.json` cannot be compared entry by entry, so the review happens on the rebuilt file. During a merge the other branch is `MERGE_HEAD`; during a rebase the commit being replayed is `REBASE_HEAD`.
+
+   ```sh
+   chkit snapshot rebuild
+   git diff HEAD -- chkit/meta/snapshot.json
+   git diff MERGE_HEAD -- chkit/meta/snapshot.json    # during a merge
+   git diff REBASE_HEAD -- chkit/meta/snapshot.json   # during a rebase
+   ```
+
+   Every entry that differs from one side must come from a migration file of the other side.
+
+3. Stage the file and finish the rebase or the merge:
+
+   ```sh
+   git add chkit/meta/snapshot.json
+   git rebase --continue    # or, for a merge: git commit --no-edit
+   ```
+
+Do not resolve the conflict by taking one side: that drops the other branch's entries, and the next `generate` writes a duplicate migration for them. A rebuild records every schema definition as migrated, so check [when not to rebuild](/cli/snapshot/#when-not-to-rebuild) first. If both branches changed the same table or view, read [When both branches change the same object](/cli/snapshot/#when-both-branches-change-the-same-object) before you commit.
+
 ## Promoting across environments
 
 The same committed migration files flow through every environment: `test`, then `stage`, then `prod`. Each has its own `_chkit_migrations` journal, so `migrate` applies only what an environment is missing and skips what it already has. Promotion is running `chkit migrate --apply` against the next environment with the same commit checked out.
 
 :::caution
-Once a migration is applied, do not edit its `.sql` file. `migrate` checksums every applied file and aborts if one changed since it ran. This catches an already-shipped migration being rewritten instead of superseded by a new one. To change course, add a new migration.
+Once a migration is applied, do not edit its `.sql` file. `migrate` checksums every applied file and aborts if one changed since it ran. This catches an already-shipped migration being rewritten instead of superseded by a new one. To change course, add a new migration. A migration that failed part-way is not applied yet, so its file can still be fixed: see [failed migrations](/cli/migrate/#failed-migrations).
 :::
 
 ## Hand-written migrations
 
-A migration does not have to come from `generate`. Because deploy replays committed `.sql` files, `migrate` applies any `.sql` file in the migrations directory that is not yet in the journal, whether chkit wrote it or not. There is no scaffold command for a blank migration, and none is required.
+A migration does not have to come from `generate`. Because deploy replays committed `.sql` files, `migrate` applies any `.sql` file in the migrations directory that is not yet in the journal, whether chkit wrote it or not. [`chkit generate --empty`](/cli/generate/#empty-mode) scaffolds a blank file with the standard header, or create the file by hand.
 
 To add custom SQL such as a data seed or a backfill, create a file in `chkit/migrations/` following the `<timestamp>_<name>.sql` naming convention so it orders correctly alongside generated ones:
 
@@ -97,6 +126,7 @@ INSERT INTO default.regions (id, name) VALUES
 Run `chkit migrate` and it is picked up like any generated migration, applied in timestamp order and recorded in the journal. A few things carry over from generated migrations:
 
 - **It is immutable once applied.** The checksum gate blocks edits afterward, the same as for generated files.
+- **It needs at least one statement.** `migrate` refuses a pending file that holds only comments, so an unfinished stub is never recorded as applied. See [empty migrations](/cli/migrate/#empty-migrations).
 - **Destructive statements** (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, …) require `--allow-destructive` in CI, even when hand-written. See [destructive operation safety](/cli/migrate/#destructive-operation-safety).
 - **Large data loads**, such as a multi-minute `INSERT ... SELECT` or a backfill, can be marked `mode=async` so chkit submits the query without blocking on the HTTP response and polls for progress. See [async operations](/cli/migrate/#async-operations-modeasync).
 
@@ -110,3 +140,4 @@ For structural changes that must preserve data, the common pattern is a hand-wri
 - [`chkit pull`](/cli/pull/) — introspect an existing database to seed a project
 - [CI/CD integration](/guides/ci-cd/) — running `generate`, `migrate`, and `check` in a pipeline
 - [Configuration](/configuration/overview/) — `outDir`, `migrationsDir`, and `metaDir`
+- [`chkit snapshot`](/cli/snapshot/) — rebuild `snapshot.json` after two branches conflict on it

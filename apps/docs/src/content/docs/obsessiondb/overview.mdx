@@ -12,7 +12,7 @@ chkit ships a dedicated integration with [ObsessionDB](https://obsessiondb.com),
 ## What it gives you
 
 - **Zero-copy onboarding** — claim a free dev instance or sign up with a one-time email code straight from `chkit init` or the CLI, no URLs or tokens to paste.
-- **One schema, two targets** — write `Shared*` engines once and run them against ObsessionDB as-is, or against regular ClickHouse with the `Shared` prefix stripped automatically.
+- **One schema, two targets** — write `Shared*` engines once: chkit writes the standard engine name for every target and ObsessionDB substitutes the `Shared` variant, while the plugin strips the `storage_policy` table setting for regular ClickHouse.
 - **Service selection** — list services across your organizations, pick a default per project, and override per command without touching config.
 - **Remote query execution** — once a service is selected, `chkit query` and other SQL-emitting commands route through the ObsessionDB API instead of a local ClickHouse connection.
 - **Remote backfills** — `chkit plugin backfill` can submit jobs to ObsessionDB rather than streaming chunks from your machine.
@@ -64,11 +64,11 @@ chkit ships a dedicated integration with [ObsessionDB](https://obsessiondb.com),
   </TabItem>
 </Tabs>
 
-The plugin hooks into `generate`, `migrate`, `status`, `drift`, `check`, and `query`.
+The plugin hooks into `generate`, `migrate`, `status`, `drift`, `check`, `query`, and `snapshot rebuild` (TypeScript only).
 
 ## Next
 
 - [Getting Started](/obsessiondb/getting-started/) — sign up, authenticate, and select your first service.
-- [Engine Rewriting](/obsessiondb/engine-rewriting/) — how `Shared*` engines are stripped for non-ObsessionDB targets.
+- [Engine Rewriting](/obsessiondb/engine-rewriting/) — how one schema with `Shared*` engines and `storage_policy` works on both ObsessionDB and regular ClickHouse.
 - [Services](/obsessiondb/services/) — list, select, alias, and override services per command.
 - [Backfill Jobs](/obsessiondb/backfills/) — submit backfills as managed jobs and track them in the console.

@@ -3,8 +3,10 @@ import {
   isKafkaEngine,
   isIndexProjection,
   isRawCodec,
+  parseColumnDefault,
   type ColumnCodec,
   type ColumnCodecSpec,
+  type ColumnDefaultValue,
   type ColumnDefinition,
   type DictionaryAttribute,
   type DictionaryDefinition,
@@ -194,10 +196,17 @@ function renderColumn(column: ColumnDefinition): string {
   ]
   if (column.nullable) parts.push('nullable: true')
   if (column.defaultKind && column.defaultKind !== 'DEFAULT') parts.push(`defaultKind: ${renderString(column.defaultKind)}`)
-  if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
+  if (column.default !== undefined) parts.push(`default: ${renderColumnDefault(column.default)}`)
   if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
   if (column.codec) parts.push(`codec: ${renderCodecSource(column.codec)}`)
   return `{ ${parts.join(', ')} }`
+}
+
+/** Expression defaults (canonical `fn:` strings) are written in the documented `{ expression }` form. */
+function renderColumnDefault(value: ColumnDefaultValue): string {
+  const parsed = parseColumnDefault(value)
+  if (parsed.kind === 'expression') return `{ expression: ${renderString(parsed.sql)} }`
+  return renderLiteral(parsed.value)
 }
 
 function renderIndexLines(indexes: SkipIndexDefinition[]): string[] {

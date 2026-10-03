@@ -206,7 +206,7 @@ See the [CLI reference](https://chkit.obsessiondb.com/cli/overview/) for command
 | [`@chkit/plugin-codegen`](packages/plugin-codegen) | Codegen plugin for the CLI |
 | [`@chkit/plugin-backfill`](packages/plugin-backfill) | Backfill plugin for data migrations |
 | [`@chkit/plugin-ingest`](packages/plugin-ingest) | API source readers, batching, retries, and journaled checkpoints |
-| [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB integration: auto-rewrite `Shared` engines for ClickHouse targets |
+| [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB integration: login, service selection, remote execution, and `storage_policy` stripping for regular ClickHouse targets |
 
 ## Python
 
@@ -220,7 +220,7 @@ Read the documentation at **[chkit.obsessiondb.com](https://chkit.obsessiondb.co
 
 The [**ObsessionDB**](https://obsessiondb.com) team builds chkit and provides a managed ClickHouse service:
 
-- **Engine configuration.** Use the [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) plugin to select `SharedReplacingMergeTree` / `SharedMergeTree` for managed replication while keeping the same TypeScript schema for your development database.
+- **Engine configuration.** One TypeScript schema works against ObsessionDB and your development database: chkit writes standard engine names, ObsessionDB substitutes the `Shared` variants (`SharedMergeTree`, `SharedReplacingMergeTree`) for managed replication, and the [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) plugin strips `storage_policy` for non-ObsessionDB targets.
 - **Managed infrastructure.** ObsessionDB manages Keeper, replicas, and scaling.
 - **Release tests.** The chkit release pipeline runs its E2E suite against ObsessionDB.
 
