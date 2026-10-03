@@ -41,4 +41,6 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 
 ## Deliver and verify
 
+For integrations published in the official app registry, include the provider's official logo for the documentation listing. Store the asset in `apps/docs/public/logos/<provider>.svg` (or another supported image format), record its official source in `apps/docs/public/logos/README.md`, and set `meta.chkit.logo` to `https://chkit.obsessiondb.com/logos/<provider>.svg`. Use the provider's artwork without redrawing or altering it. The docs build requires the logo URL and a matching local asset. Read `apps/docs/src/content/docs/api-sync/registry-authoring.md` for registry metadata, integration guides, and immutable release publication.
+
 Deliver definitions, config, and run/query commands. Inspect exports with `chkit ingest list`; generate and review migrations, then use `chkit check` against the configured development target after applying them. `check` has no `--offline` flag. Test empty input, pagination, checkpoint boundaries, and failure replay with fixtures. Keep live writes within authorization. Report verified behavior and limitations.
