@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-pull",
-  "version": "0.2.0-beta.8",
+  "version": "0.2.0-beta.9",
   "description": "Introspect live ClickHouse databases into chkit schema files",
   "license": "MIT",
   "author": "ObsessionDB",

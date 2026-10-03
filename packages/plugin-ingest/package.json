@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-ingest",
-  "version": "0.2.0-beta.8",
+  "version": "0.2.0-beta.9",
   "description": "Scheduled pull ingestion into ClickHouse with journaled checkpoints for chkit",
   "license": "MIT",
   "author": "ObsessionDB",

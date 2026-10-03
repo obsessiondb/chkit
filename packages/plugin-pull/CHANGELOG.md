@@ -1,5 +1,36 @@
 # @chkit/plugin-pull
 
+## 0.2.0-beta.9
+
+### Patch Changes
+
+- d072fe3: Add a typed form for SQL expression column defaults (#234): `default: { expression: 'now64(3)' }` renders `DEFAULT now64(3)`, and it works with every `defaultKind`: `{ defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } }` renders `MATERIALIZED toDate(ts)`. Plain strings stay quoted literals (`default: 'pending'` renders `DEFAULT 'pending'`), and the `fn:` prefix keeps working as the legacy spelling of an expression. `snapshot.json` stores both forms as the `fn:` string, trimmed (`fn:now64(3)`), so switching between `{ expression }`, `'fn:now64(3)'` and `'fn: now64(3)'` generates no migration and snapshots stay readable by chkit-py. SQL comments in an expression default are dropped when it is rendered, so a `--` comment no longer swallows the `,`, `COMMENT`, `CODEC` or `;` after it, and `drift` and `check` now ignore every kind of comment in it, including `#`, `//` and nested `/* */` comments.
+
+  `chkit generate` now rejects a plain string `DEFAULT` or `EPHEMERAL` default that starts with a function call on a column that cannot hold a string. For example, `default: 'now64(3)'` on a `DateTime64(3, 'UTC')` column used to generate `DEFAULT 'now64(3)'` and fail at `chkit migrate` with "default expression and column type are incompatible"; on a `Nullable` number, date, time, UUID or IP address column ClickHouse accepted it and silently stored `NULL`. The new `column_default_looks_like_expression` error names the column and the fix. Columns that hold text (`String` and its aliases, `FixedString`, `Enum`, `LowCardinality(String)`, `Dynamic`, a `Variant` with a string member) are unaffected. `column_expression_required` now also reports an `{ expression }` with no SQL or only comments, and `column_default_invalid` reports a default object without a string `expression`, an expression that keeps the `fn:` prefix, one with an unterminated string, quoted identifier, or block comment that would swallow the rest of the migration, and one with a `#` that starts no comment, which ClickHouse rejects and which at the end of an expression used to comment out the column's `COMMENT` and `CODEC` without an error. The troubleshooting guide shows how to recover a migration that already failed this way.
+
+  `chkit pull` now writes introspected defaults as `{ expression: "..." }` next to their `defaultKind`, instead of `"fn:..."`; the pulled definitions are unchanged. Upgrade `chkit` together with `@chkit/plugin-pull`: chkit 0.2.0-beta.8 and older render the object form as `DEFAULT [object Object]`. `chkit init` scaffolds the typed form, `ColumnDefinition.default` documents both forms in its type, `renderDefault()` accepts `{ expression }`, and `@chkit/core` exports `parseColumnDefault()` for plugins that read defaults.
+
+- 2f53550: Support `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns with a new `defaultKind` column field. `default` holds the value or `fn:` expression for every kind, and `EPHEMERAL` may omit it. SQL rendering, `pull`, snapshots, and drift keep the kind; validation reports `column_expression_required` and `column_default_kind_invalid`.
+
+  - `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning that stored values are not rewritten, and removed expressions emit `REMOVE DEFAULT`/`REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail `generate` with `column_kind_change_unsupported`.
+  - Codegen emits `Row` (`SELECT *`), `RowExplicit` (all readable columns), and `RowInsert` (all insertable columns) for these tables; ingest helpers take `RowInsert`.
+  - Inserts into tables with `EPHEMERAL` columns name their columns: generated ingest helpers pass `columns`, which `@chkit/clickhouse` `insert()` and the ObsessionDB remote executor send, and the `@chkit/plugin-ingest` destination does the same.
+  - Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live column kinds first: a copy is blocked only when the target has both `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column, and a missing target fails with "does not exist or is not visible yet".
+  - `drift` and `check` compare defaults token by token. Write expressions in the canonical form ClickHouse stores, such as `CAST(x, 'String')`, to avoid drift.
+  - Fix string defaults containing backslashes: `C:\temp` now renders as `DEFAULT 'C:\\temp'`.
+
+- Updated dependencies [d072fe3]
+- Updated dependencies [2f53550]
+- Updated dependencies [98e3667]
+- Updated dependencies [96a18c6]
+- Updated dependencies [46cbf88]
+- Updated dependencies [46cbf88]
+- Updated dependencies [b59fc83]
+- Updated dependencies [c49f0a9]
+- Updated dependencies [672d67e]
+  - @chkit/core@0.2.0-beta.9
+  - @chkit/clickhouse@0.2.0-beta.9
+
 ## 0.2.0-beta.8
 
 ### Minor Changes

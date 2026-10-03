@@ -1,5 +1,34 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.9
+
+### Patch Changes
+
+- 2f53550: Support `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns with a new `defaultKind` column field. `default` holds the value or `fn:` expression for every kind, and `EPHEMERAL` may omit it. SQL rendering, `pull`, snapshots, and drift keep the kind; validation reports `column_expression_required` and `column_default_kind_invalid`.
+
+  - `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning that stored values are not rewritten, and removed expressions emit `REMOVE DEFAULT`/`REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail `generate` with `column_kind_change_unsupported`.
+  - Codegen emits `Row` (`SELECT *`), `RowExplicit` (all readable columns), and `RowInsert` (all insertable columns) for these tables; ingest helpers take `RowInsert`.
+  - Inserts into tables with `EPHEMERAL` columns name their columns: generated ingest helpers pass `columns`, which `@chkit/clickhouse` `insert()` and the ObsessionDB remote executor send, and the `@chkit/plugin-ingest` destination does the same.
+  - Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live column kinds first: a copy is blocked only when the target has both `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column, and a missing target fails with "does not exist or is not visible yet".
+  - `drift` and `check` compare defaults token by token. Write expressions in the canonical form ClickHouse stores, such as `CAST(x, 'String')`, to avoid drift.
+  - Fix string defaults containing backslashes: `C:\temp` now renders as `DEFAULT 'C:\\temp'`.
+
+- 96a18c6: Recover a migration that failed part-way without editing the journal table by hand (#233). When no statement of the in-progress migration had completed or was interrupted while running, an edited file now runs again from statement 1 on the next `chkit migrate --apply`. Otherwise `chkit migrate --apply --retry <migration>` resumes with the edited file: chkit checks that every statement that completed keeps its position and `-- operation:` marker, and that statements sharing such a marker (a column's `REMOVE DEFAULT` or `REMOVE MATERIALIZED` and the `MODIFY COLUMN` after it) all stay in the file, records the new checksum, and continues from the first statement that did not complete. For any other migration `--retry` has no effect and the output says so, also when nothing is pending, so pipelines can pass it to every environment. `chkit migrate --abandon <migration>` shows what it would reset and, with `--apply`, writes a new journal version in which every recorded statement failed, so the next apply runs the file from statement 1; it lists the statements that stay applied in ClickHouse, runs no migration SQL (its only write is a journal INSERT), and needs neither the migration file nor a readable `snapshot.json`. The refusal for an edited in-progress migration names both commands, and these errors carry stable `--json` error codes. An async statement now only trusts `system.query_log` entries of queries that started after it was submitted, so a load that an earlier attempt finished is no longer reported as finished when the edited statement fails before it starts; such a failure is recorded as failed. A re-run that attaches to a still-running attempt likewise only trusts entries of queries that started no earlier than that attempt, so it no longer records an earlier attempt's result for it. The ObsessionDB remote executor now compares these bounds with the query's start time, as a direct connection does: its status checks failed with `TYPE_MISMATCH` on such a bound, so a retried async statement was never journaled as completed and each re-run loaded its data again. It also reports how long a running query has run, which an attach needs for its bound. In `--json` mode, async progress lines go to stderr instead of stdout. `chkit migrate --apply` refuses to apply a pending migration file without executable statements, such as a `generate --empty` stub without SQL, instead of recording it as applied; plan mode lists these files. In `@chkit/core`, `extractExecutableStatements` no longer returns a statement made only of comments, which ClickHouse rejects as `Empty query` (for example a block comment after the last statement).
+- b59fc83: The ObsessionDB remote executor now sends per-insert `settings` (such as `insert_deduplication_token`) with `insert`. Before, it silently dropped them, so an insert retried through it was not deduplicated.
+- cfabb19: Fix `--force-shared-engines` and `--no-shared-engines`. The plugin looked the parsed flags up without their `--` prefix, so both overrides were silently ignored and host auto-detection always decided whether the `storage_policy` table setting was stripped. `--force-shared-engines` now keeps it for a URL not recognized as ObsessionDB (for example a service behind a custom domain), and `--no-shared-engines` strips it even when targeting ObsessionDB. The flags take effect in `chkit generate` and `chkit snapshot rebuild`, which now accepts them too, so a rebuilt snapshot matches what `generate` writes; `migrate`, `status`, `drift` and `check` still accept them but ignore them. The flag help no longer claims to keep `Shared` engines, and the docs now state that chkit writes the standard engine name (`SharedMergeTree` becomes `MergeTree()`) for every target while the plugin only strips `storage_policy`.
+- Updated dependencies [d072fe3]
+- Updated dependencies [2f53550]
+- Updated dependencies [98e3667]
+- Updated dependencies [96a18c6]
+- Updated dependencies [46cbf88]
+- Updated dependencies [46cbf88]
+- Updated dependencies [b59fc83]
+- Updated dependencies [c49f0a9]
+- Updated dependencies [672d67e]
+  - @chkit/core@0.2.0-beta.9
+  - @chkit/clickhouse@0.2.0-beta.9
+  - @chkit/plugin-backfill@0.2.0-beta.9
+
 ## 0.2.0-beta.8
 
 ### Patch Changes
