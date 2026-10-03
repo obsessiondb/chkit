@@ -1,0 +1,20 @@
+name: "Require repository admin"
+description: "Fail unless the user who triggered this run is a repository admin"
+runs:
+  using: "composite"
+  steps:
+    - name: Check admin permission
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        # triggering_actor is whoever started this attempt: the dispatcher, the
+        # user who merged (for a push), or the user who re-ran the run.
+        ACTOR: ${{ github.triggering_actor }}
+      run: |
+        perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission)
+        echo "$ACTOR has permission: $perm"
+        if [ "$perm" != "admin" ]; then
+          echo "::error::Only repository admins can release. An admin can re-run this run to proceed."
+          exit 1
+        fi

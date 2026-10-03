@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+  # "Release: prepare" opens its PR with GITHUB_TOKEN, which does not start
+  # pull_request runs, so it dispatches CI on the release branch instead.
+  workflow_dispatch:
 
 jobs:
   verify:
