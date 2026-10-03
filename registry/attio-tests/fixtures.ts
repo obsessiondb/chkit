@@ -2,7 +2,7 @@ import type { AttioClientDeps } from '../attio/client.js'
 
 export const peopleObject = { id: { workspace_id: 'workspace-1', object_id: 'object-people' }, api_slug: 'people' }
 export const customObject = { id: { workspace_id: 'workspace-1', object_id: 'object-custom' }, api_slug: 'subscriptions' }
-export const salesList = { id: { workspace_id: 'workspace-1', list_id: 'list-sales' }, api_slug: 'sales' }
+const salesList = { id: { workspace_id: 'workspace-1', list_id: 'list-sales' }, api_slug: 'sales' }
 
 export const person = {
   id: { workspace_id: 'workspace-1', object_id: 'object-people', record_id: 'record-1' },

@@ -27,6 +27,6 @@ export async function readOptional(path: string): Promise<string | undefined> {
   })
 }
 
-export function isMissing(error: unknown): boolean {
+function isMissing(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT'
 }

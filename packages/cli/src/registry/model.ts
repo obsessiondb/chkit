@@ -38,7 +38,7 @@ const metadataSchema = z.object({
   fileHashes: z.record(relativePath, z.string().regex(/^[a-f0-9]{64}$/)).optional(),
 }).strict()
 
-export const registryItemSchema = z.object({
+const registryItemSchema = z.object({
   $schema: z.literal(ITEM_SCHEMA_URL).optional(),
   name: z.string().regex(/^[a-z][a-z0-9-]*$/).refine((value) => value !== 'registry', 'Item name registry is reserved for the catalog'),
   type: z.literal('registry:item'),
@@ -55,7 +55,7 @@ export const registryItemSchema = z.object({
   meta: z.object({ chkit: metadataSchema }).strict(),
 }).strict()
 
-export const registryCatalogSchema = z.object({
+const registryCatalogSchema = z.object({
   $schema: z.literal(CATALOG_SCHEMA_URL).optional(),
   name: z.string().min(1),
   homepage: z.url(),
