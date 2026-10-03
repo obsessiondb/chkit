@@ -62,10 +62,15 @@ describe('createRemoteExecutor queryStatus (live)', () => {
 			expect(await remote.queryStatus(queryId, { afterTime: laterBound })).toEqual({
 				status: 'unknown',
 			})
-			// The unbounded lookup of an attach that has no elapsed time.
-			expect(
-				await remote.queryStatus(queryId, { afterTime: '1970-01-01 00:00:00' }),
-			).toMatchObject({ status: 'finished', writtenRows: 3 })
+			// The unbounded lookup of an attach that has no elapsed time. Poll like
+			// migrate does: query_log is per replica, and on a multi-replica service
+			// a single request can land on a replica that never ran the query.
+			const unbounded = await pollUntil(
+				() => remote.queryStatus(queryId, { afterTime: '1970-01-01 00:00:00' }),
+				(status) => status.status === 'finished',
+				{ timeoutMs: 60_000 },
+			)
+			expect(unbounded).toMatchObject({ status: 'finished', writtenRows: 3 })
 		} finally {
 			await live.command(`DROP TABLE IF EXISTS ${table}`)
 			await live.close()
