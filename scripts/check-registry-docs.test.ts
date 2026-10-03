@@ -93,6 +93,17 @@ test('rejects missing logo assets and guides with duplicate routes', () => {
   ])
 })
 
+test('requires a provider logo for every official app', () => {
+  const fixture = createFixture()
+  fixture.catalog.items = fixture.catalog.items.map((app) => ({
+    ...app,
+    meta: { chkit: { ...app.meta.chkit, logo: undefined } },
+  }))
+  expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
+    'example: official apps must declare meta.chkit.logo pointing to a local provider logo asset.',
+  ])
+})
+
 test('rejects noncanonical guide URLs and externally hosted logos', () => {
   const fixture = createFixture()
   fixture.catalog.items = fixture.catalog.items.map((app) => ({

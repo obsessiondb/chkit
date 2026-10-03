@@ -4,8 +4,10 @@ import { dirname, join } from 'node:path'
 
 import { buildRegistry } from '../../registry/build.js'
 import { CATALOG_SCHEMA_URL, ITEM_SCHEMA_URL, type RegistryItem } from '../../registry/model.js'
+import { CLI_VERSION } from '../../runtime/version.js'
 
-export const FIXTURE_VERSION = '0.2.0-beta.8'
+// Keep successful installation fixtures compatible after release PRs bump the CLI.
+export const FIXTURE_VERSION = CLI_VERSION
 
 export function fixtureTracker() {
   const roots: string[] = []

@@ -20,6 +20,7 @@ Use TypeScript and a direct `clickhouse` connection, including for ObsessionDB d
 - [Apps & integrations](/integrations/): browse the registry and each app's complete sync guide.
 - [Provider templates](/api-sync/templates/): install editable schemas and readers with one command.
 - [Integrating ClickHouse with Attio](/integrations/attio/): sync workspace objects, records, lists, notes, tasks, and members.
+- [Integrating ClickHouse with Slack](/integrations/slack/): sync conversations, users, retained messages, and thread replies into raw tables.
 - [Quickstart](/api-sync/quickstart/): ingest a small public API and query the result.
 - [Install the authoring skill](/api-sync/agent-skill/): give a coding agent the authoring workflow and relevant documentation.
 

@@ -47,7 +47,9 @@ export function checkRegistryDocs(catalog: RegistryCatalog, paths: DocsPaths): s
       if (guide) errors.push(...checkGuide(guide, item, paths.docsDir))
     }
 
-    if (metadata.logo) {
+    if (!metadata.logo) {
+      errors.push(`${item.name}: official apps must declare meta.chkit.logo pointing to a local provider logo asset.`)
+    } else {
       const logo = new URL(metadata.logo)
       if (logo.origin !== new URL(catalog.homepage).origin || logo.search || logo.hash) {
         errors.push(`${item.name}: meta.chkit.logo must point to a local asset on ${new URL(catalog.homepage).origin}.`)

@@ -213,7 +213,7 @@ After validating a new release artifact, copy its immutable file into the provid
 
 Each provider declared in `registry/<name>/manifest.json` has a guide at `apps/docs/src/content/docs/integrations/<name>.md` or `.mdx`. Set its title to `Integrating ClickHouse with <App title>` and write a specific one-sentence description. Give the sidebar a short app label.
 
-Set `meta.chkit.documentation` to `https://chkit.obsessiondb.com/integrations/<name>/`. To include a logo, store the official asset in `apps/docs/public/logos/`, record its source, and set `meta.chkit.logo` to its full HTTPS URL on the docs site. Preserve the asset's proportions and brand colors.
+Set `meta.chkit.documentation` to `https://chkit.obsessiondb.com/integrations/<name>/`. Every official app requires a provider logo: store the official asset in `apps/docs/public/logos/`, record its source in that directory's `README.md`, and set `meta.chkit.logo` to its full HTTPS URL on the docs site. Preserve the asset's proportions and brand colors.
 
 Every official manifest includes authentication setup steps, resource titles and destination tables, provider endpoint references, derived views, and sync/deletion metadata. Credential setup must explain where an administrator creates a token in the source system, which permissions it requires, and how the execution environment receives it. Link to the provider's current instructions and verify the UI path before publishing.
 
@@ -231,7 +231,7 @@ import RegistryReference from '../../../components/RegistryReference.astro';
 
 The other sections are `overview`, `views`, and `sync`. The raw-Markdown build expands the same components for agents. The `resources` section documents every declared resource; handwritten guides must include each exact resource name in backticks. Keep the explanation of provider-specific behavior as prose alongside the generated reference tables.
 
-The [integration list](/integrations/), its agent-readable Markdown, CLI discovery, and search structured data read the same manifest. The docs build checks that every official item has its guide, description, resource coverage, and any declared logo asset. New guides also enter site search, the sitemap, and `llms.txt` automatically.
+The [integration list](/integrations/), its agent-readable Markdown, CLI discovery, and search structured data read the same manifest. The docs build checks that every official item has its guide, description, resource coverage, and required local logo asset. New guides also enter site search, the sitemap, and `llms.txt` automatically.
 
 ```sh
 bun run scripts/check-registry-docs.ts

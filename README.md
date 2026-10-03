@@ -33,9 +33,13 @@ Install editable ClickHouse schemas and API readers from the [app registry](http
 bunx chkit registry list
 bunx chkit registry inspect attio
 bunx chkit add attio
+bunx chkit registry inspect slack
+bunx chkit add slack
 ```
 
 [Integrating ClickHouse with Attio](https://chkit.obsessiondb.com/integrations/attio/) covers credentials, migrations, all nine synced resources, query views, and full-read behavior. Configure credentials and review schema migrations before running ingestion.
+
+[Integrating ClickHouse with Slack](https://chkit.obsessiondb.com/integrations/slack/) covers conversation metadata, users, retained message history, and thread replies in three raw tables, with token scopes, rate limits, and full-read behavior.
 
 ## From a schema to a working sync
 

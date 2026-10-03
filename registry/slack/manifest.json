@@ -1,0 +1,88 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "slack",
+  "type": "registry:item",
+  "title": "Slack",
+  "description": "Editable Slack API readers and raw ClickHouse tables for conversations, users, messages, and thread replies.",
+  "dependencies": ["@chkit/core@^0.2.0-beta.8", "@chkit/plugin-ingest@^0.2.0-beta.8"],
+  "devDependencies": ["@types/bun@^1.2.0"],
+  "files": [
+    { "path": "README.md", "type": "registry:file", "target": "src/integrations/slack/README.md" },
+    { "path": "client.ts", "type": "registry:file", "target": "src/integrations/slack/client.ts" },
+    { "path": "config.ts", "type": "registry:file", "target": "src/integrations/slack/config.ts" },
+    { "path": "index.ts", "type": "registry:file", "target": "src/integrations/slack/index.ts" },
+    { "path": "pipeline.ts", "type": "registry:file", "target": "src/integrations/slack/pipeline.ts" },
+    { "path": "sources/channels.ts", "type": "registry:file", "target": "src/integrations/slack/sources/channels.ts" },
+    { "path": "sources/users.ts", "type": "registry:file", "target": "src/integrations/slack/sources/users.ts" },
+    { "path": "sources/messages.ts", "type": "registry:file", "target": "src/integrations/slack/sources/messages.ts" },
+    { "path": "tests/slack.test.ts", "type": "registry:file", "target": "src/integrations/slack/tests/slack.test.ts", "role": "test" },
+    { "path": "tests/fixtures.ts", "type": "registry:file", "target": "src/integrations/slack/tests/fixtures.ts", "role": "test" }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.1",
+      "documentation": "https://chkit.obsessiondb.com/integrations/slack/",
+      "logo": "https://chkit.obsessiondb.com/logos/slack.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/slack",
+      "entry": "index.ts",
+      "exports": ["slack", "slackChannelsRaw", "slackUsersRaw", "slackMessagesRaw"],
+      "resources": [
+        {
+          "name": "channels",
+          "title": "Conversations",
+          "table": "slack_channels_raw",
+          "description": "Selected accessible conversations, including archived channels, with complete returned topics, purpose, membership flags, and shared-channel metadata. Public channels by default; private channels, DMs, and group DMs are opt-in.",
+          "scopes": ["channels:read"],
+          "strategy": "full",
+          "endpoints": [{ "method": "GET", "path": "/conversations.list", "documentation": "https://docs.slack.dev/reference/methods/conversations.list/" }]
+        },
+        {
+          "name": "users",
+          "title": "Users",
+          "table": "slack_users_raw",
+          "description": "Complete returned workspace member and bot profiles, IDs, names, status, timezone, and deactivation flags. Email requires the optional users:read.email scope.",
+          "scopes": ["users:read"],
+          "strategy": "full",
+          "endpoints": [{ "method": "GET", "path": "/users.list", "documentation": "https://docs.slack.dev/reference/methods/users.list/" }]
+        },
+        {
+          "name": "messages",
+          "title": "Messages and thread replies",
+          "table": "slack_messages_raw",
+          "description": "All retained accessible history in selected conversations and replies to every discovered thread, preserving timestamp strings, text, blocks, attachments, file references, reactions, subtypes, and metadata as returned. No file downloads or separate reaction enumeration.",
+          "scopes": ["channels:read", "channels:history"],
+          "strategy": "full",
+          "endpoints": [
+            { "method": "GET", "path": "/conversations.history", "documentation": "https://docs.slack.dev/reference/methods/conversations.history/" },
+            { "method": "GET", "path": "/conversations.replies", "documentation": "https://docs.slack.dev/reference/methods/conversations.replies/" }
+          ]
+        }
+      ],
+      "env": { "SLACK_API_TOKEN": "" },
+      "authentication": {
+        "method": "Slack OAuth bearer token (user token recommended)",
+        "env": ["SLACK_API_TOKEN"],
+        "documentation": "https://docs.slack.dev/authentication/tokens/",
+        "setup": [
+          "Create a Slack app for the workspace at api.slack.com/apps. Open OAuth & Permissions.",
+          "Add channels:read, channels:history, and users:read under User Token Scopes for the default three streams. Add users:read.email only when emails are needed.",
+          "For private channels add groups:read and groups:history; for DMs add im:read and im:history; for group DMs add mpim:read and mpim:history. Enable the matching conversationTypes in config.ts.",
+          "Install or reinstall the app to the workspace and copy the User OAuth Token into SLACK_API_TOKEN in the project .env or scheduler secret environment. A bot token only reads conversations it can access; enabled thread replies must also be permitted.",
+          "Keep tokens outside version control. Supply token refresh separately when using expiring tokens; the integration does not manage OAuth issuance or refresh."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "Each run fully reads enabled resources. Messages discover their own selected conversations, read retained history, and revisit every discovered thread when includeReplies is true. Conservative history/replies defaults use 15-item pages and a 60-second delay before requests; internal apps can tune these to their Slack tier.",
+        "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler, with one process per project/target. Select channel IDs and size the execution budget for a complete scan; interrupted full reads restart from the beginning.",
+        "deletions": "Later observations replace stable row IDs, but deleted, inaccessible, or deselected records remain. The integration does not consume Slack events, propagate deletions, or maintain a complete change log."
+      }
+    }
+  }
+}
