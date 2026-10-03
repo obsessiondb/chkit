@@ -1,6 +1,6 @@
 ---
 title: "chkit ingest"
-description: "Run, list, or inspect the ingestion streams exported by your project entry."
+description: "Run, list, or inspect the ingestion streams your project exports."
 sidebar:
   order: 11
 ---
@@ -40,7 +40,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 ### Prerequisites
 
-The ingest plugin must be registered in `plugins` and the config must set `entry` to a module that exports at least one `definePipeline(...)` value. Without an exported pipeline, every subcommand fails with exit code 2.
+The ingest plugin must be registered in `plugins`, and the modules loaded from `entry` (or from `schema` globs) must export at least one `definePipeline(...)` value. Without an exported pipeline, every subcommand fails with exit code 2.
 
 `run` and `status` require a direct `clickhouse` connection in the config. Host-provided executors, including the ObsessionDB workbench executor, are rejected. `list` reads only the definition graph and needs no connection.
 
@@ -70,7 +70,9 @@ Prints each selected stream with its destination table and effective tags.
 
 ### `status`
 
-Reads the journal and prints the committed checkpoint of each selected stream's scheduled namespace. Streams that have never committed progress show `(no checkpoint)`.
+Prints the committed checkpoint of each selected stream's scheduled namespace. Streams that have never committed progress show `(no checkpoint)`.
+
+`status` is not read-only: it runs `CREATE TABLE IF NOT EXISTS` for the journal before reading it, so on a target without a journal the connection needs permission to create that table.
 
 ## Examples
 
@@ -109,8 +111,8 @@ chkit ingest status --tag pipeline:helpdesk --json
 | Code | Meaning |
 |------|---------|
 | 0 | Success. For `run`, every selected stream succeeded |
-| 1 | Error, or a `run` with any stream that did not succeed |
-| 2 | Configuration error: no exported pipeline, no matching stream, invalid flags, or missing direct connection |
+| 1 | Error, including an unknown flag or a flag without a value, or a `run` with any stream that did not succeed |
+| 2 | Configuration error: no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
 
 ## JSON output
 
