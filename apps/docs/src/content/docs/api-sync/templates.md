@@ -15,7 +15,7 @@ Run from an existing TypeScript project with `package.json`:
 bunx chkit add attio
 ```
 
-The installer copies the full provider, wires its exports into the project, and installs the required packages. [Attio](/integrations/attio/) includes object and list metadata, records, list entries, notes, tasks, members, and query views. Each template declares its exact coverage and limitations.
+The installer copies the full provider, wires its exports into the project, and installs the required packages. [Attio](/integrations/attio/) includes object and list metadata, records, list entries, notes, tasks, members, and query views. [Slack](/integrations/slack/) includes conversation metadata, users, message history, and thread replies in raw tables. Each template declares its exact coverage and limitations.
 
 The installed files belong to the project. Edit them, commit them, remove unneeded streams, or adapt their schemas. The registry is used to obtain source code; ingestion reads the installed files.
 
@@ -101,6 +101,7 @@ Treat a third-party template as source code and dependencies to review. chkit su
 ## Related pages
 
 - [Integrating ClickHouse with Attio](/integrations/attio/): setup, included resources, and sync semantics.
+- [Integrating ClickHouse with Slack](/integrations/slack/): token access, raw messages, threads, and request pacing.
 - [`chkit add`](/cli/add/): installation flags and conflict behavior.
 - [`chkit registry`](/cli/registry/): discovery, inspection, and builds.
 - [Publish a registry](/api-sync/registry-authoring/): author and host templates.
