@@ -21,8 +21,9 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.1.1",
       "documentation": "https://chkit.obsessiondb.com/integrations/slack/",
+      "logo": "https://chkit.obsessiondb.com/logos/slack.svg",
       "language": "typescript",
       "license": "MIT",
       "chkit": "^0.2.0-beta.8",
