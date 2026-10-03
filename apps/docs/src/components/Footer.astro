@@ -3,8 +3,7 @@
  * Override of Starlight's Footer.
  * Renders the default per-page footer (pagination / meta) followed by the
  * site-wide footer (brand + link columns). The Agentation overlay is
- * rendered only under `import.meta.env.DEV`, so the production build drops
- * it (and its react island) via dead-code elimination.
+ * enabled for local development and explicitly enabled preview builds.
  */
 import Default from '@astrojs/starlight/components/Footer.astro';
 import AgentationDev from './AgentationDev';
@@ -55,4 +54,4 @@ const repo = 'https://github.com/obsessiondb/chkit';
 	</div>
 </footer>
 
-{import.meta.env.DEV && <AgentationDev client:only="react" />}
+{(import.meta.env.DEV || import.meta.env.PUBLIC_AGENTATION_ENABLED === 'true') && <AgentationDev client:only="react" />}

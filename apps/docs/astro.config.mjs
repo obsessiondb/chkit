@@ -7,6 +7,7 @@ import sitemap from '@astrojs/sitemap';
 import rawMarkdown from './src/integrations/raw-markdown';
 
 const isDev = process.argv.includes('dev');
+const enableAgentation = isDev || process.env.PUBLIC_AGENTATION_ENABLED === 'true';
 
 // https://astro.build/config
 export default defineConfig({
@@ -125,7 +126,7 @@ export default defineConfig({
 			],
 		}),
 		sitemap(),
-		...(isDev ? [react()] : []),
+		...(enableAgentation ? [react()] : []),
 		rawMarkdown(),
 	],
 });

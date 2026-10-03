@@ -128,6 +128,8 @@ jobs:
 
       - name: Build docs preview
         if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        env:
+          PUBLIC_AGENTATION_ENABLED: 'true'
         run: bun run docs:build
 
       - name: Deploy docs preview
