@@ -114,6 +114,35 @@ test.serial('presentation metadata is optional and accepts only HTTP or HTTPS UR
   }
 })
 
+test.serial('optional test roles and dependencies preserve legacy items and reject invalid entries', async () => {
+  const fixture = await fixtures.create(true)
+  expect(parseRegistryItem(fixture.item)).toEqual(fixture.item)
+  expect(fixture.item.files.filter((file) => file.role === 'test')).toHaveLength(2)
+  expect(() => parseRegistryItem({ ...fixture.item, files: fixture.item.files.map((file) => ({ ...file, role: 'test' })) })).toThrow('entry cannot be a test file')
+  expect(() => parseRegistryItem({ ...fixture.item, devDependencies: [...fixture.item.dependencies] })).toThrow('Duplicate package dependencies')
+  expect(() => parseRegistryItem({ ...fixture.item, devDependencies: ['@types/bun@latest'] })).toThrow()
+})
+
+test.serial('authentication and resource metadata validate provider links without changing legacy shapes', async () => {
+  const fixture = await fixtures.create()
+  const authentication = {
+    method: 'Bearer API token', env: ['FIXTURE_TOKEN'],
+    setup: ['Open workspace settings.', 'Create a read-only API token.'],
+    documentation: 'https://example.com/api/auth',
+  }
+  const resources = [{
+    name: 'records', title: 'Records', table: 'fixture_raw', description: 'All records', scopes: ['record:read'], strategy: 'full',
+    endpoints: [{ method: 'POST', path: '/records/query', documentation: 'https://example.com/api/records' }],
+  }]
+  const views = [{ name: 'fixture_people', source: 'fixture_raw', description: 'People records only' }]
+  const sync = { description: 'Full snapshot', schedule: 'Hourly', deletions: 'Deleted records remain in raw storage.' }
+  const item = { ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, authentication, resources, views, sync } } }
+  expect(parseRegistryItem(item)).toEqual(item)
+  expect(parseRegistryItem(fixture.item).meta.chkit.resources[0]).not.toHaveProperty('table')
+  expect(() => parseRegistryItem({ ...item, meta: { chkit: { ...item.meta.chkit, authentication: { ...authentication, documentation: 'file:///secret' } } } })).toThrow()
+  expect(() => parseRegistryItem({ ...item, meta: { chkit: { ...item.meta.chkit, resources: [{ ...resources[0], endpoints: [{ method: 'DELETE', path: '/records', documentation: 'https://example.com' }] }] } } })).toThrow()
+})
+
 test.serial('build rejects source and output symlinks and missing source files', async () => {
   const fixture = await fixtures.create()
   const schema = join(fixture.source, 'fixture/schema.ts')

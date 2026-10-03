@@ -20,6 +20,7 @@ chkit add <name[@version] | URL | local.json> [flags]
 | `--path <directory>` | string | Template's declared root | Relocate the provider directory inside the current project |
 | `--dry-run` | boolean | `false` | Plan changes without writing files or installing packages |
 | `--yes`, `-y` | boolean | `false` | Use defaults; accepted for scripted installs without overriding conflicts |
+| `--with-tests` | boolean | `false` | Include the template's portable tests and fixtures |
 | `--no-install` | boolean | `false` | Write source and dependency declarations without running the package manager |
 | `--package-manager <name>` | string | Detected | Use `bun`, `npm`, `pnpm`, or `yarn` |
 | `--registry <location>` | string | `https://chkit.obsessiondb.com/r/registry.json` | Catalog URL, local directory, or local catalog file used to resolve template names |
@@ -50,6 +51,17 @@ Existing `schema` paths remain in place; the provider entry is added to them. Ex
 
 Computed config shapes, ambiguous exports, package conflicts, and unsupported paths fail before writes and report the required manual integration. Project code is parsed for installation planning rather than imported to discover its shape.
 
+### Optional fixture tests
+
+`--with-tests` includes files marked `role: "test"` in the template manifest, alongside the normal source. Attio ships tests with mocked HTTP responses and an in-memory destination; they run with Bun and require no provider credentials or ClickHouse server:
+
+```sh
+chkit add attio --with-tests
+bun test src/integrations/attio/tests/attio.test.ts
+```
+
+Use `--with-tests` on the initial installation or add the test set later by repeating the same version and path with the flag. Test files follow the same ownership and conflict checks as source files. Adjust the test path when using `--path`. `chkit registry inspect` labels optional test files and their development dependencies; the integration guide gives the test command.
+
 ### Package installation
 
 Package-manager selection uses `--package-manager`, then the project's `packageManager` field, then a single recognized lockfile, then CLI environment detection. Multiple package-manager lockfiles require an explicit choice.
@@ -70,16 +82,16 @@ Installation does not run migrations, query the provider API, start ingestion, o
 
 ## Examples
 
-**Install the complete Attio template:**
+**Install Attio with its fixture tests:**
 
 ```sh
-chkit add attio
+chkit add attio --with-tests
 ```
 
 **Inspect a pinned installation plan:**
 
 ```sh
-chkit add attio@0.1.1 --dry-run --json
+chkit add attio@0.1.2 --dry-run --json
 ```
 
 **Choose the provider directory:**
@@ -97,7 +109,7 @@ chkit add attio --yes --no-install --package-manager pnpm
 **Install a locally built item:**
 
 ```sh
-chkit add ./registry-output/attio/0.1.1.json --yes
+chkit add ./registry-output/attio/0.1.2.json --yes
 ```
 
 ## Exit codes
@@ -109,7 +121,7 @@ chkit add ./registry-output/attio/0.1.1.json --yes
 
 ## JSON output
 
-Results include `command: "add"`, `schemaVersion: 1`, `ok`, and `dryRun`. The plan reports `template` (`name`, `version`, `origin`), `files`, missing `dependencies`, selected `packageManager`, `noInstall`, `alreadyInstalled`, and `installRequired`. The last field describes whether dependency installation was required when the plan was created.
+Results include `command: "add"`, `schemaVersion: 1`, `ok`, and `dryRun`. The plan reports `template` (`name`, `version`, `origin`), `files`, missing `dependencies`, selected `packageManager`, `noInstall`, `withTests`, `alreadyInstalled`, and `installRequired`. The last field describes whether dependency installation was required when the plan was created.
 
 Each planned file has a project-relative `path`, an `action` of `create` or `update`, and its complete planned `content`. Dry-run output therefore includes local configuration source that the installer plans to change.
 
@@ -123,13 +135,14 @@ Each planned file has a project-relative `path`, an `action` of `create` or `upd
   "dryRun": false,
   "template": {
     "name": "attio",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "origin": "https://chkit.obsessiondb.com/r/attio.json"
   },
   "files": [],
   "dependencies": [],
   "packageManager": "bun",
   "noInstall": false,
+  "withTests": false,
   "alreadyInstalled": true,
   "installRequired": false
 }

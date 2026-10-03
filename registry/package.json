@@ -6,13 +6,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome lint attio attio-tests",
-    "test": "bun test attio-tests --timeout 30000"
+    "lint": "biome lint .",
+    "test": "bun test attio/tests ../scripts/registry-catalog.test.ts --timeout 30000"
   },
   "devDependencies": {
     "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*",
     "@chkit/plugin-ingest": "workspace:*",
+    "@types/bun": "^1.2.0",
     "chkit": "workspace:*"
   }
 }

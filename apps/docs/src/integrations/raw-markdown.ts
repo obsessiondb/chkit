@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'n
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AstroIntegration } from 'astro';
-import { registryMarkdown } from '../data/registry';
+import { registryMarkdown, registryReferenceMarkdown, type RegistryReferenceSection } from '../data/registry';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
 const SITE_TAGLINE = 'ClickHouse schemas, migrations, and API sync in code. Schema workflows in TypeScript and Python; API sync in TypeScript.';
@@ -46,9 +46,7 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 			if (statSync(fullPath).isDirectory()) {
 				walk(fullPath);
 			} else if (/\.mdx?$/.test(entry)) {
-				const source = readFileSync(fullPath, 'utf-8')
-					.replace(/^import RegistryApps from .+;\n/m, '')
-					.replace('<RegistryApps />', () => registryMarkdown());
+				const source = expandRegistryReferences(readFileSync(fullPath, 'utf-8'));
 				const slug = toSlug(relative(srcDir, fullPath));
 				const { title, description } = extractFrontmatter(source);
 
@@ -68,6 +66,16 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 
 	walk(srcDir);
 	return entries;
+}
+
+// Keep component examples in code fences intact while expanding rendered references.
+function expandRegistryReferences(source: string): string {
+	return source.split(/(^```[^\n]*\n[\s\S]*?^```[ \t]*(?:\n|$))/gm)
+		.map((part, index) => index % 2 === 1 ? part : part
+			.replace(/^import Registry(?:Apps|Reference) from .+;\n/gm, '')
+			.replace('<RegistryApps />', () => registryMarkdown())
+			.replace(/<RegistryReference name="([^"]+)" section="(overview|authentication|scopes|resources|views|sync)" \/>/g, (_match, name: string, section: RegistryReferenceSection) => registryReferenceMarkdown(name, section)))
+		.join('');
 }
 
 // Sort root pages first, then alphabetically by slug.

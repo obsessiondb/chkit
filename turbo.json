@@ -10,7 +10,7 @@
     },
     "@chkit/docs#build": {
       "dependsOn": ["^build"],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/registry/**", "$TURBO_ROOT$/scripts/build-registry.ts", "$TURBO_ROOT$/scripts/check-registry-docs.ts", "$TURBO_ROOT$/packages/cli/src/registry/**"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/registry/**", "$TURBO_ROOT$/scripts/build-registry.ts", "$TURBO_ROOT$/scripts/registry-catalog.ts", "$TURBO_ROOT$/scripts/check-registry-docs.ts", "$TURBO_ROOT$/packages/cli/src/registry/**"],
       "outputs": ["dist/**", "public/r/**"]
     },
     "build": {

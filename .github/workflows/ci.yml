@@ -106,7 +106,9 @@ jobs:
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
             changed_files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- \
-              apps/docs/ package.json bun.lock turbo.json \
+              apps/docs/ registry/ scripts/build-registry.ts \
+              scripts/registry-catalog.ts scripts/check-registry-docs.ts \
+              packages/cli/src/registry/ package.json bun.lock turbo.json \
               .github/workflows/ci.yml .github/actions/setup/)"
             if [ -n "$changed_files" ]; then
               echo 'changed=true' >> "$GITHUB_OUTPUT"

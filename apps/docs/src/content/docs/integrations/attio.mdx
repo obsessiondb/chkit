@@ -8,20 +8,13 @@ sidebar:
 
 Sync Attio into ClickHouse to query CRM records, relationships, list membership, notes, and tasks alongside product or business data.
 
+import RegistryReference from '../../../components/RegistryReference.astro';
+
 <img src="/logos/attio.svg" alt="Attio logo" width="37" height="30" style="box-sizing: content-box; padding: 12px; background: white; border-radius: 8px;" />
 
 The [app registry](/integrations/) installs the Attio integration as editable TypeScript source. It includes nine raw tables, nine full-read streams, and three SQL views for people, companies, and deals. Each run reads the selected resources through the Attio REST API and updates their latest observed versions in ClickHouse.
 
-| Property | Included behavior |
-|---|---|
-| Registry app | `attio` |
-| Install command | `bunx chkit add attio` |
-| Source directory | `src/integrations/attio` |
-| Authentication | `ATTIO_API_TOKEN`, sent as a bearer token |
-| Destination | Direct ClickHouse connection, version 25.3 or newer |
-| Default database and prefix | `default`, `attio_` |
-| Sync strategy | Full read on every run |
-| Execution | Finite CLI command, scheduled externally |
+<RegistryReference name="attio" section="overview" />
 
 ## Install the Attio integration
 
@@ -62,29 +55,31 @@ Set the connection variables for the intended target. Keep the existing entry, s
 
 The copied `config.ts` separately controls the database of the Attio tables and views. Set its `database` to the intended destination too; changing `CLICKHOUSE_DB` alone does not rename those schema objects.
 
-### Configure Attio authentication
+## Create an Attio API key
 
-Set `ATTIO_API_TOKEN` in the execution environment. Attio supports a single-workspace API key or an OAuth access token. Generate and scope the token using the [Attio authentication guide](https://docs.attio.com/rest-api/guides/authentication). The integration reads the token when a request runs and does not implement OAuth issuance or refresh.
+A workspace admin creates a single-workspace access token in Attio. The following steps use Attio's [API-key setup instructions](https://attio.com/help/reference/apps/generating-an-api-key):
 
-Bun loads the project's `.env`; a scheduler must supply the same variables through its own environment setup. The installer writes required names to `.env.example`, which does not load credentials. Keep real tokens out of source control. Schema inspection, migration generation, and `ingest list` do not need an Attio token.
+<RegistryReference name="attio" section="authentication" />
 
-Use the following read scopes for the enabled streams. These match the endpoint requirements linked in the [API request table](#api-requests-and-pagination).
+Grant read access to the categories required by the enabled streams. The full default integration uses all the scopes below. No write scopes are needed.
 
-| Stream | Required scopes |
-|---|---|
-| Objects | `object_configuration:read` |
-| Object attributes | `object_configuration:read` |
-| Records | `object_configuration:read`, `record_permission:read` |
-| Lists | `list_configuration:read` |
-| List attributes | `list_configuration:read` |
-| List entries | `list_configuration:read`, `list_entry:read` |
-| Notes | `note:read`, `object_configuration:read`, `record_permission:read` |
-| Tasks | `task:read`, `object_configuration:read`, `record_permission:read`, `user_management:read` |
-| Workspace members | `user_management:read` |
+<RegistryReference name="attio" section="scopes" />
+
+### Configure the token in the project and scheduler
+
+Set the copied token in the project's `.env`, replacing the placeholder:
+
+```sh
+ATTIO_API_TOKEN=replace-with-the-access-token-from-attio
+```
+
+Bun loads the project's `.env`; a scheduler must supply `ATTIO_API_TOKEN` through its own secret or environment configuration, together with the ClickHouse connection variables. The installer writes required names to `.env.example`, which does not load credentials. Keep real tokens out of source control.
+
+The reader sends the token in an `Authorization: Bearer` header when a request runs. Schema inspection, migration generation, and `ingest list` do not need an Attio token. An existing OAuth access token also works, but this integration does not obtain or refresh OAuth tokens; see [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
 
 A token's permissions also determine which data the API returns. A `401` or `403` fails the affected stream with a diagnostic; the reader does not turn a permission error into an empty result.
 
-### Choose objects, lists, and destination names
+## Choose objects, lists, and destination names
 
 The installed `src/integrations/attio/config.ts` starts with:
 
@@ -148,17 +143,7 @@ Queries in this guide use the default database and prefix. Substitute the config
 
 Each resource has its own stream and raw table. This table lists the returned entity data retained in `raw.data`; the complete API entity is preserved, including additional fields returned by Attio. Fields may be absent or null depending on the resource and workspace configuration.
 
-| Resource | Default ClickHouse table | Included data |
-|---|---|---|
-| Objects | `attio_objects_raw` | Accessible standard and custom object definitions, IDs, API slug, singular and plural names, creation time |
-| Object attributes | `attio_object_attributes_raw` | Attribute IDs, slug, title, description, type, flags, defaults, relationship definitions, configuration, creation time; includes archived definitions |
-| Records | `attio_records_raw` | Current records for every selected object, IDs, creation time, Attio URL, and the complete `values` object with all returned attribute arrays |
-| Lists | `attio_lists_raw` | List IDs, slug, name, parent objects, workspace and member access configuration, creator, creation time |
-| List attributes | `attio_list_attributes_raw` | Attribute definitions for selected lists, including types, configuration, flags, defaults, relationships, and archived definitions |
-| List entries | `attio_entries_raw` | Entry IDs, parent object and record ID, creation time, and the complete `entry_values` object |
-| Notes | `attio_notes_raw` | Note IDs, parent record links, title, plaintext and Markdown content, tags, creator, creation time, and meeting reference when returned |
-| Tasks | `attio_tasks_raw` | Task IDs, plaintext content, deadline, completion state and time, linked records, assignees, creator, creation time |
-| Workspace members | `attio_members_raw` | Member IDs, first and last name, email address, avatar URL, access level, creation time |
+<RegistryReference name="attio" section="resources" />
 
 The records stream discovers objects through the [objects API](https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects). It is not restricted to the three objects with packaged views. People, companies, deals, and custom objects all land in the same records table when accessible and selected. A `users` object, when present, contains CRM records; workspace members are collected separately.
 
@@ -168,23 +153,25 @@ Notes retain the content and references in the [notes response](https://docs.att
 
 ### API requests and pagination
 
-Every path below is relative to `https://api.attio.com/v2`. Object and list placeholders are resolved to IDs by discovery before the child request runs.
+Every API path in the resource table is relative to `https://api.attio.com/v2`. Object and list placeholders are resolved to IDs by discovery before the child request runs.
 
-| Stream tag | API request | Pagination and filters |
-|---|---|---|
-| `resource:objects` | [`GET /objects`](https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects) | Single collection request, then configured object selection |
-| `resource:object_attributes` | [`GET /objects/{object_id}/attributes`](https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes) | `limit` and `offset` query parameters; `show_archived=true` |
-| `resource:records` | [`POST /objects/{object_id}/records/query`](https://docs.attio.com/rest-api/endpoint-reference/records/list-records) | `limit` and `offset` in JSON body; no record filter or custom sort |
-| `resource:lists` | [`GET /lists`](https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists) | Single collection request, then configured list selection |
-| `resource:list_attributes` | [`GET /lists/{list_id}/attributes`](https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes) | `limit` and `offset` query parameters; `show_archived=true` |
-| `resource:entries` | [`POST /lists/{list_id}/entries/query`](https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries) | `limit` and `offset` in JSON body; no entry filter or custom sort |
-| `resource:notes` | [`GET /notes`](https://docs.attio.com/rest-api/endpoint-reference/notes/list-notes) | `limit` and `offset` query parameters; no parent filter |
-| `resource:tasks` | [`GET /tasks`](https://docs.attio.com/rest-api/endpoint-reference/tasks/list-tasks) | `limit` and `offset` query parameters; `sort=created_at:asc`; no completion filter |
-| `resource:members` | [`GET /workspace_members`](https://docs.attio.com/rest-api/endpoint-reference/workspace-members/list-workspace-members) | Single collection request |
+| Resource | Pagination and filters |
+|---|---|
+| `objects` | Single collection request, then configured object selection |
+| `object_attributes` | `limit` and `offset` query parameters; `show_archived=true` |
+| `records` | `limit` and `offset` in JSON body; no record filter or custom sort |
+| `lists` | Single collection request, then configured list selection |
+| `list_attributes` | `limit` and `offset` query parameters; `show_archived=true` |
+| `entries` | `limit` and `offset` in JSON body; no entry filter or custom sort |
+| `notes` | `limit` and `offset` query parameters; no parent filter |
+| `tasks` | `limit` and `offset` query parameters; `sort=created_at:asc`; no completion filter |
+| `members` | Single collection request |
 
 Paginated reads start at offset zero, advance by the number of returned entities, and stop when a page is shorter than the requested limit. Each stream discovers its own parents, so running records alone does not depend on the objects stream having run first. The pipeline's stream array does not establish dependencies.
 
 ## How the sync works
+
+<RegistryReference name="attio" section="sync" />
 
 1. The CLI loads the installed pipeline and selects streams by their tags.
 2. Each reader discovers accessible parents where needed, applies the configured selection, and fetches the collection pages.
@@ -276,7 +263,11 @@ The original entity lives under `data`, so custom provider fields cannot overwri
 
 ## Included people, company, and deal views
 
-The integration creates ordinary SQL views over `attio_records_raw FINAL`, filtered by `object_slug`. Each view shares these columns:
+The integration creates ordinary SQL views over `attio_records_raw FINAL`, filtered by `object_slug`. These views reuse the records stream; they do not make additional API requests.
+
+<RegistryReference name="attio" section="views" />
+
+Each view shares these columns:
 
 | Column | Meaning |
 |---|---|
@@ -411,18 +402,32 @@ Deleting or deselecting a source entity does not remove it from a view. Applicat
 |---|---|
 | `config.ts` | Source identity, destination names, parent selection, page sizes |
 | `client.ts` | Authentication, response validation, pagination, row identity, request pacing |
-| `metadata/read.ts` and `metadata/schema.ts` | Object and object-attribute readers and raw tables |
-| `records/read.ts` and `records/schema.ts` | Record reader, raw records table, people/company/deal views |
-| `lists/read.ts` and `lists/schema.ts` | List, list-attribute, and entry readers and raw tables |
-| `notes/`, `tasks/`, `members/` | Resource-specific readers and schemas |
+| `sources/objects.ts`, `sources/object-attributes.ts` | Object and attribute readers with their raw table schemas |
+| `sources/records.ts` | Record reader, raw records table, people/company/deal views |
+| `sources/lists.ts`, `sources/list-attributes.ts`, `sources/entries.ts` | List resource readers with their raw table schemas |
+| `sources/notes.ts`, `sources/tasks.ts`, `sources/members.ts` | One reader and raw table schema per resource |
+| `tests/attio.test.ts`, `tests/fixtures.ts` | Optional installed tests and mocked API responses |
 | `pipeline.ts` | Enabled streams, resource tags, retries, batching, concurrency |
 | `index.ts` | Exports that make the pipeline and schema objects discoverable |
 
 Remove a stream entry from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve existing tables under migration management. Removing a schema export changes the desired database schema and can generate a drop operation; review that migration separately.
 
-Edit the view SQL in `records/schema.ts` to expose custom fields, then generate and apply a reviewed migration. Existing raw payloads support new projections without another API fetch. Reader changes apply to subsequent ingestion runs. Revisit pacing when raising concurrency, and test modified readers with fixtures before scheduling them.
+Edit the view SQL in `sources/records.ts` to expose custom fields, then generate and apply a reviewed migration. Existing raw payloads support new projections without another API fetch. Reader changes apply to subsequent ingestion runs. Revisit pacing when raising concurrency, and test modified readers with fixtures before scheduling them.
 
 Installed files belong to the project. Reinstalling does not overwrite local edits or automatically merge a newer integration version. See [provider templates](/api-sync/templates/) for version pinning and updates.
+
+### Install and run the fixture tests
+
+Include the integration's tests when installing it:
+
+```sh
+bunx chkit add attio --with-tests
+bun test src/integrations/attio/tests/attio.test.ts
+```
+
+The tests use fixture responses, a mocked HTTP client, and an in-memory destination. They exercise reader behavior without Attio credentials or a ClickHouse server. Edit the fixtures and assertions alongside customized readers. With `--path`, adjust the test command to the chosen installation directory.
+
+Repository-only packaging and live-database tests remain outside the installed test set. The manifest selects the portable tests explicitly.
 
 ## Related pages
 

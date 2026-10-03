@@ -19,6 +19,17 @@ The installer copies the full provider, wires its exports into the project, and 
 
 The installed files belong to the project. Edit them, commit them, remove unneeded streams, or adapt their schemas. The registry is used to obtain source code; ingestion reads the installed files.
 
+## Include the integration tests
+
+Use `--with-tests` to copy the provider's portable tests with its source:
+
+```sh
+bunx chkit add attio --with-tests
+bun test src/integrations/attio/tests/attio.test.ts
+```
+
+Attio's test set uses fixtures, mocked HTTP, and an in-memory destination. It runs without API credentials or a database. Keep these tests with the copied readers when changing pagination, payload validation, or row identities. Repository-only installation and live-database tests are excluded from consumer projects.
+
 ## Inspect before installing
 
 ```sh
@@ -27,12 +38,12 @@ bunx chkit registry inspect attio
 bunx chkit add attio --dry-run
 ```
 
-Inspection shows the template's version, files, dependencies, environment variables, resource coverage, and compatibility requirements. A dry run shows the planned project changes without writing files or installing packages.
+Inspection shows the template's version, files, dependencies, environment variables, credential setup instructions, resource coverage and API references, derived views, sync limitations, and compatibility requirements. A dry run shows the planned project changes without writing files or installing packages.
 
 Pin an item version for a reproducible installation:
 
 ```sh
-bunx chkit add attio@0.1.1
+bunx chkit add attio@0.1.2
 ```
 
 Template versions are independent of chkit package versions. Their metadata declares the compatible CLI and ingestion package ranges.
@@ -81,8 +92,8 @@ Use a registry catalog, a built item URL, or a local built item:
 ```sh
 bunx chkit registry list --registry https://example.com/r/registry.json
 bunx chkit add attio --registry ./my-registry-output
-bunx chkit add https://example.com/r/attio/0.1.1.json
-bunx chkit add ./my-registry-output/attio/0.1.1.json
+bunx chkit add https://example.com/r/attio/0.1.2.json
+bunx chkit add ./my-registry-output/attio/0.1.2.json
 ```
 
 Treat a third-party template as source code and dependencies to review. chkit supports the documented [registry format](/api-sync/registry-authoring/); a general shadcn UI item is not a chkit provider template.

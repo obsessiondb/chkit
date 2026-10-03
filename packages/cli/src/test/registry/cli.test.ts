@@ -23,6 +23,7 @@ test.serial('registry and add help work outside a project', async () => {
   expect(add.exitCode).toBe(0)
   expect(add.stdout).toContain('chkit add <name[@version]|URL|local.json>')
   expect(add.stdout).toContain('--dry-run')
+  expect(add.stdout).toContain('--with-tests')
   expect(add.stdout).toContain('Browse apps with chkit registry list')
   expect(registry.exitCode).toBe(0)
   expect(registry.stdout).toContain('chkit registry <command>')
@@ -91,6 +92,8 @@ test.serial('build, list and inspect roundtrip through the CLI without importing
   expect(inspectText.exitCode).toBe(0)
   expect(inspectText.stdout).toContain('FIXTURE_TOKEN: empty placeholder; configure before syncing')
   expect(inspectText.stdout).toContain('records: Fixture records')
+  expect(inspectText.stdout).toContain('Table: see source schema')
+  expect(inspectText.stdout).not.toContain('Table: records')
   expect(inspectText.stdout).toContain('Strategy: full; scopes: record:read')
   expect(inspectText.stdout).not.toContain('Guide:')
   expect(inspectText.stdout).not.toContain('Logo:')
@@ -151,6 +154,7 @@ test.serial('list and inspect expose integration guides, logos, complete resourc
   const installed = await runCli(fixture.project, ['add', 'fixture@1.0.1', '--registry', fixture.output, '--no-install', '--package-manager', 'bun'])
   expect(installed.exitCode).toBe(0)
   expect(installed.stdout).toContain(`Integration guide: ${documentation}`)
+  expect(installed.stdout).not.toContain('Fixture tests:')
 })
 
 test.serial('add dry-run stays read-only and no-install writes the selected provider path', async () => {
@@ -172,6 +176,56 @@ test.serial('add dry-run stays read-only and no-install writes the selected prov
   expect(await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')).toContain('./src/providers/fixture/index.ts')
   expect(await readFile(join(fixture.project, '.env.example'), 'utf8')).toContain('FIXTURE_TOKEN=""')
   expect(JSON.parse(await readFile(join(fixture.project, '.chkit/registry-lock.json'), 'utf8')).items.fixture.dependenciesInstalled).toBe(false)
+})
+
+test.serial('add --with-tests previews and installs runnable fixtures at a custom path', async () => {
+  const fixture = await fixtures.create(true)
+  const args = ['add', 'fixture', '--registry', fixture.output, '--path', 'src/providers/demo', '--no-install', '--with-tests', '--package-manager', 'bun', '--json']
+  const preview = await runCli(fixture.project, [...args, '--dry-run'])
+  expect(preview.exitCode).toBe(0)
+  const planned = JSON.parse(preview.stdout)
+  expect(planned).toMatchObject({ ok: true, dryRun: true, withTests: true })
+  expect(planned.dependencies).toContain('@types/bun@^1.3.0')
+  expect(planned.files).toContainEqual(expect.objectContaining({ path: 'src/providers/demo/tests/fixture.test.ts', action: 'create' }))
+  expect(await readdir(fixture.project)).toEqual([])
+  const installed = await runCli(fixture.project, args)
+  expect(installed.exitCode).toBe(0)
+  expect(JSON.parse(installed.stdout)).toMatchObject({ ok: true, dryRun: false, withTests: true })
+  expect(await readFile(join(fixture.project, 'src/providers/demo/tests/fixture.test.ts'), 'utf8')).toContain("'../schema.js'")
+  expect(await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')).toContain('./src/providers/demo/index.ts')
+  expect(await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')).not.toContain('tests/')
+})
+
+test.serial('inspect explains authentication, synced tables, endpoints, views and optional tests', async () => {
+  const fixture = await fixtures.create(true)
+  const authentication = {
+    method: 'Bearer API token', env: ['FIXTURE_TOKEN'], setup: ['Open workspace settings.', 'Create a read-only token.'], documentation: 'https://example.com/auth',
+  }
+  const resources = [{
+    name: 'records', title: 'Records', table: 'fixture_raw', description: 'All accessible records', scopes: ['record:read'], strategy: 'full' as const,
+    endpoints: [{ method: 'POST' as const, path: '/records/query', documentation: 'https://example.com/records' }],
+  }]
+  const views = [{ name: 'fixture_people', source: 'fixture_raw', description: 'People only' }]
+  const sync = { description: 'Read every page.', schedule: 'Every hour.', deletions: 'Retain deleted records.' }
+  await writeManifest(fixture.manifest, { ...fixture.sourceItem, meta: { chkit: { ...fixture.sourceItem.meta.chkit, version: '1.0.1', authentication, resources, views, sync } } })
+  await buildRegistry({ manifestPath: fixture.manifest, outputDir: fixture.output })
+  const [human, json] = await Promise.all([
+    runCli(fixture.project, ['registry', 'inspect', 'fixture', '--registry', fixture.output]),
+    runCli(fixture.project, ['registry', 'inspect', 'fixture', '--registry', fixture.output, '--json']),
+  ])
+  expect(human.exitCode).toBe(0)
+  expect(human.stdout).toContain('Authentication: Bearer API token')
+  expect(human.stdout).toContain('1. Open workspace settings.')
+  expect(human.stdout).toContain('Provider guide: https://example.com/auth')
+  expect(human.stdout).toContain('Default table: fixture_raw')
+  expect(human.stdout).toContain('POST /records/query (https://example.com/records)')
+  expect(human.stdout).toContain('fixture_people (from fixture_raw): People only')
+  expect(human.stdout).toContain('Deletions: Retain deleted records.')
+  expect(human.stdout).toContain('fixture.test.ts (optional; --with-tests)')
+  expect(human.stdout).toContain('Test dependencies (--with-tests): @types/bun@^1.3.0')
+  expect(json.exitCode).toBe(0)
+  expect(JSON.parse(json.stdout).item.meta.chkit).toMatchObject({ authentication, resources, views, sync })
+  expect(await readdir(fixture.project)).toEqual([])
 })
 
 test.serial('HTTP catalogs, named pins and item URLs resolve in asynchronous CLI subprocesses', async () => {

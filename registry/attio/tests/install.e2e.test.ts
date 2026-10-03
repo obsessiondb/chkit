@@ -8,15 +8,16 @@ import { createStatelessLiveExecutor, createPrefix, getLiveEnv, quoteIdent, wait
 import { createClickHouseDestination, definePipeline, runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
-import { buildRegistry } from '../../packages/cli/src/registry/build.js'
-import { formatTestDiagnostic, runCli } from '../../packages/cli/src/test/e2e-testkit.js'
+import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.js'
+import { formatTestDiagnostic, runCli } from '../../../packages/cli/src/test/e2e-testkit.js'
+import { readRegistrySourceCatalog } from '../../../scripts/registry-catalog.js'
 import { fixtureDeps, person } from './fixtures.js'
 
 describe.serial('built Attio template installed into a consumer', () => {
   const env = getLiveEnv()
   const executor = createStatelessLiveExecutor(env)
   const prefix = createPrefix('registry')
-  const root = resolve(import.meta.dir, '../..')
+  const root = resolve(import.meta.dir, '../../..')
   const temporary: string[] = []
 
   afterAll(async () => {
@@ -32,7 +33,7 @@ describe.serial('built Attio template installed into a consumer', () => {
     const directory = await mkdtemp(join(tmpdir(), 'chkit-attio-installed-'))
     temporary.push(directory)
     const outputDir = join(directory, 'registry')
-    await buildRegistry({ manifestPath: join(root, 'registry/registry.json'), outputDir })
+    await buildRegistryCatalog({ catalog: await readRegistrySourceCatalog(), sourceRoot: join(root, 'registry'), outputDir })
     const project = join(directory, 'project')
     await writeProject(project, root, env.clickhouseDatabase, prefix)
     const cliEnv = {
@@ -51,9 +52,14 @@ describe.serial('built Attio template installed into a consumer', () => {
     const existingTable = `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}existing`)}`
     await waitForTable(executor, env.clickhouseDatabase, `${prefix}existing`)
     await executor.command(`INSERT INTO ${existingTable} VALUES (7)`)
-    const add = cli(['add', 'attio', '--registry', outputDir, '--no-install', '--json'])
+    const add = cli(['add', 'attio', '--registry', outputDir, '--with-tests', '--no-install', '--json'])
     expect(add.exitCode, formatTestDiagnostic('install', add)).toBe(0)
     expect(JSON.parse(add.stdout).template.name).toBe('attio')
+    const fixtureTests = Bun.spawnSync(['bun', 'test', 'src/integrations/attio/tests/attio.test.ts'], {
+      cwd: project, env: { ...process.env, ATTIO_API_TOKEN: '' },
+    })
+    expect(fixtureTests.exitCode, fixtureTests.stderr.toString()).toBe(0)
+    expect(await Bun.file(join(project, 'src/integrations/attio/tests/install.e2e.test.ts')).exists()).toBe(false)
     const configPath = join(project, 'src/integrations/attio/config.ts')
     const config = await readFile(configPath, 'utf8')
     await writeFile(configPath, config.replace("database: 'default'", `database: ${JSON.stringify(env.clickhouseDatabase)}`).replace("tablePrefix: 'attio'", `tablePrefix: '${prefix}'`))
@@ -68,8 +74,8 @@ describe.serial('built Attio template installed into a consumer', () => {
     await waitForTable(executor, env.clickhouseDatabase, `${prefix}_records_raw`)
     await waitForView(executor, env.clickhouseDatabase, `${prefix}_people`)
 
-    const installed: typeof import('../attio/index.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/index.ts')).href)
-    const readers: typeof import('../attio/records/read.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/records/read.ts')).href)
+    const installed: typeof import('../index.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/index.ts')).href)
+    const readers: typeof import('../sources/records.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/sources/records.ts')).href)
     const recordStream = installed.attio.streams.find((stream) => stream.id.endsWith('.records'))
     expect(recordStream).toBeDefined()
     if (!recordStream) throw new Error('Installed records stream is missing')

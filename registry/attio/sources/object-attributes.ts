@@ -1,11 +1,9 @@
-import type { FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
 
 import { discoverObjects, entityId, entitySlug, readCollection, toAttioRows, type AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
 
-export async function* readObjects(context: FetchContext, deps?: AttioClientDeps) {
-  yield { rows: toAttioRows(await discoverObjects(context, deps), 'objects', ['workspace_id', 'object_id']) }
-}
+export const attioObjectAttributesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_object_attributes_raw` })
 
 export async function* readObjectAttributes(context: FetchContext, deps?: AttioClientDeps) {
   for (const object of await discoverObjects(context, deps)) {

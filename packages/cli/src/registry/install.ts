@@ -12,6 +12,7 @@ const lockSchema = z.object({
   formatVersion: z.literal(1),
   items: z.record(z.string(), z.object({
     version: z.string(), origin: z.string(), artifactHash: z.string(), root: z.string(), dependenciesInstalled: z.boolean(),
+    withTests: z.boolean().optional(),
     files: z.record(z.string(), z.string()),
   }).strict()),
 }).strict()
@@ -29,13 +30,14 @@ export interface InstallPlan {
   dependencies: string[]
   packageManager: PackageManager
   noInstall: boolean
+  withTests: boolean
   alreadyInstalled: boolean
   installRequired: boolean
 }
 
 export async function planInstallation(input: {
   cwd: string; item: RegistryItem; origin: string; cliVersion: string; path?: string;
-  configPath?: string; packageManager?: PackageManager; noInstall?: boolean
+  configPath?: string; packageManager?: PackageManager; noInstall?: boolean; withTests?: boolean
 }): Promise<InstallPlan> {
   const cwd = resolve(input.cwd)
   const meta = input.item.meta.chkit
@@ -46,6 +48,8 @@ export async function planInstallation(input: {
   const lockText = await readOptional(lockPath)
   const lock = lockText === undefined ? { formatVersion: 1 as const, items: {} } : lockSchema.parse(JSON.parse(lockText))
   const previous = lock.items[input.item.name]
+  // Opting in later adds tests; a plain retry preserves the installed selection.
+  const withTests = input.withTests === true || previous?.withTests === true
   const artifactHash = hashContent(JSON.stringify(input.item))
   if (previous && (previous.version !== meta.version || previous.artifactHash !== artifactHash || previous.root !== root || previous.origin !== input.origin)) {
     throw new Error(`${input.item.name} is already installed from ${previous.origin} at ${previous.version}. Automatic replacement is not supported; review changes manually.`)
@@ -53,14 +57,15 @@ export async function planInstallation(input: {
 
   const files: PlannedFile[] = []
   const hashes: Record<string, string> = {}
-  for (const file of input.item.files) {
+  const selectedFiles = input.item.files.filter((file) => withTests || file.role !== 'test')
+  for (const file of selectedFiles) {
     const target = `${root}/${file.target.slice(meta.root.length + 1)}`
     const path = resolve(cwd, target)
     await assertProjectPath(cwd, path)
     const original = await readOptional(path)
     const content = file.content
     if (content === undefined) throw new Error(`Template has no built content for ${target}`)
-    if (previous && (original === undefined || hashContent(original) !== previous.files[target])) {
+    if (previous?.files[target] !== undefined && (original === undefined || hashContent(original) !== previous.files[target])) {
       throw new Error(`Local template file was ${original === undefined ? 'deleted' : 'modified'}: ${target}. It will not be restored or overwritten.`)
     }
     if (original !== undefined && original !== content) throw new Error(`File already exists with different content: ${target}`)
@@ -73,14 +78,14 @@ export async function planInstallation(input: {
   await assertProjectPath(cwd, resolve(cwd, 'package.json'))
   const config = await planProjectConfig({
     cwd, configPath, providerEntry: resolve(cwd, root, meta.entry), exportNames: meta.exports,
-    providerFiles: input.item.files.map((file) => resolve(cwd, root, file.target.slice(meta.root.length + 1))),
+    providerFiles: selectedFiles.map((file) => resolve(cwd, root, file.target.slice(meta.root.length + 1))),
   })
   for (const file of config.files) {
     await assertProjectPath(cwd, file.path)
     const original = await readOptional(file.path)
     if (original !== file.content) files.push({ ...file, original })
   }
-  const dependencyPlan = await planDependencies({ cwd, item: input.item, cliVersion: input.cliVersion, packageManager: input.packageManager })
+  const dependencyPlan = await planDependencies({ cwd, item: input.item, cliVersion: input.cliVersion, packageManager: input.packageManager, withTests })
   if (dependencyPlan.content !== dependencyPlan.original) files.push({ path: dependencyPlan.path, content: dependencyPlan.content, original: dependencyPlan.original })
   const envPath = resolve(cwd, '.env.example')
   await assertProjectPath(cwd, envPath)
@@ -93,8 +98,8 @@ export async function planInstallation(input: {
     files.push({ path: envPath, original: envOriginal, content: `${prefix}${missing.map(([name, value]) => `${name}=${JSON.stringify(value)}`).join('\n')}\n` })
   }
   const installRequired = !previous?.dependenciesInstalled || dependencyPlan.dependencies.length > 0 || !dependencyPlan.installed
-  if (!previous || (previous.dependenciesInstalled && installRequired)) {
-    const nextLock = { formatVersion: 1, items: { ...lock.items, [input.item.name]: { version: meta.version, origin: input.origin, artifactHash, root, files: hashes, dependenciesInstalled: false } } }
+  if (!previous || previous.withTests !== withTests || (previous.dependenciesInstalled && installRequired)) {
+    const nextLock = { formatVersion: 1, items: { ...lock.items, [input.item.name]: { version: meta.version, origin: input.origin, artifactHash, root, files: hashes, withTests, dependenciesInstalled: previous?.dependenciesInstalled === true && !installRequired } } }
     files.push({ path: lockPath, original: lockText, content: `${JSON.stringify(nextLock, null, 2)}\n` })
   }
   const unique = new Set<string>()
@@ -107,7 +112,7 @@ export async function planInstallation(input: {
     template: { name: input.item.name, version: meta.version, origin: input.origin },
     files, dependencies: dependencyPlan.dependencies, packageManager: dependencyPlan.packageManager,
     noInstall: input.noInstall ?? false, alreadyInstalled: previous !== undefined && files.length === 0 && !installRequired,
-    installRequired,
+    installRequired, withTests,
   }
 }
 
@@ -137,6 +142,7 @@ export function describePlan(plan: InstallPlan) {
     dependencies: plan.dependencies,
     packageManager: plan.packageManager,
     noInstall: plan.noInstall,
+    withTests: plan.withTests,
     alreadyInstalled: plan.alreadyInstalled,
     installRequired: plan.installRequired,
   }
@@ -148,7 +154,7 @@ async function markDependenciesInstalled(plan: InstallPlan): Promise<void> {
   const content = await readFile(path, 'utf8')
   const lock = lockSchema.parse(JSON.parse(content))
   const item = lock.items[plan.template.name]
-  if (!item || item.version !== plan.template.version || item.origin !== plan.template.origin) {
+  if (!item || item.version !== plan.template.version || item.origin !== plan.template.origin || (item.withTests ?? false) !== plan.withTests) {
     throw new Error('Registry lock changed during dependency installation. Review it before retrying.')
   }
   const updated = { ...lock, items: { ...lock.items, [plan.template.name]: { ...item, dependenciesInstalled: true } } }

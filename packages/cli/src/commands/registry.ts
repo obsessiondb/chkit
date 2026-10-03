@@ -18,6 +18,7 @@ const OPTIONS = {
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
   'no-install': { type: 'boolean' },
+  'with-tests': { type: 'boolean' },
   'package-manager': { type: 'string' },
   output: { type: 'string' },
 } as const
@@ -30,7 +31,7 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
   }
   const action = command === 'add' ? 'add' : positionals.shift()
   const allowed: Record<string, string[]> = {
-    add: ['json', 'config', 'registry', 'path', 'dry-run', 'yes', 'no-install', 'package-manager'],
+    add: ['json', 'config', 'registry', 'path', 'dry-run', 'yes', 'no-install', 'with-tests', 'package-manager'],
     list: ['json', 'registry'], inspect: ['json', 'registry'], build: ['json', 'output'],
   }
   if (!action || !allowed[action]) throw new Error('Usage: chkit registry <list|inspect|build> [options]')
@@ -43,12 +44,14 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
     const plan = await planInstallation({
       cwd: process.cwd(), item, origin, cliVersion: CLI_VERSION,
       path: values.path, configPath: values.config, noInstall: values['no-install'],
+      withTests: values['with-tests'],
       packageManager: values['package-manager'] ? parsePackageManager(values['package-manager']) : undefined,
     })
     if (!values['dry-run']) await applyInstallation(plan)
     if (values.json) emitJson('add', { ok: true, dryRun: values['dry-run'] ?? false, ...describePlan(plan) })
     else {
       console.log(`${values['dry-run'] ? 'Planned' : plan.alreadyInstalled ? 'Already installed' : 'Added'} ${item.title} (${item.meta.chkit.version})`)
+      if (item.files.some((file) => file.role === 'test')) console.log(`  Fixture tests: ${plan.withTests ? 'included' : 'not selected; add --with-tests to include them'}`)
       for (const file of describePlan(plan).files) console.log(`  ${file.action}: ${file.path}`)
       if (plan.dependencies.length > 0) console.log(`  Dependencies: ${plan.dependencies.join(', ')}`)
       if (!values['dry-run']) {
@@ -95,6 +98,14 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
       console.log(`Install: ${installCommand(reference, values.registry)}`)
       console.log(`Requires chkit ${item.meta.chkit.chkit}; ingestion ${item.meta.chkit.ingest}; ClickHouse ${item.meta.chkit.clickhouse}`)
       console.log(`\nDependencies: ${item.dependencies.join(', ')}`)
+      if (item.devDependencies?.length) console.log(`Test dependencies (--with-tests): ${item.devDependencies.join(', ')}`)
+      const authentication = item.meta.chkit.authentication
+      if (authentication) {
+        console.log(`\nAuthentication: ${authentication.method}`)
+        console.log(`  Environment variables: ${authentication.env.join(', ')}`)
+        for (const [index, step] of authentication.setup.entries()) console.log(`  ${index + 1}. ${step}`)
+        console.log(`  Provider guide: ${authentication.documentation}`)
+      }
       console.log('\nEnvironment (.env.example defaults):')
       const environment = Object.entries(item.meta.chkit.env)
       if (environment.length === 0) console.log('  None declared')
@@ -102,10 +113,23 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
       console.log('\nResources:')
       for (const resource of item.meta.chkit.resources) {
         console.log(`  ${resource.name}: ${resource.description}`)
+        if (resource.title) console.log(`    Title: ${resource.title}`)
+        console.log(resource.table ? `    Default table: ${resource.table}` : '    Table: see source schema')
         console.log(`    Strategy: ${resource.strategy}; scopes: ${resource.scopes.join(', ') || 'none declared'}`)
+        for (const endpoint of resource.endpoints ?? []) console.log(`    ${endpoint.method} ${endpoint.path} (${endpoint.documentation})`)
+      }
+      if (item.meta.chkit.views?.length) {
+        console.log('\nDerived views:')
+        for (const view of item.meta.chkit.views) console.log(`  ${view.name} (from ${view.source}): ${view.description}`)
+      }
+      const sync = item.meta.chkit.sync
+      if (sync) {
+        console.log(`\nSync: ${sync.description}`)
+        console.log(`  Schedule: ${sync.schedule}`)
+        console.log(`  Deletions: ${sync.deletions}`)
       }
       console.log('\nFiles:')
-      for (const file of item.files) console.log(`  ${file.target}`)
+      for (const file of item.files) console.log(`  ${file.target}${file.role === 'test' ? ' (optional; --with-tests)' : ''}`)
     }
     return
   }
@@ -160,6 +184,7 @@ Browse apps with chkit registry list; review sync coverage with chkit registry i
   --config <path>            Project config (default: clickhouse.config.ts)
   --dry-run                  Show the installation plan without writing files
   --no-install               Write files without running the package manager
+  --with-tests               Include fixture tests and their development dependencies
   --package-manager <name>   bun, npm, pnpm, or yarn
   -y, --yes                  Use defaults; never overwrite conflicting files
   --json                     Machine-readable output

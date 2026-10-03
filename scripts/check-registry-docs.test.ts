@@ -39,6 +39,39 @@ test('requires exact resource names in the body, excluding metadata and longer n
   ])
 })
 
+test('accepts manifest-generated resource coverage only for the matching provider', () => {
+  const fixture = createFixture()
+  const source = '---\ntitle: Integrating ClickHouse with Example\ndescription: Sync Example records.\n---\n'
+  writeFileSync(fixture.guide, `${source}<RegistryReference name="example" section="resources" />\n`)
+  expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([])
+  writeFileSync(fixture.guide, `${source}<RegistryReference name="different-app" section="resources" />\n`)
+  expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
+    'integrations/example.mdx: document the registry resource `objects` in the guide body.',
+    'integrations/example.mdx: document the registry resource `records` in the guide body.',
+  ])
+})
+
+test('requires usable provider references and credential setup for official apps', () => {
+  const fixture = createFixture()
+  fixture.catalog.items = fixture.catalog.items.map((app) => ({
+    ...app,
+    meta: { chkit: {
+      ...app.meta.chkit,
+      authentication: undefined,
+      views: undefined,
+      sync: undefined,
+      resources: app.meta.chkit.resources.map((resource) => ({ ...resource, endpoints: [] })),
+    } },
+  }))
+  expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
+    'example: official apps must declare meta.chkit.authentication for their integration reference.',
+    'example: official apps must declare meta.chkit.views for their integration reference.',
+    'example: official apps must declare meta.chkit.sync for their integration reference.',
+    'example: resource objects needs a title, default table, and API endpoint references.',
+    'example: resource records needs a title, default table, and API endpoint references.',
+  ])
+})
+
 test('reports incorrect SEO metadata and malformed YAML with the guide path', () => {
   const fixture = createFixture()
   writeFileSync(fixture.guide, '---\ntitle: Example\ndescription: ""\n---\n`objects` and `records`\n')
@@ -107,8 +140,14 @@ function createFixture(extension = 'mdx') {
         root: 'src/integrations/example',
         entry: 'index.ts',
         exports: ['example'],
-        resources: ['objects', 'records'].map((name) => ({ name, description: name, scopes: [], strategy: 'full' })),
-        env: {},
+        resources: ['objects', 'records'].map((name) => ({
+          name, title: name, description: name, scopes: [], strategy: 'full', table: `example_${name}_raw`,
+          endpoints: [{ method: 'GET', path: `/${name}`, documentation: `https://example.com/api/${name}` }],
+        })),
+        authentication: { method: 'API token', env: ['EXAMPLE_API_TOKEN'], setup: ['Create a token in workspace settings.'], documentation: 'https://example.com/api/authentication' },
+        views: [],
+        sync: { description: 'Full reads.', schedule: 'Scheduled externally.', deletions: 'Previously observed rows remain.' },
+        env: { EXAMPLE_API_TOKEN: '' },
         documentation: 'https://chkit.obsessiondb.com/integrations/example/',
         logo: 'https://chkit.obsessiondb.com/logos/example.svg',
       } },

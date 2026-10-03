@@ -17,7 +17,7 @@ const manifestSchema = z.object({
   optionalDependencies: z.record(z.string(), z.string()).optional(),
 }).passthrough()
 
-export async function planDependencies(input: { cwd: string; item: RegistryItem; cliVersion: string; packageManager?: PackageManager }): Promise<{
+export async function planDependencies(input: { cwd: string; item: RegistryItem; cliVersion: string; packageManager?: PackageManager; withTests?: boolean }): Promise<{
   path: string; content: string; original?: string; dependencies: string[]; packageManager: PackageManager; installed: boolean
 }> {
   const path = resolve(input.cwd, 'package.json')
@@ -30,7 +30,7 @@ export async function planDependencies(input: { cwd: string; item: RegistryItem;
   const meta = input.item.meta.chkit
   const versionOptions = { includePrerelease: true }
   if (!satisfies(input.cliVersion, meta.chkit, versionOptions)) throw new Error(`Template requires chkit ${meta.chkit}; running ${input.cliVersion}. Use a compatible CLI version.`)
-  const desired = [...input.item.dependencies]
+  const desired = [...input.item.dependencies, ...(input.withTests ? input.item.devDependencies ?? [] : [])]
   const hasExplicitCli = desired.some((spec) => requireDependency(spec).name === 'chkit')
   if (!hasExplicitCli) desired.push(`chkit@${input.cliVersion}`)
   const devDependencies = { ...parsed.devDependencies }

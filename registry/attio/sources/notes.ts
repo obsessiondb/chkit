@@ -1,7 +1,9 @@
-import { IngestConfigError, type FetchContext } from '@chkit/plugin-ingest'
+import { IngestConfigError, rawTable, type FetchContext } from '@chkit/plugin-ingest'
 
 import { readCollection, toAttioRows, type AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
+
+export const attioNotesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_notes_raw` })
 
 export async function* readNotes(context: FetchContext, deps?: AttioClientDeps) {
   if (attioConfig.notesPageSize > 50) throw new IngestConfigError('Attio notesPageSize cannot exceed 50.')

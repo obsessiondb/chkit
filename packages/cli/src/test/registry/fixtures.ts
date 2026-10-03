@@ -10,7 +10,7 @@ export const FIXTURE_VERSION = '0.2.0-beta.8'
 export function fixtureTracker() {
   const roots: string[] = []
   return {
-    async create() {
+    async create(withTests = false) {
       const root = await mkdtemp(join(tmpdir(), 'chkit-registry-test-'))
       roots.push(root)
       const source = join(root, 'source')
@@ -28,6 +28,18 @@ export function fixtureTracker() {
   maxStreams: 1, maxFetches: 1, maxLoads: 1,
 }\n`)
       const item = sourceItem()
+      if (withTests) {
+        item.devDependencies = ['@types/bun@^1.3.0']
+        for (const file of ['fixtures.ts', 'fixture.test.ts']) {
+          item.files.push({ path: `fixture/tests/${file}`, target: `src/integrations/fixture/tests/${file}`, type: 'registry:file', role: 'test' })
+        }
+        await write(join(source, 'fixture/tests/fixtures.ts'), "export const expectedTable = 'fixture_raw'\n")
+        await write(join(source, 'fixture/tests/fixture.test.ts'), `import { expect, test } from 'bun:test'
+import { fixtureRaw } from '../schema.js'
+import { expectedTable } from './fixtures.js'
+test('installed fixture matches its schema', () => { expect(fixtureRaw.name).toBe(expectedTable) })
+`)
+      }
       await writeManifest(manifest, item)
       const built = await buildRegistry({ manifestPath: manifest, outputDir: output })
       const artifact = built.items[0]

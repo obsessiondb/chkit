@@ -3,13 +3,18 @@ import { dirname, resolve } from 'node:path'
 import * as ts from 'typescript'
 
 import { assertProjectPath, readOptional } from './files.js'
-import { CATALOG_SCHEMA_URL, hashContent, ITEM_SCHEMA_URL, MAX_ARTIFACT_BYTES, parseRegistryCatalog, parseRegistryItem, type RegistryItem } from './model.js'
+import { CATALOG_SCHEMA_URL, hashContent, ITEM_SCHEMA_URL, MAX_ARTIFACT_BYTES, parseRegistryCatalog, parseRegistryItem, type RegistryCatalog, type RegistryItem } from './model.js'
 
 export async function buildRegistry(input: { manifestPath: string; outputDir: string }): Promise<{ items: RegistryItem[]; files: string[] }> {
   const manifestPath = resolve(input.manifestPath)
-  const sourceRoot = dirname(manifestPath)
-  const outputDir = resolve(input.outputDir)
   const catalog = parseRegistryCatalog(JSON.parse(await readFile(manifestPath, 'utf8')))
+  return buildRegistryCatalog({ catalog, sourceRoot: dirname(manifestPath), outputDir: input.outputDir })
+}
+
+export async function buildRegistryCatalog(input: { catalog: RegistryCatalog; sourceRoot: string; outputDir: string }): Promise<{ items: RegistryItem[]; files: string[] }> {
+  const sourceRoot = resolve(input.sourceRoot)
+  const outputDir = resolve(input.outputDir)
+  const catalog = parseRegistryCatalog(input.catalog)
   const items: RegistryItem[] = []
   const outputs: Array<{ path: string; content: string }> = []
   for (const source of catalog.items) {

@@ -61,6 +61,87 @@ test.serial('entry projects preserve exports and relocate provider code consiste
   expect(await readFile(join(fixture.project, 'src/providers/demo/index.ts'), 'utf8')).toContain("'./schema.js'")
 })
 
+test.serial('test files and development dependencies are opt-in and can be added to an existing install', async () => {
+  const fixture = await fixtures.create(true)
+  const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, path: 'src/providers/demo', noInstall: true }
+  const defaultPlan = await planInstallation(input)
+  expect(describePlan(defaultPlan).withTests).toBe(false)
+  expect(defaultPlan.files.some((file) => file.path.includes('/tests/'))).toBe(false)
+  expect(defaultPlan.dependencies).not.toContain('@types/bun@^1.3.0')
+  await applyInstallation(defaultPlan)
+  const packagePath = join(fixture.project, 'package.json')
+  expect(JSON.parse(await readFile(packagePath, 'utf8')).devDependencies).not.toHaveProperty('@types/bun')
+
+  const testPlan = await planInstallation({ ...input, withTests: true })
+  expect(describePlan(testPlan).withTests).toBe(true)
+  expect(testPlan.files.filter((file) => file.path.includes('/tests/'))).toHaveLength(2)
+  expect(testPlan.dependencies).toEqual(['@types/bun@^1.3.0'])
+  await applyInstallation(testPlan)
+  expect(JSON.parse(await readFile(packagePath, 'utf8')).devDependencies['@types/bun']).toBe('^1.3.0')
+  expect(await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')).not.toContain('tests/')
+  const lock = JSON.parse(await readFile(join(fixture.project, '.chkit/registry-lock.json'), 'utf8'))
+  expect(lock.items.fixture.withTests).toBe(true)
+  expect(Object.keys(lock.items.fixture.files)).toContain('src/providers/demo/tests/fixture.test.ts')
+  const repeated = await planInstallation(input)
+  expect(repeated.withTests).toBe(true)
+  expect(repeated.files).toEqual([])
+
+  const child = Bun.spawn({ cmd: [process.execPath, 'test', 'src/providers/demo/tests'], cwd: fixture.project, stdout: 'pipe', stderr: 'pipe' })
+  const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+  expect({ exitCode, stdout, stderr }).toMatchObject({ exitCode: 0 })
+
+  const testPath = join(fixture.project, 'src/providers/demo/tests/fixture.test.ts')
+  await write(testPath, 'a local test edit')
+  await expect(planInstallation(input)).rejects.toThrow('modified')
+  expect(await readFile(testPath, 'utf8')).toBe('a local test edit')
+})
+
+test.serial('test dependency conflicts fail before any writes only when tests are selected', async () => {
+  const fixture = await fixtures.create(true)
+  const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION }
+  const manifest = JSON.stringify({ devDependencies: { '@types/bun': '^99.0.0' } })
+  await write(join(fixture.project, 'package.json'), manifest)
+  expect((await planInstallation(input)).withTests).toBe(false)
+  await expect(planInstallation({ ...input, withTests: true })).rejects.toThrow('Dependency conflict: @types/bun')
+  expect(await readdir(fixture.project)).toEqual(['package.json'])
+  expect(await readFile(join(fixture.project, 'package.json'), 'utf8')).toBe(manifest)
+})
+
+test.serial('opting into tests retries dependency setup and then remains an idempotent install', async () => {
+  const fixture = await fixtures.create(true)
+  const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, packageManager: 'bun' as const }
+  await applyInstallation(await planInstallation(input), { install: installFixtureDependencies })
+  expect((await planInstallation(input)).alreadyInstalled).toBe(true)
+  const tests = await planInstallation({ ...input, withTests: true })
+  expect(tests.installRequired).toBe(true)
+  await expect(applyInstallation(tests, { install: async () => { throw new Error('test dependency installation failed') } })).rejects.toThrow('test dependency installation failed')
+  const retry = await planInstallation(input)
+  expect(retry.withTests).toBe(true)
+  expect(retry.installRequired).toBe(true)
+  expect(retry.files).toEqual([])
+  let installs = 0
+  await applyInstallation(retry, { install: async (cwd) => {
+    installs += 1
+    await write(join(cwd, 'node_modules/@types/bun/package.json'), JSON.stringify({ name: '@types/bun', version: '1.3.0' }))
+  } })
+  expect(installs).toBe(1)
+  expect((await planInstallation(input)).alreadyInstalled).toBe(true)
+  const lock = JSON.parse(await readFile(join(fixture.project, '.chkit/registry-lock.json'), 'utf8'))
+  expect(lock.items.fixture).toMatchObject({ withTests: true, dependenciesInstalled: true })
+})
+
+test.serial('test files are protected from broad schema globs and conflicting local files', async () => {
+  const fixture = await fixtures.create(true)
+  const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, withTests: true }
+  await write(join(fixture.project, 'clickhouse.config.ts'), `export default { schema: './src/**/tests/**/*.ts' }`)
+  await expect(planInstallation(input)).rejects.toThrow('provider internals')
+  await rm(join(fixture.project, 'clickhouse.config.ts'))
+  const testPath = join(fixture.project, 'src/integrations/fixture/tests/fixture.test.ts')
+  await write(testPath, 'existing user test')
+  await expect(planInstallation(input)).rejects.toThrow('different content')
+  expect(await readFile(testPath, 'utf8')).toBe('existing user test')
+})
+
 test.serial('reinstall preserves local modifications and intentional file deletion', async () => {
   const fixture = await fixtures.create()
   const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, noInstall: true }

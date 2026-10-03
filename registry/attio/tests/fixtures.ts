@@ -1,4 +1,4 @@
-import type { AttioClientDeps } from '../attio/client.js'
+import type { AttioClientDeps } from '../client.js'
 
 export const peopleObject = { id: { workspace_id: 'workspace-1', object_id: 'object-people' }, api_slug: 'people' }
 export const customObject = { id: { workspace_id: 'workspace-1', object_id: 'object-custom' }, api_slug: 'subscriptions' }

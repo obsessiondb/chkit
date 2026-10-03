@@ -4,8 +4,8 @@
   "type": "module",
   "version": "0.0.2",
   "scripts": {
-    "dev": "astro dev",
-    "start": "astro dev",
+    "dev": "bun ../../scripts/build-registry.ts && astro dev",
+    "start": "bun run dev",
     "build": "bun ../../scripts/check-registry-docs.ts && bun ../../scripts/build-registry.ts && astro build",
     "test": "bun test ../../scripts/check-registry-docs.test.ts",
     "preview": "astro preview",

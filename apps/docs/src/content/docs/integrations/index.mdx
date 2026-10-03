@@ -24,16 +24,16 @@ Browse the same registry from the CLI without a ClickHouse connection:
 bunx chkit registry list
 bunx chkit registry inspect attio
 bunx chkit add attio --dry-run
-bunx chkit add attio
+bunx chkit add attio --with-tests
 ```
 
-`registry list --json` exposes resource coverage and documentation links for scripts and agents. `registry inspect` includes API scopes, dependencies, credentials to configure, and the files to install.
+`registry list --json` exposes resource coverage and documentation links for scripts and agents. `registry inspect` includes API endpoints and scopes, destination tables, derived views, credential setup instructions, sync limitations, dependencies, and the files to install. `--with-tests` copies the app's portable fixture tests alongside its source.
 
 Installation adds source files, registers schemas and ingestion, and installs dependencies. Configure the app credentials and ClickHouse connection, then follow the integration guide to generate and review migrations before the first sync. Schedule recurring runs through cron, CI, or an existing scheduler.
 
 ## What each integration guide covers
 
-- **Setup:** requirements, authentication scopes, installation, schema migrations, and the first run.
+- **Setup:** requirements, where to create source-system credentials, authentication scopes, installation, schema migrations, and the first run.
 - **Records:** every included resource, its destination table, stored fields, and query views.
 - **Sync behavior:** discovery, pagination, retries, repeat runs, and failed runs.
 - **Coverage limits:** unsupported resources, deletion behavior, and permissions.

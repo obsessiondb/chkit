@@ -35,7 +35,7 @@ Reads the registry catalog and lists its current apps with titles, versions, res
 
 Loads and validates a built item. A bare name resolves to `<name>.json`; a pinned name resolves to `<name>/<version>.json` beside the configured catalog. URLs and local JSON paths identify an item directly.
 
-Inspection exposes the version, copied files, dependency requirements, environment examples, resource coverage, scopes, and compatibility metadata. When declared, documentation and logo URLs are included. Human output labels environment values as `.env.example` defaults, shows each resource's scopes and strategy, and prints an install command preserving the selected registry. It does not install files or execute the provider.
+Inspection exposes the version, copied files, optional test set, dependency requirements, environment examples, resource coverage, scopes, and compatibility metadata. Rich provider metadata also includes credential setup steps, destination tables, API references, derived views, schedules, and deletion behavior. When declared, documentation and logo URLs are included. Human output labels environment values as `.env.example` defaults, shows each resource's scopes and strategy, and prints an install command preserving the selected registry. It does not install files or execute the provider.
 
 ### Build
 
@@ -60,7 +60,7 @@ chkit registry list
 **Inspect a pinned version:**
 
 ```sh
-chkit registry inspect attio@0.1.1
+chkit registry inspect attio@0.1.2
 ```
 
 **Build a custom registry:**
@@ -78,7 +78,7 @@ chkit registry list --registry ./registry-output --json
 **Inspect an item by URL:**
 
 ```sh
-chkit registry inspect https://example.com/r/attio/0.1.1.json
+chkit registry inspect https://example.com/r/attio/0.1.2.json
 ```
 
 ## Exit codes
@@ -90,7 +90,11 @@ chkit registry inspect https://example.com/r/attio/0.1.1.json
 
 ## JSON output
 
-**List:**
+**List:** filter the full resource metadata to show app identity and coverage:
+
+```sh
+chkit registry list --json | jq '{command, schemaVersion, ok, action, items: [.items[] | {name, title, version, resourceCount, documentation}]}'
+```
 
 ```json
 {
@@ -102,101 +106,15 @@ chkit registry inspect https://example.com/r/attio/0.1.1.json
     {
       "name": "attio",
       "title": "Attio",
-      "description": "Editable Attio CRM schemas, raw data readers, typed views, and full-read ingestion pipelines.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "resourceCount": 9,
-      "resources": [
-        {
-          "name": "objects",
-          "description": "Standard and custom object metadata",
-          "scopes": [
-            "object_configuration:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "object_attributes",
-          "description": "Object attribute definitions",
-          "scopes": [
-            "object_configuration:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "records",
-          "description": "Current records for all selected objects, including custom attributes",
-          "scopes": [
-            "object_configuration:read",
-            "record_permission:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "lists",
-          "description": "List metadata",
-          "scopes": [
-            "list_configuration:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "list_attributes",
-          "description": "List attribute definitions",
-          "scopes": [
-            "list_configuration:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "entries",
-          "description": "List entries and their attribute values",
-          "scopes": [
-            "list_configuration:read",
-            "list_entry:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "notes",
-          "description": "Plaintext and Markdown notes",
-          "scopes": [
-            "note:read",
-            "object_configuration:read",
-            "record_permission:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "tasks",
-          "description": "Tasks and their links",
-          "scopes": [
-            "task:read",
-            "object_configuration:read",
-            "record_permission:read",
-            "user_management:read"
-          ],
-          "strategy": "full"
-        },
-        {
-          "name": "members",
-          "description": "Workspace members and actor identities",
-          "scopes": [
-            "user_management:read"
-          ],
-          "strategy": "full"
-        }
-      ],
-      "strategies": [
-        "full"
-      ],
-      "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
-      "logo": "https://chkit.obsessiondb.com/logos/attio.svg"
+      "documentation": "https://chkit.obsessiondb.com/integrations/attio/"
     }
   ]
 }
 ```
 
-The `resources` array preserves the manifest's resource descriptions, scopes, and strategies. `documentation` and `logo` are omitted for older or custom items without those optional fields.
+The `resources` array preserves the manifest's resource descriptions, scopes, strategies, and optional titles, destination tables, and API endpoints. `inspect --json` includes provider authentication, derived views, and sync behavior under `item.meta.chkit` when declared. `documentation` and `logo` are omitted for older or custom items without those optional fields.
 
 **Inspect:** returns `action: "inspect"`, the resolved `origin`, and the full built `item`, including source contents and `meta.chkit`. To extract only the item identity:
 
@@ -212,7 +130,7 @@ chkit registry inspect attio --json | jq '{command, schemaVersion, ok, action, o
   "action": "inspect",
   "origin": "https://chkit.obsessiondb.com/r/attio.json",
   "name": "attio",
-  "version": "0.1.1"
+  "version": "0.1.2"
 }
 ```
 
@@ -224,9 +142,9 @@ chkit registry inspect attio --json | jq '{command, schemaVersion, ok, action, o
   "schemaVersion": 1,
   "ok": true,
   "action": "build",
-  "items": ["attio@0.1.1"],
+  "items": ["attio@0.1.2"],
   "files": [
-    "/project/registry-output/attio/0.1.1.json",
+    "/project/registry-output/attio/0.1.2.json",
     "/project/registry-output/attio.json",
     "/project/registry-output/registry.json"
   ]

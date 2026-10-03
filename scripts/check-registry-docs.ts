@@ -3,7 +3,8 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { YAML } from 'bun'
-import { type RegistryCatalog, parseRegistryCatalog } from '../packages/cli/src/registry/model.js'
+import type { RegistryCatalog, RegistryItem } from '../packages/cli/src/registry/model.js'
+import { readRegistrySourceCatalog } from './registry-catalog.js'
 
 interface DocsPaths {
   docsDir: string
@@ -14,7 +15,7 @@ interface DocsPaths {
 // Each official app needs a canonical guide, SEO metadata, documented resources, and local logo assets.
 if (import.meta.main) {
   const repoDir = fileURLToPath(new URL('../', import.meta.url))
-  const catalog = parseRegistryCatalog(JSON.parse(readFileSync(join(repoDir, 'registry/registry.json'), 'utf8')))
+  const catalog = await readRegistrySourceCatalog()
   const errors = checkRegistryDocs(catalog, {
     docsDir: join(repoDir, 'apps/docs/src/content/docs'),
     publicDir: join(repoDir, 'apps/docs/public'),
@@ -31,6 +32,7 @@ export function checkRegistryDocs(catalog: RegistryCatalog, paths: DocsPaths): s
   return catalog.items.flatMap((item) => {
     const errors: string[] = []
     const metadata = item.meta.chkit
+    errors.push(...checkReferenceMetadata(item))
     const canonicalUrl = new URL(`/integrations/${item.name}/`, catalog.homepage).href
     if (metadata.documentation !== canonicalUrl) {
       errors.push(`${item.name}: meta.chkit.documentation must be ${canonicalUrl}.`)
@@ -42,7 +44,7 @@ export function checkRegistryDocs(catalog: RegistryCatalog, paths: DocsPaths): s
       errors.push(`${item.name}: expected one guide at integrations/${item.name}.md or .mdx; found ${guides.length}.`)
     } else {
       const guide = guides[0]
-      if (guide) errors.push(...checkGuide(guide, item.title, metadata.resources.map((resource) => resource.name), paths.docsDir))
+      if (guide) errors.push(...checkGuide(guide, item, paths.docsDir))
     }
 
     if (metadata.logo) {
@@ -57,7 +59,21 @@ export function checkRegistryDocs(catalog: RegistryCatalog, paths: DocsPaths): s
   })
 }
 
-function checkGuide(path: string, appTitle: string, resources: string[], docsDir: string): string[] {
+function checkReferenceMetadata(item: RegistryItem): string[] {
+  const metadata = item.meta.chkit
+  const errors: string[] = []
+  for (const field of ['authentication', 'views', 'sync'] as const) {
+    if (metadata[field] === undefined) errors.push(`${item.name}: official apps must declare meta.chkit.${field} for their integration reference.`)
+  }
+  for (const resource of metadata.resources) {
+    if (!resource.title || !resource.table || !resource.endpoints?.length) {
+      errors.push(`${item.name}: resource ${resource.name} needs a title, default table, and API endpoint references.`)
+    }
+  }
+  return errors
+}
+
+function checkGuide(path: string, item: RegistryItem, docsDir: string): string[] {
   const label = relative(docsDir, path)
   const source = readFileSync(path, 'utf8')
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source)
@@ -74,7 +90,7 @@ function checkGuide(path: string, appTitle: string, resources: string[], docsDir
   }
 
   const errors: string[] = []
-  const expectedTitle = `Integrating ClickHouse with ${appTitle}`
+  const expectedTitle = `Integrating ClickHouse with ${item.title}`
   if (!('title' in frontmatter) || frontmatter.title !== expectedTitle) {
     errors.push(`${label}: frontmatter title must be "${expectedTitle}".`)
   }
@@ -83,8 +99,9 @@ function checkGuide(path: string, appTitle: string, resources: string[], docsDir
   }
 
   const body = source.slice(match[0].length)
-  for (const resource of resources) {
-    if (!body.includes(`\`${resource}\``)) {
+  const generatedResources = body.includes(`<RegistryReference name="${item.name}" section="resources" />`)
+  for (const { name: resource } of item.meta.chkit.resources) {
+    if (!generatedResources && !body.includes(`\`${resource}\``)) {
       errors.push(`${label}: document the registry resource \`${resource}\` in the guide body.`)
     }
   }

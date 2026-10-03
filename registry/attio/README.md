@@ -6,6 +6,15 @@ This is your source code: edit the API readers, schemas, views, and `pipeline.ts
 
 Set `ATTIO_API_TOKEN` in your execution environment and configure the project's direct ClickHouse connection. A single-workspace API token works; an OAuth access token also works, but this template does not implement OAuth issuance or refresh. See [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
 
+### Create an Attio API key
+
+1. As a workspace admin, open the workspace-name dropdown in Attio and select **Workspace settings**.
+2. Open **Developers**, select **+ New access token**, and name the token, for example **chkit ClickHouse**.
+3. Grant the read scopes in the resource table below for the streams to run.
+4. Click the token on the Developers page to copy it. Set `ATTIO_API_TOKEN` in the project's `.env` file or the scheduler's secret environment.
+
+See Attio's [API key instructions](https://attio.com/help/reference/apps/generating-an-api-key). Use a single-workspace API token for this setup; OAuth token creation and refresh require a separate application flow.
+
 Bun loads a project `.env` automatically. With Node or a scheduler, explicitly supply environment variables using that runtime's environment-loading mechanism. `.env.example` only lists required variable names; it does not load values. Schema imports, `check`, and `ingest list` do not read the token or make API requests.
 
 Review `config.ts` before the first migration. The default target database is `default`; raw table and view names begin with `attio_`. Use a stable, non-secret `sourceId` for this source instance. For another installation, give it a distinct source ID and table prefix or database before exporting its pipeline. Changing these after ingestion changes stream/storage identities and requires a deliberate migration.
@@ -45,6 +54,8 @@ API references: [attributes](https://docs.attio.com/rest-api/endpoint-reference/
 
 ## Customize the source
 
+Each file in `sources/` contains one resource's raw table and reader, such as `sources/notes.ts`, `sources/tasks.ts`, or `sources/members.ts`. `sources/records.ts` also defines the people, company, and deal views. `client.ts` shares HTTP and pagination logic; `pipeline.ts` composes the nine streams.
+
 Remove an entry from `pipeline.ts` to stop collecting that resource. Keep its schema export in `index.ts` to preserve already collected data. Removing schema exports can generate destructive migration operations, which should be reviewed. After removing a resource's stream and schema export, its local files can also be deleted.
 
 Set `objects` and `lists` in `config.ts` to arrays of API slugs or IDs to restrict discovery. `undefined` means all accessible parents; `[]` means none. Unknown configured parents fail visibly. Object selection affects objects, object attributes, and records. List selection affects lists, list attributes, and entries. Notes, tasks, and members remain workspace-wide; customize their readers separately if narrower scope is needed.
@@ -68,7 +79,7 @@ SELECT id, raw.data, _chkit_ingested_at
 FROM default.attio_records_raw FINAL;
 ```
 
-`records/schema.ts` defines three ordinary `FINAL` views:
+`sources/records.ts` defines three ordinary `FINAL` views:
 
 | View | Editable projection |
 | --- | --- |
@@ -79,6 +90,16 @@ FROM default.attio_records_raw FINAL;
 All include the stable row `id`, `source_id`, `workspace_id`, `object_id`, `record_id`, nullable `created_at`, `web_url`, and `_chkit_ingested_at`. Missing optional strings yield empty strings, absent arrays yield empty arrays, and absent/unparseable dates or deal amounts yield null. A workspace without deals simply has an empty deals view. Edit these SQL projections to expose your custom fields, then generate and review a migration. The original payload remains available for further projections.
 
 These views show the latest **observed** version per ID, not a guaranteed snapshot of Attio now. Full reads update returned IDs without clearing tables. Deleted, merged, inaccessible, or deselected entities remain until you implement reconciliation. Data is published batch by batch, so a failed run may have loaded some updates. Offset pagination over changing source data can miss or duplicate entities within a scan. There is no universal modification cursor, atomic snapshot replacement, source-version ordering, or complete change history in this template.
+
+## Fixture tests
+
+Install the optional test suite with `bunx chkit add attio --with-tests`, then run:
+
+```sh
+bun test src/integrations/attio/tests/attio.test.ts
+```
+
+For a custom install path, point the command at that folder's `tests/attio.test.ts`. Tests mock Attio HTTP responses and use in-memory ingestion destinations and journals. They require Bun but no Attio credentials or ClickHouse server. The fixture suite checks resource coverage, pagination, preserved custom fields, repeat runs, cancellation, and error handling. Adjust the fixtures and expectations when customizing the source.
 
 ## Smoke check
 

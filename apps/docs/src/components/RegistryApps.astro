@@ -16,8 +16,9 @@ import { registryApps } from '../data/registry';
 				</div>
 				<p class="app-description">{app.description}</p>
 				<ul class="app-resources" aria-label={`${app.title} resources`}>
-					{app.resources.map((resource) => <li title={resource.description}>{resource.name.replaceAll('_', ' ')}</li>)}
+					{app.resources.map((resource) => <li title={resource.description}>{resource.title ?? resource.name.replaceAll('_', ' ')}</li>)}
 				</ul>
+				<p class="app-description">{app.authentication?.method}{app.authentication && ' · '}{app.views?.length ?? 0} derived views</p>
 				<div class="app-install"><code>bunx chkit add {app.name}</code></div>
 				<a class="app-guide" href={app.href}>Integrating ClickHouse with {app.title} <span aria-hidden="true">→</span></a>
 			</article>
