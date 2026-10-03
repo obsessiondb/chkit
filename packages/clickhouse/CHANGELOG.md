@@ -1,5 +1,33 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.9
+
+### Patch Changes
+
+- 2f53550: Support `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns with a new `defaultKind` column field. `default` holds the value or `fn:` expression for every kind, and `EPHEMERAL` may omit it. SQL rendering, `pull`, snapshots, and drift keep the kind; validation reports `column_expression_required` and `column_default_kind_invalid`.
+
+  - `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning that stored values are not rewritten, and removed expressions emit `REMOVE DEFAULT`/`REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail `generate` with `column_kind_change_unsupported`.
+  - Codegen emits `Row` (`SELECT *`), `RowExplicit` (all readable columns), and `RowInsert` (all insertable columns) for these tables; ingest helpers take `RowInsert`.
+  - Inserts into tables with `EPHEMERAL` columns name their columns: generated ingest helpers pass `columns`, which `@chkit/clickhouse` `insert()` and the ObsessionDB remote executor send, and the `@chkit/plugin-ingest` destination does the same.
+  - Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live column kinds first: a copy is blocked only when the target has both `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column, and a missing target fails with "does not exist or is not visible yet".
+  - `drift` and `check` compare defaults token by token. Write expressions in the canonical form ClickHouse stores, such as `CAST(x, 'String')`, to avoid drift.
+  - Fix string defaults containing backslashes: `C:\temp` now renders as `DEFAULT 'C:\\temp'`.
+
+- 46cbf88: `chkit migrate` now waits after each view and materialized view statement until the object appears in `system.tables` (or, after a drop, disappears from it), as it already did for tables and dictionaries (#231). Before, the next statement could run before the previous view statement had propagated on managed ClickHouse environments (e.g. ObsessionDB), so a view created right after the view it reads could still fail with `Unknown table expression identifier`. The wait now escapes object names, so a table, view, dictionary or column whose name contains a quote or a backslash no longer fails `migrate` with a syntax error after its statement has run. `migrate` also reads operation keys whose names contain spaces; before, such a name shifted the next operation onto its statement, so `migrate` waited for an object that did not exist yet. The wait now reads names that contain `:` in full. Before, it cut them at the `:`, so `migrate` failed after the statement on such a table, dictionary or column had run, and a drop of such an object did not wait at all.
+- b59fc83: Quote and escape identifiers in generated SQL. Database and object names that are not plain identifiers (e.g. containing `.`, `-` or spaces) are now backtick-quoted, and backticks or backslashes inside any column, index, projection, attribute or object name are escaped. Plain names render exactly as before. `ON CLUSTER` injection understands quoted object references, and validation rejects empty names and names containing control characters (`invalid_identifier`).
+
+  Names that need quoting now also round-trip through introspection and drift: key entries that name a declared column are never split on commas, the `CREATE TABLE` parser ignores parens and commas inside quoted names and unescapes projection names, and drift compares key clauses by their unescaped identifiers.
+
+- Updated dependencies [d072fe3]
+- Updated dependencies [2f53550]
+- Updated dependencies [98e3667]
+- Updated dependencies [96a18c6]
+- Updated dependencies [46cbf88]
+- Updated dependencies [b59fc83]
+- Updated dependencies [c49f0a9]
+- Updated dependencies [672d67e]
+  - @chkit/core@0.2.0-beta.9
+
 ## 0.2.0-beta.8
 
 ### Patch Changes
