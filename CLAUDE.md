@@ -60,32 +60,38 @@ bun run lint         # lint all packages
 
 ## Testing
 
-### E2E Tests
+`bun run test` runs every package's tests, unit and e2e together, through Turbo. Each package's `test` task depends on the root `infra:up` task, which starts the test stack in `test/infra/docker-compose.yml` (ClickHouse 26.3 and a Redpanda Kafka broker) and waits until it is healthy. The stack stays up between runs; `bun run infra:down` removes it. Docker is required.
 
-E2E tests run against a live ClickHouse instance, either local ClickHouse or ObsessionDB. They require these environment variables (hard-fail, never skip):
+### Test target
+
+Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; then `infra:up` starts nothing and the tests run against that server:
 
 - `CLICKHOUSE_HOST` or `CLICKHOUSE_URL` — ClickHouse endpoint
-- `CLICKHOUSE_PASSWORD` — authentication
+- `CLICKHOUSE_PASSWORD` — required for a remote target
 - `CLICKHOUSE_DB` — target database (optional, defaults to `default`)
 
-Shared ClickHouse test utilities (env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones.
+`bun run test:obsessiondb` runs the suite against ObsessionDB (set the variables above, e.g. through Doppler). It sets `CHKIT_E2E_TARGET=obsessiondb` and leaves out the Kafka suite, whose broker only exists in the local stack.
+
+Shared ClickHouse test utilities (target env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones. The Kafka suite is the private workspace `test/kafka` (`@chkit/kafka-e2e`). plugin-backfill's `test` script seeds its chunking fixtures before running.
 
 Key conventions:
 
-- **Hard-fail on missing env** — never `test.skip()` or silently pass when credentials are absent.
+- **Never skip** — an unreachable server fails the test; never `test.skip()` or silently pass.
 - **State-based polling** — use `waitForTable()`, `waitForView()`, `waitForColumn()` instead of blind retry loops. ObsessionDB DDL is eventually consistent.
 - **Unique naming** — every test run uses `createPrefix()` / `createJournalTableName()` with timestamps and random suffixes to avoid collisions.
 - **Structured diagnostics** — use `formatTestDiagnostic()` for CLI failure messages.
 
 ### CI
 
-CI runs **verify** on every pull request and push to `main`, using a disposable ClickHouse 26.3 service container with local test credentials. It seeds the chunking fixtures and executes `turbo run typecheck lint test build`, so fork PRs do not need database secrets.
+Turbo orchestrates; GitHub Actions only checks out, installs and calls one script. Keep it that way: no version matrices and no extra jobs.
 
-`test/ci/clickhouse.xml` configures a one-node `cluster` for the backfill status queries and a short query-log flush interval. The separate replicated clusters in `test/cluster/` remain opt-in.
+**verify** runs on every pull request and push to `main`: `bun run verify`, the same command as locally (workspace deps check, `turbo run typecheck lint test build`, packed deps check). Pull requests also get a non-blocking Fallow report.
 
-After **verify** passes on a push to `main`, **obsessiondb** seeds the same fixtures and runs `turbo run test` against the managed test database using the existing `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
+`test/infra/clickhouse.xml` configures a one-node `cluster` for the backfill status queries, a short query-log flush interval, and Kafka consumers that read topics from the start. The replicated clusters in `test/cluster/` remain opt-in.
 
-The **obsessiondb** job also sets `CHKIT_E2E_TARGET=obsessiondb`. A test may skip itself on that target only for a known ObsessionDB limitation with a linked issue, and must still run in **verify**.
+After **verify** passes on a push to `main`, **obsessiondb** runs `bun run test:obsessiondb` against the managed test database using the `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
+
+A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known ObsessionDB limitation with a linked issue, and must still run in **verify**.
 
 `turbo.json` passes through `CHKIT_E2E_TARGET`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
 
@@ -102,7 +108,7 @@ Versions are semver; all 10 published packages share one version (a changesets `
 
 Publish refuses a release commit that still has unreleased changesets (changesets merged after prepare), because they would ship without a changelog entry. Re-run prepare to cut the next version. Every step is idempotent: to retry a failed release, re-run its workflow run. A manual dispatch of publish (with an optional `dry_run`) publishes whatever version `main` is at.
 
-Publishing authenticates via **OIDC Trusted Publishing**, so the job runs on a GitHub-hosted runner (`ubuntu-24.04`): Trusted Publishing does not support self-hosted runners, which is how Blacksmith runners register. `bun publish` can't do OIDC, so packages publish with `npm publish --provenance`. `npm publish` copies `workspace:*` into the tarball verbatim, so the script resolves every internal dependency to the current workspace version first (`scripts/workspace-deps.ts`), and `check:packed-deps` packs with `npm pack` after the same resolution. The beta `latest` sync (`npm dist-tag add`) also authenticates via OIDC, which needs npm >= 11.21.0, so the workflow pins `npm@^11.21.0` (npm 12 needs a newer Node than the pinned 22.14.0). No npm token is stored anywhere. The quality gates run against a disposable ClickHouse container seeded like **verify**, not the shared ObsessionDB test database.
+Publishing authenticates via **OIDC Trusted Publishing**, so the job runs on a GitHub-hosted runner (`ubuntu-24.04`): Trusted Publishing does not support self-hosted runners, which is how Blacksmith runners register. `bun publish` can't do OIDC, so packages publish with `npm publish --provenance`. `npm publish` copies `workspace:*` into the tarball verbatim, so the script resolves every internal dependency to the current workspace version first (`scripts/workspace-deps.ts`), and `check:packed-deps` packs with `npm pack` after the same resolution. The beta `latest` sync (`npm dist-tag add`) also authenticates via OIDC, which needs npm >= 11.21.0, so the workflow pins `npm@^11.21.0` (npm 12 needs a newer Node than the pinned 22.14.0). No npm token is stored anywhere. The quality gates run `bun run verify` against the local test stack, not the shared ObsessionDB test database.
 
 **One-time setup** (out of band): on each of the 10 packages, add a Trusted Publisher (GitHub Actions → `obsessiondb/chkit` → `release-publish.yml` → environment `release`) and enable **Allow npm dist-tag** on it (off by default; without it a beta release publishes, then fails moving `latest`, and needs a re-run). Create the `release` GitHub environment with deployment branches limited to `main`. Install the pkg.pr.new GitHub App for previews.
 

@@ -14,20 +14,25 @@ import { table } from './model.js'
 import { planDiff } from './planner.js'
 import { renderAlterAddColumn, renderAlterDropColumn, toCreateSQL } from './sql.js'
 
-function getRequiredEnv() {
+// Same target rules as getLiveEnv in @chkit/clickhouse/e2e-testkit, which core
+// cannot depend on: without CLICKHOUSE_URL or CLICKHOUSE_HOST, use the local
+// test stack (test/infra).
+function getLiveEnv() {
   const host = process.env.CLICKHOUSE_HOST?.trim()
   const url = process.env.CLICKHOUSE_URL?.trim() || (host ? `https://${host}` : '')
+  if (!url) {
+    return { url: 'http://localhost:8123', username: 'default', password: 'chkit-ci', database: 'default' }
+  }
   const username = process.env.CLICKHOUSE_USER?.trim() || 'default'
   const password = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
   const database = process.env.CLICKHOUSE_DB?.trim() || 'default'
 
-  if (!url) throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
   if (!password) throw new Error('Missing CLICKHOUSE_PASSWORD')
 
   return { url, username, password, database }
 }
 
-const env = getRequiredEnv()
+const env = getLiveEnv()
 const client = createClient({
   url: env.url,
   username: env.username,

@@ -13,7 +13,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   waitForColumn,
@@ -430,7 +430,7 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
 })
 
 async function createProject(label: string): Promise<Project> {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
   const dir = await mkdtemp(join(tmpdir(), `chkit-${label}-e2e-`))
   const migrationsDir = join(dir, 'chkit/migrations')
   const metaDir = join(dir, 'chkit/meta')

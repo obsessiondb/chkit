@@ -9,7 +9,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
@@ -46,7 +46,7 @@ async function createFixture(input: {
   const migrationsDir = join(outDir, 'migrations')
   const metaDir = join(outDir, 'meta')
 
-  const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+  const { clickhouseUrl, clickhouseUser, clickhousePassword } = getLiveEnv()
 
   await writeFile(schemaPath, renderBaseSchema(input.database, input.usersTableName), 'utf8')
   await writeFile(
@@ -59,7 +59,7 @@ async function createFixture(input: {
 }
 
 describe('@chkit/cli drift depth env e2e', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
 
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',

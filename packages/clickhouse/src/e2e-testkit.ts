@@ -1,7 +1,8 @@
 /**
  * Shared E2E test utilities for live ClickHouse tests.
  *
- * Hard-fails on missing env — never skips.
+ * Targets the local test stack (test/infra) unless CLICKHOUSE_* points elsewhere.
+ * Never skips: an unreachable server fails the test.
  * Uses ClickHouseExecutor so any package that depends on @chkit/clickhouse can import this.
  */
 
@@ -26,21 +27,28 @@ export interface LiveEnv {
   clickhouseDatabase: string
 }
 
+/** The ClickHouse in test/infra/docker-compose.yml, which `infra:up` starts. */
+export const LOCAL_STACK_ENV: LiveEnv = {
+  clickhouseUrl: 'http://localhost:8123',
+  clickhouseUser: 'default',
+  clickhousePassword: 'chkit-ci',
+  clickhouseDatabase: 'default',
+}
+
 /**
- * Reads and validates required ClickHouse env vars.
- * Throws immediately if anything is missing — tests must not silently skip.
+ * Reads the ClickHouse target from env vars. Without CLICKHOUSE_URL or
+ * CLICKHOUSE_HOST, tests run against the local test stack. A remote target
+ * must also set CLICKHOUSE_PASSWORD.
  */
-export function getRequiredEnv(): LiveEnv {
+export function getLiveEnv(): LiveEnv {
   const clickhouseHost = process.env.CLICKHOUSE_HOST?.trim()
   const clickhouseUrl =
     process.env.CLICKHOUSE_URL?.trim() || (clickhouseHost ? `https://${clickhouseHost}` : '')
+  if (!clickhouseUrl) return LOCAL_STACK_ENV
+
   const clickhouseUser = process.env.CLICKHOUSE_USER?.trim() || 'default'
   const clickhousePassword = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
   const clickhouseDatabase = process.env.CLICKHOUSE_DB?.trim() || 'default'
-
-  if (!clickhouseUrl) {
-    throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
-  }
 
   if (!clickhousePassword) {
     throw new Error('Missing CLICKHOUSE_PASSWORD')

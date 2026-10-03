@@ -14,8 +14,12 @@
     "lint": {
       "dependsOn": ["^lint"]
     },
+    "//#infra:up": {
+      "cache": false,
+      "passThroughEnv": ["CLICKHOUSE_HOST", "CLICKHOUSE_URL"]
+    },
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "//#infra:up"],
       "cache": false,
       "passThroughEnv": [
         "CHKIT_E2E_TARGET",

@@ -66,7 +66,7 @@ Use `patch` while in beta. `major` changesets are rejected.
 - **npm auth:** OIDC Trusted Publishing from GitHub Actions; no npm token for the publish itself. Trusted Publishing does not support self-hosted runners, so the job runs on GitHub-hosted `ubuntu-24.04` (Blacksmith runners register as self-hosted).
 - **`npm publish`, not `bun publish`:** bun cannot publish via OIDC. `npm publish` copies `workspace:*` into the tarball verbatim, so the script rewrites every internal dependency to the current workspace version before publishing and restores `package.json` afterwards (`scripts/workspace-deps.ts`). `check:packed-deps` packs with `npm pack` after the same rewrite and fails on any leftover `workspace:` or stale pin.
 - **dist-tags:** moving `latest` onto a beta (`npm dist-tag add`) authenticates via OIDC too, which needs npm >= 11.21.0. The workflow pins `npm@^11.21.0`. No npm token is stored anywhere.
-- **Quality gates:** typecheck, lint, test and build run against a disposable ClickHouse container, as in CI's `verify` job.
+- **Quality gates:** `bun run verify` (typecheck, lint, test and build against the local test stack in `test/infra`), as in CI's `verify` job.
 
 ## One-time setup
 

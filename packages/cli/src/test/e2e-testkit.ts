@@ -12,7 +12,7 @@ import { spawnWithTimeout } from './spawn-cli.js'
 
 // Re-export all shared utilities so CLI tests only need one import
 export {
-  getRequiredEnv,
+  getLiveEnv,
   createLiveExecutor,
   createStatelessLiveExecutor,
   quoteIdent,

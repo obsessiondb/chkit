@@ -32,9 +32,6 @@
  * --ci (implied by CI=true) runs publish non-interactively in GitHub Actions:
  *   - npm authenticates via OIDC Trusted Publishing: no OTP and no `npm whoami`
  *     precheck (there is no logged-in user under OIDC).
- *   - Quality gates run turbo directly instead of via the Doppler wrapper;
- *     CLICKHOUSE_* point at a disposable ClickHouse container, as in ci.yml's
- *     verify job.
  *   - The beta `latest` sync (`npm dist-tag add`) authenticates via OIDC as
  *     well. That needs npm >= 11.21.0 and "Allow npm dist-tag" on each
  *     package's trusted publisher.
@@ -309,7 +306,7 @@ async function publishRelease({ dryRun, ci }: PublishArgs): Promise<void> {
 		assertNoUnreleasedChangesets(version)
 
 		// 3. Quality gates (typecheck, lint, test, build) and release guards.
-		runQualityGates(ci)
+		runQualityGates()
 		runReleaseGuards()
 	} else {
 		logLine(
@@ -935,17 +932,9 @@ function gitHead(): string {
 	return runCommand('git', ['rev-parse', 'HEAD']).stdout.trim()
 }
 
-function runQualityGates(ci: boolean): void {
+function runQualityGates(): void {
 	logLine('Running quality gates (typecheck, lint, test, build)...')
-	// Locally, `verify` wraps turbo in Doppler to inject CLICKHOUSE_* for the
-	// e2e tests. CI has no Doppler — the workflow points CLICKHOUSE_* at a
-	// disposable ClickHouse container, so run turbo as-is (mirrors ci.yml's
-	// verify job).
-	if (ci) {
-		runCommand('bunx', ['turbo', 'run', 'typecheck', 'lint', 'test', 'build'])
-		return
-	}
-
+	// `verify` starts the local test stack itself, as in ci.yml's verify job.
 	runCommand('bun', ['run', 'verify'])
 }
 

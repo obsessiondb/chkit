@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { waitForDDLPropagation } from './ddl-propagation.js'
-import { createLiveExecutor, createPrefix, getRequiredEnv, quoteIdent, waitForTable } from './e2e-testkit.js'
+import { createLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from './e2e-testkit.js'
 import type { ClickHouseExecutor, ClickHouseSettings } from './index.js'
 
 /**
@@ -13,7 +13,7 @@ import type { ClickHouseExecutor, ClickHouseSettings } from './index.js'
  */
 describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
   test('waits for created views and materialized views to appear and dropped ones to disappear', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const db = liveEnv.clickhouseDatabase
     const p = createPrefix('ddlwait')
@@ -60,7 +60,7 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
   }, 120_000)
 
   test('waits for objects and columns whose names contain quotes and backslashes', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const db = liveEnv.clickhouseDatabase
     const p = createPrefix('ddlwait_quoted')
@@ -88,7 +88,7 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
   }, 120_000)
 
   test('waits for the whole name of objects and columns whose names contain colons', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const db = liveEnv.clickhouseDatabase
     const p = createPrefix('ddlwait_colon')

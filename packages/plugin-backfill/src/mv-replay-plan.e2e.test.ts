@@ -9,7 +9,7 @@ import {
   createLiveExecutor,
   createPrefix,
   createStatelessLiveExecutor,
-  getRequiredEnv,
+  getLiveEnv,
   pollUntil,
   quoteIdent,
   waitForTable,
@@ -167,7 +167,7 @@ export const events_mv = {
 }
 
 beforeAll(async () => {
-  liveEnv = getRequiredEnv()
+  liveEnv = getLiveEnv()
   db = liveEnv.clickhouseDatabase
   ddl = createLiveExecutor(liveEnv)
   runExecutor = createStatelessLiveExecutor(liveEnv)

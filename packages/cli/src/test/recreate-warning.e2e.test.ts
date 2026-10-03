@@ -9,7 +9,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   waitForTable,
@@ -24,7 +24,7 @@ import {
  */
 describe('@chkit/cli table-recreate warning e2e (#23)', () => {
   test('a structural change surfaces the distinct table_recreate_data_loss warning', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const journalTable = createJournalTableName('recreate')

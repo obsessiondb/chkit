@@ -4,12 +4,12 @@ import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import { getRequiredEnv, runCli } from './e2e-testkit.js'
+import { getLiveEnv, runCli } from './e2e-testkit.js'
 
 describe('@chkit/cli query error surface e2e', () => {
   test('a SQL syntax error is clean: no "Plugin core failed" wrapper (#20), no injected FORMAT (#24)', async () => {
     const { clickhouseUrl, clickhouseUser, clickhousePassword, clickhouseDatabase } =
-      getRequiredEnv()
+      getLiveEnv()
     const dir = await mkdtemp(join(tmpdir(), 'chkit-query-e2e-'))
     const configPath = join(dir, 'clickhouse.config.ts')
     await writeFile(

@@ -3,20 +3,14 @@ import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/prom
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { createClickHouseExecutor } from '../../packages/clickhouse/src/index.js'
+import { createClickHouseExecutor } from '@chkit/clickhouse'
+import { getLiveEnv } from '@chkit/clickhouse/e2e-testkit'
 import { runCli } from '../../packages/cli/src/test/e2e-testkit.js'
 
 const root = resolve(import.meta.dir, '../..')
-const compose = [
-  'docker',
-  'compose',
-  '-p',
-  process.env.KAFKA_TEST_PROJECT ?? 'chkit-issue203',
-  '-f',
-  join(import.meta.dir, 'docker-compose.yml'),
-]
-const url = process.env.CLICKHOUSE_URL ?? 'http://127.0.0.1:18203'
-const password = 'chkit-kafka-test'
+// The broker runs in the local test stack, so this suite only runs against it.
+const compose = ['docker', 'compose', '-f', join(root, 'test/infra/docker-compose.yml')]
+const { clickhouseUrl: url, clickhousePassword: password } = getLiveEnv()
 
 async function broker(args: string[], stdin?: string) {
   const proc = Bun.spawn([...compose, 'exec', '-T', 'kafka', 'rpk', ...args], {

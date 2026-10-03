@@ -8,14 +8,14 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
 } from './e2e-testkit.js'
 
 describe('@chkit/cli migrate journal-table message e2e (#38)', () => {
   test('the post-apply message names the resolved journal table, not a hardcoded _chkit_migrations', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const journalTable = createJournalTableName('jname')

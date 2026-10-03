@@ -11,7 +11,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   pollUntil,
   quoteIdent,
   runCli,
@@ -85,7 +85,7 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
   test(
     'creates and drops views, materialized views, dictionaries and dictGet defaults in dependency order',
     async () => {
-      const liveEnv = getRequiredEnv()
+      const liveEnv = getLiveEnv()
       const executor = createLiveExecutor(liveEnv)
       const db = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('deporder')

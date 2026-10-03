@@ -11,7 +11,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
@@ -84,7 +84,7 @@ describe('@chkit/cli SQL comments in schema fragments e2e (#232)', () => {
   test(
     'generate + migrate create objects whose SQL carries comments, and comment edits plan nothing',
     async () => {
-      const liveEnv = getRequiredEnv()
+      const liveEnv = getLiveEnv()
       const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('sqlcomments')

@@ -4,7 +4,7 @@ import {
   createLiveExecutor,
   createPrefix,
   createStatelessLiveExecutor,
-  getRequiredEnv,
+  getLiveEnv,
   pollUntil,
   quoteIdent,
   type LiveEnv,
@@ -174,7 +174,7 @@ async function settledTargetRows(): Promise<number> {
 }
 
 beforeAll(async () => {
-  liveEnv = getRequiredEnv()
+  liveEnv = getLiveEnv()
   db = liveEnv.clickhouseDatabase
   ddl = createLiveExecutor(liveEnv)
   runExecutor = createStatelessLiveExecutor(liveEnv)

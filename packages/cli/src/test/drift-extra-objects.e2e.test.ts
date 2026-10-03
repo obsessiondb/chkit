@@ -9,14 +9,14 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
   waitForTable,
 } from './e2e-testkit.js'
 
-function renderConfig(dir: string, env: ReturnType<typeof getRequiredEnv>, database: string, extra: string): string {
+function renderConfig(dir: string, env: ReturnType<typeof getLiveEnv>, database: string, extra: string): string {
   return (
     `export default {\n` +
     `  schema: '${join(dir, 'schema.ts')}',\n` +
@@ -35,7 +35,7 @@ function renderConfig(dir: string, env: ReturnType<typeof getRequiredEnv>, datab
 
 describe('@chkit/cli drift extra-objects e2e (#5)', () => {
   test('unmanaged tables are reported but do not fail drift/check by default; opt-in flips it', async () => {
-    const env = getRequiredEnv()
+    const env = getLiveEnv()
     const executor = createLiveExecutor(env)
     const database = env.clickhouseDatabase
     const journalTable = createJournalTableName('drift_extra')

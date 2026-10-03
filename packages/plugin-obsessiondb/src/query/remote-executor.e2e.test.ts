@@ -5,7 +5,7 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import {
 	createLiveExecutor,
 	createPrefix,
-	getRequiredEnv,
+	getLiveEnv,
 	type LiveEnv,
 	pollUntil,
 	quoteIdent,
@@ -35,7 +35,7 @@ interface WorkbenchResult {
 
 describe('createRemoteExecutor queryStatus (live)', () => {
 	test('reads the ISO 8601 bounds migrate sends and counts only queries started at or after them', async () => {
-		const env = getRequiredEnv()
+		const env = getLiveEnv()
 		const workbench = startWorkbench(env)
 		const remote = connect(workbench.url)
 		const live = createLiveExecutor(env)
@@ -79,7 +79,7 @@ describe('createRemoteExecutor queryStatus (live)', () => {
 	}, TIMEOUT_MS)
 
 	test('reports how long a running query has run, in milliseconds', async () => {
-		const env = getRequiredEnv()
+		const env = getLiveEnv()
 		const workbench = startWorkbench(env)
 		const remote = connect(workbench.url)
 		const queryId = randomUUID()
