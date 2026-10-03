@@ -92,3 +92,20 @@ The **obsessiondb** job also sets `CHKIT_E2E_TARGET=obsessiondb`. A test may ski
 ## Release
 
 Uses changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump versions.
+
+### Releasing (GitHub Actions)
+
+Versions are semver; all 10 published packages share one version (a changesets `fixed` group). A release takes two steps, so the version reaches git before npm and any failure can be re-run:
+
+1. **Release: prepare** (`.github/workflows/release-prepare.yml`, manual, repo admins only). Pick `beta` (the next beta) or `stable` (graduates the beta line to GA). It runs `changeset version`, pushes a `release/v<version>` branch, opens a `release: v<version>` PR with the changelog as its body, and starts CI on that branch. A PR opened with `GITHUB_TOKEN` does not trigger `pull_request` runs, so `ci.yml` has a `workflow_dispatch` trigger for this. Re-running prepare refreshes the PR and closes release PRs for other versions.
+2. **Merge the release PR.** That is the release decision. **Release: publish** (`.github/workflows/release-publish.yml`) runs on every push to `main`; its `detect` job lets through only a commit whose subject is `release: v<version>` (keep the squash title) or a merge of `release/v<version>`. It runs the quality gates and release guards, publishes with `npm publish`, moves dist-tags, then creates the `v<version>` tag and GitHub release. Beta versions publish under `beta` and move `latest` onto them; stable versions publish straight to `latest`. The publish job also requires an admin: when someone else merged, an admin re-runs it.
+
+Publish refuses a release commit that still has unreleased changesets (changesets merged after prepare), because they would ship without a changelog entry. Re-run prepare to cut the next version. Every step is idempotent: to retry a failed release, re-run its workflow run. A manual dispatch of publish (with an optional `dry_run`) publishes whatever version `main` is at.
+
+Publishing authenticates via **OIDC Trusted Publishing**, so the job runs on a GitHub-hosted runner (`ubuntu-24.04`): Trusted Publishing does not support self-hosted runners, which is how Blacksmith runners register. `bun publish` can't do OIDC, so packages publish with `npm publish --provenance`. `npm publish` copies `workspace:*` into the tarball verbatim, so the script resolves every internal dependency to the current workspace version first (`scripts/workspace-deps.ts`), and `check:packed-deps` packs with `npm pack` after the same resolution. The beta `latest` sync (`npm dist-tag add`) also authenticates via OIDC, which needs npm >= 11.21.0, so the workflow pins `npm@^11.21.0` (npm 12 needs a newer Node than the pinned 22.14.0). No npm token is stored anywhere. The quality gates run against a disposable ClickHouse container seeded like **verify**, not the shared ObsessionDB test database.
+
+**One-time setup** (out of band): on each of the 10 packages, add a Trusted Publisher (GitHub Actions → `obsessiondb/chkit` → `release-publish.yml` → environment `release`) and enable **Allow npm dist-tag** on it (off by default; without it a beta release publishes, then fails moving `latest`, and needs a re-run). Create the `release` GitHub environment with deployment branches limited to `main`. Install the pkg.pr.new GitHub App for previews.
+
+**Previews:** `.github/workflows/preview.yml` publishes every push to `main` to pkg.pr.new, not npm: `bun add -d https://pkg.pr.new/chkit@<sha>` (or `@main`).
+
+Without CI: `bun run release:prepare [--stable]` opens the release PR from a clean, up-to-date local `main`, and `bun run release:publish [--dry-run]` publishes the merged release from local `main` (prompts for an npm OTP).

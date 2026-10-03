@@ -1,0 +1,65 @@
+name: "Release: prepare"
+
+# Cuts a release from current main: versions every package from the unreleased
+# changesets and opens a `release/v<version>` PR. Merging that PR is the release
+# decision; "Release: publish" then publishes it. Re-run this to refresh the PR
+# when new changesets land on main before you merge.
+#
+# The PR is opened with the workflow's GITHUB_TOKEN, and events from that token
+# do not start pull_request workflows. workflow_dispatch is the exception, so
+# this workflow starts CI on the release branch itself; its `verify` check run
+# lands on the branch head and satisfies the required check.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "beta: next beta. stable: graduate the beta line (or a stable release outside pre mode)"
+        type: choice
+        options:
+          - beta
+          - stable
+        default: beta
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # push the release branch
+      pull-requests: write # open or refresh the release PR
+      actions: write # start CI on the release branch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Restrict to repository admins
+        uses: ./.github/actions/require-admin
+
+      - name: Setup Bun + install dependencies
+        uses: ./.github/actions/setup
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare release PR
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun run release:prepare ${{ inputs.channel == 'stable' && '--stable' || '' }}
+
+      - name: Run CI on the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.prepare.outputs.branch }}
+          PR: ${{ steps.prepare.outputs.pr }}
+        run: |
+          gh workflow run ci.yml --ref "$BRANCH"
+          echo "### Release PR: $PR" >> "$GITHUB_STEP_SUMMARY"
