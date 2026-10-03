@@ -1,0 +1,7 @@
+export { attio } from './pipeline.js'
+export { attioObjectsRaw, attioObjectAttributesRaw } from './metadata/schema.js'
+export { attioRecordsRaw, attioPeople, attioCompanies, attioDeals } from './records/schema.js'
+export { attioListsRaw, attioListAttributesRaw, attioEntriesRaw } from './lists/schema.js'
+export { attioNotesRaw } from './notes/schema.js'
+export { attioTasksRaw } from './tasks/schema.js'
+export { attioMembersRaw } from './members/schema.js'

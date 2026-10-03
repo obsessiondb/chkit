@@ -1,5 +1,10 @@
 export const onRequest: PagesFunction<{ ASSETS: Fetcher }> = async (context) => {
 	const url = new URL(context.request.url);
+	// The app-specific guide now lives in the registry integration section.
+	if (/^\/api-sync\/attio(?:\/|\.md)?$/.test(url.pathname)) {
+		url.pathname = url.pathname.endsWith('.md') ? '/integrations/attio.md' : '/integrations/attio/';
+		return Response.redirect(url.toString(), 301);
+	}
 
 	// The Ingestion section moved to /api-sync/. Keep old links (READMEs,
 	// installed agent skills, search results) working, including .md URLs.

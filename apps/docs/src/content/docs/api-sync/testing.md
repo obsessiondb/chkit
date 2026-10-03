@@ -83,7 +83,7 @@ The memory destination deduplicates tokens without a time limit. It does not mod
 - Child edits/deletes that do not change the parent timestamp; a failed child fetch must not publish an incomplete root as complete.
 - Deletion discovery and checkpointing; a partial reconciliation scan must not mark unseen records as deleted.
 
-Start with `chkit ingest list` and `chkit check --offline` to verify exports and required metadata columns. These checks do not prove that a provider reader or live table behaves correctly.
+Start with `chkit ingest list` to inspect exported streams without a database connection. Generate migrations to inspect the destination schema, then run `chkit check` after applying them to the development target. `check` has no `--offline` flag and can query ClickHouse. These checks do not prove that a provider reader or live table behaves correctly.
 
 ## Related pages
 

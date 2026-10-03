@@ -29,7 +29,7 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 
 ## Preserve these contracts
 
-- TypeScript and direct ClickHouse config are required. Replace `schema` with `entry`, preserving schema exports and exporting active pipelines. Migrations create destinations.
+- TypeScript and direct ClickHouse config are required. Preserve existing schema discovery: add the provider entry to `schema` paths, or re-export its schema and active pipelines from the project `entry`. Migrations create destinations.
 - Stream IDs own checkpoints: keep them stable and account-scoped. Pipelines group streams without dependency ordering.
 - Use `context.attempt`/`paginate`, forward cancellation, and throw `HttpError.fromResponse` for HTTP failures. Yield bounded chunks.
 - Enforce both time bounds. Persist only provider-guaranteed, complete resume state after all preceding rows are represented; the executor commits it after writes.
@@ -41,4 +41,4 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 
 ## Deliver and verify
 
-Deliver definitions, config, and run/query commands. Check `chkit ingest list` and `chkit check --offline`; test empty input, pagination, checkpoint boundaries, and failure replay with fixtures. Keep live writes within authorization. Report verified behavior and limitations.
+Deliver definitions, config, and run/query commands. Inspect exports with `chkit ingest list`; generate and review migrations, then use `chkit check` against the configured development target after applying them. `check` has no `--offline` flag. Test empty input, pagination, checkpoint boundaries, and failure replay with fixtures. Keep live writes within authorization. Report verified behavior and limitations.

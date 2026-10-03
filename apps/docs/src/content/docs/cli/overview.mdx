@@ -15,6 +15,8 @@ Use the `chkit` CLI to define ClickHouse schemas in TypeScript or Python, review
 | Command | Description |
 |---------|-------------|
 | [`chkit init`](/cli/init/) | Scaffold a new project with config and example schema |
+| [`chkit add`](/cli/add/) | Copy a provider template and wire its schema and ingestion exports into a TypeScript project |
+| [`chkit registry`](/cli/registry/) | Browse apps and integration guides, inspect sync coverage, or build source templates |
 | [`chkit generate`](/cli/generate/) | Diff schema definitions against the last snapshot and produce migration SQL |
 | [`chkit migrate`](/cli/migrate/) | Apply pending migration files to ClickHouse |
 | [`chkit status`](/cli/status/) | Show migration status (total, applied, pending, checksum mismatches) |
@@ -26,6 +28,19 @@ Use the `chkit` CLI to define ClickHouse schemas in TypeScript or Python, review
 | [`chkit codegen`](/cli/codegen/) | Generate typed row models from schema definitions |
 | [`chkit plugin`](/cli/plugin/) | List or run plugin commands |
 | [`chkit ingest`](/cli/ingest/) | Run, list, or inspect API sync streams (`@chkit/plugin-ingest`, TypeScript only) |
+
+## Install an app integration
+
+Browse the [app registry](/integrations/) for supported integrations and their complete sync guides, or discover the same apps in the terminal:
+
+```sh
+bunx chkit registry list
+bunx chkit registry inspect attio
+bunx chkit add attio --dry-run
+bunx chkit add attio
+```
+
+These commands prepare editable source and configuration without a ClickHouse connection. Follow the app's guide to configure credentials, review and apply migrations, and run the first sync. `registry list --json` includes resource coverage and guide links for automation.
 
 ## Connection requirements
 

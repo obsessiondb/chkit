@@ -1,4 +1,6 @@
 type Command =
+  | 'add'
+  | 'registry'
   | 'generate'
   | 'migrate'
   | 'status'

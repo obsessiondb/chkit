@@ -75,10 +75,15 @@ export default defineConfig({
 					autogenerate: { directory: 'schema' },
 				},
 				{
+					label: 'Apps & integrations',
+					autogenerate: { directory: 'integrations' },
+				},
+				{
 					label: 'API Sync',
 					items: [
 						{ label: 'Overview', slug: 'api-sync' },
 						{ label: 'Quickstart', slug: 'api-sync/quickstart' },
+						{ label: 'Provider templates', slug: 'api-sync/templates' },
 						{ label: 'Authoring skill', slug: 'api-sync/agent-skill' },
 						{
 							label: 'Build a source',
@@ -88,6 +93,7 @@ export default defineConfig({
 								{ slug: 'api-sync/destinations' },
 								{ slug: 'api-sync/incremental-syncs' },
 								{ slug: 'api-sync/loading' },
+								{ slug: 'api-sync/registry-authoring' },
 							],
 						},
 						{

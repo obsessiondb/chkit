@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'n
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AstroIntegration } from 'astro';
+import { registryMarkdown } from '../data/registry';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
 const SITE_TAGLINE = 'ClickHouse schemas, migrations, and API sync in code. Schema workflows in TypeScript and Python; API sync in TypeScript.';
@@ -45,7 +46,9 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 			if (statSync(fullPath).isDirectory()) {
 				walk(fullPath);
 			} else if (/\.mdx?$/.test(entry)) {
-				const source = readFileSync(fullPath, 'utf-8');
+				const source = readFileSync(fullPath, 'utf-8')
+					.replace(/^import RegistryApps from .+;\n/m, '')
+					.replace('<RegistryApps />', () => registryMarkdown());
 				const slug = toSlug(relative(srcDir, fullPath));
 				const { title, description } = extractFrontmatter(source);
 

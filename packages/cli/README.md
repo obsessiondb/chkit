@@ -53,6 +53,19 @@ bunx chkit check
 
 All commands support `--json` for machine-readable output and `--config <path>` to specify a custom config file.
 
+## Apps & integrations
+
+Browse [registry apps](https://chkit.obsessiondb.com/integrations/) and copy editable schemas and sync readers into a TypeScript project:
+
+```sh
+bunx chkit registry list
+bunx chkit registry inspect attio
+bunx chkit add attio --dry-run
+bunx chkit add attio
+```
+
+The [Attio integration guide](https://chkit.obsessiondb.com/integrations/attio/) explains setup, every synced resource, and sync limitations. `registry list --json` includes resource coverage and guide links. Installation prepares files and dependencies; configure credentials and review migrations before running ingestion.
+
 ## Add API sync
 
 Install `@chkit/plugin-ingest` at the same version as the CLI and core, register `ingest()` in the config, and export tables and pipelines from a TypeScript entry file. A stream pairs a destination table with an async reader. Keep raw objects for flexible SQL transformations, or map records into known columns.
