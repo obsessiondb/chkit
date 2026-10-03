@@ -20,13 +20,13 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   runCli,
   runCliWithRetry,
   waitForTable,
 } from './e2e-testkit.js'
 
-const env = getRequiredEnv()
+const env = getLiveEnv()
 const docs = (name: string, index: TextSkipIndex): TableDefinition =>
   table({
     database: env.clickhouseDatabase,

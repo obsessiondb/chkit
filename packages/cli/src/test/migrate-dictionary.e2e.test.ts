@@ -9,7 +9,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   pollUntil,
   quoteIdent,
   runCli,
@@ -24,7 +24,7 @@ import {
  * source or a filesystem FILE() source — both require connection details
  * (native TCP port, server-local file paths) this suite cannot assume for a
  * managed target like ObsessionDB. HTTP only needs the same URL/credentials
- * `getRequiredEnv()` already validated.
+ * `getLiveEnv()` already validated.
  */
 function renderSchema(input: {
   database: string
@@ -90,7 +90,7 @@ describe('@chkit/cli migrate dictionary e2e', () => {
   test(
     'create -> replace -> drift -> drop lifecycle for a ClickHouse dictionary',
     async () => {
-      const liveEnv = getRequiredEnv()
+      const liveEnv = getLiveEnv()
       const executor = createLiveExecutor(liveEnv)
       const database = liveEnv.clickhouseDatabase
       const journalTable = createJournalTableName('dict')

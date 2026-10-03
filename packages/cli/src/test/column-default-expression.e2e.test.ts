@@ -11,7 +11,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
@@ -59,7 +59,7 @@ function renderSchema(database: string, tableName: string, columns: string[]): s
 }
 
 describe('@chkit/cli expression column defaults e2e (#234)', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
 
   test(
     '{ expression } defaults of every kind migrate as SQL, fill inserted rows, add columns, and read as no drift',

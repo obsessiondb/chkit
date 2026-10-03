@@ -9,7 +9,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
@@ -42,7 +42,7 @@ function renderSchema(database: string, tableName: string): string {
 }
 
 describe('@chkit/cli quoted identifiers e2e', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
 
   test(
     'generate -> migrate -> drift round-trips names that need quoting',

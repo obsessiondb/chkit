@@ -13,8 +13,8 @@ name: "Release: publish"
 #
 # Runs on a GitHub-hosted runner: npm Trusted Publishing does not support
 # self-hosted runners, which is what Blacksmith runners register as. The quality
-# gates run against a disposable ClickHouse container seeded the same way as
-# ci.yml's verify job, never the shared ObsessionDB test database.
+# gates run `bun run verify`, which starts the local test stack (test/infra) as
+# in ci.yml's verify job, never the shared ObsessionDB test database.
 #
 # Prerequisites (configured once, out of band):
 #   - npm Trusted Publisher on each of the 10 packages -> GitHub Actions,
@@ -68,39 +68,12 @@ jobs:
     permissions:
       id-token: write # OIDC Trusted Publishing
       contents: write # create the tag and GitHub release
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:26.3
-        env:
-          CLICKHOUSE_USER: default
-          CLICKHOUSE_PASSWORD: chkit-ci
-          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-        ports:
-          - 8123:8123
-        options: >-
-          --ulimit nofile=262144:262144
-          --health-cmd "clickhouse-client --password chkit-ci --query 'SELECT 1'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      CLICKHOUSE_URL: http://127.0.0.1:8123
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: chkit-ci
-      CLICKHOUSE_DB: default
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Restrict to repository admins
         uses: ./.github/actions/require-admin
-
-      - name: Configure local ClickHouse
-        env:
-          CLICKHOUSE_CONTAINER: ${{ job.services.clickhouse.id }}
-        run: |
-          docker cp test/ci/clickhouse.xml "$CLICKHOUSE_CONTAINER:/etc/clickhouse-server/config.d/chkit-ci.xml"
-          docker exec "$CLICKHOUSE_CONTAINER" clickhouse-client --password "$CLICKHOUSE_PASSWORD" --query 'SYSTEM RELOAD CONFIG'
 
       - name: Setup Node + npm registry (OIDC)
         uses: actions/setup-node@v4
@@ -117,12 +90,6 @@ jobs:
 
       - name: Setup Bun + install dependencies
         uses: ./.github/actions/setup
-
-      - name: Build test fixture dependencies
-        run: bunx turbo run build --filter=@chkit/clickhouse...
-
-      - name: Seed chunking test fixtures
-        run: bun run packages/plugin-backfill/src/chunking/e2e/seed-datasets.script.ts
 
       - name: Publish
         env:

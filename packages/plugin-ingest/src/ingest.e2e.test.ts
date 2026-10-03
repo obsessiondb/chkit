@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 
 import { table, toCreateSQL } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import { createPrefix, createStatelessLiveExecutor, getRequiredEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
+import { createPrefix, createStatelessLiveExecutor, getLiveEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 
 import { createClickHouseDestination, ingestionColumns, rawRows, rawTable } from './destination.js'
 import { runIngestion } from './executor.js'
@@ -12,7 +12,7 @@ import { definePipeline, defineStream, selectStreams } from './registry.js'
 import type { DestinationAdapter } from './types.js'
 
 describe('@chkit/plugin-ingest live env e2e', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
   const prefix = createPrefix('ingest')
   const database = liveEnv.clickhouseDatabase
   const journalTable = `${prefix}journal`

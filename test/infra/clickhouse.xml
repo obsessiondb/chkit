@@ -16,4 +16,10 @@
     <query_log>
         <flush_interval_milliseconds>1000</flush_interval_milliseconds>
     </query_log>
+    <!-- The Kafka test produces messages before its consumers attach. -->
+    <kafka>
+        <consumer>
+            <auto_offset_reset>earliest</auto_offset_reset>
+        </consumer>
+    </kafka>
 </clickhouse>

@@ -9,7 +9,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   waitForTable,
@@ -23,7 +23,7 @@ import {
  */
 describe('@chkit/cli table-scope unmarked migrations e2e (#36)', () => {
   test('an unmarked migration is applied under --table, not silently skipped', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const journalTable = createJournalTableName('scope_unmarked')

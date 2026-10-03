@@ -25,7 +25,7 @@ import { PlanSchema } from '../../../plugin-backfill/src/options.js'
 import {
 	createLiveExecutor,
 	createPrefix,
-	getRequiredEnv,
+	getLiveEnv,
 	pollUntil,
 	quoteIdent,
 } from './e2e-testkit.js'
@@ -35,7 +35,7 @@ import {
 const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 
 test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inserts and ALTER on live ClickHouse', async () => {
-	const env = getRequiredEnv()
+	const env = getLiveEnv()
 	const client = createClient({
 		url: env.clickhouseUrl,
 		username: env.clickhouseUser,
@@ -291,7 +291,7 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 }, 120_000)
 
 test('hand-written heredoc defaults and alias-typed EPHEMERAL columns show no drift', async () => {
-	const env = getRequiredEnv()
+	const env = getLiveEnv()
 	const executor = createLiveExecutor(env)
 	const def = table({
 		database: env.clickhouseDatabase,

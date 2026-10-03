@@ -12,45 +12,12 @@ on:
 jobs:
   verify:
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:26.3
-        env:
-          CLICKHOUSE_USER: default
-          CLICKHOUSE_PASSWORD: chkit-ci
-          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-        ports:
-          - 8123:8123
-        options: >-
-          --ulimit nofile=262144:262144
-          --health-cmd "clickhouse-client --password chkit-ci --query 'SELECT 1'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      CLICKHOUSE_URL: http://127.0.0.1:8123
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: chkit-ci
-      CLICKHOUSE_DB: default
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure local ClickHouse
-        env:
-          CLICKHOUSE_CONTAINER: ${{ job.services.clickhouse.id }}
-        run: |
-          docker cp test/ci/clickhouse.xml "$CLICKHOUSE_CONTAINER:/etc/clickhouse-server/config.d/chkit-ci.xml"
-          docker exec "$CLICKHOUSE_CONTAINER" clickhouse-client --password "$CLICKHOUSE_PASSWORD" --query 'SYSTEM RELOAD CONFIG'
-
       - name: Setup Bun
         uses: ./.github/actions/setup
-
-      - name: Verify lockfile unchanged
-        run: git diff --exit-code bun.lock
-
-      - name: Check internal workspace deps
-        run: bun run check:workspace-deps
 
       - name: Fallow analysis
         if: github.event_name == 'pull_request'
@@ -65,67 +32,13 @@ jobs:
         with:
           sarif_file: fallow-results.sarif
 
-      - name: Build test fixture dependencies
-        run: bunx turbo run build --filter=@chkit/clickhouse...
-
-      - name: Seed chunking test fixtures
-        run: bun run packages/plugin-backfill/src/chunking/e2e/seed-datasets.script.ts
-
+      # Same command as locally: Turbo starts the test stack (test/infra) and
+      # runs typecheck, lint, test and build.
       - name: Verify
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-        run: bunx turbo run typecheck lint test build
-
-      - name: Check packed tarball deps
-        run: bun run check:packed-deps
-
-  text-index:
-    name: Text indexes (ClickHouse ${{ matrix.clickhouse }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    strategy:
-      fail-fast: false
-      matrix:
-        clickhouse: ['26.3', '26.8']
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:${{ matrix.clickhouse }}
-        env:
-          CLICKHOUSE_PASSWORD: chkit-ci
-          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-        ports:
-          - 8123:8123
-        options: >-
-          --ulimit nofile=262144:262144
-          --health-cmd "clickhouse-client --password chkit-ci --query 'SELECT 1'"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      CLICKHOUSE_URL: http://127.0.0.1:8123
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: chkit-ci
-      CLICKHOUSE_DB: default
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Build test dependencies
-        run: bunx turbo run build --filter=chkit... --filter=@chkit/plugin-pull...
-      - name: Test TypeScript text indexes
-        run: bun test packages/core/src/text-index.test.ts packages/cli/src/test/text-index.e2e.test.ts
-      - name: Install Python test dependencies
-        run: python -m pip install -e './chkit_python[dev]'
-      - name: Test Python text indexes
-        working-directory: chkit_python
-        run: python -m pytest tests/test_text_index.py tests/test_text_index_e2e.py -q
-      - name: Test TypeScript column expressions
-        run: bun test packages/cli/src/test/column-expression-safety.test.ts packages/core/src/column-expressions.test.ts packages/clickhouse/src/column-expressions.test.ts packages/cli/src/test/column-expressions.e2e.test.ts
-      - name: Test Python column expressions
-        working-directory: chkit_python
-        run: python -m pytest tests/test_column_expressions.py tests/test_column_expressions_e2e.py tests/test_column_kind_change_cli.py tests/test_sql_normalizer.py tests/test_drift_compare.py tests/test_introspect.py tests/test_backfill_planner.py -q
+        run: bun run verify
 
   obsessiondb:
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -140,8 +53,6 @@ jobs:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
       CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
-      # Lets a test that cannot run on ObsessionDB yet skip itself (see #240).
-      CHKIT_E2E_TARGET: obsessiondb
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -154,21 +65,15 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup
 
-      - name: Build test fixture dependencies
-        run: bunx turbo run build --filter=@chkit/clickhouse...
-
-      - name: Seed chunking test fixtures
-        run: bun run packages/plugin-backfill/src/chunking/e2e/seed-datasets.script.ts
-
       - name: Test against ObsessionDB
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-        run: bunx turbo run test
+        run: bun run test:obsessiondb
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [verify, obsessiondb, text-index]
+    needs: [verify, obsessiondb]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout

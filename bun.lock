@@ -39,6 +39,7 @@
     },
     "examples/clickbench": {
       "name": "chkit-example-clickbench",
+      "version": "0.0.0",
       "devDependencies": {
         "@chkit/core": "0.1.2-beta.2",
         "@chkit/plugin-obsessiondb": "0.1.2-beta.2",
@@ -169,6 +170,15 @@
         "zod": "^4.3.6",
       },
     },
+    "test/kafka": {
+      "name": "@chkit/kafka-e2e",
+      "devDependencies": {
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
+        "@chkit/plugin-pull": "workspace:*",
+        "chkit": "workspace:*",
+      },
+    },
   },
   "overrides": {
     "@orpc/client": "1.15.4",
@@ -296,6 +306,8 @@
     "@chkit/core": ["@chkit/core@workspace:packages/core"],
 
     "@chkit/docs": ["@chkit/docs@workspace:apps/docs"],
+
+    "@chkit/kafka-e2e": ["@chkit/kafka-e2e@workspace:test/kafka"],
 
     "@chkit/plugin-backfill": ["@chkit/plugin-backfill@workspace:packages/plugin-backfill"],
 

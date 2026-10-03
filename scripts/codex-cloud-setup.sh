@@ -96,7 +96,7 @@ export CLICKHOUSE_DB=default
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 
-cp test/ci/clickhouse.xml /etc/clickhouse-server/config.d/chkit-ci.xml
+cp test/infra/clickhouse.xml /etc/clickhouse-server/config.d/chkit-ci.xml
 if ! curl --noproxy '*' -fsS --max-time 2 --user default:chkit-ci \
   "$CLICKHOUSE_URL/?query=SELECT%201" >/dev/null 2>&1; then
   service clickhouse-server start

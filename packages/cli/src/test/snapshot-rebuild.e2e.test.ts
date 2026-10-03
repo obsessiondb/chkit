@@ -9,7 +9,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   pollUntil,
   quoteIdent,
   runCli,
@@ -24,7 +24,7 @@ interface SnapshotFile {
 }
 
 describe('@chkit/cli snapshot rebuild e2e (#235)', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
 
   test(
     'a rebuilt snapshot matches the views two merged branches left in ClickHouse',

@@ -14,7 +14,8 @@
   "workspaces": [
     "packages/*",
     "apps/*",
-    "examples/clickbench"
+    "examples/clickbench",
+    "test/kafka"
   ],
   "scripts": {
     "build": "turbo run build",
@@ -24,8 +25,9 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "test:turbo": "turbo run test",
-    "test:env": "doppler run --project chkit --config ci -- bun run test",
+    "test:obsessiondb": "CHKIT_E2E_TARGET=obsessiondb turbo run test --filter=!@chkit/kafka-e2e",
+    "infra:up": "bun run scripts/infra-up.ts",
+    "infra:down": "docker compose -f test/infra/docker-compose.yml down -v",
     "cluster:up": "docker compose -f test/cluster/docker-compose.yml up -d --wait",
     "cluster:down": "docker compose -f test/cluster/docker-compose.yml down -v",
     "cluster:logs": "docker compose -f test/cluster/docker-compose.yml logs -f",
@@ -38,7 +40,7 @@
     "fallow:dead-code": "bunx fallow --only dead-code",
     "fallow:pr": "bunx fallow --changed-since main --summary || true",
     "fallow:ci": "bunx fallow --fail-on-issues",
-    "verify": "doppler run --project chkit --config ci -- turbo run typecheck lint test build",
+    "verify": "bun run check:workspace-deps && turbo run typecheck lint test build && bun run check:packed-deps",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "check:examples": "bun run scripts/check-examples-manifest.ts",

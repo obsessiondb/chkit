@@ -48,7 +48,7 @@ jobs:
 - Fail fast instead of silently skipping behavior.
 
 ### 5. Local Execution
-- Prefer `bun run test:env` when tests depend on Doppler-provided env vars.
+- `bun run test` needs no env: tests target the local test stack. Use `doppler run --project chkit --config ci -- bun run test:obsessiondb` to run them against ObsessionDB.
 
 ## Checklist: Adding a New Env Var
 
@@ -57,7 +57,7 @@ jobs:
 - [ ] Mapped in `.github/workflows/ci.yml` (if CI uses it)
 - [ ] Added to package-level `turbo.json` `passThroughEnv`
 - [ ] Added runtime/test validation where required
-- [ ] Verified locally with `bun run test:env` (or package-specific command)
+- [ ] Verified locally (`doppler run --project chkit --config ci -- <command>` when it needs Doppler values)
 - [ ] Verified CI passes
 
 ## Debugging Missing Env Vars
@@ -67,21 +67,21 @@ Check in order:
 2. Task receives env via package `turbo.json`
 3. CI workflow env mapping exists
 4. Validation/schema includes the variable
-5. Command is run with the right environment (`bun run test:env`)
+5. Command is run with the right environment (`doppler run --project chkit --config ci -- <command>`)
 
 ## Common Mistakes
 
 - Adding passthrough in the wrong `turbo.json`
 - Using a var in code/tests without validation
-- Running tests without Doppler env for env-dependent suites
+- Expecting `bun run test` to hit ObsessionDB: without `CLICKHOUSE_URL`/`CLICKHOUSE_HOST` it targets the local stack
 - Adding a var in Doppler but forgetting CI mapping
 
 ## Quick Commands
 
 ```bash
-# Run full test pipeline with CI-like Doppler config
-bun run test:env
-
-# Run workspace tests
+# Run workspace tests against the local test stack
 bun run test
+
+# Run them against ObsessionDB with Doppler-provided credentials
+doppler run --project chkit --config ci -- bun run test:obsessiondb
 ```

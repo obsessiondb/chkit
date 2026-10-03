@@ -113,13 +113,14 @@ Then run bash scripts/codex-cloud-verify.sh.
 Report each result and any failures.
 ```
 
-Use this verification script here: `bun run verify` invokes Doppler. It runs one
+Use this verification script here instead of `bun run verify`. It runs one
 package task at a time and runs the complete CLI suite separately without Bun's
 parallel workers. This avoids the CLI timeout and Bun `epoll_ctl` errors observed
 in cloud verification; the latter matches this
 [upstream Bun issue](https://github.com/oven-sh/bun/issues/37968).
 It runs all main CI checks with the existing tests, assertions, and time limits
-unchanged, including the CLI's 15-second timeout. The replicated
+unchanged, including the CLI's 15-second timeout, except the Kafka suite: its
+broker runs in the Docker test stack, which the cloud container does not have. The replicated
 cluster suites under `test/cluster/` are separate, opt-in tests outside the main CI
 check and are not provisioned by these scripts.
 

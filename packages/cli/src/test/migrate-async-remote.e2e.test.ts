@@ -13,7 +13,7 @@ import type { JournalStore, MigrationRowState } from '../runtime/journal-store.j
 import {
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   pollUntil,
   quoteIdent,
   waitForTable,
@@ -32,7 +32,7 @@ const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 const POLL_INTERVAL_MS = 250
 const MIGRATION_CHECKSUM = 'c1'
 
-type LiveEnv = ReturnType<typeof getRequiredEnv>
+type LiveEnv = ReturnType<typeof getLiveEnv>
 
 interface WorkbenchInput {
   query: string
@@ -145,7 +145,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
 })
 
 function startRun(label: string) {
-  const env = getRequiredEnv()
+  const env = getLiveEnv()
   const workbench = startWorkbench(env)
   const live = createLiveExecutor(env)
   const remote = createRemoteExecutor({

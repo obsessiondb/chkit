@@ -7,7 +7,7 @@ import type { ResolvedChxConfig, TableDefinition } from '@chkit/core'
 import { collectDefinitionsFromModule, toCreateSQL } from '@chkit/core'
 import { createClickHouseExecutor, type ClickHouseExecutor } from '@chkit/clickhouse'
 import {
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   createPrefix,
   waitForTable,
@@ -50,7 +50,7 @@ const noiseDatabase = `chkit_e2e_pull_noise_${runTag}`
 const projectionDatabase = `chkit_e2e_pull_proj_${runTag}`
 
 describe('@chkit/plugin-pull live env e2e', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
   let executor: ClickHouseExecutor
 
   beforeAll(async () => {
@@ -89,7 +89,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
   })
 
   test('validates required env variables are present', () => {
-    expect(() => getRequiredEnv()).not.toThrow()
+    expect(() => getLiveEnv()).not.toThrow()
   })
 
   // Regression for #183: an index-only projection used to be dropped on pull,

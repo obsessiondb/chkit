@@ -1,17 +1,14 @@
 #!/usr/bin/env bun
 
 /**
- * Seeds ClickHouse tables for smart-chunking E2E tests.
+ * Seeds ClickHouse tables for smart-chunking E2E tests. The package's `test`
+ * script runs it before the tests, against the same target (see getLiveEnv).
  *
- * Run once manually:
- *   bun run packages/plugin-backfill/src/chunking/e2e/seed.ts
- *
- * Requires CLICKHOUSE_HOST/CLICKHOUSE_URL + CLICKHOUSE_PASSWORD env vars.
  * Creates tables if they don't exist, truncates them, and re-inserts data.
  */
 
 import { randomBytes } from 'node:crypto'
-import { getRequiredEnv, createLiveExecutor } from '@chkit/clickhouse/e2e-testkit'
+import { getLiveEnv, createLiveExecutor } from '@chkit/clickhouse/e2e-testkit'
 
 import { TABLE_PREFIX } from './constants.js'
 
@@ -115,7 +112,7 @@ export const datasets: DatasetConfig[] = [
 const BATCH_SIZE = 5000
 
 async function seed() {
-  const env = getRequiredEnv()
+  const env = getLiveEnv()
   const executor = createLiveExecutor(env)
   const db = env.clickhouseDatabase
 
