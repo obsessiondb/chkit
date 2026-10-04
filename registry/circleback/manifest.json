@@ -1,0 +1,90 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "circleback",
+  "type": "registry:item",
+  "title": "Circleback",
+  "description": "Small, editable Circleback API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/README.md"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/index.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/tests/basic.test.ts",
+      "role": "test"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "documentation": "https://chkit.obsessiondb.com/integrations/circleback/",
+      "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/circleback",
+      "entry": "index.ts",
+      "exports": [
+        "circlebackPipeline",
+        "circleback_meetingsRaw"
+      ],
+      "resources": [
+        {
+          "name": "meetings",
+          "title": "Meetings",
+          "table": "circleback_meetings_raw",
+          "description": "Meeting metadata and notes, with a transcript where access permits it.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/meetings",
+              "documentation": "https://circleback.ai/docs/api/meetings/list-meetings"
+            },
+            {
+              "method": "GET",
+              "path": "/meeting/{meetingId}/transcript",
+              "documentation": "https://circleback.ai/docs/api/meetings/get-meeting-transcript"
+            }
+          ]
+        }
+      ],
+      "env": {
+        "CIRCLEBACK_API_KEY": ""
+      },
+      "authentication": {
+        "method": "Bearer API key",
+        "env": [
+          "CIRCLEBACK_API_KEY"
+        ],
+        "documentation": "https://circleback.ai/docs/api",
+        "setup": [
+          "Provide CIRCLEBACK_API_KEY with read access to the selected resources.",
+          "Keep the API key in the runtime environment and rotate it according to the provider policy."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:circleback from a scheduler.",
+        "deletions": "The meetings endpoint is scanned on every run. Missing transcripts remain null; removed meetings remain stored."
+      }
+    }
+  }
+}
