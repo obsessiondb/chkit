@@ -23,7 +23,7 @@ chkit add <name[@version] | URL | local.json> [flags]
 | `--with-tests` | boolean | `false` | Include the template's portable tests and fixtures |
 | `--no-install` | boolean | `false` | Write source and dependency declarations without running the package manager |
 | `--package-manager <name>` | string | Detected | Use `bun`, `npm`, `pnpm`, or `yarn` |
-| `--registry <location>` | string | `https://chkit.obsessiondb.com/r/registry.json` | Catalog URL, local directory, or local catalog file used to resolve template names |
+| `--registry <location>` | string | `github:obsessiondb/chkit` | Official GitHub registry, catalog URL, local directory, or local catalog file used to resolve template names |
 | `--config <path>` | string | `clickhouse.config.ts` | Config file to create or update inside the project |
 | `--json` | boolean | `false` | Emit the installation result as JSON |
 
@@ -33,7 +33,7 @@ See [CLI Overview](/cli/overview/#global-flags) for global flags.
 
 ### Resolution and compatibility
 
-A name selects the registry's current item; `name@version` selects an immutable template version. An item URL or local JSON path loads a built item directly. Source manifests must first pass through [`chkit registry build`](/cli/registry/).
+A name selects the registry's current item; `name@version` selects an immutable template version. By default, names resolve through the chkit GitHub repository: the manifest declares the current version, and committed release JSON supplies the installable files. An item URL or local JSON path loads a built item directly. Source manifests must first pass through [`chkit registry build`](/cli/registry/).
 
 The installer validates the artifact, file hashes, running CLI version, and declared package ranges before applying changes. Incompatible existing dependencies fail instead of being replaced. The template's ClickHouse range describes its destination requirement; installation does not connect to the database to verify the server version.
 
@@ -73,6 +73,14 @@ By default the selected package manager runs `install` after files are written. 
 Source files become project-owned code. Repeating the same template reference at the same version and path leaves identical files unchanged. Locally modified or deleted template files are conflicts, and a reinstall does not overwrite or restore them.
 
 Changing the installed version, origin, or root is not an automatic update operation. Review such changes manually in a separate checkout. Installation uses defaults without an interactive prompt; `--yes` is accepted for scripted workflows and does not override conflicts.
+
+Installations made through the previous docs-site default keep that origin in their lock file. For those projects, repeat `add` with the original reference and `--registry https://chkit.obsessiondb.com/r/registry.json`, for example:
+
+```sh
+chkit add attio --registry https://chkit.obsessiondb.com/r/registry.json
+```
+
+If the original reference was pinned, keep that version pin. A bare name remains repeatable while the docs-site catalog serves the installed version.
 
 `--path` must be a normalized relative directory inside the project. Absolute targets, path traversal, and symlink destinations are rejected.
 
@@ -136,7 +144,7 @@ Each planned file has a project-relative `path`, an `action` of `create` or `upd
   "template": {
     "name": "attio",
     "version": "0.1.2",
-    "origin": "https://chkit.obsessiondb.com/r/attio.json"
+    "origin": "https://raw.githubusercontent.com/obsessiondb/chkit/main/registry/attio/releases/0.1.2.json"
   },
   "files": [],
   "dependencies": [],

@@ -19,7 +19,7 @@ chkit registry build [manifest] [flags]
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--registry <location>` | string | `https://chkit.obsessiondb.com/r/registry.json` | Catalog URL, local directory, or local catalog file for `list` and name-based `inspect` |
+| `--registry <location>` | string | `github:obsessiondb/chkit` | Official GitHub registry, catalog URL, local directory, or local catalog file for `list` and name-based `inspect` |
 | `--output <directory>` | string | `public/r` | Artifact output directory for `build` |
 | `--json` | boolean | `false` | Emit machine-readable results |
 
@@ -29,11 +29,11 @@ The optional build manifest defaults to `registry/registry.json`. These operatio
 
 ### List
 
-Reads the registry catalog and lists its current apps with titles, versions, resource counts, sync strategies, integration guide links, and install commands. The [web integration list](/integrations/) provides logos and dedicated guides for each official app. A local directory is resolved to its `registry.json`. A URL without a `.json` path is treated as the registry directory.
+By default, reads provider directories and manifests from the chkit GitHub repository's `main` branch. It lists their current apps with titles, versions, resource counts, sync strategies, integration guide links, and install commands. The [web integration list](/integrations/) provides logos and dedicated guides for each official app. With a custom registry, a local directory is resolved to its `registry.json`; a URL without a `.json` path is treated as the registry directory.
 
 ### Inspect
 
-Loads and validates a built item. A bare name resolves to `<name>.json`; a pinned name resolves to `<name>/<version>.json` beside the configured catalog. URLs and local JSON paths identify an item directly.
+Loads and validates a built item. In the official GitHub registry, a bare name reads the manifest's current version and then its committed `releases/<version>.json`; a pinned name reads that release directly. With a custom registry, a bare name resolves to `<name>.json` and a pinned name to `<name>/<version>.json` beside the configured catalog. URLs and local JSON paths identify an item directly.
 
 Inspection exposes the version, copied files, optional test set, dependency requirements, environment examples, resource coverage, scopes, and compatibility metadata. Rich provider metadata also includes credential setup steps, destination tables, API references, derived views, schedules, and deletion behavior. When declared, documentation and logo URLs are included. Human output labels environment values as `.env.example` defaults, shows each resource's scopes and strategy, and prints an install command preserving the selected registry. It does not install files or execute the provider.
 
@@ -128,7 +128,7 @@ chkit registry inspect attio --json | jq '{command, schemaVersion, ok, action, o
   "schemaVersion": 1,
   "ok": true,
   "action": "inspect",
-  "origin": "https://chkit.obsessiondb.com/r/attio.json",
+  "origin": "https://raw.githubusercontent.com/obsessiondb/chkit/main/registry/attio/releases/0.1.2.json",
   "name": "attio",
   "version": "0.1.2"
 }
