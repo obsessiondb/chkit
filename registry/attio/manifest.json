@@ -95,7 +95,7 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
       "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
       "language": "typescript",

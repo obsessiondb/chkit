@@ -2,9 +2,9 @@ import type { AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
 
 export const peopleObject = { id: { workspace_id: 'workspace-1', object_id: 'object-people' }, api_slug: 'people' }
-export const companiesObject = { id: { workspace_id: 'workspace-1', object_id: 'object-companies' }, api_slug: 'companies' }
+const companiesObject = { id: { workspace_id: 'workspace-1', object_id: 'object-companies' }, api_slug: 'companies' }
 export const customObject = { id: { workspace_id: 'workspace-1', object_id: 'object-custom' }, api_slug: 'subscriptions' }
-export const salesList = { id: { workspace_id: 'workspace-1', list_id: 'list-sales' }, api_slug: 'sales' }
+const salesList = { id: { workspace_id: 'workspace-1', list_id: 'list-sales' }, api_slug: 'sales' }
 
 const fixtureParents: Record<string, unknown> = {
   '/v2/objects/people': peopleObject,
