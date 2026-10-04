@@ -1,0 +1,31 @@
+---
+title: Integrating ClickHouse with Linear
+description: Install the editable Linear raw ingestion example.
+---
+
+The Linear registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+## Install
+
+```sh
+bunx chkit add linear
+bunx chkit check
+bunx chkit generate --name add_linear
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:linear
+```
+
+Set `LINEAR_API_KEY` in the runtime environment before the ingestion run. Edit the GraphQL query in `src/integrations/linear/index.ts` to select the fields needed by the project.
+
+<RegistryReference name="linear" section="resources" />
+
+## Sync behavior
+
+Every run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+
+## Related pages
+
+- [App registry](/integrations/)
+- [Ingestion plugin](/plugins/ingest/)

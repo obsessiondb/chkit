@@ -1,5 +1,9 @@
 {
   "extends": "../tsconfig.base.json",
-  "compilerOptions": { "noEmit": true },
-  "include": ["attio/**/*.ts", "slack/**/*.ts"]
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "**/*.ts"
+  ]
 }
