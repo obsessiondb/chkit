@@ -5,7 +5,7 @@ import { z } from 'zod'
 
 export const ITEM_SCHEMA_URL = 'https://ui.shadcn.com/schema/registry-item.json'
 export const CATALOG_SCHEMA_URL = 'https://ui.shadcn.com/schema/registry.json'
-export const DEFAULT_REGISTRY = 'https://chkit.obsessiondb.com/r/registry.json'
+export const DEFAULT_REGISTRY = 'github:obsessiondb/chkit'
 export const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 
 const relativePath = z.string().min(1).refine(isSafeRelativePath, 'Expected a normalized project-relative path')

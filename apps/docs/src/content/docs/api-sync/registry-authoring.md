@@ -205,9 +205,9 @@ Each `sources/` module keeps a resource's reader and schema together. Shared req
 
 `manifest.json` contains one registry item. Its source paths are relative to the provider directory (for example, `sources/notes.ts`); target paths still use the full consumer path such as `src/integrations/attio/sources/notes.ts`. The repository's catalog loader discovers these provider-local manifests and aggregates them for the build, CLI artifacts, and documentation. `bun scripts/build-registry.ts` builds the official catalog; it does not require a handwritten catalog at the registry root.
 
-Released artifacts are committed under `registry/<name>/releases/<version>.json`. The documentation build copies that history into `apps/docs/public/r/<name>/` before building the current catalog and latest aliases. The public pinned URL remains `/r/<name>/<version>.json`. History and the source are colocated without installing release files into consumer projects.
+Released artifacts are committed under `registry/<name>/releases/<version>.json`. The official CLI reads provider directories and manifests from GitHub and installs those committed release artifacts directly. The documentation build also copies that history into `apps/docs/public/r/<name>/` before building the current catalog and latest aliases. History and the source are colocated without installing release files into consumer projects.
 
-After validating a new release artifact, copy its immutable file into the provider's `releases/` directory and commit it with the corresponding source and version change. Do not hand-edit the artifact or commit generated latest aliases. The docs build publishes the catalog at `https://chkit.obsessiondb.com/r/registry.json`.
+After validating a new release artifact, copy its immutable file into the provider's `releases/` directory and commit it with the corresponding source and version change. Do not hand-edit the artifact or commit generated latest aliases. Adding a provider or template version does not require an npm package release; changes to CLI behavior do. The docs build also publishes a static catalog at `https://chkit.obsessiondb.com/r/registry.json` for web and custom-registry use.
 
 ## Add an app to the official documentation
 
