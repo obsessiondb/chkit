@@ -1,0 +1,101 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "github",
+  "type": "registry:item",
+  "title": "GitHub",
+  "description": "Small, editable GitHub API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "github/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/github/README.md",
+      "content": "# GitHub raw ingestion example\n\nThis is a small editable starting point based on the GitHub source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `GITHUB_TOKEN` in the runtime environment and configure a direct ClickHouse connection. Edit `repositories` in `index.ts` before the first migration. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_github\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:github\n```\n\n## Resources\n\n- `issues` → `github_issues_raw`\n- `stargazers` → `github_stargazers_raw`\n\nEach run scans configured repositories. Removed issues or stars remain stored. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.\n"
+    },
+    {
+      "path": "github/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, rawRows, rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nconst database = 'default'\n// Supply owner/repo names; one stable stream per repository.\nconst repositories = ['obsessiondb/chkit']\n\ninterface Issue { number: number; [key: string]: unknown }\ninterface Stargazer { user: { id: number }; [key: string]: unknown }\n\nexport const github_issuesRaw = rawTable({ database, name: 'github_issues_raw' })\nexport const github_stargazersRaw = rawTable({ database, name: 'github_stargazers_raw' })\n\nexport const githubPipeline = definePipeline({\n  id: 'github', tags: ['provider:github'], maxFetches: 1,\n  streams: repositories.flatMap((repo) => [\n    defineStream({\n      id: `github.issues.${repo.replace('/', '.')}`, tags: ['resource:issues'], destination: github_issuesRaw,\n      async *read(context) {\n        for await (const page of pages<Issue>(context, repo, 'issues', 'application/vnd.github+json')) {\n          yield { rows: rawRows(page, (issue) => JSON.stringify([repo, issue.number])) }\n        }\n      },\n    }),\n    defineStream({\n      id: `github.stargazers.${repo.replace('/', '.')}`, tags: ['resource:stargazers'], destination: github_stargazersRaw,\n      async *read(context) {\n        for await (const page of pages<Stargazer>(context, repo, 'stargazers', 'application/vnd.github.star+json')) {\n          yield { rows: rawRows(page, (star) => JSON.stringify([repo, star.user.id])) }\n        }\n      },\n    }),\n  ]),\n})\n\nasync function* pages<T>(context: FetchContext, repo: string, resource: string, accept: string): AsyncGenerator<T[]> {\n  let page = 1\n  while (true) {\n    const url = new URL(`https://api.github.com/repos/${repo}/${resource}`)\n    url.searchParams.set('per_page', '100')\n    url.searchParams.set('page', String(page))\n    if (resource === 'issues') url.searchParams.set('state', 'all')\n    const items = await context.attempt(async (signal) => {\n      const token = process.env.GITHUB_TOKEN\n      if (!token) throw new Error('Set GITHUB_TOKEN')\n      const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${token}`, Accept: accept, 'X-GitHub-Api-Version': '2022-11-28' } })\n      if (!response.ok) throw await HttpError.fromResponse(response)\n      return await response.json() as T[]\n    }, { label: `GET /repos/{owner}/{repo}/${resource}` })\n    if (!Array.isArray(items)) throw new Error(`GitHub ${resource} response is not an array`)\n    if (items.length) yield items\n    if (items.length < 100) return\n    page++\n  }\n}\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/github/",
+      "logo": "https://chkit.obsessiondb.com/logos/github.svg",
+      "authentication": {
+        "method": "Bearer token",
+        "env": [
+          "GITHUB_TOKEN"
+        ],
+        "setup": [
+          "Provide GITHUB_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ],
+        "documentation": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+      },
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/github",
+      "entry": "index.ts",
+      "exports": [
+        "githubPipeline",
+        "github_issuesRaw",
+        "github_stargazersRaw"
+      ],
+      "resources": [
+        {
+          "name": "issues",
+          "title": "Issues and pull requests",
+          "table": "github_issues_raw",
+          "description": "Issue and pull request summaries for the configured repositories",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/issues",
+              "documentation": "https://docs.github.com/en/rest/issues/issues#list-repository-issues"
+            }
+          ]
+        },
+        {
+          "name": "stargazers",
+          "title": "Stargazers",
+          "table": "github_stargazers_raw",
+          "description": "Repository stargazers with starred_at when the token permits it",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/stargazers",
+              "documentation": "https://docs.github.com/en/rest/activity/starring#list-stargazers"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:github from a scheduler.",
+        "deletions": "Each run scans configured repositories. Removed issues or stars remain stored."
+      },
+      "env": {
+        "GITHUB_TOKEN": ""
+      },
+      "fileHashes": {
+        "src/integrations/github/README.md": "f379065b39c5cf9dd234083b16fb3d2e50461e9d585da1e56ce1213a7f867bda",
+        "src/integrations/github/index.ts": "ef6212daa554da71afee509174a0ce950874fac666cae39ef878deef1733fafe"
+      }
+    }
+  }
+}
