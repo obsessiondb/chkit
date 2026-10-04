@@ -34,11 +34,11 @@ describe.serial('built Slack template installed into a consumer', () => {
     const directory = await mkdtemp(join(tmpdir(), 'chkit-slack-installed-'))
     temporary.push(directory)
     const outputDir = join(directory, 'registry')
-    // Source targets the next release; exercise it with this checkout's toolchain.
+    // Exercise source with workspace packages, retaining the template version and changelog.
     const sourceCatalog = await readRegistrySourceCatalog()
     const catalog = { ...sourceCatalog, items: sourceCatalog.items.map((item) => ({ ...item,
       dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`],
-      meta: { chkit: { ...item.meta.chkit, version: `${item.meta.chkit.version}-workspace`, chkit: CLI_VERSION, ingest: CLI_VERSION } },
+      meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     })) }
     await buildRegistryCatalog({ catalog, sourceRoot: join(root, 'registry'), outputDir })
     const project = join(directory, 'project')

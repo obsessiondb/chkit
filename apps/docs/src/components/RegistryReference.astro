@@ -67,3 +67,9 @@ if (!app) throw new Error(`Unknown registry app: ${name}`);
 		</tbody>
 	</table>
 )}
+{section === 'changelog' && app.changelog?.map((release) => (
+	<>
+		<h3>Version {release.version}</h3>
+		<ul>{release.changes.map((change) => <li>{change}</li>)}</ul>
+	</>
+))}

@@ -101,6 +101,12 @@ A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known Obsess
 
 Uses changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump versions.
 
+### Registry integration releases
+
+Keep at most one new release artifact per integration in a PR. Versions already on the merged base are immutable; artifacts added by the unmerged PR are drafts. Further edits refresh that same draft version and its current `meta.chkit.changelog` entry, without adding intermediate versions. Preserve earlier released changelog entries.
+
+Regenerate with `bun run registry:release -- --base origin/main <provider>` and validate with `bun run check:registry-releases -- --base origin/main`; use the actual PR base if different. Omit provider names to refresh all drafts. Do not hand-edit generated artifacts. `bun run verify` checks release history and source/artifact agreement.
+
 ### Releasing (GitHub Actions)
 
 Versions are semver; all 10 published packages share one version (a changesets `fixed` group). A release takes two steps, so the version reaches git before npm and any failure can be re-run:

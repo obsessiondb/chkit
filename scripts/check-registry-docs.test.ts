@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { RegistryCatalog } from '../packages/cli/src/registry/model.js'
 import { checkRegistryDocs } from './check-registry-docs.js'
 
 const roots: string[] = []
+const CHANGELOG_REFERENCE = '<RegistryReference name="example" section="changelog" />'
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -32,7 +33,7 @@ test('reports missing canonical metadata and guides for every added app', () => 
 
 test('requires exact resource names in the body, excluding metadata and longer names', () => {
   const fixture = createFixture()
-  writeFileSync(fixture.guide, '---\ntitle: Integrating ClickHouse with Example\ndescription: "Read `records`."\n---\n`object_attributes` and `records_archive` are available.\n')
+  writeFileSync(fixture.guide, `---\ntitle: Integrating ClickHouse with Example\ndescription: "Read \`records\`."\n---\n\`object_attributes\` and \`records_archive\` are available.\n${CHANGELOG_REFERENCE}\n`)
   expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
     'integrations/example.mdx: document the registry resource `objects` in the guide body.',
     'integrations/example.mdx: document the registry resource `records` in the guide body.',
@@ -42,9 +43,9 @@ test('requires exact resource names in the body, excluding metadata and longer n
 test('accepts manifest-generated resource coverage only for the matching provider', () => {
   const fixture = createFixture()
   const source = '---\ntitle: Integrating ClickHouse with Example\ndescription: Sync Example records.\n---\n'
-  writeFileSync(fixture.guide, `${source}<RegistryReference name="example" section="resources" />\n`)
+  writeFileSync(fixture.guide, `${source}<RegistryReference name="example" section="resources" />\n${CHANGELOG_REFERENCE}\n`)
   expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([])
-  writeFileSync(fixture.guide, `${source}<RegistryReference name="different-app" section="resources" />\n`)
+  writeFileSync(fixture.guide, `${source}<RegistryReference name="different-app" section="resources" />\n${CHANGELOG_REFERENCE}\n`)
   expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
     'integrations/example.mdx: document the registry resource `objects` in the guide body.',
     'integrations/example.mdx: document the registry resource `records` in the guide body.',
@@ -60,6 +61,7 @@ test('requires usable provider references and credential setup for official apps
       authentication: undefined,
       views: undefined,
       sync: undefined,
+      changelog: undefined,
       resources: app.meta.chkit.resources.map((resource) => ({ ...resource, endpoints: [] })),
     } },
   }))
@@ -67,14 +69,26 @@ test('requires usable provider references and credential setup for official apps
     'example: official apps must declare meta.chkit.authentication for their integration reference.',
     'example: official apps must declare meta.chkit.views for their integration reference.',
     'example: official apps must declare meta.chkit.sync for their integration reference.',
+    'example: official apps must declare meta.chkit.changelog for their integration reference.',
     'example: resource objects needs a title, default table, and API endpoint references.',
     'example: resource records needs a title, default table, and API endpoint references.',
   ])
 })
 
+test('requires changelog references generated from the matching integration metadata', () => {
+  const fixture = createFixture()
+  const source = readFileSync(fixture.guide, 'utf8')
+  for (const replacement of ['### 1.0.0\nAdd the integration.', '<RegistryReference name="different-app" section="changelog" />']) {
+    writeFileSync(fixture.guide, source.replace(CHANGELOG_REFERENCE, replacement))
+    expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
+      'integrations/example.mdx: generate the integration changelog with <RegistryReference name="example" section="changelog" />.',
+    ])
+  }
+})
+
 test('reports incorrect SEO metadata and malformed YAML with the guide path', () => {
   const fixture = createFixture()
-  writeFileSync(fixture.guide, '---\ntitle: Example\ndescription: ""\n---\n`objects` and `records`\n')
+  writeFileSync(fixture.guide, `---\ntitle: Example\ndescription: ""\n---\n\`objects\` and \`records\`\n${CHANGELOG_REFERENCE}\n`)
   expect(checkRegistryDocs(fixture.catalog, fixture)).toEqual([
     'integrations/example.mdx: frontmatter title must be "Integrating ClickHouse with Example".',
     'integrations/example.mdx: frontmatter description must be a non-empty string.',
@@ -128,7 +142,7 @@ function createFixture(extension = 'mdx') {
   mkdirSync(join(docsDir, 'integrations'), { recursive: true })
   mkdirSync(join(publicDir, 'logos'), { recursive: true })
   const guide = join(docsDir, `integrations/example.${extension}`)
-  writeFileSync(guide, '---\ntitle: "Integrating ClickHouse with Example"\ndescription: >-\n  Sync Example records into ClickHouse.\n---\nThe `objects` and `records` resources are synced.\n')
+  writeFileSync(guide, `---\ntitle: "Integrating ClickHouse with Example"\ndescription: >-\n  Sync Example records into ClickHouse.\n---\nThe \`objects\` and \`records\` resources are synced.\n\n## Changelog\n\n${CHANGELOG_REFERENCE}\n`)
   writeFileSync(join(publicDir, 'logos/example.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>')
   const catalog: RegistryCatalog = {
     name: 'chkit',
@@ -143,6 +157,7 @@ function createFixture(extension = 'mdx') {
       meta: { chkit: {
         formatVersion: 1,
         version: '1.0.0',
+        changelog: [{ version: '1.0.0', changes: ['Add the integration.'] }],
         language: 'typescript',
         license: 'MIT',
         chkit: '^0.2.0',

@@ -128,6 +128,13 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
         console.log(`  Schedule: ${sync.schedule}`)
         console.log(`  Deletions: ${sync.deletions}`)
       }
+      if (item.meta.chkit.changelog?.length) {
+        console.log('\nChangelog:')
+        for (const release of item.meta.chkit.changelog) {
+          console.log(`  ${release.version}`)
+          for (const change of release.changes) console.log(`    - ${change}`)
+        }
+      }
       console.log('\nFiles:')
       for (const file of item.files) console.log(`  ${file.target}${file.role === 'test' ? ' (optional; --with-tests)' : ''}`)
     }
@@ -163,7 +170,7 @@ function registryHelp(command: 'add' | 'registry'): string {
   if (command === 'registry') return `chkit registry <command> [options]
 
   list                       Browse apps, sync resources, and integration guides
-  inspect <template>         Show records, scopes, environment, files, and install command
+  inspect <template>         Show records, scopes, environment, changelog, files, and install command
   build [manifest]           Build a registry/registry.json manifest
 
 Options:

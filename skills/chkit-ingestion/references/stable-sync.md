@@ -57,4 +57,12 @@ Use portable fixtures through `runIngestion` with memory journal/destination ada
 
 Mark distributed fixture files with `role: "test"`, include their dependencies, and keep them free of repository-only imports and live credentials. For new packaging or destination changes, verify installed consumers and real ClickHouse JSON/replay behavior in an authorized isolated target; memory adapters do not establish merge or deduplication-window behavior.
 
-Before delivery, align manifest labels, README, and integration guide with implemented coverage, bootstrap, normal sync, resumption, reconciliation, deletion semantics, account changes, backfill support, and tuning. Preserve immutable historical artifacts; bump template versions for changed source and document row/state identity changes. Report the evidence and remaining API limits.
+Before delivery, align manifest labels, README, and integration guide with implemented coverage, bootstrap, normal sync, resumption, reconciliation, deletion semantics, account changes, backfill support, and tuning. Document row/state identity changes and report the evidence and remaining API limits.
+
+## Keep one release draft per integration
+
+Treat release artifacts already present in the PR's merged base as immutable history. A new artifact on an unmerged PR branch is a draft, even after it is committed or pushed. Each integration has at most one new version artifact in that PR; update the same draft throughout implementation instead of retaining intermediate versions. Choose a new version relative to the latest merged release, then keep it until the PR merges.
+
+Maintain cumulative `meta.chkit.changelog` entries with semantic `version` and `changes` arrays, newest first. The first entry matches the current template version. Consolidate the final user-visible changes and identity migrations in that one entry, and preserve earlier released notes. Do not describe temporary PR revisions as published releases or require migrations from them.
+
+In the chkit checkout, regenerate the selected draft with `bun run registry:release -- --base origin/main <provider>` and run `bun run check:registry-releases -- --base origin/main`. Use the actual PR base if different. The release command rewrites only current drafts absent from that base; the guard verifies one added artifact per integration, unchanged published history, and source/artifact agreement. After merging, further source or metadata changes belong to a new version and changelog entry in a later PR.

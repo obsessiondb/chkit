@@ -95,7 +95,35 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.1",
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Give People, Companies, each configured object type, and each configured list independent ingestion streams using chkit pagination.",
+            "Make object and list selection explicit, with People and Companies enabled by default; replay interrupted mutable offset reads from the beginning of that stream.",
+            "Preserve raw tables, scoped row identities, and typed views while changing child stream IDs; include fixtures for stream independence and failure recovery."
+          ]
+        },
+        {
+          "version": "0.1.2",
+          "changes": [
+            "Consolidate schemas and readers into resource modules, include portable fixture tests, and document authentication, resources, views, and sync behavior."
+          ]
+        },
+        {
+          "version": "0.1.1",
+          "changes": [
+            "Add integration guide and logo metadata; distributed source is unchanged."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw CRM objects, attributes, records, lists, entries, notes, tasks, and workspace members, with People, Companies, and Deals views."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
       "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
       "language": "typescript",

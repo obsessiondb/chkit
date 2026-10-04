@@ -36,6 +36,22 @@
     "chkit": {
       "formatVersion": 1,
       "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Sync issues through overlapping updated-time windows, explicitly including archived issues.",
+            "Collect all accessible comment pages and advance the watermark only after the complete window reaches the destination.",
+            "Replay failed windows safely and include fixtures for bounded queries, pagination, empty windows, and destination failures."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw GraphQL issue ingestion."
+          ]
+        }
+      ],
       "language": "typescript",
       "license": "MIT",
       "documentation": "https://chkit.obsessiondb.com/integrations/linear/",

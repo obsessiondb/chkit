@@ -188,7 +188,7 @@ Every stream uses `fullSync()` and begins its next execution at offset zero. Att
 
 Child response workspace and parent IDs are checked against the reader's resolved object/list before rows are published. Adding a configured type creates a new stream; removing it stops future reads without removing existing rows. Every scheduled run rereads the selected collections, so edits remain observable.
 
-Version `0.2.0` changes the former combined records, object-attributes, entries, and list-attributes stream IDs to per-type/per-list IDs. Those streams begin with fresh journal progress; the raw table schemas, row IDs for the same `sourceId`, and views are unchanged. The `0.1.3` release artifact remains available. When upgrading from its checkpointed-scan preview, use a new `sourceId` to avoid reusing the old custom strategy for unchanged workspace stream IDs. A new source ID also changes raw row IDs, so review retained observations as part of that migration. Installed files are not automatically overwritten by a newer registry release.
+Upgrading from `0.1.2` to `0.2.0` changes the former combined records, object-attributes, entries, and list-attributes stream IDs to per-type/per-list IDs. Those streams begin with fresh journal progress; the raw table schemas, row IDs for the same `sourceId`, and views are unchanged. Installed files are not automatically overwritten by a newer registry release.
 
 The destination stores the latest **observed** entity. New observations replace earlier observations for the same row identity when ClickHouse reconciles versions. Freshness depends on the external schedule, scan duration, and successful API responses. There are no webhooks or continuous change capture in this integration.
 
@@ -434,6 +434,10 @@ bun test src/integrations/attio/tests/attio.test.ts
 The tests use fixture responses, a mocked HTTP client, and an in-memory destination. They exercise reader behavior without Attio credentials or a ClickHouse server. Edit the fixtures and assertions alongside customized readers. With `--path`, adjust the test command to the chosen installation directory.
 
 Repository-only packaging and live-database tests remain outside the installed test set. The manifest selects the portable tests explicitly.
+
+## Changelog
+
+<RegistryReference name="attio" section="changelog" />
 
 ## Related pages
 

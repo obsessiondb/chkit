@@ -6,7 +6,7 @@ import type { RegistryCatalog } from '../../../../packages/cli/src/registry/mode
 // Read it as build-time data so source analysis does not require generated files.
 const registry: RegistryCatalog = JSON.parse(readFileSync(resolve('public/r/registry.json'), 'utf8'));
 
-export type RegistryReferenceSection = 'overview' | 'authentication' | 'scopes' | 'resources' | 'views' | 'sync';
+export type RegistryReferenceSection = 'overview' | 'authentication' | 'scopes' | 'resources' | 'views' | 'sync' | 'changelog';
 
 export function registryStrategyLabel(strategy: 'full' | 'timestamp' | 'cursor'): string {
 	return { full: 'Full scans', timestamp: 'Timestamp windows', cursor: 'Cursor checkpoints' }[strategy];
@@ -27,6 +27,7 @@ export const registryApps = registry.items.map((item) => ({
 	authentication: item.meta.chkit.authentication,
 	views: item.meta.chkit.views,
 	sync: item.meta.chkit.sync,
+	changelog: item.meta.chkit.changelog,
 	clickhouse: item.meta.chkit.clickhouse,
 	language: item.meta.chkit.language,
 	strategies: [...new Set(item.meta.chkit.resources.map((resource) => resource.strategy))],
@@ -90,6 +91,12 @@ export function registryReferenceMarkdown(name: string, section: RegistryReferen
 				['Schedule', app.sync.schedule],
 				['Deletions', app.sync.deletions],
 			]) : '';
+		case 'changelog':
+			return (app.changelog ?? []).map((release) => [
+				`### Version ${release.version}`,
+				'',
+				...release.changes.map((change) => `- ${change}`),
+			].join('\n')).join('\n\n');
 	}
 }
 

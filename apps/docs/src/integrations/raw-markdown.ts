@@ -74,7 +74,7 @@ function expandRegistryReferences(source: string): string {
 		.map((part, index) => index % 2 === 1 ? part : part
 			.replace(/^import Registry(?:Apps|Reference) from .+;\n/gm, '')
 			.replace('<RegistryApps />', () => registryMarkdown())
-			.replace(/<RegistryReference name="([^"]+)" section="(overview|authentication|scopes|resources|views|sync)" \/>/g, (_match, name: string, section: RegistryReferenceSection) => registryReferenceMarkdown(name, section)))
+			.replace(/<RegistryReference name="([^"]+)" section="(overview|authentication|scopes|resources|views|sync|changelog)" \/>/g, (_match, name: string, section: RegistryReferenceSection) => registryReferenceMarkdown(name, section)))
 		.join('');
 }
 

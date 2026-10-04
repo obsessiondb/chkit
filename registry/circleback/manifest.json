@@ -30,6 +30,22 @@
     "chkit": {
       "formatVersion": 1,
       "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Checkpoint acknowledged meetings within a full scan and replay unfinished parent enrichment after failure.",
+            "Retain explicit forbidden and not-found transcript diagnostics, retry listed meetings on each new scan, and bound saved recovery state.",
+            "Keep raw meeting observations and add portable fixtures for pagination, transcript availability, and destination failures."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw meeting ingestion with transcript enrichment."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/circleback/",
       "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
       "language": "typescript",

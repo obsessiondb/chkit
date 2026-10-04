@@ -97,6 +97,32 @@ test.serial('build, list and inspect roundtrip through the CLI without importing
   expect(inspectText.stdout).toContain('Strategy: full (full scans); scopes: record:read')
   expect(inspectText.stdout).not.toContain('Guide:')
   expect(inspectText.stdout).not.toContain('Logo:')
+  expect(inspectText.stdout).not.toContain('Changelog:')
+})
+
+test.serial('inspect shows the integration changelog in human and JSON output', async () => {
+  const fixture = await fixtures.create()
+  const changelog = [
+    { version: '1.0.1', changes: ['Resume interrupted syncs from saved cursors.', 'Keep provider payloads unchanged.'] },
+    { version: '1.0.0', changes: ['Add the initial integration.'] },
+  ]
+  await writeManifest(fixture.manifest, {
+    ...fixture.sourceItem,
+    meta: { chkit: { ...fixture.sourceItem.meta.chkit, version: '1.0.1', changelog } },
+  })
+  await buildRegistry({ manifestPath: fixture.manifest, outputDir: fixture.output })
+  const [human, json, legacy] = await Promise.all([
+    runCli(fixture.project, ['registry', 'inspect', 'fixture@1.0.1', '--registry', fixture.output]),
+    runCli(fixture.project, ['registry', 'inspect', 'fixture@1.0.1', '--registry', fixture.output, '--json']),
+    runCli(fixture.project, ['registry', 'inspect', 'fixture@1.0.0', '--registry', fixture.output]),
+  ])
+  expect(human.exitCode).toBe(0)
+  expect(human.stdout).toContain('Changelog:\n  1.0.1\n    - Resume interrupted syncs from saved cursors.\n    - Keep provider payloads unchanged.\n  1.0.0\n    - Add the initial integration.')
+  expect(json.exitCode).toBe(0)
+  expect(JSON.parse(json.stdout).item.meta.chkit.changelog).toEqual(changelog)
+  expect(legacy.exitCode).toBe(0)
+  expect(legacy.stdout).not.toContain('Changelog:')
+  expect(await readdir(fixture.project)).toEqual([])
 })
 
 test.serial('list and inspect expose integration guides, logos, complete resources and environment defaults', async () => {

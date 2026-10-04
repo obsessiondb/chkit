@@ -36,6 +36,22 @@
     "chkit": {
       "formatVersion": 1,
       "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Replace the rolling occurrence window with canonical events and incremental provider sync tokens, including cancellation payloads.",
+            "Resume acknowledged pages, promote the terminal sync token after destination acknowledgement, and bound recovery from rejected or expired tokens.",
+            "Scope row IDs to the installation and resolved calendar; migrate legacy occurrence identities or use a fresh table and stream when upgrading."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw events ingestion over a rolling occurrence window."
+          ]
+        }
+      ],
       "language": "typescript",
       "license": "MIT",
       "documentation": "https://chkit.obsessiondb.com/integrations/google-calendar/",

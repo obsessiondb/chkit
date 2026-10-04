@@ -36,6 +36,22 @@
     "chkit": {
       "formatVersion": 1,
       "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Checkpoint fixed conference discovery windows and retain pending conferences until expiry to revisit late transcript artifacts.",
+            "Resume acknowledged discovery, transcript, and entry pages with bounded token recovery and visible expiry gaps.",
+            "Store transcript entries in a separate raw table and scope row IDs to the source; migrate legacy identities deliberately when upgrading."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw conference and transcript ingestion with transcript entries nested in each transcript observation."
+          ]
+        }
+      ],
       "language": "typescript",
       "license": "MIT",
       "documentation": "https://chkit.obsessiondb.com/integrations/google-meet/",

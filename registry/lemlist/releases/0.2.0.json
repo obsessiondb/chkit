@@ -36,6 +36,22 @@
     "chkit": {
       "formatVersion": 1,
       "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Sync activities through bounded, overlapping creation-time intervals and advance checkpoints only after all interval pages are acknowledged.",
+            "Replay interrupted intervals from offset zero and record successful campaign full scans without treating creation time as a modification cursor.",
+            "Preserve raw destinations and include fixtures for empty intervals, backfills, and source or destination failures."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw campaigns and activities ingestion."
+          ]
+        }
+      ],
       "language": "typescript",
       "license": "MIT",
       "documentation": "https://chkit.obsessiondb.com/integrations/lemlist/",

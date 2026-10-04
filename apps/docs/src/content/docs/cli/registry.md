@@ -37,6 +37,8 @@ Loads and validates a built item. In the official GitHub registry, a bare name r
 
 Inspection exposes the version, copied files, optional test set, dependency requirements, environment examples, resource coverage, scopes, and compatibility metadata. Rich provider metadata also includes credential setup steps, destination tables, API references, derived views, schedules, and deletion behavior. When declared, documentation and logo URLs are included. Human output labels environment values as `.env.example` defaults, shows each resource's scopes and strategy, and prints an install command preserving the selected registry. It does not install files or execute the provider.
 
+When declared, the changelog lists release versions and their changes, newest first. The CLI and integration guide use the same `meta.chkit.changelog` history. Inspecting a pinned version shows the history bundled with that release; older or custom items without changelog metadata remain readable.
+
 ### Build
 
 Reads the source catalog and each declared source file relative to the manifest directory. Validation covers the supported item format, safe paths, unique targets, required dependencies, and explicit entry exports. The builder embeds source content, computes file hashes, and emits:
@@ -114,7 +116,7 @@ chkit registry list --json | jq '{command, schemaVersion, ok, action, items: [.i
 }
 ```
 
-The `resources` array preserves the manifest's resource descriptions, scopes, strategies, and optional titles, destination tables, and API endpoints. `inspect --json` includes provider authentication, derived views, and sync behavior under `item.meta.chkit` when declared. `documentation` and `logo` are omitted for older or custom items without those optional fields.
+The `resources` array preserves the manifest's resource descriptions, scopes, strategies, and optional titles, destination tables, and API endpoints. `inspect --json` includes provider authentication, derived views, sync behavior, and versioned `changelog` entries under `item.meta.chkit` when declared. `documentation`, `logo`, and `changelog` are omitted for older or custom items without those optional fields.
 
 **Inspect:** returns `action: "inspect"`, the resolved `origin`, and the full built `item`, including source contents and `meta.chkit`. To extract only the item identity:
 

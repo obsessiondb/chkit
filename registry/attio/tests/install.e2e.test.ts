@@ -35,11 +35,11 @@ describe.serial('built Attio template installed into a consumer', () => {
     temporary.push(directory)
     const outputDir = join(directory, 'registry')
     const catalog = await readRegistrySourceCatalog()
-    // Exercise unreleased source with workspace packages; published artifacts keep their release minima.
+    // Exercise source with workspace packages, retaining the template version and changelog.
     const workspaceCatalog = { ...catalog, items: catalog.items.map((item) => item.name === 'attio' ? {
       ...item,
       dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`],
-      meta: { chkit: { ...item.meta.chkit, version: `${item.meta.chkit.version}-workspace`, chkit: CLI_VERSION, ingest: CLI_VERSION } },
+      meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     } : item) }
     await buildRegistryCatalog({ catalog: workspaceCatalog, sourceRoot: join(root, 'registry'), outputDir })
     const project = join(directory, 'project')

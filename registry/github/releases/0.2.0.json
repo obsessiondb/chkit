@@ -36,6 +36,22 @@
     "chkit": {
       "formatVersion": 1,
       "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Sync issues through overlapping updated-time windows, advancing the watermark only after complete destination acknowledgement.",
+            "Collect all accessible issue comments and pull-request context, reporting provider caps on commits and files.",
+            "Record successful stargazer full scans and add failure-replay and empty-window fixtures without changing raw destinations."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw repository issues and stargazers ingestion."
+          ]
+        }
+      ],
       "language": "typescript",
       "license": "MIT",
       "documentation": "https://chkit.obsessiondb.com/integrations/github/",
