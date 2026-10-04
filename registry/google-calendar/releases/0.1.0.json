@@ -1,0 +1,95 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "google-calendar",
+  "type": "registry:item",
+  "title": "Google Calendar",
+  "description": "Small, editable Google Calendar API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "google-calendar/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/README.md",
+      "content": "# Google Calendar raw ingestion example\n\nThis is a small editable starting point based on the Google-Calendar source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `GOOGLE_CALENDAR_ACCESS_TOKEN` in the runtime environment and configure a direct ClickHouse connection. Edit `calendarId`, `pastDays`, and `futureDays` in `index.ts` before the first migration. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_google_calendar\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:google-calendar\n```\n\n## Resources\n\n- `events` → `google_calendar_events_raw`\n\nEach run reads a configured time range. Events outside the range and deleted records are not reconciled. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.\n"
+    },
+    {
+      "path": "google-calendar/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, rawRows, rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nconst database = 'default'\nconst calendarId = 'primary'\n// Change these bounds to the events relevant to the project.\nconst pastDays = 365\nconst futureDays = 180\n\ninterface Event { id: string; [key: string]: unknown }\ninterface Page { items?: Event[]; nextPageToken?: string }\n\nexport const google_calendar_eventsRaw = rawTable({ database, name: 'google_calendar_events_raw' })\n\nexport const google_calendarPipeline = definePipeline({\n  id: 'google-calendar', tags: ['provider:google-calendar'], maxFetches: 1,\n  streams: [defineStream({ id: 'google-calendar.events', tags: ['resource:events'], destination: google_calendar_eventsRaw,\n    async *read(context) {\n      let pageToken: string | undefined\n      const seen = new Set<string>()\n      do {\n        const page = await readPage(context, pageToken)\n        if (!Array.isArray(page.items ?? [])) throw new Error('Calendar items are not an array')\n        if (page.items?.length) yield { rows: rawRows(page.items, (event) => JSON.stringify([calendarId, event.id])) }\n        pageToken = page.nextPageToken\n        if (pageToken && seen.has(pageToken)) throw new Error('Calendar repeated a page token')\n        if (pageToken) seen.add(pageToken)\n      } while (pageToken)\n    },\n  })],\n})\n\nasync function readPage(context: FetchContext, pageToken?: string): Promise<Page> {\n  return context.attempt(async (signal) => {\n    const token = process.env.GOOGLE_CALENDAR_ACCESS_TOKEN\n    if (!token) throw new Error('Set GOOGLE_CALENDAR_ACCESS_TOKEN')\n    const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`)\n    const timeMin = new Date(Date.now() - pastDays * 86_400_000).toISOString()\n    const timeMax = new Date(Date.now() + futureDays * 86_400_000).toISOString()\n    for (const [key, value] of Object.entries({ singleEvents: 'true', showDeleted: 'true', maxResults: '250', timeMin, timeMax })) url.searchParams.set(key, value)\n    if (pageToken) url.searchParams.set('pageToken', pageToken)\n    const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${token}` } })\n    if (!response.ok) throw await HttpError.fromResponse(response)\n    return await response.json() as Page\n  }, { label: 'GET calendar events' })\n}\n"
+    },
+    {
+      "path": "google-calendar/tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/tests/basic.test.ts",
+      "role": "test",
+      "content": "import { afterEach, expect, test } from 'bun:test'\nimport { runIngestion, selectStreams } from '@chkit/plugin-ingest'\nimport { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'\n\nimport { google_calendarPipeline } from '../index.js'\n\nconst originalFetch = globalThis.fetch\nconst originalToken = process.env.GOOGLE_CALENDAR_ACCESS_TOKEN\n\nfunction setFetch(handler: (...args: Parameters<typeof fetch>) => Promise<Response>): void {\n  globalThis.fetch = Object.assign(handler, { preconnect: originalFetch.preconnect })\n}\n\nafterEach(() => {\n  globalThis.fetch = originalFetch\n  if (originalToken === undefined) delete process.env.GOOGLE_CALENDAR_ACCESS_TOKEN\n  else process.env.GOOGLE_CALENDAR_ACCESS_TOKEN = originalToken\n})\n\ntest.serial('Google Calendar follows page tokens and keeps cancellation payloads', async () => {\n  process.env.GOOGLE_CALENDAR_ACCESS_TOKEN = 'fixture'\n  const tokens: Array<string | null> = []\n  setFetch(async (input) => {\n    const url = new URL(String(input))\n    tokens.push(url.searchParams.get('pageToken'))\n    return Response.json(url.searchParams.has('pageToken')\n      ? { items: [{ id: 'cancelled', status: 'cancelled' }] }\n      : { items: [{ id: 'active', summary: 'Call' }], nextPageToken: 'next' })\n  })\n  const destination = createMemoryDestination()\n  const result = await runIngestion({ selected: selectStreams([google_calendarPipeline], []), backfill: undefined }, { journal: createMemoryJournal(), destination })\n  expect(result.ok).toBe(true)\n  expect(tokens).toEqual([null, 'next'])\n  expect(destination.tables.get('default.google_calendar_events_raw')?.map((row) => row.raw)).toEqual([\n    { id: 'active', summary: 'Call' }, { id: 'cancelled', status: 'cancelled' },\n  ])\n})\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/google-calendar/",
+      "logo": "https://chkit.obsessiondb.com/logos/google-calendar.svg",
+      "authentication": {
+        "method": "OAuth access token",
+        "env": [
+          "GOOGLE_CALENDAR_ACCESS_TOKEN"
+        ],
+        "setup": [
+          "Provide GOOGLE_CALENDAR_ACCESS_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ],
+        "documentation": "https://developers.google.com/calendar/api/guides/auth"
+      },
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/google-calendar",
+      "entry": "index.ts",
+      "exports": [
+        "google_calendarPipeline",
+        "google_calendar_eventsRaw"
+      ],
+      "resources": [
+        {
+          "name": "events",
+          "title": "Events",
+          "table": "google_calendar_events_raw",
+          "description": "Events from the configured calendar, including cancelled events",
+          "scopes": [
+            "https://www.googleapis.com/auth/calendar.readonly"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/calendars/{calendarId}/events",
+              "documentation": "https://developers.google.com/workspace/calendar/api/v3/reference/events/list"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:google-calendar from a scheduler.",
+        "deletions": "Each run reads a configured time range. Events outside the range and deleted records are not reconciled."
+      },
+      "env": {
+        "GOOGLE_CALENDAR_ACCESS_TOKEN": ""
+      },
+      "fileHashes": {
+        "src/integrations/google-calendar/README.md": "2753ad1ffb21bb5ccd7d48743ed1153e36185dd8689bb1709c202961bb624b18",
+        "src/integrations/google-calendar/index.ts": "99936cd05b512ec4bd8b578853d3e17ac8c8314c36153bba1ab1c6af525b416d",
+        "src/integrations/google-calendar/tests/basic.test.ts": "bfc0eac8f850a49511baa5d4f87d605834c59f4fdf48d320b17009424ea6aa43"
+      }
+    }
+  }
+}
