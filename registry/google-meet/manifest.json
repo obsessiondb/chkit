@@ -1,0 +1,104 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "google-meet",
+  "type": "registry:item",
+  "title": "Google Meet",
+  "description": "Small, editable Google Meet API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/README.md"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/index.ts"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "documentation": "https://chkit.obsessiondb.com/integrations/google-meet/",
+      "logo": "https://chkit.obsessiondb.com/logos/google-meet.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/google-meet",
+      "entry": "index.ts",
+      "exports": [
+        "google_meetPipeline",
+        "google_meet_conferencesRaw",
+        "google_meet_transcriptsRaw"
+      ],
+      "resources": [
+        {
+          "name": "conferences",
+          "title": "Conferences",
+          "table": "google_meet_conferences_raw",
+          "description": "Conference records visible to the access token",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            }
+          ]
+        },
+        {
+          "name": "transcripts",
+          "title": "Transcripts",
+          "table": "google_meet_transcripts_raw",
+          "description": "Transcript metadata and paged entries for each visible conference",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/transcripts",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/transcripts/{transcript}/entries",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts.entries/list"
+            }
+          ]
+        }
+      ],
+      "env": {
+        "GOOGLE_MEET_ACCESS_TOKEN": ""
+      },
+      "authentication": {
+        "method": "OAuth access token",
+        "env": [
+          "GOOGLE_MEET_ACCESS_TOKEN"
+        ],
+        "documentation": "https://developers.google.com/workspace/meet/api/guides/authenticate-authorize",
+        "setup": [
+          "Provide GOOGLE_MEET_ACCESS_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:google-meet from a scheduler.",
+        "deletions": "Each run reads a configured time range. Transcripts generated later require another scan of that range."
+      }
+    }
+  }
+}

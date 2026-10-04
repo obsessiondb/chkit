@@ -1,0 +1,31 @@
+---
+title: Integrating ClickHouse with Google Meet
+description: Install the editable Google Meet raw ingestion example.
+---
+
+The Google Meet registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+## Install
+
+```sh
+bunx chkit add google-meet
+bunx chkit check
+bunx chkit generate --name add_google_meet
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:google-meet
+```
+
+Set `GOOGLE_MEET_ACCESS_TOKEN` in the runtime environment before the ingestion run. Edit `lookbackDays` in `src/integrations/google-meet/index.ts` to select the conference window.
+
+<RegistryReference name="google-meet" section="resources" />
+
+## Sync behavior
+
+Each run reads a configured time range. Transcripts generated later require another scan of that range. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+
+## Related pages
+
+- [App registry](/integrations/)
+- [Ingestion plugin](/plugins/ingest/)
