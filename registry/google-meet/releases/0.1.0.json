@@ -1,0 +1,110 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "google-meet",
+  "type": "registry:item",
+  "title": "Google Meet",
+  "description": "Small, editable Google Meet API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "google-meet/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/README.md",
+      "content": "# Google Meet raw ingestion example\n\nThis is a small editable starting point based on the Google-Meet source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `GOOGLE_MEET_ACCESS_TOKEN` in the runtime environment and configure a direct ClickHouse connection. Edit `lookbackDays` in `index.ts` to select the conference window. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_google_meet\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:google-meet\n```\n\n## Resources\n\n- `conferences` → `google_meet_conferences_raw`\n- `transcripts` → `google_meet_transcripts_raw`\n\nEach run reads a configured time range. Transcripts generated later require another scan of that range. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.\n"
+    },
+    {
+      "path": "google-meet/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, rawRows, rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nconst database = 'default'\n// Pick a range that includes conferences whose transcripts may still be processing.\nconst lookbackDays = 30\nconst baseUrl = 'https://meet.googleapis.com/v2'\n\ninterface Named { name: string; [key: string]: unknown }\n\nexport const google_meet_conferencesRaw = rawTable({ database, name: 'google_meet_conferences_raw' })\nexport const google_meet_transcriptsRaw = rawTable({ database, name: 'google_meet_transcripts_raw' })\n\nexport const google_meetPipeline = definePipeline({\n  id: 'google-meet', tags: ['provider:google-meet'], maxStreams: 1, maxFetches: 1,\n  streams: [\n    defineStream({ id: 'google-meet.conferences', tags: ['resource:conferences'], destination: google_meet_conferencesRaw,\n      async *read(context) {\n        for await (const page of conferences(context)) yield { rows: rawRows(page, (item) => item.name) }\n      },\n    }),\n    defineStream({ id: 'google-meet.transcripts', tags: ['resource:transcripts'], destination: google_meet_transcriptsRaw,\n      async *read(context) {\n        for await (const page of conferences(context)) {\n          for (const conference of page) {\n            for await (const transcripts of list<Named>(context, `${conference.name}/transcripts`, 'transcripts')) {\n              for (const transcript of transcripts) {\n                const entries: unknown[] = []\n                for await (const part of list<unknown>(context, `${transcript.name}/entries`, 'transcriptEntries')) entries.push(...part)\n                yield { rows: rawRows([{ ...transcript, conference_name: conference.name, entries }], (item) => item.name) }\n              }\n            }\n          }\n        }\n      },\n    }),\n  ],\n})\n\nfunction conferences(context: FetchContext): AsyncGenerator<Named[]> {\n  const from = new Date(Date.now() - lookbackDays * 86_400_000).toISOString()\n  const to = new Date().toISOString()\n  return list<Named>(context, `conferenceRecords?filter=${encodeURIComponent(`start_time>=\"${from}\" AND start_time<=\"${to}\"`)}`, 'conferenceRecords')\n}\n\nasync function* list<T>(context: FetchContext, path: string, field: string): AsyncGenerator<T[]> {\n  let pageToken: string | undefined\n  const seen = new Set<string>()\n  do {\n    const page = await context.attempt(async (signal) => {\n      const token = process.env.GOOGLE_MEET_ACCESS_TOKEN\n      if (!token) throw new Error('Set GOOGLE_MEET_ACCESS_TOKEN')\n      const url = new URL(`${baseUrl}/${path}`)\n      url.searchParams.set('pageSize', '100')\n      if (pageToken) url.searchParams.set('pageToken', pageToken)\n      const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${token}` } })\n      if (!response.ok) throw await HttpError.fromResponse(response)\n      return await response.json() as Record<string, unknown>\n    }, { label: `GET ${field}` })\n    const items = page[field]\n    if (items !== undefined && !Array.isArray(items)) throw new Error(`Meet ${field} is not an array`)\n    if (Array.isArray(items) && items.length) yield items as T[]\n    pageToken = typeof page.nextPageToken === 'string' ? page.nextPageToken : undefined\n    if (pageToken && seen.has(pageToken)) throw new Error(`Meet repeated ${field} page token`)\n    if (pageToken) seen.add(pageToken)\n  } while (pageToken)\n}\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/google-meet/",
+      "logo": "https://chkit.obsessiondb.com/logos/google-meet.svg",
+      "authentication": {
+        "method": "OAuth access token",
+        "env": [
+          "GOOGLE_MEET_ACCESS_TOKEN"
+        ],
+        "setup": [
+          "Provide GOOGLE_MEET_ACCESS_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ],
+        "documentation": "https://developers.google.com/workspace/meet/api/guides/authenticate-authorize"
+      },
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/google-meet",
+      "entry": "index.ts",
+      "exports": [
+        "google_meetPipeline",
+        "google_meet_conferencesRaw",
+        "google_meet_transcriptsRaw"
+      ],
+      "resources": [
+        {
+          "name": "conferences",
+          "title": "Conferences",
+          "table": "google_meet_conferences_raw",
+          "description": "Conference records visible to the access token",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            }
+          ]
+        },
+        {
+          "name": "transcripts",
+          "title": "Transcripts",
+          "table": "google_meet_transcripts_raw",
+          "description": "Transcript metadata and paged entries for each visible conference",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/transcripts",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/transcripts/{transcript}/entries",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts.entries/list"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:google-meet from a scheduler.",
+        "deletions": "Each run reads a configured time range. Transcripts generated later require another scan of that range."
+      },
+      "env": {
+        "GOOGLE_MEET_ACCESS_TOKEN": ""
+      },
+      "fileHashes": {
+        "src/integrations/google-meet/README.md": "edb197feca682634aacac3061dbd0bb7af2428459a2cde2aac10b6ba87f23f20",
+        "src/integrations/google-meet/index.ts": "d17aae8ebef5d27c19ae6a20e43d69a34834b0526c82211e2d4a787a46448ed3"
+      }
+    }
+  }
+}
