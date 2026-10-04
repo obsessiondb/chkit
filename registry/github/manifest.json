@@ -1,0 +1,95 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "github",
+  "type": "registry:item",
+  "title": "GitHub",
+  "description": "Small, editable GitHub API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/github/README.md"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/index.ts"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "documentation": "https://chkit.obsessiondb.com/integrations/github/",
+      "logo": "https://chkit.obsessiondb.com/logos/github.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/github",
+      "entry": "index.ts",
+      "exports": [
+        "githubPipeline",
+        "github_issuesRaw",
+        "github_stargazersRaw"
+      ],
+      "resources": [
+        {
+          "name": "issues",
+          "title": "Issues and pull requests",
+          "table": "github_issues_raw",
+          "description": "Issue and pull request summaries for the configured repositories",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/issues",
+              "documentation": "https://docs.github.com/en/rest/issues/issues#list-repository-issues"
+            }
+          ]
+        },
+        {
+          "name": "stargazers",
+          "title": "Stargazers",
+          "table": "github_stargazers_raw",
+          "description": "Repository stargazers with starred_at when the token permits it",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/stargazers",
+              "documentation": "https://docs.github.com/en/rest/activity/starring#list-stargazers"
+            }
+          ]
+        }
+      ],
+      "env": {
+        "GITHUB_TOKEN": ""
+      },
+      "authentication": {
+        "method": "Bearer token",
+        "env": [
+          "GITHUB_TOKEN"
+        ],
+        "documentation": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
+        "setup": [
+          "Provide GITHUB_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:github from a scheduler.",
+        "deletions": "Each run scans configured repositories. Removed issues or stars remain stored."
+      }
+    }
+  }
+}
