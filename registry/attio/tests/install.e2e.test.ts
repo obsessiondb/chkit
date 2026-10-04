@@ -70,11 +70,16 @@ describe.serial('built Attio template installed into a consumer', () => {
     expect(await Bun.file(join(project, 'src/integrations/attio/tests/install.e2e.test.ts')).exists()).toBe(false)
     const configPath = join(project, 'src/integrations/attio/config.ts')
     const config = await readFile(configPath, 'utf8')
-    await writeFile(configPath, config.replace("database: 'default'", `database: ${JSON.stringify(env.clickhouseDatabase)}`).replace("tablePrefix: 'attio'", `tablePrefix: '${prefix}'`))
+    await writeFile(configPath, config.replace("database: 'default'", `database: ${JSON.stringify(env.clickhouseDatabase)}`)
+      .replace("tablePrefix: 'attio'", `tablePrefix: '${prefix}'`)
+      .replace("objects: ['people', 'companies']", "objects: ['people', 'subscriptions']"))
 
     const list = cli(['ingest', 'list', '--tag', 'provider:attio', '--json'])
     expect(list.exitCode, formatTestDiagnostic('list without token', list)).toBe(0)
     expect(JSON.parse(list.stdout).streams).toHaveLength(9)
+    const peopleOnly = cli(['ingest', 'list', '--tag', 'provider:attio', '--tag', 'resource:records', '--tag', 'object:people', '--json'])
+    expect(peopleOnly.exitCode, formatTestDiagnostic('one object stream', peopleOnly)).toBe(0)
+    expect(JSON.parse(peopleOnly.stdout).streams.map((stream: { streamId: string }) => stream.streamId)).toEqual(['attio.primary.records.people'])
     const generate = cli(['generate', '--name', 'attio_fixture', '--json'])
     expect(generate.exitCode, formatTestDiagnostic('generate', generate)).toBe(0)
     const migrate = cli(['migrate', '--apply', '--json'])
@@ -83,16 +88,18 @@ describe.serial('built Attio template installed into a consumer', () => {
     await waitForView(executor, env.clickhouseDatabase, `${prefix}_people`)
 
     const installed: typeof import('../index.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/index.ts')).href)
-    const readers: typeof import('../sources/records.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/sources/records.ts')).href)
-    const recordStream = installed.attio.streams.find((stream) => stream.id.endsWith('.records'))
-    expect(recordStream).toBeDefined()
-    if (!recordStream) throw new Error('Installed records stream is missing')
+    const factory: typeof import('../pipeline.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/pipeline.ts')).href)
+    const installedConfig: typeof import('../config.js') = await import(pathToFileURL(join(project, 'src/integrations/attio/config.ts')).href)
+    expect(installed.attio.streams.filter((stream) => stream.tags.includes('resource:records')).map((stream) => stream.id))
+      .toEqual(['attio.primary.records.people', 'attio.primary.records.subscriptions'])
     let revision = 1
     const deps = fixtureDeps((url) => {
-      if (url.pathname === '/v2/objects') return Response.json({ data: [
+      if (url.pathname === '/v2/objects/people') return Response.json({ data:
         { id: { workspace_id: 'workspace-1', object_id: 'people' }, api_slug: 'people' },
+      })
+      if (url.pathname === '/v2/objects/subscriptions') return Response.json({ data:
         { id: { workspace_id: 'workspace-1', object_id: 'custom' }, api_slug: 'subscriptions' },
-      ] })
+      })
       if (url.pathname === '/v2/objects/people/records/query') return Response.json({ data: [
         { ...person, id: { ...person.id, object_id: 'people' }, values: { ...person.values, name: [{ full_name: revision === 1 ? 'Ada Example' : 'Ada Updated' }], email_addresses: [{ email_address: 'one@example.test' }, { email_address: 'two@example.test' }] } },
         { id: { ...person.id, object_id: 'people', record_id: 'empty-attributes' }, values: {} },
@@ -100,7 +107,8 @@ describe.serial('built Attio template installed into a consumer', () => {
       if (url.pathname === '/v2/objects/custom/records/query') return Response.json({ data: [{ id: { workspace_id: 'workspace-1', object_id: 'custom', record_id: 'custom-1' }, values: { unmodeled: [{ value: 'retained' }] } }] })
       throw new Error(`Unexpected provider fixture request: ${url.pathname}`)
     })
-    const pipeline = definePipeline({ id: 'fixture', streams: [{ ...recordStream, read: (context) => readers.readRecords(context, deps) }], retry: { retries: 0 } })
+    const configured = factory.createAttioPipeline(installedConfig.attioConfig, deps)
+    const pipeline = definePipeline({ id: 'fixture', streams: configured.streams.filter((stream) => stream.tags.includes('resource:records')), retry: { retries: 0 } })
     const journal = createMemoryJournal()
     for (const next of [1, 2]) {
       revision = next

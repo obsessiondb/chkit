@@ -3,7 +3,7 @@
   "name": "attio",
   "type": "registry:item",
   "title": "Attio",
-  "description": "Editable Attio CRM schemas, raw data readers, typed views, and checkpointed full-scan ingestion pipelines.",
+  "description": "Editable Attio CRM schemas, raw data readers, typed views, and independent streams for People, Companies, configured custom types, and workspace resources.",
   "dependencies": [
     "@chkit/core@^0.2.0-beta.10",
     "@chkit/plugin-ingest@^0.2.0-beta.10"
@@ -18,11 +18,6 @@
       "path": "client.ts",
       "type": "registry:file",
       "target": "src/integrations/attio/client.ts"
-    },
-    {
-      "path": "checkpoints.ts",
-      "type": "registry:file",
-      "target": "src/integrations/attio/checkpoints.ts"
     },
     {
       "path": "config.ts",
@@ -100,7 +95,7 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.3",
+      "version": "0.2.0",
       "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
       "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
       "language": "typescript",
@@ -157,12 +152,17 @@
               "method": "GET",
               "path": "/objects/{object_id}/attributes",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
             }
           ]
         },
         {
           "name": "records",
-          "description": "Current records for every selected object, IDs, creation time, Attio URL, and the complete values object with all returned attribute arrays",
+          "description": "Independent records streams for configured object types (People and Companies by default), IDs, creation time, Attio URL, and the complete values object with all returned attribute arrays",
           "scopes": [
             "object_configuration:read",
             "record_permission:read"
@@ -175,6 +175,11 @@
               "method": "POST",
               "path": "/objects/{object_id}/records/query",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/records/list-records"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
             }
           ]
         },
@@ -209,6 +214,11 @@
               "method": "GET",
               "path": "/lists/{list_id}/attributes",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
             }
           ]
         },
@@ -227,6 +237,11 @@
               "method": "POST",
               "path": "/lists/{list_id}/entries/query",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
             }
           ]
         },
@@ -321,7 +336,7 @@
         }
       ],
       "sync": {
-        "description": "Full scan cycles retain the latest observed raw entities. Interrupted parent collections resume from the frozen object/list set after the last completely loaded parent; unfinished offset scans restart at zero. A completed cycle starts fresh discovery and full reads on the next run.",
+        "description": "People, Companies, each configured custom object/list, and workspace resources have independent full-sync streams. Each reader paginates one collection through chkit-ingest; interrupted mutable offset reads replay that collection from zero. Completed and empty reads are recorded by the executor journal without a custom scan checkpoint. Custom types and lists must be configured explicitly.",
         "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler; the template does not start a background worker.",
         "deletions": "Records absent from a later API response remain in ClickHouse. The template does not propagate deletions or consume webhooks."
       }

@@ -1,13 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { HttpError, IngestConfigError, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
+import { HttpError, IngestConfigError, paginate, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
 
-import { attioConfig } from './config.js'
-import { beginScan, type AttioReadContext, type ScanParent } from './checkpoints.js'
+import { attioConfig, type AttioConfig } from './config.js'
 
 export type AttioEntity = Record<string, unknown> & { id: Record<string, string> }
 
 export interface AttioClientDeps {
+  config: AttioConfig
   fetch: (url: string, init: RequestInit) => Promise<Response>
   token: () => string | undefined
   wait: (milliseconds: number, signal: AbortSignal) => Promise<void>
@@ -25,101 +25,80 @@ interface CollectionRequest {
   parent?: { field: 'object_id' | 'list_id'; id: string; workspaceId: string }
 }
 
-const defaultDeps: AttioClientDeps = {
+export const defaultAttioClientDeps: AttioClientDeps = {
+  config: attioConfig,
   fetch: (url, init) => fetch(url, init),
   token: () => process.env.ATTIO_API_TOKEN,
   wait: async (milliseconds, signal) => { await sleep(milliseconds, undefined, { signal }) },
 }
 
-/** Offset pages are mutable: resume only after a completely loaded parent. */
-export async function* readParentCollections(
-  context: AttioReadContext,
+/** Resolve one configured object/list; each stream owns one collection. */
+export async function* readParentCollection(
+  context: FetchContext,
   input: {
     resource: string
-    parents: 'objects' | 'lists'
-    idFields: readonly string[]
-    request: (parent: ScanParent) => CollectionRequest
+    parent: { kind: 'objects' | 'lists'; ref: string }
+    request: (parent: AttioEntity) => CollectionRequest
   },
-  deps?: AttioClientDeps,
+  deps: AttioClientDeps = defaultAttioClientDeps,
 ) {
-  let state = beginScan(context, input.resource)
-  if (context.state?.phase !== 'scanning') {
-    const parents = input.parents === 'objects' ? await discoverObjects(context, deps) : await discoverLists(context, deps)
-    state = { ...state, parents: parents.map((parent) => ({
-      workspaceId: entityId(parent, 'workspace_id'),
-      id: entityId(parent, input.parents === 'objects' ? 'object_id' : 'list_id'),
-      slug: entitySlug(parent),
-    })) }
-    yield { rows: [], state, id: `scan:${state.cycle}:start` }
-  }
-  for (const parent of state.parents) {
-    if (state.completedParents.includes(parent.id)) continue
-    const request = { ...input.request(parent), parent: {
-      field: input.parents === 'objects' || input.resource === 'list_attributes' ? 'object_id' as const : 'list_id' as const,
-      id: parent.id, workspaceId: parent.workspaceId,
-    } }
-    for await (const page of readCollection(context, request, deps)) {
-      yield { rows: toAttioRows(page, input.resource, input.idFields,
-        input.parents === 'objects' ? { object_slug: parent.slug } : { list_slug: parent.slug }) }
+  const idField = input.parent.kind === 'objects' ? 'object_id' : 'list_id'
+  const path = `/${input.parent.kind}/${encodeURIComponent(input.parent.ref)}`
+  const parent = await context.attempt(async (signal) => {
+    const entity = parseEntity(await requestData({ path, idFields: ['workspace_id', idField] }, 0, signal, deps), {
+      path, idFields: ['workspace_id', idField],
+    })
+    entitySlug(entity)
+    if (input.parent.ref !== entityId(entity, idField) && input.parent.ref !== entitySlug(entity)) {
+      throw new IngestConfigError(`Attio ${path} returned a different configured parent.`)
     }
-    state = { ...state, completedParents: [...state.completedParents, parent.id] }
-    // This empty marker flushes preceding rows before publishing the parent frontier.
-    yield { rows: [], state, id: `scan:${state.cycle}:parent:${parent.id}` }
-  }
-  yield { rows: [], state: { ...state, phase: 'complete' as const }, id: `scan:${state.cycle}:complete` }
+    return entity
+  }, { label: `GET /v2${path}` })
+  const request = { ...input.request(parent), parent: {
+    field: input.parent.kind === 'objects' || input.resource === 'list_attributes' ? 'object_id' as const : 'list_id' as const,
+    id: entityId(parent, idField), workspaceId: entityId(parent, 'workspace_id'),
+  } }
+  yield* readRows(context, {
+    resource: input.resource, request,
+    metadata: input.parent.kind === 'objects' ? { object_slug: entitySlug(parent) } : { list_slug: entitySlug(parent) },
+  }, deps)
 }
 
-/** Workspace collections restart offset zero after interruption and record completion. */
-export async function* readCollectionScan(
-  context: AttioReadContext,
-  resource: string,
-  request: CollectionRequest,
-  deps?: AttioClientDeps,
+export async function* readRows(
+  context: FetchContext,
+  input: { resource: string; request: CollectionRequest; metadata?: { object_slug?: string; list_slug?: string } },
+  deps: AttioClientDeps = defaultAttioClientDeps,
 ) {
-  const state = beginScan(context, resource)
-  if (context.state?.phase !== 'scanning') yield { rows: [], state, id: `scan:${state.cycle}:start` }
-  for await (const page of readCollection(context, request, deps)) {
-    yield { rows: toAttioRows(page, resource, request.idFields) }
+  for await (const page of readCollection(context, input.request, deps)) {
+    yield { rows: toAttioRows(page, input.resource, input.request.idFields, input.metadata, deps.config.sourceId) }
   }
-  yield { rows: [], state: { ...state, phase: 'complete' as const }, id: `scan:${state.cycle}:complete` }
 }
 
 /** Each page is validated inside attempt, so executor retry/cancellation owns every request. */
-export async function* readCollection(
+export function readCollection(
   context: FetchContext,
   request: CollectionRequest,
-  deps: AttioClientDeps = defaultDeps,
-): AsyncGenerator<AttioEntity[]> {
+  deps: AttioClientDeps = defaultAttioClientDeps,
+) {
   if (request.pageSize !== undefined && (!Number.isSafeInteger(request.pageSize) || request.pageSize <= 0)) {
     throw new IngestConfigError('Attio pageSize must be a positive safe integer.')
   }
-  let offset = 0
-  while (true) {
-    context.signal.throwIfAborted()
-    const currentOffset = offset
-    const page = await context.attempt(
-      (signal) => requestPage(request, currentOffset, signal, deps),
-      { label: `${request.method ?? 'GET'} /v2${request.path}` },
-    )
-    if (page.length > 0) yield page
-    if (request.pageSize === undefined || page.length < request.pageSize) return
-    offset += page.length
-    if (!Number.isSafeInteger(offset)) throw new IngestConfigError('Attio pagination offset exceeded the safe integer range.')
-  }
-}
-
-export async function discoverObjects(context: FetchContext, deps?: AttioClientDeps): Promise<AttioEntity[]> {
-  for await (const objects of readCollection(context, { path: '/objects', idFields: ['workspace_id', 'object_id'] }, deps)) {
-    return selectEntities(objects, attioConfig.objects, 'object_id')
-  }
-  return selectEntities([], attioConfig.objects, 'object_id')
-}
-
-export async function discoverLists(context: FetchContext, deps?: AttioClientDeps): Promise<AttioEntity[]> {
-  for await (const lists of readCollection(context, { path: '/lists', idFields: ['workspace_id', 'list_id'] }, deps)) {
-    return selectEntities(lists, attioConfig.lists, 'list_id')
-  }
-  return selectEntities([], attioConfig.lists, 'list_id')
+  return paginate({
+    context, initial: 0, label: `${request.method ?? 'GET'} /v2${request.path}`,
+    fetchPage: async (offset = 0, signal) => {
+      const data = await requestData(request, offset, signal, deps)
+      if (!Array.isArray(data)) throw new IngestConfigError(`Attio ${request.path} returned no data array.`)
+      const items = data.map((value: unknown) => parseEntity(value, request))
+      if (request.pageSize !== undefined && items.length > request.pageSize) {
+        throw new IngestConfigError(`Attio ${request.path} returned more rows than the requested page size.`)
+      }
+      const next = request.pageSize !== undefined && items.length === request.pageSize ? offset + items.length : undefined
+      if (next !== undefined && !Number.isSafeInteger(next)) {
+        throw new IngestConfigError('Attio pagination offset exceeded the safe integer range.')
+      }
+      return { items, next }
+    },
+  })
 }
 
 /** Original provider fields stay under data; metadata does not overwrite custom attributes. */
@@ -128,10 +107,11 @@ export function toAttioRows(
   resource: string,
   idFields: readonly string[],
   metadata: { object_slug?: string; list_slug?: string } = {},
+  sourceId = attioConfig.sourceId,
 ) {
   return rawRows(
-    items.map((data) => ({ source_id: attioConfig.sourceId, ...metadata, data })),
-    ({ data }) => JSON.stringify([attioConfig.sourceId, resource, ...idFields.map((field) => entityId(data, field))]),
+    items.map((data) => ({ source_id: sourceId, ...metadata, data })),
+    ({ data }) => JSON.stringify([sourceId, resource, ...idFields.map((field) => entityId(data, field))]),
   )
 }
 
@@ -155,12 +135,12 @@ export const classifyAttioError: ErrorClassifier = (cause) => {
   return undefined
 }
 
-async function requestPage(
+async function requestData(
   request: CollectionRequest,
   offset: number,
   signal: AbortSignal,
   deps: AttioClientDeps,
-): Promise<AttioEntity[]> {
+): Promise<unknown> {
   const token = deps.token()?.trim()
   if (!token) throw new IngestConfigError('Set ATTIO_API_TOKEN before running Attio ingestion. Schema imports do not need credentials.')
   const url = new URL(`https://api.attio.com/v2${request.path}`)
@@ -189,22 +169,10 @@ async function requestPage(
     throw error
   }
   const payload: unknown = await response.json()
-  if (!isObject(payload) || !Array.isArray(payload.data)) {
-    throw new IngestConfigError(`Attio ${request.path} returned no data array.`)
+  if (!isObject(payload) || !('data' in payload)) {
+    throw new IngestConfigError(`Attio ${request.path} returned no data field.`)
   }
-  return payload.data.map((value: unknown) => parseEntity(value, request))
-}
-
-function selectEntities(entities: AttioEntity[], selection: readonly string[] | undefined, idField: string): AttioEntity[] {
-  // Validate slugs even when all resources are selected: records/views rely on this metadata.
-  for (const entity of entities) entitySlug(entity)
-  if (selection === undefined) return entities
-  for (const wanted of selection) {
-    if (!entities.some((entity) => entityId(entity, idField) === wanted || entitySlug(entity) === wanted)) {
-      throw new IngestConfigError(`Configured Attio ${idField} or slug "${wanted}" was not found or is not accessible.`)
-    }
-  }
-  return entities.filter((entity) => selection.includes(entityId(entity, idField)) || selection.includes(entitySlug(entity)))
+  return payload.data
 }
 
 function parseEntity(value: unknown, request: CollectionRequest): AttioEntity {
@@ -212,7 +180,7 @@ function parseEntity(value: unknown, request: CollectionRequest): AttioEntity {
   for (const field of request.idFields) entityId(value, field)
   if (request.parent && (entityId(value, 'workspace_id') !== request.parent.workspaceId
     || entityId(value, request.parent.field) !== request.parent.id)) {
-    throw new IngestConfigError(`Attio ${request.path} returned an entity from a different workspace or parent. Restore the original account token before resuming this scan.`)
+    throw new IngestConfigError(`Attio ${request.path} returned an entity from a different workspace or parent than the resolved collection.`)
   }
   if (request.valuesField !== undefined) {
     const values = value[request.valuesField]

@@ -1,19 +1,18 @@
-import { rawTable } from '@chkit/plugin-ingest'
+import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
 
-import { readParentCollections, type AttioClientDeps } from '../client.js'
+import { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
-import type { AttioReadContext } from '../checkpoints.js'
 
 export const attioObjectAttributesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_object_attributes_raw` })
 
-export async function* readObjectAttributes(context: AttioReadContext, deps?: AttioClientDeps) {
-  yield* readParentCollections(context, {
-    resource: 'object_attributes', parents: 'objects', idFields: ['workspace_id', 'object_id', 'attribute_id'],
+export function readObjectAttributes(context: FetchContext, object: string, deps: AttioClientDeps = defaultAttioClientDeps) {
+  return readParentCollection(context, {
+    resource: 'object_attributes', parent: { kind: 'objects', ref: object },
     request: (parent) => ({
-      path: `/objects/${encodeURIComponent(parent.id)}/attributes`,
+      path: `/objects/${encodeURIComponent(entityId(parent, 'object_id'))}/attributes`,
       idFields: ['workspace_id', 'object_id', 'attribute_id'],
       query: { show_archived: 'true' },
-      pageSize: attioConfig.pageSize,
+      pageSize: deps.config.pageSize,
     }),
   }, deps)
 }

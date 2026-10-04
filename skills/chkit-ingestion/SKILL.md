@@ -13,7 +13,9 @@ Establish auth, response shape, pagination, record IDs, change filters/cursors, 
 
 Treat stored shape and mapping together: prefer raw objects plus a SQL view when the shape may evolve and storage is affordable; map inside `read` for a known schema. Model warehouse entities separately; embed bounded child collections when consumers need complete documents. A unified document table is a specialized retrieval model.
 
-Choose the strongest appropriate sync mechanism the provider actually supports: a change feed or sync token, reliable modification windows, or checkpointed full reconciliation. A simple full read remains appropriate for small bounded catalogs or explicitly requested prototypes. Use the default loader unless another publication contract is needed. Explain consequential choices and coverage limits.
+Choose the strongest appropriate sync mechanism the provider actually supports: a change feed or sync token, reliable modification windows, or full reads with safe replay. A simple full read is appropriate when the API lacks reliable change selection and its cost is acceptable, as well as for small catalogs or explicitly requested prototypes. Use the default loader unless another publication contract is needed. Explain consequential choices and coverage limits.
+
+Choose stream boundaries that match the entities users sync independently. Several streams can write to one raw table; table grouping does not require one reader to traverse every entity type. Prefer existing `paginate()` and incremental strategies. Add custom state only when a provider's recovery contract needs progress beyond the executor's journal; ordinary `fullSync()` already records successful work, including empty reads. Put repeated generic mechanics in the library when the existing API cannot express them concisely.
 
 ## Registry quality bar
 
@@ -21,7 +23,7 @@ Before creating or materially changing an official registry integration, read [S
 
 For each resource, establish its provider contract and choose a safe completion boundary before coding. Keep provider payloads raw; application-specific projections are optional and separate. Compare existing registry providers and established implementations such as Brain when accessible, then verify the API contract rather than copying their assumptions. Private repository access is not a dependency of the installed skill.
 
-The release gate is evidence that interruptions resume or safely replay, progress follows destination acknowledgement, empty reads commit completion, and late changes have a reconciliation plan. Full scans are valid when justified by the API; completion checkpoints do not make them change feeds. Match manifest strategy labels to actual behavior, document limitations and identity/state migrations, and add portable failure/restart fixtures.
+The release gate is evidence that interruptions resume or safely replay, progress follows destination acknowledgement, empty reads commit completion, and late changes have a reconciliation plan. Full scans are valid when justified by the API; completion checkpoints do not make them change feeds. Reliable full-sync replay does not require a provider-owned scan state machine. Match manifest strategy labels to actual behavior, document limitations and identity/state migrations, and add portable failure/restart fixtures.
 
 ## Read only the relevant docs
 
@@ -40,7 +42,7 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 - TypeScript and direct ClickHouse config are required. Preserve existing schema discovery: add the provider entry to `schema` paths, or re-export its schema and active pipelines from the project `entry`. Migrations create destinations.
 - Stream IDs own checkpoints: keep them stable and account-scoped. Pipelines group streams without dependency ordering.
 - Use `context.attempt`/`paginate`, forward cancellation, and throw `HttpError.fromResponse` for HTTP failures. Yield bounded chunks.
-- Support or explicitly reject historical bounds. When supported, enforce both bounds and freeze unfinished selections across restarts. Persist complete validated resume state; the executor commits it after writes.
+- Support historical bounds or state explicitly that a full-sync reader ignores them and does not provide date-range backfills. When supported, enforce both bounds and freeze unfinished selections across restarts. Persist complete validated resume state; the executor commits it after writes.
 - Separate the completed watermark from unfinished traversal state. Newest-first pages cannot alone advance a completed timestamp watermark; documented fixed-window timestamp frontiers or scoped page positions can still resume unfinished reads. Preserve timestamp precision and equal-timestamp coverage.
 - Choose overlap from indexing/arrival behavior. For children that appear or change without updating their parent, retain bounded pending parents or reconcile old roots; a recent overlap alone is insufficient.
 - Custom tables need `ingestionColumns`. Prefer `simpleLoader`; custom loaders must preserve write identity and acknowledge publication before returning receipts.
