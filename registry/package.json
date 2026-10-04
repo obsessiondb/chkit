@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint .",
-    "test": "bun test attio/tests slack/tests ../scripts/registry-catalog.test.ts --timeout 30000"
+    "test": "bun test */tests ../scripts/registry-catalog.test.ts --timeout 30000"
   },
   "devDependencies": {
     "@chkit/clickhouse": "workspace:*",

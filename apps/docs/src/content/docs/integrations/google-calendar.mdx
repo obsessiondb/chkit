@@ -1,0 +1,31 @@
+---
+title: Integrating ClickHouse with Google Calendar
+description: Install the editable Google Calendar raw ingestion example.
+---
+
+The Google Calendar registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+## Install
+
+```sh
+bunx chkit add google-calendar
+bunx chkit check
+bunx chkit generate --name add_google_calendar
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:google-calendar
+```
+
+Set `GOOGLE_CALENDAR_ACCESS_TOKEN` in the runtime environment before the ingestion run. Edit `calendarId`, `pastDays`, and `futureDays` in `src/integrations/google-calendar/index.ts` to select the calendar and time range.
+
+<RegistryReference name="google-calendar" section="resources" />
+
+## Sync behavior
+
+Each run reads a configured time range. Events outside the range and deleted records are not reconciled. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+
+## Related pages
+
+- [App registry](/integrations/)
+- [Ingestion plugin](/plugins/ingest/)

@@ -1,0 +1,87 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "google-calendar",
+  "type": "registry:item",
+  "title": "Google Calendar",
+  "description": "Small, editable Google Calendar API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/README.md"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/index.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/tests/basic.test.ts",
+      "role": "test"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "documentation": "https://chkit.obsessiondb.com/integrations/google-calendar/",
+      "logo": "https://chkit.obsessiondb.com/logos/google-calendar.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/google-calendar",
+      "entry": "index.ts",
+      "exports": [
+        "google_calendarPipeline",
+        "google_calendar_eventsRaw"
+      ],
+      "resources": [
+        {
+          "name": "events",
+          "title": "Events",
+          "table": "google_calendar_events_raw",
+          "description": "Events from the configured calendar, including cancelled events",
+          "scopes": [
+            "https://www.googleapis.com/auth/calendar.readonly"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/calendars/{calendarId}/events",
+              "documentation": "https://developers.google.com/workspace/calendar/api/v3/reference/events/list"
+            }
+          ]
+        }
+      ],
+      "env": {
+        "GOOGLE_CALENDAR_ACCESS_TOKEN": ""
+      },
+      "authentication": {
+        "method": "OAuth access token",
+        "env": [
+          "GOOGLE_CALENDAR_ACCESS_TOKEN"
+        ],
+        "documentation": "https://developers.google.com/calendar/api/guides/auth",
+        "setup": [
+          "Provide GOOGLE_CALENDAR_ACCESS_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:google-calendar from a scheduler.",
+        "deletions": "Each run reads a configured time range. Events outside the range and deleted records are not reconciled."
+      }
+    }
+  }
+}
