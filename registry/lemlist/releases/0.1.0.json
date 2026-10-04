@@ -1,0 +1,101 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "lemlist",
+  "type": "registry:item",
+  "title": "Lemlist",
+  "description": "Small, editable Lemlist API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "lemlist/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/README.md",
+      "content": "# Lemlist raw ingestion example\n\nThis is a small editable starting point based on the Lemlist source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `LEMLIST_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit `pageSize` and the stream list in `index.ts` for the resources needed by the project. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_lemlist\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:lemlist\n```\n\n## Resources\n\n- `activities` → `lemlist_activities_raw`\n- `campaigns` → `lemlist_campaigns_raw`\n\nBoth streams scan all accessible pages each run. Removed campaigns or activity records remain stored. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.\n"
+    },
+    {
+      "path": "lemlist/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, rawRows, rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nconst database = 'default'\nconst pageSize = 100\n\ninterface Item { _id: string; [key: string]: unknown }\n\nexport const lemlist_activitiesRaw = rawTable({ database, name: 'lemlist_activities_raw' })\nexport const lemlist_campaignsRaw = rawTable({ database, name: 'lemlist_campaigns_raw' })\n\nexport const lemlistPipeline = definePipeline({\n  id: 'lemlist', tags: ['provider:lemlist'], maxFetches: 1,\n  streams: [\n    defineStream({ id: 'lemlist.activities', tags: ['resource:activities'], destination: lemlist_activitiesRaw,\n      async *read(context) {\n        for await (const page of pages(context, 'activities')) yield { rows: rawRows(page, (item) => item._id) }\n      },\n    }),\n    defineStream({ id: 'lemlist.campaigns', tags: ['resource:campaigns'], destination: lemlist_campaignsRaw,\n      async *read(context) {\n        for await (const page of pages(context, 'campaigns')) yield { rows: rawRows(page, (item) => item._id) }\n      },\n    }),\n  ],\n})\n\nasync function* pages(context: FetchContext, resource: 'activities' | 'campaigns'): AsyncGenerator<Item[]> {\n  let offset = 0\n  while (true) {\n    const url = new URL(`https://api.lemlist.com/api/${resource}`)\n    url.searchParams.set('version', 'v2')\n    url.searchParams.set('limit', String(pageSize))\n    url.searchParams.set('offset', String(offset))\n    const result = await context.attempt(async (signal) => {\n      const key = process.env.LEMLIST_API_KEY\n      if (!key) throw new Error('Set LEMLIST_API_KEY')\n      const response = await fetch(url, { signal, headers: { Authorization: `Basic ${Buffer.from(`:${key}`).toString('base64')}` } })\n      if (!response.ok) throw await HttpError.fromResponse(response)\n      return await response.json() as Item[] | { campaigns: Item[] }\n    }, { label: `GET /${resource}` })\n    const items = resource === 'campaigns' && !Array.isArray(result) ? result.campaigns : result\n    if (!Array.isArray(items)) throw new Error(`Lemlist ${resource} response has no items`)\n    if (items.length) yield items\n    if (items.length < pageSize) return\n    offset += items.length\n  }\n}\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/lemlist/",
+      "logo": "https://chkit.obsessiondb.com/logos/lemlist.svg",
+      "authentication": {
+        "method": "HTTP Basic API key",
+        "env": [
+          "LEMLIST_API_KEY"
+        ],
+        "setup": [
+          "Provide LEMLIST_API_KEY with read access to the selected resources.",
+          "Keep the API key in the runtime environment and rotate it according to the provider policy."
+        ],
+        "documentation": "https://developer.lemlist.com/"
+      },
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/lemlist",
+      "entry": "index.ts",
+      "exports": [
+        "lemlistPipeline",
+        "lemlist_activitiesRaw",
+        "lemlist_campaignsRaw"
+      ],
+      "resources": [
+        {
+          "name": "activities",
+          "title": "Activities",
+          "table": "lemlist_activities_raw",
+          "description": "Outreach activity events",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/activities",
+              "documentation": "https://developer.lemlist.com/"
+            }
+          ]
+        },
+        {
+          "name": "campaigns",
+          "title": "Campaigns",
+          "table": "lemlist_campaigns_raw",
+          "description": "Campaign metadata",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/campaigns",
+              "documentation": "https://developer.lemlist.com/"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:lemlist from a scheduler.",
+        "deletions": "Both streams scan all accessible pages each run. Removed campaigns or activity records remain stored."
+      },
+      "env": {
+        "LEMLIST_API_KEY": ""
+      },
+      "fileHashes": {
+        "src/integrations/lemlist/README.md": "93c680759a15e2b6faf765a4f769437fadd84227062a4a26b2dce5ceacfb03c0",
+        "src/integrations/lemlist/index.ts": "d3c389cda9b1c1b2a3f8696d5aac1c16b0717a8dbb32090e4f8a5592db006db6"
+      }
+    }
+  }
+}
