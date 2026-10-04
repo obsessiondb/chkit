@@ -167,7 +167,7 @@ chkit registry inspect attio --json | jq '{command, schemaVersion, ok, action, o
 
 ## Related commands
 
-- [Apps & integrations](/integrations/): browse logos, integration guides, and full sync coverage.
+- [Apps & integrations](/integrations/): browse logos, integration guides, and sync coverage.
 - [`chkit add`](/cli/add/): install a built template into a project.
 - [Provider templates](/api-sync/templates/): source ownership and customization.
 - [Publish a registry](/api-sync/registry-authoring/): format and release guidance.

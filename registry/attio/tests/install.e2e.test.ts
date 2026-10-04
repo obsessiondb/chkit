@@ -9,6 +9,7 @@ import { createClickHouseDestination, definePipeline, runIngestion, selectStream
 import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.js'
+import { CLI_VERSION } from '../../../packages/cli/src/runtime/version.js'
 import { formatTestDiagnostic, runCli } from '../../../packages/cli/src/test/e2e-testkit.js'
 import { readRegistrySourceCatalog } from '../../../scripts/registry-catalog.js'
 import { fixtureDeps, person } from './fixtures.js'
@@ -33,7 +34,14 @@ describe.serial('built Attio template installed into a consumer', () => {
     const directory = await mkdtemp(join(tmpdir(), 'chkit-attio-installed-'))
     temporary.push(directory)
     const outputDir = join(directory, 'registry')
-    await buildRegistryCatalog({ catalog: await readRegistrySourceCatalog(), sourceRoot: join(root, 'registry'), outputDir })
+    const catalog = await readRegistrySourceCatalog()
+    // Exercise unreleased source with workspace packages; published artifacts keep their release minima.
+    const workspaceCatalog = { ...catalog, items: catalog.items.map((item) => item.name === 'attio' ? {
+      ...item,
+      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`],
+      meta: { chkit: { ...item.meta.chkit, version: `${item.meta.chkit.version}-workspace`, chkit: CLI_VERSION, ingest: CLI_VERSION } },
+    } : item) }
+    await buildRegistryCatalog({ catalog: workspaceCatalog, sourceRoot: join(root, 'registry'), outputDir })
     const project = join(directory, 'project')
     await writeProject(project, root, env.clickhouseDatabase, prefix)
     const cliEnv = {
@@ -86,8 +94,8 @@ describe.serial('built Attio template installed into a consumer', () => {
         { id: { workspace_id: 'workspace-1', object_id: 'custom' }, api_slug: 'subscriptions' },
       ] })
       if (url.pathname === '/v2/objects/people/records/query') return Response.json({ data: [
-        { ...person, values: { ...person.values, name: [{ full_name: revision === 1 ? 'Ada Example' : 'Ada Updated' }], email_addresses: [{ email_address: 'one@example.test' }, { email_address: 'two@example.test' }] } },
-        { id: { ...person.id, record_id: 'empty-attributes' }, values: {} },
+        { ...person, id: { ...person.id, object_id: 'people' }, values: { ...person.values, name: [{ full_name: revision === 1 ? 'Ada Example' : 'Ada Updated' }], email_addresses: [{ email_address: 'one@example.test' }, { email_address: 'two@example.test' }] } },
+        { id: { ...person.id, object_id: 'people', record_id: 'empty-attributes' }, values: {} },
       ] })
       if (url.pathname === '/v2/objects/custom/records/query') return Response.json({ data: [{ id: { workspace_id: 'workspace-1', object_id: 'custom', record_id: 'custom-1' }, values: { unmodeled: [{ value: 'retained' }] } }] })
       throw new Error(`Unexpected provider fixture request: ${url.pathname}`)

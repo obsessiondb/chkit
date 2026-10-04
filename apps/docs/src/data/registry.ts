@@ -8,6 +8,10 @@ const registry: RegistryCatalog = JSON.parse(readFileSync(resolve('public/r/regi
 
 export type RegistryReferenceSection = 'overview' | 'authentication' | 'scopes' | 'resources' | 'views' | 'sync';
 
+export function registryStrategyLabel(strategy: 'full' | 'timestamp' | 'cursor'): string {
+	return { full: 'Full scans', timestamp: 'Timestamp windows', cursor: 'Cursor checkpoints' }[strategy];
+}
+
 // The build validates and aggregates provider-local manifests before Astro loads this catalog.
 // HTML, raw Markdown, and structured data share the resulting metadata without CLI runtime dependencies.
 export const registryApps = registry.items.map((item) => ({
@@ -56,7 +60,7 @@ export function registryReferenceMarkdown(name: string, section: RegistryReferen
 				['Environment variables', app.authentication?.env.map((env) => `\`${env}\``).join(', ') ?? 'See provider setup'],
 				['ClickHouse', `\`${app.clickhouse}\``],
 				['Coverage', `${app.resources.length} synced resources, ${app.views?.length ?? 0} derived views`],
-				['Sync strategy', app.strategies.map((strategy) => strategy === 'full' ? 'Full read on every run' : strategy).join(', ')],
+				['Sync strategy', app.strategies.map(registryStrategyLabel).join(', ')],
 			]);
 		case 'authentication':
 			return app.authentication ? [

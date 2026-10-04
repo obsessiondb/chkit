@@ -3,10 +3,10 @@
   "name": "circleback",
   "type": "registry:item",
   "title": "Circleback",
-  "description": "Small, editable Circleback API ingestion example with raw ClickHouse tables.",
+  "description": "Editable Circleback full scan cycles with bounded parent recovery and durable transcript availability diagnostics.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -29,13 +29,13 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
       "documentation": "https://chkit.obsessiondb.com/integrations/circleback/",
       "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/circleback",
       "entry": "index.ts",
@@ -81,10 +81,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Full scan cycles retain acknowledged parent enrichment for recovery; completing a cycle resets parent progress, while unavailable transcript diagnostics remain explicit.",
         "schedule": "Run bunx chkit ingest run --tag provider:circleback from a scheduler.",
-        "deletions": "The meetings endpoint is scanned on every run. Missing transcripts remain null; removed meetings remain stored."
+        "deletions": "Removed meetings remain stored. Transcript 403 and 404 responses retain distinct unavailable statuses; neither proves that a transcript is still processing."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

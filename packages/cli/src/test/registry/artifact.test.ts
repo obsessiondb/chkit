@@ -114,6 +114,19 @@ test.serial('presentation metadata is optional and accepts only HTTP or HTTPS UR
   }
 })
 
+test.serial('resource strategies preserve full metadata and accept timestamp and cursor checkpoints', async () => {
+  const fixture = await fixtures.create()
+  for (const strategy of ['full', 'timestamp', 'cursor']) {
+    const resources = fixture.item.meta.chkit.resources.map((resource) => ({ ...resource, strategy }))
+    const item = { ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, resources } } }
+    expect(parseRegistryItem(item).meta.chkit.resources[0]?.strategy).toBe(strategy)
+  }
+  for (const strategy of ['offset', '', undefined]) {
+    const resources = fixture.item.meta.chkit.resources.map((resource) => ({ ...resource, strategy }))
+    expect(() => parseRegistryItem({ ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, resources } } })).toThrow()
+  }
+})
+
 test.serial('optional test roles and dependencies preserve legacy items and reject invalid entries', async () => {
   const fixture = await fixtures.create(true)
   expect(parseRegistryItem(fixture.item)).toEqual(fixture.item)

@@ -4,6 +4,8 @@ This is a small editable starting point based on the Linear source in [obsession
 
 Set `LINEAR_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit the GraphQL `query` in `index.ts` to request the issue fields needed by the project. Native JSON requires ClickHouse 25.3 or later.
 
+Keep each stream ID and destination tied to one Linear workspace. The reader does not resolve the authenticated workspace identity: when changing the token to another workspace, use a new stream ID and destination before ingesting so the old watermark cannot skip that workspace's history. Adding requested fields later requires a historical reconciliation to populate older observations.
+
 ```sh
 bunx chkit check
 bunx chkit generate --name add_linear
@@ -16,4 +18,26 @@ bunx chkit ingest run --tag provider:linear
 
 - `issues` → `linear_issues_raw`
 
-Every run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.
+## Sync and recovery
+
+Issues use a bounded `updatedAt` filter and `orderBy: updatedAt`, with `includeArchived: true`. The initial window starts at the Unix epoch; later windows replay five minutes before the committed watermark. Relay issue cursors and comment cursors are used only during the current read. All accessible comment pages are collected before their parent observation is published, retaining the provider's connection shape and the final `pageInfo`.
+
+Newest-first pages do not define a safe timestamp frontier. The checkpoint advances to the fixed execution cutoff only after the whole window and all destination writes succeed, including an empty successful window. A source or sink failure replays the window from its lower bound. Mutable observations have no declared chunk ID, so changed provider fields remain eligible for insertion on replay.
+
+Deleted issues remain stored. Archived issues are retained explicitly. A comment-only change is not assumed to advance the parent issue's `updatedAt`, and cursor pagination is not a guaranteed source snapshot. Schedule periodic reconciliation with a new backfill ID to refresh old discussions, or add a durable webhook companion:
+
+```sh
+bunx chkit ingest run --tag provider:linear --backfill reconcile-2026-10-04 --from 1970-01-01
+bunx chkit ingest status --tag provider:linear --json
+```
+
+Reconciliation reads current issue observations by their last-update timestamp; it does not reconstruct historical issue versions. Run one ingestion process per ClickHouse target at a time.
+
+## Fixture tests
+
+```sh
+bunx chkit add linear --with-tests
+bun test src/integrations/linear/tests/basic.test.ts
+```
+
+The portable suite covers bounded archive-inclusive queries, complete comments, failure replay, sink ordering and empty-window checkpoints without live credentials.

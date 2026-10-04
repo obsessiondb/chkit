@@ -1,5 +1,5 @@
 ---
-import { registryApps } from '../data/registry';
+import { registryApps, registryStrategyLabel } from '../data/registry';
 ---
 
 <ul class="registry-apps not-content" aria-label="Available ClickHouse integrations">
@@ -10,7 +10,7 @@ import { registryApps } from '../data/registry';
 					<div class="app-logo">{app.logo ? <img src={app.logo} alt={`${app.title} logo`} width="37" height="30" loading="lazy" /> : <span aria-hidden="true">{app.title.slice(0, 1)}</span>}</div>
 					<div>
 						<h3><a href={app.href}>{app.title}</a></h3>
-						<p class="app-meta">{app.resources.length} resources · {app.strategies.map((strategy) => strategy === 'full' ? 'Full reads' : strategy).join(', ')} · {app.language === 'typescript' ? 'TypeScript' : app.language}</p>
+						<p class="app-meta">{app.resources.length} resources · {app.strategies.map(registryStrategyLabel).join(', ')} · {app.language === 'typescript' ? 'TypeScript' : app.language}</p>
 					</div>
 					<span class="app-version">v{app.version}</span>
 				</div>

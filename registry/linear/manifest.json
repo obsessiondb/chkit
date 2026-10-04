@@ -3,10 +3,10 @@
   "name": "linear",
   "type": "registry:item",
   "title": "Linear",
-  "description": "Small, editable Linear API ingestion example with raw ClickHouse tables.",
+  "description": "Editable Linear timestamp ingestion with archived issues and complete paginated comments.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -18,18 +18,24 @@
       "path": "index.ts",
       "type": "registry:file",
       "target": "src/integrations/linear/index.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/linear/tests/basic.test.ts",
+      "role": "test"
     }
   ],
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
       "documentation": "https://chkit.obsessiondb.com/integrations/linear/",
       "logo": "https://chkit.obsessiondb.com/logos/linear.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/linear",
       "entry": "index.ts",
@@ -42,9 +48,9 @@
           "name": "issues",
           "title": "Issues",
           "table": "linear_issues_raw",
-          "description": "Issue fields and the first 100 comments per issue.",
+          "description": "Archived and active issues updated inside a timestamp window, with all accessible comment pages.",
           "scopes": [],
-          "strategy": "full",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "POST",
@@ -70,10 +76,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Issues use bounded updatedAt windows, five-minute overlap and whole-window checkpoints after destination acknowledgement.",
         "schedule": "Run bunx chkit ingest run --tag provider:linear from a scheduler.",
-        "deletions": "Every run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions."
+        "deletions": "Deleted issues remain stored. Periodic historical reconciliation refreshes comments whose changes may not update the parent issue."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

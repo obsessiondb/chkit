@@ -1,31 +1,65 @@
 ---
 title: Integrating ClickHouse with Google Meet
-description: Install the editable Google Meet raw ingestion example.
+description: Install resumable Google Meet ingestion with retained parent work and paged transcript entries.
 ---
 
-The Google Meet registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+The Google Meet registry item copies raw readers with fixed discovery windows and journaled conference, transcript, and entry progress into a chkit project.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
 ## Install
 
 ```sh
-bunx chkit add google-meet
+bunx chkit add google-meet --with-tests
 bunx chkit check
 bunx chkit generate --name add_google_meet
 bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:google-meet
+bunx chkit ingest status --tag provider:google-meet
 ```
 
-Set `GOOGLE_MEET_ACCESS_TOKEN` in the runtime environment before the ingestion run. Edit `lookbackDays` in `src/integrations/google-meet/index.ts` to select the conference window.
+Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access before ingestion. Review `sourceId`, `lookbackDays`, `overlapDays`, `windowDays`, and `database` in `src/integrations/google-meet/index.ts`. Keep the source identity tied to one Google account; these list responses do not identify the authenticated account. Schema imports do not call Google.
 
 <RegistryReference name="google-meet" section="resources" />
 
 ## Sync behavior
 
-Each run reads a configured time range. Transcripts generated later require another scan of that range. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+Each stream independently discovers completed conferences through fixed `end_time` windows and ongoing conferences through `end_time IS NULL`. End-time discovery includes long-running calls that began before the lookback. The initial range defaults to 30 days, later discovery overlaps seven days, and each cycle advances by at most `windowDays`.
+
+Transcript and entry streams retain parent conferences until provider expiry and revisit them on completed cycles. An empty transcript list or a still-processing artifact stays eligible after discovery advances, so late transcripts are collected outside the discovery overlap. This is polling; Meet provides no modification/change token and no transcript or entry date filter. See [conference filters](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list) and [artifact behavior](https://developers.google.com/workspace/meet/api/guides/artifacts).
+
+## Checkpoints and recovery
+
+The journal stores fixed cycle bounds and nested parent, transcript-page, and entry-page positions. Candidate progress commits after its covering rows load; failed loads retain the preceding position. Rerun after interruption or budget exhaustion to continue. Rejected page tokens replay their scoped collection once, and repeated or malformed tokens fail visibly.
+
+Saved recovery counts cover each unfinished discovery phase, parent transcript collection, and transcript entry collection. They clear at the acknowledged terminal boundary, so pauses and nonterminal replay pages do not renew the allowance. A second rejection fails across executions. Adjust the editable `budget.maxChunks`, execution duration, or polling frequency, then review coverage before explicitly migrating saved state or using a new stream identity for a fresh scan.
+
+Streams permit 200 chunks per run and retain at most 1,000 conferences. These limits are editable; an oversized pending queue fails instead of losing parents. Source/window changes require explicit checkpoint migration or a new stream identity. Native JSON requires ClickHouse 25.3 or later. Schedule repeat runs externally with one ingestion process per destination at a time.
+
+Google removes conference records and API transcript entries 30 days after a call ends. Expiry during unfinished work fails with a coverage-gap message. Previously checked parents leave the queue on expiry, while stored raw rows remain. Expired or inaccessible resources do not become inferred deletions. See [conference retention](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords) and [artifact retention](https://developers.google.com/workspace/meet/api/guides/artifacts).
+
+## Data and historical ranges
+
+Raw identities are `[sourceId, provider.name]`. Transcript metadata includes `conference_name`; individual entry rows include `conference_name` and `transcript_name`. Entries stream page by page into `google_meet_transcript_entries_raw`. The API entries do not capture later edits to the separate Google Docs transcript file.
+
+Version 0.2.0 adds the entry destination and stores new transcript metadata without embedding every entry in one row. Existing tables remain available. Row identities now include the source label; keep older datasets as archives or migrate their identities deliberately. See the installed README for upgrade details.
+
+Explicit backfill bounds constrain conference **end times** and skip ongoing-call discovery. Reuse the same backfill ID and bounds to resume; expired API history remains unavailable. Artifact lists are parent-scoped and cannot themselves be date-filtered.
+
+```sh
+bunx chkit ingest run --tag provider:google-meet --backfill october --from 2026-10-01T00:00:00Z --to 2026-10-05T00:00:00Z
+```
+
+## Fixture verification
+
+```sh
+bun test src/integrations/google-meet/tests/basic.test.ts
+```
+
+Fixtures cover nested entry resumption, late transcripts from retained parents, fixed end-time and ongoing discovery, rejected tokens, sink failures, isolated backfill bounds, and expiry gaps.
 
 ## Related pages
 
 - [App registry](/integrations/)
 - [Ingestion plugin](/plugins/ingest/)
+- [Ingestion CLI](/cli/ingest/)

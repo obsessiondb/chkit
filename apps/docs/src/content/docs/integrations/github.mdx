@@ -23,7 +23,23 @@ Set `GITHUB_TOKEN` in the runtime environment before the ingestion run. Edit `re
 
 ## Sync behavior
 
-Each run scans configured repositories. Removed issues or stars remain stored. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+Issues use `since` with update-time ordering, a fixed local upper cutoff, and five minutes of overlap. GitHub has no server-side upper timestamp filter. The checkpoint advances only after the complete issue window and destination writes succeed; failed windows replay from their lower bound. The reader follows provider `Link` URLs and includes paginated issue comments plus pull request detail, reviews, review comments, commits and files. Provider caps are reflected in raw `_chkit_context` completeness fields.
+
+Stargazers remain full reads. Their checkpoint records the last completed scan, including an empty scan; page numbers and star creation timestamps are not removal cursors. Removed stars and deleted issues remain stored. Live pagination and child-only updates require periodic reconciliation or a durable webhook companion. [GitHub issue filters](https://docs.github.com/en/rest/issues/issues#list-repository-issues) and [pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api) describe the API behavior.
+
+```sh
+bunx chkit ingest run --tag provider:github --tag resource:issues --backfill reconcile-2026-10-04 --from 2008-01-01
+bunx chkit ingest status --tag provider:github --json
+```
+
+Historical replay reads current observations, not historical versions. Use a new backfill ID for each full reconciliation. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for token permissions and [registry installation](/cli/add/).
+
+## Test the reader
+
+```sh
+bunx chkit add github --with-tests
+bun test src/integrations/github/tests/basic.test.ts
+```
 
 ## Related pages
 

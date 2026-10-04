@@ -1,8 +1,9 @@
 import { view } from '@chkit/core'
-import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable } from '@chkit/plugin-ingest'
 
-import { discoverObjects, entityId, entitySlug, readCollection, toAttioRows, type AttioClientDeps } from '../client.js'
+import { readParentCollections, type AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
+import type { AttioReadContext } from '../checkpoints.js'
 
 export const attioRecordsRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_records_raw` })
 
@@ -25,20 +26,17 @@ export const attioDeals = recordView('deals', `
   arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_company')) AS company_record_ids,
   arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_people')) AS people_record_ids`)
 
-export async function* readRecords(context: FetchContext, deps?: AttioClientDeps) {
-  // Discovery is local to this reader; the metadata stream need not have run.
-  for (const object of await discoverObjects(context, deps)) {
-    for await (const page of readCollection(context, {
-      path: `/objects/${encodeURIComponent(entityId(object, 'object_id'))}/records/query`,
-      method: 'POST',
+export async function* readRecords(context: AttioReadContext, deps?: AttioClientDeps) {
+  yield* readParentCollections(context, {
+    resource: 'records', parents: 'objects', idFields: ['workspace_id', 'object_id', 'record_id'],
+    request: (parent) => ({
+      path: `/objects/${encodeURIComponent(parent.id)}/records/query`,
       idFields: ['workspace_id', 'object_id', 'record_id'],
+      method: 'POST',
       valuesField: 'values',
       pageSize: attioConfig.pageSize,
-    }, deps)) {
-      // No checkpoint or page identity: offsets are not change cursors, and pages can mutate.
-      yield { rows: toAttioRows(page, 'records', ['workspace_id', 'object_id', 'record_id'], { object_slug: entitySlug(object) }) }
-    }
-  }
+    }),
+  }, deps)
 }
 
 function recordView(objectSlug: string, columns: string) {

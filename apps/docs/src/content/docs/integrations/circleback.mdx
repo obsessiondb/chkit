@@ -23,7 +23,24 @@ Set `CIRCLEBACK_API_KEY` in the runtime environment before the ingestion run. Ed
 
 ## Sync behavior
 
-The meetings endpoint is scanned on every run. Missing transcripts remain null; removed meetings remain stored. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+Each new scan cycle reads all meetings with `ownership=All`, follows [provider Link continuations](https://circleback.ai/docs/api), and rechecks every observed transcript. The [meeting listing](https://circleback.ai/docs/api/meetings/list-meetings) has no documented modification-time filter or durable cursor lifetime; interrupted cycles restart pagination from the first page and skip only parent enrichment already acknowledged by the destination in that cycle. Unfinished parents are replayed. Completing the cycle clears the acknowledged ID set, so the next run rechecks every accessible meeting. A meeting timestamp is not assumed to track delayed transcript availability.
+
+Sink-acknowledged checkpoints include explicit source/filter scope, bounded active-cycle parent IDs, unavailable transcript diagnostics with distinct `forbidden` and `not_found` statuses, and the last fully completed cycle's `completedAt`. Neither transcript `403` nor `404` is assumed to mean temporary processing. A new cycle retries listed meetings even when their metadata is unchanged. IDs absent from the listing remain unavailable diagnostics, not executable queued work; they are retried only when listed again or resolved by an explicit reconciliation policy. Recovery can defer updates to acknowledged parents until the next cycle. Listing permission failures fail the stream.
+
+The editable `maxRetainedMeetings` setting bounds both recovery IDs and diagnostics at `10_000`; exceeding the bound fails visibly while preserving acknowledged progress. Source/filter scope changes require a new stream identity.
+
+```sh
+bunx chkit ingest status --tag provider:circleback --json
+```
+
+Removed meetings remain stored; a full scan is not an atomic source snapshot. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README and [registry installation](/cli/add/).
+
+## Test the reader
+
+```sh
+bunx chkit add circleback --with-tests
+bun test src/integrations/circleback/tests/basic.test.ts
+```
 
 ## Related pages
 

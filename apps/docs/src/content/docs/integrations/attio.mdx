@@ -12,7 +12,7 @@ import RegistryReference from '../../../components/RegistryReference.astro';
 
 <img src="/logos/attio.svg" alt="Attio logo" width="37" height="30" style="box-sizing: content-box; padding: 12px; background: white; border-radius: 8px;" />
 
-The [app registry](/integrations/) installs the Attio integration as editable TypeScript source. It includes nine raw tables, nine full-read streams, and three SQL views for people, companies, and deals. Each run reads the selected resources through the Attio REST API and updates their latest observed versions in ClickHouse.
+The [app registry](/integrations/) installs the Attio integration as editable TypeScript source. It includes nine raw tables, nine checkpointed full-scan streams, and three SQL views for people, companies, and deals. Each complete cycle reads the selected resources through the Attio REST API and updates their latest observed versions in ClickHouse.
 
 <RegistryReference name="attio" section="overview" />
 
@@ -180,9 +180,13 @@ Paginated reads start at offset zero, advance by the number of returned entities
 5. The runtime batches rows and writes them to ClickHouse. The journal records execution and load progress.
 6. SQL views project the raw records and reconcile repeated row IDs at query time with `FINAL`.
 
-### Full reads and freshness
+### Checkpointed full scans and freshness
 
-All nine streams use full sync. Every run reads from the beginning, including a rerun after failure. The readers do not save pagination offsets or use an incremental modification cursor. A successful run can therefore show no checkpoint in `ingest status`; use the run outcome and destination queries to verify success.
+All nine streams save validated scan-cycle checkpoints. A fresh cycle discovers and freezes the selected object/list IDs and slugs. After every parent is fully fetched and loaded, an empty completion marker flushes preceding rows and commits that parent to the frontier. After interruption, the reader skips completed parents and restarts the unfinished parent at offset zero. It resumes the frozen set before performing new discovery. New parents are included in the next full cycle.
+
+Notes, tasks, and members use workspace-wide scans. Their unfinished collections restart at offset zero; terminal completion is persisted even when a collection is empty. Objects and lists likewise record completion after their returned rows load. A completed cycle starts a fresh full read on the next run, so edits remain observable. These checkpoints are scan boundaries, not a modification watermark.
+
+`ingest status` exposes the cycle, phase, frozen parent set, and completed parents. A selection change rejects the saved scope rather than reusing a frontier for different objects/lists. Restore the configuration or use a new source identity for a deliberate fresh scan. A removed or inaccessible frozen parent fails visibly. Child response workspace and parent IDs are checked against frozen discovery identity before any rows are published. Existing installations that have no checkpoint begin the first checkpointed cycle without a state migration.
 
 The destination stores the latest **observed** entity. New observations replace earlier observations for the same row identity when ClickHouse reconciles versions. Freshness depends on the external schedule, scan duration, and successful API responses. There are no webhooks or continuous change capture in this integration.
 
@@ -376,7 +380,7 @@ bunx chkit ingest status --tag provider:attio --json
 
 Repeated tags use AND matching. With the default source ID, `--tag stream:attio.primary.records` selects the same records stream; a custom `sourceId` changes that derived tag.
 
-Inspect the run's per-stream outcomes and error messages. `status` reports committed checkpoints rather than complete run history; full reads have no incremental bookmark. Keep the ingestion journal as durable operational state. After fixing a token, permission, or destination issue, rerun `ingest run`; the Attio reader starts its collection scan again.
+Inspect the run's per-stream outcomes and error messages. `status` reports committed scan-cycle checkpoints rather than complete run history. Keep the ingestion journal as durable operational state. After fixing a token, permission, or destination issue, rerun `ingest run`; the Attio reader resumes its frozen parent set and restarts any unfinished offset collection.
 
 Verify a known Attio record against its retained `raw.data`, update that record in a test workspace, rerun the sync, and confirm its view reflects the new observation. A row count alone does not establish full API coverage. Date-range backfill flags do not turn these full-read readers into historical or incremental readers; implementing those behaviors requires a source-specific strategy.
 
@@ -387,7 +391,7 @@ Verify a known Attio record against its retained `raw.data`, update that record 
 | Source record deleted or merged | Previously observed row remains; no deletion or merge reconciliation |
 | Token loses access or a parent is deselected | Existing rows remain in ClickHouse |
 | Source changes during offset pagination | A scan may miss or repeat entities; it is not a provider snapshot |
-| Run stops after some batches | Loaded batches remain visible; the next run scans again |
+| Run stops after some batches | Loaded batches remain visible; completed parents are skipped and unfinished offset collections restart |
 | Older source data loaded later | Later ingestion time wins; no source-version ordering |
 | Complete change history needed | Raw tables reconcile observations and do not form a permanent change log |
 | Meetings, call recordings, transcripts, emails, files, comments, or sequences needed | No readers are included for these resources |
@@ -401,7 +405,8 @@ Deleting or deselecting a source entity does not remove it from a view. Applicat
 | File | Responsibility |
 |---|---|
 | `config.ts` | Source identity, destination names, parent selection, page sizes |
-| `client.ts` | Authentication, response validation, pagination, row identity, request pacing |
+| `client.ts` | Authentication, response validation, pagination, parent-completion boundaries, row identity, request pacing |
+| `checkpoints.ts` | Validated scan cycles, frozen parent sets, and selection scope |
 | `sources/objects.ts`, `sources/object-attributes.ts` | Object and attribute readers with their raw table schemas |
 | `sources/records.ts` | Record reader, raw records table, people/company/deal views |
 | `sources/lists.ts`, `sources/list-attributes.ts`, `sources/entries.ts` | List resource readers with their raw table schemas |

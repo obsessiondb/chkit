@@ -42,10 +42,11 @@ Include provider documentation, example responses, freshness needs, and any rest
 
 ## Skill scope
 
-The skill covers the authoring steps and requirements for bounded readers, checkpoint ordering, write identity, and scheduling. Use the linked docs for complete examples and tradeoffs.
+The skill covers bounded readers, provider-specific sync strategies, durable checkpoint ordering, write identity, and scheduling. For official registry integrations, it requires a source contract and recovery design, raw payload preservation, late-change reconciliation, and portable interruption/replay tests. Sync tokens, timestamp windows, and checkpointed full scans follow the provider's actual capabilities. Use the linked docs for complete examples and tradeoffs.
 
 ## Related pages
 
 - [Destinations and transformations](/api-sync/destinations/): choose storage and mapping for the source.
 - [Quickstart](/api-sync/quickstart/): a working first source.
+- [Publish a registry](/api-sync/registry-authoring/): metadata, portable tests, and immutable releases.
 - [For AI agents](/ai-agents/): general chkit setup and schema workflows.

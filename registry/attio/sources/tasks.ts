@@ -1,15 +1,14 @@
-import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable } from '@chkit/plugin-ingest'
 
-import { readCollection, toAttioRows, type AttioClientDeps } from '../client.js'
+import { readCollectionScan, type AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
+import type { AttioReadContext } from '../checkpoints.js'
 
 export const attioTasksRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_tasks_raw` })
 
-export async function* readTasks(context: FetchContext, deps?: AttioClientDeps) {
-  for await (const page of readCollection(context, {
+export async function* readTasks(context: AttioReadContext, deps?: AttioClientDeps) {
+  yield* readCollectionScan(context, 'tasks', {
     path: '/tasks', idFields: ['workspace_id', 'task_id'], pageSize: attioConfig.pageSize,
     query: { sort: 'created_at:asc' },
-  }, deps)) {
-    yield { rows: toAttioRows(page, 'tasks', ['workspace_id', 'task_id']) }
-  }
+  }, deps)
 }

@@ -62,7 +62,7 @@ Run at most one ingestion process per project and target at a time. See [Schedul
 
 `--backfill <id>` runs the selected streams under the checkpoint namespace `<stream id>#backfill:<id>`, so it never moves the scheduled checkpoint. Reusing an ID resumes that backfill's state. The ID must start with a letter or digit and contain only letters, digits, `_`, `.`, and `-`.
 
-`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. Full-sync and cursor strategies ignore them. Passing `--from` or `--to` without `--backfill` fails with exit code 2.
+`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. The bundled `fullSync()` and `cursorState()` strategies do not interpret them. Custom provider strategies may honor or reject date bounds; see the source's documentation. Passing `--from` or `--to` without `--backfill` fails with exit code 2.
 
 ### `list`
 

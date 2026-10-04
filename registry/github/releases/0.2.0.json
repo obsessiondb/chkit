@@ -1,0 +1,115 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "github",
+  "type": "registry:item",
+  "title": "GitHub",
+  "description": "Editable GitHub timestamp ingestion with complete issue and pull request context and full stargazer scans.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
+  ],
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ],
+  "files": [
+    {
+      "path": "github/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/github/README.md",
+      "content": "# GitHub raw ingestion example\n\nThis is a small editable starting point based on the GitHub source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `GITHUB_TOKEN` in the runtime environment and configure a direct ClickHouse connection. Edit `repositories` in `index.ts` before the first migration. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_github\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:github\n```\n\n## Resources\n\n- `issues` → `github_issues_raw`\n- `stargazers` → `github_stargazers_raw`\n\n## Sync and recovery\n\nIssues use `since`, `sort=updated`, and `direction=asc`, then discard observations newer than the fixed execution cutoff. The initial scan starts at `2008-01-01`; later scans replay five minutes before the last committed watermark. GitHub has no `until` filter: following `Link` continuations over changing results is best-effort polling, not a source snapshot. The watermark advances only after the complete issue window and all its destination writes succeed. Failed windows start again from their lower bound; no page number is saved.\n\nEach issue includes all returned issue-comment pages. Pull requests additionally include detail, reviews, review comments, commits, and files. The provider can cap commits or files; `_chkit_context.commits_complete` and `files_complete` compare returned counts with the detail response. A child-request failure prevents publishing that parent and advancing the window. GitHub tokens need read access to issues and pull requests for this context.\n\nStargazers always perform a full scan. Their checkpoint's `completedAt` records a successful scan, including an empty one; it is not an incremental star cursor. Removed stars and deleted issues remain stored. Child-only changes may not update the parent issue, and offset pagination can miss records under concurrent mutations. Periodically replay the issue history using a new backfill ID, or supplement polling with a durable webhook integration:\n\n```sh\nbunx chkit ingest run --tag provider:github --tag resource:issues --backfill reconcile-2026-10-04 --from 2008-01-01\nbunx chkit ingest status --tag provider:github --json\n```\n\nThis re-reads current observations by their last-update timestamp; it does not reconstruct historical versions. Reusing an ID addresses that backfill's checkpoint namespace. Raw payloads keep provider fields, and mutable observations intentionally have no declared chunk ID so a changed replay is not suppressed by a page identity. Run one ingestion process per ClickHouse target at a time.\n\n## Fixture tests\n\n```sh\nbunx chkit add github --with-tests\nbun test src/integrations/github/tests/basic.test.ts\n```\n\nThe portable suite covers continuation links, cutoff filtering, PR context, replay after source/sink failures, overlap and empty full-scan completion without live credentials.\n"
+    },
+    {
+      "path": "github/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, IngestConfigError, rawRows, rawTable, timestampWindow, type ErrorClassifier, type FetchContext, type IncrementalStrategy } from '@chkit/plugin-ingest'\n\nconst database = 'default'\n// One stable stream per repository. Reset its checkpoint when changing its scope.\nconst repositories = ['obsessiondb/chkit']\nconst overlapMs = 5 * 60 * 1000\n\ninterface Issue { number: number; updated_at: string; pull_request?: { url: string }; [key: string]: unknown }\ninterface Stargazer { user: { id: number }; [key: string]: unknown }\ninterface ScanState { completedAt: string }\n\nexport const github_issuesRaw = rawTable({ database, name: 'github_issues_raw' })\nexport const github_stargazersRaw = rawTable({ database, name: 'github_stargazers_raw' })\n\nconst stargazerScan: IncrementalStrategy<ScanState, string> = {\n  id: 'github.stargazers.full_scan', version: 1,\n  parseState(raw) {\n    if (!isObject(raw) || typeof raw.completedAt !== 'string' || !Number.isFinite(Date.parse(raw.completedAt))) {\n      throw new IngestConfigError('GitHub stargazer checkpoint has no valid completedAt.')\n    }\n    return { completedAt: raw.completedAt }\n  },\n  plan: ({ cutoff }) => cutoff.toISOString(),\n  complete: ({ selection }) => ({ completedAt: selection }),\n}\n\nexport const githubPipeline = definePipeline({\n  id: 'github', tags: ['provider:github'], maxStreams: 1, maxFetches: 1,\n  streams: repositories.flatMap((repo) => [\n    defineStream({\n      id: `github.issues.${repo.replace('/', '.')}`, tags: ['resource:issues'], destination: github_issuesRaw,\n      // GitHub's since filter is strict; overlap includes equal timestamps and recent changes.\n      incremental: timestampWindow({ start: new Date('2008-01-01T00:00:00Z'), overlapMs }),\n      classifyError: classifyGitHubError,\n      async *read(context) {\n        for await (const page of pages<Issue>(context, `/repos/${repo}/issues`, 'application/vnd.github+json', {\n          state: 'all', sort: 'updated', direction: 'asc', since: context.selection.from.toISOString(),\n        })) {\n          for (const issue of page) {\n            if (!Number.isSafeInteger(issue.number) || !Number.isFinite(Date.parse(issue.updated_at))) {\n              throw new IngestConfigError('GitHub issue has no valid number or updated_at.')\n            }\n            // REST has no until parameter. Enforce the cutoff locally; live pages are not snapshots.\n            if (Date.parse(issue.updated_at) > context.selection.to.getTime()) continue\n            const complete = await withIssueContext(context, repo, issue)\n            yield { rows: rawRows([complete], (item) => JSON.stringify([repo, item.number])) }\n          }\n        }\n      },\n    }),\n    defineStream({\n      id: `github.stargazers.${repo.replace('/', '.')}`, tags: ['resource:stargazers'], destination: github_stargazersRaw,\n      incremental: stargazerScan, classifyError: classifyGitHubError,\n      async *read(context) {\n        for await (const page of pages<Stargazer>(context, `/repos/${repo}/stargazers`, 'application/vnd.github.star+json')) {\n          if (page.some((star) => !star.user || !Number.isSafeInteger(star.user.id))) throw new IngestConfigError('GitHub stargazer has no user ID.')\n          yield { rows: rawRows(page, (star) => JSON.stringify([repo, star.user.id])) }\n        }\n      },\n    }),\n  ]),\n})\n\n/** A 403 can mean rate exhaustion; ordinary permission failures remain permanent. */\nfunction classifyGitHubError(cause: unknown): ReturnType<ErrorClassifier> {\n  if (!(cause instanceof HttpError) || (cause.status !== 403 && cause.status !== 429)) return undefined\n  const headers = cause.response.headers\n  if (headers.get('x-ratelimit-remaining') !== '0' && !headers.has('retry-after')) return undefined\n  const resetSeconds = Number(headers.get('x-ratelimit-reset'))\n  const untilReset = Number.isFinite(resetSeconds) && resetSeconds > 0 ? Math.max(0, resetSeconds * 1000 - Date.now()) : undefined\n  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? untilReset }\n}\n\nasync function* pages<T>(context: FetchContext, path: string, accept: string, params: Record<string, string> = {}): AsyncGenerator<T[]> {\n  const first = new URL(`https://api.github.com${path}`)\n  for (const [key, value] of Object.entries({ ...params, per_page: '100' })) first.searchParams.set(key, value)\n  let next: string | undefined = first.toString()\n  const seen = new Set<string>()\n  while (next) {\n    if (seen.has(next)) throw new IngestConfigError('GitHub repeated a page URL.')\n    seen.add(next)\n    const current: string = next\n    const result = await context.attempt(async (signal) => {\n      const response = await request(current, accept, signal)\n      const items: unknown = await response.json()\n      if (!Array.isArray(items)) throw new IngestConfigError(`GitHub ${path} response is not an array.`)\n      return { items: items as T[], next: nextLink(response.headers.get('link'), current) }\n    }, { label: `GET ${path}` })\n    if (result.items.length) yield result.items\n    next = result.next\n  }\n}\n\n/** Load complete child conversations before publishing the parent observation. */\nasync function withIssueContext(context: FetchContext, repo: string, issue: Issue) {\n  const comment_items = await collect(context, `/repos/${repo}/issues/${issue.number}/comments`)\n  if (!issue.pull_request) return { ...issue, comment_items }\n  const path = `/repos/${repo}/pulls/${issue.number}`\n  const pull_detail = await context.attempt(async (signal) => {\n    const response = await request(`https://api.github.com${path}`, 'application/vnd.github+json', signal)\n    const detail: unknown = await response.json()\n    if (!isObject(detail)) throw new IngestConfigError('GitHub pull request detail is not an object.')\n    return detail\n  }, { label: 'GET pull request detail' })\n  const reviews = await collect(context, `${path}/reviews`)\n  const review_comments = await collect(context, `${path}/comments`)\n  const commits = await collect(context, `${path}/commits`)\n  const files = await collect(context, `${path}/files`)\n  return { ...issue, pull_detail, comment_items, reviews, review_comments, commits, files,\n    _chkit_context: { files_complete: files.length === pull_detail.changed_files, commits_complete: commits.length === pull_detail.commits } }\n}\n\nasync function collect(context: FetchContext, path: string): Promise<Record<string, unknown>[]> {\n  const items: Record<string, unknown>[] = []\n  for await (const page of pages<Record<string, unknown>>(context, path, 'application/vnd.github+json')) items.push(...page)\n  return items\n}\n\nasync function request(url: string, accept: string, signal: AbortSignal): Promise<Response> {\n  const token = process.env.GITHUB_TOKEN?.trim()\n  if (!token) throw new IngestConfigError('Set GITHUB_TOKEN.')\n  const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), redirect: 'error',\n    headers: { Authorization: `Bearer ${token}`, Accept: accept, 'X-GitHub-Api-Version': '2022-11-28' } })\n  if (!response.ok) throw await HttpError.fromResponse(response)\n  return response\n}\n\nfunction nextLink(header: string | null, current: string): string | undefined {\n  const value = header?.split(',').map((part) => /<([^>]+)>\\s*;.*rel=\"?next\"?/.exec(part)?.[1]).find(Boolean)\n  if (!value) return undefined\n  const next = new URL(value, current)\n  if (next.origin !== 'https://api.github.com') throw new IngestConfigError('GitHub next page has an unexpected origin.')\n  return next.toString()\n}\n\nfunction isObject(value: unknown): value is Record<string, unknown> {\n  return typeof value === 'object' && value !== null && !Array.isArray(value)\n}\n"
+    },
+    {
+      "path": "github/tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/tests/basic.test.ts",
+      "role": "test",
+      "content": "import { afterEach, expect, test } from 'bun:test'\nimport { IngestConfigError, runIngestion, selectStreams } from '@chkit/plugin-ingest'\nimport { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'\n\nimport { githubPipeline } from '../index.js'\n\nconst originalFetch = globalThis.fetch\nconst originalToken = process.env.GITHUB_TOKEN\nconst cutoff = new Date('2026-01-02T00:00:00Z')\n\nfunction setFetch(handler: (...args: Parameters<typeof fetch>) => Promise<Response>): void {\n  globalThis.fetch = Object.assign(handler, { preconnect: originalFetch.preconnect })\n  process.env.GITHUB_TOKEN = 'fixture'\n}\n\nfunction selected(resource = 'issues') {\n  return selectStreams([githubPipeline], [`resource:${resource}`]).map((item) => ({ ...item, stream: { ...item.stream, batchSize: 1, retry: { retries: 0 } } }))\n}\n\nafterEach(() => {\n  globalThis.fetch = originalFetch\n  if (originalToken === undefined) delete process.env.GITHUB_TOKEN\n  else process.env.GITHUB_TOKEN = originalToken\n})\n\ntest.serial('GitHub follows short-page Link continuations, bounds updates and preserves complete PR context', async () => {\n  const paths: string[] = []\n  setFetch(async (input) => {\n    const url = new URL(String(input))\n    paths.push(url.pathname + url.search)\n    if (url.pathname.endsWith('/issues')) {\n      expect(url.searchParams.get('since')).toBe('2008-01-01T00:00:00.000Z')\n      expect(url.searchParams.get('sort')).toBe('updated')\n      expect(url.searchParams.get('direction')).toBe('asc')\n      if (url.searchParams.has('page')) return Response.json([\n        { number: 2, updated_at: '2026-01-01T12:00:00Z', pull_request: { url: 'detail' } },\n        { number: 3, updated_at: '2026-01-03T00:00:00Z' },\n      ])\n      return Response.json([{ number: 1, updated_at: '2026-01-01T12:00:00Z' }], {\n        headers: { Link: `<https://api.github.com/repos/obsessiondb/chkit/issues?per_page=100&page=2&since=2008-01-01T00%3A00%3A00.000Z&sort=updated&direction=asc>; rel=\"next\"` },\n      })\n    }\n    if (url.pathname.endsWith('/pulls/2')) return Response.json({ changed_files: 2, commits: 1, custom: 'preserved' })\n    if (url.pathname.endsWith('/files')) return Response.json([{ filename: 'file.ts' }])\n    if (url.pathname.endsWith('/commits')) return Response.json([{ sha: 'a' }])\n    return Response.json([{ id: 11, body: 'context' }])\n  })\n  const journal = createMemoryJournal()\n  const destination = createMemoryDestination()\n  const result = await runIngestion({ selected: selected(), backfill: undefined }, { journal, destination, now: () => cutoff })\n  expect(result.ok).toBe(true)\n  const rows = destination.tables.get('default.github_issues_raw') ?? []\n  expect(rows.map((row) => row.id)).toEqual(['[\"obsessiondb/chkit\",1]', '[\"obsessiondb/chkit\",2]'])\n  expect(rows[1]?.raw).toMatchObject({ pull_detail: { custom: 'preserved' }, comment_items: [{ id: 11 }], _chkit_context: { files_complete: false, commits_complete: true } })\n  expect(paths.some((path) => path.includes('/issues/3/comments'))).toBe(false)\n  expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })\n})\n\ntest.serial('GitHub child failures replay the issue window and destination failures cannot advance it', async () => {\n  let failComments = true\n  const starts: string[] = []\n  setFetch(async (input) => {\n    const url = new URL(String(input))\n    if (url.pathname.endsWith('/issues')) {\n      starts.push(url.searchParams.get('since') ?? '')\n      return Response.json([{ number: 1, updated_at: '2026-01-01T12:00:00Z' }])\n    }\n    return failComments ? new Response('denied', { status: 403 }) : Response.json([])\n  })\n  const journal = createMemoryJournal()\n  const destination = createMemoryDestination()\n  const request = { selected: selected(), backfill: undefined }\n  expect((await runIngestion(request, { journal, destination, now: () => cutoff })).ok).toBe(false)\n  expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope).toBeUndefined()\n  failComments = false\n  expect((await runIngestion(request, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now: () => cutoff })).ok).toBe(false)\n  expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope).toBeUndefined()\n  expect((await runIngestion(request, { journal, destination, now: () => cutoff })).ok).toBe(true)\n  expect(starts).toEqual(Array(3).fill('2008-01-01T00:00:00.000Z'))\n})\n\ntest.serial('GitHub subsequent issue scans overlap the committed watermark', async () => {\n  const starts: string[] = []\n  setFetch(async (input) => {\n    starts.push(new URL(String(input)).searchParams.get('since') ?? '')\n    return Response.json([])\n  })\n  const journal = createMemoryJournal()\n  const destination = createMemoryDestination()\n  const request = { selected: selected(), backfill: undefined }\n  expect((await runIngestion(request, { journal, destination, now: () => cutoff })).ok).toBe(true)\n  expect((await runIngestion(request, { journal, destination, now: () => new Date('2026-01-03T00:00:00Z') })).ok).toBe(true)\n  expect(starts).toEqual(['2008-01-01T00:00:00.000Z', '2026-01-01T23:55:00.000Z'])\n})\n\ntest.serial('GitHub empty stargazer scans persist completion and always read again', async () => {\n  const paths: string[] = []\n  setFetch(async (input) => { paths.push(String(input)); return Response.json([]) })\n  const journal = createMemoryJournal()\n  const destination = createMemoryDestination()\n  const request = { selected: selected('stargazers'), backfill: undefined }\n  expect((await runIngestion(request, { journal, destination, now: () => cutoff })).ok).toBe(true)\n  expect((await runIngestion(request, { journal, destination, now: () => new Date('2026-01-03T00:00:00Z') })).ok).toBe(true)\n  expect(paths).toHaveLength(2)\n  expect(paths.every((path) => !new URL(path).searchParams.has('since'))).toBe(true)\n  expect((await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')).envelope?.state).toEqual({ completedAt: '2026-01-03T00:00:00.000Z' })\n})\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.2.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/github/",
+      "logo": "https://chkit.obsessiondb.com/logos/github.svg",
+      "authentication": {
+        "method": "Bearer token",
+        "env": [
+          "GITHUB_TOKEN"
+        ],
+        "setup": [
+          "Provide GITHUB_TOKEN with read access to the selected resources.",
+          "Supply a new access token when the existing token expires."
+        ],
+        "documentation": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+      },
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/github",
+      "entry": "index.ts",
+      "exports": [
+        "githubPipeline",
+        "github_issuesRaw",
+        "github_stargazersRaw"
+      ],
+      "resources": [
+        {
+          "name": "issues",
+          "title": "Issues and pull requests",
+          "table": "github_issues_raw",
+          "description": "Issues and pull requests updated inside a timestamp window, including paginated comments and pull request context.",
+          "scopes": [
+            "Issues:read",
+            "Pull requests:read"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/issues",
+              "documentation": "https://docs.github.com/en/rest/issues/issues#list-repository-issues"
+            }
+          ]
+        },
+        {
+          "name": "stargazers",
+          "title": "Stargazers",
+          "table": "github_stargazers_raw",
+          "description": "Repository stargazers with starred_at when the token permits it",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/stargazers",
+              "documentation": "https://docs.github.com/en/rest/activity/starring#list-stargazers"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "Issues use completed timestamp windows with five-minute overlap; stargazers record successful full-scan completion.",
+        "schedule": "Run bunx chkit ingest run --tag provider:github from a scheduler.",
+        "deletions": "Deleted issues and removed stars remain stored. Periodic historical reconciliation refreshes child context; absence does not generate tombstones."
+      },
+      "env": {
+        "GITHUB_TOKEN": ""
+      },
+      "fileHashes": {
+        "src/integrations/github/README.md": "dfa40213490ff65c8d946b53863ee4c506c4237cdd6a4883e37e81e7727b900e",
+        "src/integrations/github/index.ts": "d46a583543188f2a435998487fbcc90ee63c0a9988c7d78b0fc220825d0bc3ab",
+        "src/integrations/github/tests/basic.test.ts": "e3bed6edb47951e99715463d69effbe2f5172c6d27db0613f3e7ea327e845f39"
+      }
+    }
+  }
+}

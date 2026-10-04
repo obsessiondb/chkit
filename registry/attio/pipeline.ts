@@ -2,6 +2,7 @@ import { definePipeline, defineStream } from '@chkit/plugin-ingest'
 
 import { classifyAttioError } from './client.js'
 import { attioConfig } from './config.js'
+import { scanCheckpoint } from './checkpoints.js'
 import { attioObjectsRaw, readObjects } from './sources/objects.js'
 import { attioObjectAttributesRaw, readObjectAttributes } from './sources/object-attributes.js'
 import { attioRecordsRaw, readRecords } from './sources/records.js'
@@ -24,14 +25,14 @@ export const attio = definePipeline({
   maxLoads: 1,
   retry: { retries: 5, minTimeout: 1_000, maxTimeout: 30_000, randomize: true },
   streams: [
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.objects`, tags: ['resource:objects'], destination: attioObjectsRaw, read: readObjects }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.object_attributes`, tags: ['resource:object_attributes'], destination: attioObjectAttributesRaw, read: readObjectAttributes }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.records`, tags: ['resource:records'], destination: attioRecordsRaw, read: readRecords }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.lists`, tags: ['resource:lists'], destination: attioListsRaw, read: readLists }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.list_attributes`, tags: ['resource:list_attributes'], destination: attioListAttributesRaw, read: readListAttributes }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.entries`, tags: ['resource:entries'], destination: attioEntriesRaw, read: readEntries }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.notes`, tags: ['resource:notes'], destination: attioNotesRaw, read: readNotes }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.tasks`, tags: ['resource:tasks'], destination: attioTasksRaw, read: readTasks }),
-    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.members`, tags: ['resource:members'], destination: attioMembersRaw, read: readMembers }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.objects`, tags: ['resource:objects'], incremental: scanCheckpoint('objects'), destination: attioObjectsRaw, read: readObjects }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.object_attributes`, tags: ['resource:object_attributes'], incremental: scanCheckpoint('object_attributes'), destination: attioObjectAttributesRaw, read: readObjectAttributes }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.records`, tags: ['resource:records'], incremental: scanCheckpoint('records'), destination: attioRecordsRaw, read: readRecords }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.lists`, tags: ['resource:lists'], incremental: scanCheckpoint('lists'), destination: attioListsRaw, read: readLists }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.list_attributes`, tags: ['resource:list_attributes'], incremental: scanCheckpoint('list_attributes'), destination: attioListAttributesRaw, read: readListAttributes }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.entries`, tags: ['resource:entries'], incremental: scanCheckpoint('entries'), destination: attioEntriesRaw, read: readEntries }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.notes`, tags: ['resource:notes'], incremental: scanCheckpoint('notes'), destination: attioNotesRaw, read: readNotes }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.tasks`, tags: ['resource:tasks'], incremental: scanCheckpoint('tasks'), destination: attioTasksRaw, read: readTasks }),
+    defineStream({ ...streamOptions, id: `${attioConfig.sourceId}.members`, tags: ['resource:members'], incremental: scanCheckpoint('members'), destination: attioMembersRaw, read: readMembers }),
   ],
 })

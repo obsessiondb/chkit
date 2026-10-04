@@ -3,6 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { HttpError, IngestConfigError, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
 
 import { attioConfig } from './config.js'
+import { beginScan, type AttioReadContext, type ScanParent } from './checkpoints.js'
 
 export type AttioEntity = Record<string, unknown> & { id: Record<string, string> }
 
@@ -21,12 +22,66 @@ interface CollectionRequest {
   /** Omit for the unpaginated objects, lists, and workspace_members endpoints. */
   pageSize?: number
   valuesField?: 'values' | 'entry_values'
+  parent?: { field: 'object_id' | 'list_id'; id: string; workspaceId: string }
 }
 
 const defaultDeps: AttioClientDeps = {
   fetch: (url, init) => fetch(url, init),
   token: () => process.env.ATTIO_API_TOKEN,
   wait: async (milliseconds, signal) => { await sleep(milliseconds, undefined, { signal }) },
+}
+
+/** Offset pages are mutable: resume only after a completely loaded parent. */
+export async function* readParentCollections(
+  context: AttioReadContext,
+  input: {
+    resource: string
+    parents: 'objects' | 'lists'
+    idFields: readonly string[]
+    request: (parent: ScanParent) => CollectionRequest
+  },
+  deps?: AttioClientDeps,
+) {
+  let state = beginScan(context, input.resource)
+  if (context.state?.phase !== 'scanning') {
+    const parents = input.parents === 'objects' ? await discoverObjects(context, deps) : await discoverLists(context, deps)
+    state = { ...state, parents: parents.map((parent) => ({
+      workspaceId: entityId(parent, 'workspace_id'),
+      id: entityId(parent, input.parents === 'objects' ? 'object_id' : 'list_id'),
+      slug: entitySlug(parent),
+    })) }
+    yield { rows: [], state, id: `scan:${state.cycle}:start` }
+  }
+  for (const parent of state.parents) {
+    if (state.completedParents.includes(parent.id)) continue
+    const request = { ...input.request(parent), parent: {
+      field: input.parents === 'objects' || input.resource === 'list_attributes' ? 'object_id' as const : 'list_id' as const,
+      id: parent.id, workspaceId: parent.workspaceId,
+    } }
+    for await (const page of readCollection(context, request, deps)) {
+      yield { rows: toAttioRows(page, input.resource, input.idFields,
+        input.parents === 'objects' ? { object_slug: parent.slug } : { list_slug: parent.slug }) }
+    }
+    state = { ...state, completedParents: [...state.completedParents, parent.id] }
+    // This empty marker flushes preceding rows before publishing the parent frontier.
+    yield { rows: [], state, id: `scan:${state.cycle}:parent:${parent.id}` }
+  }
+  yield { rows: [], state: { ...state, phase: 'complete' as const }, id: `scan:${state.cycle}:complete` }
+}
+
+/** Workspace collections restart offset zero after interruption and record completion. */
+export async function* readCollectionScan(
+  context: AttioReadContext,
+  resource: string,
+  request: CollectionRequest,
+  deps?: AttioClientDeps,
+) {
+  const state = beginScan(context, resource)
+  if (context.state?.phase !== 'scanning') yield { rows: [], state, id: `scan:${state.cycle}:start` }
+  for await (const page of readCollection(context, request, deps)) {
+    yield { rows: toAttioRows(page, resource, request.idFields) }
+  }
+  yield { rows: [], state: { ...state, phase: 'complete' as const }, id: `scan:${state.cycle}:complete` }
 }
 
 /** Each page is validated inside attempt, so executor retry/cancellation owns every request. */
@@ -155,6 +210,10 @@ function selectEntities(entities: AttioEntity[], selection: readonly string[] | 
 function parseEntity(value: unknown, request: CollectionRequest): AttioEntity {
   if (!isEntity(value)) throw new IngestConfigError(`Attio ${request.path} returned an entity without a valid id object.`)
   for (const field of request.idFields) entityId(value, field)
+  if (request.parent && (entityId(value, 'workspace_id') !== request.parent.workspaceId
+    || entityId(value, request.parent.field) !== request.parent.id)) {
+    throw new IngestConfigError(`Attio ${request.path} returned an entity from a different workspace or parent. Restore the original account token before resuming this scan.`)
+  }
   if (request.valuesField !== undefined) {
     const values = value[request.valuesField]
     if (!isObject(values) || !Object.values(values).every(Array.isArray)) {

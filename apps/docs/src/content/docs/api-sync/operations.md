@@ -100,7 +100,7 @@ chkit ingest status --tag pipeline:helpdesk --json
 | Symptom | Check |
 |---|---|
 | No pipeline / no matching streams | Entry exports and exact tag spelling |
-| No checkpoint after a successful run | Full syncs have no incremental bookmark |
+| No checkpoint after a successful run | The bundled `fullSync()` strategy has no checkpoint; custom full-scan strategies may record completion |
 | Window restarts from the beginning | Timestamp progress commits after the whole window; reduce work or use safe intermediate provider state |
 | Duplicated logical records | Destination keys/versioning, query reconciliation, deduplication settings, and volatile mapped fields |
 | Incompatible checkpoint | Strategy ID/version or state format changed |

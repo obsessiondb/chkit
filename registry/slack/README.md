@@ -30,7 +30,7 @@ Use an external scheduler to repeat ingestion, with one ingestion process per pr
 
 ## Included resources
 
-All three streams read their complete selected resource on every run. Each discovers its own authenticated workspace through `auth.test`; the messages stream independently discovers conversations.
+Channels and users read their complete selected resource on every run. Messages bootstrap retained history and then read checkpointed time ranges. Each reader discovers its authenticated workspace through `auth.test`; messages independently discover conversations.
 
 | Stream tag | Default raw table | Required scopes for defaults |
 |---|---|---|
@@ -65,7 +65,7 @@ Slack documents one request per minute and 15 objects per page for new commercia
 
 The pipeline runs one stream, fetch, and load at a time. Requests have a 30-second timeout and use the ingestion executor's retry and cancellation context. The pipeline permits five retries after the initial attempt, with exponential backoff from 1 to 60 seconds. HTTP `429` honors `Retry-After`; Slack rate-limit responses and transient server codes also retry. Authentication and permission errors, including Slack `ok: false` responses, fail visibly instead of becoming empty datasets.
 
-Full history and thread reads can take hours or days at the conservative defaults. Restrict conversations and selected streams, and choose `--max-duration` for the expected scan. The CLI's default duration is 3600 seconds. Interrupted runs restart their scans rather than resuming from a saved cursor.
+History and thread reads can take hours or days at conservative defaults. Restrict conversations and selected streams, and choose `--max-duration` for the workload. The CLI default is 3600 seconds. Interrupted message reads resume a saved timestamp boundary and retained thread work; metadata reads restart.
 
 To read only messages:
 
@@ -103,17 +103,23 @@ LIMIT 20;
 
 There are no packaged typed views. Add SQL projections in the project's schema for the fields needed by the application. Preserve source and workspace identity in joins.
 
-## Full reads and coverage limits
+## Incremental messages and recovery
 
-Each run starts at the beginning and reads history without date bounds or subtype filtering. Within each channel, history pagination finishes before threads are read. Old roots are scanned again to capture late replies when Slack still retains and exposes them. Short or empty pages continue when a cursor exists; repeated cursors or `has_more: true` without a cursor fail explicitly. Full reads save no incremental checkpoint.
+The first messages run reads from `historyFrom` (`0.000000` by default) to a fixed execution cutoff. Later runs begin at the completed watermark minus `overlapMs` (one day by default). `reconcileIntervalMs` (seven days) periodically triggers a full historical scan to revisit old edits and roots that gained late replies. Newly discovered channels bootstrap their retained history even during an incremental run.
+
+Checkpoints retain exact timestamp strings, the authenticated workspace and query scope, fixed bounds, channel position, and pending thread work. History progresses newest first; replies progress oldest first. Each loaded history page retains its thread work before proceeding to older history, keeping the pending queue bounded to one page. Restart finishes those threads before continuing. Temporary cursors are used only to cross empty API pages; expiration restarts that unfinished timestamp interval. Empty terminal pages also commit progress.
+
+`historyFrom`, `overlapMs`, and `reconcileIntervalMs` belong in `config.ts`. Zero reconciliation interval means every completed run starts a full scan. Keep source identity and selection stable; changing the account, channels, types, or reply policy fails against existing state. Use a new source ID for a deliberate separate installation. Version 0.2.0 preserves existing raw tables and row IDs. Earlier full readers had no saved provider state; the first upgraded messages run bootstraps once.
 
 The destination stores the latest **observed** payload per identity. Deleted messages, deselected conversations, and data made inaccessible remain in ClickHouse. Loaded batches stay visible when a run fails; there is no atomic snapshot replacement or rollback. Changes during pagination may cause misses or repeated observations. Slack retention, permissions, and token access determine historical coverage.
 
-The integration has no deletion reconciliation, permanent edit log, webhooks, or continuous change capture. Date-range backfill flags do not make these readers bounded or incremental.
+The integration has no deletion reconciliation, permanent edit log, webhooks, or continuous change capture. Recent overlap alone does not capture all old edits or late replies; periodic full reconciliation catches those still retained and accessible. Deleted messages no longer returned by Slack remain stored.
+
+Messages support isolated date-bound backfills with `--backfill <id> --from <date> --to <date>`. Unfinished backfills retain their original bounds; changing those bounds requires another ID. Channels and users remain full reads and do not interpret date ranges. As with scheduled reads, historical raw observations loaded later can replace newer observations because replacement uses ingestion time.
 
 ## Customize the source
 
-`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, pagination, row IDs, and pacing; `pipeline.ts` composes the streams.
+`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, pagination, row IDs, and pacing; `state.ts` validates timestamp checkpoints; `pipeline.ts` composes the streams.
 
 Remove a stream from `pipeline.ts` to stop ingestion while retaining its schema export in `index.ts` to preserve the table. Removing schema exports can generate destructive migration operations; review them. Test reader changes and revisit pacing when changing concurrency.
 
@@ -123,13 +129,13 @@ Install the optional portable test suite, then run it:
 
 ```sh
 bunx chkit add slack --with-tests
-bun test src/integrations/slack/tests/slack.test.ts
+bun test src/integrations/slack/tests/slack.test.ts src/integrations/slack/tests/checkpoints.test.ts
 ```
 
 For a custom install path, point the command at its `tests/slack.test.ts`. Tests use sanitized responses, mocked HTTP, and in-memory ingestion destinations. They require Bun and no Slack credentials or ClickHouse server. Update fixtures and expectations alongside customized readers.
 
 ## Smoke check
 
-After a migration and successful run, inspect `chkit ingest status --tag provider:slack` and query `SELECT count() FROM default.slack_messages_raw FINAL`. Compare a known message and an older thread with their stored payloads. Add a reply to that test thread, rerun ingestion, and verify the reply is collected. Row counts alone do not establish complete live API coverage.
+After a migration and successful run, inspect `chkit ingest status --tag provider:slack` and query `SELECT count() FROM default.slack_messages_raw FINAL`. Compare a known message and an older thread with their stored payloads. Add a reply to that old thread, then run a messages-only backfill with a new ID and `--from` before the root's timestamp to verify the reply is collected. A normal incremental rerun revisits old roots during the next scheduled full reconciliation. Row counts alone do not establish complete live API coverage.
 
 The [Slack integration guide](https://chkit.obsessiondb.com/integrations/slack/) covers installation, SQL queries, scheduling, and recovery.

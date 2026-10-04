@@ -1,11 +1,11 @@
 ---
 name: chkit-ingestion
-description: Author or adapt API ingestion sources with @chkit/plugin-ingest. Use for chkit streams, readers, pagination, incremental checkpoints, destinations, and loader choices; excludes generated insert helpers from plugin-codegen.
+description: Author or improve API ingestion sources and registry integrations with @chkit/plugin-ingest. Use for provider-specific sync, pagination, durable checkpoints, recovery, raw destinations, and loader choices; excludes generated insert helpers from plugin-codegen.
 ---
 
 # chkit ingestion authoring
 
-Implement a source reader with finite runs. Inspect the installed plugin version, config, and existing streams; preserve the user's choices.
+Implement a recoverable source reader with finite runs. Inspect the installed plugin version, config, and existing streams; preserve the user's choices.
 
 ## Decide before coding
 
@@ -13,7 +13,15 @@ Establish auth, response shape, pagination, record IDs, change filters/cursors, 
 
 Treat stored shape and mapping together: prefer raw objects plus a SQL view when the shape may evolve and storage is affordable; map inside `read` for a known schema. Model warehouse entities separately; embed bounded child collections when consumers need complete documents. A unified document table is a specialized retrieval model.
 
-Start with the default loader and a full sync for small datasets; add provider-supported incremental reads when needed. Explain consequential choices at their implementation step, introducing tuning and custom interfaces only as required.
+Choose the strongest appropriate sync mechanism the provider actually supports: a change feed or sync token, reliable modification windows, or checkpointed full reconciliation. A simple full read remains appropriate for small bounded catalogs or explicitly requested prototypes. Use the default loader unless another publication contract is needed. Explain consequential choices and coverage limits.
+
+## Registry quality bar
+
+Before creating or materially changing an official registry integration, read [Stable sync design and verification](references/stable-sync.md). Registry providers are reusable implementations of supported capabilities: deliver robust bootstrap, incremental selection where available, durable recovery, and reconciliation for changes polling cannot capture. Do not stop at a happy-path pagination example.
+
+For each resource, establish its provider contract and choose a safe completion boundary before coding. Keep provider payloads raw; application-specific projections are optional and separate. Compare existing registry providers and established implementations such as Brain when accessible, then verify the API contract rather than copying their assumptions. Private repository access is not a dependency of the installed skill.
+
+The release gate is evidence that interruptions resume or safely replay, progress follows destination acknowledgement, empty reads commit completion, and late changes have a reconciliation plan. Full scans are valid when justified by the API; completion checkpoints do not make them change feeds. Match manifest strategy labels to actual behavior, document limitations and identity/state migrations, and add portable failure/restart fixtures.
 
 ## Read only the relevant docs
 
@@ -32,15 +40,16 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 - TypeScript and direct ClickHouse config are required. Preserve existing schema discovery: add the provider entry to `schema` paths, or re-export its schema and active pipelines from the project `entry`. Migrations create destinations.
 - Stream IDs own checkpoints: keep them stable and account-scoped. Pipelines group streams without dependency ordering.
 - Use `context.attempt`/`paginate`, forward cancellation, and throw `HttpError.fromResponse` for HTTP failures. Yield bounded chunks.
-- Enforce both time bounds. Persist only provider-guaranteed, complete resume state after all preceding rows are represented; the executor commits it after writes.
-- Size `overlapMs` to the latest arrival: minutes for indexing delay, days when records or children appear long after their timestamp (recordings, transcripts). Newest-first pages have no safe intermediate `state`; resume only from a completed window.
+- Support or explicitly reject historical bounds. When supported, enforce both bounds and freeze unfinished selections across restarts. Persist complete validated resume state; the executor commits it after writes.
+- Separate the completed watermark from unfinished traversal state. Newest-first pages cannot alone advance a completed timestamp watermark; documented fixed-window timestamp frontiers or scoped page positions can still resume unfinished reads. Preserve timestamp precision and equal-timestamp coverage.
+- Choose overlap from indexing/arrival behavior. For children that appear or change without updating their parent, retain bounded pending parents or reconcile old roots; a recent overlap alone is insufficient.
 - Custom tables need `ingestionColumns`. Prefer `simpleLoader`; custom loaders must preserve write identity and acknowledge publication before returning receipts.
-- Delivery is at-least-once: choose reconciliation keys/versioning. Declare chunk `id` only for stable logical intervals; avoid volatile mapped fields.
-- Prefer tombstones for logical deletion. Fetch deletion signals explicitly; full sync does not reconcile missing IDs. Never infer deletions from partial scans. Complete required child reads before yielding a root.
+- Delivery is at-least-once: choose reconciliation keys/versioning. Leave explicit chunk `id` unset for mutable observations. A stable page, cursor, or window label is insufficient: explicit data-bearing IDs require replay-immutable content. State-only markers can flush progress.
+- Fetch deletion signals explicitly and retain raw cancellation/tombstone payloads. Full sync does not reconcile missing IDs; never infer deletions from partial or inaccessible scans. Complete required child reads before publishing a complete embedded document, or use independent raw child streams/durable pending work that gates completion.
 - Use an external scheduler and run one process per project/target, including backfills.
 
 ## Deliver and verify
 
 For integrations published in the official app registry, include the provider's official logo for the documentation listing. Store the asset in `apps/docs/public/logos/<provider>.svg` (or another supported image format), record its official source in `apps/docs/public/logos/README.md`, and set `meta.chkit.logo` to `https://chkit.obsessiondb.com/logos/<provider>.svg`. Use the provider's artwork without redrawing or altering it. The docs build requires the logo URL and a matching local asset. Read `apps/docs/src/content/docs/api-sync/registry-authoring.md` for registry metadata, integration guides, and immutable release publication.
 
-Deliver definitions, config, and run/query commands. Inspect exports with `chkit ingest list`; generate and review migrations, then use `chkit check` against the configured development target after applying them. `check` has no `--offline` flag. Test empty input, pagination, checkpoint boundaries, and failure replay with fixtures. Keep live writes within authorization. Report verified behavior and limitations.
+Deliver definitions, config, and run/query commands. Inspect exports with `chkit ingest list`; generate and review migrations, then use `chkit check` against the configured development target after applying them. `check` has no `--offline` flag. Test checkpoint behavior through `runIngestion` and memory adapters, not just reader iteration; use the applicable recovery cases in the stable-sync reference for registry sources. Keep live writes within authorization. Report verified behavior and limitations.

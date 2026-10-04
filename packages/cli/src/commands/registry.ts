@@ -79,7 +79,7 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
       console.log(`Apps in ${catalog.name} (${items.length}):`)
       for (const item of items) {
         console.log(`\n${item.title} (${item.name}@${item.version})\n  ${item.description}`)
-        console.log(`  ${item.resourceCount} resource${item.resourceCount === 1 ? '' : 's'}; sync strategies: ${item.strategies.join(', ')}`)
+        console.log(`  ${item.resourceCount} resource${item.resourceCount === 1 ? '' : 's'}; sync strategies: ${item.strategies.map(describeStrategy).join(', ')}`)
         if (item.documentation) console.log(`  Guide: ${item.documentation}`)
         console.log(`  Install: ${installCommand(`${item.name}@${item.version}`, values.registry)}`)
       }
@@ -115,7 +115,7 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
         console.log(`  ${resource.name}: ${resource.description}`)
         if (resource.title) console.log(`    Title: ${resource.title}`)
         console.log(resource.table ? `    Default table: ${resource.table}` : '    Table: see source schema')
-        console.log(`    Strategy: ${resource.strategy}; scopes: ${resource.scopes.join(', ') || 'none declared'}`)
+        console.log(`    Strategy: ${describeStrategy(resource.strategy)}; scopes: ${resource.scopes.join(', ') || 'none declared'}`)
         for (const endpoint of resource.endpoints ?? []) console.log(`    ${endpoint.method} ${endpoint.path} (${endpoint.documentation})`)
       }
       if (item.meta.chkit.views?.length) {
@@ -138,6 +138,11 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
   const output = { ok: true, action, items: result.items.map((item) => `${item.name}@${item.meta.chkit.version}`), files: result.files }
   if (values.json) emitJson('registry', output)
   else console.log(`Built ${result.items.length} template(s) into ${resolve(values.output ?? 'public/r')}`)
+}
+
+function describeStrategy(strategy: 'full' | 'timestamp' | 'cursor'): string {
+  const labels = { full: 'full scans', timestamp: 'timestamp windows', cursor: 'cursor checkpoints' }
+  return `${strategy} (${labels[strategy]})`
 }
 
 function onePositional(positionals: string[], usage: string): string {

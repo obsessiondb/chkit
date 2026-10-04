@@ -32,7 +32,7 @@ The schema uses native JSON (ClickHouse 25.3 or newer). A direct ClickHouse conn
 
 ## Included resources
 
-All nine streams perform full reads on each run. Every stream can run alone and discovers its own parent objects/lists; it does not rely on another stream having run first.
+All nine streams perform checkpointed full scan cycles. Every stream runs independently; a new cycle discovers its own parent objects/lists. After interruption, parent-scoped streams keep the frozen parent set and resume after the last completely loaded parent. The unfinished parent restarts at offset zero because offsets into mutable collections are not durable change cursors.
 
 | Stream tag | Raw table | Required Attio scopes |
 | --- | --- | --- |
@@ -54,7 +54,7 @@ API references: [attributes](https://docs.attio.com/rest-api/endpoint-reference/
 
 ## Customize the source
 
-Each file in `sources/` contains one resource's raw table and reader, such as `sources/notes.ts`, `sources/tasks.ts`, or `sources/members.ts`. `sources/records.ts` also defines the people, company, and deal views. `client.ts` shares HTTP and pagination logic; `pipeline.ts` composes the nine streams.
+Each file in `sources/` contains one resource's raw table and reader, such as `sources/notes.ts`, `sources/tasks.ts`, or `sources/members.ts`. `sources/records.ts` also defines the people, company, and deal views. `client.ts` shares HTTP and pagination logic; `checkpoints.ts` validates scan state and selection scope; `pipeline.ts` composes the nine streams.
 
 Remove an entry from `pipeline.ts` to stop collecting that resource. Keep its schema export in `index.ts` to preserve already collected data. Removing schema exports can generate destructive migration operations, which should be reviewed. After removing a resource's stream and schema export, its local files can also be deleted.
 
@@ -89,7 +89,9 @@ FROM default.attio_records_raw FINAL;
 
 All include the stable row `id`, `source_id`, `workspace_id`, `object_id`, `record_id`, nullable `created_at`, `web_url`, and `_chkit_ingested_at`. Missing optional strings yield empty strings, absent arrays yield empty arrays, and absent/unparseable dates or deal amounts yield null. A workspace without deals simply has an empty deals view. Edit these SQL projections to expose your custom fields, then generate and review a migration. The original payload remains available for further projections.
 
-These views show the latest **observed** version per ID, not a guaranteed snapshot of Attio now. Full reads update returned IDs without clearing tables. Deleted, merged, inaccessible, or deselected entities remain until you implement reconciliation. Data is published batch by batch, so a failed run may have loaded some updates. Offset pagination over changing source data can miss or duplicate entities within a scan. There is no universal modification cursor, atomic snapshot replacement, source-version ordering, or complete change history in this template.
+The journal stores scan cycles, selected parent IDs/slugs, completed parent IDs, and terminal completion. Parent-completion markers flush all preceding rows before advancing state. Workspace-wide notes/tasks/members restart an interrupted collection at offset zero; a completed cycle starts a fresh full read on the next run. New parents discovered during an interrupted cycle wait until that next cycle. An empty scan still records completion. Changing the object/list selection rejects the saved scope; restore it or use a new source identity for a deliberate fresh scan. A frozen parent that disappears or loses access fails visibly instead of being marked complete. Returned child workspace and parent IDs must match the frozen discovery identity; switching account tokens cannot publish rows from a different workspace under that frontier. Existing installations without a checkpoint start their first checkpointed cycle normally.
+
+These views show the latest **observed** version per ID, not a guaranteed snapshot of Attio now. Full reads update returned IDs without clearing tables. Deleted, merged, inaccessible, or deselected entities remain until you implement reconciliation. Data is published batch by batch, so a failed run may have loaded some updates. Offset pagination over changing source data can miss or duplicate entities within a scan. There is no universal modification cursor, atomic snapshot replacement, source-version ordering, or complete change history in this template. Checkpoints reduce repeated parent work; they do not turn offset scans into provider snapshots. No data-bearing chunk uses a page offset as its identity.
 
 ## Fixture tests
 
@@ -99,7 +101,7 @@ Install the optional test suite with `bunx chkit add attio --with-tests`, then r
 bun test src/integrations/attio/tests/attio.test.ts
 ```
 
-For a custom install path, point the command at that folder's `tests/attio.test.ts`. Tests mock Attio HTTP responses and use in-memory ingestion destinations and journals. They require Bun but no Attio credentials or ClickHouse server. The fixture suite checks resource coverage, pagination, preserved custom fields, repeat runs, cancellation, and error handling. Adjust the fixtures and expectations when customizing the source.
+For a custom install path, point the command at that folder's `tests/attio.test.ts`. Tests mock Attio HTTP responses and use in-memory ingestion destinations and journals. They require Bun but no Attio credentials or ClickHouse server. The fixture suite checks resource coverage, pagination, preserved custom fields, repeat runs, cancellation, errors, serialized checkpoint resumption, frozen parents, safe restart of unfinished offsets, empty completion, and rows loaded before a journal failure. Adjust the fixtures and expectations when customizing the source.
 
 ## Smoke check
 

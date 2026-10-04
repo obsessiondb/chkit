@@ -3,10 +3,10 @@
   "name": "github",
   "type": "registry:item",
   "title": "GitHub",
-  "description": "Small, editable GitHub API ingestion example with raw ClickHouse tables.",
+  "description": "Editable GitHub timestamp ingestion with complete issue and pull request context and full stargazer scans.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -18,18 +18,24 @@
       "path": "index.ts",
       "type": "registry:file",
       "target": "src/integrations/github/index.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/tests/basic.test.ts",
+      "role": "test"
     }
   ],
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
       "documentation": "https://chkit.obsessiondb.com/integrations/github/",
       "logo": "https://chkit.obsessiondb.com/logos/github.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/github",
       "entry": "index.ts",
@@ -43,9 +49,12 @@
           "name": "issues",
           "title": "Issues and pull requests",
           "table": "github_issues_raw",
-          "description": "Issue and pull request summaries for the configured repositories",
-          "scopes": [],
-          "strategy": "full",
+          "description": "Issues and pull requests updated inside a timestamp window, including paginated comments and pull request context.",
+          "scopes": [
+            "Issues:read",
+            "Pull requests:read"
+          ],
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -86,10 +95,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Issues use completed timestamp windows with five-minute overlap; stargazers record successful full-scan completion.",
         "schedule": "Run bunx chkit ingest run --tag provider:github from a scheduler.",
-        "deletions": "Each run scans configured repositories. Removed issues or stars remain stored."
+        "deletions": "Deleted issues and removed stars remain stored. Periodic historical reconciliation refreshes child context; absence does not generate tombstones."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

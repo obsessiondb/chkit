@@ -18,7 +18,12 @@ export interface CollectionRequest {
   idField: 'id' | 'ts'
   query?: Record<string, string>
   pageSize?: number
+  /** Message endpoints support timestamp pagination without an opaque cursor. */
+  timePagination?: boolean
 }
+
+export interface SlackPage { items: SlackEntity[]; cursor: string; hasMore: boolean }
+export class SlackCursorExpiredError extends IngestConfigError {}
 
 const defaultDeps: SlackClientDeps = {
   fetch: (url, init) => fetch(url, init),
@@ -32,20 +37,11 @@ export async function* readCollection(
   request: CollectionRequest,
   deps: SlackClientDeps = defaultDeps,
 ): AsyncGenerator<SlackEntity[]> {
-  const messageRequest = request.field === 'messages'
-  const limit = request.pageSize ?? (messageRequest ? slackConfig.messagePageSize : slackConfig.pageSize)
-  if (!Number.isSafeInteger(limit) || limit <= 0 || limit >= 1_000) {
-    throw new IngestConfigError('Slack page sizes must be safe integers between 1 and 999.')
-  }
   const seenCursors = new Set<string>()
   let cursor = ''
   while (true) {
     context.signal.throwIfAborted()
-    const query = { ...request.query, limit: String(limit), ...(cursor ? { cursor } : {}) }
-    const page = await context.attempt(async (signal) => {
-      const payload = await requestSlack(request.method, query, signal, deps)
-      return parsePage(payload, request)
-    }, { label: `GET /api/${request.method}` })
+    const page = await readCollectionPage(context, request, cursor, deps)
     if (page.items.length > 0) yield page.items
     // Empty/short pages can still have a cursor. Only cursor exhaustion ends a scan.
     if (!page.cursor) return
@@ -53,6 +49,14 @@ export async function* readCollection(
     seenCursors.add(page.cursor)
     cursor = page.cursor
   }
+}
+
+/** Retains empty pages and continuation metadata needed by checkpointed readers. */
+export async function readCollectionPage(context: FetchContext, request: CollectionRequest, cursor = '', deps: SlackClientDeps = defaultDeps): Promise<SlackPage> {
+  const limit = request.pageSize ?? (request.field === 'messages' ? slackConfig.messagePageSize : slackConfig.pageSize)
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit >= 1_000) throw new IngestConfigError('Slack page sizes must be safe integers between 1 and 999.')
+  const query = { ...request.query, limit: String(limit), ...(cursor ? { cursor } : {}) }
+  return context.attempt(async (signal) => parsePage(await requestSlack(request.method, query, signal, deps), request), { label: `GET /api/${request.method}` })
 }
 
 /** Discover independently in each reader; pipeline stream order is not a dependency. */
@@ -151,6 +155,7 @@ async function requestSlack(
   // Slack reports authentication, permission, and transient errors in HTTP 200 responses.
   if (!payload.ok) {
     const code = typeof payload.error === 'string' ? payload.error : 'unknown_error'
+    if (code === 'invalid_cursor') throw new SlackCursorExpiredError(`Slack ${method} pagination cursor expired.`)
     if (code === 'ratelimited' || code === 'rate_limited') {
       const headers = new Headers(response.headers)
       if (!headers.has('Retry-After')) headers.set('Retry-After', '60')
@@ -190,10 +195,10 @@ function parsePage(payload: Record<string, unknown>, request: CollectionRequest)
   if (payload.has_more !== undefined && typeof payload.has_more !== 'boolean') {
     throw new IngestConfigError(`Slack ${request.method} returned an invalid has_more flag.`)
   }
-  if (payload.has_more === true && !cursor) {
+  if (payload.has_more === true && !cursor && !request.timePagination) {
     throw new IngestConfigError(`Slack ${request.method} reports more data without a pagination cursor; refusing an incomplete scan.`)
   }
-  return { items, cursor }
+  return { items, cursor, hasMore: payload.has_more === true || cursor.length > 0 }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

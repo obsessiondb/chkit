@@ -168,7 +168,7 @@ chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
 
 Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
 
-A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. Full-sync and cursor strategies do not interpret date bounds. See [Backfill source data](/api-sync/operations/#backfill-source-data).
+A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. The bundled `fullSync()` and `cursorState()` strategies do not interpret date bounds; custom provider strategies may honor or reject them. See the source's documentation and [Backfill source data](/api-sync/operations/#backfill-source-data).
 
 `chkit check` verifies that every stream destination carries the ingestion metadata columns. See [`chkit ingest`](/cli/ingest/) for the full flag reference, exit codes, and JSON output.
 

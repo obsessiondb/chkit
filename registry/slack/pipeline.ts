@@ -5,6 +5,7 @@ import { slackConfig } from './config.js'
 import { readChannels, slackChannelsRaw } from './sources/channels.js'
 import { readUsers, slackUsersRaw } from './sources/users.js'
 import { readMessages, slackMessagesRaw } from './sources/messages.js'
+import { slackMessageStrategy } from './state.js'
 
 const streamOptions = { classifyError: classifySlackError, batchSize: 500 }
 
@@ -19,6 +20,6 @@ export const slack = definePipeline({
   streams: [
     defineStream({ ...streamOptions, id: `${slackConfig.sourceId}.channels`, tags: ['resource:channels'], destination: slackChannelsRaw, read: readChannels }),
     defineStream({ ...streamOptions, id: `${slackConfig.sourceId}.users`, tags: ['resource:users'], destination: slackUsersRaw, read: readUsers }),
-    defineStream({ ...streamOptions, id: `${slackConfig.sourceId}.messages`, tags: ['resource:messages'], destination: slackMessagesRaw, read: readMessages }),
+    defineStream({ ...streamOptions, batchSize: 1, id: `${slackConfig.sourceId}.messages`, tags: ['resource:messages'], destination: slackMessagesRaw, incremental: slackMessageStrategy, read: readMessages }),
   ],
 })

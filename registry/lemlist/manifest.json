@@ -3,10 +3,10 @@
   "name": "lemlist",
   "type": "registry:item",
   "title": "Lemlist",
-  "description": "Small, editable Lemlist API ingestion example with raw ClickHouse tables.",
+  "description": "Editable Lemlist ingestion with resumable activity date intervals and full campaign scans.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -18,18 +18,24 @@
       "path": "index.ts",
       "type": "registry:file",
       "target": "src/integrations/lemlist/index.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/tests/basic.test.ts",
+      "role": "test"
     }
   ],
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
       "documentation": "https://chkit.obsessiondb.com/integrations/lemlist/",
       "logo": "https://chkit.obsessiondb.com/logos/lemlist.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/lemlist",
       "entry": "index.ts",
@@ -45,12 +51,12 @@
           "table": "lemlist_activities_raw",
           "description": "Outreach activity events",
           "scopes": [],
-          "strategy": "full",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
               "path": "/activities",
-              "documentation": "https://developer.lemlist.com/"
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/activities/get-many-activities"
             }
           ]
         },
@@ -65,7 +71,7 @@
             {
               "method": "GET",
               "path": "/campaigns",
-              "documentation": "https://developer.lemlist.com/"
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/campaigns/get-many-campaigns"
             }
           ]
         }
@@ -86,10 +92,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Activities checkpoint completed thirty-day createdAt intervals with one-day overlap; campaigns record successful full-scan completion.",
         "schedule": "Run bunx chkit ingest run --tag provider:lemlist from a scheduler.",
-        "deletions": "Both streams scan all accessible pages each run. Removed campaigns or activity records remain stored."
+        "deletions": "Removed campaigns and activities remain stored. Historical replay is required for older activity metadata updates outside the overlap."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

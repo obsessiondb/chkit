@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { HttpError, definePipeline, runIngestion, selectStreams, type FetchContext, type SourceChunk } from '@chkit/plugin-ingest'
+import { HttpError, definePipeline, defineStream, runIngestion, selectStreams, type FetchContext, type ReadContext, type SourceChunk } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { classifySlackError, discoverChannels, readCollection, type SlackClientDeps } from '../client.js'
@@ -10,24 +10,26 @@ import { slack } from '../pipeline.js'
 import { readChannels } from '../sources/channels.js'
 import { readUsers } from '../sources/users.js'
 import { readMessages } from '../sources/messages.js'
+import { slackMessageStrategy, type SlackMessageSelection, type SlackMessageState } from '../state.js'
 import { channel, fixtureDeps, parentMessage, replyMessage, standaloneMessage, user } from './fixtures.js'
 
 const readers: Record<string, (context: FetchContext, deps: SlackClientDeps) => AsyncIterable<SourceChunk>> = {
-  channels: readChannels, users: readUsers, messages: readMessages,
+  channels: readChannels, users: readUsers,
 }
 const originalConfig = { ...slackConfig }
+const fixtureNow = () => new Date('2023-11-15T00:00:00Z')
 
 afterEach(() => { Object.assign(slackConfig, originalConfig) })
 
 describe('Slack raw template', () => {
-  test('exports three raw destinations and full-read streams without credentials', () => {
+  test('exports three raw destinations and checkpointed messages without credentials', () => {
     const exported = Object.values(definitions)
     expect(exported).toContain(slack)
     expect(slack.streams).toHaveLength(3)
     expect(slack.streams.map((stream) => stream.destination.name)).toEqual(['slack_channels_raw', 'slack_users_raw', 'slack_messages_raw'])
     for (const stream of slack.streams) {
       expect(exported).toContain(stream.destination)
-      expect(stream.incremental.id).toBe('chkit.full_sync')
+      expect(stream.incremental.id).toBe(stream.id.endsWith('.messages') ? 'slack.message-ranges' : 'chkit.full_sync')
     }
   })
 
@@ -41,7 +43,7 @@ describe('Slack raw template', () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
     const request = { selected: selectStreams([pipeline], []), backfill: undefined }
-    const first = await runIngestion(request, { journal, destination })
+    const first = await runIngestion(request, { now: fixtureNow, journal, destination })
     expect(first.ok, JSON.stringify(first)).toBe(true)
     expect(first.streams.map((stream) => stream.rows)).toEqual([1, 2, 4])
     expect(destination.tables.size).toBe(3)
@@ -52,7 +54,7 @@ describe('Slack raw template', () => {
     expect(new Set(messages.map((row) => row.id)).size).toBe(3)
     expect(messages.find((row) => JSON.stringify(row.raw).includes('Edited discussion'))).toBeUndefined()
     changed = true
-    const second = await runIngestion(request, { journal, destination })
+    const second = await runIngestion(request, { now: fixtureNow, journal, destination })
     expect(second.ok, JSON.stringify(second)).toBe(true)
     const repeated = destination.tables.get('default.slack_messages_raw') ?? []
     const edited = repeated.find((row) => JSON.stringify(row.raw).includes('Edited discussion'))
@@ -93,7 +95,8 @@ describe('Slack raw template', () => {
     const chunks = await collect(readMessages(context(), deps))
     expect(chunks.flatMap((chunk) => chunk.rows).map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: { ...parentMessage, text: 'Latest parent' } })
     expect(chunks.flatMap((chunk) => chunk.rows)).toHaveLength(3)
-    expect(chunks.every((chunk) => !('state' in chunk) && !('id' in chunk))).toBe(true)
+    expect(chunks.every((chunk) => 'state' in chunk)).toBe(true)
+    expect(chunks.filter((chunk) => chunk.rows.length > 0).every((chunk) => chunk.id === undefined)).toBe(true)
     const messageRequests = requests.filter((url) => ['conversations.history', 'conversations.replies'].some((method) => url.pathname.endsWith(method)))
     expect(messageRequests.map((url) => url.searchParams.get('limit'))).toEqual(['15', '15', '15'])
     expect(messageRequests.at(-1)?.searchParams.get('cursor')).toBe('reply-next')
@@ -116,14 +119,15 @@ describe('Slack raw template', () => {
     expect(first[0]?.id).toBe(JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', standaloneMessage.ts]))
   })
 
-  test('finishes every history page before opening threads and scans each root once', async () => {
+  test('finishes retained thread work before resuming history from its timestamp frontier', async () => {
     const requests: string[] = []
     const defaults = fixtureDeps()
     const deps = fixtureDeps((url, init) => {
       if (url.pathname === '/api/conversations.history') {
-        const cursor = url.searchParams.get('cursor')
-        requests.push(`history:${cursor ?? 'first'}`)
-        return Response.json({ ok: true, messages: [parentMessage], response_metadata: { next_cursor: cursor === null ? 'history-final' : '' } })
+        const latest = url.searchParams.get('latest')
+        const resumed = latest === parentMessage.ts
+        requests.push(`history:${resumed ? 'resumed' : 'first'}`)
+        return Response.json({ ok: true, messages: [resumed ? { ...standaloneMessage, ts: '1699999999.000003' } : parentMessage], has_more: !resumed })
       }
       if (url.pathname === '/api/conversations.replies') {
         requests.push('replies')
@@ -133,7 +137,7 @@ describe('Slack raw template', () => {
     })
     const chunks = await collect(readMessages(context(), deps))
     expect(chunks.flatMap((chunk) => chunk.rows)).toHaveLength(4)
-    expect(requests).toEqual(['history:first', 'history:history-final', 'replies'])
+    expect(requests).toEqual(['history:first', 'replies', 'history:resumed'])
   })
 
   test('history-only selection avoids thread API requests', async () => {
@@ -172,6 +176,8 @@ describe('Slack raw template', () => {
     })
     deps.wait = async (milliseconds, signal) => { waits.push(milliseconds); signal.throwIfAborted() }
     const iterator = readMessages(context(controller.signal), deps)
+    const opening = await iterator.next()
+    expect(opening.value?.rows).toHaveLength(0)
     const first = await iterator.next()
     expect(first.value?.rows).toHaveLength(1)
     controller.abort(new Error('fixture cancelled'))
@@ -252,7 +258,7 @@ describe('Slack raw template', () => {
     })
     const journal = createMemoryJournal()
     const pipeline = fixturePipeline(deps, ['users'])
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination() })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal, destination: createMemoryDestination() })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
@@ -269,7 +275,7 @@ describe('Slack raw template', () => {
     const fixture = fixturePipeline(deps, ['messages'])
     const pipeline = definePipeline({ ...fixture, streams: fixture.streams.map((stream) => ({ ...stream, batchSize: 1 })) })
     const destination = createMemoryDestination()
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: createMemoryJournal(), destination })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal: createMemoryJournal(), destination })
     expect(result.ok).toBe(false)
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(result.streams[0]?.error).toContain('missing_scope')
@@ -290,7 +296,7 @@ describe('Slack raw template', () => {
     })
     const journal = createMemoryJournal()
     const pipeline = fixturePipeline(deps, ['users'])
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination() })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal, destination: createMemoryDestination() })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
@@ -312,6 +318,7 @@ function fixturePipeline(deps: SlackClientDeps, selectedResources?: readonly str
     ...slack,
     retry: { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false },
     streams: slack.streams.filter((stream) => selectedResources === undefined || selectedResources.includes(stream.id.split('.').at(-1) ?? '')).map((stream) => {
+      if (stream.id.endsWith('.messages')) return defineStream({ ...stream, incremental: slackMessageStrategy, read: (context) => readMessages(context, deps) })
       const read = readers[stream.id.split('.').at(-1) ?? '']
       if (!read) throw new Error(`No fixture reader for ${stream.id}`)
       return { ...stream, read: (context: FetchContext) => read(context, deps) }
@@ -321,11 +328,12 @@ function fixturePipeline(deps: SlackClientDeps, selectedResources?: readonly str
 
 async function runFixture(deps: SlackClientDeps, selectedResources: readonly string[], destination = createMemoryDestination()) {
   const pipeline = fixturePipeline(deps, selectedResources)
-  return runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: createMemoryJournal(), destination })
+  return runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal: createMemoryJournal(), destination })
 }
 
-function context(signal = new AbortController().signal): FetchContext {
-  return { signal, attempt: async (operation) => operation(signal) }
+function context(signal = new AbortController().signal): ReadContext<SlackMessageSelection, SlackMessageState> {
+  return { signal, attempt: async (operation) => operation(signal), streamId: 'slack.primary.messages', state: undefined,
+    cutoff: fixtureNow(), selection: slackMessageStrategy.plan({ cutoff: fixtureNow(), state: undefined, range: undefined }) }
 }
 
 async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {

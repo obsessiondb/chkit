@@ -19,11 +19,29 @@ bunx chkit ingest run --tag provider:linear
 
 Set `LINEAR_API_KEY` in the runtime environment before the ingestion run. Edit the GraphQL query in `src/integrations/linear/index.ts` to select the fields needed by the project.
 
+Keep each stream ID and destination tied to one workspace. The reader does not resolve the token's workspace identity; switching workspaces requires a new stream ID and destination so the previous watermark cannot skip history. Reconcile older observations after adding requested fields.
+
 <RegistryReference name="linear" section="resources" />
 
 ## Sync behavior
 
-Every run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+Issues use server-side bounded `updatedAt` windows, Relay cursors, five minutes of overlap, and explicit archive inclusion. All accessible comment pages are fetched before their issue is published. The timestamp checkpoint advances only after the whole window and destination writes succeed, including an empty window; failed windows replay from their lower bound. [Linear pagination](https://linear.app/developers/pagination) and [date filtering](https://linear.app/developers/filtering) document the selection controls.
+
+Deleted issues remain stored. Comment-only changes are not assumed to update the parent issue timestamp; use periodic reconciliation or a durable webhook companion to refresh old discussions. The API does not provide an atomic snapshot guarantee.
+
+```sh
+bunx chkit ingest run --tag provider:linear --backfill reconcile-2026-10-04 --from 1970-01-01
+bunx chkit ingest status --tag provider:linear --json
+```
+
+Historical replay reads current issue observations, not historical versions. Use a new backfill ID for each full reconciliation. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+
+## Test the reader
+
+```sh
+bunx chkit add linear --with-tests
+bun test src/integrations/linear/tests/basic.test.ts
+```
 
 ## Related pages
 

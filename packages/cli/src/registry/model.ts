@@ -40,7 +40,7 @@ const metadataSchema = z.object({
     table: z.string().min(1).optional(),
     description: z.string().min(1),
     scopes: z.array(z.string()),
-    strategy: z.literal('full'),
+    strategy: z.enum(['full', 'timestamp', 'cursor']),
     endpoints: z.array(z.object({
       method: z.enum(['GET', 'POST']),
       path: z.string().startsWith('/'),

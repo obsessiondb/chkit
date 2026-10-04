@@ -94,7 +94,7 @@ test.serial('build, list and inspect roundtrip through the CLI without importing
   expect(inspectText.stdout).toContain('records: Fixture records')
   expect(inspectText.stdout).toContain('Table: see source schema')
   expect(inspectText.stdout).not.toContain('Table: records')
-  expect(inspectText.stdout).toContain('Strategy: full; scopes: record:read')
+  expect(inspectText.stdout).toContain('Strategy: full (full scans); scopes: record:read')
   expect(inspectText.stdout).not.toContain('Guide:')
   expect(inspectText.stdout).not.toContain('Logo:')
 })
@@ -104,8 +104,8 @@ test.serial('list and inspect expose integration guides, logos, complete resourc
   const documentation = 'https://example.com/registry/fixture/'
   const logo = 'https://example.com/logos/fixture.svg'
   const resources = [
-    ...fixture.sourceItem.meta.chkit.resources,
-    { name: 'members', description: 'Workspace members', scopes: ['members:read', 'workspace:read'], strategy: 'full' as const },
+    ...fixture.sourceItem.meta.chkit.resources.map((resource) => ({ ...resource, strategy: 'timestamp' as const })),
+    { name: 'members', description: 'Workspace members', scopes: ['members:read', 'workspace:read'], strategy: 'cursor' as const },
   ]
   await writeManifest(fixture.manifest, {
     ...fixture.sourceItem,
@@ -128,7 +128,7 @@ test.serial('list and inspect expose integration guides, logos, complete resourc
     command: 'registry', schemaVersion: 1, ok: true, action: 'list',
     items: [{
       name: 'fixture', title: 'Fixture', description: 'A provider fixture', version: '1.0.1',
-      resourceCount: 2, resources, strategies: ['full'], documentation, logo,
+      resourceCount: 2, resources, strategies: ['timestamp', 'cursor'], documentation, logo,
     }],
   })
   expect(inspectJson.exitCode).toBe(0)
@@ -139,7 +139,7 @@ test.serial('list and inspect expose integration guides, logos, complete resourc
   })
   expect(listText.exitCode).toBe(0)
   expect(listText.stdout).toContain('Fixture (fixture@1.0.1)')
-  expect(listText.stdout).toContain('2 resources; sync strategies: full')
+  expect(listText.stdout).toContain('2 resources; sync strategies: timestamp (timestamp windows), cursor (cursor checkpoints)')
   expect(listText.stdout).toContain(`Guide: ${documentation}`)
   expect(listText.stdout).toContain(`Install: chkit add fixture@1.0.1 --registry ${fixture.output}`)
   expect(inspectText.exitCode).toBe(0)
@@ -147,7 +147,7 @@ test.serial('list and inspect expose integration guides, logos, complete resourc
   expect(inspectText.stdout).toContain(`Logo: ${logo}`)
   expect(inspectText.stdout).toContain(`Install: chkit add fixture@1.0.1 --registry ${fixture.output}`)
   expect(inspectText.stdout).toContain('members: Workspace members')
-  expect(inspectText.stdout).toContain('Strategy: full; scopes: members:read, workspace:read')
+  expect(inspectText.stdout).toContain('Strategy: cursor (cursor checkpoints); scopes: members:read, workspace:read')
   expect(inspectText.stdout).toContain('FIXTURE_REGION: "eu"')
   expect(await readdir(fixture.project)).toEqual([])
 
