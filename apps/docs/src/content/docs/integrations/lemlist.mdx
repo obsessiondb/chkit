@@ -1,0 +1,31 @@
+---
+title: Integrating ClickHouse with Lemlist
+description: Install the editable Lemlist raw ingestion example.
+---
+
+The Lemlist registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+## Install
+
+```sh
+bunx chkit add lemlist
+bunx chkit check
+bunx chkit generate --name add_lemlist
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:lemlist
+```
+
+Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/lemlist/index.ts` to select activities, campaigns, or both.
+
+<RegistryReference name="lemlist" section="resources" />
+
+## Sync behavior
+
+Both streams scan all accessible pages each run. Removed campaigns or activity records remain stored. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+
+## Related pages
+
+- [App registry](/integrations/)
+- [Ingestion plugin](/plugins/ingest/)

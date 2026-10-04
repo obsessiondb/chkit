@@ -1,0 +1,95 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "lemlist",
+  "type": "registry:item",
+  "title": "Lemlist",
+  "description": "Small, editable Lemlist API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/README.md"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/index.ts"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "documentation": "https://chkit.obsessiondb.com/integrations/lemlist/",
+      "logo": "https://chkit.obsessiondb.com/logos/lemlist.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/lemlist",
+      "entry": "index.ts",
+      "exports": [
+        "lemlistPipeline",
+        "lemlist_activitiesRaw",
+        "lemlist_campaignsRaw"
+      ],
+      "resources": [
+        {
+          "name": "activities",
+          "title": "Activities",
+          "table": "lemlist_activities_raw",
+          "description": "Outreach activity events",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/activities",
+              "documentation": "https://developer.lemlist.com/"
+            }
+          ]
+        },
+        {
+          "name": "campaigns",
+          "title": "Campaigns",
+          "table": "lemlist_campaigns_raw",
+          "description": "Campaign metadata",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/campaigns",
+              "documentation": "https://developer.lemlist.com/"
+            }
+          ]
+        }
+      ],
+      "env": {
+        "LEMLIST_API_KEY": ""
+      },
+      "authentication": {
+        "method": "HTTP Basic API key",
+        "env": [
+          "LEMLIST_API_KEY"
+        ],
+        "documentation": "https://developer.lemlist.com/",
+        "setup": [
+          "Provide LEMLIST_API_KEY with read access to the selected resources.",
+          "Keep the API key in the runtime environment and rotate it according to the provider policy."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:lemlist from a scheduler.",
+        "deletions": "Both streams scan all accessible pages each run. Removed campaigns or activity records remain stored."
+      }
+    }
+  }
+}
