@@ -148,7 +148,8 @@ test('Lemlist binds account configuration to independent resource streams and pr
   config.start.setUTCFullYear(2000)
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  const selected = selectStreams([pipeline], []).map((item) => ({ ...item, stream: { ...item.stream, retry: { retries: 0 } } }))
+  const selected = selectStreams([pipeline], []).filter((item) => ['lemlist.sales.activities', 'lemlist.sales.campaigns'].includes(item.stream.id))
+    .map((item) => ({ ...item, stream: { ...item.stream, retry: { retries: 0 } } }))
   const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => new Date('2026-01-02') })
   expect(result.streams.map((stream) => [stream.streamId, stream.outcome])).toEqual([
     ['lemlist.sales.activities', 'succeeded'], ['lemlist.sales.campaigns', 'failed'],

@@ -6,6 +6,8 @@ export interface LemlistConfig {
   start: Date
   overlapMs: number
   intervalMs: number
+  /** Empty or omitted discovers all team members for the conversations stream. */
+  inboxUserIds?: readonly string[]
 }
 
 export type LemlistReaderConfig = Omit<LemlistConfig, 'database'>
@@ -18,4 +20,5 @@ export const lemlistConfig: LemlistConfig = {
   start: new Date('2000-01-01T00:00:00Z'),
   overlapMs: 24 * 60 * 60 * 1000,
   intervalMs: 30 * 24 * 60 * 60 * 1000,
+  inboxUserIds: [],
 }
