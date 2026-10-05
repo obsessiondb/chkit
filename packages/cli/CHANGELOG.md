@@ -1,5 +1,34 @@
 # chkit
 
+## 0.2.0-beta.10
+
+### Patch Changes
+
+- ba4f762: Allow registry resources to declare cursor checkpoints and timestamp windows alongside full scans. Upgrade the eight raw API integrations with provider-specific sync tokens, overlapping incremental ranges, and safe restart recovery, while preserving historical registry releases. Use one pipeline per installation with independent resource or configured collection streams, editable configuration, injectable clients, and meaningful resource readers. Attio creates independent object-type and list streams using existing full-sync pagination, with People and Companies enabled by default. GitHub separates eight raw resource types per repository, including independent issues, PRs, comments, reviews, and SHA/message commits with warehouse join keys; it no longer fetches PR files or assembles child arrays. Resources without reliable change filters use built-in full-sync completion; Calendar tokens and Lemlist activity intervals retain their necessary recovery state. Meet and Slack use recent rediscovery and coarse completed-page checkpoints, replaying unfinished children without retained-work queues. Circleback independently reads meetings, complete transcript snapshots, action items, people, and companies with replay-safe full pagination.
+
+  Update the ingestion authoring skill with the registry sync quality bar, provider capability selection, meaningful stream boundaries, normalized raw ingestion by default with transformations and joins in ClickHouse, existing pagination/checkpoint primitives, coarse replay where affordable, explicit freshness coverage, durable recovery rules, and required failure/restart verification.
+
+  Linear syncs issues, comments, projects, project updates, cycles, users, teams, issue relations, and issue history into nine independent raw destinations. Seven resources own update-time windows; relations and history use complete full reads, with history discovering all issues independently of parent progress. Preserve raw relationship IDs and complete issue label names as strings, and leave joins and metrics to ClickHouse. Populate new destinations independently and migrate retained legacy nested comments deliberately.
+
+  Treat repeated pagination continuations as permanent provider-protocol errors so reader retries cannot repeatedly replay a cyclic collection.
+
+  Add per-integration changelog metadata, shown in registry inspection and integration guides. Keep one draft release per integration in each PR, refresh it in place until merge, and validate release artifacts against the PR base to protect published versions and changelog history.
+
+- 027a69c: Split Circleback into independently selectable meetings, meeting transcripts, action items, people, and companies with raw destinations and replay-safe full reads. Cover all verified action-item statuses and ownership, keep transcript availability separate from successful content, retrieve complete same-resource person/company details, and represent applied tags as string names. Keep joins and transformations in ClickHouse and consolidate these changes into the integration's existing draft release.
+- 6b6ef4b: Document and verify Google Calendar's events-only raw contract: native nested event fields remain unchanged, and sparse cancellations replace recurring exceptions under stable identities. Preserve the existing recoverable page and sync-token protocol in the integration's single draft release.
+- a2e8a98: Add independent Google Meet participant, participant-session, and recording metadata streams alongside conferences, transcripts, and transcript entries. Rediscover recent conferences with a 24-hour lookback and ordinary nested pagination. Checkpoint completed discovery pages and replay their unfinished children instead of retaining conferences or per-child positions. Keep scoped identities, date-bound backfills, and bounded token recovery in the existing draft release. Recording rows retain links without downloading media; artifacts that appear after a conference leaves the lookback require an explicit backfill.
+- e265457: Expand Lemlist to seven independent raw streams: campaigns, contacts, companies, campaign leads, activities, inbox conversations, and inbox messages. Use complete campaign-lead exports and full contact payloads, keep inbox reads read-only, and retain acknowledged incremental activity intervals. Preserve native relationship keys for warehouse joins and refresh the single integration draft release.
+- 9a8a573: Add a source-template registry with `chkit add` and `chkit registry list`, `inspect`, and `build`. Install editable provider schemas and ingestion readers into an existing TypeScript project, preview changes before writing, and preserve local modifications on repeated installs. Publish versioned Attio templates with API sync setup, coverage, and registry authoring documentation.
+- 9a8a573: Show registry apps with resource coverage, sync strategies, documentation links, and install commands in the CLI. Expose optional documentation and logo metadata in JSON discovery while supporting existing registry items. Add an app catalog and detailed ClickHouse integration guides to the documentation.
+- 9a8a573: Support installing registry fixture tests with `chkit add --with-tests` and expose authentication setup, destination tables, API references, views, and sync behavior through registry inspection.
+- b8984af: Read the default integration catalog and committed template releases directly from GitHub.
+- 36da53d: Document Slack's three raw resources and verify messages-first ingestion and metadata execution that leaves message progress unchanged. Default message bootstrap and overlap to 24 hours, with optional explicit historical bootstrap and isolated backfills. Complete each history page's replies before checkpointing its timestamp frontier; interruptions replay the unfinished page instead of retaining thread queues. Remove automatic historical reconciliation: edits and late replies on roots outside the chosen window are excluded. Replies remain individual native messages joined through thread references in ClickHouse.
+- dee07eb: Add an installable Slack app to the application registry with its official logo, raw conversation, user, message, and thread-reply ingestion, portable fixture tests, and a ClickHouse integration guide.
+- Updated dependencies [3c546e8]
+  - @chkit/clickhouse@0.2.0-beta.10
+  - @chkit/core@0.2.0-beta.10
+  - @chkit/codegen@0.2.0-beta.10
+
 ## 0.2.0-beta.9
 
 ### Patch Changes

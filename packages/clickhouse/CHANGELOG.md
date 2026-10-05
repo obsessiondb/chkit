@@ -1,5 +1,12 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.10
+
+### Patch Changes
+
+- 3c546e8: `@chkit/clickhouse/e2e-testkit`: `getRequiredEnv` is now `getLiveEnv`. Without `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` it targets the local test stack (`http://localhost:8123`, the repository's `test/infra` Docker Compose stack) instead of throwing.
+  - @chkit/core@0.2.0-beta.10
+
 ## 0.2.0-beta.9
 
 ### Patch Changes
