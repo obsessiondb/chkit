@@ -14,10 +14,10 @@ pnpm create chkit@latest
 yarn create chkit
 ```
 
-Pick an example by name:
+Pick an example by name. `hello` is the default when `--example` is omitted:
 
 ```sh
-bun create chkit@latest my-app --example clickbench
+bun create chkit@latest my-app --example hello
 ```
 
 ## Options
@@ -25,7 +25,7 @@ bun create chkit@latest my-app --example clickbench
 | Flag | Description |
 | --- | --- |
 | `[project-directory]` | Target directory. Prompted if omitted. |
-| `-e, --example <name>` | Example to scaffold. Bare name (`clickbench`) or full GitHub URL. Prompted with the list of bundled examples if omitted. |
+| `-e, --example <name>` | Example to scaffold. Bare name (`hello`, `clickbench`) or full GitHub URL. Prompted with the list of bundled examples if omitted. `hello` is the default. |
 | `-m, --package-manager <pm>` | `npm`, `pnpm`, `yarn`, or `bun`. Auto-detected from the invoking package manager. |
 | `--skip-install` | Skip installing dependencies after scaffolding. |
 | `-v, --version` | Print version. |
@@ -35,6 +35,7 @@ bun create chkit@latest my-app --example clickbench
 
 | Name | Description |
 | --- | --- |
-| `clickbench` | Full ClickBench schema and dataset load against ObsessionDB / ClickHouse. |
+| `hello` | Default. Two small tables (`users`, `events`) and one migration. No dataset load. Claim a free ObsessionDB instance from the scaffold prompt, or set `CLICKHOUSE_URL`. |
+| `clickbench` | Full ClickBench schema and dataset load against ObsessionDB or ClickHouse. |
 
-See the [chkit documentation](https://chkit.obsessiondb.com) for the full list.
+See [Getting started](https://chkit.obsessiondb.com/getting-started/).

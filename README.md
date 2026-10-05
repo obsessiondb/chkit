@@ -12,9 +12,25 @@ chkit is an open-source CLI for ClickHouse. Review migration SQL before applying
 
 [Get started](https://chkit.obsessiondb.com/getting-started/) · [Build a data source](https://chkit.obsessiondb.com/api-sync/quickstart/) · [Documentation](https://chkit.obsessiondb.com)
 
-New to chkit? Scaffold the small [hello example](examples/hello) with `bun create chkit@latest my-app --example hello`, or clone that folder and follow its README. The heavier ClickBench load stays at [`examples/clickbench`](examples/clickbench).
-
 > **Beta:** the public API is still evolving. Keep the CLI, core, and plugins on matching versions.
+
+## Get started in 2 minutes
+
+Scaffold [hello](examples/hello), the default example: two MergeTree tables (`users` and `events`) and one migration. No dataset load.
+
+```sh
+bun create chkit@latest my-app --example hello
+cd my-app
+# claim a free ObsessionDB instance from the prompt, or set CLICKHOUSE_URL
+bun run migrate
+bunx chkit query "SELECT name FROM system.tables WHERE database = 'default' AND name IN ('users', 'events') ORDER BY name"
+```
+
+Bare `bun create chkit@latest` uses the same hello default. The npm, pnpm, and yarn equivalents are `npm create chkit@latest`, `pnpm create chkit@latest`, and `yarn create chkit`.
+
+You can also clone [`examples/hello`](examples/hello) and follow its README. The heavier ClickBench path is `bun create chkit@latest my-app --example clickbench`, or [`examples/clickbench`](examples/clickbench).
+
+Continue in [Getting started](https://chkit.obsessiondb.com/getting-started/).
 
 ## Why chkit
 
