@@ -75,6 +75,41 @@ test.serial('Calendar keeps the input sync token across empty delta pages', asyn
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ syncToken: 'sync-2' })
 })
 
+test('Calendar preserves native event structure and replaces an exception with its sparse cancellation', async () => {
+  const series = {
+    id: 'series', status: 'confirmed', recurrence: ['RRULE:FREQ=WEEKLY'],
+    attendees: [{ email: 'guest@example.com', responseStatus: 'accepted' }],
+    organizer: { email: 'owner@example.com' }, reminders: { useDefault: false, overrides: [{ method: 'email', minutes: 30 }] },
+    conferenceData: { conferenceId: 'abc-defg-hij', entryPoints: [{ entryPointType: 'video', uri: 'https://meet.google.com/abc-defg-hij' }] },
+    attachments: [{ fileId: 'file-1', fileUrl: 'https://drive.google.com/file/d/file-1/view' }],
+    extendedProperties: { private: { custom: 'retained' } },
+  }
+  const exception = { id: 'exception', recurringEventId: series.id, originalStartTime: { dateTime: '2026-10-06T09:00:00Z' }, summary: 'Moved occurrence' }
+  const cancellation = { id: exception.id, status: 'cancelled', recurringEventId: series.id, originalStartTime: exception.originalStartTime }
+  const calls: URL[] = []
+  const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, {
+    config: googleCalendarConfig,
+    token: () => 'fixture',
+    fetch: async (input) => {
+      const url = new URL(input)
+      calls.push(url)
+      return Response.json(url.pathname.endsWith('/events')
+        ? url.searchParams.has('syncToken') ? { items: [cancellation], nextSyncToken: 'sync-2' } : { items: [series, exception], nextSyncToken: 'sync-1' }
+        : { id: 'calendar@example.com' })
+    },
+  })
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const input = { selected: selectStreams([pipeline], ['resource:events']), backfill: undefined }
+  expect((await runIngestion(input, { journal, destination })).ok).toBe(true)
+  expect(destination.tables.get('default.google_calendar_events_raw')?.map((row) => row.raw)).toEqual([series, exception])
+  expect((await runIngestion(input, { journal, destination })).ok).toBe(true)
+  const latest = new Map(destination.tables.get('default.google_calendar_events_raw')?.map((row) => [row.id, row.raw]))
+  expect(latest.size).toBe(2)
+  expect(latest.get(JSON.stringify(['google-calendar.primary', 'calendar@example.com', exception.id]))).toEqual(cancellation)
+  expect(calls.filter((url) => url.pathname.endsWith('/events')).map((url) => url.searchParams.get('syncToken'))).toEqual([null, 'sync-1'])
+  expect(calls).toHaveLength(4)
+})
+
 test.serial('Calendar retains its page checkpoint after a lost terminal acknowledgement', async () => {
   setFetch((url) => Response.json(url.searchParams.has('pageToken')
     ? { items: [{ id: 'second' }], nextSyncToken: 'sync-1' }

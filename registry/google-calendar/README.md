@@ -21,6 +21,8 @@ The first run reads canonical events with `singleEvents=false` and `showDeleted=
 
 The raw destination keeps the latest observed payload per identity. A recurring master contains recurrence rules; applications needing occurrences should add a separate bounded instances reader or derive an occurrence projection. A cancelled payload can be sparse and remains unmodified.
 
+Attendees, organizer, recurrence, reminders, attachments, and `conferenceData` remain native fields inside each event, as returned by Google. Calendar metadata is used only to resolve the calendar identity. This installation collects events only; it does not add attendee, calendar-directory, attachment, or Meet tables. Project fields and join other integrations later in ClickHouse, preserving source and calendar identity.
+
 ## Pipeline and stream
 
 One installation exports one `google_calendarPipeline` with the canonical `events` stream. `pipeline.ts` wires the stream to its destination and sync-token strategy; `sources/events.ts` owns provider progress, and `client.ts` owns validated requests. The ingestion library owns retries, cancellation, budgets, and load acknowledgements.
