@@ -8,7 +8,7 @@ sidebar:
 import PackagedCommand from '../../../components/PackagedCommand.astro';
 import Command from '../../../components/Command.astro';
 
-`create-chkit` scaffolds a working chkit project by downloading a curated example from the chkit repository and wiring it up against your chosen package manager. The default example is [`hello`](https://github.com/obsessiondb/chkit/tree/main/examples/hello): two small tables and one migration.
+`create-chkit` scaffolds a working chkit project by downloading a curated example from the chkit repository and wiring it up against your chosen package manager. [`hello`](https://github.com/obsessiondb/chkit/tree/main/examples/hello) is two small tables and one migration. Pass `--example hello` to scaffold it.
 
 :::note[Working in Python?]
 The `create-chkit` examples are TypeScript projects. For Python, start with `pip install chkit-py` and run `chkit init` in your project instead — see the [Python overview](/python/overview/).
@@ -21,13 +21,11 @@ The `create-chkit` examples are TypeScript projects. For Python, start with `pip
 
 ## Scaffold a project
 
-Run the package without arguments to be prompted for a project name and to pick from the bundled examples. `hello` is the default in the repository manifest; pass `--example hello` to select it directly.
-
-<PackagedCommand create="chkit@latest" />
-
-Pass a project directory and select `hello` explicitly:
+Pass `--example hello`:
 
 <PackagedCommand create="chkit@latest" args="my-chkit-app --example hello" />
+
+Omitting `--example` prompts from the manifest bundled in the installed `create-chkit` package. That published prompt still preselects `clickbench` and does not list `hello` until `create-chkit` is republished. `--example` downloads the named example from the repository, so `--example hello` works on the current release. The repository manifest default is already `hello`; the prompt picks that up on the next release.
 
 The scaffold then asks how to connect:
 
@@ -49,7 +47,7 @@ For the full ClickBench schema and public dataset load, pass `--example clickben
 | Flag | Description |
 | --- | --- |
 | `[project-directory]` | Target directory. Prompted if omitted. |
-| `-e, --example <name>` | Example name or full GitHub URL. Prompted with the list of bundled examples if omitted. |
+| `-e, --example <name>` | Example name or full GitHub URL. If omitted, prompted from the manifest bundled in the installed package. |
 | `-m, --package-manager <pm>` | `npm`, `pnpm`, `yarn`, or `bun`. Auto-detected from the invoking package manager. |
 | `--skip-install` | Skip installing dependencies after scaffolding. |
 
@@ -57,10 +55,10 @@ For the full ClickBench schema and public dataset load, pass `--example clickben
 
 | Name | Description |
 | --- | --- |
-| `hello` | Two small tables and one migration. Default. Claim a free ObsessionDB instance or use local ClickHouse. |
-| `clickbench` | Full ClickBench schema and dataset load against ObsessionDB or ClickHouse. |
+| `hello` | Two small tables and one migration. Default in the repository manifest. Claim a free ObsessionDB instance or use local ClickHouse. |
+| `clickbench` | Full ClickBench schema and dataset load against ObsessionDB or ClickHouse. Preselected by the published interactive prompt until `create-chkit` is republished. |
 
-The list and default live in [`examples/manifest.json`](https://github.com/obsessiondb/chkit/blob/main/examples/manifest.json). The same `hello` project can be cloned from [`examples/hello`](https://github.com/obsessiondb/chkit/tree/main/examples/hello) without the scaffolder.
+The list and repository default live in [`examples/manifest.json`](https://github.com/obsessiondb/chkit/blob/main/examples/manifest.json). The same `hello` project can be cloned from [`examples/hello`](https://github.com/obsessiondb/chkit/tree/main/examples/hello) without the scaffolder.
 
 ## Run your first migration
 
