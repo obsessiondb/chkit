@@ -1,9 +1,9 @@
 ---
 title: Integrating ClickHouse with Circleback
-description: Install the editable Circleback raw ingestion example.
+description: Sync Circleback meetings, transcripts, action items, people, and companies into independent raw tables.
 ---
 
-The Circleback registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+The Circleback integration runs five independently selectable raw resource streams within one account pipeline.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -17,32 +17,83 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:circleback
 ```
 
-Set `CIRCLEBACK_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/circleback/config.ts` for stable account and stream identities, the ownership filter, and the retained-meeting bound. `pipeline.ts` groups the meetings resource stream in one account pipeline. Individual meetings are records within that stream; its reader in `sources/meetings.ts` owns enrichment and recovery. `client.ts` uses `paginate()` for Link traversal, and `index.ts` exports the pipeline and raw schema.
+Set `CIRCLEBACK_API_KEY` in the runtime environment. Create a key through Circleback **Settings → API keys**; see the [authentication reference](https://circleback.ai/docs/api). Native JSON requires ClickHouse 25.3 or later.
 
-`createCirclebackPipeline(config, deps)` binds reader settings and optional HTTP dependencies. Configure storage in the installation's `circlebackConfig` before schema discovery; factories use the exported raw table. Meetings ignore date bounds and do not provide date-range backfills.
+Edit `src/integrations/circleback/config.ts` for a stable `sourceId`, meeting ownership, and setup-time database. `ownership: 'All'` includes shared meetings accessible to the authenticated user. People, companies, and action items use the provider's own authenticated-user collections; these endpoints do not promise a full organization export.
+
+`pipeline.ts` composes the five resources, `sources/` owns raw schemas and readers, and `client.ts` handles requests and Link pagination. The factory `createCirclebackPipeline(config, deps)` binds reader configuration and optional HTTP dependencies. Runtime factories use existing exported schemas; storage changes belong before schema discovery and migration generation.
 
 <RegistryReference name="circleback" section="resources" />
 
-## Sync behavior
+## Raw resource boundaries
 
-Each new scan cycle reads all meetings with `ownership=All`, follows [provider Link continuations](https://circleback.ai/docs/api), and rechecks every observed transcript. The [meeting listing](https://circleback.ai/docs/api/meetings/list-meetings) has no documented modification-time filter or durable cursor lifetime; interrupted cycles restart pagination from the first page and skip only parent enrichment already acknowledged by the destination in that cycle. Unfinished parents are replayed. Completing the cycle clears the acknowledged ID set, so the next run rechecks every accessible meeting. A meeting timestamp is not assumed to track delayed transcript availability.
+Meetings, meeting transcripts, action items, people, and companies have separate streams, tables, and journal completion. Each runs alone and owns any required discovery. The transcript reader lists its own eligible meetings; selecting transcripts does not depend on a prior meetings run, and transcript failure does not block raw meeting publication.
 
-Sink-acknowledged checkpoints include explicit source/filter scope, bounded active-cycle parent IDs, unavailable transcript diagnostics with distinct `forbidden` and `not_found` statuses, and the last fully completed cycle's `completedAt`. Neither transcript `403` nor `404` is assumed to mean temporary processing. A new cycle retries listed meetings even when their metadata is unchanged. IDs absent from the listing remain unavailable diagnostics, not executable queued work; they are retried only when listed again or resolved by an explicit reconciliation policy. Recovery can defer updates to acknowledged parents until the next cycle. Listing permission failures fail the stream.
+Raw provider fields remain under `data` with `source_id` metadata. Provider-returned meeting attendee/action-item summaries and recording URLs remain intact; readers do not assemble a meeting by fetching its child streams. The requested tag projection stores all returned tag names as `string[]`, without a tag-definition stream. No calendar-event or binary-download reader is included.
 
-The editable `maxRetainedMeetings` setting bounds both recovery IDs and diagnostics at `10_000`; exceeding the bound fails visibly while preserving acknowledged progress. Source/filter scope changes require a new stream identity.
+People fetch one [same-person detail](https://circleback.ai/docs/api/people/get-person) per listed profile and validate the native ID, preserving `externalLinks` and all other returned fields. Companies likewise fetch one detail per domain. These same-resource requests add to full-read cost and require matching access.
 
 ```sh
+bunx chkit ingest run --tag provider:circleback --tag resource:meeting_transcripts
 bunx chkit ingest status --tag provider:circleback --json
 ```
 
-Removed meetings remain stored; a full scan is not an atomic source snapshot. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README and [registry installation](/cli/add/).
+## Full sync and recovery
 
-## Test the reader
+Circleback exposes [paginated full collections](https://circleback.ai/docs/api) without a reliable modification feed. Every resource uses native `fullSync()` completion and `paginate()`. Each run exhausts its own provider pages; failed or interrupted reads restart from the first page, and empty successful reads still record completion. Progress never declares successful completion before destination acknowledgement. Loaded rows may remain visible after a later failure.
+
+Link pagination preserves ownership, assignee and completion filters even on cursor-only continuations. Conflicting filters, repeated/unsafe links and malformed provider responses fail visibly. Requests forward cancellation and time out after 30 seconds; executor retries honor HTTP 429 `Retry-After`.
+
+Transcripts are rechecked for every listed meeting, including unchanged old meetings. A meeting's `updatedAt` is not treated as transcript readiness. The [action-item listing](https://circleback.ai/docs/api/action-items/list-action-items) explicitly uses `assigneeType=Anyone` and separately exhausts `PENDING` and `DONE`, the native statuses verified in the [official OpenAPI](https://circleback.ai/docs/api/openapi.json) and [update contract](https://circleback.ai/docs/api/action-items/update-action-item). Unexpected statuses fail instead of silently producing a partial export.
+
+Full reads and status partitions are mutable, not atomic snapshots. A subsequent full run reconciles late availability, edits and status changes. Absent resources remain stored, and inaccessible transcripts do not prove deletion. Full-sync readers ignore date backfill bounds and provide no date-range backfill. Use an external scheduler and one ingestion process per ClickHouse target.
+
+## Identities and joins
+
+Row IDs are `[sourceId, nativeId]` for meetings, action items and people; companies always use `[sourceId, domain]`. Native provider IDs and references remain unchanged in `data`. Keep `source_id` in every cross-resource join.
+
+Company responses preserve listing and [same-company detail](https://circleback.ai/docs/api/companies/get-company) fields. The `company_id` envelope metadata preserves a native list/detail ID or a consistent non-null company ID from returned people. Conflicting numeric IDs fail. Empty companies without a numeric ID remain valid domain-keyed rows with `company_id: null`; no numeric mapping is invented. Join person `data.companyId` to company `company_id` only when known.
+
+Account or filter changes require a new `sourceId` and deliberately configured destinations. Version 0.1.0 used direct meeting JSON and unscoped keys. The 0.2.0 source envelopes, scoped IDs, string tags and additional tables require deliberate migration or reingestion; earlier rows are not automatically rewritten.
+
+## Transcript content and read outcomes
+
+Each transcript has one stable full-content key `[sourceId, meetingId]` and one read-outcome key `[sourceId, meetingId, 'availability']`. The envelope discriminator is `kind: 'transcript'` or `kind: 'availability'`.
+
+HTTP 200 writes the complete raw segment array and an `available` outcome. HTTP 403 or 404 updates only the outcome to `forbidden` or `not_found`, preserving earlier successful text. A successful empty array replaces the prior content with `[]`. Malformed transcript data fails without marking availability successful. Segments have no synthetic IDs.
+
+Select successful snapshots with `raw.kind::String = 'transcript'`; join the latest outcome separately:
+
+```sql
+WITH snapshots AS (
+  SELECT raw.source_id::String AS source_id,
+    raw.meeting_id::String AS meeting_id,
+    JSONExtractRaw(toJSONString(raw), 'data') AS transcript
+  FROM default.circleback_meeting_transcripts_raw FINAL
+  WHERE raw.kind::String = 'transcript'
+), outcomes AS (
+  SELECT raw.source_id::String AS source_id,
+    raw.meeting_id::String AS meeting_id,
+    raw.status::String AS latest_status
+  FROM default.circleback_meeting_transcripts_raw FINAL
+  WHERE raw.kind::String = 'availability'
+)
+SELECT s.source_id, s.meeting_id, s.transcript, o.latest_status
+FROM snapshots AS s
+LEFT JOIN outcomes AS o
+  ON s.source_id = o.source_id AND s.meeting_id = o.meeting_id;
+```
+
+An unavailable latest outcome can coexist with a retained successful snapshot. Neither unavailable status is assumed to mean temporary processing or deletion.
+
+## Test the readers
 
 ```sh
 bunx chkit add circleback --with-tests
 bun test src/integrations/circleback/tests/basic.test.ts
 ```
+
+The installed fixture suite requires no credentials or live database and verifies independently selected resources, complete status partitions, source/sink replay, late transcripts, retained content, native joins and pagination failures.
 
 ## Changelog
 
@@ -51,4 +102,5 @@ bun test src/integrations/circleback/tests/basic.test.ts
 ## Related pages
 
 - [App registry](/integrations/)
+- [Registry installation](/cli/add/)
 - [Ingestion plugin](/plugins/ingest/)
