@@ -81,6 +81,32 @@ describe('Slack raw template', () => {
     expect(selectStreams([pipeline], ['resource:users']).map(({ stream }) => stream.id)).toEqual(['slack.primary.users'])
   })
 
+  test('messages run before metadata streams and resume replies without advancing another resource', async () => {
+    const calls: string[] = []
+    const defaults = fixtureDeps()
+    const deps = fixtureDeps((url, init) => { calls.push(url.pathname); return defaults.fetch(url.toString(), init) })
+    const pipeline = createSlackPipeline(slackConfig, deps)
+    const limited = { ...pipeline, streams: pipeline.streams.map((stream) => ({ ...stream, budget: { ...stream.budget, maxChunks: 2 } })) }
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const first = await runIngestion({ selected: selectStreams([limited], ['resource:messages']), backfill: undefined }, { now: fixtureNow, journal, destination })
+    expect(first.streams[0]?.outcome).toBe('budget_exhausted')
+    const pending = await journal.readCheckpoint('slack.primary.messages')
+    expect(parseMessageState(pending.envelope?.state).active?.threads).toEqual([{ root: parentMessage.ts }])
+    expect(destination.tables.has('default.slack_channels_raw')).toBe(false)
+    expect(destination.tables.has('default.slack_users_raw')).toBe(false)
+    expect((await journal.readCheckpoint('slack.primary.channels')).version).toBe(0)
+    expect((await journal.readCheckpoint('slack.primary.users')).version).toBe(0)
+    calls.length = 0
+    expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:users']), backfill: undefined }, { now: fixtureNow, journal, destination })).ok).toBe(true)
+    expect(calls).toEqual(['/api/auth.test', '/api/users.list'])
+    expect(await journal.readCheckpoint('slack.primary.messages')).toEqual(pending)
+    calls.length = 0
+    expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:messages']), backfill: undefined }, { now: fixtureNow, journal, destination })).ok).toBe(true)
+    expect(calls).toEqual(['/api/auth.test', '/api/conversations.replies'])
+    expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage })
+    expect((await journal.readCheckpoint('slack.primary.channels')).version).toBe(0)
+  })
+
   test('every stream preserves provider payloads and reruns publish edits under stable identities', async () => {
     let changed = false
     const defaults = fixtureDeps()

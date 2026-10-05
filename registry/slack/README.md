@@ -44,6 +44,8 @@ One installation pipeline contains independent streams for channels, users, and 
 
 Messages preserve blocks, attachments, reactions, metadata, and file references when returned. File references do not download files. No separate files, reactions, pins, canvases, search, or events reader is included.
 
+Replies are individual Message objects with their own `ts` and a `thread_ts` parent reference, so they use the messages stream and table. The reader does not assemble a conversation array inside each parent or enrich messages with channel/user records. Run messages before, after, or without the metadata streams; it discovers conversation IDs independently and checkpoints its own pending replies. Join users, channels, and thread parents later in ClickHouse using source, workspace, channel, and native message keys.
+
 ## Choose conversations and request pacing
 
 The default config selects public channels, includes replies, uses metadata pages of 200, and uses history/reply pages of 15. `requestIntervalMs` defaults to 3000; `messageIntervalMs` defaults to 60000.

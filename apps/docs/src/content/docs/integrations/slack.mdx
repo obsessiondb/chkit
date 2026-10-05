@@ -72,6 +72,8 @@ Add scopes for each additional conversation type selected in `config.ts`:
 
 The users stream needs `users:read`. Add `users:read.email` when email addresses should appear in returned profiles; missing email fields are retained as missing. See [Slack scopes](https://docs.slack.dev/reference/scopes/) and [`users.list`](https://docs.slack.dev/reference/methods/users.list/).
 
+The three raw streams are channels, users, and messages. [Thread replies](https://docs.slack.dev/reference/methods/conversations.replies/) are individual messages with their own `ts` and a `thread_ts` parent reference; they share the messages table. The messages reader discovers conversation IDs independently and can run before or without the metadata streams. Each resource owns its progress. Preserve returned nested message fields and join channel, user, and thread-parent records later in ClickHouse using source, workspace, channel, and native IDs.
+
 ### Token type and conversation access
 
 User tokens with the appropriate history scope read public channels and private conversations the user can access. Bot history access requires the bot to belong to the conversation. A bot may list public channels it has not joined, so the default `channels: undefined` can fail on history access. For a bot token, select IDs of conversations the bot has joined. See [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/).
