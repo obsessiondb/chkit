@@ -12,6 +12,10 @@ const cutoff = new Date('2026-10-20T00:00:00Z')
 const conference = { name: 'conferenceRecords/c1', startTime: '2026-08-01T00:00:00Z', endTime: '2026-10-01T00:00:00Z', expireTime: '2026-10-31T00:00:00Z' }
 const transcript = { name: `${conference.name}/transcripts/t1`, state: 'FILE_GENERATED' }
 const entry = { name: `${transcript.name}/entries/e1`, text: 'first' }
+const participant = { name: `${conference.name}/participants/p1`, signedinUser: { user: 'users/u1', displayName: 'Fixture user' }, earliestStartTime: conference.startTime }
+const session = { name: `${participant.name}/participantSessions/s1`, startTime: conference.startTime }
+const recording = { name: `${conference.name}/recordings/r1`, state: 'FILE_GENERATED', driveDestination: { file: 'drive-file-1', exportUri: 'https://drive.google.com/file/d/drive-file-1/view' } }
+const resources = ['conferences', 'transcripts', 'transcript-entries', 'participants', 'participant-sessions', 'recordings'] as const
 
 function setFetch(handler?: (url: URL) => Response): void {
   process.env.GOOGLE_MEET_ACCESS_TOKEN = 'fixture'
@@ -21,6 +25,9 @@ function setFetch(handler?: (url: URL) => Response): void {
 function fixture(url: URL): Response {
   if (url.pathname === '/v2/conferenceRecords') return Response.json({ conferenceRecords: url.searchParams.get('filter')?.includes('IS NULL') ? [] : [conference] })
   if (url.pathname.endsWith('/transcripts')) return Response.json({ transcripts: [transcript] })
+  if (url.pathname.endsWith('/participants')) return Response.json({ participants: [participant] })
+  if (url.pathname.endsWith('/participantSessions')) return Response.json({ participantSessions: [session] })
+  if (url.pathname.endsWith('/recordings')) return Response.json({ recordings: [recording] })
   if (url.pathname.endsWith('/entries')) return Response.json(url.searchParams.has('pageToken')
     ? { transcriptEntries: [{ ...entry, name: `${transcript.name}/entries/e2`, text: 'second' }] }
     : { transcriptEntries: [entry], nextPageToken: 'entries-next' })
@@ -271,7 +278,7 @@ test('Meet factory snapshots installation settings and runs transcript and confe
   config.overlapDays = 0
   config.windowDays = 1
   expect(pipeline.id).toBe('meet.work')
-  expect(pipeline.streams.map((stream) => stream.id)).toEqual(['meet.work.conferences', 'meet.work.transcripts', 'meet.work.transcript-entries'])
+  expect(pipeline.streams.map((stream) => stream.id)).toEqual(resources.map((resource) => `meet.work.${resource}`))
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:transcripts']), backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(true)
@@ -310,3 +317,196 @@ test('Meet factory rejects window scope changes before resuming a saved resource
   expect(result.streams[0]?.error).toContain('scope changed')
   expect(requests).toBe(previousRequests)
 })
+
+test('Meet exposes exactly six independently selectable resource streams and raw destinations', async () => {
+  const expected = new Map<string, { name: string; [key: string]: unknown }>([
+    ['conferences', conference], ['transcripts', { ...transcript, conference_name: conference.name }],
+    ['transcript-entries', { ...entry, conference_name: conference.name, transcript_name: transcript.name }],
+    ['participants', { ...participant, conference_name: conference.name }],
+    ['participant-sessions', { ...session, conference_name: conference.name, participant_name: participant.name }],
+    ['recordings', { ...recording, conference_name: conference.name }],
+  ])
+  for (const resource of resources) {
+    const requests: URL[] = []
+    const pipeline = fixturePipeline((url) => { requests.push(url); return fixture(url) })
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    const result = await runIngestion(selectedRequest(pipeline, resource), { journal, destination, now: () => cutoff })
+    expect(result.ok).toBe(true)
+    expect(result.streams.map((stream) => stream.streamId)).toEqual([`google-meet.${resource}`])
+    expect(destination.tables.size).toBe(1)
+    const rows = destination.tables.get(`default.google_meet_${resource.replaceAll('-', '_')}_raw`)
+    expect(rows?.[0]).toMatchObject({ id: JSON.stringify([googleMeetConfig.sourceId, expected.get(resource)?.name]), raw: expected.get(resource) })
+    expect(requests.filter((url) => url.pathname === '/v2/conferenceRecords')).toHaveLength(2)
+    expect(requests.every((url) => url.origin === 'https://meet.googleapis.com')).toBe(true)
+    for (const other of resources) expect((await journal.readCheckpoint(`google-meet.${other}`)).version > 0).toBe(other === resource)
+  }
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  const result = await runIngestion({ selected: selectStreams([fixturePipeline(fixture)], ['provider:google-meet']), backfill: undefined }, { journal, destination, now: () => cutoff })
+  expect(result.ok).toBe(true)
+  expect(result.streams).toHaveLength(6)
+  expect(destination.tables.size).toBe(6)
+})
+
+for (const resource of ['participants', 'participant-sessions', 'recordings'] as const) {
+  test(`Meet revisits retained conferences for late ${resource} changes without parent updates`, async () => {
+    let late = false
+    const pipeline = fixturePipeline((url) => {
+      if (late && url.pathname === '/v2/conferenceRecords') return Response.json({ conferenceRecords: [] })
+      if (resource === 'participants' && url.pathname.endsWith('/participants')) return Response.json({ participants: [{ ...participant, ...(late ? { latestEndTime: conference.endTime } : {}) }] })
+      if (resource === 'participant-sessions' && url.pathname.endsWith('/participantSessions')) return Response.json({ participantSessions: [{ ...session, ...(late ? { endTime: conference.endTime } : {}) }] })
+      if (resource === 'recordings' && url.pathname.endsWith('/recordings')) return Response.json({ recordings: late ? [recording] : [{ name: recording.name, state: 'ENDED' }] })
+      return fixture(url)
+    })
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    expect((await runIngestion(selectedRequest(pipeline, resource), { journal, destination, now: () => cutoff })).ok).toBe(true)
+    late = true
+    expect((await runIngestion(selectedRequest(pipeline, resource), { journal, destination, now: () => new Date('2026-10-28T00:00:00Z') })).ok).toBe(true)
+    const rows = destination.tables.get(`default.google_meet_${resource.replaceAll('-', '_')}_raw`)
+    expect(rows).toHaveLength(2)
+    expect(rows?.[0]?.id).toBe(rows?.[1]?.id)
+    expect(rows?.[1]?.raw).toMatchObject(resource === 'participants'
+      ? { latestEndTime: conference.endTime }
+      : resource === 'participant-sessions' ? { endTime: conference.endTime } : recording)
+    expect((await journal.readCheckpoint(`google-meet.${resource}`)).envelope?.state).toMatchObject({ pending: [{ name: conference.name, checkedAt: '2026-10-28T00:00:00.000Z' }] })
+  })
+}
+
+test('Meet resumes nested participant sessions and pages every participant independently', async () => {
+  const secondParticipant = { name: `${conference.name}/participants/p2`, anonymousUser: { displayName: 'Guest' } }
+  const secondSession = { ...session, name: `${participant.name}/participantSessions/s2` }
+  const guestSession = { ...session, name: `${secondParticipant.name}/participantSessions/s3` }
+  const requests: URL[] = []
+  const pipeline = fixturePipeline((url) => {
+    requests.push(url)
+    if (url.pathname.endsWith('/participants')) return Response.json(url.searchParams.has('pageToken')
+      ? { participants: [secondParticipant] } : { participants: [participant], nextPageToken: 'participants-next' })
+    if (url.pathname === `/v2/${participant.name}/participantSessions`) return Response.json(url.searchParams.has('pageToken')
+      ? { participantSessions: [secondSession] } : { participantSessions: [session], nextPageToken: 'sessions-next' })
+    if (url.pathname === `/v2/${secondParticipant.name}/participantSessions`) return Response.json({ participantSessions: [guestSession] })
+    return fixture(url)
+  })
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  expect((await runIngestion(selectedRequest(pipeline, 'participant-sessions', 5), { journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await journal.readCheckpoint('google-meet.participant-sessions')).envelope?.state).toMatchObject({ active: { collection: { items: [{ name: participant.name }], sessionPageToken: 'sessions-next', nextPageToken: 'participants-next' } }, cycle: { to: cutoff.toISOString() } })
+  const requestCount = requests.length
+  const resumed = restoredJournal(journal)
+  expect((await runIngestion(selectedRequest(pipeline, 'participant-sessions'), { journal: resumed, destination, now: () => new Date('2026-10-21T00:00:00Z') })).ok).toBe(true)
+  expect(requests[requestCount]?.pathname).toBe(`/v2/${participant.name}/participantSessions`)
+  expect(requests[requestCount]?.searchParams.get('pageToken')).toBe('sessions-next')
+  expect(requests.slice(requestCount).some((url) => url.pathname === '/v2/conferenceRecords')).toBe(false)
+  expect(destination.tables.get('default.google_meet_participant_sessions_raw')?.map((row) => row.id)).toEqual([session, secondSession, guestSession].map((item) => JSON.stringify([googleMeetConfig.sourceId, item.name])))
+  expect((await resumed.readCheckpoint('google-meet.participant-sessions')).envelope?.state).toMatchObject({ watermark: cutoff.toISOString() })
+})
+
+test('Meet recording source failure preserves acknowledged page progress and other resource checkpoints', async () => {
+  let unavailable = true
+  const second = { ...recording, name: `${conference.name}/recordings/r2` }
+  const pipeline = fixturePipeline((url) => {
+    if (url.pathname.endsWith('/recordings')) return url.searchParams.has('pageToken')
+      ? unavailable ? new Response('fixture unavailable', { status: 503 }) : Response.json({ recordings: [second] })
+      : Response.json({ recordings: [recording], nextPageToken: 'recordings-next' })
+    return fixture(url)
+  })
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  expect((await runIngestion(selectedRequest(pipeline, 'participants'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  const independent = await journal.readCheckpoint('google-meet.participants')
+  expect((await runIngestion(selectedRequest(pipeline, 'recordings', 4), { journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(selectedRequest(pipeline, 'recordings'), { journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await journal.readCheckpoint('google-meet.recordings')).envelope?.state).toMatchObject({ active: { collection: { pageToken: 'recordings-next' } } })
+  unavailable = false
+  expect((await runIngestion(selectedRequest(pipeline, 'recordings'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect(destination.tables.get('default.google_meet_recordings_raw')).toHaveLength(2)
+  expect((await journal.readCheckpoint('google-meet.participants')).version).toBe(independent.version)
+})
+
+test('Meet participant terminal progress waits for destination acknowledgement and replays changed content', async () => {
+  let ended = false
+  const pipeline = fixturePipeline((url) => url.pathname.endsWith('/participants')
+    ? Response.json({ participants: [{ ...participant, ...(ended ? { latestEndTime: conference.endTime } : {}) }] }) : fixture(url))
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  const result = await runIngestion(selectedRequest(pipeline, 'participants'), { journal, destination: {
+    insert: async (input) => { await destination.insert(input); throw new Error('fixture lost acknowledgement') },
+  }, now: () => cutoff })
+  expect(result.ok).toBe(false)
+  const checkpoint = await journal.readCheckpoint('google-meet.participants')
+  expect(checkpoint.envelope?.state).toMatchObject({ cycle: { phase: 'parents', parentIndex: 0 }, pending: [{ name: conference.name }] })
+  expect(checkpoint.envelope?.state).not.toHaveProperty('watermark')
+  ended = true
+  expect((await runIngestion(selectedRequest(pipeline, 'participants'), { journal: restoredJournal(journal), destination, now: () => cutoff })).ok).toBe(true)
+  const rows = destination.tables.get('default.google_meet_participants_raw')
+  expect(rows).toHaveLength(2)
+  expect(rows?.[0]?.id).toBe(rows?.[1]?.id)
+  expect(rows?.[1]?.raw).toMatchObject({ latestEndTime: conference.endTime })
+})
+
+for (const resource of ['participants', 'participant-sessions', 'recordings'] as const) {
+  test(`Meet ${resource} reset debt survives paused replay and fails a second rejection`, async () => {
+    const field = resource === 'participant-sessions' ? 'participantSessions' : resource
+    const item = resource === 'participants' ? participant : resource === 'recordings' ? recording : session
+    const pipeline = fixturePipeline((url) => url.pathname.endsWith(`/${field}`)
+      ? url.searchParams.has('pageToken') ? new Response('expired token', { status: 400 }) : Response.json({ [field]: [item], nextPageToken: 'next' })
+      : fixture(url))
+    const destination = createMemoryDestination()
+    const initial = createMemoryJournal()
+    const chunks = resource === 'participant-sessions' ? 5 : 4
+    expect((await runIngestion(selectedRequest(pipeline, resource, chunks), { journal: initial, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+    const reset = restoredJournal(initial)
+    expect((await runIngestion(selectedRequest(pipeline, resource, 1), { journal: reset, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+    const replay = restoredJournal(reset)
+    expect((await runIngestion(selectedRequest(pipeline, resource, 1), { journal: replay, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+    const checkpoint = await replay.readCheckpoint(`google-meet.${resource}`)
+    expect(checkpoint.envelope?.state).toMatchObject({ active: { collection: resource === 'participant-sessions'
+      ? { sessionRecoveryCount: 1, sessionPageToken: 'next' } : { recoveryCount: 1, pageToken: 'next' } } })
+    const final = restoredJournal(replay)
+    const result = await runIngestion(selectedRequest(pipeline, resource), { journal: final, destination, now: () => cutoff })
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.error).toContain('repeatedly rejected')
+    expect((await final.readCheckpoint(`google-meet.${resource}`)).version).toBe(checkpoint.version)
+  })
+}
+
+test('Meet rejects attendance outside its requested parent before publishing or advancing', async () => {
+  const pipeline = fixturePipeline((url) => url.pathname.endsWith('/participants')
+    ? Response.json({ participants: [{ ...participant, name: 'conferenceRecords/other/participants/p1' }] }) : fixture(url))
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  const result = await runIngestion(selectedRequest(pipeline, 'participants'), { journal, destination, now: () => cutoff })
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('outside its requested parent')
+  expect(destination.tables.size).toBe(0)
+  expect((await journal.readCheckpoint('google-meet.participants')).envelope?.state).not.toHaveProperty('watermark')
+})
+
+test('Meet rejects orphaned entry tokens and traversal state from another resource before resuming', async () => {
+  const pipeline = fixturePipeline(fixture)
+  const journal = createMemoryJournal()
+  expect((await runIngestion(selectedRequest(pipeline, 'transcript-entries', 5), { journal, destination: createMemoryDestination(), now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  const raw: unknown = JSON.parse(JSON.stringify((await journal.readCheckpoint('google-meet.transcript-entries')).envelope?.state))
+  expect(typeof raw).toBe('object')
+  const saved = pipeline.streams[2]?.incremental.parseState(raw)
+  expect(saved?.active?.entryPageToken).toBe('entries-next')
+  expect(saved?.active?.transcripts).toHaveLength(1)
+  expect(() => pipeline.streams[2]?.incremental.parseState({ ...saved, active: { ...saved?.active, transcriptIndex: 1 } })).toThrow('no active transcript')
+  expect(() => pipeline.streams[2]?.incremental.parseState({ ...saved, active: { ...saved?.active, transcripts: undefined } })).toThrow('no active transcript')
+  for (const resource of ['participants', 'participant-sessions', 'recordings']) {
+    const stream = pipeline.streams.find((stream) => stream.id === `google-meet.${resource}`)
+    expect(() => stream?.incremental.parseState(saved)).toThrow('another resource stream')
+    expect(() => stream?.incremental.parseState({ ...saved, active: { name: conference.name, transcriptIndex: 0, transcriptPageToken: 'old-token' } })).toThrow('another resource stream')
+  }
+  expect(() => pipeline.streams[1]?.incremental.parseState(saved)).toThrow('another resource stream')
+})
+
+function fixturePipeline(handler: (url: URL) => Response) {
+  return { ...createGoogleMeetPipeline(googleMeetConfig, { config: googleMeetConfig, token: () => 'fixture', fetch: async (input) => handler(new URL(input)) }), retry: { retries: 0 } }
+}
+
+function selectedRequest(pipeline: ReturnType<typeof fixturePipeline>, resource: string, maxChunks?: number) {
+  const bounded = { ...pipeline, streams: pipeline.streams.map((stream) => ({ ...stream, ...(maxChunks === undefined ? {} : { budget: { ...stream.budget, maxChunks } }) })) }
+  return { selected: selectStreams([bounded], [`resource:${resource}`]), backfill: undefined }
+}

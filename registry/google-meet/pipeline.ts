@@ -2,7 +2,7 @@ import { definePipeline, defineStream, IngestConfigError } from '@chkit/plugin-i
 
 import { classifyGoogleMeetError, defaultGoogleMeetClientDeps, type GoogleMeetClientDeps } from './client.js'
 import { googleMeetConfig, type GoogleMeetReaderConfig } from './config.js'
-import { google_meet_conferencesRaw, google_meet_transcriptsRaw, google_meet_transcriptEntriesRaw, parseMeetState, readResource, type Resource } from './sources/resources.js'
+import { google_meet_conferencesRaw, google_meet_transcriptsRaw, google_meet_transcriptEntriesRaw, google_meet_participantsRaw, google_meet_participantSessionsRaw, google_meet_recordingsRaw, parseMeetState, readResource, type Resource } from './sources/resources.js'
 
 export function createGoogleMeetPipeline(config: GoogleMeetReaderConfig = googleMeetConfig, deps: GoogleMeetClientDeps = defaultGoogleMeetClientDeps) {
   const boundConfig = { ...config }
@@ -18,6 +18,9 @@ export function createGoogleMeetPipeline(config: GoogleMeetReaderConfig = google
       resourceStream('conferences', google_meet_conferencesRaw, client),
       resourceStream('transcripts', google_meet_transcriptsRaw, client),
       resourceStream('transcript-entries', google_meet_transcriptEntriesRaw, client),
+      resourceStream('participants', google_meet_participantsRaw, client),
+      resourceStream('participant-sessions', google_meet_participantSessionsRaw, client),
+      resourceStream('recordings', google_meet_recordingsRaw, client),
     ],
   })
 }
@@ -30,7 +33,7 @@ function resourceStream(resource: Resource, destination: typeof google_meet_conf
     id: `${config.streamPrefix}.${resource}`, tags: [`resource:${resource}`], destination,
     incremental: {
       id: `${config.streamPrefix}.${resource}.pending`, version: 1,
-      parseState: (raw) => parseMeetState(raw, config),
+      parseState: (raw) => parseMeetState(raw, config, resource),
       plan: ({ range }) => range,
     },
     batchSize: 1,

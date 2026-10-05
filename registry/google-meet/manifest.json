@@ -54,10 +54,11 @@
         {
           "version": "0.2.0",
           "changes": [
-            "Checkpoint fixed conference discovery windows and retain pending conferences until expiry to revisit late transcript artifacts.",
-            "Resume acknowledged discovery, transcript, and entry pages with bounded token recovery and visible expiry gaps.",
-            "Store transcript entries in a separate raw table and scope row IDs to the source; migrate legacy identities deliberately when upgrading.",
-            "Separate editable installation configuration, injectable HTTP clients, and resource readers from one pipeline; preserve independent stream identities and provider recovery."
+            "Sync six independent raw resources in one installation pipeline: conferences, participants, participant sessions, recordings, transcript metadata, and individual transcript entries.",
+            "Checkpoint fixed conference discovery windows and retain pending conferences until expiry to revisit late artifacts and attendance changes independently of parent updates.",
+            "Resume acknowledged discovery and nested child pages with bounded token recovery, sink acknowledgement, and visible expiry gaps.",
+            "Keep recording metadata and Drive references without downloading files; keep child rows separate with provider-name join keys and source-scoped row IDs. Migrate legacy transcript identities and embedded entries deliberately when upgrading.",
+            "Separate editable installation configuration, injectable HTTP clients, and resource readers; preserve existing conference/transcript/entry stream identities and checkpoint scope."
           ]
         },
         {
@@ -78,9 +79,13 @@
       "entry": "index.ts",
       "exports": [
         "google_meetPipeline",
+        "createGoogleMeetPipeline",
         "google_meet_conferencesRaw",
         "google_meet_transcriptsRaw",
-        "google_meet_transcriptEntriesRaw"
+        "google_meet_transcriptEntriesRaw",
+        "google_meet_participantsRaw",
+        "google_meet_participantSessionsRaw",
+        "google_meet_recordingsRaw"
       ],
       "resources": [
         {
@@ -110,6 +115,11 @@
           ],
           "strategy": "cursor",
           "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
             {
               "method": "GET",
               "path": "/conferenceRecords/{conferenceRecord}/transcripts",
@@ -143,6 +153,77 @@
               "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts.entries/list"
             }
           ]
+        },
+        {
+          "name": "participants",
+          "title": "Participants",
+          "table": "google_meet_participants_raw",
+          "description": "Native attendance records, including signed-in, anonymous, and phone participants",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "cursor",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/participants",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.participants/list"
+            }
+          ]
+        },
+        {
+          "name": "participant-sessions",
+          "title": "Participant sessions",
+          "table": "google_meet_participant_sessions_raw",
+          "description": "Individually keyed join/leave sessions with conference and participant names",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "cursor",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/participants",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.participants/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/participants/{participant}/participantSessions",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.participants.participantSessions/list"
+            }
+          ]
+        },
+        {
+          "name": "recordings",
+          "title": "Recordings",
+          "table": "google_meet_recordings_raw",
+          "description": "Recording metadata and native Drive destination references; no file downloads",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "cursor",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/recordings",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.recordings/list"
+            }
+          ]
         }
       ],
       "env": {
@@ -161,9 +242,9 @@
       },
       "views": [],
       "sync": {
-        "description": "Fixed end-time discovery windows and retained conference work queues checkpoint nested transcript and entry pagination.",
+        "description": "Six independent raw streams use fixed end-time discovery windows and retained conference queues to checkpoint child pages and revisit late artifacts and attendance changes.",
         "schedule": "Run bunx chkit ingest run --tag provider:google-meet from a scheduler.",
-        "deletions": "Late artifacts revisit retained parents until provider expiry. API expiry does not delete archived raw observations; unfinished work that expires fails visibly."
+        "deletions": "Child streams revisit retained conferences until provider expiry. API expiry does not delete archived raw observations; unfinished work that expires fails visibly."
       }
     }
   },

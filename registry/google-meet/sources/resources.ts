@@ -5,7 +5,7 @@ import { googleMeetConfig, type GoogleMeetReaderConfig } from '../config.js'
 
 const dayMs = 86_400_000
 
-export type Resource = 'conferences' | 'transcripts' | 'transcript-entries'
+export type Resource = 'conferences' | 'transcripts' | 'transcript-entries' | 'participants' | 'participant-sessions' | 'recordings'
 interface PendingConference { name: string; expireTime?: string; checkedAt?: string }
 interface Cycle {
   from: string
@@ -26,6 +26,17 @@ interface ActiveParent {
   transcriptIndex: number
   entryPageToken?: string
   entryRecoveryCount?: number
+  collection?: CollectionProgress
+}
+interface CollectionProgress {
+  kind: 'participants' | 'recordings'
+  pageToken?: string
+  recoveryCount?: number
+  nextPageToken?: string
+  items?: Named[]
+  index: number
+  sessionPageToken?: string
+  sessionRecoveryCount?: number
 }
 interface MeetState {
   scope: string
@@ -42,6 +53,9 @@ type MeetChunk = SourceChunk<Record<string, unknown>, MeetState>
 export const google_meet_conferencesRaw = rawTable({ database: googleMeetConfig.database, name: 'google_meet_conferences_raw' })
 export const google_meet_transcriptsRaw = rawTable({ database: googleMeetConfig.database, name: 'google_meet_transcripts_raw' })
 export const google_meet_transcriptEntriesRaw = rawTable({ database: googleMeetConfig.database, name: 'google_meet_transcript_entries_raw' })
+export const google_meet_participantsRaw = rawTable({ database: googleMeetConfig.database, name: 'google_meet_participants_raw' })
+export const google_meet_participantSessionsRaw = rawTable({ database: googleMeetConfig.database, name: 'google_meet_participant_sessions_raw' })
+export const google_meet_recordingsRaw = rawTable({ database: googleMeetConfig.database, name: 'google_meet_recordings_raw' })
 
 // Resource streams share traversal code, while every stream owns its journaled work queue.
 export async function* readResource(context: MeetContext, resource: Resource, deps: GoogleMeetClientDeps): AsyncGenerator<MeetChunk> {
@@ -107,6 +121,12 @@ export async function* readResource(context: MeetContext, resource: Resource, de
       throw new IngestConfigError(`Meet ${name} expired during unfinished artifact work. Review the coverage gap and migrate the checkpoint explicitly.`)
     }
     const active: ActiveParent = state.active ?? { name, transcriptIndex: 0 }
+    if (resource === 'participants' || resource === 'participant-sessions' || resource === 'recordings') {
+      const chunk = await readAttendanceOrRecordings(context, resource, state, active, seen, deps)
+      state = chunk.state
+      yield chunk.rows.length ? chunk : checkpoint(state)
+      continue
+    }
     if (active.transcripts === undefined) {
       const path = `${name}/transcripts`
       const page = await readPage(context, path, 'transcripts', active.transcriptPageToken, undefined, deps)
@@ -158,7 +178,7 @@ export async function* readResource(context: MeetContext, resource: Resource, de
   }
 }
 
-export function parseMeetState(raw: unknown, config: GoogleMeetReaderConfig): MeetState {
+export function parseMeetState(raw: unknown, config: GoogleMeetReaderConfig, resource?: Resource): MeetState {
   const scope = meetScope(config)
   const maxPendingConferences = config.maxPendingConferences
   if (!isObject(raw) || raw.scope !== scope || !Array.isArray(raw.pending)) throw new IngestConfigError('Meet checkpoint scope changed or pending queue is invalid. Migrate the state explicitly or use a new stream ID.')
@@ -200,11 +220,79 @@ export function parseMeetState(raw: unknown, config: GoogleMeetReaderConfig): Me
     if (transcripts && transcripts.length > 100) throw new IngestConfigError('Meet active transcript page is oversized.')
     if (transcripts?.some((item) => !item.name.startsWith(`${name}/transcripts/`) || item.name.slice(`${name}/transcripts/`.length).includes('/'))) throw new IngestConfigError('Meet active transcript belongs to another parent.')
     const transcriptIndex = position(active.transcriptIndex, transcripts?.length ?? 0, 'transcriptIndex')
+    const transcriptPageToken = optionalString(active.transcriptPageToken, 'transcriptPageToken')
+    const nextTranscriptPageToken = optionalString(active.nextTranscriptPageToken, 'nextTranscriptPageToken')
+    const entryPageToken = optionalString(active.entryPageToken, 'entryPageToken')
+    const transcriptRecoveryCount = parseRecoveryCount(active.transcriptRecoveryCount)
     const entryRecoveryCount = parseRecoveryCount(active.entryRecoveryCount)
-    if (entryRecoveryCount !== undefined && !transcripts?.[transcriptIndex]) throw new IngestConfigError('Meet entry recovery debt has no active transcript.')
-    state.active = { name, transcripts, transcriptIndex, transcriptPageToken: optionalString(active.transcriptPageToken, 'transcriptPageToken'), nextTranscriptPageToken: optionalString(active.nextTranscriptPageToken, 'nextTranscriptPageToken'), entryPageToken: optionalString(active.entryPageToken, 'entryPageToken'), transcriptRecoveryCount: parseRecoveryCount(active.transcriptRecoveryCount), entryRecoveryCount }
+    if ((entryPageToken !== undefined || entryRecoveryCount !== undefined) && !transcripts?.[transcriptIndex]) throw new IngestConfigError('Meet entry progress has no active transcript.')
+    if (nextTranscriptPageToken !== undefined && transcripts === undefined) throw new IngestConfigError('Meet next transcript page has no cached transcript page.')
+    const hasTranscriptWork = transcripts !== undefined || transcriptIndex !== 0 || transcriptPageToken !== undefined || nextTranscriptPageToken !== undefined || entryPageToken !== undefined || transcriptRecoveryCount !== undefined || entryRecoveryCount !== undefined
+    if (resource === 'conferences' || (resource !== undefined && resource !== 'transcripts' && resource !== 'transcript-entries' && hasTranscriptWork) ||
+      (resource === 'transcripts' && (transcripts !== undefined || transcriptIndex !== 0 || nextTranscriptPageToken !== undefined || entryPageToken !== undefined || entryRecoveryCount !== undefined))) throw new IngestConfigError('Meet transcript traversal belongs to another resource stream.')
+    const collection = active.collection === undefined ? undefined : parseCollection(active.collection, name, resource)
+    if (collection && hasTranscriptWork) throw new IngestConfigError('Meet active parent mixes resource traversal state.')
+    state.active = { name, transcripts, transcriptIndex, transcriptPageToken, nextTranscriptPageToken, entryPageToken, transcriptRecoveryCount, entryRecoveryCount, collection }
   }
   return state
+}
+
+async function readAttendanceOrRecordings(context: MeetContext, resource: 'participants' | 'participant-sessions' | 'recordings', state: MeetState, active: ActiveParent, seen: Map<string, Set<string>>, deps: GoogleMeetClientDeps): Promise<MeetChunk & { state: MeetState }> {
+  if (!state.cycle) throw new IngestConfigError('Meet child collection has no cycle.')
+  const kind = resource === 'recordings' ? 'recordings' : 'participants'
+  const collection = active.collection ?? { kind, index: 0 }
+  if (collection.items === undefined) {
+    const path = `${active.name}/${kind}`
+    const page = await readPage(context, path, kind, collection.pageToken, undefined, deps)
+    if ('reset' in page) {
+      const recoveryCount = nextRecoveryCount(collection.recoveryCount, path)
+      seen.delete(path)
+      return { rows: [], state: { ...state, active: { ...active, collection: { kind, index: 0, recoveryCount } } } }
+    }
+    checkProgress(seen, path, collection.pageToken, page.nextPageToken)
+    if (resource !== 'participant-sessions') {
+      const next: MeetState = page.nextPageToken
+        ? { ...state, active: { ...active, collection: { kind, index: 0, pageToken: page.nextPageToken, recoveryCount: collection.recoveryCount } } }
+        : finishParent(state, active.name, state.cycle.to)
+      return { rows: rawRows(page.items.map((item) => ({ ...item, conference_name: active.name })), (item) => JSON.stringify([deps.config.sourceId, item.name])), state: next }
+    }
+    return { rows: [], state: { ...state, active: { ...active, collection: { ...collection, items: page.items.map(({ name }) => ({ name })), nextPageToken: page.nextPageToken } } } }
+  }
+  const participant = collection.items[collection.index]
+  if (!participant) {
+    return { rows: [], state: collection.nextPageToken
+      ? { ...state, active: { ...active, collection: { kind, index: 0, pageToken: collection.nextPageToken, recoveryCount: collection.recoveryCount } } }
+      : finishParent(state, active.name, state.cycle.to) }
+  }
+  const path = `${participant.name}/participantSessions`
+  const page = await readPage(context, path, 'participantSessions', collection.sessionPageToken, undefined, deps)
+  if ('reset' in page) {
+    const sessionRecoveryCount = nextRecoveryCount(collection.sessionRecoveryCount, path)
+    seen.delete(path)
+    return { rows: [], state: { ...state, active: { ...active, collection: { ...collection, sessionPageToken: undefined, sessionRecoveryCount } } } }
+  }
+  checkProgress(seen, path, collection.sessionPageToken, page.nextPageToken)
+  return {
+    rows: rawRows(page.items.map((item) => ({ ...item, conference_name: active.name, participant_name: participant.name })), (item) => JSON.stringify([deps.config.sourceId, item.name])),
+    state: { ...state, active: { ...active, collection: page.nextPageToken
+      ? { ...collection, sessionPageToken: page.nextPageToken }
+      : { ...collection, sessionPageToken: undefined, sessionRecoveryCount: undefined, index: collection.index + 1 } } },
+  }
+}
+
+function parseCollection(raw: unknown, conference: string, resource: Resource | undefined): CollectionProgress {
+  if (!isObject(raw) || (raw.kind !== 'participants' && raw.kind !== 'recordings')) throw new IngestConfigError('Meet child collection is invalid.')
+  const kind = raw.kind
+  if (resource !== undefined && (kind === 'recordings' ? resource !== 'recordings' : resource !== 'participants' && resource !== 'participant-sessions')) throw new IngestConfigError('Meet child collection belongs to another resource stream.')
+  if (raw.items !== undefined && (!Array.isArray(raw.items) || resource !== 'participant-sessions' && resource !== undefined || kind !== 'participants')) throw new IngestConfigError('Meet active participant page is invalid.')
+  const items = raw.items?.map((item: unknown) => named(item))
+  const path = `${conference}/${kind}/`
+  if (items && (items.length > 100 || items.some((item) => !item.name.startsWith(path) || item.name.slice(path.length).includes('/')))) throw new IngestConfigError('Meet active participant page is oversized or belongs to another conference.')
+  const index = position(raw.index, items?.length ?? 0, 'collection index')
+  const sessionPageToken = optionalString(raw.sessionPageToken, 'sessionPageToken')
+  const sessionRecoveryCount = parseRecoveryCount(raw.sessionRecoveryCount)
+  if ((sessionPageToken !== undefined || sessionRecoveryCount !== undefined) && !items?.[index]) throw new IngestConfigError('Meet session progress has no active participant.')
+  return { kind, items, index, pageToken: optionalString(raw.pageToken, 'collection pageToken'), nextPageToken: optionalString(raw.nextPageToken, 'collection nextPageToken'), recoveryCount: parseRecoveryCount(raw.recoveryCount), sessionPageToken, sessionRecoveryCount }
 }
 
 function mergeParents(previous: PendingConference[], conferences: Named[], maxPendingConferences: number): PendingConference[] {

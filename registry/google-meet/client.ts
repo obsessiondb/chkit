@@ -51,7 +51,7 @@ export async function readPage(context: FetchContext, path: string, field: strin
 export function named(value: unknown): Named {
   if (!isObject(value)) throw new IngestConfigError('Meet returned an invalid resource.')
   const name = requiredString(value.name, 'resource name')
-  if (!/^conferenceRecords\/[^/?#]+(?:\/transcripts\/[^/?#]+(?:\/entries\/[^/?#]+)?)?$/.test(name)) throw new IngestConfigError('Meet returned an invalid resource name.')
+  if (!/^conferenceRecords\/[^/?#]+(?:\/(?:recordings\/[^/?#]+|participants\/[^/?#]+(?:\/participantSessions\/[^/?#]+)?|transcripts\/[^/?#]+(?:\/entries\/[^/?#]+)?))?$/.test(name)) throw new IngestConfigError('Meet returned an invalid resource name.')
   return { ...value, name }
 }
 
