@@ -55,10 +55,10 @@
           "version": "0.2.0",
           "changes": [
             "Sync six independent raw resources in one installation pipeline: conferences, participants, participant sessions, recordings, transcript metadata, and individual transcript entries.",
-            "Checkpoint fixed conference discovery windows and retain pending conferences until expiry to revisit late artifacts and attendance changes independently of parent updates.",
-            "Resume acknowledged discovery and nested child pages with bounded token recovery, sink acknowledgement, and visible expiry gaps.",
+            "Default initial discovery and subsequent overlap to 24 hours, including ongoing calls; reread child collections without retaining conference catalogs or child work queues.",
+            "Checkpoint completed discovery pages after their child rows land. Replay unfinished pages with ordinary pagination, fixed bounds, source scope, and bounded token recovery.",
             "Keep recording metadata and Drive references without downloading files; keep child rows separate with provider-name join keys and source-scoped row IDs. Migrate legacy transcript identities and embedded entries deliberately when upgrading.",
-            "Separate editable installation configuration, injectable HTTP clients, and resource readers; preserve existing conference/transcript/entry stream identities and checkpoint scope."
+            "Separate editable configuration, injectable requests, and resource readers. Broader artifact coverage uses an explicit lookback or isolated backfill rather than automatic historical reconciliation."
           ]
         },
         {
@@ -96,7 +96,7 @@
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "cursor",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -109,11 +109,11 @@
           "name": "transcripts",
           "title": "Transcripts",
           "table": "google_meet_transcripts_raw",
-          "description": "Transcript metadata for discovered and retained pending conferences",
+          "description": "Native transcript metadata for independently discovered recent and ongoing conferences",
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "cursor",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -131,11 +131,11 @@
           "name": "transcript-entries",
           "title": "Transcript entries",
           "table": "google_meet_transcript_entries_raw",
-          "description": "Individually keyed, paged transcript entries for retained conferences",
+          "description": "Individually keyed transcript entries for independently discovered recent and ongoing conferences",
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "cursor",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -162,7 +162,7 @@
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "cursor",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -184,7 +184,7 @@
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "cursor",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -211,7 +211,7 @@
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "cursor",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -242,9 +242,9 @@
       },
       "views": [],
       "sync": {
-        "description": "Six independent raw streams use fixed end-time discovery windows and retained conference queues to checkpoint child pages and revisit late artifacts and attendance changes.",
+        "description": "Six independent raw streams rediscover recent conferences with a 24-hour lookback and ongoing calls, checkpoint completed discovery pages, and replay unfinished child reads.",
         "schedule": "Run bunx chkit ingest run --tag provider:google-meet from a scheduler.",
-        "deletions": "Child streams revisit retained conferences until provider expiry. API expiry does not delete archived raw observations; unfinished work that expires fails visibly."
+        "deletions": "Missing, inaccessible, or expired resources do not delete archived raw observations. Changes on conferences outside the selected window require a wider lookback or explicit backfill."
       }
     }
   },

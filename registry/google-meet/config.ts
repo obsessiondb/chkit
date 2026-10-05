@@ -4,10 +4,10 @@ export interface GoogleMeetConfig {
   /** Journal identities use this prefix; change it for a separate installation. */
   streamPrefix: string
   database: string
-  lookbackDays: number
-  overlapDays: number
-  windowDays: number
-  maxPendingConferences: number
+  /** Re-read recent completed calls and their children; defaults to 24 hours. */
+  lookbackHours: number
+  /** Small discovery pages bound how many conferences replay after interruption. */
+  pageSize: number
   maxChunks: number
 }
 
@@ -19,9 +19,7 @@ export const googleMeetConfig: GoogleMeetConfig = {
   sourceId: 'google-meet.primary',
   streamPrefix: 'google-meet',
   database: 'default',
-  lookbackDays: 30,
-  overlapDays: 7,
-  windowDays: 30,
-  maxPendingConferences: 1_000,
+  lookbackHours: 24,
+  pageSize: 1,
   maxChunks: 200,
 }
