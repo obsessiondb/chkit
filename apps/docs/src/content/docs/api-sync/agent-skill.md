@@ -42,7 +42,7 @@ Include provider documentation, example responses, freshness needs, and any rest
 
 ## Skill scope
 
-The skill covers bounded readers, provider-specific sync strategies, durable checkpoint ordering, write identity, and scheduling. For official registry integrations, it requires a source contract and recovery design, raw payload preservation, late-change reconciliation, and portable interruption/replay tests. Sync tokens, timestamp windows, and checkpointed full scans follow the provider's actual capabilities. Use the linked docs for complete examples and tradeoffs.
+The skill covers bounded readers, provider-specific sync strategies, durable checkpoint ordering, write identity, and scheduling. For official registry integrations, it requires a source contract and recovery design, raw payload preservation, explicit freshness coverage, and portable interruption/replay tests. Prefer coarse checkpoints and replay when affordable; reconcile older changes when the chosen coverage requires it. Sync tokens, timestamp windows, and checkpointed full scans follow the provider's actual capabilities. Use the linked docs for complete examples and tradeoffs.
 
 ## Related pages
 
