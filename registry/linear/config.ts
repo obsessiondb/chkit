@@ -5,7 +5,7 @@ export interface LinearConfig {
   overlapMs: number
 }
 
-// Source identity and date selection; raw destination and requested fields live in sources/issues.ts.
+// Source identity and date selection; raw destinations and requested fields live in sources/.
 export const linearConfig: LinearConfig = {
   sourceId: 'linear',
   start: new Date(0),
