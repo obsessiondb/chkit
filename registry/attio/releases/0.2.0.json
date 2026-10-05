@@ -1,0 +1,413 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "attio",
+  "type": "registry:item",
+  "title": "Attio",
+  "description": "Editable Attio CRM schemas, raw data readers, typed views, and independent streams for People, Companies, configured custom types, and workspace resources.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
+  ],
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ],
+  "files": [
+    {
+      "path": "attio/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/attio/README.md",
+      "content": "# Attio CRM ingestion\n\nThis is your source code: edit the API readers, schemas, views, and `pipeline.ts` directly. It uses the [chkit CLI](https://www.npmjs.com/package/chkit), `@chkit/core`, and `@chkit/plugin-ingest`; there is no runtime connection to the template registry.\n\n## First run\n\nSet `ATTIO_API_TOKEN` in your execution environment and configure the project's direct ClickHouse connection. A single-workspace API token works; an OAuth access token also works, but this template does not implement OAuth issuance or refresh. See [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).\n\n### Create an Attio API key\n\n1. As a workspace admin, open the workspace-name dropdown in Attio and select **Workspace settings**.\n2. Open **Developers**, select **+ New access token**, and name the token, for example **chkit ClickHouse**.\n3. Grant the read scopes in the resource table below for the streams to run.\n4. Click the token on the Developers page to copy it. Set `ATTIO_API_TOKEN` in the project's `.env` file or the scheduler's secret environment.\n\nSee Attio's [API key instructions](https://attio.com/help/reference/apps/generating-an-api-key). Use a single-workspace API token for this setup; OAuth token creation and refresh require a separate application flow.\n\nBun loads a project `.env` automatically. With Node or a scheduler, explicitly supply environment variables using that runtime's environment-loading mechanism. `.env.example` only lists required variable names; it does not load values. Schema imports, `check`, and `ingest list` do not read the token or make API requests.\n\nReview `config.ts` before the first migration. The default target database is `default`; raw table and view names begin with `attio_`. Use a stable, non-secret `sourceId` for this source instance. For another installation, give it a distinct source ID and table prefix or database before exporting its pipeline. Changing these after ingestion changes stream/storage identities and requires a deliberate migration.\n\n```sh\nbunx chkit check\nbunx chkit ingest list --tag provider:attio\nbunx chkit generate --name add_attio\n# Review the generated SQL.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:attio\n```\n\nThe schema uses native JSON (ClickHouse 25.3 or newer). A direct ClickHouse connection is required; workbench-only execution is not supported. Use an external scheduler to repeat the run command, with one ingestion process per project/target at a time.\n\n`createAttioPipeline(config, deps)` snapshots reader settings and configured collections for one installation. Database and table prefix belong to setup-time `attioConfig`: the factory uses the exported raw tables and does not redefine storage.\n\n## Included resources\n\nEach configured object type has its own records and object-attributes streams. The defaults create separate People and Companies readers; tasks, notes, members, and the object/list catalogs have workspace-wide streams. Each configured list similarly gets independent entries and list-attributes streams. The number of streams depends on `objects` and `lists`; the default configuration has nine streams writing to seven resource tables. All nine raw tables are defined, including entries and list attributes, whose readers are enabled by configuring `lists`.\n\nEvery stream uses `fullSync()` and the existing pagination helper. A records reader fetches one configured object type, such as People, rather than looping over all object types. An interrupted stream restarts its collection at offset zero because Attio's mutable offsets are not durable cursors. Each stream has its own execution journal; no parent-completion ledger or custom scan state is needed.\n\n| Stream tag | Raw table | Required Attio scopes |\n| --- | --- | --- |\n| `resource:objects` | `attio_objects_raw` | `object_configuration:read` |\n| `resource:object_attributes` | `attio_object_attributes_raw` | `object_configuration:read` |\n| `resource:records` | `attio_records_raw` | `object_configuration:read`, `record_permission:read` |\n| `resource:lists` | `attio_lists_raw` | `list_configuration:read` |\n| `resource:list_attributes` | `attio_list_attributes_raw` | `list_configuration:read` |\n| `resource:entries` | `attio_entries_raw` | `list_configuration:read`, `list_entry:read` |\n| `resource:notes` | `attio_notes_raw` | `note:read`, `object_configuration:read`, `record_permission:read` |\n| `resource:tasks` | `attio_tasks_raw` | `task:read`, `object_configuration:read`, `record_permission:read`, `user_management:read` |\n| `resource:members` | `attio_members_raw` | `user_management:read` |\n\nThe objects and lists catalog streams retain all accessible metadata. Records and attributes are fetched only for the object types configured in `objects`; entries and list attributes require configured `lists`. Standard `users` records, when explicitly configured, are distinct from [workspace members](https://docs.attio.com/rest-api/endpoint-reference/workspace-members/list-workspace-members). Attribute streams include archived attribute definitions; separate select-option/status catalogs and historical attribute values are not fetched. Active record/entry payloads retain their returned select/status values.\n\nThe template does not collect meetings, call recordings, transcripts, emails, files, comments, or historical attribute values. It does not receive webhooks or detect source deletions/merges. Coverage is limited to data the token can access. A permission error fails that stream with a diagnostic; it is never treated as an empty dataset.\n\nAPI references: [attributes](https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes), [records](https://docs.attio.com/rest-api/endpoint-reference/records/list-records), [lists](https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists), [entries](https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries), [notes](https://docs.attio.com/rest-api/endpoint-reference/notes/list-notes), [tasks](https://docs.attio.com/rest-api/endpoint-reference/tasks/list-tasks).\n\n## Customize the source\n\nEach file in `sources/` contains one resource's raw table and reader, such as `sources/notes.ts`, `sources/tasks.ts`, or `sources/members.ts`. `sources/records.ts` also defines the people, company, and deal views. `client.ts` shares HTTP, validation, and pagination logic; `pipeline.ts` creates streams from the explicit object/list configuration.\n\nRemove an entry from `pipeline.ts` to stop collecting that resource. Keep its schema export in `index.ts` to preserve already collected data. Removing schema exports can generate destructive migration operations, which should be reviewed. After removing a resource's stream and schema export, its local files can also be deleted.\n\nSet `objects` and `lists` in `config.ts` to explicit arrays of API slugs or IDs. Defaults are `objects: ['people', 'companies']` and `lists: []`. Add `deals` or a custom object slug to collect that type; add list slugs or IDs to collect entries. `[]` disables the corresponding object/list child streams. The stream graph is built from these arrays without API discovery, so schema imports and `ingest list` remain offline. A reader resolves its one configured slug or ID through Attio and fails visibly if it is unknown or inaccessible. The objects/lists catalogs still collect all accessible metadata; notes, tasks, and members remain workspace-wide.\n\nObject streams use `<sourceId>.records.<ref>` and `<sourceId>.object_attributes.<ref>`. List streams use `<sourceId>.entries.<ref>` and `<sourceId>.list_attributes.<ref>`. Each has independent journal progress even though streams of the same resource write to the same raw table. Keep configured references stable: changing from a slug to its equivalent ID changes the stream ID.\n\nTo run all configured records streams:\n\n```sh\nbunx chkit ingest run --tag provider:attio --tag resource:records\n```\n\nTo run only People records:\n\n```sh\nbunx chkit ingest run --tag provider:attio --tag resource:records --tag object:people\n```\n\nRecord streams carry `resource:records` and `object:<ref>`. Object-attribute streams carry `resource:object_attributes` and `object:<ref>`; entries/list-attribute streams carry their resource tag and `list:<ref>`.\n\n`pageSize` defaults to 500. Notes have a separate `notesPageSize` of 50, the documented maximum. Requests go through the ingestion executor's retry/cancellation context, with a 30-second request timeout. The serial pipeline leaves a 25ms gap before each request and a 125ms gap for notes; raising concurrency requires revisiting rate control. `429` responses retain `Retry-After` for executor backoff. Attio also limits query complexity; a permanently expensive query may need simpler filters/sorts rather than repeated retries. See [rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).\n\n## Stored data and editable views\n\nEach raw table contains a stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time metadata. The key includes source identity, resource kind, workspace ID, and every relevant object/list/entity ID. Names, emails, and domains are never keys.\n\nThe complete returned entity is retained under `raw.data`. The envelope adds `source_id`; record and object-attribute rows also include `object_slug`, and list-entry/list-attribute rows include `list_slug`. No custom attributes or multivalued arrays are flattened away. For example:\n\n```sql\nSELECT id, raw.data, _chkit_ingested_at\nFROM default.attio_records_raw FINAL;\n```\n\n`sources/records.ts` defines three ordinary `FINAL` views:\n\n| View | Editable projection |\n| --- | --- |\n| `attio_people` | name, email address array, company record ID array |\n| `attio_companies` | name, domain array, description |\n| `attio_deals` | name, stage, nullable numeric value, currency code, company/people record ID arrays |\n\nAll include the stable row `id`, `source_id`, `workspace_id`, `object_id`, `record_id`, nullable `created_at`, `web_url`, and `_chkit_ingested_at`. Missing optional strings yield empty strings, absent arrays yield empty arrays, and absent/unparseable dates or deal amounts yield null. The deals view remains empty until `deals` is configured and observed; previously loaded deal rows remain when it is later deselected. Edit these SQL projections to expose your custom fields, then generate and review a migration. The original payload remains available for further projections.\n\nThe executor journal records per-stream execution and load completion, including successful empty reads. Every scheduled run reads each selected stream from the beginning. An interruption in Companies affects that stream's completion independently of People; the next Companies attempt starts at offset zero. The reader validates returned child workspace and parent IDs against its resolved object/list before publishing rows. The journal stores no Attio-specific cycle, parent inventory, or offset checkpoint. These full-sync readers ignore date bounds; date-range backfills are not supported.\n\nUpgrading from `0.1.2` to `0.2.0` changes records, object-attributes, entries, and list-attributes stream IDs to the per-type/per-list forms above. Those new stream IDs begin with fresh journal progress. Raw table schemas, row identities for the same `sourceId`, and all three views remain unchanged. Installed source is editable and is not automatically replaced by a registry update.\n\nThese views show the latest **observed** version per ID, not a guaranteed snapshot of Attio now. Full reads update returned IDs without clearing tables. Deleted, merged, inaccessible, or deselected entities remain until you implement reconciliation. Data is published batch by batch, so a failed run may have loaded some updates. Offset pagination over changing source data can miss or duplicate entities within a read. There is no universal modification cursor, atomic snapshot replacement, source-version ordering, or complete change history in this template. No data-bearing chunk uses a page offset as its identity.\n\n## Fixture tests\n\nInstall the optional test suite with `bunx chkit add attio --with-tests`, then run:\n\n```sh\nbun test src/integrations/attio/tests/attio.test.ts\n```\n\nFor a custom install path, point the command at that folder's `tests/attio.test.ts`. Tests mock Attio HTTP responses and use in-memory ingestion destinations and journals. They require Bun but no Attio credentials or ClickHouse server. The fixture suite checks per-type stream selection, independent pagination, preserved custom fields, repeat runs, cancellation, errors, safe offset-zero restart, successful empty reads, and rows loaded before a journal failure. Adjust the fixtures and expectations when customizing the source.\n\n## Smoke check\n\nAfter a migration and one successful run, inspect `chkit ingest status --tag provider:attio` and query `SELECT count() FROM default.attio_records_raw FINAL`. Compare a known record's retained `raw.data` with its Attio API response. Run again after changing that record and verify its view reflects the new observation. This smoke check needs a real test workspace and database; the registry's sanitized fixture tests do not assert complete live API coverage.\n"
+    },
+    {
+      "path": "attio/client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/client.ts",
+      "content": "import { setTimeout as sleep } from 'node:timers/promises'\n\nimport { HttpError, IngestConfigError, paginate, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { attioConfig, type AttioReaderConfig } from './config.js'\n\nexport type AttioEntity = Record<string, unknown> & { id: Record<string, string> }\n\nexport interface AttioClientDeps {\n  config: AttioReaderConfig\n  fetch: (url: string, init: RequestInit) => Promise<Response>\n  token: () => string | undefined\n  wait: (milliseconds: number, signal: AbortSignal) => Promise<void>\n}\n\ninterface CollectionRequest {\n  path: string\n  idFields: readonly string[]\n  method?: 'GET' | 'POST'\n  body?: Record<string, unknown>\n  query?: Record<string, string>\n  /** Omit for the unpaginated objects, lists, and workspace_members endpoints. */\n  pageSize?: number\n  valuesField?: 'values' | 'entry_values'\n  parent?: { field: 'object_id' | 'list_id'; id: string; workspaceId: string }\n}\n\nexport const defaultAttioClientDeps: AttioClientDeps = {\n  config: attioConfig,\n  fetch: (url, init) => fetch(url, init),\n  token: () => process.env.ATTIO_API_TOKEN,\n  wait: async (milliseconds, signal) => { await sleep(milliseconds, undefined, { signal }) },\n}\n\n/** Resolve one configured object/list; each stream owns one collection. */\nexport async function* readParentCollection(\n  context: FetchContext,\n  input: {\n    resource: string\n    parent: { kind: 'objects' | 'lists'; ref: string }\n    request: (parent: AttioEntity) => CollectionRequest\n  },\n  deps: AttioClientDeps = defaultAttioClientDeps,\n) {\n  const idField = input.parent.kind === 'objects' ? 'object_id' : 'list_id'\n  const path = `/${input.parent.kind}/${encodeURIComponent(input.parent.ref)}`\n  const parent = await context.attempt(async (signal) => {\n    const entity = parseEntity(await requestData({ path, idFields: ['workspace_id', idField] }, 0, signal, deps), {\n      path, idFields: ['workspace_id', idField],\n    })\n    entitySlug(entity)\n    if (input.parent.ref !== entityId(entity, idField) && input.parent.ref !== entitySlug(entity)) {\n      throw new IngestConfigError(`Attio ${path} returned a different configured parent.`)\n    }\n    return entity\n  }, { label: `GET /v2${path}` })\n  const request = { ...input.request(parent), parent: {\n    field: input.parent.kind === 'objects' || input.resource === 'list_attributes' ? 'object_id' as const : 'list_id' as const,\n    id: entityId(parent, idField), workspaceId: entityId(parent, 'workspace_id'),\n  } }\n  yield* readRows(context, {\n    resource: input.resource, request,\n    metadata: input.parent.kind === 'objects' ? { object_slug: entitySlug(parent) } : { list_slug: entitySlug(parent) },\n  }, deps)\n}\n\nexport async function* readRows(\n  context: FetchContext,\n  input: { resource: string; request: CollectionRequest; metadata?: { object_slug?: string; list_slug?: string } },\n  deps: AttioClientDeps = defaultAttioClientDeps,\n) {\n  for await (const page of readCollection(context, input.request, deps)) {\n    yield { rows: toAttioRows(page.items, input.resource, input.request.idFields, input.metadata, deps.config.sourceId) }\n  }\n}\n\n/** Each page is validated inside attempt, so executor retry/cancellation owns every request. */\nexport function readCollection(\n  context: FetchContext,\n  request: CollectionRequest,\n  deps: AttioClientDeps = defaultAttioClientDeps,\n) {\n  if (request.pageSize !== undefined && (!Number.isSafeInteger(request.pageSize) || request.pageSize <= 0)) {\n    throw new IngestConfigError('Attio pageSize must be a positive safe integer.')\n  }\n  return paginate({\n    context, initial: 0, label: `${request.method ?? 'GET'} /v2${request.path}`,\n    fetchPage: async (offset = 0, signal) => {\n      const data = await requestData(request, offset, signal, deps)\n      if (!Array.isArray(data)) throw new IngestConfigError(`Attio ${request.path} returned no data array.`)\n      const items = data.map((value: unknown) => parseEntity(value, request))\n      if (request.pageSize !== undefined && items.length > request.pageSize) {\n        throw new IngestConfigError(`Attio ${request.path} returned more rows than the requested page size.`)\n      }\n      const next = request.pageSize !== undefined && items.length === request.pageSize ? offset + items.length : undefined\n      if (next !== undefined && !Number.isSafeInteger(next)) {\n        throw new IngestConfigError('Attio pagination offset exceeded the safe integer range.')\n      }\n      return { items, next }\n    },\n  })\n}\n\n/** Original provider fields stay under data; metadata does not overwrite custom attributes. */\nfunction toAttioRows(\n  items: readonly AttioEntity[],\n  resource: string,\n  idFields: readonly string[],\n  metadata: { object_slug?: string; list_slug?: string } = {},\n  sourceId = attioConfig.sourceId,\n) {\n  return rawRows(\n    items.map((data) => ({ source_id: sourceId, ...metadata, data })),\n    ({ data }) => JSON.stringify([sourceId, resource, ...idFields.map((field) => entityId(data, field))]),\n  )\n}\n\nexport function entityId(entity: AttioEntity, field: string): string {\n  const value = entity.id[field]\n  if (!value) throw new IngestConfigError(`Attio entity is missing id.${field}.`)\n  return value\n}\n\nfunction entitySlug(entity: AttioEntity): string {\n  if (typeof entity.api_slug !== 'string' || entity.api_slug.length === 0) {\n    throw new IngestConfigError('Attio object/list is missing api_slug.')\n  }\n  return entity.api_slug\n}\n\n/** Invalid successful responses/configurations cannot be fixed by retrying. */\nexport const classifyAttioError: ErrorClassifier = (cause) => {\n  if (cause instanceof IngestConfigError || cause instanceof SyntaxError) return { kind: 'permanent' }\n  // HttpError preserves 429 Retry-After dates, 5xx retries, and permanent 4xx semantics.\n  return undefined\n}\n\nasync function requestData(\n  request: CollectionRequest,\n  offset: number,\n  signal: AbortSignal,\n  deps: AttioClientDeps,\n): Promise<unknown> {\n  const token = deps.token()?.trim()\n  if (!token) throw new IngestConfigError('Set ATTIO_API_TOKEN before running Attio ingestion. Schema imports do not need credentials.')\n  const url = new URL(`https://api.attio.com/v2${request.path}`)\n  for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value)\n  const method = request.method ?? 'GET'\n  const pagination = request.pageSize === undefined ? {} : { limit: request.pageSize, offset }\n  if (method === 'GET') {\n    for (const [key, value] of Object.entries(pagination)) url.searchParams.set(key, String(value))\n  }\n  // The default pipeline runs one request at a time: <=40 reads/s and <=8 notes/s.\n  // Attio may lower limits and applies query-complexity limits; 429s still use executor backoff.\n  await deps.wait(request.path === '/notes' ? 125 : 25, signal)\n  signal.throwIfAborted()\n  const response = await deps.fetch(url.toString(), {\n    method,\n    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },\n    ...(method === 'POST' ? { body: JSON.stringify({ ...request.body, ...pagination }) } : {}),\n    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),\n    redirect: 'error',\n  })\n  if (!response.ok) {\n    const error = await HttpError.fromResponse(response)\n    if (response.status === 401 || response.status === 403) {\n      error.message += ' Check ATTIO_API_TOKEN and the resource scopes in the Attio README, or disable this stream.'\n    }\n    throw error\n  }\n  const payload: unknown = await response.json()\n  if (!isObject(payload) || !('data' in payload)) {\n    throw new IngestConfigError(`Attio ${request.path} returned no data field.`)\n  }\n  return payload.data\n}\n\nfunction parseEntity(value: unknown, request: CollectionRequest): AttioEntity {\n  if (!isEntity(value)) throw new IngestConfigError(`Attio ${request.path} returned an entity without a valid id object.`)\n  for (const field of request.idFields) entityId(value, field)\n  if (request.parent && (entityId(value, 'workspace_id') !== request.parent.workspaceId\n    || entityId(value, request.parent.field) !== request.parent.id)) {\n    throw new IngestConfigError(`Attio ${request.path} returned an entity from a different workspace or parent than the resolved collection.`)\n  }\n  if (request.valuesField !== undefined) {\n    const values = value[request.valuesField]\n    if (!isObject(values) || !Object.values(values).every(Array.isArray)) {\n      throw new IngestConfigError(`Attio ${request.path} returned invalid ${request.valuesField}; expected arrays of attribute values.`)\n    }\n  }\n  return value\n}\n\nfunction isEntity(value: unknown): value is AttioEntity {\n  return isObject(value) && isObject(value.id) && Object.values(value.id).every((part) => typeof part === 'string')\n}\n\nfunction isObject(value: unknown): value is Record<string, unknown> {\n  return typeof value === 'object' && value !== null && !Array.isArray(value)\n}\n"
+    },
+    {
+      "path": "attio/config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/config.ts",
+      "content": "export interface AttioConfig {\n  /** Stable, non-secret name for this installation. Changing it creates new stream identities. */\n  sourceId: string\n  database: string\n  tablePrefix: string\n  /** Each UUID or API slug creates its own records and attributes streams. */\n  objects: readonly string[]\n  /** Each UUID or API slug creates its own entries and attributes streams. */\n  lists: readonly string[]\n  pageSize: number\n  notesPageSize: number\n}\n\nexport type AttioReaderConfig = Omit<AttioConfig, 'database' | 'tablePrefix'>\n\n// Keep these values stable across runs. Credentials are read only in client.ts at request time.\nexport const attioConfig: AttioConfig = {\n  sourceId: 'attio.primary',\n  database: 'default',\n  tablePrefix: 'attio',\n  objects: ['people', 'companies'],\n  lists: [],\n  pageSize: 500,\n  notesPageSize: 50,\n}\n"
+    },
+    {
+      "path": "attio/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/index.ts",
+      "content": "export { attio, createAttioPipeline } from './pipeline.js'\nexport { attioObjectsRaw } from './sources/objects.js'\nexport { attioObjectAttributesRaw } from './sources/object-attributes.js'\nexport { attioRecordsRaw, attioPeople, attioCompanies, attioDeals } from './sources/records.js'\nexport { attioListsRaw } from './sources/lists.js'\nexport { attioListAttributesRaw } from './sources/list-attributes.js'\nexport { attioEntriesRaw } from './sources/entries.js'\nexport { attioNotesRaw } from './sources/notes.js'\nexport { attioTasksRaw } from './sources/tasks.js'\nexport { attioMembersRaw } from './sources/members.js'\n"
+    },
+    {
+      "path": "attio/pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/pipeline.ts",
+      "content": "import { definePipeline, defineStream } from '@chkit/plugin-ingest'\n\nimport { classifyAttioError, defaultAttioClientDeps, type AttioClientDeps } from './client.js'\nimport { attioConfig, type AttioReaderConfig } from './config.js'\nimport { attioObjectsRaw, readObjects } from './sources/objects.js'\nimport { attioObjectAttributesRaw, readObjectAttributes } from './sources/object-attributes.js'\nimport { attioRecordsRaw, readRecords } from './sources/records.js'\nimport { attioListsRaw, readLists } from './sources/lists.js'\nimport { attioListAttributesRaw, readListAttributes } from './sources/list-attributes.js'\nimport { attioEntriesRaw, readEntries } from './sources/entries.js'\nimport { attioNotesRaw, readNotes } from './sources/notes.js'\nimport { attioTasksRaw, readTasks } from './sources/tasks.js'\nimport { attioMembersRaw, readMembers } from './sources/members.js'\n\nconst streamOptions = { classifyError: classifyAttioError, batchSize: 500 }\n\n// One records stream per object type; no reader traverses other objects.\n// Keep schema exports when removing streams to retain existing stored data.\nexport function createAttioPipeline(config: AttioReaderConfig = attioConfig, deps: AttioClientDeps = defaultAttioClientDeps) {\n  const client = { ...deps, config: { ...config, objects: [...config.objects], lists: [...config.lists] } }\n  return definePipeline({\n    id: config.sourceId,\n    tags: ['provider:attio'],\n    maxStreams: 1,\n    maxFetches: 1,\n    maxLoads: 1,\n    retry: { retries: 5, minTimeout: 1_000, maxTimeout: 30_000, randomize: true },\n    streams: [\n      defineStream({ ...streamOptions, id: `${config.sourceId}.objects`, tags: ['resource:objects'], destination: attioObjectsRaw, read: (context) => readObjects(context, client) }),\n      ...config.objects.flatMap((object) => [\n        defineStream({ ...streamOptions, id: `${config.sourceId}.records.${object}`, tags: ['resource:records', `object:${object}`], destination: attioRecordsRaw, read: (context) => readRecords(context, object, client) }),\n        defineStream({ ...streamOptions, id: `${config.sourceId}.object_attributes.${object}`, tags: ['resource:object_attributes', `object:${object}`], destination: attioObjectAttributesRaw, read: (context) => readObjectAttributes(context, object, client) }),\n      ]),\n      defineStream({ ...streamOptions, id: `${config.sourceId}.lists`, tags: ['resource:lists'], destination: attioListsRaw, read: (context) => readLists(context, client) }),\n      ...config.lists.flatMap((list) => [\n        defineStream({ ...streamOptions, id: `${config.sourceId}.entries.${list}`, tags: ['resource:entries', `list:${list}`], destination: attioEntriesRaw, read: (context) => readEntries(context, list, client) }),\n        defineStream({ ...streamOptions, id: `${config.sourceId}.list_attributes.${list}`, tags: ['resource:list_attributes', `list:${list}`], destination: attioListAttributesRaw, read: (context) => readListAttributes(context, list, client) }),\n      ]),\n      defineStream({ ...streamOptions, id: `${config.sourceId}.notes`, tags: ['resource:notes'], destination: attioNotesRaw, read: (context) => readNotes(context, client) }),\n      defineStream({ ...streamOptions, id: `${config.sourceId}.tasks`, tags: ['resource:tasks'], destination: attioTasksRaw, read: (context) => readTasks(context, client) }),\n      defineStream({ ...streamOptions, id: `${config.sourceId}.members`, tags: ['resource:members'], destination: attioMembersRaw, read: (context) => readMembers(context, client) }),\n    ],\n  })\n}\n\nexport const attio = createAttioPipeline()\n"
+    },
+    {
+      "path": "attio/sources/objects.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/objects.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { readRows, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioObjectsRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_objects_raw` })\n\nexport function readObjects(context: FetchContext, deps?: AttioClientDeps) {\n  return readRows(context, {\n    resource: 'objects', request: { path: '/objects', idFields: ['workspace_id', 'object_id'] },\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/object-attributes.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/object-attributes.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioObjectAttributesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_object_attributes_raw` })\n\nexport function readObjectAttributes(context: FetchContext, object: string, deps: AttioClientDeps = defaultAttioClientDeps) {\n  return readParentCollection(context, {\n    resource: 'object_attributes', parent: { kind: 'objects', ref: object },\n    request: (parent) => ({\n      path: `/objects/${encodeURIComponent(entityId(parent, 'object_id'))}/attributes`,\n      idFields: ['workspace_id', 'object_id', 'attribute_id'],\n      query: { show_archived: 'true' },\n      pageSize: deps.config.pageSize,\n    }),\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/records.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/records.ts",
+      "content": "import { view } from '@chkit/core'\nimport { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioRecordsRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_records_raw` })\n\n// Each view depends only on records. JSON extraction tolerates absent optional attributes.\nexport const attioPeople = recordView('people', `\n  JSONExtractString(values, 'name', 1, 'full_name') AS name,\n  arrayMap(value -> JSONExtractString(value, 'email_address'), JSONExtractArrayRaw(values, 'email_addresses')) AS email_addresses,\n  arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'company')) AS company_record_ids`)\n\nexport const attioCompanies = recordView('companies', `\n  JSONExtractString(values, 'name', 1, 'value') AS name,\n  arrayMap(value -> JSONExtractString(value, 'domain'), JSONExtractArrayRaw(values, 'domains')) AS domains,\n  JSONExtractString(values, 'description', 1, 'value') AS description`)\n\nexport const attioDeals = recordView('deals', `\n  JSONExtractString(values, 'name', 1, 'value') AS name,\n  JSONExtractString(values, 'stage', 1, 'status', 'title') AS stage,\n  JSONExtract(values, 'value', 1, 'currency_value', 'Nullable(Float64)') AS value,\n  JSONExtractString(values, 'value', 1, 'currency_code') AS currency_code,\n  arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_company')) AS company_record_ids,\n  arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_people')) AS people_record_ids`)\n\nexport function readRecords(context: FetchContext, object: string, deps: AttioClientDeps = defaultAttioClientDeps) {\n  return readParentCollection(context, {\n    resource: 'records', parent: { kind: 'objects', ref: object },\n    request: (parent) => ({\n      path: `/objects/${encodeURIComponent(entityId(parent, 'object_id'))}/records/query`,\n      idFields: ['workspace_id', 'object_id', 'record_id'],\n      method: 'POST',\n      valuesField: 'values',\n      pageSize: deps.config.pageSize,\n    }),\n  }, deps)\n}\n\nfunction recordView(objectSlug: string, columns: string) {\n  return view({\n    database: attioConfig.database,\n    name: `${attioConfig.tablePrefix}_${objectSlug}`,\n    as: `WITH toJSONString(raw) AS payload,\n  JSONExtractRaw(payload, 'data') AS record,\n  JSONExtractRaw(record, 'values') AS values\nSELECT id,\n  JSONExtractString(payload, 'source_id') AS source_id,\n  JSONExtractString(record, 'id', 'workspace_id') AS workspace_id,\n  JSONExtractString(record, 'id', 'object_id') AS object_id,\n  JSONExtractString(record, 'id', 'record_id') AS record_id,\n  parseDateTime64BestEffortOrNull(JSONExtractString(record, 'created_at'), 6, 'UTC') AS created_at,\n  JSONExtractString(record, 'web_url') AS web_url,${columns},\n  _chkit_ingested_at\nFROM ${quoteIdentifier(attioRecordsRaw.database)}.${quoteIdentifier(attioRecordsRaw.name)} FINAL\nWHERE JSONExtractString(payload, 'object_slug') = '${objectSlug}'`,\n  })\n}\n\nfunction quoteIdentifier(value: string): string {\n  return `\\`${value.replaceAll('\\\\', '\\\\\\\\').replaceAll('`', '\\\\`')}\\``\n}\n"
+    },
+    {
+      "path": "attio/sources/lists.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/lists.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { readRows, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioListsRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_lists_raw` })\n\nexport function readLists(context: FetchContext, deps?: AttioClientDeps) {\n  return readRows(context, {\n    resource: 'lists', request: { path: '/lists', idFields: ['workspace_id', 'list_id'] },\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/list-attributes.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/list-attributes.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioListAttributesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_list_attributes_raw` })\n\nexport function readListAttributes(context: FetchContext, list: string, deps: AttioClientDeps = defaultAttioClientDeps) {\n  return readParentCollection(context, {\n    resource: 'list_attributes', parent: { kind: 'lists', ref: list },\n    request: (parent) => ({\n      path: `/lists/${encodeURIComponent(entityId(parent, 'list_id'))}/attributes`,\n      idFields: ['workspace_id', 'object_id', 'attribute_id'],\n      // Attio's shared attribute schema calls the parent list ID object_id too.\n      query: { show_archived: 'true' },\n      pageSize: deps.config.pageSize,\n    }),\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/entries.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/entries.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioEntriesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_entries_raw` })\n\nexport function readEntries(context: FetchContext, list: string, deps: AttioClientDeps = defaultAttioClientDeps) {\n  return readParentCollection(context, {\n    resource: 'entries', parent: { kind: 'lists', ref: list },\n    request: (parent) => ({\n      path: `/lists/${encodeURIComponent(entityId(parent, 'list_id'))}/entries/query`,\n      idFields: ['workspace_id', 'list_id', 'entry_id'],\n      method: 'POST',\n      valuesField: 'entry_values',\n      pageSize: deps.config.pageSize,\n    }),\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/notes.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/notes.ts",
+      "content": "import { IngestConfigError, rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { defaultAttioClientDeps, readRows, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioNotesRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_notes_raw` })\n\nexport function readNotes(context: FetchContext, deps: AttioClientDeps = defaultAttioClientDeps) {\n  if (deps.config.notesPageSize > 50) throw new IngestConfigError('Attio notesPageSize cannot exceed 50.')\n  return readRows(context, {\n    resource: 'notes', request: {\n      path: '/notes', idFields: ['workspace_id', 'note_id'], pageSize: deps.config.notesPageSize,\n    },\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/tasks.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/tasks.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { defaultAttioClientDeps, readRows, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioTasksRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_tasks_raw` })\n\nexport function readTasks(context: FetchContext, deps: AttioClientDeps = defaultAttioClientDeps) {\n  return readRows(context, {\n    resource: 'tasks', request: {\n      path: '/tasks', idFields: ['workspace_id', 'task_id'], pageSize: deps.config.pageSize,\n      query: { sort: 'created_at:asc' },\n    },\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/sources/members.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/members.ts",
+      "content": "import { rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nimport { readRows, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const attioMembersRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_members_raw` })\n\nexport function readMembers(context: FetchContext, deps?: AttioClientDeps) {\n  return readRows(context, {\n    resource: 'members', request: {\n      path: '/workspace_members', idFields: ['workspace_id', 'workspace_member_id'],\n    },\n  }, deps)\n}\n"
+    },
+    {
+      "path": "attio/tests/attio.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/tests/attio.test.ts",
+      "role": "test",
+      "content": "import { describe, expect, test } from 'bun:test'\n\nimport { HttpError, definePipeline, runIngestion, selectStreams, type FetchContext } from '@chkit/plugin-ingest'\nimport { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'\n\nimport { classifyAttioError, readCollection, type AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\nimport * as definitions from '../index.js'\nimport { attio, createAttioPipeline } from '../pipeline.js'\nimport { readEntries } from '../sources/entries.js'\nimport { readMembers } from '../sources/members.js'\nimport { readNotes } from '../sources/notes.js'\nimport { readRecords } from '../sources/records.js'\nimport { readTasks } from '../sources/tasks.js'\nimport { fixtureDeps, fixtureResponse, peopleObject, person } from './fixtures.js'\n\ndescribe('Attio template', () => {\n  test('exports independently selectable object streams and raw destinations without credentials', () => {\n    const exported = Object.values(definitions)\n    expect(exported).toContain(attio)\n    expect(attio.streams).toHaveLength(9)\n    expect(attio.streams.filter((stream) => stream.tags.includes('resource:records')).map((stream) => stream.id))\n      .toEqual(['attio.primary.records.people', 'attio.primary.records.companies'])\n    expect(selectStreams([attio], ['resource:records', 'object:people']).map(({ stream }) => stream.id)).toEqual(['attio.primary.records.people'])\n    expect(selectStreams([attio], ['resource:records', 'object:companies']).map(({ stream }) => stream.id))\n      .toEqual(['attio.primary.records.companies'])\n    for (const stream of attio.streams) {\n      expect(exported).toContain(stream.destination)\n      expect(stream.incremental.id).toBe('chkit.full_sync')\n    }\n    expect([definitions.attioPeople, definitions.attioCompanies, definitions.attioDeals].map((view) => view.name))\n      .toEqual(['attio_people', 'attio_companies', 'attio_deals'])\n  })\n\n  test('an object named tasks does not overlap the workspace tasks resource tag', () => {\n    const pipeline = createAttioPipeline({ ...attioConfig, objects: ['tasks'], lists: [] }, fixtureDeps())\n    expect(selectStreams([pipeline], ['resource:tasks']).map(({ stream }) => stream.id)).toEqual(['attio.primary.tasks'])\n    expect(selectStreams([pipeline], ['resource:records', 'object:tasks']).map(({ stream }) => stream.id))\n      .toEqual(['attio.primary.records.tasks'])\n  })\n\n  test('configured custom objects and lists have their own streams sharing raw tables', async () => {\n    const pipeline = fixturePipeline(fixtureDeps())\n    const journal = createMemoryJournal()\n    const destination = createMemoryDestination()\n    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })\n    expect(result.ok, JSON.stringify(result)).toBe(true)\n    expect(pipeline.streams).toHaveLength(11)\n    expect(result.streams.filter((stream) => stream.streamId.includes('.records.')).map((stream) => stream.rows)).toEqual([1, 1])\n    expect(destination.tables.size).toBe(9)\n    expect(destination.tables.get('default.attio_records_raw')?.map((row) => row.raw)).toContainEqual({\n      source_id: 'attio.primary', object_slug: 'people', data: person,\n    })\n    expect(destination.tables.get('default.attio_entries_raw')?.[0]?.raw).toMatchObject({ list_slug: 'sales' })\n    expect(selectStreams([pipeline], ['resource:records', 'object:subscriptions']).map(({ stream }) => stream.id))\n      .toEqual(['attio.primary.records.subscriptions'])\n    expect(selectStreams([pipeline], ['resource:entries']).map(({ stream }) => stream.id))\n      .toEqual(['attio.primary.entries.sales'])\n  })\n\n  test('one object reader paginates only that object and preserves raw custom values and IDs', async () => {\n    const requests: Array<{ path: string; body: unknown }> = []\n    const firstPage = Array.from({ length: 500 }, (_, index) => ({ ...person, id: { ...person.id, record_id: `record-${index}` } }))\n    const deps = fixtureDeps((url, init) => {\n      const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined\n      requests.push({ path: url.pathname, body })\n      if (url.pathname === '/v2/objects/people') return Response.json({ data: peopleObject })\n      if (url.pathname === '/v2/objects/object-people/records/query') {\n        return Response.json({ data: body.offset === 0 ? firstPage : [{ ...person, id: { ...person.id, record_id: 'last' } }] })\n      }\n      throw new Error(`Unexpected URL ${url.pathname}`)\n    })\n    const chunks = await collect(readRecords(context(), 'people', deps))\n    expect(chunks.map((chunk) => chunk.rows.length)).toEqual([500, 1])\n    expect(requests).toEqual([\n      { path: '/v2/objects/people', body: undefined },\n      { path: '/v2/objects/object-people/records/query', body: { limit: 500, offset: 0 } },\n      { path: '/v2/objects/object-people/records/query', body: { limit: 500, offset: 500 } },\n    ])\n    expect(chunks.every((chunk) => !('state' in chunk) && !('id' in chunk))).toBe(true)\n    expect(chunks[0]?.rows[0]?.id).toBe(JSON.stringify(['attio.primary', 'records', 'workspace-1', 'object-people', 'record-0']))\n    expect(chunks[0]?.rows[0]?.raw).toMatchObject({ data: { values: { custom_multi: [{ value: 'one' }, { value: 'two' }] } } })\n    const custom = await collect(readRecords(context(), 'subscriptions', fixtureDeps()))\n    expect(custom[0]?.rows[0]?.raw).toMatchObject({ object_slug: 'subscriptions' })\n    expect(custom[0]?.rows[0]?.id).not.toBe(chunks[0]?.rows[0]?.id)\n  })\n\n  test('a source identity supplied to the pipeline owns stream IDs and raw row IDs', async () => {\n    const config = { ...attioConfig, sourceId: 'attio.secondary', objects: ['people'], lists: [], pageSize: 2 }\n    const queries: unknown[] = []\n    const pipeline = createAttioPipeline(config, fixtureDeps((url, init) => {\n      if (url.pathname.endsWith('/records/query')) queries.push(JSON.parse(String(init.body)))\n      return fixtureResponse(url)\n    }))\n    config.sourceId = 'changed-after-construction'\n    config.pageSize = 500\n    config.objects.push('companies')\n    const destination = createMemoryDestination()\n    const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:records', 'object:people']), backfill: undefined }, {\n      journal: createMemoryJournal(), destination,\n    })\n    expect(result.ok).toBe(true)\n    expect(result.streams[0]?.streamId).toBe('attio.secondary.records.people')\n    const row = destination.tables.get('default.attio_records_raw')?.[0]\n    expect(row?.id).toBe(JSON.stringify(['attio.secondary', 'records', 'workspace-1', 'object-people', 'record-1']))\n    expect(row?.raw).toMatchObject({ source_id: 'attio.secondary' })\n    expect(queries).toEqual([{ limit: 2, offset: 0 }])\n    expect(selectStreams([pipeline], ['resource:records']).map(({ stream }) => stream.id)).toEqual(['attio.secondary.records.people'])\n  })\n\n  test('notes use their 50-item limit and stop fetching after cancellation', async () => {\n    const controller = new AbortController()\n    const waits: number[] = []\n    const urls: string[] = []\n    const page = Array.from({ length: 50 }, (_, index) => ({ id: { workspace_id: 'workspace-1', note_id: `note-${index}` } }))\n    const deps = fixtureDeps((url) => { urls.push(url.toString()); return Response.json({ data: page }) })\n    deps.wait = async (milliseconds, signal) => { waits.push(milliseconds); signal.throwIfAborted() }\n    const iterator = readNotes(context(controller.signal), deps)\n    expect((await iterator.next()).value?.rows).toHaveLength(50)\n    controller.abort(new Error('fixture cancelled'))\n    await expect(iterator.next()).rejects.toThrow('fixture cancelled')\n    expect(urls).toHaveLength(1)\n    expect(new URL(urls[0] ?? '').searchParams.get('limit')).toBe('50')\n    expect(waits).toEqual([125])\n  })\n\n  test('GET offset pagination requests the terminating empty page for an exact multiple', async () => {\n    const offsets: string[] = []\n    const deps = fixtureDeps((url) => {\n      const offset = url.searchParams.get('offset') ?? ''\n      offsets.push(offset)\n      return Response.json({ data: offset === '0' ? [{ id: { task_id: 'a' } }, { id: { task_id: 'b' } }] : [] })\n    })\n    const pages = await collect(readCollection(context(), { path: '/tasks', idFields: ['task_id'], pageSize: 2 }, deps))\n    expect(pages.map((page) => page.items.length)).toEqual([2, 0])\n    expect(pages.map((page) => page.next)).toEqual([2, undefined])\n    expect(offsets).toEqual(['0', '2'])\n  })\n\n  test('malformed successful responses and missing identities fail visibly', async () => {\n    for (const payload of [{}, { data: null }, { data: [{ id: { task_id: 'task-1' } }] }]) {\n      await expect(collect(readTasks(context(), fixtureDeps(() => Response.json(payload))))).rejects.toThrow('Attio')\n    }\n    const malformed = fixtureDeps((url) => url.pathname === '/v2/objects/people'\n      ? fixtureResponse(url) : Response.json({ data: [{ ...person, values: { name: 'not-an-array' } }] }))\n    await expect(collect(readRecords(context(), 'people', malformed))).rejects.toThrow('invalid values')\n    await expect(collect(readRecords(context(), 'people', fixtureDeps(() => Response.json({ data: [peopleObject] }))))).rejects.toThrow('Attio')\n  })\n\n  test.each(['workspace_id', 'object_id'])('object readers reject children with a different %s', async (field) => {\n    const deps = fixtureDeps((url) => url.pathname === '/v2/objects/people'\n      ? fixtureResponse(url) : Response.json({ data: [{ ...person, id: { ...person.id, [field]: 'foreign' } }] }))\n    await expect(collect(readRecords(context(), 'people', deps))).rejects.toThrow('different workspace or parent')\n  })\n\n  test('list readers resolve one list and reject entries belonging to another list', async () => {\n    const requests: string[] = []\n    const deps = fixtureDeps((url) => {\n      requests.push(url.pathname)\n      return fixtureResponse(url)\n    })\n    const chunks = await collect(readEntries(context(), 'sales', deps))\n    expect(requests).toEqual(['/v2/lists/sales', '/v2/lists/list-sales/entries/query'])\n    expect(chunks[0]?.rows[0]?.raw).toMatchObject({ list_slug: 'sales' })\n    const invalid = fixtureDeps((url) => url.pathname === '/v2/lists/sales'\n      ? fixtureResponse(url) : Response.json({ data: [{ id: { workspace_id: 'workspace-1', list_id: 'foreign', entry_id: 'one' }, entry_values: {} }] }))\n    await expect(collect(readEntries(context(), 'sales', invalid))).rejects.toThrow('different workspace or parent')\n  })\n\n  test('permission failures fail one object stream while another remains independent', async () => {\n    const requests: string[] = []\n    const deps = fixtureDeps((url) => {\n      requests.push(url.pathname)\n      return url.pathname === '/v2/objects/object-custom/records/query'\n        ? Response.json({ code: 'insufficient_scope' }, { status: 403 }) : fixtureResponse(url)\n    })\n    const pipeline = fixturePipeline(deps)\n    const destination = createMemoryDestination()\n    const journal = createMemoryJournal()\n    const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:records']), backfill: undefined }, { journal, destination })\n    expect(result.ok).toBe(false)\n    expect(result.streams.map((stream) => [stream.streamId, stream.outcome, stream.rows])).toEqual([\n      ['attio.primary.records.people', 'succeeded', 1], ['attio.primary.records.subscriptions', 'failed', 0],\n    ])\n    expect(result.streams[1]?.error).toContain('resource scopes')\n    expect(requests.filter((path) => path === '/v2/objects/object-custom/records/query')).toHaveLength(1)\n    expect(destination.tables.get('default.attio_records_raw')).toHaveLength(1)\n    expect((await journal.readCheckpoint('attio.primary.records.people')).lastSuccessSeq).toBeGreaterThan(0)\n    expect((await journal.readCheckpoint('attio.primary.records.subscriptions')).lastSuccessSeq).toBe(0)\n  })\n\n  test('429 retries remain under executor authority and retain Retry-After', async () => {\n    let calls = 0\n    const deps = fixtureDeps((url) => {\n      calls += 1\n      return calls === 1 ? Response.json({ code: 'rate_limit_exceeded' }, { status: 429, headers: { 'Retry-After': '0' } }) : fixtureResponse(url)\n    })\n    const journal = createMemoryJournal()\n    const result = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:notes']), backfill: undefined }, {\n      journal, destination: createMemoryDestination(),\n    })\n    expect(result.ok).toBe(true)\n    expect(calls).toBe(2)\n    expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)\n    const http = await HttpError.fromResponse(new Response(null, { status: 429, headers: { 'Retry-After': '2' } }))\n    expect(http.retryAfterMs).toBe(2_000)\n    expect(classifyAttioError(http, { kind: 'rate_limited', retryAfterMs: 2_000 })).toBeUndefined()\n  })\n\n  test('a missing token fails only when a reader runs', async () => {\n    const deps = fixtureDeps(() => { throw new Error('must not fetch') })\n    deps.token = () => undefined\n    expect(attio.streams).toHaveLength(9)\n    await expect(collect(readMembers(context(), deps))).rejects.toThrow('Set ATTIO_API_TOKEN')\n  })\n\n  test('an interrupted object restarts offset zero without requesting other objects', async () => {\n    let fail = true\n    const requests: string[] = []\n    const offsets: number[] = []\n    const page = Array.from({ length: 500 }, (_, index) => ({ ...person, id: { ...person.id, record_id: `record-${index}` } }))\n    const deps = fixtureDeps((url, init) => {\n      requests.push(url.pathname)\n      if (url.pathname === '/v2/objects/people') return fixtureResponse(url)\n      if (url.pathname !== '/v2/objects/object-people/records/query') throw new Error(`Unexpected object request ${url.pathname}`)\n      const { offset } = JSON.parse(String(init.body))\n      offsets.push(offset)\n      if (offset === 0) return Response.json({ data: page })\n      return fail ? Response.json({ code: 'insufficient_scope' }, { status: 403 }) : Response.json({ data: [] })\n    })\n    const journal = createMemoryJournal()\n    const destination = createMemoryDestination()\n    const first = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, { journal, destination })\n    expect(first.ok).toBe(false)\n    expect((await journal.readCheckpoint('attio.primary.records.people')).envelope).toBeUndefined()\n    fail = false\n    const restored = await restoredJournal(journal)\n    const resumed = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, { journal: restored, destination })\n    expect(resumed.ok).toBe(true)\n    expect(offsets).toEqual([0, 500, 0, 500])\n    expect(requests).not.toContain('/v2/objects')\n    expect(destination.tables.get('default.attio_records_raw')).toHaveLength(500)\n  })\n\n  test('reruns publish changed observations with the same stable raw ID', async () => {\n    let changed = false\n    const deps = fixtureDeps((url) => url.pathname === '/v2/objects/object-people/records/query'\n      ? Response.json({ data: [{ ...person, values: { ...person.values, name: [{ full_name: changed ? 'Ada Updated' : 'Ada Example' }] } }] }) : fixtureResponse(url))\n    const journal = createMemoryJournal()\n    const destination = createMemoryDestination()\n    const request = { selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }\n    expect((await runIngestion(request, { journal, destination })).ok).toBe(true)\n    changed = true\n    expect((await runIngestion(request, { journal, destination })).ok).toBe(true)\n    const rows = destination.tables.get('default.attio_records_raw') ?? []\n    expect(rows).toHaveLength(2)\n    expect(rows[0]?.id).toBe(rows[1]?.id)\n    expect(rows[1]?.raw).toMatchObject({ data: { values: { name: [{ full_name: 'Ada Updated' }] } } })\n  })\n\n  test('a fresh runtime after a lost journal acknowledgement replays changed rows safely', async () => {\n    let changed = false\n    const deps = fixtureDeps((url) => url.pathname === '/v2/objects/object-people/records/query'\n      ? Response.json({ data: [{ ...person, values: { ...person.values, revision: [{ value: changed ? 'new' : 'old' }] } }] }) : fixtureResponse(url))\n    const journal = createMemoryJournal()\n    const destination = createMemoryDestination()\n    const failingJournal = {\n      ...journal,\n      async append(events: Parameters<typeof journal.append>[0]) {\n        if (events.some((event) => event.eventKind === 'batch_committed' && Number(event.detail.rows) > 0)) {\n          throw new Error('fixture journal unavailable after rows loaded')\n        }\n        await journal.append(events)\n      },\n    }\n    const failed = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, {\n      journal: failingJournal, destination,\n    })\n    expect(failed.ok).toBe(false)\n    expect(destination.tables.get('default.attio_records_raw')).toHaveLength(1)\n    changed = true\n    const resumed = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, {\n      journal: await restoredJournal(journal), destination,\n    })\n    expect(resumed.ok).toBe(true)\n    const rows = destination.tables.get('default.attio_records_raw') ?? []\n    expect(rows).toHaveLength(2)\n    expect(rows[0]?.id).toBe(rows[1]?.id)\n    expect(rows[1]?.raw).toMatchObject({ data: { values: { revision: [{ value: 'new' }] } } })\n  }, 10_000)\n})\n\nfunction fixturePipeline(deps: AttioClientDeps) {\n  return definePipeline({\n    ...createAttioPipeline({ ...attioConfig, objects: ['people', 'subscriptions'], lists: ['sales'] }, deps),\n    retry: { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false },\n  })\n}\n\nfunction context(signal = new AbortController().signal): FetchContext {\n  return { signal, attempt: async (operation) => operation(signal) }\n}\n\nasync function collect<T>(items: AsyncIterable<T>): Promise<T[]> {\n  const result: T[] = []\n  for await (const item of items) result.push(item)\n  return result\n}\n\nasync function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {\n  const journal = createMemoryJournal()\n  await journal.append(previous.events.map((event) => ({\n    ...event, checkpoint: event.checkpoint === undefined ? undefined : JSON.parse(JSON.stringify(event.checkpoint)),\n  })))\n  return journal\n}\n"
+    },
+    {
+      "path": "attio/tests/fixtures.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/tests/fixtures.ts",
+      "role": "test",
+      "content": "import type { AttioClientDeps } from '../client.js'\nimport { attioConfig } from '../config.js'\n\nexport const peopleObject = { id: { workspace_id: 'workspace-1', object_id: 'object-people' }, api_slug: 'people' }\nconst companiesObject = { id: { workspace_id: 'workspace-1', object_id: 'object-companies' }, api_slug: 'companies' }\nconst customObject = { id: { workspace_id: 'workspace-1', object_id: 'object-custom' }, api_slug: 'subscriptions' }\nconst salesList = { id: { workspace_id: 'workspace-1', list_id: 'list-sales' }, api_slug: 'sales' }\n\nconst fixtureParents: Record<string, unknown> = {\n  '/v2/objects/people': peopleObject,\n  '/v2/objects/object-people': peopleObject,\n  '/v2/objects/companies': companiesObject,\n  '/v2/objects/object-companies': companiesObject,\n  '/v2/objects/subscriptions': customObject,\n  '/v2/objects/object-custom': customObject,\n  '/v2/lists/sales': salesList,\n  '/v2/lists/list-sales': salesList,\n}\n\nexport const person = {\n  id: { workspace_id: 'workspace-1', object_id: 'object-people', record_id: 'record-1' },\n  created_at: '2026-01-01T00:00:00Z',\n  web_url: 'https://app.attio.com/example/person/record-1',\n  values: {\n    name: [{ full_name: 'Ada Example', first_name: 'Ada', last_name: 'Example', attribute_type: 'personal-name', active_until: null }],\n    email_addresses: [{ email_address: 'ada@example.test', attribute_type: 'email-address' }],\n    custom_multi: [{ value: 'one' }, { value: 'two' }],\n  },\n}\n\nconst fixtureCollections: Record<string, readonly unknown[]> = {\n  '/v2/objects': [peopleObject, customObject],\n  '/v2/objects/object-people/records/query': [person],\n  '/v2/objects/object-custom/records/query': [{ id: { ...person.id, object_id: 'object-custom' }, values: { custom_number: [{ value: 7 }] } }],\n  '/v2/objects/object-companies/records/query': [],\n  '/v2/objects/object-people/attributes': [{ id: { ...peopleObject.id, attribute_id: 'attribute-1' }, api_slug: 'name', type: 'personal-name' }],\n  '/v2/objects/object-custom/attributes': [{ id: { ...customObject.id, attribute_id: 'attribute-1' }, api_slug: 'custom_number', type: 'number' }],\n  '/v2/objects/object-companies/attributes': [],\n  '/v2/lists': [salesList],\n  '/v2/lists/list-sales/attributes': [{ id: { workspace_id: 'workspace-1', object_id: 'list-sales', attribute_id: 'attribute-1' }, api_slug: 'stage', type: 'status' }],\n  '/v2/lists/list-sales/entries/query': [{ id: { ...salesList.id, entry_id: 'entry-1' }, parent_object: 'people', parent_record_id: 'record-1', entry_values: { stage: [{ status: { title: 'Prospect' } }] } }],\n  '/v2/notes': [{ id: { workspace_id: 'workspace-1', note_id: 'note-1' }, parent_object: 'people', parent_record_id: 'record-1', content_markdown: '# First call' }],\n  '/v2/tasks': [{ id: { workspace_id: 'workspace-1', task_id: 'task-1' }, content_plaintext: 'Follow up', is_completed: false }],\n  '/v2/workspace_members': [{ id: { workspace_id: 'workspace-1', workspace_member_id: 'member-1' }, first_name: 'Grace' }],\n}\n\nexport function fixtureDeps(\n  respond: (url: URL, init: RequestInit) => Response | Promise<Response> = fixtureResponse,\n): AttioClientDeps {\n  return {\n    config: attioConfig,\n    token: () => 'fixture-token',\n    wait: async () => {},\n    fetch: (url, init) => Promise.resolve(respond(new URL(url), init)),\n  }\n}\n\nexport function fixtureResponse(url: URL): Response {\n  const data = fixtureParents[url.pathname] ?? fixtureCollections[url.pathname]\n  if (data === undefined) throw new Error(`Unexpected fixture URL: ${url.pathname}`)\n  return Response.json({ data })\n}\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Give People, Companies, each configured object type, and each configured list independent ingestion streams using chkit pagination.",
+            "Group those resource streams in one installation pipeline and bind factory reader settings independently of setup-time storage definitions.",
+            "Make object and list selection explicit, with People and Companies enabled by default; replay interrupted mutable offset reads from the beginning of that stream.",
+            "Preserve raw tables, scoped row identities, and typed views while changing child stream IDs; include fixtures for stream independence and failure recovery.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+          ]
+        },
+        {
+          "version": "0.1.2",
+          "changes": [
+            "Consolidate schemas and readers into resource modules, include portable fixture tests, and document authentication, resources, views, and sync behavior."
+          ]
+        },
+        {
+          "version": "0.1.1",
+          "changes": [
+            "Add integration guide and logo metadata; distributed source is unchanged."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw CRM objects, attributes, records, lists, entries, notes, tasks, and workspace members, with People, Companies, and Deals views."
+          ]
+        }
+      ],
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
+      "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
+      "authentication": {
+        "method": "Bearer token",
+        "env": [
+          "ATTIO_API_TOKEN"
+        ],
+        "setup": [
+          "As a workspace admin, open the workspace-name dropdown in Attio and select Workspace settings.",
+          "Open Developers, select + New access token, and name the token (for example, chkit ClickHouse).",
+          "Grant the read scopes listed for the resources to sync.",
+          "Click the token on the Developers page to copy it. Set ATTIO_API_TOKEN in the project .env file or the scheduler secret environment."
+        ],
+        "documentation": "https://attio.com/help/reference/apps/generating-an-api-key"
+      },
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/attio",
+      "entry": "index.ts",
+      "exports": [
+        "attio",
+        "createAttioPipeline",
+        "attioObjectsRaw",
+        "attioObjectAttributesRaw",
+        "attioRecordsRaw",
+        "attioPeople",
+        "attioCompanies",
+        "attioDeals",
+        "attioListsRaw",
+        "attioListAttributesRaw",
+        "attioEntriesRaw",
+        "attioNotesRaw",
+        "attioTasksRaw",
+        "attioMembersRaw"
+      ],
+      "resources": [
+        {
+          "name": "objects",
+          "title": "Objects",
+          "table": "attio_objects_raw",
+          "description": "Accessible standard and custom object definitions, IDs, API slug, singular and plural names, creation time",
+          "scopes": [
+            "object_configuration:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/objects",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects"
+            }
+          ]
+        },
+        {
+          "name": "object_attributes",
+          "title": "Object attributes",
+          "table": "attio_object_attributes_raw",
+          "description": "Attribute IDs, slug, title, description, type, flags, defaults, relationship definitions, configuration, creation time; includes archived definitions",
+          "scopes": [
+            "object_configuration:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}/attributes",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
+            }
+          ]
+        },
+        {
+          "name": "records",
+          "title": "Records",
+          "table": "attio_records_raw",
+          "description": "Independent records streams for configured object types (People and Companies by default), IDs, creation time, Attio URL, and the complete values object with all returned attribute arrays",
+          "scopes": [
+            "object_configuration:read",
+            "record_permission:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/objects/{object_id}/records/query",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/records/list-records"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
+            }
+          ]
+        },
+        {
+          "name": "lists",
+          "title": "Lists",
+          "table": "attio_lists_raw",
+          "description": "List IDs, slug, name, parent objects, workspace and member access configuration, creator, creation time",
+          "scopes": [
+            "list_configuration:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/lists",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists"
+            }
+          ]
+        },
+        {
+          "name": "list_attributes",
+          "title": "List attributes",
+          "table": "attio_list_attributes_raw",
+          "description": "Attribute definitions for selected lists, including types, configuration, flags, defaults, relationships, and archived definitions",
+          "scopes": [
+            "list_configuration:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}/attributes",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
+            }
+          ]
+        },
+        {
+          "name": "entries",
+          "title": "List entries",
+          "table": "attio_entries_raw",
+          "description": "Entry IDs, parent object and record ID, creation time, and the complete entry_values object",
+          "scopes": [
+            "list_configuration:read",
+            "list_entry:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/lists/{list_id}/entries/query",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
+            }
+          ]
+        },
+        {
+          "name": "notes",
+          "title": "Notes",
+          "table": "attio_notes_raw",
+          "description": "Note IDs, parent record links, title, plaintext and Markdown content, tags, creator, creation time, and meeting reference when returned",
+          "scopes": [
+            "note:read",
+            "object_configuration:read",
+            "record_permission:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/notes",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/notes/list-notes"
+            }
+          ]
+        },
+        {
+          "name": "tasks",
+          "title": "Tasks",
+          "table": "attio_tasks_raw",
+          "description": "Task IDs, plaintext content, deadline, completion state and time, linked records, assignees, creator, creation time",
+          "scopes": [
+            "task:read",
+            "object_configuration:read",
+            "record_permission:read",
+            "user_management:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/tasks",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/tasks/list-tasks"
+            }
+          ]
+        },
+        {
+          "name": "members",
+          "title": "Workspace members",
+          "table": "attio_members_raw",
+          "description": "Member IDs, first and last name, email address, avatar URL, access level, creation time",
+          "scopes": [
+            "user_management:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/workspace_members",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/workspace-members/list-workspace-members"
+            }
+          ]
+        }
+      ],
+      "views": [
+        {
+          "name": "attio_people",
+          "source": "records",
+          "description": "Names, email addresses, and linked companies for people records."
+        },
+        {
+          "name": "attio_companies",
+          "source": "records",
+          "description": "Names, domains, and descriptions for company records."
+        },
+        {
+          "name": "attio_deals",
+          "source": "records",
+          "description": "Deal names, stages, values, currencies, and linked people and companies."
+        }
+      ],
+      "sync": {
+        "description": "People, Companies, each configured custom object/list, and workspace resources have independent full-sync streams. Each reader paginates one collection through chkit-ingest; interrupted mutable offset reads replay that collection from zero. Completed and empty reads are recorded by the executor journal without a custom scan checkpoint. Custom types and lists must be configured explicitly.",
+        "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler; the template does not start a background worker.",
+        "deletions": "Records absent from a later API response remain in ClickHouse. The template does not propagate deletions or consume webhooks."
+      },
+      "env": {
+        "ATTIO_API_TOKEN": ""
+      },
+      "fileHashes": {
+        "src/integrations/attio/README.md": "814a3e4a0e2b74595e81356e302608deacabc4832caf0c5b4b47d3fbfe02b5ed",
+        "src/integrations/attio/client.ts": "73a89084519cae5cc545c6cc83045046399941cf7a1b74781f92814c6a1ebb3c",
+        "src/integrations/attio/config.ts": "806dced94ca7bf5e766c3cbc4be0c1e7435a51bcefb3d428f6ebb28f796ed278",
+        "src/integrations/attio/index.ts": "592dfcfbb5be89bea43b75c5042be9537a745c64065895feab0ee3ecdc7d19d1",
+        "src/integrations/attio/pipeline.ts": "7466c4d8162c39f3424c1d05169c0f7619a7ae5d75e97665baa4581535d5f549",
+        "src/integrations/attio/sources/objects.ts": "3262f82c51f3367b169548af28e6e98ca859fb85dc60cfe20816a0352365293d",
+        "src/integrations/attio/sources/object-attributes.ts": "4c6e543f1f13a1ac9afb10e10be8524efbc817df23f5dab6c3ba47742f3b7178",
+        "src/integrations/attio/sources/records.ts": "2dd116f2ea2e3476c278153e762adbeecbf6d61952c2e5f69332ab3674fe75b7",
+        "src/integrations/attio/sources/lists.ts": "89cd338931fb8959fb16c88b872b02229be9737cbf9987ee9d0aa025ea647a88",
+        "src/integrations/attio/sources/list-attributes.ts": "95f4e2aaac531e05115916c26d8b97973daa358e7679970aec6ac1db16060d93",
+        "src/integrations/attio/sources/entries.ts": "9329630f494d8cdc0ea2711a49845f09cfc9ab1775a7e39cb381a85e4c5960aa",
+        "src/integrations/attio/sources/notes.ts": "ca5b71bf24d432ff1967eefa9a1b5feef938ee6b102a06c6a2cc8058d23fb743",
+        "src/integrations/attio/sources/tasks.ts": "a2d64a19efe7bdeedf0925d7883feb6e931b1b62264f83532c1932c893625e97",
+        "src/integrations/attio/sources/members.ts": "7ed50b334465e4060ab3ecc4d47c6863c1c03b9940026f8e7089603504b72462",
+        "src/integrations/attio/tests/attio.test.ts": "36d5e2661e26d06b749ac51e093df3a0b7a2e79047dc4224a64ba6cd5b63ba42",
+        "src/integrations/attio/tests/fixtures.ts": "7144c0e6113464a0e5354ee4fde0e599f0e3db7dc6172f94330af847a4a5332f"
+      }
+    }
+  }
+}

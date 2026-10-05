@@ -1,9 +1,9 @@
 ---
 title: Integrating ClickHouse with Linear
-description: Install the editable Linear raw ingestion example.
+description: Install nine independent Linear raw resource streams with recoverable checkpoints.
 ---
 
-The Linear registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+The Linear registry item copies independent raw resource readers and ClickHouse destinations into a chkit project.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -17,13 +17,58 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:linear
 ```
 
-Set `LINEAR_API_KEY` in the runtime environment before the ingestion run. Edit the GraphQL query in `src/integrations/linear/index.ts` to select the fields needed by the project.
+Set `LINEAR_API_KEY` in the runtime environment before ingestion. Edit queries and raw destinations in `src/integrations/linear/sources/` to select fields and configure tables. `config.ts` supplies source identity and timestamp selection; `client.ts` handles authenticated requests, and `pipeline.ts` groups nine independent streams in one workspace pipeline.
+
+`createLinearPipeline(config, deps)` snapshots configuration and binds injectable HTTP dependencies. The pipeline and all nine table exports remain in `index.ts`. Destination schemas stay in source modules rather than runtime configuration.
+
+Keep stream IDs and destinations tied to one workspace. The reader does not resolve the token's workspace identity, so switching workspaces requires new IDs and destinations. Reconcile older observations after adding requested fields.
 
 <RegistryReference name="linear" section="resources" />
 
+## Raw data and resource selection
+
+Issues, comments, projects, project updates, cycles, users, teams, issue relations, and issue history each have their own raw table and checkpoint. Relationships retain provider-shaped ID references. Join resources and calculate metrics later in ClickHouse. Issues retain fully paginated label names as strings; label definitions, workflow states, and project statuses have no separate streams. Bounded inline state/status metadata remains provider fields.
+
+Comments use their own collection, including nullable references for issue and other parent types. History independently discovers all accessible issues before paging their events. Neither reader depends on the issues stream's execution or checkpoint. Paginated project memberships and other associations are outside the selected resource scope.
+
+```sh
+bunx chkit ingest run --tag provider:linear --tag resource:comments
+bunx chkit ingest run --tag provider:linear --tag resource:issue_history
+```
+
+Repeated tags use AND matching. The default pipeline executes streams sequentially to limit API usage; ordering does not establish a discovery dependency. Expensive history reads can have their own schedule and execution budget.
+
 ## Sync behavior
 
-Every run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+Seven root resources use server-side bounded `updatedAt` windows, Relay cursors, five minutes of overlap, and explicit archive inclusion. Users also include disabled accounts. Comments and project updates use their own update times, independently of their parents. [Linear pagination](https://linear.app/developers/pagination) and [date filtering](https://linear.app/developers/filtering) document these selection controls.
+
+`paginate()` owns request retries and continuation cycle detection. Readers validate GraphQL errors and reject partial success. Each timestamp checkpoint advances only after the complete window and destination writes succeed, including an empty window. Failed windows replay from their lower bound. Issues complete all label pages before publishing their label strings.
+
+Issue relations lack a reliable root change filter. History is only exposed through each issue's history connection, with no timestamp filter. These streams use `fullSync()`: discover their complete accessible scope on each run and journal success after destination acknowledgement, including empty results. Interrupted full reads restart from the beginning. They ignore date bounds and provide no date-range backfill. See [Linear's API schema](https://github.com/linear/linear/blob/master/packages/sdk/src/schema.graphql).
+
+Deleted records and removed relations remain stored. The API does not promise atomic snapshots, and label renames are not assumed to update issue timestamps. Periodic reconciliation refreshes older timestamp-selected observations:
+
+```sh
+bunx chkit ingest run --tag provider:linear --tag resource:issues --backfill reconcile-2026-10-05 --from 1970-01-01
+bunx chkit ingest status --tag provider:linear --json
+```
+
+Use a new backfill ID for each reconciliation. Timestamp replay reads current observations; the history stream preserves accessible provider events. The raw tables require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+
+## Upgrading existing data
+
+Version `0.2.0` adds eight raw destinations while retaining issue row IDs and the `linear.issues` stream ID. Existing nested comments in old issue observations remain until those rows are refreshed or migrated deliberately. Initial reads populate the new resource tables; application queries should join those destinations rather than use retained nested comments.
+
+## Test the readers
+
+```sh
+bunx chkit add linear --with-tests
+bun test src/integrations/linear/tests/basic.test.ts
+```
+
+## Changelog
+
+<RegistryReference name="linear" section="changelog" />
 
 ## Related pages
 

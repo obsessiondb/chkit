@@ -52,6 +52,59 @@ test.serial('immutable versions reject changed source until the version is bumpe
   expect((await resolveRegistryItem('fixture', fixture.output)).item.meta.chkit.version).toBe('1.0.1')
 })
 
+test.serial('changelogs roundtrip through artifacts and catalogs while legacy versions remain readable', async () => {
+  const fixture = await fixtures.create()
+  const changelog = [
+    { version: '1.1.0', changes: ['Resume interrupted syncs from saved cursors.', 'Keep provider payloads unchanged.'] },
+    { version: '1.0.0', changes: ['Add the initial integration.'] },
+    { version: '1.0.0-rc.10', changes: ['Fix cursor recovery.'] },
+    { version: '1.0.0-rc.2', changes: ['Preview cursor recovery.'] },
+  ]
+  await writeManifest(fixture.manifest, {
+    ...fixture.sourceItem,
+    meta: { chkit: { ...fixture.sourceItem.meta.chkit, version: '1.1.0', changelog } },
+  })
+  await buildRegistry({ manifestPath: fixture.manifest, outputDir: fixture.output })
+  const [latest, pinned, legacy, catalog] = await Promise.all([
+    resolveRegistryItem('fixture', fixture.output),
+    resolveRegistryItem('fixture@1.1.0', fixture.output),
+    resolveRegistryItem('fixture@1.0.0', fixture.output),
+    readRegistryCatalog(fixture.output),
+  ])
+  expect(latest.item.meta.chkit.changelog).toEqual(changelog)
+  expect(pinned.item).toEqual(latest.item)
+  expect(catalog.items[0]?.meta.chkit.changelog).toEqual(changelog)
+  expect(legacy.item).toEqual(fixture.item)
+  expect(legacy.item.meta.chkit).not.toHaveProperty('changelog')
+})
+
+test.serial('changelogs require a current entry and unique versions in semantic newest-first order', async () => {
+  const fixture = await fixtures.create()
+  const change = ['Improve sync recovery.']
+  const withChangelog = (changelog: unknown) => ({
+    ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, changelog } },
+  })
+  expect(() => parseRegistryItem(withChangelog([{ version: '0.9.0', changes: change }]))).toThrow('Changelog must start with the current version')
+  for (const versions of [
+    ['1.0.0', '1.0.0'],
+    ['1.0.0', '0.8.0', '0.9.0'],
+    ['1.0.0', '1.1.0'],
+    ['1.0.0', '1.0.0-rc.2', '1.0.0-rc.10'],
+  ]) {
+    expect(() => parseRegistryItem(withChangelog(versions.map((version) => ({ version, changes: change }))))).toThrow('Changelog versions must be unique and newest first')
+  }
+  for (const changelog of [
+    [],
+    [{ version: '1.0.0', changes: [] }],
+    [{ version: '1.0.0', changes: [''] }],
+    [{ version: '1.0.0', changes: [' \n\t'] }],
+    [{ version: '1.0.0', changes: change }, { version: 'latest', changes: change }],
+    [{ version: '1.0.0', changes: change }, { version: '1.0.0+previous', changes: change }],
+  ]) {
+    expect(() => parseRegistryItem(withChangelog(changelog))).toThrow()
+  }
+})
+
 test.serial('named references reject a registry response with a different name or pinned version', async () => {
   const fixture = await fixtures.create()
   await write(fixture.origin, JSON.stringify({ ...fixture.item, name: 'unexpected' }))
@@ -111,6 +164,19 @@ test.serial('presentation metadata is optional and accepts only HTTP or HTTPS UR
       const item = { ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, [field]: url } } }
       expect(() => parseRegistryItem(item)).toThrow()
     }
+  }
+})
+
+test.serial('resource strategies preserve full metadata and accept timestamp and cursor checkpoints', async () => {
+  const fixture = await fixtures.create()
+  for (const strategy of ['full', 'timestamp', 'cursor']) {
+    const resources = fixture.item.meta.chkit.resources.map((resource) => ({ ...resource, strategy }))
+    const item = { ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, resources } } }
+    expect(parseRegistryItem(item).meta.chkit.resources[0]?.strategy).toBe(strategy)
+  }
+  for (const strategy of ['offset', '', undefined]) {
+    const resources = fixture.item.meta.chkit.resources.map((resource) => ({ ...resource, strategy }))
+    expect(() => parseRegistryItem({ ...fixture.item, meta: { chkit: { ...fixture.item.meta.chkit, resources } } })).toThrow()
   }
 })
 

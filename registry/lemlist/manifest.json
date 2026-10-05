@@ -3,10 +3,10 @@
   "name": "lemlist",
   "type": "registry:item",
   "title": "Lemlist",
-  "description": "Small, editable Lemlist API ingestion example with raw ClickHouse tables.",
+  "description": "Seven independent Lemlist raw resource streams with acknowledged activity intervals and complete replayable reads.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -18,25 +18,113 @@
       "path": "index.ts",
       "type": "registry:file",
       "target": "src/integrations/lemlist/index.ts"
+    },
+    {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/pipeline.ts"
+    },
+    {
+      "path": "sources/activities.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/activities.ts"
+    },
+    {
+      "path": "sources/campaigns.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/campaigns.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/tests/basic.test.ts",
+      "role": "test"
+    },
+    {
+      "path": "sources/contacts.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/contacts.ts"
+    },
+    {
+      "path": "sources/companies.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/companies.ts"
+    },
+    {
+      "path": "sources/campaign-leads.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/campaign-leads.ts"
+    },
+    {
+      "path": "sources/inbox-conversations.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/inbox-conversations.ts"
+    },
+    {
+      "path": "sources/inbox-messages.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/sources/inbox-messages.ts"
+    },
+    {
+      "path": "tests/resources.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/lemlist/tests/resources.test.ts",
+      "role": "test"
     }
   ],
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Sync seven independent raw resources: campaigns, contacts, companies, campaign leads, activities, inbox conversations, and inbox messages.",
+            "Preserve bounded overlapping activity intervals, acknowledgement-only progress, explicit backfill recovery, and existing campaign/activity identities.",
+            "Hydrate complete same-resource contacts in bounded ID batches and export all campaign leads rather than using the nonpaginating 500-record list.",
+            "Independently discover campaigns, contacts, and inbox users; paginate accessible message history with markAsRead=false and preserve native records in scoped envelopes.",
+            "Use ordinary full-sync completion and safe replay for six resources without reliable modification filters; validate continuations, totals, empty completion, and source/destination recovery.",
+            "Add five raw tables with source/parent-scoped row identities and portable fixtures; preserve version 0.1.0 history and document additive migration, polling, and deletion limits.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw campaigns and activities ingestion."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/lemlist/",
       "logo": "https://chkit.obsessiondb.com/logos/lemlist.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/lemlist",
       "entry": "index.ts",
       "exports": [
         "lemlistPipeline",
+        "createLemlistPipeline",
         "lemlist_activitiesRaw",
-        "lemlist_campaignsRaw"
+        "lemlist_campaignsRaw",
+        "lemlist_contactsRaw",
+        "lemlist_companiesRaw",
+        "lemlist_campaignLeadsRaw",
+        "lemlist_inboxConversationsRaw",
+        "lemlist_inboxMessagesRaw"
       ],
       "resources": [
         {
@@ -45,12 +133,12 @@
           "table": "lemlist_activities_raw",
           "description": "Outreach activity events",
           "scopes": [],
-          "strategy": "full",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
               "path": "/activities",
-              "documentation": "https://developer.lemlist.com/"
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/activities/get-many-activities"
             }
           ]
         },
@@ -65,9 +153,99 @@
             {
               "method": "GET",
               "path": "/campaigns",
-              "documentation": "https://developer.lemlist.com/"
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/campaigns/get-many-campaigns"
             }
           ]
+        },
+        {
+          "name": "contacts",
+          "title": "Contacts",
+          "table": "lemlist_contacts_raw",
+          "description": "Complete team-wide contact records and native campaign lead references",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/contacts",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/contacts/get-many-contacts"
+            }
+          ],
+          "scopes": [],
+          "strategy": "full"
+        },
+        {
+          "name": "companies",
+          "title": "Companies",
+          "table": "lemlist_companies_raw",
+          "description": "Company records and native custom fields",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/companies",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/companies/get-many-companies"
+            }
+          ],
+          "scopes": [],
+          "strategy": "full"
+        },
+        {
+          "name": "campaign_leads",
+          "title": "Campaign leads",
+          "table": "lemlist_campaign_leads_raw",
+          "description": "Complete campaign-specific lead exports with campaign scope",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/campaigns",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/campaigns/get-many-campaigns"
+            },
+            {
+              "method": "GET",
+              "path": "/v2/campaigns/{campaignId}/export/leads",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/campaigns/export-campaign-leads-v2"
+            }
+          ],
+          "scopes": [],
+          "strategy": "full"
+        },
+        {
+          "name": "inbox_conversations",
+          "title": "Inbox conversations",
+          "table": "lemlist_inbox_conversations_raw",
+          "description": "Conversations with independent user inbox scope",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/team",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/team/get-team"
+            },
+            {
+              "method": "GET",
+              "path": "/inbox",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/inbox/get-many-inboxes"
+            }
+          ],
+          "scopes": [],
+          "strategy": "full"
+        },
+        {
+          "name": "inbox_messages",
+          "title": "Inbox messages",
+          "table": "lemlist_inbox_messages_raw",
+          "description": "Complete accessible per-contact message history without marking conversations read",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/contacts",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/contacts/get-many-contacts"
+            },
+            {
+              "method": "GET",
+              "path": "/inbox/{contactId}",
+              "documentation": "https://developer.lemlist.com/api-reference/endpoints/inbox/get-contact-messages"
+            }
+          ],
+          "scopes": [],
+          "strategy": "full"
         }
       ],
       "env": {
@@ -86,10 +264,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Activities checkpoint acknowledged creation-time intervals; six other resources record independent full-read completion and replay mutable pagination from the beginning.",
         "schedule": "Run bunx chkit ingest run --tag provider:lemlist from a scheduler.",
-        "deletions": "Both streams scan all accessible pages each run. Removed campaigns or activity records remain stored."
+        "deletions": "Missing records are not deleted automatically. Activities need historical reconciliation for older metadata edits; other resources revisit current accessible parents on each full read."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

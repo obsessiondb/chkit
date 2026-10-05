@@ -11,7 +11,13 @@ export interface SlackConfig {
   messagePageSize: number
   requestIntervalMs: number
   messageIntervalMs: number
+  /** Optional bootstrap lower bound; undefined starts with the recent overlap window. */
+  historyFrom?: string
+  overlapMs: number
 }
+
+/** Runtime reader settings; destination names are defined when the schemas load. */
+export type SlackReaderConfig = Omit<SlackConfig, 'database' | 'tablePrefix'>
 
 // Credentials are read only in client.ts at request time. Keep these values stable across runs.
 export const slackConfig: SlackConfig = {
@@ -27,4 +33,6 @@ export const slackConfig: SlackConfig = {
   messagePageSize: 15,
   requestIntervalMs: 3_000,
   messageIntervalMs: 60_000,
+  historyFrom: undefined,
+  overlapMs: 86_400_000,
 }

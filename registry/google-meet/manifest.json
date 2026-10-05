@@ -3,10 +3,10 @@
   "name": "google-meet",
   "type": "registry:item",
   "title": "Google Meet",
-  "description": "Small, editable Google Meet API ingestion example with raw ClickHouse tables.",
+  "description": "Editable Google Meet API ingestion with journaled checkpoints and raw ClickHouse tables.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -18,25 +18,74 @@
       "path": "index.ts",
       "type": "registry:file",
       "target": "src/integrations/google-meet/index.ts"
+    },
+    {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/pipeline.ts"
+    },
+    {
+      "path": "sources/resources.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/sources/resources.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/tests/basic.test.ts",
+      "role": "test"
     }
   ],
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Sync six independent raw resources in one installation pipeline: conferences, participants, participant sessions, recordings, transcript metadata, and individual transcript entries.",
+            "Default initial discovery and subsequent overlap to 24 hours, including ongoing calls; reread child collections without retaining conference catalogs or child work queues.",
+            "Checkpoint completed discovery pages after their child rows land. Replay unfinished pages with ordinary pagination, fixed bounds, source scope, and bounded token recovery.",
+            "Keep recording metadata and Drive references without downloading files; keep child rows separate with provider-name join keys and source-scoped row IDs. Migrate legacy transcript identities and embedded entries deliberately when upgrading.",
+            "Separate editable configuration, injectable requests, and resource readers. Broader artifact coverage uses an explicit lookback or isolated backfill rather than automatic historical reconciliation."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw conference and transcript ingestion with transcript entries nested in each transcript observation."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/google-meet/",
       "logo": "https://chkit.obsessiondb.com/logos/google-meet.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/google-meet",
       "entry": "index.ts",
       "exports": [
         "google_meetPipeline",
+        "createGoogleMeetPipeline",
         "google_meet_conferencesRaw",
-        "google_meet_transcriptsRaw"
+        "google_meet_transcriptsRaw",
+        "google_meet_transcriptEntriesRaw",
+        "google_meet_participantsRaw",
+        "google_meet_participantSessionsRaw",
+        "google_meet_recordingsRaw"
       ],
       "resources": [
         {
@@ -47,7 +96,7 @@
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "full",
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -60,12 +109,39 @@
           "name": "transcripts",
           "title": "Transcripts",
           "table": "google_meet_transcripts_raw",
-          "description": "Transcript metadata and paged entries for each visible conference",
+          "description": "Native transcript metadata for independently discovered recent and ongoing conferences",
           "scopes": [
             "https://www.googleapis.com/auth/meetings.space.readonly"
           ],
-          "strategy": "full",
+          "strategy": "timestamp",
           "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/transcripts",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts/list"
+            }
+          ]
+        },
+        {
+          "name": "transcript-entries",
+          "title": "Transcript entries",
+          "table": "google_meet_transcript_entries_raw",
+          "description": "Individually keyed transcript entries for independently discovered recent and ongoing conferences",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
             {
               "method": "GET",
               "path": "/conferenceRecords/{conferenceRecord}/transcripts",
@@ -75,6 +151,77 @@
               "method": "GET",
               "path": "/conferenceRecords/{conferenceRecord}/transcripts/{transcript}/entries",
               "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.transcripts.entries/list"
+            }
+          ]
+        },
+        {
+          "name": "participants",
+          "title": "Participants",
+          "table": "google_meet_participants_raw",
+          "description": "Native attendance records, including signed-in, anonymous, and phone participants",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/participants",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.participants/list"
+            }
+          ]
+        },
+        {
+          "name": "participant-sessions",
+          "title": "Participant sessions",
+          "table": "google_meet_participant_sessions_raw",
+          "description": "Individually keyed join/leave sessions with conference and participant names",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/participants",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.participants/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/participants/{participant}/participantSessions",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.participants.participantSessions/list"
+            }
+          ]
+        },
+        {
+          "name": "recordings",
+          "title": "Recordings",
+          "table": "google_meet_recordings_raw",
+          "description": "Recording metadata and native Drive destination references; no file downloads",
+          "scopes": [
+            "https://www.googleapis.com/auth/meetings.space.readonly"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/conferenceRecords",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list"
+            },
+            {
+              "method": "GET",
+              "path": "/conferenceRecords/{conferenceRecord}/recordings",
+              "documentation": "https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords.recordings/list"
             }
           ]
         }
@@ -95,10 +242,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Six independent raw streams rediscover recent conferences with a 24-hour lookback and ongoing calls, checkpoint completed discovery pages, and replay unfinished child reads.",
         "schedule": "Run bunx chkit ingest run --tag provider:google-meet from a scheduler.",
-        "deletions": "Each run reads a configured time range. Transcripts generated later require another scan of that range."
+        "deletions": "Missing, inaccessible, or expired resources do not delete archived raw observations. Changes on conferences outside the selected window require a wider lookback or explicit backfill."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

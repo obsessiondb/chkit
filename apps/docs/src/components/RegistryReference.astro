@@ -1,5 +1,5 @@
 ---
-import { registryApps, type RegistryReferenceSection } from '../data/registry';
+import { registryApps, registryStrategyLabel, type RegistryReferenceSection } from '../data/registry';
 
 interface Props {
 	name: string;
@@ -22,7 +22,7 @@ if (!app) throw new Error(`Unknown registry app: ${name}`);
 			<tr><td>Environment variables</td><td>{app.authentication?.env.map((env, index) => <>{index > 0 && ', '}<code>{env}</code></>) ?? 'See provider setup'}</td></tr>
 			<tr><td>ClickHouse</td><td><code>{app.clickhouse}</code></td></tr>
 			<tr><td>Coverage</td><td>{app.resources.length} synced resources, {app.views?.length ?? 0} derived views</td></tr>
-			<tr><td>Sync strategy</td><td>{app.strategies.map((strategy) => strategy === 'full' ? 'Full read on every run' : strategy).join(', ')}</td></tr>
+			<tr><td>Sync strategy</td><td>{app.strategies.map(registryStrategyLabel).join(', ')}</td></tr>
 		</tbody>
 	</table>
 )}
@@ -67,3 +67,9 @@ if (!app) throw new Error(`Unknown registry app: ${name}`);
 		</tbody>
 	</table>
 )}
+{section === 'changelog' && app.changelog?.map((release) => (
+	<>
+		<h3>Version {release.version}</h3>
+		<ul>{release.changes.map((change) => <li>{change}</li>)}</ul>
+	</>
+))}

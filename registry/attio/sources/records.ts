@@ -1,7 +1,7 @@
 import { view } from '@chkit/core'
 import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
 
-import { discoverObjects, entityId, entitySlug, readCollection, toAttioRows, type AttioClientDeps } from '../client.js'
+import { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
 
 export const attioRecordsRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_records_raw` })
@@ -25,20 +25,17 @@ export const attioDeals = recordView('deals', `
   arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_company')) AS company_record_ids,
   arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_people')) AS people_record_ids`)
 
-export async function* readRecords(context: FetchContext, deps?: AttioClientDeps) {
-  // Discovery is local to this reader; the metadata stream need not have run.
-  for (const object of await discoverObjects(context, deps)) {
-    for await (const page of readCollection(context, {
-      path: `/objects/${encodeURIComponent(entityId(object, 'object_id'))}/records/query`,
-      method: 'POST',
+export function readRecords(context: FetchContext, object: string, deps: AttioClientDeps = defaultAttioClientDeps) {
+  return readParentCollection(context, {
+    resource: 'records', parent: { kind: 'objects', ref: object },
+    request: (parent) => ({
+      path: `/objects/${encodeURIComponent(entityId(parent, 'object_id'))}/records/query`,
       idFields: ['workspace_id', 'object_id', 'record_id'],
+      method: 'POST',
       valuesField: 'values',
-      pageSize: attioConfig.pageSize,
-    }, deps)) {
-      // No checkpoint or page identity: offsets are not change cursors, and pages can mutate.
-      yield { rows: toAttioRows(page, 'records', ['workspace_id', 'object_id', 'record_id'], { object_slug: entitySlug(object) }) }
-    }
-  }
+      pageSize: deps.config.pageSize,
+    }),
+  }, deps)
 }
 
 function recordView(objectSlug: string, columns: string) {

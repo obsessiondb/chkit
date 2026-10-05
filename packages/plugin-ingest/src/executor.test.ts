@@ -834,4 +834,30 @@ describe('paginate', () => {
     }
     await expect(iterate()).rejects.toThrow('repeated continuation')
   })
+
+  test('a cyclic provider cursor fails permanently without replaying the reader under its retry policy', async () => {
+    const cursors: Array<string | undefined> = []
+    const stream = defineStream({
+      id: 'app.cyclic', destination: events,
+      retry: { retries: 2, minTimeout: 1, maxTimeout: 1, randomize: false },
+      async *read(context) {
+        for await (const page of paginate({
+          context,
+          fetchPage: async (cursor: string | undefined) => {
+            cursors.push(cursor)
+            return { items: [], next: 'same' }
+          },
+        })) yield { rows: page.items }
+      },
+    })
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ selected: selectStreams([definePipeline({ id: 'app', streams: [stream] })], []), backfill: undefined }, {
+      journal, destination: createMemoryDestination(),
+    })
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.error).toContain('repeated continuation')
+    expect(cursors).toEqual([undefined, 'same'])
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+    expect((await journal.readCheckpoint('app.cyclic')).lastSuccessSeq).toBe(0)
+  })
 })

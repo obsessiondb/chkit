@@ -1,4 +1,4 @@
-export { attio } from './pipeline.js'
+export { attio, createAttioPipeline } from './pipeline.js'
 export { attioObjectsRaw } from './sources/objects.js'
 export { attioObjectAttributesRaw } from './sources/object-attributes.js'
 export { attioRecordsRaw, attioPeople, attioCompanies, attioDeals } from './sources/records.js'

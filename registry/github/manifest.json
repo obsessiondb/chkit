@@ -3,10 +3,10 @@
   "name": "github",
   "type": "registry:item",
   "title": "GitHub",
-  "description": "Small, editable GitHub API ingestion example with raw ClickHouse tables.",
+  "description": "Editable GitHub ingestion with independent issue, pull-request, discussion, review, commit, and stargazer streams and raw ClickHouse tables.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -18,34 +18,122 @@
       "path": "index.ts",
       "type": "registry:file",
       "target": "src/integrations/github/index.ts"
+    },
+    {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/pipeline.ts"
+    },
+    {
+      "path": "sources/issues.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/issues.ts"
+    },
+    {
+      "path": "sources/stargazers.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/stargazers.ts"
+    },
+    {
+      "path": "sources/issue-comments.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/issue-comments.ts"
+    },
+    {
+      "path": "sources/pull-requests.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/pull-requests.ts"
+    },
+    {
+      "path": "sources/pull-request-comments.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/pull-request-comments.ts"
+    },
+    {
+      "path": "sources/pull-request-review-comments.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/pull-request-review-comments.ts"
+    },
+    {
+      "path": "sources/pull-request-reviews.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/pull-request-reviews.ts"
+    },
+    {
+      "path": "sources/pull-request-commits.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/sources/pull-request-commits.ts"
+    },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/github/tests/basic.test.ts",
+      "role": "test"
     }
   ],
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Sync issues and editable comments through overlapping updated-time windows; advance each stream watermark only after its destination acknowledgement.",
+            "Separate issues, issue comments, pull requests, PR conversation comments, review comments, reviews, commits, and stargazers into independently selectable raw streams for every configured repository.",
+            "Store repository and parent join keys beside provider data; retain only commit SHA and message through paginated GraphQL commit connections, and leave joins to ClickHouse.",
+            "Use one installation pipeline with configuration snapshots, injectable requests, shared pagination, and fullSync where no reliable change filter exists; existing mixed or combined observations require deliberate data migration.",
+            "Consume full pagination pages and use shared continuation-cycle detection while preserving raw resource checkpoints and PR commit completeness checks."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw repository issues and stargazers ingestion."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/github/",
       "logo": "https://chkit.obsessiondb.com/logos/github.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/github",
       "entry": "index.ts",
       "exports": [
         "githubPipeline",
+        "createGitHubPipeline",
         "github_issuesRaw",
+        "github_issueCommentsRaw",
+        "github_pullRequestsRaw",
+        "github_pullRequestCommentsRaw",
+        "github_pullRequestReviewCommentsRaw",
+        "github_pullRequestReviewsRaw",
+        "github_pullRequestCommitsRaw",
         "github_stargazersRaw"
       ],
       "resources": [
         {
           "name": "issues",
-          "title": "Issues and pull requests",
+          "title": "Issues",
           "table": "github_issues_raw",
-          "description": "Issue and pull request summaries for the configured repositories",
-          "scopes": [],
-          "strategy": "full",
+          "description": "Only ordinary issues, with complete provider issue fields and repository context",
+          "scopes": [
+            "Issues:read"
+          ],
+          "strategy": "timestamp",
           "endpoints": [
             {
               "method": "GET",
@@ -55,10 +143,133 @@
           ]
         },
         {
+          "name": "issue_comments",
+          "title": "Issue comments",
+          "table": "github_issue_comments_raw",
+          "description": "One raw comment per row for ordinary issues; independently discovers all issue parents and filters child updates",
+          "scopes": [
+            "Issues:read"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/issues",
+              "documentation": "https://docs.github.com/en/rest/issues/issues#list-repository-issues"
+            },
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/issues/{issue_number}/comments",
+              "documentation": "https://docs.github.com/en/rest/issues/comments#list-issue-comments"
+            }
+          ]
+        },
+        {
+          "name": "pull_requests",
+          "title": "Pull requests",
+          "table": "github_pull_requests_raw",
+          "description": "Pull-request metadata from its own collection, with repository context",
+          "scopes": [
+            "Pull requests:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/pulls",
+              "documentation": "https://docs.github.com/en/rest/pulls/pulls#list-pull-requests"
+            }
+          ]
+        },
+        {
+          "name": "pull_request_comments",
+          "title": "Pull request conversation comments",
+          "table": "github_pull_request_comments_raw",
+          "description": "One raw conversation comment per row with its pull number; independently discovers all pull-request parents and filters child updates",
+          "scopes": [
+            "Pull requests:read"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/pulls",
+              "documentation": "https://docs.github.com/en/rest/pulls/pulls#list-pull-requests"
+            },
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/issues/{pull_number}/comments",
+              "documentation": "https://docs.github.com/en/rest/issues/comments#list-issue-comments"
+            }
+          ]
+        },
+        {
+          "name": "pull_request_review_comments",
+          "title": "Pull request review comments",
+          "table": "github_pull_request_review_comments_raw",
+          "description": "Raw diff-review comments with repository and pull-number context, selected by their own update times",
+          "scopes": [
+            "Pull requests:read"
+          ],
+          "strategy": "timestamp",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/pulls/comments",
+              "documentation": "https://docs.github.com/en/rest/pulls/comments#list-review-comments-in-a-repository"
+            }
+          ]
+        },
+        {
+          "name": "pull_request_reviews",
+          "title": "Pull request reviews",
+          "table": "github_pull_request_reviews_raw",
+          "description": "One raw review per row with repository and pull number; discovers its own pull-request parents",
+          "scopes": [
+            "Pull requests:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/pulls",
+              "documentation": "https://docs.github.com/en/rest/pulls/pulls#list-pull-requests"
+            },
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+              "documentation": "https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request"
+            }
+          ]
+        },
+        {
+          "name": "pull_request_commits",
+          "title": "Pull request commits",
+          "table": "github_pull_request_commits_raw",
+          "description": "Commit SHA and message only, with repository and pull number; paginates GraphQL commits after independent pull-request discovery",
+          "scopes": [
+            "Pull requests:read",
+            "Contents:read"
+          ],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/repos/{owner}/{repo}/pulls",
+              "documentation": "https://docs.github.com/en/rest/pulls/pulls#list-pull-requests"
+            },
+            {
+              "method": "POST",
+              "path": "/graphql",
+              "documentation": "https://docs.github.com/en/graphql/reference/pulls#pullrequest"
+            }
+          ]
+        },
+        {
           "name": "stargazers",
           "title": "Stargazers",
           "table": "github_stargazers_raw",
-          "description": "Repository stargazers with starred_at when the token permits it",
+          "description": "Repository stargazers with starred_at and repository context",
           "scopes": [],
           "strategy": "full",
           "endpoints": [
@@ -80,16 +291,19 @@
         ],
         "documentation": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
         "setup": [
-          "Provide GITHUB_TOKEN with read access to the selected resources.",
+          "For private repositories, the supported setup grants GITHUB_TOKEN repository access with Issues:read, Pull requests:read, and Contents:read, including GraphQL commit reads; this is not a verified field-level permission minimum.",
           "Supply a new access token when the existing token expires."
         ]
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "One installation pipeline groups eight independent resource streams per configured repository. Issues and comments use completed updated-time windows; pull requests, reviews, commits, and stargazers use fullSync. Each child stream discovers its own parent collection, independently of parent-stream execution or parent update times.",
         "schedule": "Run bunx chkit ingest run --tag provider:github from a scheduler.",
-        "deletions": "Each run scans configured repositories. Removed issues or stars remain stored."
+        "deletions": "Deleted records, removed stars, and commits no longer present after a force-push remain stored. Missing observations do not generate tombstones; legacy mixed issue/PR rows and nested child payloads require deliberate migration."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

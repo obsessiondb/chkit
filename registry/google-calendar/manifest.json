@@ -3,10 +3,10 @@
   "name": "google-calendar",
   "type": "registry:item",
   "title": "Google Calendar",
-  "description": "Small, editable Google Calendar API ingestion example with raw ClickHouse tables.",
+  "description": "Editable Google Calendar API ingestion with journaled checkpoints and raw ClickHouse tables.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -20,6 +20,26 @@
       "target": "src/integrations/google-calendar/index.ts"
     },
     {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/pipeline.ts"
+    },
+    {
+      "path": "sources/events.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/sources/events.ts"
+    },
+    {
       "path": "tests/basic.test.ts",
       "type": "registry:file",
       "target": "src/integrations/google-calendar/tests/basic.test.ts",
@@ -29,13 +49,32 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.0",
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Replace the rolling occurrence window with canonical events and incremental provider sync tokens, including cancellation payloads.",
+            "Resume acknowledged pages, promote the terminal sync token after destination acknowledgement, and bound recovery from rejected or expired tokens.",
+            "Scope row IDs to the installation and resolved calendar; migrate legacy occurrence identities or use a fresh table and stream when upgrading.",
+            "Separate editable installation configuration, injectable HTTP clients, and resource readers from one pipeline; preserve independent stream identities and provider recovery.",
+            "Keep events as the sole raw resource with native nested fields and sparse cancellation observations; verify recurring-exception replacement without hydration.",
+            "Use full paginate pages and checkpoint metadata for canonical sync-token progress and bounded token recovery in one pagination loop, including empty terminal pages and the existing saved state format."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw events ingestion over a rolling occurrence window."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/google-calendar/",
       "logo": "https://chkit.obsessiondb.com/logos/google-calendar.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/google-calendar",
       "entry": "index.ts",
@@ -48,12 +87,17 @@
           "name": "events",
           "title": "Events",
           "table": "google_calendar_events_raw",
-          "description": "Events from the configured calendar, including cancelled events",
+          "description": "Canonical events, recurring masters, exceptions, and cancellation payloads from the configured calendar",
           "scopes": [
             "https://www.googleapis.com/auth/calendar.readonly"
           ],
-          "strategy": "full",
+          "strategy": "cursor",
           "endpoints": [
+            {
+              "method": "GET",
+              "path": "/calendars/{calendarId}",
+              "documentation": "https://developers.google.com/workspace/calendar/api/v3/reference/calendars/get"
+            },
             {
               "method": "GET",
               "path": "/calendars/{calendarId}/events",
@@ -78,10 +122,13 @@
       },
       "views": [],
       "sync": {
-        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "description": "Initial canonical event read followed by Google sync-token deltas. Acknowledged pages resume from journaled state.",
         "schedule": "Run bunx chkit ingest run --tag provider:google-calendar from a scheduler.",
-        "deletions": "Each run reads a configured time range. Events outside the range and deleted records are not reconciled."
+        "deletions": "Cancellation payloads are retained. An expired token reboots provider progress without clearing raw observations; absent records are not reconciled."
       }
     }
-  }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
 }

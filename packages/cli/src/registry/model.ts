@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
-import { valid, validRange } from 'semver'
+import { compare, valid, validRange } from 'semver'
 import { z } from 'zod'
 
 export const ITEM_SCHEMA_URL = 'https://ui.shadcn.com/schema/registry-item.json'
@@ -18,6 +18,10 @@ const webUrl = z.url({ protocol: /^https?$/ })
 const metadataSchema = z.object({
   formatVersion: z.literal(1),
   version,
+  changelog: z.array(z.object({
+    version,
+    changes: z.array(z.string().refine((value) => value.trim().length > 0, 'Expected a non-empty change')).min(1),
+  }).strict()).min(1).optional(),
   language: z.literal('typescript'),
   license: z.string().min(1),
   documentation: webUrl.optional(),
@@ -40,7 +44,7 @@ const metadataSchema = z.object({
     table: z.string().min(1).optional(),
     description: z.string().min(1),
     scopes: z.array(z.string()),
-    strategy: z.literal('full'),
+    strategy: z.enum(['full', 'timestamp', 'cursor']),
     endpoints: z.array(z.object({
       method: z.enum(['GET', 'POST']),
       path: z.string().startsWith('/'),
@@ -89,6 +93,16 @@ export type RegistryCatalog = z.infer<typeof registryCatalogSchema>
 export function parseRegistryItem(value: unknown, built = true): RegistryItem {
   const item = registryItemSchema.parse(value)
   const meta = item.meta.chkit
+  if (meta.changelog) {
+    if (meta.changelog[0]?.version !== meta.version) throw new Error('Changelog must start with the current version')
+    for (let index = 1; index < meta.changelog.length; index++) {
+      const previous = meta.changelog[index - 1]
+      const entry = meta.changelog[index]
+      if (previous && entry && compare(previous.version, entry.version) <= 0) {
+        throw new Error('Changelog versions must be unique and newest first')
+      }
+    }
+  }
   const targets = new Set<string>()
   for (const file of item.files) {
     if (!file.target.startsWith(`${meta.root}/`)) throw new Error(`File target ${file.target} must be inside ${meta.root}/`)

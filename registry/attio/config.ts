@@ -3,20 +3,23 @@ export interface AttioConfig {
   sourceId: string
   database: string
   tablePrefix: string
-  /** Undefined reads every accessible object/list; otherwise use UUIDs or API slugs. */
-  objects: readonly string[] | undefined
-  lists: readonly string[] | undefined
+  /** Each UUID or API slug creates its own records and attributes streams. */
+  objects: readonly string[]
+  /** Each UUID or API slug creates its own entries and attributes streams. */
+  lists: readonly string[]
   pageSize: number
   notesPageSize: number
 }
+
+export type AttioReaderConfig = Omit<AttioConfig, 'database' | 'tablePrefix'>
 
 // Keep these values stable across runs. Credentials are read only in client.ts at request time.
 export const attioConfig: AttioConfig = {
   sourceId: 'attio.primary',
   database: 'default',
   tablePrefix: 'attio',
-  objects: undefined,
-  lists: undefined,
+  objects: ['people', 'companies'],
+  lists: [],
   pageSize: 500,
   notesPageSize: 50,
 }

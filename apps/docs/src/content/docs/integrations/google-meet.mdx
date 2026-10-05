@@ -1,31 +1,82 @@
 ---
 title: Integrating ClickHouse with Google Meet
-description: Install the editable Google Meet raw ingestion example.
+description: Install six independent raw Google Meet streams with recent discovery and coarse page replay.
 ---
 
-The Google Meet registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+The Google Meet registry item copies raw resource readers with a 24-hour lookback and independently journaled discovery-page checkpoints into a chkit project.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
 ## Install
 
 ```sh
-bunx chkit add google-meet
+bunx chkit add google-meet --with-tests
 bunx chkit check
 bunx chkit generate --name add_google_meet
 bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:google-meet
+bunx chkit ingest status --tag provider:google-meet
 ```
 
-Set `GOOGLE_MEET_ACCESS_TOKEN` in the runtime environment before the ingestion run. Edit `lookbackDays` in `src/integrations/google-meet/index.ts` to select the conference window.
+Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access. Review identity, lookback, schema placement and budgets in `src/integrations/google-meet/config.ts`. Keep identity tied to one Google account; these list responses do not identify the authenticated account. Coverage depends on that user's access. The reader does not refresh tokens or export an entire workspace automatically. Schema imports do not call Google. See [authorization](https://developers.google.com/workspace/meet/api/guides/authenticate-authorize).
 
 <RegistryReference name="google-meet" section="resources" />
 
+## Pipeline and streams
+
+One installation pipeline contains six independent streams: `conferences`, `participants`, `participant-sessions`, `recordings`, `transcripts`, and `transcript-entries`. Each owns its raw destination and journal progress. Every child stream discovers its own conference IDs; entries discover transcripts and sessions discover participants. Resources run independently in any order.
+
+```sh
+bunx chkit ingest run --tag provider:google-meet --tag resource:transcript-entries
+bunx chkit ingest run --tag provider:google-meet --tag resource:participant-sessions
+```
+
+`sourceId` scopes raw identities and queries; `streamPrefix` determines journal IDs. Another installation needs separate values. The factory snapshots supplied configuration and injectable request dependencies. Edit `database` before schema imports to change setup-time table placement. The default pipeline runs one stream and request at a time.
+
 ## Sync behavior
 
-Each run reads a configured time range. Transcripts generated later require another scan of that range. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
+Initial discovery covers the preceding 24 hours by conference end time. Later windows start at the completed watermark minus `lookbackHours` (24 by default), rereading recent calls and catching up after missed runs. Ongoing calls are discovered separately using `end_time IS NULL`, including long-running calls started before the lookback.
+
+Children of selected conferences are read completely with ordinary pagination. No conference catalog or child queue survives a completed window. Changes that appear after their conference leaves that window require a wider configured lookback or explicit backfill. There is no automatic historical reconciliation. Conference end times are not child update times; this is bounded recent polling. See [conference filters](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords/list) and [artifact behavior](https://developers.google.com/workspace/meet/api/guides/artifacts).
+
+## Checkpoints and recovery
+
+The saved state contains scope, watermark, optional historical bounds, and the unfinished discovery window/phase/page token. Bounds are saved before the first request. A discovery page's children finish before a state-only marker advances the parent-page cursor. The executor commits it after all preceding rows land.
+
+An interrupted page repeats its child reads from the beginning under the same bounds; completed discovery pages remain skipped. No child cursor, cached page, or child completion index is persisted. Configure small discovery pages and enough budget to finish one page's children plus the checkpoint marker. Defaults are `pageSize: 1` and `maxChunks: 200`; increase the cap or `--max-duration` for unusually large conferences. Native JSON requires ClickHouse 25.3 or later.
+
+Rejected tokens restart their collection once. Discovery recovery debt persists across resumed executions until the phase finishes. Child collections restart naturally when their parent page replays. Repeated rejection and cyclic/malformed pagination fail visibly. Strategy version 2 rejects incompatible saved state; scope changes require deliberate migration or a new `streamPrefix`. Schedule externally with one ingestion process per target.
+
+## Raw updates and historical ranges
+
+Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. Join native resource names and derive attendance/transcript views later in ClickHouse.
+
+Participants and sessions preserve attendance identities and join/leave records. Recordings preserve metadata and Drive references without downloading media. Transcripts preserve metadata/document references, and entries preserve speech segments. API entries do not capture later edits to the separate Google Docs transcript.
+
+Each observation inserts under its stable identity into `ReplacingMergeTree(_chkit_ingested_at)`. A later transcript state replaces an earlier state; an empty list creates no placeholder that could block a generated transcript. A body hash or insert-only staging is unnecessary. Query with `FINAL` for latest observations. Missing or expired records are not inferred deletions; archived raw rows remain. See [conference retention](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords).
+
+Backfills select conference end times and skip ongoing calls. Child lists are complete for selected conferences. Use the same ID and bounds to resume; changed bounds require a new ID, and expired API history is unavailable.
+
+```sh
+bunx chkit ingest run --tag provider:google-meet --backfill october --from 2026-10-01T00:00:00Z --to 2026-10-05T00:00:00Z
+```
+
+Version 0.2.0 adds participant, session, recording and entry destinations while preserving conference/transcript tables. Entries become separate rows. Source-scoped row IDs do not replace legacy provider-name IDs; archive or migrate legacy rows deliberately. The installed README explains this upgrade.
+
+## Fixture verification
+
+```sh
+bun test src/integrations/google-meet/tests/basic.test.ts
+```
+
+Fixtures cover independent resources, coarse replay/resume, lost sink acknowledgement, changed transcript content under stable IDs, recent late artifacts, empty pages, bounded recovery, fixed windows, scope and backfill isolation.
+
+## Changelog
+
+<RegistryReference name="google-meet" section="changelog" />
 
 ## Related pages
 
 - [App registry](/integrations/)
 - [Ingestion plugin](/plugins/ingest/)
+- [Ingestion CLI](/cli/ingest/)

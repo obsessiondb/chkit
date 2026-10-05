@@ -12,7 +12,7 @@ interface DocsPaths {
 }
 
 // Run with `bun scripts/check-registry-docs.ts`; the docs build runs this automatically.
-// Each official app needs a canonical guide, SEO metadata, documented resources, and local logo assets.
+// Each official app needs a canonical guide, SEO metadata, documented resources, a generated changelog, and local logo assets.
 if (import.meta.main) {
   const repoDir = fileURLToPath(new URL('../', import.meta.url))
   const catalog = await readRegistrySourceCatalog()
@@ -64,7 +64,7 @@ export function checkRegistryDocs(catalog: RegistryCatalog, paths: DocsPaths): s
 function checkReferenceMetadata(item: RegistryItem): string[] {
   const metadata = item.meta.chkit
   const errors: string[] = []
-  for (const field of ['authentication', 'views', 'sync'] as const) {
+  for (const field of ['authentication', 'views', 'sync', 'changelog'] as const) {
     if (metadata[field] === undefined) errors.push(`${item.name}: official apps must declare meta.chkit.${field} for their integration reference.`)
   }
   for (const resource of metadata.resources) {
@@ -106,6 +106,9 @@ function checkGuide(path: string, item: RegistryItem, docsDir: string): string[]
     if (!generatedResources && !body.includes(`\`${resource}\``)) {
       errors.push(`${label}: document the registry resource \`${resource}\` in the guide body.`)
     }
+  }
+  if (!body.includes(`<RegistryReference name="${item.name}" section="changelog" />`)) {
+    errors.push(`${label}: generate the integration changelog with <RegistryReference name="${item.name}" section="changelog" />.`)
   }
   return errors
 }

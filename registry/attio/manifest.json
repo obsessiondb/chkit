@@ -3,10 +3,10 @@
   "name": "attio",
   "type": "registry:item",
   "title": "Attio",
-  "description": "Editable Attio CRM schemas, raw data readers, typed views, and full-read ingestion pipelines.",
+  "description": "Editable Attio CRM schemas, raw data readers, typed views, and independent streams for People, Companies, configured custom types, and workspace resources.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.8",
-    "@chkit/plugin-ingest@^0.2.0-beta.8"
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
   ],
   "files": [
     {
@@ -95,18 +95,49 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.1.2",
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Give People, Companies, each configured object type, and each configured list independent ingestion streams using chkit pagination.",
+            "Group those resource streams in one installation pipeline and bind factory reader settings independently of setup-time storage definitions.",
+            "Make object and list selection explicit, with People and Companies enabled by default; replay interrupted mutable offset reads from the beginning of that stream.",
+            "Preserve raw tables, scoped row identities, and typed views while changing child stream IDs; include fixtures for stream independence and failure recovery.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+          ]
+        },
+        {
+          "version": "0.1.2",
+          "changes": [
+            "Consolidate schemas and readers into resource modules, include portable fixture tests, and document authentication, resources, views, and sync behavior."
+          ]
+        },
+        {
+          "version": "0.1.1",
+          "changes": [
+            "Add integration guide and logo metadata; distributed source is unchanged."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw CRM objects, attributes, records, lists, entries, notes, tasks, and workspace members, with People, Companies, and Deals views."
+          ]
+        }
+      ],
       "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
       "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.8",
-      "ingest": "^0.2.0-beta.8",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/attio",
       "entry": "index.ts",
       "exports": [
         "attio",
+        "createAttioPipeline",
         "attioObjectsRaw",
         "attioObjectAttributesRaw",
         "attioRecordsRaw",
@@ -152,12 +183,17 @@
               "method": "GET",
               "path": "/objects/{object_id}/attributes",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
             }
           ]
         },
         {
           "name": "records",
-          "description": "Current records for every selected object, IDs, creation time, Attio URL, and the complete values object with all returned attribute arrays",
+          "description": "Independent records streams for configured object types (People and Companies by default), IDs, creation time, Attio URL, and the complete values object with all returned attribute arrays",
           "scopes": [
             "object_configuration:read",
             "record_permission:read"
@@ -170,6 +206,11 @@
               "method": "POST",
               "path": "/objects/{object_id}/records/query",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/records/list-records"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
             }
           ]
         },
@@ -204,6 +245,11 @@
               "method": "GET",
               "path": "/lists/{list_id}/attributes",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
             }
           ]
         },
@@ -222,6 +268,11 @@
               "method": "POST",
               "path": "/lists/{list_id}/entries/query",
               "documentation": "https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
             }
           ]
         },
@@ -316,7 +367,7 @@
         }
       ],
       "sync": {
-        "description": "Every run discovers the selected objects and lists and reads every page of each enabled resource. Stable row IDs retain the latest observed version in ClickHouse.",
+        "description": "People, Companies, each configured custom object/list, and workspace resources have independent full-sync streams. Each reader paginates one collection through chkit-ingest; interrupted mutable offset reads replay that collection from zero. Completed and empty reads are recorded by the executor journal without a custom scan checkpoint. Custom types and lists must be configured explicitly.",
         "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler; the template does not start a background worker.",
         "deletions": "Records absent from a later API response remain in ClickHouse. The template does not propagate deletions or consume webhooks."
       }

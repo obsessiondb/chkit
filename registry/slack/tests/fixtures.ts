@@ -1,4 +1,5 @@
 import type { SlackClientDeps } from '../client.js'
+import { slackConfig } from '../config.js'
 
 export const channel = {
   id: 'C1', name: 'project-example', is_channel: true, is_private: false, is_archived: false,
@@ -38,6 +39,7 @@ export function fixtureDeps(
   },
 ): SlackClientDeps {
   return {
+    config: slackConfig,
     token: () => 'fixture-token',
     wait: async () => {},
     fetch: (url, init) => Promise.resolve(respond(new URL(url), init)),

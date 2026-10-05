@@ -12,7 +12,7 @@ import RegistryReference from '../../../components/RegistryReference.astro';
 
 <img src="/logos/attio.svg" alt="Attio logo" width="37" height="30" style="box-sizing: content-box; padding: 12px; background: white; border-radius: 8px;" />
 
-The [app registry](/integrations/) installs the Attio integration as editable TypeScript source. It includes nine raw tables, nine full-read streams, and three SQL views for people, companies, and deals. Each run reads the selected resources through the Attio REST API and updates their latest observed versions in ClickHouse.
+The [app registry](/integrations/) installs the Attio integration as editable TypeScript source. It includes nine raw tables, separate streams for each configured object type or list, workspace-wide resource streams, and three SQL views for people, companies, and deals. The default configuration creates nine streams writing to seven resource tables; entries and list-attribute readers require configured lists. Every run performs full reads through the Attio REST API and updates the latest observed versions in ClickHouse.
 
 <RegistryReference name="attio" section="overview" />
 
@@ -61,7 +61,7 @@ A workspace admin creates a single-workspace access token in Attio. The followin
 
 <RegistryReference name="attio" section="authentication" />
 
-Grant read access to the categories required by the enabled streams. The full default integration uses all the scopes below. No write scopes are needed.
+Grant read access to the categories required by the enabled streams. The scope table covers all supported resources; list-entry and list-attribute readers run only when `lists` is configured. No write scopes are needed.
 
 <RegistryReference name="attio" section="scopes" />
 
@@ -81,6 +81,8 @@ A token's permissions also determine which data the API returns. A `401` or `403
 
 ## Choose objects, lists, and destination names
 
+One installation pipeline groups the independently selectable resource streams. `createAttioPipeline(config, deps)` snapshots reader settings and configured collections; raw table placement comes from the installation's setup-time `attioConfig` before schema discovery.
+
 The installed `src/integrations/attio/config.ts` starts with:
 
 ```ts
@@ -88,8 +90,8 @@ export interface AttioConfig {
   sourceId: string
   database: string
   tablePrefix: string
-  objects: readonly string[] | undefined
-  lists: readonly string[] | undefined
+  objects: readonly string[]
+  lists: readonly string[]
   pageSize: number
   notesPageSize: number
 }
@@ -98,8 +100,8 @@ export const attioConfig: AttioConfig = {
   sourceId: 'attio.primary',
   database: 'default',
   tablePrefix: 'attio',
-  objects: undefined,
-  lists: undefined,
+  objects: ['people', 'companies'],
+  lists: [],
   pageSize: 500,
   notesPageSize: 50,
 }
@@ -110,12 +112,14 @@ export const attioConfig: AttioConfig = {
 | `sourceId` | Stable, non-secret identity used in stream IDs and row IDs |
 | `database` | Database containing the nine raw tables and three views |
 | `tablePrefix` | Prefix used before `_records_raw`, `_people`, and the other suffixes |
-| `objects` | Object API slugs or UUIDs; `undefined` discovers all accessible objects; `[]` selects none |
-| `lists` | List API slugs or UUIDs; `undefined` discovers all accessible lists; `[]` selects none |
+| `objects` | Explicit object API slugs or UUIDs; default `['people', 'companies']`; creates records and attribute streams per type |
+| `lists` | Explicit list API slugs or UUIDs; default `[]`; creates entries and attribute streams per list |
 | `pageSize` | Positive integer, default `500`, for attributes, records, entries, and tasks |
 | `notesPageSize` | Positive integer up to `50`, default `50`, for notes |
 
-For example, set `objects: ['people', 'companies']` to restrict object metadata, object attributes, and records. List selection similarly controls lists, list attributes, and entries. An unknown or inaccessible configured slug or ID fails visibly. Notes, tasks, and members remain workspace-wide; their readers need separate changes to narrow their coverage.
+Add `deals` or a custom slug to `objects` to collect that type, and add list slugs or IDs to `lists` to collect their entries. Empty arrays disable the corresponding child streams. The objects and lists catalog streams retain all accessible metadata independently of these selections. An unknown or inaccessible configured slug or ID fails its stream visibly. Notes, tasks, and members remain workspace-wide; their readers need separate changes to narrow their coverage.
+
+The pipeline creates its stream graph from these explicit arrays without API discovery. People and Companies have independent readers and journal progress, while both write to `attio_records_raw`. An object stream's ID ends in `.records.<ref>` or `.object_attributes.<ref>`; a list stream's ID ends in `.entries.<ref>` or `.list_attributes.<ref>`. Keep each configured reference stable: switching a slug to an equivalent UUID changes the stream ID.
 
 Keep `sourceId` stable after ingestion starts. For a second workspace, use a distinct source identity and a separate table prefix or database. Copying the directory alone does not isolate pipeline IDs or destination tables.
 
@@ -141,11 +145,11 @@ Queries in this guide use the default database and prefix. Substitute the config
 
 ## All synced resources and records
 
-Each resource has its own stream and raw table. This table lists the returned entity data retained in `raw.data`; the complete API entity is preserved, including additional fields returned by Attio. Fields may be absent or null depending on the resource and workspace configuration.
+Each object type has its own records and attribute streams, and each configured list has its own entries and attribute streams. Catalogs, notes, tasks, and members have workspace-wide streams. Streams for the same resource share a raw table. This table lists the returned entity data retained in `raw.data`; the complete API entity is preserved, including additional fields returned by Attio. Fields may be absent or null depending on the resource and workspace configuration.
 
 <RegistryReference name="attio" section="resources" />
 
-The records stream discovers objects through the [objects API](https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects). It is not restricted to the three objects with packaged views. People, companies, deals, and custom objects all land in the same records table when accessible and selected. A `users` object, when present, contains CRM records; workspace members are collected separately.
+The default records streams read People and Companies separately. Deals and custom objects require explicit slugs or IDs in `objects`; configured types all land in the same records table. A `users` object, when configured, contains CRM records; workspace members are collected separately. The object catalog exposes accessible types without automatically adding readers for them.
 
 Record and entry attributes remain arrays, including multivalued custom fields and relationship references. Returned attribute values keep their accompanying metadata. The integration does not issue separate requests for historical attribute values, select-option catalogs, or status catalogs. See the [record API](https://docs.attio.com/rest-api/endpoint-reference/records/list-records), [entry API](https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries), and [attribute API](https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes) for the provider's response shapes.
 
@@ -153,36 +157,40 @@ Notes retain the content and references in the [notes response](https://docs.att
 
 ### API requests and pagination
 
-Every API path in the resource table is relative to `https://api.attio.com/v2`. Object and list placeholders are resolved to IDs by discovery before the child request runs.
+Every API path in the resource table is relative to `https://api.attio.com/v2`. An object/list child reader first resolves its single configured slug or ID with an individual parent request, then fetches that parent's collection.
 
 | Resource | Pagination and filters |
 |---|---|
-| `objects` | Single collection request, then configured object selection |
+| `objects` | Single collection request retaining all accessible objects |
 | `object_attributes` | `limit` and `offset` query parameters; `show_archived=true` |
 | `records` | `limit` and `offset` in JSON body; no record filter or custom sort |
-| `lists` | Single collection request, then configured list selection |
+| `lists` | Single collection request retaining all accessible lists |
 | `list_attributes` | `limit` and `offset` query parameters; `show_archived=true` |
 | `entries` | `limit` and `offset` in JSON body; no entry filter or custom sort |
 | `notes` | `limit` and `offset` query parameters; no parent filter |
 | `tasks` | `limit` and `offset` query parameters; `sort=created_at:asc`; no completion filter |
 | `members` | Single collection request |
 
-Paginated reads start at offset zero, advance by the number of returned entities, and stop when a page is shorter than the requested limit. Each stream discovers its own parents, so running records alone does not depend on the objects stream having run first. The pipeline's stream array does not establish dependencies.
+Paginated reads use the ingestion plugin's `paginate()` helper: they start at offset zero, advance by the number of returned entities, and stop when a page is shorter than the requested limit. Each reader resolves only its configured object/list, so running People records does not depend on the objects catalog having run first. The pipeline's stream array does not establish dependencies.
 
 ## How the sync works
 
 <RegistryReference name="attio" section="sync" />
 
 1. The CLI loads the installed pipeline and selects streams by their tags.
-2. Each reader discovers accessible parents where needed, applies the configured selection, and fetches the collection pages.
+2. Each selected reader resolves its one configured object/list where needed and fetches that collection's pages.
 3. The client validates the response's `data` array and required entity IDs. Record `values` and entry `entry_values` must contain arrays.
 4. The reader wraps each entity with its source identity and relevant parent slug, then assigns a stable composite row ID.
 5. The runtime batches rows and writes them to ClickHouse. The journal records execution and load progress.
 6. SQL views project the raw records and reconcile repeated row IDs at query time with `FINAL`.
 
-### Full reads and freshness
+### Full reads and independent recovery
 
-All nine streams use full sync. Every run reads from the beginning, including a rerun after failure. The readers do not save pagination offsets or use an incremental modification cursor. A successful run can therefore show no checkpoint in `ingest status`; use the run outcome and destination queries to verify success.
+Every stream uses `fullSync()` and begins its next execution at offset zero. Attio's offsets describe positions in mutable collections and are not durable change cursors. A failed Companies reader therefore replays Companies independently of People; it does not maintain an outer loop over object types or a completed-parent ledger. The executor journal records execution and load completion, including successful empty reads, without custom provider checkpoint state.
+
+Child response workspace and parent IDs are checked against the reader's resolved object/list before rows are published. Adding a configured type creates a new stream; removing it stops future reads without removing existing rows. Every scheduled run rereads the selected collections, so edits remain observable.
+
+Upgrading from `0.1.2` to `0.2.0` changes the former combined records, object-attributes, entries, and list-attributes stream IDs to per-type/per-list IDs. Those streams begin with fresh journal progress; the raw table schemas, row IDs for the same `sourceId`, and views are unchanged. Installed files are not automatically overwritten by a newer registry release.
 
 The destination stores the latest **observed** entity. New observations replace earlier observations for the same row identity when ClickHouse reconciles versions. Freshness depends on the external schedule, scan duration, and successful API responses. There are no webhooks or continuous change capture in this integration.
 
@@ -263,7 +271,7 @@ The original entity lives under `data`, so custom provider fields cannot overwri
 
 ## Included people, company, and deal views
 
-The integration creates ordinary SQL views over `attio_records_raw FINAL`, filtered by `object_slug`. These views reuse the records stream; they do not make additional API requests.
+The integration creates ordinary SQL views over `attio_records_raw FINAL`, filtered by `object_slug`. These views project the collected record rows; they do not make additional API requests.
 
 <RegistryReference name="attio" section="views" />
 
@@ -366,7 +374,7 @@ bunx chkit ingest run --tag provider:attio --max-duration 3600 --json
 
 The scheduler supplies the project directory, credentials, runtime, cadence, and concurrency control. Run at most one ingestion process per project and ClickHouse target at a time, including runs that select different tags. Pipeline limits apply within one process and do not lock out another process.
 
-For a narrower run, select the records stream:
+For a narrower run, select all configured records streams:
 
 ```sh
 bunx chkit ingest list --tag provider:attio --tag resource:records
@@ -374,11 +382,11 @@ bunx chkit ingest run --tag provider:attio --tag resource:records --json
 bunx chkit ingest status --tag provider:attio --json
 ```
 
-Repeated tags use AND matching. With the default source ID, `--tag stream:attio.primary.records` selects the same records stream; a custom `sourceId` changes that derived tag.
+Repeated tags use AND matching. Add `--tag object:people` to select only People records. Its record stream carries `resource:records` and `object:people`; its attribute stream carries `resource:object_attributes` and `object:people`. With the default source ID, `--tag stream:attio.primary.records.people` selects the People record stream. List readers carry `list:<ref>` together with `resource:entries` or `resource:list_attributes`.
 
-Inspect the run's per-stream outcomes and error messages. `status` reports committed checkpoints rather than complete run history; full reads have no incremental bookmark. Keep the ingestion journal as durable operational state. After fixing a token, permission, or destination issue, rerun `ingest run`; the Attio reader starts its collection scan again.
+Inspect the run's per-stream outcomes and error messages. `status` reports committed execution state rather than complete run history. Keep the ingestion journal as durable operational state. After fixing a token, permission, or destination issue, rerun the affected stream; its collection starts at offset zero.
 
-Verify a known Attio record against its retained `raw.data`, update that record in a test workspace, rerun the sync, and confirm its view reflects the new observation. A row count alone does not establish full API coverage. Date-range backfill flags do not turn these full-read readers into historical or incremental readers; implementing those behaviors requires a source-specific strategy.
+Verify a known Attio record against its retained `raw.data`, update that record in a test workspace, rerun the sync, and confirm its view reflects the new observation. A row count alone does not establish full API coverage. These full-sync readers ignore date bounds and do not support date-range backfills; implementing historical selection requires a source-specific strategy.
 
 ## Coverage and consistency limits
 
@@ -387,7 +395,7 @@ Verify a known Attio record against its retained `raw.data`, update that record 
 | Source record deleted or merged | Previously observed row remains; no deletion or merge reconciliation |
 | Token loses access or a parent is deselected | Existing rows remain in ClickHouse |
 | Source changes during offset pagination | A scan may miss or repeat entities; it is not a provider snapshot |
-| Run stops after some batches | Loaded batches remain visible; the next run scans again |
+| Run stops after some batches | Loaded batches remain visible; the affected stream restarts its collection at offset zero |
 | Older source data loaded later | Later ingestion time wins; no source-version ordering |
 | Complete change history needed | Raw tables reconcile observations and do not form a permanent change log |
 | Meetings, call recordings, transcripts, emails, files, comments, or sequences needed | No readers are included for these resources |
@@ -400,14 +408,14 @@ Deleting or deselecting a source entity does not remove it from a view. Applicat
 
 | File | Responsibility |
 |---|---|
-| `config.ts` | Source identity, destination names, parent selection, page sizes |
-| `client.ts` | Authentication, response validation, pagination, row identity, request pacing |
+| `config.ts` | Source identity, destination names, explicit object/list references, page sizes |
+| `client.ts` | Authentication, response validation, single-parent lookup, pagination, row identity, request pacing |
 | `sources/objects.ts`, `sources/object-attributes.ts` | Object and attribute readers with their raw table schemas |
 | `sources/records.ts` | Record reader, raw records table, people/company/deal views |
 | `sources/lists.ts`, `sources/list-attributes.ts`, `sources/entries.ts` | List resource readers with their raw table schemas |
 | `sources/notes.ts`, `sources/tasks.ts`, `sources/members.ts` | One reader and raw table schema per resource |
 | `tests/attio.test.ts`, `tests/fixtures.ts` | Optional installed tests and mocked API responses |
-| `pipeline.ts` | Enabled streams, resource tags, retries, batching, concurrency |
+| `pipeline.ts` | Per-type/per-list streams, resource tags, retries, batching, concurrency |
 | `index.ts` | Exports that make the pipeline and schema objects discoverable |
 
 Remove a stream entry from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve existing tables under migration management. Removing a schema export changes the desired database schema and can generate a drop operation; review that migration separately.
@@ -428,6 +436,10 @@ bun test src/integrations/attio/tests/attio.test.ts
 The tests use fixture responses, a mocked HTTP client, and an in-memory destination. They exercise reader behavior without Attio credentials or a ClickHouse server. Edit the fixtures and assertions alongside customized readers. With `--path`, adjust the test command to the chosen installation directory.
 
 Repository-only packaging and live-database tests remain outside the installed test set. The manifest selects the portable tests explicitly.
+
+## Changelog
+
+<RegistryReference name="attio" section="changelog" />
 
 ## Related pages
 

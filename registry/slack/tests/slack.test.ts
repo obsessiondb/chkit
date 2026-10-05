@@ -1,34 +1,111 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { HttpError, definePipeline, runIngestion, selectStreams, type FetchContext, type SourceChunk } from '@chkit/plugin-ingest'
+import { HttpError, definePipeline, defineStream, runIngestion, selectStreams, type FetchContext, type ReadContext, type SourceChunk } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { classifySlackError, discoverChannels, readCollection, type SlackClientDeps } from '../client.js'
 import { slackConfig } from '../config.js'
 import * as definitions from '../index.js'
-import { slack } from '../pipeline.js'
+import { createSlackPipeline, slack } from '../pipeline.js'
 import { readChannels } from '../sources/channels.js'
 import { readUsers } from '../sources/users.js'
 import { readMessages } from '../sources/messages.js'
+import { messageScope, parseMessageState, slackMessageStrategy, type SlackMessageSelection, type SlackMessageState } from '../state.js'
 import { channel, fixtureDeps, parentMessage, replyMessage, standaloneMessage, user } from './fixtures.js'
 
 const readers: Record<string, (context: FetchContext, deps: SlackClientDeps) => AsyncIterable<SourceChunk>> = {
-  channels: readChannels, users: readUsers, messages: readMessages,
+  channels: readChannels, users: readUsers,
 }
 const originalConfig = { ...slackConfig }
+const fixtureNow = () => new Date('2023-11-15T00:00:00Z')
 
 afterEach(() => { Object.assign(slackConfig, originalConfig) })
 
 describe('Slack raw template', () => {
-  test('exports three raw destinations and full-read streams without credentials', () => {
+  test('exports three raw destinations and checkpointed messages without credentials', () => {
     const exported = Object.values(definitions)
     expect(exported).toContain(slack)
     expect(slack.streams).toHaveLength(3)
     expect(slack.streams.map((stream) => stream.destination.name)).toEqual(['slack_channels_raw', 'slack_users_raw', 'slack_messages_raw'])
     for (const stream of slack.streams) {
       expect(exported).toContain(stream.destination)
-      expect(stream.incremental.id).toBe('chkit.full_sync')
+      expect(stream.incremental.id).toBe(stream.id.endsWith('.messages') ? 'slack.message-ranges' : 'chkit.full_sync')
     }
+    expect(selectStreams([slack], ['provider:slack', 'resource:messages']).map(({ stream }) => stream.id)).toEqual(['slack.primary.messages'])
+  })
+
+  test('a pipeline binds installation identity and reader settings independently of later config edits', async () => {
+    const config = { ...slackConfig, sourceId: 'slack.secondary', channels: ['C1'], conversationTypes: ['public_channel'] as const,
+      includeReplies: false, pageSize: 37, messagePageSize: 12, requestIntervalMs: 7, messageIntervalMs: 11, historyFrom: '1699999999.000000' }
+    const expectedScope = messageScope('T1', config)
+    const requests: URL[] = [], waits: number[] = []
+    const defaults = fixtureDeps()
+    const deps = fixtureDeps((url, init) => { requests.push(url); return defaults.fetch(url.toString(), init) })
+    deps.wait = async (milliseconds) => { waits.push(milliseconds) }
+    const pipeline = createSlackPipeline(config, deps)
+    config.sourceId = 'changed'
+    config.channels.push('missing')
+    config.historyFrom = 'invalid'
+    slackConfig.sourceId = 'unrelated'
+    slackConfig.includeReplies = true
+    slackConfig.historyFrom = 'invalid'
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal, destination })
+    expect(result.ok, JSON.stringify(result)).toBe(true)
+    expect(result.streams.map((stream) => stream.streamId)).toEqual(['slack.secondary.channels', 'slack.secondary.users', 'slack.secondary.messages'])
+    expect(parseMessageState((await journal.readCheckpoint('slack.secondary.messages')).envelope?.state).scope).toBe(expectedScope)
+    expect(destination.tables.get('default.slack_messages_raw')?.[0]?.id).toBe(JSON.stringify(['slack.secondary', 'messages', 'T1', 'C1', parentMessage.ts]))
+    expect(destination.tables.get('default.slack_users_raw')?.[0]?.raw).toMatchObject({ source_id: 'slack.secondary' })
+    expect(requests.filter((url) => url.pathname === '/api/conversations.list' || url.pathname === '/api/users.list').every((url) => url.searchParams.get('limit') === '37')).toBe(true)
+    expect(requests.find((url) => url.pathname === '/api/conversations.history')?.searchParams.get('limit')).toBe('12')
+    expect(requests.find((url) => url.pathname === '/api/conversations.history')?.searchParams.get('oldest')).toBe('1699999998.999999')
+    expect(requests.some((url) => url.pathname === '/api/conversations.replies')).toBe(false)
+    expect(waits).toContain(7)
+    expect(waits).toContain(11)
+  })
+
+  test('a failed resource leaves the other resource streams selectable and able to commit', async () => {
+    const defaults = fixtureDeps()
+    const deps = fixtureDeps((url, init) => url.pathname === '/api/users.list'
+      ? Response.json({ ok: false, error: 'missing_scope', needed: 'users:read' }) : defaults.fetch(url.toString(), init))
+    const pipeline = createSlackPipeline(slackConfig, deps)
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal, destination })
+    expect(result.ok).toBe(false)
+    expect(result.streams.map((stream) => stream.outcome)).toEqual(['succeeded', 'failed', 'succeeded'])
+    expect(destination.tables.has('default.slack_channels_raw')).toBe(true)
+    expect(destination.tables.has('default.slack_users_raw')).toBe(false)
+    expect(destination.tables.has('default.slack_messages_raw')).toBe(true)
+    expect(parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state).active).toBeUndefined()
+    expect((await journal.readCheckpoint('slack.primary.users')).envelope).toBeUndefined()
+    expect(selectStreams([pipeline], ['resource:users']).map(({ stream }) => stream.id)).toEqual(['slack.primary.users'])
+  })
+
+  test('messages run before metadata streams and replay an unfinished page independently', async () => {
+    const calls: string[] = []
+    const defaults = fixtureDeps()
+    const deps = fixtureDeps((url, init) => { calls.push(url.pathname); return defaults.fetch(url.toString(), init) })
+    const pipeline = createSlackPipeline(slackConfig, deps)
+    const limited = { ...pipeline, streams: pipeline.streams.map((stream) => ({ ...stream, budget: { ...stream.budget, maxChunks: 2 } })) }
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const first = await runIngestion({ selected: selectStreams([limited], ['resource:messages']), backfill: undefined }, { now: fixtureNow, journal, destination })
+    expect(first.streams[0]?.outcome).toBe('budget_exhausted')
+    const pending = await journal.readCheckpoint('slack.primary.messages')
+    expect(parseMessageState(pending.envelope?.state).active?.latest).toBe('1700006400.000001')
+    expect(parseMessageState(pending.envelope?.state).active).not.toHaveProperty('threads')
+    expect(destination.tables.has('default.slack_channels_raw')).toBe(false)
+    expect(destination.tables.has('default.slack_users_raw')).toBe(false)
+    expect((await journal.readCheckpoint('slack.primary.channels')).version).toBe(0)
+    expect((await journal.readCheckpoint('slack.primary.users')).version).toBe(0)
+    calls.length = 0
+    expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:users']), backfill: undefined }, { now: fixtureNow, journal, destination })).ok).toBe(true)
+    expect(calls).toEqual(['/api/auth.test', '/api/users.list'])
+    expect(await journal.readCheckpoint('slack.primary.messages')).toEqual(pending)
+    calls.length = 0
+    expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:messages']), backfill: undefined }, { now: fixtureNow, journal, destination })).ok).toBe(true)
+    expect(calls).toEqual(['/api/auth.test', '/api/conversations.history', '/api/conversations.replies'])
+    expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage })
+    expect((await journal.readCheckpoint('slack.primary.channels')).version).toBe(0)
   })
 
   test('every stream preserves provider payloads and reruns publish edits under stable identities', async () => {
@@ -41,7 +118,7 @@ describe('Slack raw template', () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
     const request = { selected: selectStreams([pipeline], []), backfill: undefined }
-    const first = await runIngestion(request, { journal, destination })
+    const first = await runIngestion(request, { now: fixtureNow, journal, destination })
     expect(first.ok, JSON.stringify(first)).toBe(true)
     expect(first.streams.map((stream) => stream.rows)).toEqual([1, 2, 4])
     expect(destination.tables.size).toBe(3)
@@ -52,7 +129,7 @@ describe('Slack raw template', () => {
     expect(new Set(messages.map((row) => row.id)).size).toBe(3)
     expect(messages.find((row) => JSON.stringify(row.raw).includes('Edited discussion'))).toBeUndefined()
     changed = true
-    const second = await runIngestion(request, { journal, destination })
+    const second = await runIngestion(request, { now: fixtureNow, journal, destination })
     expect(second.ok, JSON.stringify(second)).toBe(true)
     const repeated = destination.tables.get('default.slack_messages_raw') ?? []
     const edited = repeated.find((row) => JSON.stringify(row.raw).includes('Edited discussion'))
@@ -71,8 +148,40 @@ describe('Slack raw template', () => {
       throw new Error(`Unexpected cursor ${cursor}`)
     })
     const pages = await collect(readCollection(context(), { method: 'conversations.list', field: 'channels', idField: 'id', pageSize: 2 }, deps))
-    expect(pages.flat().map((value) => value.id)).toEqual(['C1', 'C2'])
+    expect(pages.flatMap((page) => page.items).map((value) => value.id)).toEqual(['C1', 'C2'])
+    expect(pages.map((page) => page.next)).toEqual(['empty-next', 'final-next', undefined])
+    expect(pages.map((page) => page.items.length)).toEqual([0, 1, 1])
     expect(cursors).toEqual([null, 'empty-next', 'final-next'])
+  })
+
+  test('the channels reader yields a page before fetching the next selected conversation page', async () => {
+    let channelCalls = 0
+    const defaults = fixtureDeps()
+    const deps = fixtureDeps((url, init) => {
+      if (url.pathname !== '/api/conversations.list') return defaults.fetch(url.toString(), init)
+      channelCalls += 1
+      return Response.json({ ok: true, channels: [{ ...channel, id: channelCalls === 1 ? 'C1' : 'C2' }],
+        response_metadata: { next_cursor: channelCalls === 1 ? 'next' : '' } })
+    })
+    const iterator = readChannels(context(), deps)
+    const first = await iterator.next()
+    expect(first.done).toBe(false)
+    expect(first.value?.rows[0]?.id).toBe(JSON.stringify(['slack.primary', 'channels', 'T1', 'C1']))
+    expect(channelCalls).toBe(1)
+    const second = await iterator.next()
+    expect(second.done).toBe(false)
+    expect(second.value?.rows[0]?.id).toBe(JSON.stringify(['slack.primary', 'channels', 'T1', 'C2']))
+    expect(channelCalls).toBe(2)
+    expect((await iterator.next()).done).toBe(true)
+  })
+
+  test('channel discovery reports missing configured IDs after yielding accessible pages', async () => {
+    const deps = { ...fixtureDeps(), config: { ...slackConfig, channels: ['C1', 'missing'] } }
+    const iterator = readChannels(context(), deps)
+    const first = await iterator.next()
+    expect(first.done).toBe(false)
+    expect(first.value?.rows).toHaveLength(1)
+    await expect(iterator.next()).rejects.toThrow('Configured Slack channel "missing" was not found')
   })
 
   test('messages discover channels independently and paginate threads including the parent payload', async () => {
@@ -93,7 +202,9 @@ describe('Slack raw template', () => {
     const chunks = await collect(readMessages(context(), deps))
     expect(chunks.flatMap((chunk) => chunk.rows).map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: { ...parentMessage, text: 'Latest parent' } })
     expect(chunks.flatMap((chunk) => chunk.rows)).toHaveLength(3)
-    expect(chunks.every((chunk) => !('state' in chunk) && !('id' in chunk))).toBe(true)
+    expect(chunks.filter((chunk) => chunk.rows.length > 0).every((chunk) => chunk.state === undefined)).toBe(true)
+    expect(chunks.filter((chunk) => chunk.rows.length === 0).every((chunk) => chunk.state !== undefined)).toBe(true)
+    expect(chunks.filter((chunk) => chunk.rows.length > 0).every((chunk) => chunk.id === undefined)).toBe(true)
     const messageRequests = requests.filter((url) => ['conversations.history', 'conversations.replies'].some((method) => url.pathname.endsWith(method)))
     expect(messageRequests.map((url) => url.searchParams.get('limit'))).toEqual(['15', '15', '15'])
     expect(messageRequests.at(-1)?.searchParams.get('cursor')).toBe('reply-next')
@@ -116,14 +227,15 @@ describe('Slack raw template', () => {
     expect(first[0]?.id).toBe(JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', standaloneMessage.ts]))
   })
 
-  test('finishes every history page before opening threads and scans each root once', async () => {
+  test('finishes a history page and its replies before moving the timestamp frontier', async () => {
     const requests: string[] = []
     const defaults = fixtureDeps()
     const deps = fixtureDeps((url, init) => {
       if (url.pathname === '/api/conversations.history') {
-        const cursor = url.searchParams.get('cursor')
-        requests.push(`history:${cursor ?? 'first'}`)
-        return Response.json({ ok: true, messages: [parentMessage], response_metadata: { next_cursor: cursor === null ? 'history-final' : '' } })
+        const latest = url.searchParams.get('latest')
+        const resumed = latest === parentMessage.ts
+        requests.push(`history:${resumed ? 'resumed' : 'first'}`)
+        return Response.json({ ok: true, messages: [resumed ? { ...standaloneMessage, ts: '1699999999.000003' } : parentMessage], has_more: !resumed })
       }
       if (url.pathname === '/api/conversations.replies') {
         requests.push('replies')
@@ -133,7 +245,7 @@ describe('Slack raw template', () => {
     })
     const chunks = await collect(readMessages(context(), deps))
     expect(chunks.flatMap((chunk) => chunk.rows)).toHaveLength(4)
-    expect(requests).toEqual(['history:first', 'history:history-final', 'replies'])
+    expect(requests).toEqual(['history:first', 'replies', 'history:resumed'])
   })
 
   test('history-only selection avoids thread API requests', async () => {
@@ -172,6 +284,8 @@ describe('Slack raw template', () => {
     })
     deps.wait = async (milliseconds, signal) => { waits.push(milliseconds); signal.throwIfAborted() }
     const iterator = readMessages(context(controller.signal), deps)
+    const opening = await iterator.next()
+    expect(opening.value?.rows).toHaveLength(0)
     const first = await iterator.next()
     expect(first.value?.rows).toHaveLength(1)
     controller.abort(new Error('fixture cancelled'))
@@ -240,6 +354,21 @@ describe('Slack raw template', () => {
     expect(calls).toBe(2)
   })
 
+  test.each(['users', 'messages'])('%s pagination has one executor retry budget per request', async (resource) => {
+    let calls = 0
+    const defaults = fixtureDeps()
+    const method = resource === 'users' ? 'users.list' : 'conversations.history'
+    const deps = fixtureDeps((url, init) => {
+      if (url.pathname !== `/api/${method}`) return defaults.fetch(url.toString(), init)
+      calls += 1
+      return Response.json({ ok: false, error: 'internal_error' })
+    })
+    const result = await runFixture(deps, [resource])
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.outcome).toBe('failed')
+    expect(calls).toBe(2)
+  })
+
   test('HTTP 200 rate-limit errors retain Retry-After and retry under executor authority', async () => {
     let calls = 0
     const defaults = fixtureDeps()
@@ -252,7 +381,7 @@ describe('Slack raw template', () => {
     })
     const journal = createMemoryJournal()
     const pipeline = fixturePipeline(deps, ['users'])
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination() })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal, destination: createMemoryDestination() })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
@@ -269,7 +398,7 @@ describe('Slack raw template', () => {
     const fixture = fixturePipeline(deps, ['messages'])
     const pipeline = definePipeline({ ...fixture, streams: fixture.streams.map((stream) => ({ ...stream, batchSize: 1 })) })
     const destination = createMemoryDestination()
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: createMemoryJournal(), destination })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal: createMemoryJournal(), destination })
     expect(result.ok).toBe(false)
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(result.streams[0]?.error).toContain('missing_scope')
@@ -290,7 +419,7 @@ describe('Slack raw template', () => {
     })
     const journal = createMemoryJournal()
     const pipeline = fixturePipeline(deps, ['users'])
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination() })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal, destination: createMemoryDestination() })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
@@ -312,6 +441,7 @@ function fixturePipeline(deps: SlackClientDeps, selectedResources?: readonly str
     ...slack,
     retry: { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false },
     streams: slack.streams.filter((stream) => selectedResources === undefined || selectedResources.includes(stream.id.split('.').at(-1) ?? '')).map((stream) => {
+      if (stream.id.endsWith('.messages')) return defineStream({ ...stream, incremental: slackMessageStrategy, read: (context) => readMessages(context, deps) })
       const read = readers[stream.id.split('.').at(-1) ?? '']
       if (!read) throw new Error(`No fixture reader for ${stream.id}`)
       return { ...stream, read: (context: FetchContext) => read(context, deps) }
@@ -321,11 +451,12 @@ function fixturePipeline(deps: SlackClientDeps, selectedResources?: readonly str
 
 async function runFixture(deps: SlackClientDeps, selectedResources: readonly string[], destination = createMemoryDestination()) {
   const pipeline = fixturePipeline(deps, selectedResources)
-  return runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: createMemoryJournal(), destination })
+  return runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { now: fixtureNow, journal: createMemoryJournal(), destination })
 }
 
-function context(signal = new AbortController().signal): FetchContext {
-  return { signal, attempt: async (operation) => operation(signal) }
+function context(signal = new AbortController().signal): ReadContext<SlackMessageSelection, SlackMessageState> {
+  return { signal, attempt: async (operation) => operation(signal), streamId: 'slack.primary.messages', state: undefined,
+    cutoff: fixtureNow(), selection: slackMessageStrategy.plan({ cutoff: fixtureNow(), state: undefined, range: undefined }) }
 }
 
 async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {

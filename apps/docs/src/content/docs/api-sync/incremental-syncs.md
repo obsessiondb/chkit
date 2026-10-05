@@ -42,7 +42,7 @@ const tickets = defineStream({
       },
     })
     for await (const page of pages) {
-      yield { rows: rawRows(page, (ticket) => ticket.id) }
+      yield { rows: rawRows(page.items, (ticket) => ticket.id) }
     }
   },
 })
@@ -65,10 +65,10 @@ Use `timestampWindow({ from })` when `start` and `overlapMs` do not express the 
 
 Choose `cursorState` when the provider guarantees resumption across runs. `parse` validates the saved state. `context.state` and `context.selection` expose it to the reader; neither contains uncommitted progress.
 
-This standalone fixture demonstrates a provider with stable, increasing change sequence numbers. Replace the fixture read with a documented provider operation inside `context.attempt`:
+This standalone fixture demonstrates a provider with stable, increasing change sequence numbers. `paginate` owns each request attempt and exposes its candidate checkpoint in metadata. Replace the fixture body of `fetchPage` with a documented provider operation, forwarding its signal:
 
 ```ts
-import { cursorState, definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { cursorState, definePipeline, defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'
 
 const changes = [
   { sequence: 1, id: 'a', subject: 'Opened' },
@@ -90,16 +90,24 @@ const tickets = defineStream({
     },
   }),
   async *read(context) {
-    let after = context.state ?? 0
-    while (true) {
-      const page = await context.attempt(async (signal) => {
+    const pages = paginate({
+      context,
+      initial: context.state ?? 0,
+      label: 'read changes',
+      fetchPage: async (after = 0, signal) => {
         signal.throwIfAborted()
-        return changes.filter((change) => change.sequence > after).slice(0, 2)
-      }, { label: 'read changes' })
-      const last = page.at(-1)
-      if (!last) return
-      yield { rows: rawRows(page, (ticket) => ticket.id), state: last.sequence }
-      after = last.sequence
+        const remaining = changes.filter((change) => change.sequence > after)
+        const items = remaining.slice(0, 2)
+        const checkpoint = items.at(-1)?.sequence ?? after
+        return {
+          items,
+          next: remaining.length > items.length ? checkpoint : undefined,
+          metadata: { checkpoint },
+        }
+      },
+    })
+    for await (const page of pages) {
+      yield { rows: rawRows(page.items, (ticket) => ticket.id), state: page.metadata?.checkpoint }
     }
   },
 })
@@ -108,6 +116,15 @@ export const fixture = definePipeline({ id: 'fixture', streams: [tickets] })
 ```
 
 `state` is the complete resume state safe after all rows through that chunk are saved. It can be a scalar or an object such as `{ snapshot, cursor }`. Omit it if the source cannot guarantee a safe boundary. An empty chunk with state can record progress when no destination rows are needed.
+
+`next` and checkpoint metadata have separate jobs. For a provider sync-token protocol, the page adapter can return:
+
+| Page | `next` request continuation | `metadata.checkpoint` candidate |
+| --- | --- | --- |
+| More pages remain | `'page-2'` | `{ syncToken: 'sync-old', pageToken: 'page-2' }` |
+| Final page, possibly empty | `undefined` | `{ syncToken: 'sync-new' }` |
+
+Start a resumed pagination sequence with the saved `pageToken` and keep its input `syncToken` fixed. Only the acknowledged terminal candidate replaces that sync token and clears the page position. Construct fresh complete checkpoint objects; metadata alone does not commit progress. [Google Calendar](/integrations/google-calendar/) implements this protocol with `paginate`, `cursorState`, and provider-specific expiry recovery.
 
 A pagination token may expire between runs. Confirm expiration, snapshot lifetime, ordering, and terminal-token behavior before storing one. Resumption must not skip unfinished pages or repeatedly reuse an expired cursor.
 
