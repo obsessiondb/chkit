@@ -11,10 +11,9 @@ export interface SlackConfig {
   messagePageSize: number
   requestIntervalMs: number
   messageIntervalMs: number
-  /** Earliest message to bootstrap/reconcile; retain the exact timestamp string. */
-  historyFrom: string
+  /** Optional bootstrap lower bound; undefined starts with the recent overlap window. */
+  historyFrom?: string
   overlapMs: number
-  reconcileIntervalMs: number
 }
 
 /** Runtime reader settings; destination names are defined when the schemas load. */
@@ -34,7 +33,6 @@ export const slackConfig: SlackConfig = {
   messagePageSize: 15,
   requestIntervalMs: 3_000,
   messageIntervalMs: 60_000,
-  historyFrom: '0.000000',
+  historyFrom: undefined,
   overlapMs: 86_400_000,
-  reconcileIntervalMs: 7 * 86_400_000,
 }

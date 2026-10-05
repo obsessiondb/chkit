@@ -30,7 +30,7 @@ Use an external scheduler to repeat ingestion, with one ingestion process per pr
 
 ## Included resources
 
-One installation pipeline contains independent streams for channels, users, and messages. Channels and users read their complete selected resource on every run. Messages bootstrap retained history and then read checkpointed time ranges. Each reader discovers its authenticated workspace through `auth.test`; messages independently discover conversations. A channel is an individual entity inside the messages resource, so channel and thread traversal stays within that stream.
+One installation pipeline contains independent streams for channels, users, and messages. Channels and users read their complete selected resource on every run. Messages bootstrap the recent 24 hours by default and then read checkpointed overlapping time ranges. Each reader discovers its authenticated workspace through `auth.test`; messages independently discover conversations. A channel is an individual entity inside the messages resource, so channel and thread traversal stays within that stream.
 
 | Stream tag | Default raw table | Required scopes for defaults |
 |---|---|---|
@@ -40,11 +40,11 @@ One installation pipeline contains independent streams for channels, users, and 
 
 - **Channels:** conversation metadata returned by [`conversations.list`](https://docs.slack.dev/reference/methods/conversations.list/), including archived conversations when returned. No separate `conversations.info` expansion or membership request.
 - **Users:** complete objects returned by [`users.list`](https://docs.slack.dev/reference/methods/users.list/), including profiles, bots, and deleted-user flags.
-- **Messages:** all accessible retained [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/) pages for selected conversations. With `includeReplies: true`, roots with `reply_count > 0` also fetch every `conversations.replies` page. Replies and their parents share the raw messages table.
+- **Messages:** the selected timestamp range of accessible [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/) pages for selected conversations. With `includeReplies: true`, roots with `reply_count > 0` also fetch every `conversations.replies` page. Replies and their parents share the raw messages table.
 
 Messages preserve blocks, attachments, reactions, metadata, and file references when returned. File references do not download files. No separate files, reactions, pins, canvases, search, or events reader is included.
 
-Replies are individual Message objects with their own `ts` and a `thread_ts` parent reference, so they use the messages stream and table. The reader does not assemble a conversation array inside each parent or enrich messages with channel/user records. Run messages before, after, or without the metadata streams; it discovers conversation IDs independently and checkpoints its own pending replies. Join users, channels, and thread parents later in ClickHouse using source, workspace, channel, and native message keys.
+Replies are individual Message objects with their own `ts` and a `thread_ts` parent reference, so they use the messages stream and table. The reader does not assemble a conversation array inside each parent or enrich messages with channel/user records. Run messages before, after, or without the metadata streams; it discovers conversation IDs independently and checkpoints each completed history page after its replies finish. Join users, channels, and thread parents later in ClickHouse using source, workspace, channel, and native message keys.
 
 ## Choose conversations and request pacing
 
@@ -69,7 +69,7 @@ Slack documents one request per minute and 15 objects per page for new commercia
 
 The pipeline runs one stream, fetch, and load at a time. Requests have a 30-second timeout and use the ingestion executor's retry and cancellation context. The pipeline permits five retries after the initial attempt, with exponential backoff from 1 to 60 seconds. HTTP `429` honors `Retry-After`; Slack rate-limit responses and transient server codes also retry. Authentication and permission errors, including Slack `ok: false` responses, fail visibly instead of becoming empty datasets.
 
-History and thread reads can take hours or days at conservative defaults. Restrict conversations and selected streams, and choose `--max-duration` for the workload. The CLI default is 3600 seconds. Interrupted message reads resume a saved timestamp boundary and retained thread work; metadata reads restart.
+History and thread reads can take hours or days at conservative defaults. Restrict conversations and selected streams, and choose `--max-duration` for the workload. The CLI default is 3600 seconds. Interrupted message reads resume a completed timestamp boundary and replay the incomplete history page with its replies; metadata reads restart. A history page and all its replies must fit the execution budget, including its completion marker. Reduce messagePageSize or increase the budget if that unit repeatedly cannot finish.
 
 To read only messages:
 
@@ -109,17 +109,19 @@ There are no packaged typed views. Add SQL projections in the project's schema f
 
 ## Incremental messages and recovery
 
-The first messages run reads from `historyFrom` (`0.000000` by default) to a fixed execution cutoff. Later runs begin at the completed watermark minus `overlapMs` (one day by default). `reconcileIntervalMs` (seven days) periodically triggers a full historical scan to revisit old edits and roots that gained late replies. Newly discovered channels bootstrap their retained history even during an incremental run.
+The first messages run reads the recent 24 hours to a fixed execution cutoff. Set `historyFrom` to an exact timestamp string for a broader initial bootstrap; its default is `undefined`. Later runs begin at the completed watermark minus `overlapMs` (24 hours by default), so gaps between runs remain eligible. Newly discovered channels use the same selected range. There is no periodic historical reconciliation.
 
-Checkpoints retain exact timestamp strings, the authenticated workspace and query scope, fixed bounds, channel position, and pending thread work. History progresses newest first; replies progress oldest first. Each loaded history page retains its thread work before proceeding to older history, keeping the pending queue bounded to one page. Restart finishes those threads before continuing. Temporary cursors are used only to cross empty API pages; expiration restarts that unfinished timestamp interval. Empty terminal pages also commit progress.
+Checkpoints retain exact timestamp strings, the authenticated workspace and query scope, fixed bounds, channel position, and the last completed history-page frontier. History progresses newest first; replies progress oldest first using temporary local boundaries. A history page and all of its selected replies must finish before an empty checkpoint marker advances history. Interrupted pages replay from their original boundary, including any child rows already loaded. Temporary API cursors never enter durable state; expiry replays that unfinished timestamp interval once. Empty terminal pages also commit progress.
 
-`historyFrom`, `overlapMs`, and `reconcileIntervalMs` belong in `config.ts`. Zero reconciliation interval means every completed run starts a full scan. Keep source identity and selection stable; changing the account, channels, types, or reply policy fails against existing state. Use a new source ID for a deliberate separate installation. Version 0.2.0 preserves existing raw tables and row IDs. Earlier full readers had no saved provider state; the first upgraded messages run bootstraps once.
+One history page and all its replies must fit a fresh execution's duration and chunk budget, including the completion marker. A budget that always stops before that marker will keep replaying the same page. Reduce `messagePageSize`, raise the budget, or narrow the selected workload. The integration deliberately accepts page replay instead of maintaining durable per-thread or per-reply checkpoints.
+
+Keep source identity and selection stable; changing the account, channels, types, reply policy, bootstrap lower bound, or overlap fails against existing state. Use a new source ID for a deliberate separate installation. The message strategy is version 2; incompatible saved strategy versions require an explicit migration or a new stream identity. Version 0.2.0 preserves raw tables and row IDs. Earlier released full readers had no saved provider state; their first upgraded messages run bootstraps once.
 
 The destination stores the latest **observed** payload per identity. Deleted messages, deselected conversations, and data made inaccessible remain in ClickHouse. Loaded batches stay visible when a run fails; there is no atomic snapshot replacement or rollback. Changes during pagination may cause misses or repeated observations. Slack retention, permissions, and token access determine historical coverage.
 
-The integration has no deletion reconciliation, permanent edit log, webhooks, or continuous change capture. Recent overlap alone does not capture all old edits or late replies; periodic full reconciliation catches those still retained and accessible. Deleted messages no longer returned by Slack remain stored.
+Replies are fetched only for roots returned in the selected history range, up to the fixed upper cutoff. Old edits and late replies attached to roots outside that range are outside normal coverage. The integration has no historical reconciliation, deletion reconciliation, permanent edit log, webhooks, or continuous change capture.
 
-Messages support isolated date-bound backfills with `--backfill <id> --from <date> --to <date>`. Unfinished backfills retain their original bounds; changing those bounds requires another ID. Channels and users remain full reads and do not interpret date ranges. As with scheduled reads, historical raw observations loaded later can replace newer observations because replacement uses ingestion time.
+Messages support isolated date-bound backfills with `--backfill <id> --from <date> --to <date>`. Bounds select root/history timestamps; child replies for those roots are read up to the upper cutoff. Unfinished backfills retain their original bounds; changing those bounds requires another ID. An omitted upper bound freezes the original execution cutoff. Channels and users remain full reads and do not interpret date ranges. Historical raw observations loaded later can replace newer observations because replacement uses ingestion time.
 
 ## Customize the source
 
@@ -142,6 +144,6 @@ For a custom install path, point the command at its `tests/slack.test.ts`. Tests
 
 ## Smoke check
 
-After a migration and successful run, inspect `chkit ingest status --tag provider:slack` and query `SELECT count() FROM default.slack_messages_raw FINAL`. Compare a known message and an older thread with their stored payloads. Add a reply to that old thread, then run a messages-only backfill with a new ID and `--from` before the root's timestamp to verify the reply is collected. A normal incremental rerun revisits old roots during the next scheduled full reconciliation. Row counts alone do not establish complete live API coverage.
+After a migration and successful run, inspect `chkit ingest status --tag provider:slack` and query `SELECT count() FROM default.slack_messages_raw FINAL`. Compare a known message and an older thread with their stored payloads. Add a reply to that old thread, then run a messages-only backfill with a new ID and `--from` before the root's timestamp to verify the reply is collected. Normal incremental runs revisit roots within the selected overlap; an old root outside that range requires an explicit backfill. Row counts alone do not establish complete live API coverage.
 
 The [Slack integration guide](https://chkit.obsessiondb.com/integrations/slack/) covers installation, SQL queries, scheduling, and recovery.

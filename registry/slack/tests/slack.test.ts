@@ -81,7 +81,7 @@ describe('Slack raw template', () => {
     expect(selectStreams([pipeline], ['resource:users']).map(({ stream }) => stream.id)).toEqual(['slack.primary.users'])
   })
 
-  test('messages run before metadata streams and resume replies without advancing another resource', async () => {
+  test('messages run before metadata streams and replay an unfinished page independently', async () => {
     const calls: string[] = []
     const defaults = fixtureDeps()
     const deps = fixtureDeps((url, init) => { calls.push(url.pathname); return defaults.fetch(url.toString(), init) })
@@ -91,7 +91,8 @@ describe('Slack raw template', () => {
     const first = await runIngestion({ selected: selectStreams([limited], ['resource:messages']), backfill: undefined }, { now: fixtureNow, journal, destination })
     expect(first.streams[0]?.outcome).toBe('budget_exhausted')
     const pending = await journal.readCheckpoint('slack.primary.messages')
-    expect(parseMessageState(pending.envelope?.state).active?.threads).toEqual([{ root: parentMessage.ts }])
+    expect(parseMessageState(pending.envelope?.state).active?.latest).toBe('1700006400.000001')
+    expect(parseMessageState(pending.envelope?.state).active).not.toHaveProperty('threads')
     expect(destination.tables.has('default.slack_channels_raw')).toBe(false)
     expect(destination.tables.has('default.slack_users_raw')).toBe(false)
     expect((await journal.readCheckpoint('slack.primary.channels')).version).toBe(0)
@@ -102,7 +103,7 @@ describe('Slack raw template', () => {
     expect(await journal.readCheckpoint('slack.primary.messages')).toEqual(pending)
     calls.length = 0
     expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:messages']), backfill: undefined }, { now: fixtureNow, journal, destination })).ok).toBe(true)
-    expect(calls).toEqual(['/api/auth.test', '/api/conversations.replies'])
+    expect(calls).toEqual(['/api/auth.test', '/api/conversations.history', '/api/conversations.replies'])
     expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage })
     expect((await journal.readCheckpoint('slack.primary.channels')).version).toBe(0)
   })
@@ -201,7 +202,8 @@ describe('Slack raw template', () => {
     const chunks = await collect(readMessages(context(), deps))
     expect(chunks.flatMap((chunk) => chunk.rows).map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: { ...parentMessage, text: 'Latest parent' } })
     expect(chunks.flatMap((chunk) => chunk.rows)).toHaveLength(3)
-    expect(chunks.every((chunk) => 'state' in chunk)).toBe(true)
+    expect(chunks.filter((chunk) => chunk.rows.length > 0).every((chunk) => chunk.state === undefined)).toBe(true)
+    expect(chunks.filter((chunk) => chunk.rows.length === 0).every((chunk) => chunk.state !== undefined)).toBe(true)
     expect(chunks.filter((chunk) => chunk.rows.length > 0).every((chunk) => chunk.id === undefined)).toBe(true)
     const messageRequests = requests.filter((url) => ['conversations.history', 'conversations.replies'].some((method) => url.pathname.endsWith(method)))
     expect(messageRequests.map((url) => url.searchParams.get('limit'))).toEqual(['15', '15', '15'])
@@ -225,7 +227,7 @@ describe('Slack raw template', () => {
     expect(first[0]?.id).toBe(JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', standaloneMessage.ts]))
   })
 
-  test('finishes retained thread work before resuming history from its timestamp frontier', async () => {
+  test('finishes a history page and its replies before moving the timestamp frontier', async () => {
     const requests: string[] = []
     const defaults = fixtureDeps()
     const deps = fixtureDeps((url, init) => {

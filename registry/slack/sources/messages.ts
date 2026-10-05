@@ -15,15 +15,14 @@ export async function* readMessages(
   const teamId = await getWorkspace(context, deps)
   const scope = messageScope(teamId, config)
   if (context.state && context.state.scope !== scope) throw new IngestConfigError('Slack checkpoint belongs to a different workspace or query. Restore the configuration or use a distinct sourceId.')
-  let state: SlackMessageState = context.state ?? { scope, watermark: config.historyFrom, knownChannels: [] }
+  const initialFrom = context.selection.from ?? config.historyFrom ?? formatTimestamp(max(0n, timestampMicros(context.selection.to) - BigInt(config.overlapMs) * 1_000n))
+  let state: SlackMessageState = context.state ?? { scope, watermark: initialFrom }
   if (!state.active) {
     const channels = (await discoverChannels(context, deps)).map((channel) => entityId(channel, 'id')).sort()
     const to = context.selection.to
-    const full = state.lastFullAt === undefined || timestampMicros(to) - timestampMicros(state.lastFullAt) >= BigInt(config.reconcileIntervalMs) * 1_000n
-    const from = context.selection.from ?? (full ? config.historyFrom : formatTimestamp(max(timestampMicros(config.historyFrom), timestampMicros(state.watermark) - BigInt(config.overlapMs) * 1_000n)))
+    const from = context.selection.from ?? (context.state ? formatTimestamp(max(config.historyFrom === undefined ? 0n : timestampMicros(config.historyFrom), timestampMicros(state.watermark) - BigInt(config.overlapMs) * 1_000n)) : initialFrom)
     if (timestampMicros(from) > timestampMicros(to)) throw new IngestConfigError('Slack selection starts after its cutoff.')
-    state = { ...state, active: { kind: context.selection.backfill ? 'backfill' : full ? 'full' : 'incremental', from, to, channels, channelIndex: 0,
-      latest: formatTimestamp(timestampMicros(to) + 1n), historyDone: false, threads: [],
+    state = { ...state, active: { from, to, channels, channelIndex: 0, latest: formatTimestamp(timestampMicros(to) + 1n),
       requestedFrom: context.selection.from, requestedTo: context.selection.requestedTo } }
     yield marker(state, 'window-open')
   } else if (context.selection.backfill && (context.selection.from !== state.active.requestedFrom || context.selection.requestedTo !== state.active.requestedTo)) {
@@ -35,41 +34,35 @@ export async function* readMessages(
     const work = state.active
     const channelId = work.channels[work.channelIndex]
     if (!channelId) throw new IngestConfigError('Slack checkpoint has no current channel.')
-    const thread = work.threads[0]
-    if (thread) {
-      const after = thread.after ?? formatTimestamp(max(0n, timestampMicros(thread.root) - 1n))
-      const page = await readTimePage(context, { channel: channelId, ts: thread.root, oldest: after,
-        latest: formatTimestamp(timestampMicros(work.to) + 1n), inclusive: 'false', include_all_metadata: 'true' }, 'conversations.replies', deps)
-      const replies = page.items.filter((item) => entityId(item, 'ts') !== thread.root)
-      assertRange(replies, timestampMicros(after) + 1n, timestampMicros(work.to))
-      const frontier = replies.length ? formatTimestamp(replies.reduce((latest, item) => max(latest, timestampMicros(entityId(item, 'ts'))), timestampMicros(after))) : undefined
-      if (page.hasMore && frontier === undefined) throw new IngestConfigError('Slack thread pagination has no safe timestamp progress.')
-      const threads = page.hasMore ? [{ root: thread.root, after: frontier }, ...work.threads.slice(1)] : work.threads.slice(1)
-      state = { ...state, active: { ...work, threads } }
-      yield page.items.length ? { rows: toSlackRows(page.items, 'messages', teamId, 'ts', channelId, config.sourceId), state } : marker(state, 'thread-complete')
-      continue
-    }
-    if (work.historyDone) {
-      state = { ...state, active: { ...work, channelIndex: work.channelIndex + 1, latest: formatTimestamp(timestampMicros(work.to) + 1n), historyDone: false } }
-      yield marker(state, 'channel-complete')
-      continue
-    }
-    const from = work.kind === 'incremental' && !state.knownChannels.includes(channelId) ? config.historyFrom : work.from
-    const page = await readTimePage(context, { channel: channelId, oldest: formatTimestamp(max(0n, timestampMicros(from) - 1n)), latest: work.latest,
+    const page = await readTimePage(context, { channel: channelId, oldest: formatTimestamp(max(0n, timestampMicros(work.from) - 1n)), latest: work.latest,
       inclusive: 'false', include_all_metadata: 'true' }, 'conversations.history', deps)
-    assertRange(page.items, timestampMicros(from), timestampMicros(work.latest) - 1n)
+    assertRange(page.items, timestampMicros(work.from), timestampMicros(work.latest) - 1n)
     const latest = page.items.length ? formatTimestamp(page.items.reduce((oldest, item) => min(oldest, timestampMicros(entityId(item, 'ts'))), timestampMicros(work.latest))) : work.latest
     if (page.hasMore && (page.items.length === 0 || timestampMicros(latest) >= timestampMicros(work.latest))) throw new IngestConfigError('Slack history pagination has no safe timestamp progress.')
     const roots = config.includeReplies ? page.items.filter((item) => typeof item.reply_count === 'number' && item.reply_count > 0)
       .map((item) => typeof item.thread_ts === 'string' ? entityId(item, 'thread_ts') : entityId(item, 'ts')) : []
-    state = { ...state, active: { ...work, latest, historyDone: !page.hasMore, threads: [...new Set(roots)].map((root) => ({ root })) } }
-    // The page retains its bounded child queue before the history frontier advances durably.
-    yield page.items.length ? { rows: toSlackRows(page.items, 'messages', teamId, 'ts', channelId, config.sourceId), state } : marker(state, 'history-complete')
+    if (page.items.length) yield { rows: toSlackRows(page.items, 'messages', teamId, 'ts', channelId, config.sourceId) }
+    for (const root of new Set(roots)) {
+      let after = formatTimestamp(max(0n, timestampMicros(root) - 1n))
+      while (true) {
+        const replies = await readTimePage(context, { channel: channelId, ts: root, oldest: after,
+          latest: formatTimestamp(timestampMicros(work.to) + 1n), inclusive: 'false', include_all_metadata: 'true' }, 'conversations.replies', deps)
+        const children = replies.items.filter((item) => entityId(item, 'ts') !== root)
+        assertRange(children, timestampMicros(after) + 1n, timestampMicros(work.to))
+        if (replies.hasMore && children.length === 0) throw new IngestConfigError('Slack thread pagination has no safe timestamp progress.')
+        if (replies.items.length) yield { rows: toSlackRows(replies.items, 'messages', teamId, 'ts', channelId, config.sourceId) }
+        if (!replies.hasMore) break
+        after = formatTimestamp(children.reduce((frontier, item) => max(frontier, timestampMicros(entityId(item, 'ts'))), timestampMicros(after)))
+      }
+    }
+    // Only a fully read history page and all its replies may advance durable history.
+    context.signal.throwIfAborted()
+    state = { ...state, active: { ...work, channelIndex: work.channelIndex + (page.hasMore ? 0 : 1),
+      latest: page.hasMore ? latest : formatTimestamp(timestampMicros(work.to) + 1n) } }
+    yield marker(state, 'history-page-complete')
   }
   if (state.active) {
-    const { to, kind, channels } = state.active
-    state = { scope, watermark: formatTimestamp(max(timestampMicros(state.watermark), timestampMicros(to))),
-      knownChannels: [...new Set([...state.knownChannels, ...channels])].sort(), lastFullAt: kind === 'full' ? to : state.lastFullAt }
+    state = { scope, watermark: formatTimestamp(max(timestampMicros(state.watermark), timestampMicros(state.active.to))) }
     yield marker(state, 'window-complete')
   }
 }

@@ -3,7 +3,7 @@
   "name": "slack",
   "type": "registry:item",
   "title": "Slack",
-  "description": "Editable raw Slack readers with resumable message ranges, retained thread work, and historical reconciliation.",
+  "description": "Editable raw Slack readers with recent overlapping message ranges and checkpoints after complete history pages and replies.",
   "dependencies": [
     "@chkit/core@^0.2.0-beta.10",
     "@chkit/plugin-ingest@^0.2.0-beta.10"
@@ -84,12 +84,11 @@
         {
           "version": "0.2.0",
           "changes": [
-            "Checkpoint message history with fixed overlapping time windows and completed channel and thread progress.",
-            "Bootstrap newly discovered channels and periodically reconcile retained history for older edits and late replies.",
-            "Preserve raw tables and scoped row identities, validate checkpoint scope, and include failure-recovery fixtures.",
-            "Bind installation configuration to one pipeline with independently selectable channels, users, and messages streams; reuse plugin pagination for streaming metadata pages.",
-            "Keep replies as raw messages with native thread references, and verify messages-first execution and recovery independently of metadata streams.",
-            "Reuse full paginate pages and native has_more metadata for metadata reads and temporary message cursors; preserve durable timestamp frontiers and bounded expired-cursor replay."
+            "Use one installation pipeline with independently selectable channels, users, and messages streams and unchanged raw tables and scoped record identities.",
+            "Default messages to a recent 24-hour bootstrap, then overlap the completed watermark by 24 hours; allow explicit historyFrom bootstrap coverage and isolated bounded backfills.",
+            "Checkpoint fixed windows and complete history pages after all their selected replies load; replay an interrupted page without durable thread queues or child cursors.",
+            "Reuse full paginate pages and native has_more metadata with exact timestamp frontiers and bounded temporary-cursor replay; reject incompatible strategy state explicitly.",
+            "Document that old edits and late replies on roots outside the selected range are outside normal coverage; remove periodic historical reconciliation and include portable recovery fixtures."
           ]
         },
         {
@@ -159,7 +158,7 @@
           "name": "messages",
           "title": "Messages and thread replies",
           "table": "slack_messages_raw",
-          "description": "Raw messages and replies selected by checkpointed timestamp windows, with retained thread work and periodic full historical reconciliation. Slack timestamps remain exact strings.",
+          "description": "Raw messages selected by recent overlapping timestamp windows, plus replies belonging to selected roots. History-page progress commits after every selected reply is loaded. Old roots outside the range are not revisited; timestamps remain exact strings.",
           "scopes": [
             "channels:read",
             "channels:history"
@@ -198,8 +197,8 @@
       },
       "views": [],
       "sync": {
-        "description": "Channels and users are full reads. Messages bootstrap retained history, then read overlapping time ranges. Each page checkpoints its timestamp frontier and pending threads after writes. Weekly full reconciliation revisits old roots and edits; temporary Slack cursors are never persisted.",
-        "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler, with one process per project/target. Interrupted message windows resume their fixed bounds and pending threads; users/channels restart full reads. Conservative message pacing remains 15 items and one request per minute.",
+        "description": "Channels and users are full reads. Messages initially select the recent 24 hours unless historyFrom is set, then overlap the completed watermark by 24 hours. Each history page and all its selected replies finish before its timestamp frontier commits. Temporary cursors and child progress are not persisted; old-root replies and old edits outside the selected range are outside normal coverage.",
+        "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler, with one process per project/target. Interrupted message windows keep their fixed bounds and replay the incomplete history page; users/channels restart full reads. One history page and all its replies must fit the execution budget. Conservative message pacing remains 15 items and one request per minute.",
         "deletions": "Later observations replace stable row IDs, but deleted, inaccessible, or deselected records remain. The integration does not consume Slack events, propagate deletions, or maintain a complete change log."
       }
     }

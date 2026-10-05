@@ -1,33 +1,28 @@
 import { IngestConfigError, type IncrementalStrategy } from '@chkit/plugin-ingest'
 import { slackConfig, type SlackReaderConfig } from './config.js'
 
-export interface PendingThread { root: string; after?: string }
 export interface MessageWork {
-  kind: 'full' | 'incremental' | 'backfill'
   from: string
   to: string
   channels: string[]
   channelIndex: number
   latest: string
-  historyDone: boolean
-  threads: PendingThread[]
   requestedFrom?: string
   requestedTo?: string
 }
 export interface SlackMessageState {
   scope: string
   watermark: string
-  knownChannels: string[]
-  lastFullAt?: string
   active?: MessageWork
 }
 export interface SlackMessageSelection { from?: string; to: string; requestedTo?: string; backfill: boolean }
 
 export function createSlackMessageStrategy(config: SlackReaderConfig): IncrementalStrategy<SlackMessageState, SlackMessageSelection> {
   return {
-    id: 'slack.message-ranges', version: 1, parseState: parseMessageState,
+    id: 'slack.message-ranges', version: 2, parseState: parseMessageState,
     plan({ cutoff, range }) {
-      validateMessageConfig(config)
+      if (config.historyFrom !== undefined) timestampMicros(config.historyFrom)
+      if (!Number.isSafeInteger(config.overlapMs) || config.overlapMs < 0) throw new IngestConfigError('Slack overlapMs must be a non-negative safe integer.')
       return { from: range?.from ? dateTimestamp(range.from) : undefined, to: dateTimestamp(range?.to ?? cutoff),
         requestedTo: range?.to ? dateTimestamp(range.to) : undefined, backfill: range !== undefined }
     },
@@ -38,8 +33,7 @@ export const slackMessageStrategy = createSlackMessageStrategy(slackConfig)
 
 export function messageScope(teamId: string, config: SlackReaderConfig = slackConfig): string {
   return JSON.stringify([config.sourceId, teamId, config.channels ? [...config.channels].sort() : null,
-    [...config.conversationTypes].sort(), config.includeReplies, config.historyFrom,
-    config.overlapMs, config.reconcileIntervalMs])
+    [...config.conversationTypes].sort(), config.includeReplies, config.historyFrom ?? null, config.overlapMs])
 }
 
 export function timestampMicros(value: string): bigint {
@@ -60,49 +54,29 @@ export function dateTimestamp(value: Date): string {
 
 export function parseMessageState(raw: unknown): SlackMessageState {
   if (!isObject(raw) || typeof raw.scope !== 'string') throw new IngestConfigError('Invalid Slack checkpoint scope.')
+  if ('knownChannels' in raw || 'lastFullAt' in raw) throw new IngestConfigError('Slack message checkpoint uses the former retained-work format. Migrate it explicitly or use a new sourceId for strategy version 2.')
   const watermark = readTimestamp(raw.watermark)
-  const knownChannels = readIds(raw.knownChannels)
-  const lastFullAt = raw.lastFullAt === undefined ? undefined : readTimestamp(raw.lastFullAt)
   let active: MessageWork | undefined
   if (raw.active !== undefined) {
     const work = raw.active
     if (!isObject(work) || typeof work.channelIndex !== 'number' || !Number.isSafeInteger(work.channelIndex)
-      || typeof work.historyDone !== 'boolean' || !Array.isArray(work.threads)) throw new IngestConfigError('Invalid Slack active work.')
-    const kind = work.kind
-    if (kind !== 'full' && kind !== 'incremental' && kind !== 'backfill') throw new IngestConfigError('Invalid Slack work kind.')
-    const channels = readIds(work.channels)
-    if (work.channelIndex < 0 || work.channelIndex > channels.length) throw new IngestConfigError('Invalid Slack channel position.')
+      || !Array.isArray(work.channels) || !work.channels.every((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+      || new Set(work.channels).size !== work.channels.length) throw new IngestConfigError('Invalid Slack active work.')
+    if ('threads' in work || 'historyDone' in work || 'kind' in work) throw new IngestConfigError('Slack message checkpoint uses the former retained-work format. Migrate it explicitly or use a new sourceId for strategy version 2.')
+    if (work.channelIndex < 0 || work.channelIndex > work.channels.length) throw new IngestConfigError('Invalid Slack channel position.')
     const from = readTimestamp(work.from), to = readTimestamp(work.to), latest = readTimestamp(work.latest)
-    if (timestampMicros(from) > timestampMicros(to) || timestampMicros(latest) > timestampMicros(to) + 1n) throw new IngestConfigError('Invalid Slack window bounds.')
-    const threads = work.threads.map((thread: unknown) => {
-      if (!isObject(thread)) throw new IngestConfigError('Invalid Slack pending thread.')
-      const root = readTimestamp(thread.root)
-      const after = thread.after === undefined ? undefined : readTimestamp(thread.after)
-      if (timestampMicros(root) > timestampMicros(to) || (after !== undefined && (timestampMicros(after) < timestampMicros(root) || timestampMicros(after) > timestampMicros(to)))) throw new IngestConfigError('Invalid Slack thread frontier.')
-      return { root, after }
-    })
-    if (new Set(threads.map((thread) => thread.root)).size !== threads.length) throw new IngestConfigError('Duplicate Slack pending threads.')
-    active = { kind, from, to, channels, channelIndex: work.channelIndex, latest, historyDone: work.historyDone, threads,
+    if (timestampMicros(from) > timestampMicros(to) || timestampMicros(latest) <= timestampMicros(from) - 1n
+      || timestampMicros(latest) > timestampMicros(to) + 1n) throw new IngestConfigError('Invalid Slack window bounds.')
+    active = { from, to, channels: [...work.channels], channelIndex: work.channelIndex, latest,
       requestedFrom: work.requestedFrom === undefined ? undefined : readTimestamp(work.requestedFrom),
       requestedTo: work.requestedTo === undefined ? undefined : readTimestamp(work.requestedTo) }
   }
-  return { scope: raw.scope, watermark, knownChannels, lastFullAt, active }
+  return { scope: raw.scope, watermark, active }
 }
 
-function validateMessageConfig(config: SlackReaderConfig): void {
-  timestampMicros(config.historyFrom)
-  for (const value of [config.overlapMs, config.reconcileIntervalMs]) {
-    if (!Number.isSafeInteger(value) || value < 0) throw new IngestConfigError('Slack overlap and reconciliation intervals must be non-negative safe integers.')
-  }
-}
 function readTimestamp(value: unknown): string {
   if (typeof value !== 'string') throw new IngestConfigError('Invalid Slack checkpoint timestamp.')
   timestampMicros(value)
   return value
-}
-function readIds(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.every((item: unknown): item is string => typeof item === 'string' && item.length > 0)
-    || new Set(value).size !== value.length) throw new IngestConfigError('Invalid Slack checkpoint channel IDs.')
-  return [...value]
 }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
