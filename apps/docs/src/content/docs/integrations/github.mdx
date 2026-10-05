@@ -1,55 +1,73 @@
 ---
 title: Integrating ClickHouse with GitHub
-description: Install the editable GitHub raw ingestion example.
+description: Install independent GitHub issue, pull-request, discussion, review, commit, and stargazer streams into raw ClickHouse tables.
 ---
 
-The GitHub registry item copies a small API reader and raw ClickHouse tables into a chkit project.
+The GitHub registry item installs one pipeline with independently selected resource streams and separate raw ClickHouse destinations.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
 ## Install
 
 ```sh
-bunx chkit add github
+bunx chkit add github --with-tests
 bunx chkit check
 bunx chkit generate --name add_github
 bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:github
 ```
 
-Set `GITHUB_TOKEN` in the runtime environment before the ingestion run. Edit `githubConfig.repositories` in `src/integrations/github/config.ts` to select repositories. `pipeline.ts` groups independent issues and stargazers streams for each repository in one pipeline; `sources/` contains the resource readers and raw table declarations. The named pipeline and table exports remain in `index.ts`.
-
-The pipeline factory binds source configuration and injectable HTTP dependencies. Keep `sourceId` stable for one installation; its stream IDs own the checkpoints. Table schemas are edited in their source modules before migration.
+Set `GITHUB_TOKEN` before the ingestion run. For private repositories, the supported setup grants repository access with **Issues: read**, **Pull requests: read**, and **Contents: read**, including GraphQL commit reads. A field-level permission minimum has not been verified. Edit `githubConfig.repositories`, source identity, and reader settings in `src/integrations/github/config.ts`. Raw tables are declared in their `sources/` modules before schema discovery and migration. Native JSON requires ClickHouse 25.3 or later; schema imports do not call GitHub.
 
 <RegistryReference name="github" section="resources" />
 
-## Sync behavior
+## Pipeline and streams
 
-Issues use `since` with update-time ordering, a fixed local upper cutoff, and five minutes of overlap. GitHub has no server-side upper timestamp filter. The checkpoint advances only after the complete issue window and destination writes succeed; failed windows replay from their lower bound. The reader follows provider `Link` URLs and includes paginated issue comments plus pull request detail, reviews, review comments, commits and files. Provider caps are reflected in raw `_chkit_context` completeness fields.
+Each configured repository contributes independent streams for issues, issue comments, pull requests, PR conversation comments, PR review comments, PR reviews, PR commits, and stargazers. Issues exclude pull requests. The streams share one installation pipeline and retain their own journal progress; stream order creates no dependency.
 
-Stargazers use the built-in `fullSync` strategy; the journal records completion even for an empty read. Both readers use `paginate` for request retries and continuation cycle detection. Removed stars and deleted issues remain stored. Live pagination and child-only updates require periodic reconciliation or a durable webhook companion. [GitHub issue filters](https://docs.github.com/en/rest/issues/issues#list-repository-issues) and [pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api) describe the API behavior.
+Child-resource streams discover their own parents through the API. Selecting PR comments or commits works even when the pull-requests stream has never run. Individual PRs and issues remain records within those resource streams.
 
 ```sh
-bunx chkit ingest run --tag provider:github --tag resource:issues --backfill reconcile-2026-10-04 --from 2008-01-01
+bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_requests
+bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_commits
+```
+
+Repeated tags use AND matching. The default pipeline runs streams sequentially with `maxStreams: 1`; filtered runs give each resource its own schedule and execution budget. `createGitHubPipeline(config, deps)` snapshots reader settings and injectable HTTP dependencies. Changing `sourceId` creates new stream identities; runtime reader settings do not redefine the exported raw tables.
+
+## Raw data and joins
+
+Raw payloads use `{ repository, data }`. Issue comments add `issue_number`; PR child rows add `pull_number`. Provider response fields stay under `data`. PR commits retain only `data.sha` and `data.message`, with repository/PR join keys. Their reader paginates the [GraphQL commit connection](https://docs.github.com/en/graphql/reference/pulls#pullrequest), rejects repeated SHAs, and checks stable totals and distinct terminal counts before completing the stream. Changed files and patches are not fetched.
+
+Join resources in ClickHouse through repository and issue/PR number. PR metadata lives in its own destination, and comments, reviews, and commits are separate rows. Conversation comments and diff-review comments remain distinct collections. Existing issue/stargazer provider-ID formats are preserved.
+
+## Sync behavior
+
+Issues and comments use independent updated-time windows with five minutes of overlap and a fixed local upper cutoff. Child comments on old issues and PRs remain eligible because parent discovery does not filter by parent update times. Review comments use the repository-wide update feed and retain their PR number. The checkpoint advances only after the selected stream's complete window and destination writes succeed; failed windows replay from their lower bound. See [issue filtering](https://docs.github.com/en/rest/issues/issues#list-repository-issues), [issue comments](https://docs.github.com/en/rest/issues/comments#list-issue-comments), and [review comments](https://docs.github.com/en/rest/pulls/comments#list-review-comments-in-a-repository).
+
+Pull requests, reviews, commits, and stargazers use `fullSync()`. Each invocation reads its selected collection from the beginning, and the library journals successful completion, including empty results. REST Link continuations and GraphQL cursors use `paginate()` for request retries and cycle detection; no mutable page offset or parent scan ledger is saved.
+
+Deleted records, removed stars, and commits removed from PRs remain stored. Live pagination does not guarantee a source snapshot. Historical replay refreshes current observations outside the timestamp overlap:
+
+```sh
+bunx chkit ingest run --tag provider:github --tag resource:issue_comments --backfill reconcile-2026-10-05 --from 2008-01-01
 bunx chkit ingest status --tag provider:github --json
 ```
 
-Historical replay reads current observations, not historical versions. Use a new backfill ID for each full reconciliation. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for token permissions and [registry installation](/cli/add/).
+Use a new backfill ID for each reconciliation. Full-sync resources ignore date bounds. A failed stream does not advance another stream's progress. Schedule finite ingestion runs externally, with one process per ClickHouse target at a time.
 
-Select a repository/resource stream independently:
+## Existing datasets
 
-```sh
-bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:issues
-```
+Version `0.2.0` adds six raw destinations and changes payloads to `{ repository, data }`. Existing issue and stargazer row IDs stay unchanged. Retained flat payloads may coexist with new envelopes until they are reread or migrated.
 
-The default pipeline executes streams sequentially with `maxStreams: 1`. Separate filtered runs give each stream its own schedule and execution budget; a failed stream does not advance another stream's progress.
+Existing combined-reader datasets may include PR rows in `github_issues_raw` and child arrays inside parent payloads. Those rows remain after the new streams run. Archive the legacy dataset or deliberately migrate classifications and child records into the separate destinations. Normal ingestion does not remove legacy PR rows from the issues table; application queries must account for retained shapes during migration.
 
-## Test the reader
+## Test the readers
 
 ```sh
-bunx chkit add github --with-tests
 bun test src/integrations/github/tests/basic.test.ts
 ```
+
+Fixtures cover isolated resource selection, join keys, narrow commit data, recent comments on old parents, pagination, failures, and journal completion without GitHub credentials.
 
 ## Changelog
 
@@ -59,3 +77,4 @@ bun test src/integrations/github/tests/basic.test.ts
 
 - [App registry](/integrations/)
 - [Ingestion plugin](/plugins/ingest/)
+- [Ingestion CLI](/cli/ingest/)

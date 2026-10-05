@@ -1,7 +1,7 @@
 export interface GitHubConfig {
   /** Stable, non-secret stream prefix for this installation. */
   sourceId: string
-  /** Each repository creates independent issues and stargazers streams. */
+  /** Each repository creates eight independent resource streams with separate raw tables. */
   repositories: readonly string[]
   start: Date
   overlapMs: number
