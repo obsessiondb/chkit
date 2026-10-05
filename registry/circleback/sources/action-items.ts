@@ -11,13 +11,13 @@ export const circleback_actionItemsRaw = rawTable({ database: circlebackConfig.d
 export async function* readActionItems(context: FetchContext, deps: CirclebackClientDeps) {
   for (const status of statuses) {
     for await (const page of readCirclebackPages(context, { path: '/action-items', query: { assigneeType: 'Anyone', status } }, deps)) {
-      for (const item of page) {
+      for (const item of page.items) {
         if (item.status !== status || !Array.isArray(item.meetingIds) ||
           !item.meetingIds.every((id: unknown) => typeof id === 'string' && id.trim())) {
           throw new IngestConfigError('Circleback action item has an unexpected status or invalid meeting IDs.')
         }
       }
-      yield { rows: toCirclebackRows(page.map(tagNames), (item) => numericId(item.id, 'action item'), deps.config.sourceId) }
+      yield { rows: toCirclebackRows(page.items.map(tagNames), (item) => numericId(item.id, 'action item'), deps.config.sourceId) }
     }
   }
 }

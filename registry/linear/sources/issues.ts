@@ -28,7 +28,7 @@ export async function* readIssues(context: ReadContext<TimestampRange, Timestamp
     query, select: (data) => data.issues, label: 'issues', window: context.selection,
     variables: { from: context.selection.from.toISOString(), to: context.selection.to.toISOString() },
   }, deps)) {
-    for (const issue of page) {
+    for (const issue of page.items) {
       const labels = await completeLabels(context, issue, deps)
       yield { rows: rawRows([{ ...issue, labels }], linearId) }
     }
@@ -43,7 +43,7 @@ async function completeLabels(context: FetchContext, issue: LinearObject, deps: 
     for await (const page of readLinearPages(context, {
       query: labelsQuery, variables: { id: linearId(issue) }, initial: first.next, label: 'issue labels',
       select: (data) => requireLinearObject(data.issue, 'label parent issue').labels,
-    }, deps)) labels.push(...page.map(labelName))
+    }, deps)) labels.push(...page.items.map(labelName))
   }
   return labels
 }

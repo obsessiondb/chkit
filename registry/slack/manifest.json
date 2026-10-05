@@ -88,7 +88,8 @@
             "Bootstrap newly discovered channels and periodically reconcile retained history for older edits and late replies.",
             "Preserve raw tables and scoped row identities, validate checkpoint scope, and include failure-recovery fixtures.",
             "Bind installation configuration to one pipeline with independently selectable channels, users, and messages streams; reuse plugin pagination for streaming metadata pages.",
-            "Keep replies as raw messages with native thread references, and verify messages-first execution and recovery independently of metadata streams."
+            "Keep replies as raw messages with native thread references, and verify messages-first execution and recovery independently of metadata streams.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
           ]
         },
         {

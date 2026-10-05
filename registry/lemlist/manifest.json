@@ -95,7 +95,8 @@
             "Hydrate complete same-resource contacts in bounded ID batches and export all campaign leads rather than using the nonpaginating 500-record list.",
             "Independently discover campaigns, contacts, and inbox users; paginate accessible message history with markAsRead=false and preserve native records in scoped envelopes.",
             "Use ordinary full-sync completion and safe replay for six resources without reliable modification filters; validate continuations, totals, empty completion, and source/destination recovery.",
-            "Add five raw tables with source/parent-scoped row identities and portable fixtures; preserve version 0.1.0 history and document additive migration, polling, and deletion limits."
+            "Add five raw tables with source/parent-scoped row identities and portable fixtures; preserve version 0.1.0 history and document additive migration, polling, and deletion limits.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
           ]
         },
         {

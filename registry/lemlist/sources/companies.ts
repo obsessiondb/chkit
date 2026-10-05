@@ -7,6 +7,6 @@ export const lemlist_companiesRaw = rawTable({ database: lemlistConfig.database,
 
 export async function* readCompanies(context: FetchContext, deps: LemlistClientDeps) {
   for await (const page of readPages(context, 'companies', undefined, deps)) {
-    yield { rows: toLemlistRows(page, deps) }
+    yield { rows: toLemlistRows(page.items, deps) }
   }
 }

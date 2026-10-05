@@ -57,7 +57,7 @@ export async function readCollectionPage(context: FetchContext, request: Collect
 /** Discover independently in each reader; pipeline stream order is not a dependency. */
 export async function discoverChannels(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps): Promise<SlackEntity[]> {
   const channels: SlackEntity[] = []
-  for await (const page of readChannelPages(context, deps)) channels.push(...page)
+  for await (const page of readChannelPages(context, deps)) channels.push(...page.items)
   return channels
 }
 
@@ -74,9 +74,9 @@ export async function* readChannelPages(context: FetchContext, deps: SlackClient
     method: 'conversations.list', field: 'channels', idField: 'id',
     query: { types: config.conversationTypes.join(','), exclude_archived: 'false' },
   }, deps)) {
-    const channels = selected === undefined ? page : page.filter((channel) => selected.includes(entityId(channel, 'id')))
+    const channels = selected === undefined ? page.items : page.items.filter((channel) => selected.includes(entityId(channel, 'id')))
     for (const channel of channels) missing.delete(entityId(channel, 'id'))
-    if (channels.length > 0) yield channels
+    yield { ...page, items: channels }
   }
   for (const id of missing) {
     throw new IngestConfigError(`Configured Slack channel "${id}" was not found or is not accessible for conversationTypes.`)

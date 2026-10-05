@@ -9,7 +9,7 @@ export async function* readActivities(context: ReadContext<TimestampRange, Times
   for (let from = context.selection.from; from < context.selection.to;) {
     const to = new Date(Math.min(from.getTime() + deps.config.intervalMs, context.selection.to.getTime()))
     for await (const page of readPages(context, 'activities', { from, to }, deps)) {
-      yield { rows: rawRows(page, (item) => item._id) }
+      yield { rows: rawRows(page.items, (item) => item._id) }
     }
     // Only an exhausted interval is a safe frontier. Its mutable offsets restart at zero.
     const watermark = new Date(Math.max(to.getTime(), Date.parse(context.state?.watermark ?? to.toISOString()))).toISOString()

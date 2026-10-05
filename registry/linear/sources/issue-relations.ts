@@ -15,5 +15,5 @@ export const linear_issueRelationsRaw = rawTable({ database: 'default', name: 'l
 export async function* readIssueRelations(context: ReadContext<undefined, undefined>, deps: LinearClientDeps) {
   for await (const page of readLinearPages(context, {
     query, select: (data) => data.issueRelations, label: 'issue relations',
-  }, deps)) yield { rows: rawRows(page, linearId) }
+  }, deps)) yield { rows: rawRows(page.items, linearId) }
 }

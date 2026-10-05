@@ -1,9 +1,11 @@
 import { expect, test } from 'bun:test'
-import { IngestConfigError, runIngestion, selectStreams } from '@chkit/plugin-ingest'
+import { IngestConfigError, runIngestion, selectStreams, type FetchContext, type Page } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { createLinearPipeline, linearPipeline } from '../index.js'
 import { linearConfig, type LinearConfig } from '../config.js'
+import type { LinearObject } from '../client.js'
+import { readLinearPages } from '../sources/common.js'
 
 const cutoff = new Date('2026-01-02T00:00:00Z')
 const updatedAt = '2026-01-01T12:00:00Z'
@@ -76,6 +78,27 @@ test('each resource runs alone and reversing stream order preserves the same obs
       .toEqual(combined.tables.get(`default.linear_${resource}_raw`)?.map(({ id, raw }) => ({ id, raw })))
     expect(calls).toHaveLength(resource === 'issue_history' ? 2 : 1)
   }
+})
+
+test('Linear page adapters preserve continuations and empty terminal pages', async () => {
+  const signal = new AbortController().signal
+  const context: FetchContext = { signal, attempt: (operation) => operation(signal) }
+  const pages: Page<LinearObject, string>[] = []
+  const afters: unknown[] = []
+  for await (const page of readLinearPages(context, {
+    query: 'query Comments($after: String) { comments(first: 100, after: $after) { nodes { id updatedAt } pageInfo { hasNextPage endCursor } } }',
+    select: (data) => data.comments, label: 'comments', window: { from: new Date(0), to: cutoff },
+  }, {
+    token: () => 'fixture', fetch: async (_url, init) => {
+      const body: GraphqlRequest = JSON.parse(String(init.body))
+      afters.push(body.variables.after)
+      return response('comments', body.variables.after === 'next' ? [comment] : [],
+        body.variables.after === null ? 'next' : body.variables.after === 'next' ? 'terminal' : null)
+    },
+  })) pages.push(page)
+  expect(afters).toEqual([null, 'next', 'terminal'])
+  expect(pages.map((page) => page.items)).toEqual([[], [comment], []])
+  expect(pages.map((page) => page.next)).toEqual(['next', 'terminal', undefined])
 })
 
 test('comment-only edits use their own update window without discovering or depending on old issues', async () => {
@@ -395,7 +418,7 @@ test('cyclic root and nested pagination fails permanently without replaying a wh
     const selected = request(pipeline, resource).selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const result = await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok, name).toBe(false)
-    expect(afters).toEqual(name === 'IssueLabels' ? ['a', 'b', 'a'] : [null, 'a', 'b'])
+    expect(afters).toEqual(name === 'IssueLabels' ? ['a', 'b'] : [null, 'a', 'b'])
     expect((await journal.readCheckpoint(`linear.${resource}`)).lastSuccessSeq).toBe(0)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
   }

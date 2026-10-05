@@ -8,7 +8,7 @@ export const lemlist_campaignLeadsRaw = rawTable({ database: lemlistConfig.datab
 export async function* readCampaignLeads(context: FetchContext, deps: LemlistClientDeps) {
   // Own complete campaign discovery: old campaigns can gain leads without changing their creation date.
   for await (const campaigns of readPages(context, 'campaigns', undefined, deps)) {
-    for (const campaign of campaigns) {
+    for (const campaign of campaigns.items) {
       // The normal lead list has a 500-row cap and no continuation. This endpoint explicitly exports all states.
       const leads = await context.attempt(async (signal) => requireItems(
         await requestLemlist(`/v2/campaigns/${encodeURIComponent(campaign._id)}/export/leads`, { state: 'all', format: 'json' }, signal, deps),

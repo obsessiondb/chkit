@@ -8,9 +8,9 @@ export const lemlist_inboxMessagesRaw = rawTable({ database: lemlistConfig.datab
 export async function* readInboxMessages(context: FetchContext, deps: LemlistClientDeps) {
   // Discover all current contacts independently; recent parent/activity watermarks cannot cover late replies.
   for await (const contacts of readPages(context, 'contacts', undefined, deps)) {
-    for (const contact of contacts) {
+    for (const contact of contacts.items) {
       for await (const page of readInboxPages(context, { contactId: contact._id }, deps)) {
-        yield { rows: toLemlistRows(page, deps, { contact_id: contact._id }) }
+        yield { rows: toLemlistRows(page.items, deps, { contact_id: contact._id }) }
       }
     }
   }

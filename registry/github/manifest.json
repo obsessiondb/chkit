@@ -92,7 +92,8 @@
             "Sync issues and editable comments through overlapping updated-time windows; advance each stream watermark only after its destination acknowledgement.",
             "Separate issues, issue comments, pull requests, PR conversation comments, review comments, reviews, commits, and stargazers into independently selectable raw streams for every configured repository.",
             "Store repository and parent join keys beside provider data; retain only commit SHA and message through paginated GraphQL commit connections, and leave joins to ClickHouse.",
-            "Use one installation pipeline with configuration snapshots, injectable requests, shared pagination, and fullSync where no reliable change filter exists; existing mixed or combined observations require deliberate data migration."
+            "Use one installation pipeline with configuration snapshots, injectable requests, shared pagination, and fullSync where no reliable change filter exists; existing mixed or combined observations require deliberate data migration.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
           ]
         },
         {

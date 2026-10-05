@@ -4,6 +4,8 @@ Write TypeScript readers to load application API data into ClickHouse with [chki
 
 The executor records progress after writes succeed. A retry can reread rows from the last committed checkpoint.
 
+`paginate()` yields complete `{ items, next, metadata? }` pages, including empty terminal pages. Read rows from `page.items`; use `next` for request continuation and explicitly map checkpoint metadata into a chunk's `state` with `cursorState`. The executor commits that state after the rows are saved. This replaces the previous item-array return type; existing readers must use `page.items`.
+
 ```ts
 import { defineConfig } from '@chkit/core'
 import { ingest } from '@chkit/plugin-ingest'

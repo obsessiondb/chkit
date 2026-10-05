@@ -30,11 +30,11 @@ export async function* readIssueHistory(context: ReadContext<undefined, undefine
   for await (const parents of readLinearPages(context, {
     query: parentsQuery, select: (data) => data.issues, label: 'history parents',
   }, deps)) {
-    for (const issue of parents) {
+    for (const issue of parents.items) {
       for await (const page of readLinearPages(context, {
         query: historyQuery, variables: { id: linearId(issue) }, label: 'issue history',
         select: (data) => requireLinearObject(data.issue, 'history parent issue').history,
-      }, deps)) yield { rows: rawRows(page, linearId) }
+      }, deps)) yield { rows: rawRows(page.items, linearId) }
     }
   }
 }

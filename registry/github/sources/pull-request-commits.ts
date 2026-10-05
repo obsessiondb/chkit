@@ -21,7 +21,7 @@ const commitsQuery = `query PullRequestCommits($owner: String!, $repo: String!, 
 export async function* readPullRequestCommits(context: FetchContext, repo: string, config: GitHubConfig, deps: GitHubClientDeps) {
   const [owner, name] = repo.split('/')
   for await (const pulls of readPullPages(context, repo, config, deps)) {
-    for (const pull of pulls) {
+    for (const pull of pulls.items) {
       const number = githubNumber(pull, 'number')
       let expectedCount: number | undefined
       const seenShas = new Set<string>()
@@ -59,7 +59,7 @@ export async function* readPullRequestCommits(context: FetchContext, repo: strin
         },
       })
       for await (const page of pages) {
-        yield { rows: toGitHubRows(page, repo, (commit) => commit.sha, { pull_number: number }) }
+        yield { rows: toGitHubRows(page.items, repo, (commit) => commit.sha, { pull_number: number }) }
       }
     }
   }

@@ -847,7 +847,7 @@ describe('paginate', () => {
             cursors.push(cursor)
             return { items: [], next: 'same' }
           },
-        })) yield { rows: page }
+        })) yield { rows: page.items }
       },
     })
     const journal = createMemoryJournal()

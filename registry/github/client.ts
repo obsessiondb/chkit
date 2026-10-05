@@ -42,19 +42,19 @@ export async function* readIssuePages(context: FetchContext, repo: string, confi
   for await (const page of readGitHubPages(context, { path: `/repos/${repo}/issues`, params: {
     state: 'all', sort: 'updated', direction: 'asc', ...(window ? { since: window.from.toISOString() } : {}),
   } }, config, deps)) {
-    const issues = page.filter((item) => {
+    const issues = page.items.filter((item) => {
       githubNumber(item, 'number')
       if (item.pull_request !== undefined) return false
       return window === undefined || updatedItems([item], window).length > 0
     })
-    if (issues.length > 0) yield issues
+    yield { ...page, items: issues }
   }
 }
 
 /** GitHub has no since filter for PR metadata: list the current collection in full. */
 export async function* readPullPages(context: FetchContext, repo: string, config: GitHubConfig, deps: GitHubClientDeps) {
   for await (const page of readGitHubPages(context, { path: `/repos/${repo}/pulls`, params: { state: 'all', sort: 'updated', direction: 'asc' } }, config, deps)) {
-    for (const pull of page) githubNumber(pull, 'number')
+    for (const pull of page.items) githubNumber(pull, 'number')
     yield page
   }
 }

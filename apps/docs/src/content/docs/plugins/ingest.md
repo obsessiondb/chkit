@@ -81,12 +81,15 @@ const ticketStream = defineStream({
         if (cursor) url.searchParams.set('cursor', cursor)
         const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${process.env.HELPDESK_TOKEN}` } })
         if (!response.ok) throw await HttpError.fromResponse(response)
-        const body = await response.json()
+        const body = await response.json() as {
+          data: Array<{ id: string; updated_at: string }>
+          next_cursor: string | null
+        }
         return { items: body.data, next: body.next_cursor ?? undefined }
       },
     })
-    for await (const items of pages) {
-      yield { rows: items.map((item) => ({ id: item.id, updated_at: item.updated_at, raw: JSON.stringify(item) })) }
+    for await (const page of pages) {
+      yield { rows: page.items.map((item) => ({ id: item.id, updated_at: item.updated_at, raw: JSON.stringify(item) })) }
     }
   },
 })
@@ -96,6 +99,8 @@ export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream]
 
 Add `ingestionColumns` to custom destination tables. The loader fills `_chkit_batch_id` and `_chkit_run_id`; ClickHouse sets `_chkit_ingested_at` at the physical insert.
 
+`paginate` returns complete pages shaped as `{ items, next, metadata? }`, including empty and terminal pages. Use `page.items` for rows. Pass checkpoint candidates from metadata explicitly to a yielded chunk's `state` when using `cursorState`; metadata itself is not persisted. See [Readers and pagination](/api-sync/readers/#pages-and-checkpoint-metadata).
+
 Batch identity decides whether a retry is deduplicated. By default it includes a content hash of the rows, which prefers a possible duplicate over suppressing rows that changed between attempts; a field like `synced_at: new Date()` therefore defeats retry deduplication. When a chunk covers a stable source interval, declare it with `id` (for example `yield { rows, id: \`page:${cursor}\` }`): the chunk then becomes its own write unit and its identity ignores row content.
 
 ## Landing raw objects
@@ -104,7 +109,7 @@ Retain raw objects when the query shape may change and storage is affordable. Ma
 
 ```ts
 import { view } from '@chkit/core'
-import { defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { HttpError, defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'
 
 export const rawTickets = rawTable({ database: 'crm', name: 'tickets_raw' })
 
@@ -124,7 +129,24 @@ const ticketStream = defineStream({
   id: 'helpdesk.tickets',
   destination: rawTickets,
   async *read(context) {
-    for await (const page of listTickets(context)) yield { rows: rawRows(page, (ticket) => ticket.id) }
+    const pages = paginate({
+      context,
+      fetchPage: async (cursor: string | undefined, signal) => {
+        const url = new URL('https://api.example.com/tickets')
+        if (cursor) url.searchParams.set('cursor', cursor)
+        const response = await fetch(url, {
+          signal,
+          headers: { Authorization: `Bearer ${process.env.HELPDESK_TOKEN}` },
+        })
+        if (!response.ok) throw await HttpError.fromResponse(response)
+        const body = await response.json() as {
+          data: Array<{ id: string; [key: string]: unknown }>
+          next_cursor: string | null
+        }
+        return { items: body.data, next: body.next_cursor ?? undefined }
+      },
+    })
+    for await (const page of pages) yield { rows: rawRows(page.items, (ticket) => ticket.id) }
   },
 })
 ```

@@ -8,7 +8,7 @@ export const circleback_meetingTranscriptsRaw = rawTable({ database: circlebackC
 /** Discover every eligible meeting here: old meetings can gain transcripts without metadata changes. */
 export async function* readMeetingTranscripts(context: FetchContext, deps: CirclebackClientDeps) {
   for await (const page of readCirclebackPages(context, { path: '/meetings', query: { ownership: deps.config.ownership } }, deps)) {
-    for (const meeting of page) {
+    for (const meeting of page.items) {
       const id = meetingId(meeting)
       const snapshot = await context.attempt(async (signal) => {
         const response = await requestCircleback(`/meeting/${encodeURIComponent(id)}/transcript`, signal, deps, true)

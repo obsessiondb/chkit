@@ -9,7 +9,7 @@ export async function* readPullRequestReviewComments(context: ReadContext<Timest
   for await (const page of readGitHubPages(context, { path: `/repos/${repo}/pulls/comments`, params: {
     since: context.selection.from.toISOString(), sort: 'updated', direction: 'asc',
   } }, config, deps)) {
-    for (const comment of updatedItems(page, context.selection)) {
+    for (const comment of updatedItems(page.items, context.selection)) {
       yield { rows: toGitHubRows([comment], repo, (item) => githubNumber(item, 'id'), { pull_number: pullNumber(comment, repo) }) }
     }
   }

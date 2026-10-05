@@ -36,6 +36,8 @@ Events are the only synced resource. Attendees, organizer, recurrence, reminders
 
 Each acknowledged page stores its next-page position and retains the same input sync token. Only a loaded terminal page promotes `nextSyncToken`, including an empty page. Rerun after interruption to resume; failed loads leave the previous checkpoint. Requests use fixed parameters, and validation rejects changed source scope or malformed pagination. Native JSON requires ClickHouse 25.3 or later.
 
+The reader uses `paginate()` for requests and continuation validation. Each full page includes raw events and a complete checkpoint candidate in metadata; the reader explicitly yields that candidate as chunk state. The existing checkpoint format is preserved. Provider-specific rejected-token recovery stays in the reader.
+
 Google forbids `timeMin`, `timeMax`, `updatedMin`, and `orderBy` on sync-token requests. This canonical reader rejects explicit `--from`/`--to` bounds. A named backfill without bounds runs an independent canonical sync. See [Google synchronization](https://developers.google.com/workspace/calendar/api/guides/sync) and [events.list parameters](https://developers.google.com/workspace/calendar/api/v3/reference/events/list).
 
 ## Expiry and stored data

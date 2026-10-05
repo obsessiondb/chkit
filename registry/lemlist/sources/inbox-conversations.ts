@@ -18,7 +18,7 @@ export async function* readInboxConversations(context: FetchContext, deps: Lemli
   }
   for (const userId of userIds) {
     for await (const page of readInboxPages(context, { userId }, deps)) {
-      yield { rows: toLemlistRows(page, deps, { user_id: userId }) }
+      yield { rows: toLemlistRows(page.items, deps, { user_id: userId }) }
     }
   }
 }

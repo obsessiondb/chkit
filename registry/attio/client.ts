@@ -70,7 +70,7 @@ export async function* readRows(
   deps: AttioClientDeps = defaultAttioClientDeps,
 ) {
   for await (const page of readCollection(context, input.request, deps)) {
-    yield { rows: toAttioRows(page, input.resource, input.request.idFields, input.metadata, deps.config.sourceId) }
+    yield { rows: toAttioRows(page.items, input.resource, input.request.idFields, input.metadata, deps.config.sourceId) }
   }
 }
 

@@ -7,6 +7,6 @@ export const github_pullRequestsRaw = rawTable({ database: 'default', name: 'git
 
 export async function* readPullRequests(context: FetchContext, repo: string, config: GitHubConfig, deps: GitHubClientDeps) {
   for await (const page of readPullPages(context, repo, config, deps)) {
-    yield { rows: toGitHubRows(page, repo, (pull) => githubNumber(pull, 'number')) }
+    yield { rows: toGitHubRows(page.items, repo, (pull) => githubNumber(pull, 'number')) }
   }
 }

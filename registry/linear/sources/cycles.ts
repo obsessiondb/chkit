@@ -19,5 +19,5 @@ export async function* readCycles(context: ReadContext<TimestampRange, Timestamp
   for await (const page of readLinearPages(context, {
     query, select: (data) => data.cycles, label: 'cycles', window: context.selection,
     variables: { from: context.selection.from.toISOString(), to: context.selection.to.toISOString() },
-  }, deps)) yield { rows: rawRows(page, linearId) }
+  }, deps)) yield { rows: rawRows(page.items, linearId) }
 }

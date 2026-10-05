@@ -7,6 +7,6 @@ export const circleback_meetingsRaw = rawTable({ database: circlebackConfig.data
 
 export async function* readMeetings(context: FetchContext, deps: CirclebackClientDeps) {
   for await (const page of readCirclebackPages(context, { path: '/meetings', query: { ownership: deps.config.ownership } }, deps)) {
-    yield { rows: toCirclebackRows(page.map(tagNames), meetingId, deps.config.sourceId) }
+    yield { rows: toCirclebackRows(page.items.map(tagNames), meetingId, deps.config.sourceId) }
   }
 }

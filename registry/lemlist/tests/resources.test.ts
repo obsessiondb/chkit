@@ -174,7 +174,10 @@ for (const resource of ['contacts', 'companies', 'campaign_leads', 'inbox_conver
 
 test('Lemlist empty full collections record completion without custom scan state', async () => {
   const value = pipeline((url) => {
-    if (url.pathname === '/api/contacts' || url.pathname === '/api/companies') return listing([], url)
+    if (url.pathname === '/api/contacts' || url.pathname === '/api/companies') {
+      expect(url.searchParams.has('idsOrEmails')).toBe(false)
+      return listing([], url)
+    }
     if (url.pathname === '/api/team') return Response.json({ users: [{ userId: 'usr' }] })
     if (url.pathname === '/api/inbox') return inbox([])
     return Response.json([])

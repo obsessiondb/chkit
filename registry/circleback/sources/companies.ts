@@ -7,7 +7,7 @@ export const circleback_companiesRaw = rawTable({ database: circlebackConfig.dat
 
 export async function* readCompanies(context: FetchContext, deps: CirclebackClientDeps) {
   for await (const page of readCirclebackPages(context, { path: '/companies' }, deps)) {
-    for (const listed of page) {
+    for (const listed of page.items) {
       const domain = companyDomain(listed)
       const detail = await context.attempt(async (signal) => {
         const response = await requestCircleback(`/company/${encodeURIComponent(domain)}`, signal, deps)

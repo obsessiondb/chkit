@@ -132,7 +132,8 @@ describe('Attio template', () => {
       return Response.json({ data: offset === '0' ? [{ id: { task_id: 'a' } }, { id: { task_id: 'b' } }] : [] })
     })
     const pages = await collect(readCollection(context(), { path: '/tasks', idFields: ['task_id'], pageSize: 2 }, deps))
-    expect(pages.map((page) => page.length)).toEqual([2])
+    expect(pages.map((page) => page.items.length)).toEqual([2, 0])
+    expect(pages.map((page) => page.next)).toEqual([2, undefined])
     expect(offsets).toEqual(['0', '2'])
   })
 

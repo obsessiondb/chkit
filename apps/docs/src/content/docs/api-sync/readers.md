@@ -46,18 +46,15 @@ export async function fetchTicketPage(
 
 This helper performs one request. Call it through `context.attempt` or from `paginate`'s `fetchPage` callback, as shown in [Incremental syncs](/api-sync/incremental-syncs/#timestamp-windows). Validate untrusted response shapes at the source boundary in production; a TypeScript assertion does not validate JSON.
 
-## Pagination is not a checkpoint
+## Pages and checkpoint metadata
 
-Use `paginate` when only the items matter. It supports an `initial` continuation, yields nonempty item arrays, and stops when `next` is `undefined` or `null`. Repeated continuations fail with `IngestConfigError`, stopping the execution without retrying the entire cyclic reader.
+`paginate` yields the complete `{ items, next, metadata? }` returned by `fetchPage`, including empty and terminal pages. Read rows from `page.items`. `initial` and `next` support offset, string-token, and compound-object continuations; `next: undefined` ends pagination. Repeated continuations, including a return to `initial`, fail with `IngestConfigError` before the invalid page reaches the reader.
+
+`next` controls the next request. `metadata` carries provider details such as a candidate checkpoint, replacement sync token, or page identity. The helper preserves metadata without interpreting or persisting it. With `cursorState`, explicitly map a safe, complete checkpoint from the page into `SourceChunk.state`; the executor commits it after the rows are saved. Empty pages can carry meaningful progress through the same path. See the complete [provider cursor example](/api-sync/incremental-syncs/#provider-cursors-and-compound-state).
 
 A page cursor can be temporary, tied to one snapshot, or expire before the next run. Only persist it with `cursorState` when the provider guarantees it is valid for later executions. Otherwise page through a timestamp window and commit progress after that whole window succeeds.
 
-<details>
-<summary>When a manual pagination loop is needed</summary>
-
-Use a manual loop when page metadata must become a chunk `id` or durable `state`, or when an empty page carries meaningful progress. The helper yields item arrays, so it does not expose the returned continuation to the consumer or persist it as a checkpoint. Wrap each manual page request in `context.attempt`.
-
-</details>
+For a sync-token API, a nonterminal page can retain the input sync token and save its next-page position in metadata. Its terminal page has no `next`, but can carry a replacement sync token. Metadata and pagination therefore have independent types: `paginate<TItem, TCursor, TMetadata>`. Protocol-specific token recovery remains the reader's responsibility; use `context.attempt` for requests outside `paginate` and avoid wrapping its `fetchPage` in another attempt.
 
 ## Bound work and separate accounts
 

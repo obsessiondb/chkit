@@ -19,6 +19,8 @@ Use one pipeline per account or installation, with independently selectable stre
 
 Prefer existing `paginate()` and incremental strategies. Add custom state only when a provider's recovery contract needs progress beyond the executor's journal; ordinary `fullSync()` already records successful work, including empty reads. Keep editable configuration, authenticated request handling, and meaningful resource readers distinct without creating one-line proxy modules or a generic scan framework. Bind factory configuration to both readers and strategies, keep setup-time raw table definitions explicit, and test that configured streams can run independently. Put repeated generic mechanics in the library when the existing API cannot express them concisely.
 
+`paginate()` yields full `{ items, next, metadata? }` pages, including empty terminal pages. Use `page.items` for rows and carry provider checkpoint candidates in metadata, then explicitly yield them as chunk `state` with `cursorState`. `next` is the request continuation; metadata is not automatically durable progress. Keep checkpoint snapshots fresh and complete, and let `paginate` own the request attempt rather than nesting `context.attempt` inside it. See the stable-sync reference for sync-token boundaries.
+
 ## Registry quality bar
 
 Before creating or materially changing an official registry integration, read [Stable sync design and verification](references/stable-sync.md). Registry providers are reusable implementations of supported capabilities: deliver robust bootstrap, incremental selection where available, durable recovery, and reconciliation for changes polling cannot capture. Do not stop at a happy-path pagination example.

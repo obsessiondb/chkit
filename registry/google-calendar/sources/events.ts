@@ -1,6 +1,6 @@
-import { IngestConfigError, rawRows, rawTable, type ReadContext } from '@chkit/plugin-ingest'
+import { IngestConfigError, paginate, rawRows, rawTable, type Page, type ReadContext } from '@chkit/plugin-ingest'
 
-import { isObject, optionalString, readPage, requiredString, resolveCalendar, type GoogleCalendarClientDeps } from '../client.js'
+import { isObject, optionalString, requestEvents, requiredString, resolveCalendar, type CalendarEvent, type GoogleCalendarClientDeps } from '../client.js'
 import { googleCalendarConfig, type GoogleCalendarReaderConfig } from '../config.js'
 
 export interface CalendarState {
@@ -11,6 +11,8 @@ export interface CalendarState {
   /** Recovery attempts for this unfinished sync, including previous executions. */
   recoveryCount?: number
 }
+
+type CalendarPageMetadata = CalendarState | { reset: 'sync' | 'page' }
 
 export const google_calendar_eventsRaw = rawTable({ database: googleCalendarConfig.database, name: 'google_calendar_events_raw' })
 
@@ -23,29 +25,38 @@ export async function* readEvents(context: ReadContext<CalendarState | undefined
     throw new IngestConfigError('Calendar checkpoint belongs to a different authenticated calendar. Use a separate stream ID for the new source.')
   }
   let state: CalendarState = context.state ?? { scope, calendarId: resolvedCalendarId }
-  const seen = new Set<string>()
-  if (state.pageToken) seen.add(state.pageToken)
   while (true) {
-    const page = await readPage(context, state, deps)
-    if ('reset' in page) {
-      if ((state.recoveryCount ?? 0) >= 1) throw new IngestConfigError('Calendar unfinished sync repeatedly rejected a token across resumed runs. Adjust the editable stream chunk budget, run duration, or polling frequency, then explicitly migrate the saved state or use a new stream identity after reviewing coverage.')
-      seen.clear()
-      // An expired sync token starts a new baseline; a rejected page token
-      // replays the current sync from its original, committed input token.
-      state = { scope, calendarId: resolvedCalendarId, recoveryCount: (state.recoveryCount ?? 0) + 1, ...(page.reset === 'page' && state.syncToken ? { syncToken: state.syncToken } : {}) }
-      yield { rows: [], state, id: 'calendar-reset' }
-      continue
+    let reset: 'sync' | 'page' | undefined
+    const pages = paginate({
+      context, initial: state, label: 'GET calendar events',
+      fetchPage: async (cursor = state, signal): Promise<Page<CalendarEvent, CalendarState, CalendarPageMetadata>> => {
+        const page = await requestEvents(cursor, signal, deps)
+        if ('reset' in page) return { items: [], next: undefined, metadata: page }
+        // Keep the input sync token throughout pagination; only the terminal
+        // candidate promotes nextSyncToken and clears acknowledged recovery debt.
+        const candidate: CalendarState = page.nextPageToken
+          ? { ...cursor, pageToken: page.nextPageToken }
+          : { scope, calendarId: resolvedCalendarId, syncToken: requiredString(page.nextSyncToken, 'nextSyncToken') }
+        return { items: page.items, next: page.nextPageToken ? candidate : undefined, metadata: candidate }
+      },
+    })
+    for await (const page of pages) {
+      if (!page.metadata) throw new IngestConfigError('Calendar page has no checkpoint metadata.')
+      if ('reset' in page.metadata) {
+        reset = page.metadata.reset
+        break
+      }
+      state = page.metadata
+      const rows = rawRows(page.items, (event) => JSON.stringify([sourceId, resolvedCalendarId, event.id]))
+      // Empty terminal pages must commit the new sync token too.
+      yield { rows, state, ...(rows.length === 0 ? { id: 'calendar-empty-page' } : {}) }
     }
-    if (page.nextPageToken && seen.has(page.nextPageToken)) throw new IngestConfigError('Calendar repeated a page token.')
-    if (page.nextPageToken) seen.add(page.nextPageToken)
-    state = page.nextPageToken
-      ? { ...state, pageToken: page.nextPageToken }
-      // Only acknowledgement of this terminal page clears recovery debt.
-      : { scope, calendarId: resolvedCalendarId, syncToken: requiredString(page.nextSyncToken, 'nextSyncToken') }
-    const rows = rawRows(page.items, (event) => JSON.stringify([sourceId, resolvedCalendarId, event.id]))
-    // Empty terminal pages must commit the new sync token too.
-    yield { rows, state, ...(rows.length === 0 ? { id: 'calendar-empty-page' } : {}) }
-    if (!page.nextPageToken) return
+    if (!reset) return
+    if ((state.recoveryCount ?? 0) >= 1) throw new IngestConfigError('Calendar unfinished sync repeatedly rejected a token across resumed runs. Adjust the editable stream chunk budget, run duration, or polling frequency, then explicitly migrate the saved state or use a new stream identity after reviewing coverage.')
+    // Page rejection replays from the original input token; sync rejection
+    // starts a new baseline. The reset remains checkpointed across executions.
+    state = { scope, calendarId: resolvedCalendarId, recoveryCount: (state.recoveryCount ?? 0) + 1, ...(reset === 'page' && state.syncToken ? { syncToken: state.syncToken } : {}) }
+    yield { rows: [], state, id: 'calendar-reset' }
   }
 }
 

@@ -8,6 +8,6 @@ export const slackUsersRaw = rawTable({ database: slackConfig.database, name: `$
 export async function* readUsers(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps) {
   const teamId = await getWorkspace(context, deps)
   for await (const page of readCollection(context, { method: 'users.list', field: 'members', idField: 'id' }, deps)) {
-    yield { rows: toSlackRows(page, 'users', teamId, 'id', undefined, deps.config.sourceId) }
+    yield { rows: toSlackRows(page.items, 'users', teamId, 'id', undefined, deps.config.sourceId) }
   }
 }

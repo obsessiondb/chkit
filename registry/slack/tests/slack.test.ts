@@ -147,7 +147,9 @@ describe('Slack raw template', () => {
       throw new Error(`Unexpected cursor ${cursor}`)
     })
     const pages = await collect(readCollection(context(), { method: 'conversations.list', field: 'channels', idField: 'id', pageSize: 2 }, deps))
-    expect(pages.flat().map((value) => value.id)).toEqual(['C1', 'C2'])
+    expect(pages.flatMap((page) => page.items).map((value) => value.id)).toEqual(['C1', 'C2'])
+    expect(pages.map((page) => page.next)).toEqual(['empty-next', 'final-next', undefined])
+    expect(pages.map((page) => page.items.length)).toEqual([0, 1, 1])
     expect(cursors).toEqual([null, 'empty-next', 'final-next'])
   })
 

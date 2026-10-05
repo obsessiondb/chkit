@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test'
-import { HttpError, IngestConfigError, runIngestion, selectStreams } from '@chkit/plugin-ingest'
+import { HttpError, IngestConfigError, runIngestion, selectStreams, type FetchContext, type Page } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { createGitHubPipeline, githubPipeline } from '../index.js'
 import { githubConfig, type GitHubConfig } from '../config.js'
-import { classifyGitHubError, requestGitHubGraphql } from '../client.js'
+import { classifyGitHubError, readIssuePages, requestGitHubGraphql, type GitHubObject } from '../client.js'
 
 const repository = 'obsessiondb/chkit'
 const cutoff = new Date('2026-01-02T00:00:00Z')
@@ -95,6 +95,27 @@ test('short issue pages follow Link continuations while excluding PRs and update
   expect(requests.every((url) => url.searchParams.get('since') === '2008-01-01T00:00:00.000Z')).toBe(true)
   expect(destination.tables.get('default.github_issues_raw')?.map((row) => row.raw)).toEqual([{ repository, data: issue }, { repository, data: nextIssue }])
   expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
+})
+
+test('issue page filtering preserves continuations and empty terminal pages', async () => {
+  const signal = new AbortController().signal
+  const context: FetchContext = { signal, attempt: (operation) => operation(signal) }
+  const pages: Page<GitHubObject, string>[] = []
+  const requests: URL[] = []
+  for await (const page of readIssuePages(context, repository, githubConfig, {
+    token: () => 'fixture', fetch: async (input) => {
+      const url = new URL(input)
+      requests.push(url)
+      const number = Number(url.searchParams.get('page') ?? '1')
+      const next = new URL(url)
+      next.searchParams.set('page', String(number + 1))
+      return Response.json(number === 1 ? [pullIssue] : number === 2 ? [issue] : [],
+        { headers: number < 3 ? { Link: `<${next}>; rel="next"` } : {} })
+    },
+  })) pages.push(page)
+  expect(requests).toHaveLength(3)
+  expect(pages.map((page) => page.items)).toEqual([[], [issue], []])
+  expect(pages.map((page) => page.next)).toEqual([requests[1]?.toString(), requests[2]?.toString(), undefined])
 })
 
 test('a failed child stream does not block its parents or the other resource checkpoints', async () => {
@@ -246,6 +267,23 @@ test('GraphQL commit totals reject truncated collections and changes during pagi
     expect(result.ok).toBe(false)
     expect(calls).toBe(changed ? 2 : 1)
     expect((await journal.readCheckpoint('github.pull_request_commits.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
+  }
+})
+
+test('GraphQL commits validate complete counts on empty terminal pages', async () => {
+  for (const total of [0, 1, 2]) {
+    let calls = 0
+    const pipeline = fixturePipeline((url, init) => {
+      if (url.pathname !== '/graphql') return fixtureResponse(url, init)
+      calls++
+      return commitPage(total > 0 && calls === 1 ? [commit] : [], total, total > 0 && calls === 1 ? 'terminal' : null)
+    })
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination, now: () => cutoff })
+    expect(result.ok).toBe(total < 2)
+    expect(calls).toBe(total === 0 ? 1 : 2)
+    expect((await journal.readCheckpoint('github.pull_request_commits.obsessiondb.chkit')).lastSuccessSeq > 0).toBe(total < 2)
+    if (total < 2) expect(destination.tables.get('default.github_pull_request_commits_raw') ?? []).toHaveLength(total)
   }
 })
 

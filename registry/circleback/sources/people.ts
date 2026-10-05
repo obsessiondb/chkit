@@ -7,7 +7,7 @@ export const circleback_peopleRaw = rawTable({ database: circlebackConfig.databa
 
 export async function* readPeople(context: FetchContext, deps: CirclebackClientDeps) {
   for await (const page of readCirclebackPages(context, { path: '/people' }, deps)) {
-    for (const listed of page) {
+    for (const listed of page.items) {
       const id = numericId(listed.id, 'person')
       const detail = await context.attempt(async (signal) => {
         const response = await requestCircleback(`/person/${id}`, signal, deps)

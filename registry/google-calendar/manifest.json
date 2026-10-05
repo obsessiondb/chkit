@@ -58,7 +58,8 @@
             "Resume acknowledged pages, promote the terminal sync token after destination acknowledgement, and bound recovery from rejected or expired tokens.",
             "Scope row IDs to the installation and resolved calendar; migrate legacy occurrence identities or use a fresh table and stream when upgrading.",
             "Separate editable installation configuration, injectable HTTP clients, and resource readers from one pipeline; preserve independent stream identities and provider recovery.",
-            "Keep events as the sole raw resource with native nested fields and sparse cancellation observations; verify recurring-exception replacement without hydration."
+            "Keep events as the sole raw resource with native nested fields and sparse cancellation observations; verify recurring-exception replacement without hydration.",
+            "Use full paginate pages and checkpoint metadata for canonical sync-token progress, including empty terminal pages, while preserving the saved state format."
           ]
         },
         {
