@@ -18,9 +18,15 @@ bunx chkit ingest run --tag provider:google-calendar
 bunx chkit ingest status --tag provider:google-calendar
 ```
 
-Set `GOOGLE_CALENDAR_ACCESS_TOKEN` with `calendar.readonly` access before ingestion. Review `sourceId`, `calendarId`, and `database` in `src/integrations/google-calendar/index.ts`. `primary` is resolved through calendar metadata to detect a different account reusing the checkpoint. Schema imports do not request credentials or call Google.
+Set `GOOGLE_CALENDAR_ACCESS_TOKEN` with `calendar.readonly` access before ingestion. Review installation settings and chunk limits in `src/integrations/google-calendar/config.ts`. `primary` is resolved through calendar metadata to detect a different account reusing the checkpoint. Schema imports do not request credentials or call Google.
 
 <RegistryReference name="google-calendar" section="resources" />
+
+## Pipeline and stream
+
+One installation exports one pipeline with a canonical `events` stream. `pipeline.ts` defines its destination and strategy; `sources/events.ts` handles acknowledged sync-token progress, and `client.ts` handles HTTP requests.
+
+`sourceId` identifies the installation in raw rows and checkpoint scope. `streamPrefix` determines journal IDs; defaults preserve `google-calendar.events`. A separate installation needs both a distinct source label and stream prefix. The pipeline factory binds configuration and injectable request dependencies while using the exported destination. Edit `database` in `config.ts` before schema imports to change table placement.
 
 ## Sync behavior
 
@@ -34,7 +40,7 @@ Google forbids `timeMin`, `timeMax`, `updatedMin`, and `orderBy` on sync-token r
 
 `410 Gone` resets provider progress and starts a new baseline without deleting raw rows. A rejected page token replays its collection once. The destination keeps the latest observed payload per `[sourceId, resolvedCalendarId, event.id]`; absent records are not reconciled after a reset. A current-calendar view requires completed-baseline generations or explicit reconciliation before treating absence as removal.
 
-The checkpoint retains the recovery count until the terminal sync page is acknowledged. Pauses and successful nonterminal replay pages keep that count; a second token rejection for the unfinished sync fails across executions. Adjust the editable stream `budget.maxChunks`, execution duration, or polling frequency so the sync finishes while tokens remain valid. After reviewing coverage and correcting those conditions, migrate saved state explicitly or use a new stream identity for a fresh sync.
+The checkpoint retains the recovery count until the terminal sync page is acknowledged. Pauses and successful nonterminal replay pages keep that count; a second token rejection for the unfinished sync fails across executions. Adjust `maxChunks` in `config.ts`, execution duration, or polling frequency so the sync finishes while tokens remain valid. After reviewing coverage and correcting those conditions, migrate saved state explicitly or use a new stream identity for a fresh sync.
 
 Version 0.2.0 changes the former rolling occurrence-window semantics and row identities. Keep old tables as archives and start a new canonical dataset, or migrate identities explicitly; old expanded occurrences are not removed automatically. The installed README describes upgrade and recovery details.
 

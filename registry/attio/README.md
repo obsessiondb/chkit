@@ -30,6 +30,8 @@ bunx chkit ingest run --tag provider:attio
 
 The schema uses native JSON (ClickHouse 25.3 or newer). A direct ClickHouse connection is required; workbench-only execution is not supported. Use an external scheduler to repeat the run command, with one ingestion process per project/target at a time.
 
+`createAttioPipeline(config, deps)` snapshots reader settings and configured collections for one installation. Database and table prefix belong to setup-time `attioConfig`: the factory uses the exported raw tables and does not redefine storage.
+
 ## Included resources
 
 Each configured object type has its own records and object-attributes streams. The defaults create separate People and Companies readers; tasks, notes, members, and the object/list catalogs have workspace-wide streams. Each configured list similarly gets independent entries and list-attributes streams. The number of streams depends on `objects` and `lists`; the default configuration has nine streams writing to seven resource tables. All nine raw tables are defined, including entries and list attributes, whose readers are enabled by configuring `lists`.

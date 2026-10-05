@@ -226,6 +226,10 @@ registry/
 
 Each `sources/` module keeps a resource's reader and schema together. Shared request behavior stays in `client.ts`; selection and destination settings stay in `config.ts`.
 
+Use one pipeline per installation or account, with independent streams per resource type or configured collection. Attio People and Companies are separate streams sharing a raw records table; individual people remain records. Parent and child pagination can stay within a resource stream when its enrichment requires that traversal. Each reader resolves its own selection, so pipeline order cannot become a discovery dependency.
+
+Prefer `paginate()` and the bundled incremental strategies. An ordinary full read uses `fullSync()` and the executor's journaled completion, including empty reads; add provider state only for a justified contract such as sync-token promotion, delayed children, or expensive acknowledged-parent enrichment. Pipeline factories bind supplied configuration to both readers and strategies. Raw table exports remain setup-time schema definitions. Verify installed modular templates at relocated paths so missing transitive files cannot pass source-only tests.
+
 `manifest.json` contains one registry item. Its source paths are relative to the provider directory (for example, `sources/notes.ts`); target paths still use the full consumer path such as `src/integrations/attio/sources/notes.ts`. The repository's catalog loader discovers these provider-local manifests and aggregates them for the build, CLI artifacts, and documentation. `bun scripts/build-registry.ts` builds the official catalog; it does not require a handwritten catalog at the registry root.
 
 Released artifacts are committed under `registry/<name>/releases/<version>.json`. The official CLI reads provider directories and manifests from GitHub's `main` branch and installs those release artifacts directly. The documentation build also copies that history into `apps/docs/public/r/<name>/` before building the current catalog and latest aliases. History and the source are colocated without installing release files into consumer projects.

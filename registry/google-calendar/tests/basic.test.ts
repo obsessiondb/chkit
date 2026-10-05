@@ -3,6 +3,8 @@ import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { google_calendarPipeline } from '../index.js'
+import { googleCalendarConfig } from '../config.js'
+import { createGoogleCalendarPipeline } from '../pipeline.js'
 
 const originalFetch = globalThis.fetch
 const originalToken = process.env.GOOGLE_CALENDAR_ACCESS_TOKEN
@@ -192,3 +194,65 @@ function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
   journal.events.push(...previous.events.map((event) => ({ ...event, checkpoint: event.checkpoint === undefined ? undefined : JSON.parse(JSON.stringify(event.checkpoint)) })))
   return journal
 }
+
+test('Calendar factory snapshots installation settings and injected credentials while resuming an empty terminal page', async () => {
+  const config = { ...googleCalendarConfig, sourceId: 'calendar.work', streamPrefix: 'calendar.work', calendarId: 'work', maxChunks: 1 }
+  let token = 'initial'
+  const requests: Array<{ url: URL; authorization: string | null }> = []
+  const deps = {
+    config: googleCalendarConfig,
+    token: () => token,
+    fetch: async (input: string, init: RequestInit) => {
+      const url = new URL(input)
+      requests.push({ url, authorization: new Headers(init.headers).get('Authorization') })
+      return Response.json(url.pathname.endsWith('/events')
+        ? url.searchParams.has('pageToken')
+          ? { items: [], nextSyncToken: 'work-sync' }
+          : { items: [{ id: 'first', custom: { original: true } }], nextPageToken: 'work-next' }
+        : { id: 'work@example.com' })
+    },
+  }
+  const pipeline = createGoogleCalendarPipeline(config, deps)
+  config.sourceId = 'edited-after-construction'
+  config.streamPrefix = 'edited-after-construction'
+  config.calendarId = 'edited-after-construction'
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  expect(pipeline.id).toBe('calendar.work')
+  expect(pipeline.streams[0]?.incremental.id).toBe('calendar.work.sync-token')
+  expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:events']), backfill: undefined }, { journal, destination })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await journal.readCheckpoint('calendar.work.events')).envelope?.state).toMatchObject({ pageToken: 'work-next' })
+  token = 'rotated'
+  const resumed = { ...pipeline, streams: pipeline.streams.map((stream) => ({ ...stream, budget: { ...stream.budget, maxChunks: 20 } })) }
+  expect((await runIngestion({ selected: selectStreams([resumed], []), backfill: undefined }, { journal, destination })).ok).toBe(true)
+  expect(requests.map(({ authorization }) => authorization)).toEqual(['Bearer initial', 'Bearer initial', 'Bearer rotated', 'Bearer rotated'])
+  expect(requests.map(({ url }) => [url.pathname, url.searchParams.get('pageToken')])).toEqual([
+    ['/calendar/v3/calendars/work', null], ['/calendar/v3/calendars/work%40example.com/events', null],
+    ['/calendar/v3/calendars/work', null], ['/calendar/v3/calendars/work%40example.com/events', 'work-next'],
+  ])
+  expect((await journal.readCheckpoint('calendar.work.events')).envelope?.state).toMatchObject({ syncToken: 'work-sync' })
+  expect((await journal.readCheckpoint('google-calendar.events')).version).toBe(0)
+  expect(destination.tables.get('default.google_calendar_events_raw')?.[0]).toMatchObject({
+    id: JSON.stringify(['calendar.work', 'work@example.com', 'first']), raw: { id: 'first', custom: { original: true } },
+  })
+})
+
+test('Calendar factory rejects source changes under an existing stream prefix before another request', async () => {
+  let requests = 0
+  const deps = {
+    config: googleCalendarConfig, token: () => 'fixture',
+    fetch: async (input: string) => {
+      requests += 1
+      return Response.json(new URL(input).pathname.endsWith('/events') ? { items: [], nextSyncToken: 'first' } : { id: 'calendar@example.com' })
+    },
+  }
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, deps)
+  expect((await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })).ok).toBe(true)
+  const changed = createGoogleCalendarPipeline({ ...googleCalendarConfig, sourceId: 'different-installation' }, deps)
+  const result = await runIngestion({ selected: selectStreams([changed], []), backfill: undefined }, { journal, destination })
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('scope changed')
+  expect(requests).toBe(2)
+})

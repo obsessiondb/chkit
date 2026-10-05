@@ -151,7 +151,7 @@ Queries in this guide use the default database and table prefix. Substitute conf
 
 ## Included resources
 
-Each resource has its own stream and raw table. The `data` field in every row retains the complete returned provider object, including fields not listed here and fields introduced by Slack later.
+One installation pipeline contains independent streams for channels, users, and messages, each with its own raw table, resource tag, and journal progress. A channel or thread is an individual entity traversed within the messages resource. The `data` field in every row retains the complete returned provider object, including fields not listed here and fields introduced by Slack later.
 
 <RegistryReference name="slack" section="resources" />
 
@@ -169,7 +169,7 @@ Every API URL is relative to `https://slack.com/api/`. Each reader calls [`POST 
 | `users` | `users.list` across the accessible workspace |
 | `messages` | Independent conversation discovery, then `conversations.history` for each selected conversation; `conversations.replies` for roots with `reply_count > 0` when replies are enabled |
 
-Metadata follows `response_metadata.next_cursor` until absent, null, or empty. Messages use exact `oldest` and `latest` time boundaries, preserving progress independently of temporary cursors. Empty message pages may use a live cursor; expiration restarts the unfinished interval. Repeated cursors and responses without a safe continuation fail visibly. Each stream discovers its workspace and parents independently.
+Metadata readers use the ingestion plugin's `paginate` helper and yield selected pages as they arrive, following `response_metadata.next_cursor` until absent, null, or empty. Configured conversation IDs are validated when discovery finishes; a missing ID fails the stream while any loaded pages remain visible. Messages use exact `oldest` and `latest` time boundaries, preserving progress independently of temporary cursors. Empty message pages may use a live cursor; expiration restarts the unfinished interval. Repeated cursors and responses without a safe continuation fail visibly. Each stream discovers its workspace and parents independently.
 
 For each channel, history advances newest first. Each loaded page stores its discovered thread work, then completes that bounded queue before requesting older history. Replies advance oldest first with an independent timestamp boundary. Threads retain the parent returned by Slack under its history identity. No history cursor waits during long thread reads, and no temporary cursor enters durable state.
 
@@ -284,6 +284,8 @@ Slack retention and access restrictions limit historical coverage. Changes durin
 | `tests/slack.test.ts`, `tests/checkpoints.test.ts`, `tests/fixtures.ts` | Portable payload, restart, boundary, and reconciliation tests |
 
 Remove a stream from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve the existing table under migration management. Removing a schema export can generate a drop operation; review that migration. Revisit pacing when changing concurrency or page sizes and run fixture tests for customized readers.
+
+`createSlackPipeline` binds source identity, conversation selection, page sizes, pacing, and message checkpoint settings when it creates the pipeline. Later config edits do not change an existing pipeline. Its runtime settings exclude `database` and `tablePrefix`: those names belong to the raw schemas declared from the installed `config.ts` during module loading. Change destination names before loading schemas and generating migrations.
 
 ### Install and run fixture tests
 

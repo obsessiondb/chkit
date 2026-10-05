@@ -20,6 +20,26 @@
       "target": "src/integrations/linear/index.ts"
     },
     {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/linear/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/linear/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/linear/pipeline.ts"
+    },
+    {
+      "path": "sources/issues.ts",
+      "type": "registry:file",
+      "target": "src/integrations/linear/sources/issues.ts"
+    },
+    {
       "path": "tests/basic.test.ts",
       "type": "registry:file",
       "target": "src/integrations/linear/tests/basic.test.ts",
@@ -36,7 +56,8 @@
           "changes": [
             "Sync issues through overlapping updated-time windows, explicitly including archived issues.",
             "Collect all accessible comment pages and advance the watermark only after the complete window reaches the destination.",
-            "Replay failed windows safely and include fixtures for bounded queries, pagination, empty windows, and destination failures."
+            "Use paginate for issue and comment connections, with one executor retry boundary per HTTP request and validation of provider continuations.",
+            "Separate editable source configuration, injectable HTTP client, resource reader, and pipeline wiring; test configuration binding and isolated installation checkpoints."
           ]
         },
         {
@@ -57,6 +78,7 @@
       "entry": "index.ts",
       "exports": [
         "linearPipeline",
+        "createLinearPipeline",
         "linear_issuesRaw"
       ],
       "resources": [

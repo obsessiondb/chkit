@@ -48,7 +48,7 @@ This helper performs one request. Call it through `context.attempt` or from `pag
 
 ## Pagination is not a checkpoint
 
-Use `paginate` when only the items matter. It supports an `initial` continuation, yields nonempty item arrays, and stops when `next` is `undefined` or `null`. It rejects repeated continuations to avoid infinite loops.
+Use `paginate` when only the items matter. It supports an `initial` continuation, yields nonempty item arrays, and stops when `next` is `undefined` or `null`. Repeated continuations fail with `IngestConfigError`, stopping the execution without retrying the entire cyclic reader.
 
 A page cursor can be temporary, tied to one snapshot, or expire before the next run. Only persist it with `cursorState` when the provider guarantees it is valid for later executions. Otherwise page through a timestamp window and commit progress after that whole window succeeds.
 

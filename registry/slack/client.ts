@@ -1,12 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { HttpError, IngestConfigError, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
+import { HttpError, IngestConfigError, paginate, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
 
-import { slackConfig } from './config.js'
+import { slackConfig, type SlackReaderConfig } from './config.js'
 
 export type SlackEntity = Record<string, unknown>
 
 export interface SlackClientDeps {
+  config: SlackReaderConfig
   fetch: (url: string, init: RequestInit) => Promise<Response>
   token: () => string | undefined
   wait: (milliseconds: number, signal: AbortSignal) => Promise<void>
@@ -25,63 +26,65 @@ export interface CollectionRequest {
 export interface SlackPage { items: SlackEntity[]; cursor: string; hasMore: boolean }
 export class SlackCursorExpiredError extends IngestConfigError {}
 
-const defaultDeps: SlackClientDeps = {
+export const defaultSlackClientDeps: SlackClientDeps = {
+  config: slackConfig,
   fetch: (url, init) => fetch(url, init),
   token: () => process.env.SLACK_API_TOKEN,
   wait: async (milliseconds, signal) => { await sleep(milliseconds, undefined, { signal }) },
 }
 
 /** Each page is validated inside attempt, so executor retry/cancellation owns every request. */
-export async function* readCollection(
+export function readCollection(
   context: FetchContext,
   request: CollectionRequest,
-  deps: SlackClientDeps = defaultDeps,
-): AsyncGenerator<SlackEntity[]> {
-  const seenCursors = new Set<string>()
-  let cursor = ''
-  while (true) {
-    context.signal.throwIfAborted()
-    const page = await readCollectionPage(context, request, cursor, deps)
-    if (page.items.length > 0) yield page.items
-    // Empty/short pages can still have a cursor. Only cursor exhaustion ends a scan.
-    if (!page.cursor) return
-    if (seenCursors.has(page.cursor)) throw new IngestConfigError(`Slack ${request.method} repeated a pagination cursor.`)
-    seenCursors.add(page.cursor)
-    cursor = page.cursor
-  }
+  deps: SlackClientDeps = defaultSlackClientDeps,
+) {
+  return paginate({
+    context, label: `GET /api/${request.method}`,
+    fetchPage: async (cursor: string | undefined, signal) => {
+      const page = await fetchCollectionPage(request, cursor ?? '', signal, deps)
+      // Empty/short pages can still have a cursor. Only cursor exhaustion ends a read.
+      return { items: page.items, next: page.cursor || undefined }
+    },
+  })
 }
 
 /** Retains empty pages and continuation metadata needed by checkpointed readers. */
-export async function readCollectionPage(context: FetchContext, request: CollectionRequest, cursor = '', deps: SlackClientDeps = defaultDeps): Promise<SlackPage> {
-  const limit = request.pageSize ?? (request.field === 'messages' ? slackConfig.messagePageSize : slackConfig.pageSize)
-  if (!Number.isSafeInteger(limit) || limit <= 0 || limit >= 1_000) throw new IngestConfigError('Slack page sizes must be safe integers between 1 and 999.')
-  const query = { ...request.query, limit: String(limit), ...(cursor ? { cursor } : {}) }
-  return context.attempt(async (signal) => parsePage(await requestSlack(request.method, query, signal, deps), request), { label: `GET /api/${request.method}` })
+export async function readCollectionPage(context: FetchContext, request: CollectionRequest, cursor = '', deps: SlackClientDeps = defaultSlackClientDeps): Promise<SlackPage> {
+  return context.attempt((signal) => fetchCollectionPage(request, cursor, signal, deps), { label: `GET /api/${request.method}` })
 }
 
 /** Discover independently in each reader; pipeline stream order is not a dependency. */
-export async function discoverChannels(context: FetchContext, deps?: SlackClientDeps): Promise<SlackEntity[]> {
+export async function discoverChannels(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps): Promise<SlackEntity[]> {
+  const channels: SlackEntity[] = []
+  for await (const page of readChannelPages(context, deps)) channels.push(...page)
+  return channels
+}
+
+/** Yield selected metadata pages directly; configured IDs must all be accessible. */
+export async function* readChannelPages(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps) {
+  const config = deps.config
   const allowedTypes = ['public_channel', 'private_channel', 'im', 'mpim']
-  if (slackConfig.conversationTypes.length === 0 || !slackConfig.conversationTypes.every((type) => allowedTypes.includes(type))) {
+  if (config.conversationTypes.length === 0 || !config.conversationTypes.every((type) => allowedTypes.includes(type))) {
     throw new IngestConfigError('Slack conversationTypes must select public_channel, private_channel, im, or mpim.')
   }
-  const channels: SlackEntity[] = []
+  const selected = config.channels
+  const missing = new Set(selected)
   for await (const page of readCollection(context, {
     method: 'conversations.list', field: 'channels', idField: 'id',
-    query: { types: slackConfig.conversationTypes.join(','), exclude_archived: 'false' },
-  }, deps)) channels.push(...page)
-  const selected = slackConfig.channels
-  if (selected === undefined) return channels
-  for (const id of selected) {
-    if (!channels.some((channel) => entityId(channel, 'id') === id)) {
-      throw new IngestConfigError(`Configured Slack channel "${id}" was not found or is not accessible for conversationTypes.`)
-    }
+    query: { types: config.conversationTypes.join(','), exclude_archived: 'false' },
+  }, deps)) {
+    const channels = selected === undefined ? page : page.filter((channel) => selected.includes(entityId(channel, 'id')))
+    for (const channel of channels) missing.delete(entityId(channel, 'id'))
+    if (channels.length > 0) yield channels
   }
-  return channels.filter((channel) => selected.includes(entityId(channel, 'id')))
+  for (const id of missing) {
+    throw new IngestConfigError(`Configured Slack channel "${id}" was not found or is not accessible for conversationTypes.`)
+  }
 }
 
 /** Scope row identities to the authenticated workspace, never its mutable display name. */
-export async function getWorkspace(context: FetchContext, deps: SlackClientDeps = defaultDeps): Promise<string> {
+export async function getWorkspace(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps): Promise<string> {
   return context.attempt(async (signal) => {
     const payload = await requestSlack('auth.test', {}, signal, deps)
     return entityId(payload, 'team_id')
@@ -95,14 +98,15 @@ export function toSlackRows(
   teamId: string,
   idField: 'id' | 'ts',
   channelId?: string,
+  sourceId = slackConfig.sourceId,
 ) {
   return rawRows(
     items.map((data) => ({
-      source_id: slackConfig.sourceId, team_id: teamId,
+      source_id: sourceId, team_id: teamId,
       ...(channelId === undefined ? {} : { channel_id: channelId }), data,
     })),
     ({ data }) => JSON.stringify([
-      slackConfig.sourceId, resource, teamId, ...(channelId === undefined ? [] : [channelId]), entityId(data, idField),
+      sourceId, resource, teamId, ...(channelId === undefined ? [] : [channelId]), entityId(data, idField),
     ]),
   )
 }
@@ -124,6 +128,13 @@ export const classifySlackError: ErrorClassifier = (cause) => {
   return undefined
 }
 
+async function fetchCollectionPage(request: CollectionRequest, cursor: string, signal: AbortSignal, deps: SlackClientDeps): Promise<SlackPage> {
+  const limit = request.pageSize ?? (request.field === 'messages' ? deps.config.messagePageSize : deps.config.pageSize)
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit >= 1_000) throw new IngestConfigError('Slack page sizes must be safe integers between 1 and 999.')
+  const query = { ...request.query, limit: String(limit), ...(cursor ? { cursor } : {}) }
+  return parsePage(await requestSlack(request.method, query, signal, deps), request)
+}
+
 async function requestSlack(
   method: CollectionRequest['method'] | 'auth.test',
   query: Record<string, string>,
@@ -133,7 +144,7 @@ async function requestSlack(
   const token = deps.token()?.trim()
   if (!token) throw new IngestConfigError('Set SLACK_API_TOKEN before running Slack ingestion. Schema imports do not need credentials.')
   const interval = method === 'conversations.history' || method === 'conversations.replies'
-    ? slackConfig.messageIntervalMs : slackConfig.requestIntervalMs
+    ? deps.config.messageIntervalMs : deps.config.requestIntervalMs
   if (!Number.isSafeInteger(interval) || interval < 0 || interval > 2_147_483_647) {
     throw new IngestConfigError('Slack request intervals must be non-negative safe integers within the timer range.')
   }

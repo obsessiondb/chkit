@@ -11,6 +11,8 @@ export interface AttioConfig {
   notesPageSize: number
 }
 
+export type AttioReaderConfig = Omit<AttioConfig, 'database' | 'tablePrefix'>
+
 // Keep these values stable across runs. Credentials are read only in client.ts at request time.
 export const attioConfig: AttioConfig = {
   sourceId: 'attio.primary',

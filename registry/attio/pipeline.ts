@@ -1,7 +1,7 @@
 import { definePipeline, defineStream } from '@chkit/plugin-ingest'
 
 import { classifyAttioError, defaultAttioClientDeps, type AttioClientDeps } from './client.js'
-import { attioConfig, type AttioConfig } from './config.js'
+import { attioConfig, type AttioReaderConfig } from './config.js'
 import { attioObjectsRaw, readObjects } from './sources/objects.js'
 import { attioObjectAttributesRaw, readObjectAttributes } from './sources/object-attributes.js'
 import { attioRecordsRaw, readRecords } from './sources/records.js'
@@ -16,8 +16,8 @@ const streamOptions = { classifyError: classifyAttioError, batchSize: 500 }
 
 // One records stream per object type; no reader traverses other objects.
 // Keep schema exports when removing streams to retain existing stored data.
-export function createAttioPipeline(config: AttioConfig = attioConfig, deps: AttioClientDeps = defaultAttioClientDeps) {
-  const client = { ...deps, config }
+export function createAttioPipeline(config: AttioReaderConfig = attioConfig, deps: AttioClientDeps = defaultAttioClientDeps) {
+  const client = { ...deps, config: { ...config, objects: [...config.objects], lists: [...config.lists] } }
   return definePipeline({
     id: config.sourceId,
     tags: ['provider:attio'],

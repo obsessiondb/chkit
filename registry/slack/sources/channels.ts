@@ -1,11 +1,13 @@
 import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
 
-import { discoverChannels, getWorkspace, toSlackRows, type SlackClientDeps } from '../client.js'
+import { defaultSlackClientDeps, getWorkspace, readChannelPages, toSlackRows, type SlackClientDeps } from '../client.js'
 import { slackConfig } from '../config.js'
 
 export const slackChannelsRaw = rawTable({ database: slackConfig.database, name: `${slackConfig.tablePrefix}_channels_raw` })
 
-export async function* readChannels(context: FetchContext, deps?: SlackClientDeps) {
+export async function* readChannels(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps) {
   const teamId = await getWorkspace(context, deps)
-  yield { rows: toSlackRows(await discoverChannels(context, deps), 'channels', teamId, 'id') }
+  for await (const page of readChannelPages(context, deps)) {
+    yield { rows: toSlackRows(page, 'channels', teamId, 'id', undefined, deps.config.sourceId) }
+  }
 }

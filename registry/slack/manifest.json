@@ -86,7 +86,8 @@
           "changes": [
             "Checkpoint message history with fixed overlapping time windows and completed channel and thread progress.",
             "Bootstrap newly discovered channels and periodically reconcile retained history for older edits and late replies.",
-            "Preserve raw tables and scoped row identities, validate checkpoint scope, and include failure-recovery fixtures."
+            "Preserve raw tables and scoped row identities, validate checkpoint scope, and include failure-recovery fixtures.",
+            "Bind installation configuration to one pipeline with independently selectable channels, users, and messages streams; reuse plugin pagination for streaming metadata pages."
           ]
         },
         {

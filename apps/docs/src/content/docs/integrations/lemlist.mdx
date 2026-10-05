@@ -17,7 +17,9 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:lemlist
 ```
 
-Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/lemlist/index.ts` to select activities, campaigns, or both.
+Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/lemlist/config.ts` for the account namespace, page size, initial date, overlap, and interval length. `pipeline.ts` groups independent activities and campaigns streams in one account pipeline; select either resource with tags. `sources/` contains the readers and `client.ts` uses `paginate()` for authenticated requests. `index.ts` exports the pipeline and raw schema.
+
+`createLemlistPipeline(config, deps)` binds reader settings and optional HTTP dependencies. Configure storage in the installation's `lemlistConfig` before schema discovery; factories use the exported raw tables.
 
 Keep each stream ID and destination tied to one account. The reader does not resolve the key's account identity; switching accounts requires new stream IDs and destinations so previous watermarks cannot skip history.
 
@@ -27,7 +29,7 @@ Keep each stream ID and destination tied to one account. The reader does not res
 
 Activities use inclusive `minDate`/`maxDate` filters on `createdAt`, thirty-day intervals, and one day of overlap. Each completed interval checkpoints only after its pages have destination acknowledgement. A failed interval starts at offset zero; an explicit backfill resumes its completed interval frontier in an isolated namespace. Empty intervals also commit progress. Offset pages remain mutable, so their offsets are never persisted as change cursors.
 
-The [activities API](https://developer.lemlist.com/api-reference/endpoints/activities/get-many-activities) can backfill metadata on older activities. Periodic historical replay refreshes such changes and late arrivals beyond the overlap. [Campaigns](https://developer.lemlist.com/api-reference/endpoints/campaigns/get-many-campaigns) remain full scans with creation-time ordering and a successful-scan `completedAt` checkpoint; creation-only incremental reads would miss campaign updates.
+The [activities API](https://developer.lemlist.com/api-reference/endpoints/activities/get-many-activities) can backfill metadata on older activities. Periodic historical replay refreshes such changes and late arrivals beyond the overlap. [Campaigns](https://developer.lemlist.com/api-reference/endpoints/campaigns/get-many-campaigns) use creation-time ordering and ordinary `fullSync()` with journaled execution completion, including empty results. Failed scans replay from offset zero; creation-only incremental reads would miss campaign updates. Campaigns ignore date bounds and do not provide date-range backfills.
 
 ```sh
 bunx chkit ingest run --tag provider:lemlist --tag resource:activities --backfill reconcile-2026-10-04 --from 2000-01-01

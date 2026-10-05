@@ -81,6 +81,8 @@ A token's permissions also determine which data the API returns. A `401` or `403
 
 ## Choose objects, lists, and destination names
 
+One installation pipeline groups the independently selectable resource streams. `createAttioPipeline(config, deps)` snapshots reader settings and configured collections; raw table placement comes from the installation's setup-time `attioConfig` before schema discovery.
+
 The installed `src/integrations/attio/config.ts` starts with:
 
 ```ts

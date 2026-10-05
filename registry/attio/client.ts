@@ -2,12 +2,12 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import { HttpError, IngestConfigError, paginate, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
 
-import { attioConfig, type AttioConfig } from './config.js'
+import { attioConfig, type AttioReaderConfig } from './config.js'
 
 export type AttioEntity = Record<string, unknown> & { id: Record<string, string> }
 
 export interface AttioClientDeps {
-  config: AttioConfig
+  config: AttioReaderConfig
   fetch: (url: string, init: RequestInit) => Promise<Response>
   token: () => string | undefined
   wait: (milliseconds: number, signal: AbortSignal) => Promise<void>
@@ -102,7 +102,7 @@ export function readCollection(
 }
 
 /** Original provider fields stay under data; metadata does not overwrite custom attributes. */
-export function toAttioRows(
+function toAttioRows(
   items: readonly AttioEntity[],
   resource: string,
   idFields: readonly string[],
@@ -121,7 +121,7 @@ export function entityId(entity: AttioEntity, field: string): string {
   return value
 }
 
-export function entitySlug(entity: AttioEntity): string {
+function entitySlug(entity: AttioEntity): string {
   if (typeof entity.api_slug !== 'string' || entity.api_slug.length === 0) {
     throw new IngestConfigError('Attio object/list is missing api_slug.')
   }

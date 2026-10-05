@@ -18,9 +18,23 @@ bunx chkit ingest run --tag provider:google-meet
 bunx chkit ingest status --tag provider:google-meet
 ```
 
-Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access before ingestion. Review `sourceId`, `lookbackDays`, `overlapDays`, `windowDays`, and `database` in `src/integrations/google-meet/index.ts`. Keep the source identity tied to one Google account; these list responses do not identify the authenticated account. Schema imports do not call Google.
+Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access before ingestion. Review source identity, window settings, schema placement, and limits in `src/integrations/google-meet/config.ts`. Keep the source identity tied to one Google account; these list responses do not identify the authenticated account. Schema imports do not call Google.
 
 <RegistryReference name="google-meet" section="resources" />
+
+## Pipeline and streams
+
+One installation exports one pipeline with independently selected `conferences`, `transcripts`, and `transcript-entries` streams. Each owns its journal progress. Transcript and entry streams discover their own parent conferences, so they work without running the conferences stream first. Nested pagination follows parent-scoped API endpoints inside the selected resource stream.
+
+```sh
+bunx chkit ingest run --tag provider:google-meet --tag resource:conferences
+bunx chkit ingest run --tag provider:google-meet --tag resource:transcripts
+bunx chkit ingest run --tag provider:google-meet --tag resource:transcript-entries
+```
+
+`pipeline.ts` wires destinations and resource streams; `sources/resources.ts` shares the provider state machine, and `client.ts` handles requests. `sourceId` scopes raw rows and query state; `streamPrefix` determines journal IDs. Defaults preserve `google-meet.*` checkpoints. Another installation needs distinct values for both. The pipeline factory binds configuration and injectable request dependencies while using the exported destinations. Edit `database` in `config.ts` before schema imports to change table placement.
+
+The default pipeline runs one stream and request at a time. Filtered runs give resources separate schedules and execution budgets.
 
 ## Sync behavior
 
@@ -32,9 +46,9 @@ Transcript and entry streams retain parent conferences until provider expiry and
 
 The journal stores fixed cycle bounds and nested parent, transcript-page, and entry-page positions. Candidate progress commits after its covering rows load; failed loads retain the preceding position. Rerun after interruption or budget exhaustion to continue. Rejected page tokens replay their scoped collection once, and repeated or malformed tokens fail visibly.
 
-Saved recovery counts cover each unfinished discovery phase, parent transcript collection, and transcript entry collection. They clear at the acknowledged terminal boundary, so pauses and nonterminal replay pages do not renew the allowance. A second rejection fails across executions. Adjust the editable `budget.maxChunks`, execution duration, or polling frequency, then review coverage before explicitly migrating saved state or using a new stream identity for a fresh scan.
+Saved recovery counts cover each unfinished discovery phase, parent transcript collection, and transcript entry collection. They clear at the acknowledged terminal boundary, so pauses and nonterminal replay pages do not renew the allowance. A second rejection fails across executions. Adjust `maxChunks` in `config.ts`, execution duration, or polling frequency, then review coverage before explicitly migrating saved state or using a new stream identity for a fresh scan.
 
-Streams permit 200 chunks per run and retain at most 1,000 conferences. These limits are editable; an oversized pending queue fails instead of losing parents. Source/window changes require explicit checkpoint migration or a new stream identity. Native JSON requires ClickHouse 25.3 or later. Schedule repeat runs externally with one ingestion process per destination at a time.
+Streams permit 200 chunks per run and retain at most 1,000 conferences. Edit `maxChunks` and `maxPendingConferences` in `config.ts`; an oversized pending queue fails instead of losing parents. Source/window changes require explicit checkpoint migration or a new stream identity. Native JSON requires ClickHouse 25.3 or later. Schedule repeat runs externally with one ingestion process per destination at a time.
 
 Google removes conference records and API transcript entries 30 days after a call ends. Expiry during unfinished work fails with a coverage-gap message. Previously checked parents leave the queue on expiry, while stored raw rows remain. Expired or inaccessible resources do not become inferred deletions. See [conference retention](https://developers.google.com/workspace/meet/api/reference/rest/v2/conferenceRecords) and [artifact retention](https://developers.google.com/workspace/meet/api/guides/artifacts).
 

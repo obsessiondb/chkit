@@ -3,6 +3,8 @@ import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { google_meetPipeline } from '../index.js'
+import { googleMeetConfig } from '../config.js'
+import { createGoogleMeetPipeline } from '../pipeline.js'
 
 const originalFetch = globalThis.fetch
 const originalToken = process.env.GOOGLE_MEET_ACCESS_TOKEN
@@ -249,3 +251,62 @@ function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
   journal.events.push(...previous.events.map((event) => ({ ...event, checkpoint: event.checkpoint === undefined ? undefined : JSON.parse(JSON.stringify(event.checkpoint)) })))
   return journal
 }
+
+test('Meet factory snapshots installation settings and runs transcript and conference streams independently', async () => {
+  const config = { ...googleMeetConfig, sourceId: 'meet.work', streamPrefix: 'meet.work', lookbackDays: 5, overlapDays: 2, windowDays: 3 }
+  let token = 'initial'
+  const requests: Array<{ url: URL; authorization: string | null }> = []
+  const pipeline = createGoogleMeetPipeline(config, {
+    config: googleMeetConfig,
+    token: () => token,
+    fetch: async (input: string, init: RequestInit) => {
+      const url = new URL(input)
+      requests.push({ url, authorization: new Headers(init.headers).get('Authorization') })
+      return fixture(url)
+    },
+  })
+  config.sourceId = 'edited-after-construction'
+  config.streamPrefix = 'edited-after-construction'
+  config.lookbackDays = 1
+  config.overlapDays = 0
+  config.windowDays = 1
+  expect(pipeline.id).toBe('meet.work')
+  expect(pipeline.streams.map((stream) => stream.id)).toEqual(['meet.work.conferences', 'meet.work.transcripts', 'meet.work.transcript-entries'])
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:transcripts']), backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  const transcriptCheckpoint = await journal.readCheckpoint('meet.work.transcripts')
+  expect(transcriptCheckpoint.envelope?.state).toMatchObject({ watermark: '2026-10-18T00:00:00.000Z', pending: [{ name: conference.name }] })
+  const transcriptStream = pipeline.streams.find((stream) => stream.id === 'meet.work.transcripts')
+  expect(transcriptStream?.incremental.parseState(transcriptCheckpoint.envelope?.state)).toMatchObject({
+    scope: JSON.stringify(['meet.work', 5, 2, 3]), watermark: '2026-10-18T00:00:00.000Z',
+  })
+  expect((await journal.readCheckpoint('meet.work.conferences')).version).toBe(0)
+  expect((await journal.readCheckpoint('meet.work.transcript-entries')).version).toBe(0)
+  expect(requests.map(({ url }) => url.pathname)).toEqual(['/v2/conferenceRecords', '/v2/conferenceRecords', `/v2/${conference.name}/transcripts`])
+  expect(requests[0]?.url.searchParams.get('filter')).toBe('end_time>="2026-10-15T00:00:00.000Z" AND end_time<="2026-10-18T00:00:00.000Z"')
+  expect(destination.tables.get('default.google_meet_transcripts_raw')?.[0]).toMatchObject({ id: JSON.stringify(['meet.work', transcript.name]), raw: { ...transcript, conference_name: conference.name } })
+  token = 'rotated'
+  expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:conferences']), backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await journal.readCheckpoint('meet.work.transcripts')).version).toBe(transcriptCheckpoint.version)
+  expect((await journal.readCheckpoint('meet.work.conferences')).envelope?.state).toMatchObject({ watermark: '2026-10-18T00:00:00.000Z' })
+  expect(requests.map(({ authorization }) => authorization)).toEqual(['Bearer initial', 'Bearer initial', 'Bearer initial', 'Bearer rotated', 'Bearer rotated'])
+})
+
+test('Meet factory rejects window scope changes before resuming a saved resource stream', async () => {
+  let requests = 0
+  const deps = {
+    config: googleMeetConfig, token: () => 'fixture',
+    fetch: async (input: string) => { requests += 1; return fixture(new URL(input)) },
+  }
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  const pipeline = createGoogleMeetPipeline(googleMeetConfig, deps)
+  expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:transcripts']), backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  const previousRequests = requests
+  const changed = createGoogleMeetPipeline({ ...googleMeetConfig, overlapDays: 1 }, deps)
+  const result = await runIngestion({ selected: selectStreams([changed], ['resource:transcripts']), backfill: undefined }, { journal, destination, now: () => cutoff })
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('scope changed')
+  expect(requests).toBe(previousRequests)
+})

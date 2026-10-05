@@ -30,7 +30,7 @@ Use an external scheduler to repeat ingestion, with one ingestion process per pr
 
 ## Included resources
 
-Channels and users read their complete selected resource on every run. Messages bootstrap retained history and then read checkpointed time ranges. Each reader discovers its authenticated workspace through `auth.test`; messages independently discover conversations.
+One installation pipeline contains independent streams for channels, users, and messages. Channels and users read their complete selected resource on every run. Messages bootstrap retained history and then read checkpointed time ranges. Each reader discovers its authenticated workspace through `auth.test`; messages independently discover conversations. A channel is an individual entity inside the messages resource, so channel and thread traversal stays within that stream.
 
 | Stream tag | Default raw table | Required scopes for defaults |
 |---|---|---|
@@ -60,6 +60,8 @@ Set `channels` to an array of Slack conversation IDs to restrict channels and me
 | `mpim` | `mpim:read` | `mpim:history` |
 
 Keep `sourceId` stable after ingestion begins. A second workspace should use a distinct source ID and a separate table prefix or database. Changing these values changes stream and storage identities and requires a deliberate migration.
+
+`createSlackPipeline` in `pipeline.ts` binds source identity, selection, page sizes, pacing, and message state settings when the pipeline is created. Later changes to a config object do not alter that pipeline. Raw table names are defined from `config.ts` when the schema modules load; the factory does not rename or create destination schemas. Set `database` and `tablePrefix` in the installed config before loading schemas and generating migrations.
 
 Slack documents one request per minute and 15 objects per page for new commercially distributed apps outside the Slack Marketplace. Marketplace and internal customer-built apps retain Tier 3 limits. See the current [history method](https://docs.slack.dev/reference/methods/conversations.history/) and [rate-limit clarification](https://docs.slack.dev/changelog/2025/06/03/rate-limits-clarity/). For an internal app entitled to Tier 3, edit `messagePageSize` to 200 and `messageIntervalMs` to 1200 after confirming its limits.
 
@@ -119,7 +121,9 @@ Messages support isolated date-bound backfills with `--backfill <id> --from <dat
 
 ## Customize the source
 
-`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, pagination, row IDs, and pacing; `state.ts` validates timestamp checkpoints; `pipeline.ts` composes the streams.
+`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, row IDs, and pacing; metadata readers use the plugin's `paginate` helper and yield pages as they arrive. `state.ts` validates provider timestamp checkpoints; `pipeline.ts` binds reader configuration and composes the three streams. Each stream has its own journal progress and resource tag, so selecting users does not run messages and a message failure does not prevent a users run.
+
+Conversation selection validates configured IDs after discovery finishes. If a configured ID is missing, the stream fails visibly; any metadata pages already loaded remain visible.
 
 Remove a stream from `pipeline.ts` to stop ingestion while retaining its schema export in `index.ts` to preserve the table. Removing schema exports can generate destructive migration operations; review them. Test reader changes and revisit pacing when changing concurrency.
 

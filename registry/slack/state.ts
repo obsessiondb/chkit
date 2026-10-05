@@ -1,5 +1,5 @@
 import { IngestConfigError, type IncrementalStrategy } from '@chkit/plugin-ingest'
-import { slackConfig } from './config.js'
+import { slackConfig, type SlackReaderConfig } from './config.js'
 
 export interface PendingThread { root: string; after?: string }
 export interface MessageWork {
@@ -23,19 +23,23 @@ export interface SlackMessageState {
 }
 export interface SlackMessageSelection { from?: string; to: string; requestedTo?: string; backfill: boolean }
 
-export const slackMessageStrategy: IncrementalStrategy<SlackMessageState, SlackMessageSelection> = {
-  id: 'slack.message-ranges', version: 1, parseState: parseMessageState,
-  plan({ cutoff, range }) {
-    validateMessageConfig()
-    return { from: range?.from ? dateTimestamp(range.from) : undefined, to: dateTimestamp(range?.to ?? cutoff),
-      requestedTo: range?.to ? dateTimestamp(range.to) : undefined, backfill: range !== undefined }
-  },
+export function createSlackMessageStrategy(config: SlackReaderConfig): IncrementalStrategy<SlackMessageState, SlackMessageSelection> {
+  return {
+    id: 'slack.message-ranges', version: 1, parseState: parseMessageState,
+    plan({ cutoff, range }) {
+      validateMessageConfig(config)
+      return { from: range?.from ? dateTimestamp(range.from) : undefined, to: dateTimestamp(range?.to ?? cutoff),
+        requestedTo: range?.to ? dateTimestamp(range.to) : undefined, backfill: range !== undefined }
+    },
+  }
 }
 
-export function messageScope(teamId: string): string {
-  return JSON.stringify([slackConfig.sourceId, teamId, slackConfig.channels ? [...slackConfig.channels].sort() : null,
-    [...slackConfig.conversationTypes].sort(), slackConfig.includeReplies, slackConfig.historyFrom,
-    slackConfig.overlapMs, slackConfig.reconcileIntervalMs])
+export const slackMessageStrategy = createSlackMessageStrategy(slackConfig)
+
+export function messageScope(teamId: string, config: SlackReaderConfig = slackConfig): string {
+  return JSON.stringify([config.sourceId, teamId, config.channels ? [...config.channels].sort() : null,
+    [...config.conversationTypes].sort(), config.includeReplies, config.historyFrom,
+    config.overlapMs, config.reconcileIntervalMs])
 }
 
 export function timestampMicros(value: string): bigint {
@@ -85,9 +89,9 @@ export function parseMessageState(raw: unknown): SlackMessageState {
   return { scope: raw.scope, watermark, knownChannels, lastFullAt, active }
 }
 
-function validateMessageConfig(): void {
-  timestampMicros(slackConfig.historyFrom)
-  for (const value of [slackConfig.overlapMs, slackConfig.reconcileIntervalMs]) {
+function validateMessageConfig(config: SlackReaderConfig): void {
+  timestampMicros(config.historyFrom)
+  for (const value of [config.overlapMs, config.reconcileIntervalMs]) {
     if (!Number.isSafeInteger(value) || value < 0) throw new IngestConfigError('Slack overlap and reconciliation intervals must be non-negative safe integers.')
   }
 }

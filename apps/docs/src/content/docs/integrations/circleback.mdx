@@ -17,7 +17,9 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:circleback
 ```
 
-Set `CIRCLEBACK_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/circleback/index.ts` to select meetings or skip transcript requests.
+Set `CIRCLEBACK_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/circleback/config.ts` for stable account and stream identities, the ownership filter, and the retained-meeting bound. `pipeline.ts` groups the meetings resource stream in one account pipeline. Individual meetings are records within that stream; its reader in `sources/meetings.ts` owns enrichment and recovery. `client.ts` uses `paginate()` for Link traversal, and `index.ts` exports the pipeline and raw schema.
+
+`createCirclebackPipeline(config, deps)` binds reader settings and optional HTTP dependencies. Configure storage in the installation's `circlebackConfig` before schema discovery; factories use the exported raw table. Meetings ignore date bounds and do not provide date-range backfills.
 
 <RegistryReference name="circleback" section="resources" />
 

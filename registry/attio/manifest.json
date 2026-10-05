@@ -101,6 +101,7 @@
           "version": "0.2.0",
           "changes": [
             "Give People, Companies, each configured object type, and each configured list independent ingestion streams using chkit pagination.",
+            "Group those resource streams in one installation pipeline and bind factory reader settings independently of setup-time storage definitions.",
             "Make object and list selection explicit, with People and Companies enabled by default; replay interrupted mutable offset reads from the beginning of that stream.",
             "Preserve raw tables, scoped row identities, and typed views while changing child stream IDs; include fixtures for stream independence and failure recovery."
           ]
@@ -135,6 +136,7 @@
       "entry": "index.ts",
       "exports": [
         "attio",
+        "createAttioPipeline",
         "attioObjectsRaw",
         "attioObjectAttributesRaw",
         "attioRecordsRaw",

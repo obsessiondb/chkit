@@ -3,7 +3,7 @@ import { attioConfig } from '../config.js'
 
 export const peopleObject = { id: { workspace_id: 'workspace-1', object_id: 'object-people' }, api_slug: 'people' }
 const companiesObject = { id: { workspace_id: 'workspace-1', object_id: 'object-companies' }, api_slug: 'companies' }
-export const customObject = { id: { workspace_id: 'workspace-1', object_id: 'object-custom' }, api_slug: 'subscriptions' }
+const customObject = { id: { workspace_id: 'workspace-1', object_id: 'object-custom' }, api_slug: 'subscriptions' }
 const salesList = { id: { workspace_id: 'workspace-1', list_id: 'list-sales' }, api_slug: 'sales' }
 
 const fixtureParents: Record<string, unknown> = {
@@ -28,7 +28,7 @@ export const person = {
   },
 }
 
-export const fixtureCollections: Record<string, readonly unknown[]> = {
+const fixtureCollections: Record<string, readonly unknown[]> = {
   '/v2/objects': [peopleObject, customObject],
   '/v2/objects/object-people/records/query': [person],
   '/v2/objects/object-custom/records/query': [{ id: { ...person.id, object_id: 'object-custom' }, values: { custom_number: [{ value: 7 }] } }],

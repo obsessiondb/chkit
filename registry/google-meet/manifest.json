@@ -20,6 +20,26 @@
       "target": "src/integrations/google-meet/index.ts"
     },
     {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/pipeline.ts"
+    },
+    {
+      "path": "sources/resources.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-meet/sources/resources.ts"
+    },
+    {
       "path": "tests/basic.test.ts",
       "type": "registry:file",
       "target": "src/integrations/google-meet/tests/basic.test.ts",
@@ -36,7 +56,8 @@
           "changes": [
             "Checkpoint fixed conference discovery windows and retain pending conferences until expiry to revisit late transcript artifacts.",
             "Resume acknowledged discovery, transcript, and entry pages with bounded token recovery and visible expiry gaps.",
-            "Store transcript entries in a separate raw table and scope row IDs to the source; migrate legacy identities deliberately when upgrading."
+            "Store transcript entries in a separate raw table and scope row IDs to the source; migrate legacy identities deliberately when upgrading.",
+            "Separate editable installation configuration, injectable HTTP clients, and resource readers from one pipeline; preserve independent stream identities and provider recovery."
           ]
         },
         {

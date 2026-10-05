@@ -2,7 +2,9 @@ import { afterEach, expect, test } from 'bun:test'
 import { IngestConfigError, runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
-import { circlebackPipeline } from '../index.js'
+import { circlebackPipeline, createCirclebackPipeline } from '../index.js'
+import { circlebackConfig } from '../config.js'
+import { defaultCirclebackClientDeps } from '../client.js'
 
 const originalFetch = globalThis.fetch
 const originalToken = process.env.CIRCLEBACK_API_KEY
@@ -174,4 +176,47 @@ test('Circleback rejects changed source scopes and unbounded or duplicated recov
   expect(() => parse?.({ ...state, scope: 'different-source' })).toThrow('scope changed')
   expect(() => parse?.({ ...state, scan: { startedAt: '2026-01-01T00:00:00Z', completedMeetingIds: ['a', 'a'] } })).toThrow('checkpoint is invalid')
   expect(() => parse?.({ ...state, scan: { startedAt: '2026-01-01T00:00:00Z', completedMeetingIds: Array.from({ length: 10_001 }, (_, index) => String(index)) } })).toThrow('checkpoint is invalid')
+})
+
+test('Circleback binds source scope and bounds to its meeting collection without creating streams per meeting', async () => {
+  const config = { ...circlebackConfig, sourceId: 'circleback.team', sourceIdentity: 'team', maxRetainedMeetings: 2 }
+  const calls: string[] = []
+  const pipeline = createCirclebackPipeline(config, {
+    ...defaultCirclebackClientDeps, token: () => 'team-key',
+    fetch: async (url, init) => {
+      calls.push(url)
+      expect(init.headers).toEqual({ Authorization: 'Bearer team-key', Accept: 'application/json' })
+      return url.endsWith('/transcript') ? new Response('unavailable', { status: 404 }) : Response.json([{ id: 'a' }, { id: 'b' }])
+    },
+  })
+  config.sourceIdentity = 'changed-after-construction'
+  config.maxRetainedMeetings = 1
+  expect(selectStreams([pipeline], ['resource:meetings']).map((item) => item.stream.id)).toEqual(['circleback.team.meetings'])
+  const journal = createMemoryJournal()
+  const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:meetings']), backfill: undefined }, { journal, destination: createMemoryDestination() })
+  expect(result.ok).toBe(true)
+  expect(calls).toEqual(['https://circleback.ai/api/meetings?ownership=All', 'https://circleback.ai/api/meeting/a/transcript', 'https://circleback.ai/api/meeting/b/transcript'])
+  const state = (await journal.readCheckpoint('circleback.team.meetings')).envelope?.state
+  expect(state).toMatchObject({ scope: JSON.stringify({ sourceIdentity: 'team', ownership: 'All' }), scan: null })
+  expect((await journal.readCheckpoint('circleback.meetings')).envelope).toBeUndefined()
+  const changedScope = createCirclebackPipeline({ ...circlebackConfig, sourceIdentity: 'another-account' })
+  expect(() => changedScope.streams[0]?.incremental.parseState(state)).toThrow('scope changed')
+})
+
+test('Circleback rejects cyclic Link pagination and unexpected origins without completing the cycle', async () => {
+  for (const next of ['/api/meetings?cursor=repeat', 'https://untrusted.example/meetings']) {
+    const calls: string[] = []
+    const pipeline = createCirclebackPipeline(circlebackConfig, {
+      ...defaultCirclebackClientDeps, token: () => 'fixture', fetch: async (url) => {
+        calls.push(url)
+        return Response.json([], { headers: { Link: `<${next}>; rel="next"` } })
+      },
+    })
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createMemoryDestination() })
+    expect(result.ok).toBe(false)
+    expect(calls).toHaveLength(next.startsWith('/') ? 2 : 1)
+    expect((await journal.readCheckpoint('circleback.meetings')).lastSuccessSeq).toBe(0)
+    expect((await journal.readCheckpoint('circleback.meetings')).envelope).toBeUndefined()
+  }
 })

@@ -2,7 +2,8 @@ import { afterEach, expect, test } from 'bun:test'
 import { IngestConfigError, runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
-import { linearPipeline } from '../index.js'
+import { createLinearPipeline, linearPipeline } from '../index.js'
+import { linearConfig } from '../config.js'
 
 const originalFetch = globalThis.fetch
 const originalToken = process.env.LINEAR_API_KEY
@@ -132,6 +133,60 @@ test.serial('Linear rejects malformed continuation cursors before requesting ano
     expect(result.ok).toBe(false)
     expect(result.streams[0]?.error).toContain('no new issue cursor')
     expect(requests).toBe(1)
+    expect((await journal.readCheckpoint('linear.issues')).envelope).toBeUndefined()
+  }
+})
+
+test.serial('Linear binds custom date selection and isolates installation progress', async () => {
+  const requests: { query: string; variables: Record<string, unknown> }[] = []
+  const config = { ...linearConfig, sourceId: 'linear.fixture', start: new Date('2025-01-01'), overlapMs: 60_000 }
+  const pipeline = createLinearPipeline(config, {
+    token: () => 'bound-token',
+    fetch: async (_input, init) => {
+      expect(new Headers(init.headers).get('authorization')).toBe('bound-token')
+      requests.push(JSON.parse(String(init.body)))
+      return Response.json({ data: { issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } })
+    },
+  })
+  config.start.setUTCFullYear(2000)
+  config.overlapMs = 60 * 60 * 1000
+  const failing = createLinearPipeline({ ...linearConfig, sourceId: 'linear.denied' }, {
+    token: () => 'denied-token', fetch: async () => new Response('denied', { status: 403 }),
+  })
+  const journal = createMemoryJournal()
+  const destination = createMemoryDestination()
+  const selected = selectStreams([failing, pipeline], []).map((item) => ({ ...item, stream: { ...item.stream, retry: { retries: 0 } } }))
+  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
+  expect(result.ok).toBe(false)
+  expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed', 'succeeded'])
+  expect(requests[0]?.variables).toEqual({ after: null, from: '2025-01-01T00:00:00.000Z', to: cutoff.toISOString() })
+  expect((await journal.readCheckpoint('linear.denied.issues')).envelope).toBeUndefined()
+  expect((await journal.readCheckpoint('linear.fixture.issues')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
+  const onlyFixture = selectStreams([failing, pipeline], ['stream:linear.fixture.issues'])
+  expect(onlyFixture.map((item) => item.stream.id)).toEqual(['linear.fixture.issues'])
+  expect((await runIngestion({ selected: onlyFixture, backfill: undefined }, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect(requests[1]?.variables.from).toBe('2026-01-01T23:59:00.000Z')
+  expect((await journal.readCheckpoint('linear.issues')).envelope).toBeUndefined()
+})
+
+test.serial('Linear rejects cyclic issue and comment continuations without committing a window', async () => {
+  for (const resource of ['issues', 'comments']) {
+    const cursors: unknown[] = []
+    setFetch(async (_input, init) => {
+      const body = JSON.parse(String(init?.body))
+      if (resource === 'comments' && body.query.includes('query Issues')) return Response.json({ data: { issues: {
+        nodes: [{ id: 'a', updatedAt: '2026-01-01T00:00:00Z', comments: { nodes: [], pageInfo: { hasNextPage: true, endCursor: 'a' } } }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      } } })
+      cursors.push(body.variables.after)
+      const connection = { nodes: [], pageInfo: { hasNextPage: true, endCursor: body.variables.after === 'a' ? 'b' : 'a' } }
+      return resource === 'issues' ? Response.json({ data: { issues: connection } }) : Response.json({ data: { issue: { comments: connection } } })
+    })
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ selected: selected(), backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.error).toContain('repeated continuation')
+    expect(cursors).toHaveLength(3)
     expect((await journal.readCheckpoint('linear.issues')).envelope).toBeUndefined()
   }
 })

@@ -17,7 +17,9 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:github
 ```
 
-Set `GITHUB_TOKEN` in the runtime environment before the ingestion run. Edit `repositories` in `src/integrations/github/index.ts` to select repositories, then remove either stream if it is not needed.
+Set `GITHUB_TOKEN` in the runtime environment before the ingestion run. Edit `githubConfig.repositories` in `src/integrations/github/config.ts` to select repositories. `pipeline.ts` groups independent issues and stargazers streams for each repository in one pipeline; `sources/` contains the resource readers and raw table declarations. The named pipeline and table exports remain in `index.ts`.
+
+The pipeline factory binds source configuration and injectable HTTP dependencies. Keep `sourceId` stable for one installation; its stream IDs own the checkpoints. Table schemas are edited in their source modules before migration.
 
 <RegistryReference name="github" section="resources" />
 
@@ -25,7 +27,7 @@ Set `GITHUB_TOKEN` in the runtime environment before the ingestion run. Edit `re
 
 Issues use `since` with update-time ordering, a fixed local upper cutoff, and five minutes of overlap. GitHub has no server-side upper timestamp filter. The checkpoint advances only after the complete issue window and destination writes succeed; failed windows replay from their lower bound. The reader follows provider `Link` URLs and includes paginated issue comments plus pull request detail, reviews, review comments, commits and files. Provider caps are reflected in raw `_chkit_context` completeness fields.
 
-Stargazers remain full reads. Their checkpoint records the last completed scan, including an empty scan; page numbers and star creation timestamps are not removal cursors. Removed stars and deleted issues remain stored. Live pagination and child-only updates require periodic reconciliation or a durable webhook companion. [GitHub issue filters](https://docs.github.com/en/rest/issues/issues#list-repository-issues) and [pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api) describe the API behavior.
+Stargazers use the built-in `fullSync` strategy; the journal records completion even for an empty read. Both readers use `paginate` for request retries and continuation cycle detection. Removed stars and deleted issues remain stored. Live pagination and child-only updates require periodic reconciliation or a durable webhook companion. [GitHub issue filters](https://docs.github.com/en/rest/issues/issues#list-repository-issues) and [pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api) describe the API behavior.
 
 ```sh
 bunx chkit ingest run --tag provider:github --tag resource:issues --backfill reconcile-2026-10-04 --from 2008-01-01
@@ -33,6 +35,14 @@ bunx chkit ingest status --tag provider:github --json
 ```
 
 Historical replay reads current observations, not historical versions. Use a new backfill ID for each full reconciliation. The raw tables preserve provider fields and require ClickHouse 25.3 or later. See the installed README for token permissions and [registry installation](/cli/add/).
+
+Select a repository/resource stream independently:
+
+```sh
+bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:issues
+```
+
+The default pipeline executes streams sequentially with `maxStreams: 1`. Separate filtered runs give each stream its own schedule and execution budget; a failed stream does not advance another stream's progress.
 
 ## Test the reader
 

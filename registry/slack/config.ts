@@ -17,6 +17,9 @@ export interface SlackConfig {
   reconcileIntervalMs: number
 }
 
+/** Runtime reader settings; destination names are defined when the schemas load. */
+export type SlackReaderConfig = Omit<SlackConfig, 'database' | 'tablePrefix'>
+
 // Credentials are read only in client.ts at request time. Keep these values stable across runs.
 export const slackConfig: SlackConfig = {
   sourceId: 'slack.primary',

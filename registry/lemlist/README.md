@@ -2,7 +2,9 @@
 
 This is a small editable starting point based on the Lemlist source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.
 
-Set `LEMLIST_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit `pageSize` and the stream list in `index.ts` for the resources needed by the project. Native JSON requires ClickHouse 25.3 or later.
+Set `LEMLIST_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit `config.ts` for the account namespace, page size, initial date, overlap, and interval length. Native JSON requires ClickHouse 25.3 or later.
+
+`pipeline.ts` groups activities and campaigns in one account pipeline. Each resource has its own stream, checkpoint and selection tag. `sources/` contains the readers; `client.ts` supplies authenticated pagination through `paginate()`. `index.ts` exports the pipeline and raw schema. Use `createLemlistPipeline(config, deps)` to bind reader settings and optional HTTP dependencies. The exported raw tables use the installation's `lemlistConfig.database` at schema discovery; factories do not change storage names.
 
 Keep each stream ID and destination tied to one Lemlist account. The reader does not resolve the authenticated account identity: when changing the key to another account, use new stream IDs and destinations before ingesting so previous watermarks cannot skip that account's history.
 
@@ -32,7 +34,7 @@ bunx chkit ingest status --tag provider:lemlist --json
 
 Use a new backfill ID for each complete reconciliation; reusing an ID resumes that backfill. A reused ID with an upper bound earlier than its committed frontier is rejected; use a new ID for a narrower historical range. Date intervals intentionally have inclusive shared boundaries; stable `_id` row keys reconcile repeated observations. Empty completion markers carry interval identities, while mutable row chunks do not.
 
-Campaigns always scan from offset zero, ordered by `createdAt:asc`. Their `completedAt` checkpoint records a successful full scan rather than a modification cursor. Creation-only filtering would miss later campaign state changes. Removed campaigns or activities remain stored. Run one ingestion process per ClickHouse target at a time.
+Campaigns always scan from offset zero, ordered by `createdAt:asc`. The built-in `fullSync()` strategy records successful execution in the journal, including an empty result; no custom campaign state is needed. An interrupted scan safely replays from zero. Creation-only filtering would miss later campaign state changes. Campaigns ignore date backfill bounds and do not provide date-range backfills. Removed campaigns or activities remain stored. Run one ingestion process per ClickHouse target at a time.
 
 ## Fixture tests
 
@@ -41,4 +43,4 @@ bunx chkit add lemlist --with-tests
 bun test src/integrations/lemlist/tests/basic.test.ts
 ```
 
-The portable suite checks bounded interval pagination, committed-frontier recovery, explicit backfill isolation, sink failure and empty scan completion without live credentials.
+The portable suite checks bounded interval pagination, committed-frontier recovery, explicit backfill isolation, independent resource failures, bound configuration, repeated pages, changed raw observations and empty completion without live credentials.

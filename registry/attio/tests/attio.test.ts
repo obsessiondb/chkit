@@ -86,7 +86,15 @@ describe('Attio template', () => {
   })
 
   test('a source identity supplied to the pipeline owns stream IDs and raw row IDs', async () => {
-    const pipeline = createAttioPipeline({ ...attioConfig, sourceId: 'attio.secondary', objects: ['people'], lists: [] }, fixtureDeps())
+    const config = { ...attioConfig, sourceId: 'attio.secondary', objects: ['people'], lists: [], pageSize: 2 }
+    const queries: unknown[] = []
+    const pipeline = createAttioPipeline(config, fixtureDeps((url, init) => {
+      if (url.pathname.endsWith('/records/query')) queries.push(JSON.parse(String(init.body)))
+      return fixtureResponse(url)
+    }))
+    config.sourceId = 'changed-after-construction'
+    config.pageSize = 500
+    config.objects.push('companies')
     const destination = createMemoryDestination()
     const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:records', 'object:people']), backfill: undefined }, {
       journal: createMemoryJournal(), destination,
@@ -96,6 +104,8 @@ describe('Attio template', () => {
     const row = destination.tables.get('default.attio_records_raw')?.[0]
     expect(row?.id).toBe(JSON.stringify(['attio.secondary', 'records', 'workspace-1', 'object-people', 'record-1']))
     expect(row?.raw).toMatchObject({ source_id: 'attio.secondary' })
+    expect(queries).toEqual([{ limit: 2, offset: 0 }])
+    expect(selectStreams([pipeline], ['resource:records']).map(({ stream }) => stream.id)).toEqual(['attio.secondary.records.people'])
   })
 
   test('notes use their 50-item limit and stop fetching after cancellation', async () => {

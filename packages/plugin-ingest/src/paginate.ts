@@ -1,3 +1,4 @@
+import { IngestConfigError } from './errors.js'
 import { canonicalJson } from './journal.js'
 import type { AttemptOptions, FetchContext } from './types.js'
 
@@ -37,7 +38,7 @@ export async function* paginate<TItem, TCursor>(
 
     const key = canonicalJson(page.next)
     if (seen.has(key)) {
-      throw new Error(`paginate: provider returned a repeated continuation ${key}; refusing to loop.`)
+      throw new IngestConfigError(`paginate: provider returned a repeated continuation ${key}; refusing to loop.`)
     }
     seen.add(key)
     cursor = page.next

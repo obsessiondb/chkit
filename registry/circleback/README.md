@@ -2,7 +2,9 @@
 
 This is a small editable starting point based on the Circleback source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.
 
-Set `CIRCLEBACK_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit the reader in `index.ts` to select meetings and decide whether to fetch transcripts. Native JSON requires ClickHouse 25.3 or later.
+Set `CIRCLEBACK_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit `config.ts` for the stable account and stream identities, ownership filter, and retained-meeting bound. Native JSON requires ClickHouse 25.3 or later.
+
+`pipeline.ts` defines one account pipeline and its meetings resource stream. Individual meetings are records within that stream. `sources/meetings.ts` owns enrichment and its recovery state; `client.ts` uses `paginate()` for Link traversal. `index.ts` exports the pipeline and raw schema. `createCirclebackPipeline(config, deps)` binds reader settings and optional HTTP dependencies. The exported table uses the installation's `circlebackConfig.database` during schema discovery; factories do not change storage names. Meetings ignore date backfill bounds and do not provide date-range backfills.
 
 ```sh
 bunx chkit check

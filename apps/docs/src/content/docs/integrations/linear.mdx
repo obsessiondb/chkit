@@ -17,7 +17,9 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:linear
 ```
 
-Set `LINEAR_API_KEY` in the runtime environment before the ingestion run. Edit the GraphQL query in `src/integrations/linear/index.ts` to select the fields needed by the project.
+Set `LINEAR_API_KEY` in the runtime environment before the ingestion run. Edit the GraphQL query and raw destination in `src/integrations/linear/sources/issues.ts` to select fields and configure the table. `config.ts` supplies source identity and timestamp selection; `pipeline.ts` groups resource streams in one installation pipeline, and `client.ts` handles authenticated requests. The default pipeline and table exports remain in `index.ts`.
+
+`createLinearPipeline(config, deps)` binds configuration and injectable HTTP dependencies. The example currently exposes the issues resource; add supported resource types as independent streams with their own progress. Destination schemas stay in their source modules rather than runtime configuration.
 
 Keep each stream ID and destination tied to one workspace. The reader does not resolve the token's workspace identity; switching workspaces requires a new stream ID and destination so the previous watermark cannot skip history. Reconcile older observations after adding requested fields.
 
@@ -25,7 +27,7 @@ Keep each stream ID and destination tied to one workspace. The reader does not r
 
 ## Sync behavior
 
-Issues use server-side bounded `updatedAt` windows, Relay cursors, five minutes of overlap, and explicit archive inclusion. All accessible comment pages are fetched before their issue is published. The timestamp checkpoint advances only after the whole window and destination writes succeed, including an empty window; failed windows replay from their lower bound. [Linear pagination](https://linear.app/developers/pagination) and [date filtering](https://linear.app/developers/filtering) document the selection controls.
+Issues use server-side bounded `updatedAt` windows, Relay cursors, five minutes of overlap, and explicit archive inclusion. `paginate` owns retries and continuation cycle detection for each connection; all accessible comment pages are fetched before their issue is published, retaining the provider connection shape and terminal `pageInfo`. The timestamp checkpoint advances only after the whole window and destination writes succeed, including an empty window; failed windows replay from their lower bound. [Linear pagination](https://linear.app/developers/pagination) and [date filtering](https://linear.app/developers/filtering) document the selection controls.
 
 Deleted issues remain stored. Comment-only changes are not assumed to update the parent issue timestamp; use periodic reconciliation or a durable webhook companion to refresh old discussions. The API does not provide an atomic snapshot guarantee.
 

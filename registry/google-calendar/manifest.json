@@ -20,6 +20,26 @@
       "target": "src/integrations/google-calendar/index.ts"
     },
     {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/config.ts"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/client.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/pipeline.ts"
+    },
+    {
+      "path": "sources/events.ts",
+      "type": "registry:file",
+      "target": "src/integrations/google-calendar/sources/events.ts"
+    },
+    {
       "path": "tests/basic.test.ts",
       "type": "registry:file",
       "target": "src/integrations/google-calendar/tests/basic.test.ts",
@@ -36,7 +56,8 @@
           "changes": [
             "Replace the rolling occurrence window with canonical events and incremental provider sync tokens, including cancellation payloads.",
             "Resume acknowledged pages, promote the terminal sync token after destination acknowledgement, and bound recovery from rejected or expired tokens.",
-            "Scope row IDs to the installation and resolved calendar; migrate legacy occurrence identities or use a fresh table and stream when upgrading."
+            "Scope row IDs to the installation and resolved calendar; migrate legacy occurrence identities or use a fresh table and stream when upgrading.",
+            "Separate editable installation configuration, injectable HTTP clients, and resource readers from one pipeline; preserve independent stream identities and provider recovery."
           ]
         },
         {
