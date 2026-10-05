@@ -31,7 +31,6 @@ export function readGitHubPages(
       if (!Array.isArray(payload)) throw new IngestConfigError(`GitHub ${input.path} response is not an array.`)
       const items = payload.map((item: unknown) => requireGitHubObject(item, input.path))
       const next = nextLink(response.headers.get('link'), cursor)
-      if (next === cursor) throw new IngestConfigError('GitHub repeated a page URL.')
       return { items, next }
     },
   })

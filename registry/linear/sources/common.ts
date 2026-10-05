@@ -15,7 +15,7 @@ export function readLinearPages(context: FetchContext, input: {
     context, initial: input.initial, label: `POST /graphql ${input.label}`,
     fetchPage: async (after, signal) => {
       const data = await graphql(input.query, { ...input.variables, after: after ?? null }, signal, deps)
-      const page = linearConnection(input.select(data), after, input.label)
+      const page = linearConnection(input.select(data), input.label)
       if (input.window) {
         for (const item of page.items) {
           const updated = typeof item.updatedAt === 'string' ? Date.parse(item.updatedAt) : NaN
@@ -29,7 +29,7 @@ export function readLinearPages(context: FetchContext, input: {
   })
 }
 
-export function linearConnection(value: unknown, current: string | undefined, label: string) {
+export function linearConnection(value: unknown, label: string) {
   const connection = requireLinearObject(value, `${label} connection`)
   if (!Array.isArray(connection.nodes)) throw new IngestConfigError(`Linear ${label} nodes is not an array.`)
   const items = connection.nodes.map((node: unknown) => {
@@ -40,7 +40,7 @@ export function linearConnection(value: unknown, current: string | undefined, la
   const page = requireLinearObject(connection.pageInfo, `${label} pageInfo`)
   if (typeof page.hasNextPage !== 'boolean') throw new IngestConfigError(`Linear ${label} has no hasNextPage flag.`)
   if (!page.hasNextPage) return { items, next: undefined }
-  if (typeof page.endCursor !== 'string' || !page.endCursor.trim() || page.endCursor === current) {
+  if (typeof page.endCursor !== 'string' || !page.endCursor.trim()) {
     throw new IngestConfigError(`Linear ${label} returned no new cursor.`)
   }
   return { items, next: page.endCursor }

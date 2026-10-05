@@ -59,7 +59,7 @@
             "Scope row IDs to the installation and resolved calendar; migrate legacy occurrence identities or use a fresh table and stream when upgrading.",
             "Separate editable installation configuration, injectable HTTP clients, and resource readers from one pipeline; preserve independent stream identities and provider recovery.",
             "Keep events as the sole raw resource with native nested fields and sparse cancellation observations; verify recurring-exception replacement without hydration.",
-            "Use full paginate pages and checkpoint metadata for canonical sync-token progress, including empty terminal pages, while preserving the saved state format."
+            "Use full paginate pages and checkpoint metadata for canonical sync-token progress and bounded token recovery in one pagination loop, including empty terminal pages and the existing saved state format."
           ]
         },
         {

@@ -1,6 +1,6 @@
 import { IngestConfigError, rawTable, type ReadContext, type SourceChunk, type RawRow } from '@chkit/plugin-ingest'
 
-import { defaultSlackClientDeps, discoverChannels, entityId, getWorkspace, readCollectionPage, SlackCursorExpiredError, toSlackRows, type SlackClientDeps, type SlackEntity, type SlackPage } from '../client.js'
+import { defaultSlackClientDeps, discoverChannels, entityId, getWorkspace, readCollection, SlackCursorExpiredError, toSlackRows, type SlackClientDeps, type SlackEntity } from '../client.js'
 import { slackConfig } from '../config.js'
 import { formatTimestamp, messageScope, timestampMicros, type SlackMessageSelection, type SlackMessageState } from '../state.js'
 
@@ -38,7 +38,7 @@ export async function* readMessages(
     const thread = work.threads[0]
     if (thread) {
       const after = thread.after ?? formatTimestamp(max(0n, timestampMicros(thread.root) - 1n))
-      const page = await nonemptyPage(context, { channel: channelId, ts: thread.root, oldest: after,
+      const page = await readTimePage(context, { channel: channelId, ts: thread.root, oldest: after,
         latest: formatTimestamp(timestampMicros(work.to) + 1n), inclusive: 'false', include_all_metadata: 'true' }, 'conversations.replies', deps)
       const replies = page.items.filter((item) => entityId(item, 'ts') !== thread.root)
       assertRange(replies, timestampMicros(after) + 1n, timestampMicros(work.to))
@@ -55,7 +55,7 @@ export async function* readMessages(
       continue
     }
     const from = work.kind === 'incremental' && !state.knownChannels.includes(channelId) ? config.historyFrom : work.from
-    const page = await nonemptyPage(context, { channel: channelId, oldest: formatTimestamp(max(0n, timestampMicros(from) - 1n)), latest: work.latest,
+    const page = await readTimePage(context, { channel: channelId, oldest: formatTimestamp(max(0n, timestampMicros(from) - 1n)), latest: work.latest,
       inclusive: 'false', include_all_metadata: 'true' }, 'conversations.history', deps)
     assertRange(page.items, timestampMicros(from), timestampMicros(work.latest) - 1n)
     const latest = page.items.length ? formatTimestamp(page.items.reduce((oldest, item) => min(oldest, timestampMicros(entityId(item, 'ts'))), timestampMicros(work.latest))) : work.latest
@@ -75,34 +75,24 @@ export async function* readMessages(
 }
 
 /** Empty cursor pages use the live cursor; nonempty pages establish timestamp boundaries. */
-async function nonemptyPage(
+async function readTimePage(
   context: ReadContext<SlackMessageSelection, SlackMessageState>, query: Record<string, string>,
   method: 'conversations.history' | 'conversations.replies', deps?: SlackClientDeps,
-): Promise<SlackPage> {
-  let cursor = ''
+): Promise<{ items: SlackEntity[]; hasMore: boolean }> {
   let restarted = false
-  const seen = new Set<string>()
   const parents = new Map<string, SlackEntity>()
   while (true) {
-    let page: SlackPage
+    let continued = false
     try {
-      page = await readCollectionPage(context, { method, field: 'messages', idField: 'ts', query, timePagination: true }, cursor, deps)
+      for await (const page of readCollection(context, { method, field: 'messages', idField: 'ts', query, timePagination: true }, deps)) {
+        for (const item of page.items) parents.set(entityId(item, 'ts'), item)
+        if (page.next === undefined) return { items: [...parents.values()], hasMore: page.metadata?.hasMore === true }
+        continued = true
+      }
     } catch (error) {
-      if (!(error instanceof SlackCursorExpiredError) || !cursor || restarted) throw error
-      cursor = ''
+      if (!(error instanceof SlackCursorExpiredError) || !continued || restarted) throw error
       restarted = true
-      seen.clear()
-      continue
     }
-    const parentOnly = method === 'conversations.replies' && page.items.every((item) => entityId(item, 'ts') === query.ts)
-    if (page.items.length > 0 && (!parentOnly || !page.hasMore) || !page.hasMore) {
-      for (const item of page.items) parents.set(entityId(item, 'ts'), item)
-      return { ...page, items: [...parents.values()] }
-    }
-    for (const item of page.items) parents.set(entityId(item, 'ts'), item)
-    if (!page.cursor || seen.has(page.cursor)) throw new IngestConfigError('Slack empty page did not provide a new continuation.')
-    seen.add(page.cursor)
-    cursor = page.cursor
   }
 }
 

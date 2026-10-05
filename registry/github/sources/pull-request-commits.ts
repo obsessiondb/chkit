@@ -45,7 +45,6 @@ export async function* readPullRequestCommits(context: FetchContext, repo: strin
           if (typeof pageInfo.hasNextPage !== 'boolean') throw new IngestConfigError('GitHub commits have no hasNextPage flag.')
           if (pageInfo.hasNextPage && (typeof pageInfo.endCursor !== 'string' || !pageInfo.endCursor.trim())) throw new IngestConfigError('GitHub commits have no continuation cursor.')
           const next = pageInfo.hasNextPage && typeof pageInfo.endCursor === 'string' ? pageInfo.endCursor : undefined
-          if (next !== undefined && next === after) throw new IngestConfigError('GitHub commits repeated a cursor.')
           const pageShas = new Set<string>()
           for (const commit of items) {
             if (seenShas.has(commit.sha) || pageShas.has(commit.sha)) throw new IngestConfigError('GitHub PR commits repeated a SHA; replay this stream.')

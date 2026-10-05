@@ -380,12 +380,13 @@ test('invalid REST continuations and payloads fail without completing or replayi
     const pipeline = fixturePipeline((url) => {
       calls++
       return mode === 'malformed' ? Response.json({ not: 'an array' })
-        : Response.json([], { headers: { Link: `<${mode === 'foreign' ? 'https://example.com/steal' : url.toString()}>; rel="next"` } })
+        : Response.json([stargazer], { headers: { Link: `<${mode === 'foreign' ? 'https://example.com/steal' : url.toString()}>; rel="next"` } })
     })
-    const journal = createMemoryJournal()
-    const result = await runIngestion(request(pipeline, 'stargazers'), { journal, destination: createMemoryDestination(), now: () => cutoff })
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const result = await runIngestion(request(pipeline, 'stargazers'), { journal, destination, now: () => cutoff })
     expect(result.ok).toBe(false)
     expect(calls).toBe(1)
+    expect(destination.tables.size).toBe(0)
     expect((await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
   }
 })
@@ -397,7 +398,8 @@ test('GraphQL malformed or cyclic cursors and invalid commit nodes never record 
       if (url.pathname !== '/graphql') return fixtureResponse(url, init)
       calls++
       const page = { totalCount: mode === 'repeated' ? 3 : 1,
-        nodes: [{ commit: mode === 'missing-message' ? { oid: commit.sha } : { oid: commit.sha, message: commit.message } }],
+        nodes: [{ commit: mode === 'missing-message' ? { oid: commit.sha }
+          : { oid: mode === 'repeated' ? String(calls).padStart(40, '0') : commit.sha, message: commit.message } }],
         pageInfo: { hasNextPage: mode !== 'missing-message', endCursor: mode === 'missing-cursor' ? null : 'same' } }
       return Response.json({ data: { repository: { pullRequest: { commits: page } } } })
     })
@@ -405,6 +407,7 @@ test('GraphQL malformed or cyclic cursors and invalid commit nodes never record 
     const result = await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok).toBe(false)
     expect(calls).toBe(mode === 'repeated' ? 2 : 1)
+    if (mode === 'repeated') expect(result.streams[0]?.error).toContain('repeated continuation')
     expect((await journal.readCheckpoint('github.pull_request_commits.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
   }
 })

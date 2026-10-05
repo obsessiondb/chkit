@@ -104,7 +104,7 @@
             "Store each resource in its own raw table with provider IDs and relationship references; retain complete issue labels as strings and leave joins and metrics to ClickHouse.",
             "Use shared pagination, validated GraphQL responses, request-level retries and sink-acknowledged completion checkpoints; separate configuration, injectable requests, readers, and pipeline wiring.",
             "Existing issue IDs remain stable; migrate retained nested comment observations deliberately and populate the eight new destinations through their own initial syncs.",
-            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+            "Consume full pagination pages and use shared continuation-cycle detection while preserving independent resource checkpoints and GraphQL response validation."
           ]
         },
         {

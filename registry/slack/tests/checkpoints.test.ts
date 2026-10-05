@@ -95,6 +95,35 @@ test('thread reply pages resume from their ascending timestamp frontier', async 
   expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: secondReply })
 })
 
+test('history follows empty cursor pages then resumes from the nonempty timestamp boundary', async () => {
+  slackConfig.includeReplies = false
+  const urls: URL[] = []
+  const defaults = fixtureDeps()
+  const deps = fixtureDeps((url, init) => {
+    if (url.pathname !== '/api/conversations.history') return defaults.fetch(url.toString(), init)
+    urls.push(url)
+    if (url.searchParams.get('latest') === standaloneMessage.ts) {
+      return Response.json({ ok: true, messages: [parentMessage], has_more: false })
+    }
+    return Response.json(url.searchParams.has('cursor')
+      ? { ok: true, messages: [standaloneMessage], has_more: true, response_metadata: { next_cursor: 'empty-page' } }
+      : { ok: true, messages: [], has_more: true, response_metadata: { next_cursor: 'empty-page' } })
+  })
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const first = await runIngestion(request(pipeline(deps, { maxChunks: 2 })), { journal, destination, now: () => cutoff })
+  expect(first.streams[0]?.outcome).toBe('budget_exhausted')
+  const saved = parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state)
+  expect(saved.active?.latest).toBe(standaloneMessage.ts)
+  expect(saved.active?.historyDone).toBe(false)
+  expect(JSON.stringify(saved)).not.toContain('empty-page')
+  expect(urls.map((url) => url.searchParams.get('cursor'))).toEqual([null, 'empty-page'])
+  expect((await runIngestion(request(pipeline(deps)), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect(urls.map((url) => [url.searchParams.get('cursor'), url.searchParams.get('latest')])).toEqual([
+    [null, '1700006400.000001'], ['empty-page', '1700006400.000001'], [null, standaloneMessage.ts],
+  ])
+  expect(new Set(destination.tables.get('default.slack_messages_raw')?.map((row) => row.id)).size).toBe(2)
+})
+
 test('periodic full reconciliation captures new replies on roots outside recent overlap', async () => {
   let now = cutoff, late = false
   const lateReply = { ...replyMessage, ts: dateTimestamp(new Date('2023-11-16T12:00:00Z')), text: 'Late reply' }
@@ -187,6 +216,29 @@ test('expired temporary cursors replay thread bounds and keep the latest repeate
   expect(rows.filter((row) => (row.raw as { data: { ts: string } }).data.ts === parentMessage.ts)).toHaveLength(2)
   expect(rows.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: updatedParent })
   expect(JSON.stringify((await journal.readCheckpoint('slack.primary.messages')).envelope?.state)).not.toContain('cursor')
+})
+
+test.each(['initial', 'after-replay'])('a rejected thread cursor %s fails without advancing pending work', async (failure) => {
+  const cursors: Array<string | null> = []
+  const defaults = fixtureDeps()
+  const deps = fixtureDeps((url, init) => {
+    if (url.pathname !== '/api/conversations.replies') return defaults.fetch(url.toString(), init)
+    const cursor = url.searchParams.get('cursor')
+    cursors.push(cursor)
+    return Response.json(failure === 'initial' || cursor
+      ? { ok: false, error: 'invalid_cursor' }
+      : { ok: true, messages: [parentMessage], has_more: true, response_metadata: { next_cursor: 'expired' } })
+  })
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const result = await runIngestion(request(pipeline(deps)), { journal, destination, now: () => cutoff })
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('cursor expired')
+  expect(cursors).toEqual(failure === 'initial' ? [null] : [null, 'expired', null, 'expired'])
+  const saved = parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state)
+  expect(saved.active?.threads).toEqual([{ root: parentMessage.ts }])
+  expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).not.toContainEqual({
+    source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage,
+  })
 })
 
 function pipeline(deps: SlackClientDeps, budget?: { maxChunks?: number }) {

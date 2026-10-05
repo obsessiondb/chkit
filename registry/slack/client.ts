@@ -19,11 +19,11 @@ export interface CollectionRequest {
   idField: 'id' | 'ts'
   query?: Record<string, string>
   pageSize?: number
-  /** Message endpoints support timestamp pagination without an opaque cursor. */
+  /** Read empty/parent-only cursor pages until the next durable timestamp boundary. */
   timePagination?: boolean
 }
 
-export interface SlackPage { items: SlackEntity[]; cursor: string; hasMore: boolean }
+interface SlackPage { items: SlackEntity[]; cursor: string; hasMore: boolean }
 export class SlackCursorExpiredError extends IngestConfigError {}
 
 export const defaultSlackClientDeps: SlackClientDeps = {
@@ -43,15 +43,16 @@ export function readCollection(
     context, label: `GET /api/${request.method}`,
     fetchPage: async (cursor: string | undefined, signal) => {
       const page = await fetchCollectionPage(request, cursor ?? '', signal, deps)
-      // Empty/short pages can still have a cursor. Only cursor exhaustion ends a read.
-      return { items: page.items, next: page.cursor || undefined }
+      const timeBoundary = request.timePagination && (page.items.some((item) =>
+        request.method !== 'conversations.replies' || entityId(item, 'ts') !== request.query?.ts) || !page.hasMore)
+      if (request.timePagination && !timeBoundary && !page.cursor) {
+        throw new IngestConfigError('Slack empty page did not provide a new continuation.')
+      }
+      // Catalog reads follow cursors even across empty/short pages.
+      // Timestamp reads stop at a data boundary; native has_more still plans their next interval.
+      return { items: page.items, next: timeBoundary ? undefined : page.cursor || undefined, metadata: { hasMore: page.hasMore } }
     },
   })
-}
-
-/** Retains empty pages and continuation metadata needed by checkpointed readers. */
-export async function readCollectionPage(context: FetchContext, request: CollectionRequest, cursor = '', deps: SlackClientDeps = defaultSlackClientDeps): Promise<SlackPage> {
-  return context.attempt((signal) => fetchCollectionPage(request, cursor, signal, deps), { label: `GET /api/${request.method}` })
 }
 
 /** Discover independently in each reader; pipeline stream order is not a dependency. */

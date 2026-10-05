@@ -48,7 +48,7 @@
             "Read action items for anyone across both native PENDING and DONE statuses; preserve people and company relationships without inventing numeric company IDs.",
             "Store complete tag names as string arrays and raw provider payloads in source-scoped envelopes; adopting this layout requires reingestion or migration of earlier unscoped meeting observations.",
             "Add portable fixtures for independently selected resources, reversed stream order, malformed responses, pagination, late transcripts, and source/destination recovery.",
-            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+            "Consume full pagination pages and use shared continuation-cycle detection while preserving independent resource checkpoints and provider Link validation."
           ]
         },
         {

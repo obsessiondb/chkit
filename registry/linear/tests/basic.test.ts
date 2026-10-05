@@ -424,6 +424,28 @@ test('cyclic root and nested pagination fails permanently without replaying a wh
   }
 })
 
+test('a repeated initial label cursor cannot publish the issue or retry its label read', async () => {
+  const afters: unknown[] = []
+  const pipeline = fixturePipeline((body) => {
+    if (operation(body) !== 'IssueLabels') return precedingResponse(body, 'IssueLabels')
+    afters.push(body.variables.after)
+    return connectionFor(body, connection([{ id: 'label-cyclic', name: 'Incomplete' }], 'a'))
+  })
+  const selected = request(pipeline, 'issues').selected.map((entry) => ({
+    ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } },
+  }))
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
+
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('repeated continuation')
+  expect(afters).toEqual(['a'])
+  expect(destination.tables.size).toBe(0)
+  expect((await journal.readCheckpoint('linear.issues')).envelope).toBeUndefined()
+  expect((await journal.readCheckpoint('linear.issues')).lastSuccessSeq).toBe(0)
+  expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+})
+
 test('malformed connections or provider identities cannot silently complete an empty-looking window', async () => {
   for (const payload of [
     { nodes: {}, pageInfo: { hasNextPage: false, endCursor: null } },

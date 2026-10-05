@@ -114,6 +114,5 @@ function nextLink(header: string | null, current: string, query: Record<string, 
     }
     next.searchParams.set(key, value)
   }
-  if (next.toString() === current) throw new IngestConfigError('Circleback next page made no progress.')
   return next.toString()
 }

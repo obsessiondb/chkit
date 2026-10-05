@@ -89,7 +89,7 @@
             "Preserve raw tables and scoped row identities, validate checkpoint scope, and include failure-recovery fixtures.",
             "Bind installation configuration to one pipeline with independently selectable channels, users, and messages streams; reuse plugin pagination for streaming metadata pages.",
             "Keep replies as raw messages with native thread references, and verify messages-first execution and recovery independently of metadata streams.",
-            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+            "Reuse full paginate pages and native has_more metadata for metadata reads and temporary message cursors; preserve durable timestamp frontiers and bounded expired-cursor replay."
           ]
         },
         {

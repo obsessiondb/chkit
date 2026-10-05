@@ -123,7 +123,7 @@ Messages support isolated date-bound backfills with `--backfill <id> --from <dat
 
 ## Customize the source
 
-`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, row IDs, and pacing; metadata readers use the plugin's `paginate` helper and yield pages as they arrive. `state.ts` validates provider timestamp checkpoints; `pipeline.ts` binds reader configuration and composes the three streams. Each stream has its own journal progress and resource tag, so selecting users does not run messages and a message failure does not prevent a users run.
+`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, row IDs, and pacing; all three readers use the plugin's `paginate` helper. Messages use it to cross empty or parent-only pages, retain native `has_more` in metadata, and return to timestamp pagination as soon as rows establish a safe frontier. `state.ts` validates provider timestamp checkpoints; `pipeline.ts` binds reader configuration and composes the three streams. Each stream has its own journal progress and resource tag, so selecting users does not run messages and a message failure does not prevent a users run.
 
 Conversation selection validates configured IDs after discovery finishes. If a configured ID is missing, the stream fails visibly; any metadata pages already loaded remain visible.
 

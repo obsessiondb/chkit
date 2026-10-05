@@ -328,12 +328,14 @@ test('factory configuration, tokens and selected resource progress stay independ
 })
 
 test('empty Link pages continue while cyclic, cross-collection, foreign and malformed next links fail permanently', async () => {
-  for (const mode of ['empty-first', 'cyclic', 'cross-collection', 'foreign', 'malformed', 'multiple-next']) {
+  for (const mode of ['empty-first', 'same-initial', 'cyclic', 'cross-collection', 'foreign', 'malformed', 'multiple-next']) {
     const calls: string[] = []
+    let details = 0
     const pipeline = fixturePipeline((url) => {
-      if (url.pathname.startsWith('/api/person/')) return Response.json(personDetail)
+      if (url.pathname.startsWith('/api/person/')) { details++; return Response.json(personDetail) }
       calls.push(url.toString())
       if (mode === 'empty-first' && url.searchParams.has('cursor')) return Response.json([person])
+      if (mode === 'same-initial') return Response.json([person], { headers: { Link: `<${url.toString()}>; rel="next"` } })
       const next = mode === 'foreign' ? 'https://untrusted.example/people' : mode === 'cross-collection' ? '/api/companies?cursor=next' : '/api/people?cursor=next'
       const link = mode === 'malformed' ? 'not-a-link; rel="next"' : mode === 'multiple-next' ? `<${next}>; rel="next", </api/people?cursor=another>; rel="next"` : `<${next}>; rel="next"`
       return Response.json([], { headers: { Link: link } })
@@ -343,6 +345,8 @@ test('empty Link pages continue while cyclic, cross-collection, foreign and malf
     const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
     expect(result.ok).toBe(mode === 'empty-first')
     expect(calls).toHaveLength(['empty-first', 'cyclic'].includes(mode) ? 2 : 1)
+    expect(details).toBe(mode === 'empty-first' ? 1 : 0)
+    expect(destination.tables.size).toBe(mode === 'empty-first' ? 1 : 0)
     expect((await journal.readCheckpoint('circleback.people')).lastSuccessSeq > 0).toBe(mode === 'empty-first')
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
   }

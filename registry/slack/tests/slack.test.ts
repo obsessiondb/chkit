@@ -352,15 +352,16 @@ describe('Slack raw template', () => {
     expect(calls).toBe(2)
   })
 
-  test('metadata pagination has one executor retry budget per request', async () => {
+  test.each(['users', 'messages'])('%s pagination has one executor retry budget per request', async (resource) => {
     let calls = 0
     const defaults = fixtureDeps()
+    const method = resource === 'users' ? 'users.list' : 'conversations.history'
     const deps = fixtureDeps((url, init) => {
-      if (url.pathname !== '/api/users.list') return defaults.fetch(url.toString(), init)
+      if (url.pathname !== `/api/${method}`) return defaults.fetch(url.toString(), init)
       calls += 1
       return Response.json({ ok: false, error: 'internal_error' })
     })
-    const result = await runFixture(deps, ['users'])
+    const result = await runFixture(deps, [resource])
     expect(result.ok).toBe(false)
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(calls).toBe(2)

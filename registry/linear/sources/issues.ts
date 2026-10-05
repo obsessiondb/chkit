@@ -37,7 +37,7 @@ export async function* readIssues(context: ReadContext<TimestampRange, Timestamp
 
 /** Label names are the explicitly requested projection; consume every label page first. */
 async function completeLabels(context: FetchContext, issue: LinearObject, deps: LinearClientDeps): Promise<string[]> {
-  const first = linearConnection(issue.labels, undefined, 'issue labels')
+  const first = linearConnection(issue.labels, 'issue labels')
   const labels = first.items.map(labelName)
   if (first.next !== undefined) {
     for await (const page of readLinearPages(context, {
