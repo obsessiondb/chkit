@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { createJournalStore } from '../../runtime/journal-store.js'
+import { createJournalStore, type MigrationRowState } from '../../runtime/journal-store.js'
 
 interface ScriptedExecutor {
   db: ClickHouseExecutor
@@ -267,4 +267,104 @@ describe('createJournalStore', () => {
     expect(attempts).toBe(mode === 'recovers' ? 3 : mode === 'exhausts' ? 5 : 1)
   })
 
+  describe('read-your-writes on a lagging replica', () => {
+    // On a replicated service each request can land on a different replica, so
+    // the read after a write may return the previous row version. Every apply
+    // step is a read-modify-write: a stale read would mark the migration
+    // completed while a statement still reads "started".
+    function staleRow(appliedAt: string) {
+      return {
+        name: 'm.sql',
+        applied_at: appliedAt,
+        checksum: 'abc',
+        chkit_version: '0.0.0',
+        migration_completed: false,
+        operations: JSON.stringify([
+          {
+            operation_index: 0,
+            operation_key: 'view:db.v',
+            operation_type: 'create_view',
+            query_id: '',
+            status: 'started',
+            started_at: '2026-10-09 12:00:00.000',
+            finished_at: null,
+            last_error: '',
+          },
+        ]),
+      }
+    }
+
+    function writtenState(appliedAt: string): MigrationRowState {
+      return {
+        name: 'm.sql',
+        appliedAt,
+        checksum: 'abc',
+        chkitVersion: '0.0.0',
+        migrationCompleted: false,
+        operations: [
+          {
+            operationIndex: 0,
+            operationKey: 'view:db.v',
+            operationType: 'create_view',
+            queryId: '',
+            status: 'completed',
+            startedAt: '2026-10-09T12:00:00.000',
+            finishedAt: '2026-10-09T12:00:00.200',
+            lastError: '',
+          },
+        ],
+      }
+    }
+
+    function storeAnswering(rows: unknown[]) {
+      const { db } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name FROM .* LIMIT 0/, []],
+          [/FROM .* FINAL WHERE name = /, rows],
+        ]),
+      )
+      return createJournalStore(db)
+    }
+
+    test('returns the version this store wrote when the replica answers with an older one', async () => {
+      const store = storeAnswering([staleRow('2026-10-09 12:00:00.100')])
+      const written = writtenState('2026-10-09T12:00:00.200')
+      await store.writeMigrationState(written)
+
+      expect(await store.readMigrationState('m.sql')).toEqual(written)
+    })
+
+    test('returns the server row when it is newer than the last write', async () => {
+      const store = storeAnswering([staleRow('2026-10-09 12:00:00.300')])
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+
+      const state = await store.readMigrationState('m.sql')
+      expect(state?.operations.map((op) => op.status)).toEqual(['started'])
+    })
+
+    test('returns the last write when the replica has no row yet', async () => {
+      const store = storeAnswering([])
+      const written = writtenState('2026-10-09T12:00:00.200')
+      await store.writeMigrationState(written)
+
+      expect(await store.readMigrationState('m.sql')).toEqual(written)
+    })
+
+    test('appendEntry keeps the completed operations of the last write', async () => {
+      const { db, commandCalls } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name FROM .* LIMIT 0/, []],
+          [/FROM .* FINAL WHERE name = /, [staleRow('2026-10-09 12:00:00.100')]],
+        ]),
+      )
+      const store = createJournalStore(db)
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+
+      await store.appendEntry({ name: 'm.sql', appliedAt: '2026-10-09T12:00:01.000Z', checksum: 'abc' })
+
+      const inserts = commandCalls.filter((sql) => sql.startsWith('INSERT INTO'))
+      expect(inserts.at(-1)).toContain("'completed'")
+      expect(inserts.at(-1)).not.toContain("'started'")
+    })
+  })
 })

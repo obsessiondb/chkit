@@ -145,6 +145,16 @@ function parseOperations(value: unknown): OperationState[] {
   return decoded.map((row) => operationFromTuple(row as OperationTupleRow))
 }
 
+/**
+ * The `ReplacingMergeTree(applied_at)` version as epoch milliseconds. ClickHouse
+ * returns `DateTime64(3, 'UTC')` without a zone and chkit writes ISO strings with
+ * or without `Z`; all of them are UTC.
+ */
+function rowVersion(appliedAt: string): number {
+  const iso = appliedAt.trim().replace(' ', 'T')
+  return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
+}
+
 export function createJournalStore(db: ClickHouseExecutor, cluster?: string): JournalStore {
   const journalTable = resolveJournalTableName()
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
@@ -175,6 +185,8 @@ SETTINGS index_granularity = 1`
 
   let bootstrapped = false
   let _databaseMissing = false
+  // Read-your-writes: the last row version this store wrote per migration.
+  const lastWritten = new Map<string, MigrationRowState>()
 
   async function ensureTable(): Promise<void> {
     if (bootstrapped) return
@@ -267,9 +279,10 @@ SETTINGS index_granularity = 1`
       const rows = await db.query<MigrationRow>(
         `SELECT name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations FROM ${journalTable} FINAL WHERE name = '${escapeSqlString(migrationName)}' LIMIT 1 SETTINGS select_sequential_consistency = 1`,
       )
+      const written = lastWritten.get(migrationName)
       const row = rows[0]
-      if (!row) return null
-      return {
+      if (!row) return written ?? null
+      const state: MigrationRowState = {
         name: row.name,
         appliedAt: row.applied_at,
         checksum: row.checksum,
@@ -277,6 +290,15 @@ SETTINGS index_granularity = 1`
         migrationCompleted: parseBool(row.migration_completed),
         operations: parseOperations(row.operations),
       }
+      // Each request can land on a different replica, and SYSTEM SYNC REPLICA
+      // on one request does not make the next one read our write. Never hand a
+      // read-modify-write caller a version older than the one we just wrote, or
+      // its write would drop the progress recorded in between.
+      if (written && rowVersion(state.appliedAt) < rowVersion(written.appliedAt)) {
+        debug('journal', `stale journal read for ${migrationName} — using the last written version`)
+        return written
+      }
+      return state
     },
 
     async writeMigrationState(state: MigrationRowState): Promise<void> {
@@ -297,6 +319,7 @@ SETTINGS index_granularity = 1`
           return true
         },
       })
+      lastWritten.set(state.name, state)
       await trySyncReplica()
     },
 
