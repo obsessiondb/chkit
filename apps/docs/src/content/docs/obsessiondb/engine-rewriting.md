@@ -41,8 +41,6 @@ The migration files and `snapshot.json` keep what the flag decided, so pass the 
 
 `migrate`, `status`, `drift` and `check` also accept both flags, so scripts can pass them to all six commands, but those four ignore them: they work from the migration files and snapshot that `generate` already wrote.
 
-[chkit-py](/python/overview/#differences-from-the-typescript-version) does not have these flags: its commands reject them, and the plugin always decides from `clickhouse.url`.
-
 ## What gets rewritten
 
 | Schema | Generated DDL (every target) |

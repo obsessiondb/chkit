@@ -8,56 +8,23 @@ from __future__ import annotations
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import ProjectionDefinition
 from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_scan import find_quote_end, is_quote_char, strip_wrapping_parens
 
 
 def is_index_projection(projection: ProjectionDefinition) -> bool:
     return projection.index is not None
 
 
-def strip_wrapping_parens(text: str) -> str:
-    if not (text.startswith("(") and text.endswith(")")):
-        return text
-
-    # Only strip when the leading paren closes at the very end, so `(a), (b)`
-    # keeps both groups. Parens inside quoted identifiers and string literals
-    # are text, not nesting — `` (`weird)name`) `` is still a single wrapped
-    # expression.
-    depth = 0
-    quote: str | None = None
-    for i, char in enumerate(text):
-        if quote is not None:
-            if char == quote and (i == 0 or text[i - 1] != "\\"):
-                quote = None
-            continue
-        if char in ("'", '"', "`"):
-            quote = char
-            continue
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return text[1:-1].strip() if i == len(text) - 1 else text
-    return text
-
-
 def _space_after_commas(text: str) -> str:
     """ClickHouse prints one space after every argument separator."""
     out: list[str] = []
-    quote: str | None = None
     i = 0
     while i < len(text):
         char = text[i]
-        if quote is not None:
-            out.append(char)
-            if char == quote and (i == 0 or text[i - 1] != "\\"):
-                quote = None
-            i += 1
-            continue
-        if char in ("'", '"', "`"):
-            quote = char
-            out.append(char)
-            i += 1
+        if is_quote_char(char):
+            end = find_quote_end(text, i, char)
+            out.append(text[i : end + 1])
+            i = end + 1
             continue
         # Whitespace is already collapsed to single spaces by
         # normalize_sql_fragment, so a comma is followed by at most one space.

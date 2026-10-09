@@ -142,8 +142,9 @@ def test_quote_ident_wraps_in_backticks() -> None:
     assert quote_ident("events") == "`events`"
 
 
-def test_quote_ident_doubles_embedded_backticks() -> None:
-    assert quote_ident("weird`name") == "`weird``name`"
+def test_quote_ident_escapes_embedded_backticks_and_backslashes() -> None:
+    assert quote_ident("weird`name") == "`weird\\`name`"
+    assert quote_ident("back\\slash") == "`back\\\\slash`"
 
 
 # ---------- create_run_tag / create_prefix / create_journal_table_name ----------

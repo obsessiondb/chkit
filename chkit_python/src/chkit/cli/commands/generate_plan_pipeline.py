@@ -4,8 +4,9 @@
 
 Both functions return a new ``MigrationPlan`` with operations sorted by a
 stable rank (drops first, then create-database, then renames, alters,
-create-table, create-view), then alphabetically by key. The risk
-summary is recomputed and the rename suggestions list is filtered.
+object creates). Drops and object creates keep the planner's
+dependency-aware order (#231); the other classes are ordered by key. The
+risk summary is recomputed and the rename suggestions list is filtered.
 """
 
 from __future__ import annotations
@@ -35,9 +36,9 @@ _DROP_RANK = 0
 _CREATE_DATABASE_RANK = 1
 _ALTER_TABLE_RENAME_RANK = 2
 _ALTER_RANK = 3
-_CREATE_TABLE_RANK = 4
-_CREATE_VIEW_RANK = 5
-_FALLBACK_RANK = 6
+# Drops and object creates keep the order plan_diff gave them, which is
+# dependency-aware (#231); the classes this pipeline adds to sort by key.
+_CREATE_RANK = 4
 
 
 def apply_selected_rename_suggestions(
@@ -275,8 +276,6 @@ _EXACT_RANKS: dict[str, int] = {
     "create_database": _CREATE_DATABASE_RANK,
     "alter_table_rename_table": _ALTER_TABLE_RENAME_RANK,
     "rename_dictionary": _ALTER_TABLE_RENAME_RANK,
-    "create_table": _CREATE_TABLE_RANK,
-    "create_view": _CREATE_VIEW_RANK,
 }
 
 
@@ -289,11 +288,24 @@ def _rank_operation(op: MigrationOperation) -> int:
         return exact
     if type_.startswith("alter_"):
         return _ALTER_RANK
-    return _FALLBACK_RANK
+    return _CREATE_RANK
 
 
 def _sorted(operations: Sequence[MigrationOperation]) -> list[MigrationOperation]:
-    return sorted(operations, key=lambda op: (_rank_operation(op), op.key))
+    """Combine the planner's operations with the ones this pipeline adds.
+
+    Drops and object creates keep the planner's order, which is
+    dependency-aware (#231); the classes this pipeline adds to are ordered by
+    key, and operations that share a key keep the planner's order (the sort is
+    stable), so a column's ``REMOVE DEFAULT`` still runs before its
+    ``MODIFY COLUMN``.
+    """
+
+    def sort_key(op: MigrationOperation) -> tuple[int, str]:
+        rank = _rank_operation(op)
+        return (rank, "" if rank in (_DROP_RANK, _CREATE_RANK) else op.key)
+
+    return sorted(operations, key=sort_key)
 
 
 def _summarize_risk(operations: Sequence[MigrationOperation]) -> _RiskSummary:

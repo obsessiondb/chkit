@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from chkit.core.sql_lexer import is_trivia, tokenize_sql
+
 
 @dataclass
 class _SplitterState:
@@ -101,6 +103,42 @@ def split_sql_statements(text: str) -> list[str]:
 
 
 def extract_executable_statements(text: str) -> list[str]:
-    """Return statements stripped of trailing semicolons (preferred by clickhouse-connect)."""
+    """Return statements stripped of trailing semicolons (preferred by clickhouse-connect).
+
+    A statement made only of comments is not executable: ClickHouse rejects it
+    as "Empty query" (for example a block comment after the last statement),
+    so it is dropped. The splitter does not know ``#`` and ``//`` line
+    comments; when one of them holds a ``;`` the splitter cut that comment
+    line in two, and keeping the comment-only piece makes ClickHouse reject
+    the file instead of running the commented-out text after the ``;``.
+    """
     stripped = [s.rstrip(";").strip() for s in split_sql_statements(text)]
-    return [s for s in stripped if s]
+    statements = [s for s in stripped if s]
+    executable = [s for s in statements if _has_executable_content(s)]
+    if len(executable) == len(statements):
+        return statements
+    if _has_line_comment_with_semicolon(text):
+        return statements
+    return executable
+
+
+def _has_executable_content(statement: str) -> bool:
+    """False when every token is whitespace or a terminated comment.
+
+    Covers every ClickHouse comment form: ``--``, ``//``, ``# ``, ``#!`` and
+    nested ``/* */``. An unterminated comment counts as content, so
+    ClickHouse reports it.
+    """
+    # Only a statement that starts like a comment can be made only of comments.
+    if not statement.startswith(("-", "/", "#")):
+        return True
+    return any(not is_trivia(token) or not token.terminated for token in tokenize_sql(statement))
+
+
+def _has_line_comment_with_semicolon(text: str) -> bool:
+    # `--` comments never reach the splitter's cut in TS (they are stripped
+    # first), so only `//`, `# ` and `#!` comments count here.
+    return any(
+        token.kind == "line_comment" and not token.text.startswith("--") and ";" in token.text
+        for token in tokenize_sql(text)
+    )

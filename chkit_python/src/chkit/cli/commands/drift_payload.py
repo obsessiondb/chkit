@@ -11,14 +11,19 @@ from typing import Any
 
 from chkit.cli.commands.drift_compare import (
     KindMismatch,
+    MapSqlCanonicalizer,
     ObjectDriftDetail,
     SchemaObjectShape,
     TableDriftDetail,
+    collect_table_sql_fragments,
     compare_schema_objects,
     compare_table_shape,
 )
+from chkit.cli.logging_setup import debug
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.canonicalize import canonicalize_sql_fragments
 from chkit.clickhouse.introspect import (
+    IntrospectedTable,
     list_schema_objects,
     list_table_details,
 )
@@ -73,6 +78,34 @@ def _is_unknown_database_error(error: BaseException) -> bool:
         or ("Database " in message
         and "doesn't exist" in message)
     )
+
+
+def _build_sql_canonicalizer(
+    client: Any, pairs: list[tuple[TableDefinition, IntrospectedTable]]
+) -> MapSqlCanonicalizer | None:
+    """Canonicalize every SQL fragment across the compared tables via ClickHouse.
+
+    Returns None when there is nothing to canonicalize or ClickHouse can't
+    format (old server, offline) — the comparer then falls back to plain string
+    normalization.
+    """
+    expressions: list[str] = []
+    queries: list[str] = []
+    for expected, actual in pairs:
+        fragments = collect_table_sql_fragments(expected, actual)
+        expressions.extend(fragments.expressions)
+        queries.extend(fragments.queries)
+    if not expressions and not queries:
+        return None
+
+    try:
+        return MapSqlCanonicalizer(
+            expressions=canonicalize_sql_fragments(client, expressions, wrap=True),
+            queries=canonicalize_sql_fragments(client, queries, wrap=False),
+        )
+    except Exception as error:
+        debug("drift", f"sql canonicalization unavailable, using string comparison: {error}")
+        return None
 
 
 def build_drift_payload(
@@ -152,14 +185,17 @@ def build_drift_payload(
     }
 
     actual_tables = list_table_details(client, sorted(expected_databases))
-    table_drift_unsorted: list[TableDriftDetail] = []
-    for actual in actual_tables:
-        expected = expected_table_map.get(f"{actual.database}.{actual.name}")
-        if expected is None:
-            continue
-        detail = compare_table_shape(expected, actual)
-        if detail is not None:
-            table_drift_unsorted.append(detail)
+    pairs = [
+        (expected, actual)
+        for actual in actual_tables
+        if (expected := expected_table_map.get(f"{actual.database}.{actual.name}")) is not None
+    ]
+    canonicalizer = _build_sql_canonicalizer(client, pairs)
+    table_drift_unsorted = [
+        detail
+        for expected, actual in pairs
+        if (detail := compare_table_shape(expected, actual, canonicalizer)) is not None
+    ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
 
     drifted = compute_drifted(

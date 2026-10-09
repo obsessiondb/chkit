@@ -127,12 +127,30 @@ ColumnType: TypeAlias = PrimitiveColumnType | str
 ColumnDefaultKind: TypeAlias = Literal["DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL"]
 
 
+class SQLExpression(_StrictModel):
+    """Raw ClickHouse SQL, rendered unquoted (trimmed, with SQL comments removed).
+
+    Used where chkit would otherwise render a literal: a column
+    ``default=SQLExpression(expression="now64(3)")`` (or
+    ``default={"expression": "now64(3)"}``) renders ``DEFAULT now64(3)``.
+    """
+
+    expression: str
+
+
+ColumnDefaultValue: TypeAlias = str | int | float | bool | SQLExpression
+"""A column default: a literal (strings are single-quoted, numbers and booleans
+render as written) or a :class:`SQLExpression` rendered as SQL. ``'fn:<sql>'`` is
+the legacy spelling of ``SQLExpression(expression='<sql>')``; canonical
+definitions and snapshots store both as the ``fn:`` string."""
+
+
 class ColumnDefinition(_StrictModel):
     name: str
     type: ColumnType
     renamed_from: str | None = Field(default=None, alias="renamedFrom")
     nullable: bool | None = None
-    default: str | int | float | bool | None = None
+    default: ColumnDefaultValue | None = None
     default_kind: ColumnDefaultKind | None = Field(default=None, alias="defaultKind")
     comment: str | None = None
     codec: ColumnCodecSpec | None = None
@@ -704,6 +722,8 @@ ValidationIssueCode: TypeAlias = Literal[
     "column_kind_not_stored",
     "column_ephemeral_in_projection",
     "column_kind_codec_unsupported",
+    "column_default_looks_like_expression",
+    "column_default_invalid",
     "dictionary_missing_primary_key",
     "dictionary_primary_key_missing_attribute",
     "dictionary_missing_source",

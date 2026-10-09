@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
@@ -32,7 +32,10 @@ _TARGET_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 _MAX_CONCURRENCY = 48
 
 
-def build_submit_tasks(plan: BackfillPlanState) -> list[JobSubmitTask]:
+def build_submit_tasks(
+    plan: BackfillPlanState,
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
+) -> list[JobSubmitTask]:
     """Map a backfill plan into the task list the jobs backend expects. Each
     chunk renders the exact same ``INSERT … SELECT`` the local executor would
     run, so the algorithm is identical — only the execution venue differs.
@@ -41,6 +44,7 @@ def build_submit_tasks(plan: BackfillPlanState) -> list[JobSubmitTask]:
         JobSubmitTask(
             id=chunk.id,
             sql=build_chunk_execution_sql(
+                insert_settings=insert_settings,
                 plan_id=plan.plan_id,
                 chunk=chunk,
                 target=plan.target,
@@ -61,6 +65,24 @@ def build_submit_tasks(plan: BackfillPlanState) -> list[JobSubmitTask]:
         )
         for chunk in plan.chunk_plan.chunks
     ]
+
+
+def _backfill_insert_settings(
+    plugins: object,
+) -> Mapping[str, str | int | float | bool] | None:
+    """``insert_settings`` from the registered ``backfill()`` plugin's options."""
+    if not isinstance(plugins, list):
+        return None
+    for plugin in cast("list[object]", plugins):
+        manifest = getattr(plugin, "manifest", None)
+        if getattr(manifest, "name", None) != "backfill":
+            continue
+        options = getattr(getattr(plugin, "hooks", None), "options", None)
+        settings: object = getattr(options, "insert_settings", None)
+        if isinstance(settings, dict):
+            return cast("dict[str, str | int | float | bool]", settings)
+        return None
+    return None
 
 
 @dataclass(frozen=True)
@@ -174,7 +196,10 @@ def handle_submit(context: SubmitContext) -> int:
         )
         plan = output.plan
 
-        tasks = build_submit_tasks(plan)
+        # Same INSERT settings the local executor applies (backfill({insertSettings})).
+        tasks = build_submit_tasks(
+            plan, _backfill_insert_settings(getattr(context.config, "plugins", None))
+        )
         job_id = jobs_submit(
             context.credentials,
             service_slug=context.service_slug,

@@ -33,6 +33,7 @@ from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.migration_store import read_snapshot
 from chkit.cli.schema_loader import load_schema
+from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     resolve_table_scope,
     table_keys_from_definitions,
@@ -42,7 +43,7 @@ from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxConfigEnv
 
 
-def run(  # noqa: PLR0912, PLR0915
+def run(  # noqa: PLR0912, PLR0915, PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -68,6 +69,10 @@ def run(  # noqa: PLR0912, PLR0915
             ),
         ),
     ] = False,
+    # Accepted so existing scripts keep working; only generate and snapshot
+    # rebuild run the on_schema_loaded hooks that read them (as in TS).
+    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
+    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="drift"))
     meta_dir = Path(config.meta_dir)

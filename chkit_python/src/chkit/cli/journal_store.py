@@ -25,6 +25,7 @@ import json
 import os
 import re
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -109,6 +110,14 @@ def resolve_journal_table_name() -> str:
 
 def _escape_sql_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _row_version(applied_at: str) -> datetime:
+    """The ``ReplacingMergeTree(applied_at)`` version: UTC, millisecond precision."""
+    parsed = datetime.fromisoformat(applied_at.strip().replace(" ", "T"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed.replace(microsecond=parsed.microsecond // 1000 * 1000)
 
 
 def _parse_bool(value: Any) -> bool:
@@ -208,6 +217,7 @@ class JournalStore:
         "_client",
         "_cluster",
         "_database_missing",
+        "_last_written",
         "_on_cluster",
         "_table",
     )
@@ -221,6 +231,8 @@ class JournalStore:
         self._on_cluster: str = on_cluster_clause(cluster)
         self._bootstrapped: bool = False
         self._database_missing: bool = False
+        # Read-your-writes: the last row version this store wrote per migration.
+        self._last_written: dict[str, MigrationRowState] = {}
 
     @property
     def database_missing(self) -> bool:
@@ -368,10 +380,11 @@ class JournalStore:
             f"WHERE name = '{_escape_sql_string(migration_name)}' "
             f"LIMIT 1 SETTINGS select_sequential_consistency = 1"
         )
+        written = self._last_written.get(migration_name)
         if not result.rows:
-            return None
+            return written
         row = result.rows[0]
-        return MigrationRowState(
+        state = MigrationRowState(
             name=str(row["name"]),
             applied_at=str(row["applied_at"]),
             checksum=str(row["checksum"]),
@@ -379,6 +392,15 @@ class JournalStore:
             migration_completed=_parse_bool(row.get("migration_completed")),
             operations=_parse_operations(row.get("operations")),
         )
+        # Each request can land on a different replica, and SYSTEM SYNC REPLICA
+        # on one request does not make the next one read our write. Never hand a
+        # read-modify-write caller a version older than the one we just wrote,
+        # or its write would drop the progress recorded in between.
+        if written is not None and _row_version(state.applied_at) < _row_version(
+            written.applied_at
+        ):
+            return written
+        return state
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         """Upsert one migration row with INSERT race retry (5 x backoff)."""
@@ -409,6 +431,7 @@ class JournalStore:
                 ):
                     raise
                 time.sleep(attempt * _INSERT_RACE_BASE_DELAY_MS / 1000)
+        self._last_written[state.name] = state
         self._try_sync_replica()
 
 

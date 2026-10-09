@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,8 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit import ColumnDefinition, materialized_view, table, view
+from chkit.cli.commands import pull as pull_module
+from chkit.cli.commands.pull import _introspected_table_to_definition
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.commands.pull_view_parser import (
     DependsOnEntry,
@@ -18,10 +22,12 @@ from chkit.cli.commands.pull_view_parser import (
     parse_to_clause,
 )
 from chkit.cli.main import app
+from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectRef
 from chkit.core.model import (
     MaterializedViewRefresh,
     SkipIndexBloomFilter,
     SkipIndexMinmax,
+    TableDefinition,
     TableRef,
 )
 
@@ -310,3 +316,90 @@ def test_cli_rejects_missing_clickhouse_config(
     result = runner.invoke(app, ["pull"])
     assert result.exit_code != 0
     assert "clickhouse" in result.output.lower()
+
+
+# ---------- key clauses with quoted identifiers (#196) ----------
+
+
+def _introspected(name: str, **overrides: Any) -> IntrospectedTable:
+    fields: dict[str, Any] = {
+        "database": "app",
+        "name": name,
+        "engine": "MergeTree()",
+        "primary_key": "(id)",
+        "order_by": "(id)",
+        "columns": [ColumnDefinition(name="id", type="UInt64")],
+        "settings": {},
+        "indexes": [],
+        "projections": [],
+    }
+    fields.update(overrides)
+    return IntrospectedTable(**fields)
+
+
+def test_unwraps_key_tuples_whose_identifiers_contain_parens() -> None:
+    definition = _introspected_table_to_definition(
+        _introspected(
+            "events",
+            primary_key="(`w)x`, id)",
+            order_by="(`w)x`, id)",
+            columns=[
+                ColumnDefinition(name="id", type="UInt64"),
+                ColumnDefinition(name="w)x", type="String"),
+            ],
+        )
+    )
+
+    assert definition is not None
+    content = render_schema_file([definition])
+    assert 'order_by=["`w)x`", "id"],' in content
+    assert 'primary_key=["`w)x`", "id"],' in content
+
+
+# ---------- CLI: ObsessionDB metadata tables ----------
+
+
+CONFIG_WITH_CH = """
+from chkit import define_config
+
+config = define_config(
+    {
+        "schema": "./schema.py",
+        "outDir": "./chkit",
+        "migrationsDir": "./chkit/migrations",
+        "metaDir": "./chkit/meta",
+        "clickhouse": {"url": "http://localhost:8123", "database": "default"},
+    }
+)
+"""
+
+
+def test_excludes_obsessiondb_metadata_tables_from_pulled_schema_output(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = ["events", "metadata_folder", "metadata_table_folder", "metadata_table_tag"]
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "clickhouse.config.py").write_text(CONFIG_WITH_CH, encoding="utf-8")
+    def connect(cls: object, config: object) -> nullcontext[None]:
+        return nullcontext()
+
+    def list_objects(client: object) -> list[SchemaObjectRef]:
+        return [SchemaObjectRef(kind="table", database="app", name=n) for n in names]
+
+    def pull_definitions(client: object, databases: object) -> list[TableDefinition | None]:
+        return [_introspected_table_to_definition(_introspected(n)) for n in names]
+
+    monkeypatch.setattr(pull_module.ClickHouseClient, "connect", classmethod(connect))
+    monkeypatch.setattr(pull_module, "list_schema_objects", list_objects)
+    monkeypatch.setattr(pull_module, "_pull_definitions", pull_definitions)
+
+    result = runner.invoke(app, ["pull", "--dryrun", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["definitionCount"] == 1
+    assert payload["tableCount"] == 1
+    assert payload["skippedObjects"] == []
+    assert "metadata_folder" not in payload["content"]
+    assert "metadata_table_folder" not in payload["content"]
+    assert "metadata_table_tag" not in payload["content"]

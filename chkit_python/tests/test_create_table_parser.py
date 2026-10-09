@@ -241,3 +241,29 @@ def test_projection_dataclass_is_frozen() -> None:
     except (AttributeError, TypeError):
         return
     raise AssertionError("ProjectionDefinitionShape should be frozen")
+
+
+# ---------- quote-aware body scan (#196) ----------
+
+
+def test_handles_a_backtick_column_name_containing_a_paren() -> None:
+    # Regression for #196: a backtick-quoted column name containing a paren used
+    # to unbalance the body scan and truncate the parse, dropping the projection.
+    query = (
+        "CREATE TABLE app.events (`id` UInt64, `weird)name` String, "
+        "PROJECTION p INDEX id TYPE basic) ENGINE = MergeTree ORDER BY id"
+    )
+
+    assert parse_projections_from_create_table_query(query) == [
+        ProjectionDefinitionShape(name="p", index="id", type="basic")
+    ]
+    assert parse_order_by_from_create_table_query(query) == "id"
+
+
+def test_keeps_backtick_identifiers_intact_inside_key_clauses() -> None:
+    query = (
+        "CREATE TABLE app.events (`id` UInt64, `w)x` String) "
+        "ENGINE = MergeTree ORDER BY (`w)x`, id)"
+    )
+
+    assert parse_order_by_from_create_table_query(query) == "(`w)x`, id)"

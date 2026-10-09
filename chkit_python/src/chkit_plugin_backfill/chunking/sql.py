@@ -8,7 +8,7 @@ shared by top-level keyword detection and top-level delimiter splitting.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from chkit_plugin_backfill.chunking.types import (
     Chunk,
@@ -21,6 +21,7 @@ from chkit_plugin_backfill.chunking.types import (
     TableProfile,
 )
 from chkit_plugin_backfill.chunking.utils.binary_string import latin1_bytes
+from chkit_plugin_backfill.chunking.utils.jsnum import js_number_to_string
 
 # Top-level clause keywords, in the order they may legally follow a
 # projection. `inject_where_condition` uses this both to detect an existing
@@ -74,11 +75,12 @@ def build_chunk_execution_sql(
     mv_replay_queries: list[str] | None = None,
     target_columns: list[str] | None = None,
     idempotency_token: str | None = None,
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
 ) -> str:
     resolved_source = source_target if source_target is not None else target
     token = idempotency_token if idempotency_token is not None else ""
     header = f"/* chkit backfill plan={plan_id} chunk={chunk.id} token={token} */"
-    settings = _build_settings_clause(token)
+    settings = _build_settings_clause(token, insert_settings)
     chunk_conditions = _build_chunk_conditions(chunk, table.sort_keys)
 
     if mv_replay_queries:
@@ -538,10 +540,30 @@ def _build_range_bound_conditions(range_: ChunkRange, sort_key: SortKey) -> list
     return conditions
 
 
-def _build_settings_clause(token: str) -> str:
+def _build_settings_clause(
+    token: str,
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
+) -> str:
+    parts = ["async_insert=0"]
     if token:
-        return f"SETTINGS async_insert=0, insert_deduplication_token='{token}'"
-    return "SETTINGS async_insert=0"
+        parts.append(f"insert_deduplication_token='{token}'")
+    # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
+    # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
+    # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
+    for key, value in (insert_settings or {}).items():
+        parts.append(f"{key}={_render_insert_setting_value(value)}")
+    return f"SETTINGS {', '.join(parts)}"
+
+
+def _render_insert_setting_value(value: str | int | float | bool) -> str:
+    """JS template rendering: strings single-quoted (``'`` escaped as ``\\'``),
+    booleans as ``true``/``false``, numbers via ``String(number)``."""
+    if isinstance(value, str):
+        escaped = value.replace("'", "\\'")
+        return f"'{escaped}'"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return js_number_to_string(float(value)) if isinstance(value, float) else str(value)
 
 
 def _sort_key_at(sort_keys: list[SortKey], index: int) -> SortKey | None:

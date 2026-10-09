@@ -73,10 +73,12 @@ def is_obsessiondb_host(url: str) -> bool:
 def resolve_strip_behavior(
     config: ChxResolvedConfig, flags: dict[str, Any]
 ) -> bool:
-    """Should the hook strip ``Shared*`` prefixes for this command?
+    """Should the hook strip ObsessionDB settings such as storage_policy?
 
     Priority: ``--force-shared-engines`` (don't strip) >
-    ``--no-shared-engines`` (always strip) > URL auto-detect.
+    ``--no-shared-engines`` (always strip) > URL auto-detect. Parsed flags
+    keep their ``--`` prefix (TS ``parseFlags``); the unprefixed snake_case
+    keys are accepted too.
     """
     if flags.get("force_shared_engines") or flags.get("--force-shared-engines"):
         return False

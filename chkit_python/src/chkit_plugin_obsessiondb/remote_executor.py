@@ -226,15 +226,27 @@ class RemoteClickHouseClient:
         self, query_id: str, *, after_time: str | None = None
     ) -> QueryStatus:
         """Mirror of :meth:`ClickHouseClient.query_status`, proxied via workbench."""
+        # after_time bounds the query's start, as in the native client. A
+        # string compared with a DateTime column may carry neither fractional
+        # seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
+        # '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
         after_filter = (
-            f" AND event_time >= '{after_time}'" if after_time is not None else ""
+            " AND query_start_time >= "
+            f"parseDateTimeBestEffort({_quote_string(after_time)})"
+            if after_time
+            else ""
         )
+        # migrate bounds an attach by how long the running attempt has run.
+        # The workbench API returns every cell as a string.
         running = self.query(
-            "SELECT query_id FROM system.processes "
+            "SELECT elapsed FROM system.processes "
             f"WHERE user = currentUser() AND query_id = '{query_id}' LIMIT 1"
         )
         if running.rows:
-            return QueryStatus(status="running")
+            return QueryStatus(
+                status="running",
+                elapsed_ms=_elapsed_ms(running.rows[0].get("elapsed")),
+            )
         log = self.query(
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             "FROM system.query_log "
@@ -295,6 +307,18 @@ def _safe_int(value: Any) -> int | None:  # noqa: PLR0911
     return None
 
 
+def _quote_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _elapsed_ms(value: Any) -> int | None:
+    try:
+        return round(float(value) * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---- factory used by the get_context hook ----
 
 
@@ -327,3 +351,4 @@ __all__ = [
     "normalize_query_data",
     "normalize_query_json_result",
 ]
+

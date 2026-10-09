@@ -8,6 +8,7 @@ Flag set matches the TypeScript ``generateCommand``:
 - ``--rename-column``  Explicit column rename (``db.t.old=new``); repeatable.
 - ``--dryrun``         Print the plan without writing artifacts.
 - ``--json``           Emit a JSON-formatted summary instead of human text.
+- ``--empty``          Scaffold a blank manual migration (no diff, snapshot untouched).
 - ``--config``         Path to the config file (default ``clickhouse.config.py``).
 """
 
@@ -52,13 +53,20 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
+    generate_empty_migration,
     read_snapshot,
     write_migration,
     write_snapshot,
 )
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
-from chkit.cli.schema_loader import load_schema
+from chkit.cli.schema_loader import load_schema_definitions_with_hooks
+from chkit.cli.shared_engine_flags import (
+    ForceSharedEnginesOption,
+    NoSharedEnginesOption,
+    shared_engine_hook_flags,
+)
 from chkit.cli.table_scope import (
     TableScope,
     build_scoped_snapshot_definitions,
@@ -73,9 +81,7 @@ from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
 from chkit.core.validate import validate_definitions
 from chkit.plugins import (
-    ChxOnConfigLoadedContext,
     ChxOnPlanCreatedContext,
-    ChxOnSchemaLoadedContext,
     ChxPlugin,
     ChxPluginCommandContext,
     PluginContext,
@@ -137,6 +143,15 @@ def _run_codegen_integration(
             f"code {exit_code}."
         )
         raise typer.Exit(code=1) from RuntimeError(msg)
+
+
+def _emit_empty_migration(migration_file: Path, *, output_json: bool) -> None:
+    """TS ``emitGenerateEmptyOutput``."""
+    if output_json:
+        emit_json("generate", {"mode": "empty", "migrationFile": str(migration_file)})
+        return
+    typer.echo(f"Generated empty migration: {migration_file}")
+    typer.echo('Snapshot unchanged. Add your SQL to the file, then run "chkit migrate".')
 
 
 def _exit_validation_failed(error: ChxValidationError, *, output_json: bool) -> NoReturn:
@@ -228,7 +243,7 @@ def _apply_rename_mappings(
     )
 
 
-def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
+def run(  # noqa: PLR0912, PLR0915, PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -293,38 +308,46 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         bool,
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
+    empty: Annotated[
+        bool,
+        typer.Option(
+            "--empty",
+            help="Scaffold a blank manual migration (no schema diff, snapshot untouched).",
+        ),
+    ] = False,
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="generate"))
+    # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
+    # pipeline, and the snapshot is left untouched. Short-circuit before any of
+    # that machinery so the file is a pristine stub for hand-editing.
+    if empty:
+        _emit_empty_migration(
+            generate_empty_migration(
+                Path(config.migrations_dir),
+                migration_name=migration_name,
+                migration_id=migration_id,
+                cli_version=__version__,
+            ).sql_path,
+            output_json=output_json,
+        )
+        return
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
-    plugin_runtime.run_on_config_loaded(
-        ChxOnConfigLoadedContext(
-            command="generate",
-            config=config,
-            table_scope=TableScope(enabled=False),
-            flags={},
-            config_path=str(config_path or "clickhouse.config.py"),
-            options={},
-        )
+    threaded_defs = load_schema_definitions_with_hooks(
+        command="generate",
+        config=config,
+        config_path=str(config_path or "clickhouse.config.py"),
+        flags=shared_engine_hook_flags(
+            force_shared_engines=force_shared_engines,
+            no_shared_engines=no_shared_engines,
+        ),
+        json_mode=output_json,
+        plugin_runtime=plugin_runtime,
     )
-
-    schema_globs = config.schema_
-    definitions = load_schema(schema_globs)
-    canonical = canonicalize_definitions(definitions)
-
-    # Allow plugins to mutate the definitions in-place.
-    threaded_defs = plugin_runtime.run_on_schema_loaded(
-        ChxOnSchemaLoadedContext(
-            command="generate",
-            config=config,
-            table_scope=TableScope(enabled=False),
-            flags={},
-            definitions=list(canonical),
-            json_mode=output_json,
-        )
-    )
-    canonical = canonicalize_definitions(list(threaded_defs))
+    canonical = canonicalize_definitions(threaded_defs)
 
     issues = validate_definitions(canonical)
     if issues:
@@ -428,25 +451,6 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         op.warning for op in plan.operations if op.warning
     ]
 
-    if not plan.operations:
-        if output_json:
-            typer.echo(
-                json.dumps(
-                    {
-                        "mode": "plan" if dryrun else "apply",
-                        "operationCount": 0,
-                        "riskSummary": {"safe": 0, "caution": 0, "danger": 0},
-                        "operations": [],
-                        "renameSuggestions": [],
-                        "scope": _scope_to_payload(table_scope),
-                    },
-                    indent=2,
-                )
-            )
-            return
-        typer.echo("No schema changes detected.")
-        return
-
     if dryrun:
         if output_json:
             typer.echo(
@@ -502,11 +506,6 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
     snapshot = create_snapshot(artifact_definitions)
     snapshot_path = write_snapshot(meta_dir, snapshot)
 
-    if artifact is None:
-        # plan.operations was non-empty above, so this branch is unreachable;
-        # guarding for type safety.
-        return
-
     _run_codegen_integration(
         plugin_runtime=plugin_runtime,
         config=config,
@@ -515,12 +514,17 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         output_json=output_json,
     )
 
+    # A no-op plan writes no migration file (TS ``migrationFile: null``) but
+    # still refreshes the snapshot, like TS ``generateArtifacts``.
+    migration_file = str(artifact.sql_path) if artifact is not None else None
     if output_json:
         typer.echo(
             json.dumps(
                 {
-                    "migrationFile": str(artifact.sql_path),
+                    "scope": _scope_to_payload(table_scope),
+                    "migrationFile": migration_file,
                     "snapshotFile": str(snapshot_path),
+                    "definitionCount": len(artifact_definitions),
                     "operationCount": len(plan.operations),
                     "riskSummary": plan.risk_summary.model_dump(),
                     "warnings": dictionary_password_warnings,
@@ -530,6 +534,10 @@ def run(  # noqa: PLR0911, PLR0912, PLR0915, PLR0917
         )
         return
 
+    if artifact is None:
+        typer.echo("No migration generated: plan is empty.")
+        typer.echo(f"  Snapshot: {snapshot_path}")
+        return
     typer.secho(f"Generated migration {artifact.id}", fg=typer.colors.GREEN)
     typer.echo(f"  SQL:      {artifact.sql_path}")
     typer.echo(f"  Snapshot: {snapshot_path}")

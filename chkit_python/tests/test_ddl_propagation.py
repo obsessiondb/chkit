@@ -70,11 +70,12 @@ def test_wait_for_table_raises_after_max_attempts() -> None:
         wait_for_table(client, "db", "ghost")
 
 
-def test_wait_for_table_escapes_single_quotes() -> None:
+def test_wait_for_table_escapes_quotes_and_backslashes() -> None:
+    # Names are escaped as ClickHouse string literals, matching TS (#231).
     client = _ScriptedClient([[{"x": 1}]])
-    wait_for_table(client, "db'name", "t'name")
-    assert "db''name" in client.queries[0]
-    assert "t''name" in client.queries[0]
+    wait_for_table(client, "db'name", "t\\'name")
+    assert "database = 'db\\'name'" in client.queries[0]
+    assert "name = 't\\\\\\'name'" in client.queries[0]
 
 
 # ---------- wait_for_view ----------

@@ -1654,3 +1654,59 @@ clean, `ruff` clean; docs site rebuilt green (42 pages).
 - The oRPC wire-format caveat for all obsessiondb remote calls (see the
   earlier entry) — the jobs-contract model fix above is orthogonal and
   takes effect once the envelope question is settled.
+
+---
+
+## Sync to main @ cb56b91 (2026-10-09)
+
+Ported every TS change since 98e3667: #231 dependency-ordered DDL, #232 SQL
+comment stripping, #233 migrate retry/abandon/empty files, #234 typed
+expression defaults, #235 snapshot rebuild, cfabb19 shared-engine flags,
+#201 canonical drift compare, #200/#199 pull fixes, the ObsessionDB e2e
+stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
+`insertSettings` change, and the pre-existing `generate --empty` (#182) gap.
+
+### Not ported (decision: N/A by design)
+- **`chkit registry` / `chkit add` (#251 and the registry integration commits)**
+  and **plugin-ingest pagination (e3a81c8)**: registry items are
+  `language: "typescript"` `@chkit/plugin-ingest` integrations installed into a
+  TS project (TS AST edits of `clickhouse.config.ts`, npm dependencies).
+  plugin-ingest was never ported, so there is nothing for these to install
+  into. Docs list them as TypeScript-only.
+- **Stateless backfill executor (uncommitted TS change):** Python's run loop
+  already gives each worker thread its own client and its chunk planner makes
+  no concurrent queries, so there is no session-lock problem to fix.
+- **`identifier.ts` quote/render helpers and `insert-columns.ts` (#230):** only
+  `unquote_identifiers` / `unescape_quoted` were needed (for drift).
+
+### Divergences (justified)
+- **Journal read-your-writes (Python-only fix).** `JournalStore` remembers the
+  last row version it wrote per migration and never returns an older
+  `applied_at` version from `read_migration_state`. On the 2-replica `.env.test`
+  service each request may hit a different replica, and `SYSTEM SYNC REPLICA`
+  on one request does not make the next read see the write, so the apply loop's
+  read-modify-write could mark a migration completed while copying a stale
+  `started` statement. TS `journal-store.ts` had the same race; the same
+  guard lands there in #268.
+- `SQLExpression` defaults: a `default` object that is not an expression is a
+  Pydantic `ValidationError` when the column is built, not a
+  `column_default_invalid` issue.
+- The SQL lexer works on code points, TS on UTF-16 offsets; token text is the
+  same, offsets differ only outside the BMP.
+- The DDL propagation wait still also waits for skip indexes/projections and
+  only warns on timeout (TS raises).
+- `migrate --json` success output stays bare JSON (no `command` /
+  `schemaVersion` / `scope`), and `applied` entries keep `applied_at`. The JSON
+  error envelope is emitted by `migrate.run`, not a top-level handler.
+- `generate` JSON payloads, except `--empty`, still lack the `{command,
+  schemaVersion}` envelope. `--empty` stubs use microsecond `generated-at`.
+- Python keeps `--` comment lines inside executed statements; TS strips them.
+- Schema load errors include the Python exception class and resolved paths.
+  `snapshot rebuild`'s error envelope always uses `code: "error"`.
+- `normalize_key_columns` still splits a declared column name containing a
+  comma (pre-existing). `pull` keeps its first-column fallback for tables with
+  no ORDER BY.
+- e2e testkit: `run_once_visible`, `wait_for_table_on_every_replica` and
+  `poll_until` exist because `.env.test` has 2 replicas behind a load balancer
+  where a session does not pin a replica. The MV-replay visibility helpers live
+  inside that test file.

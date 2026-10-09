@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chkit.cli.shared_engine_flags import (
+    FORCE_SHARED_ENGINES_HELP,
+    NO_SHARED_ENGINES_HELP,
+)
 from chkit.plugins import (
     ChxOnBeforePluginCommandContext,
     ChxOnBeforePluginCommandResult,
@@ -165,6 +169,25 @@ def create_obsessiondb_plugin(
         # flags against the `backfill` plugin commands so the dispatcher
         # accepts them and the on_before_plugin_command hook can route on them.
         extend_commands=[
+            # Mirror of the TS shared-engine override flags. Only `generate` and
+            # `snapshot rebuild` run the on_schema_loaded hooks, so only they act
+            # on these flags (chkit-py declares them as Typer options on those two
+            # commands; see chkit.cli.shared_engine_flags).
+            {
+                "command": ["generate", "migrate", "status", "drift", "check", "snapshot"],
+                "flags": [
+                    {
+                        "name": "--force-shared-engines",
+                        "type": "boolean",
+                        "description": FORCE_SHARED_ENGINES_HELP,
+                    },
+                    {
+                        "name": "--no-shared-engines",
+                        "type": "boolean",
+                        "description": NO_SHARED_ENGINES_HELP,
+                    },
+                ],
+            },
             {
                 "command": ["backfill"],
                 "flags": [

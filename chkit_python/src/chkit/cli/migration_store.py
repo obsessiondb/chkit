@@ -23,9 +23,21 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict
 
+from chkit.cli.snapshot_document import (
+    ReadableSnapshotDocument,
+    SnapshotUnreadableReason,
+    parse_snapshot_document,
+)
 from chkit.core.model import MigrationPlan, SchemaDefinition, Snapshot
 
 _MIGRATION_FORMAT_VERSION: Final[str] = "v1"
+_EMPTY_PLAN: Final[MigrationPlan] = MigrationPlan.model_validate(
+    {
+        "operations": [],
+        "renameSuggestions": [],
+        "riskSummary": {"safe": 0, "caution": 0, "danger": 0},
+    }
+)
 _SAFE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-zA-Z0-9_-]")
 _SAFE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -97,38 +109,67 @@ def checksum_sql(sql_text: str) -> str:
     return hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
 
 
-def write_snapshot(meta_dir: Path, snapshot: Snapshot) -> Path:
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_path = meta_dir / "snapshot.json"
+def serialize_snapshot(snapshot: Snapshot) -> str:
+    """Render a snapshot exactly as ``chkit generate`` writes it: 2-space JSON
+    plus a trailing newline (TS ``serializeSnapshot``)."""
     # exclude_none matches TS JSON.stringify, which omits undefined keys.
     # Key *presence* is load-bearing for cross-implementation snapshots: TS
     # classifies projections via `'index' in projection`, so a serialized
     # `"index": null` would flip every SELECT projection to index-only there.
     payload = snapshot.model_dump(mode="json", by_alias=True, exclude_none=True)
-    snapshot_path.write_text(
-        json.dumps(payload, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def write_snapshot(meta_dir: Path, snapshot: Snapshot) -> Path:
+    """Write ``<meta_dir>/snapshot.json``. Shared by ``chkit generate`` and
+    ``chkit snapshot rebuild``, so both write byte-identical files (apart from
+    ``generatedAt``)."""
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = meta_dir / "snapshot.json"
+    snapshot_path.write_text(serialize_snapshot(snapshot), encoding="utf-8")
     return snapshot_path
+
+
+class SnapshotReadError(RuntimeError):
+    """Raised when ``snapshot.json`` exists but cannot be read as JSON."""
 
 
 def read_snapshot(meta_dir: Path) -> Snapshot | None:
     snapshot_path = meta_dir / "snapshot.json"
     if not snapshot_path.exists():
         return None
-    raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    return Snapshot.model_validate(raw)
+    parsed = parse_snapshot_document(snapshot_path.read_text(encoding="utf-8"))
+    if isinstance(parsed, ReadableSnapshotDocument):
+        return parsed.snapshot
+    raise SnapshotReadError(_describe_unreadable_snapshot(snapshot_path, parsed.reason))
 
 
-def _build_migration_content(
+def _describe_unreadable_snapshot(file: Path, reason: SnapshotUnreadableReason) -> str:
+    if reason == "conflict_markers":
+        return (
+            f"Snapshot {file} contains unresolved merge conflict markers. "
+            "Resolve any conflicts in your schema files, then run `chkit snapshot rebuild` "
+            "to rewrite snapshot.json from them, and review its report before committing. "
+            "See https://chkit.obsessiondb.com/cli/snapshot/"
+        )
+    detail = " (the file is empty)" if reason == "empty" else ""
+    # During a merge or rebase the committed version is only one side of the conflict.
+    return (
+        f"Invalid snapshot JSON at {file}{detail}. "
+        "Outside a merge or rebase, restore the committed version from git. "
+        "Otherwise, or if the file was never committed, run `chkit snapshot rebuild` "
+        "to rewrite it from your schema definitions."
+    )
+
+
+def _build_migration_header(
     *,
     generated_at: str,
     cli_version: str,
     definition_count: int,
     plan: MigrationPlan,
-) -> str:
-    """Render the TS ``buildMigrationContent`` SQL artifact verbatim."""
-    header = [
+) -> list[str]:
+    return [
         f"-- chkit-migration-format: {_MIGRATION_FORMAT_VERSION}",
         f"-- generated-at: {generated_at}",
         f"-- cli-version: {cli_version}",
@@ -141,6 +182,22 @@ def _build_migration_content(
             f"danger={plan.risk_summary.danger}"
         ),
     ]
+
+
+def _build_migration_content(
+    *,
+    generated_at: str,
+    cli_version: str,
+    definition_count: int,
+    plan: MigrationPlan,
+) -> str:
+    """Render the TS ``buildMigrationContent`` SQL artifact verbatim."""
+    header = _build_migration_header(
+        generated_at=generated_at,
+        cli_version=cli_version,
+        definition_count=definition_count,
+        plan=plan,
+    )
     rename_hints = [
         (
             f"-- rename-suggestion: kind={s.kind} "
@@ -209,20 +266,64 @@ def write_migration(
         plan=plan,
     )
 
-    collision = 0
-    while True:
-        candidate = _migration_filename(migrations_dir, timestamp, name, collision)
-        if not candidate.exists():
-            candidate.write_text(sql_text, encoding="utf-8")
-            sql_path = candidate
-            break
-        collision += 1
+    sql_path = _write_new_migration_file(migrations_dir, timestamp, name, sql_text)
 
     return MigrationArtifact(
         id=sql_path.stem,
         sql_path=sql_path,
         checksum=checksum_sql(sql_text),
     )
+
+
+def generate_empty_migration(
+    migrations_dir: Path,
+    *,
+    migration_name: str | None = None,
+    migration_id: str | None = None,
+    cli_version: str,
+    now: datetime | None = None,
+) -> MigrationArtifact:
+    """Scaffold a blank manual migration file (TS ``generateEmptyMigration``).
+
+    Unlike :func:`write_migration` this performs no schema diff and never
+    touches the snapshot — it just writes a timestamped ``.sql`` stub for the
+    user to hand-edit.
+    """
+    migrations_dir.mkdir(parents=True, exist_ok=True)
+    moment = now if now is not None else datetime.now(tz=UTC)
+    timestamp = (
+        safe_migration_id(migration_id) if migration_id else ""
+    ) or _timestamp_id(moment)
+    name = safe_name(migration_name if migration_name is not None else "manual")
+    header = _build_migration_header(
+        generated_at=moment.isoformat().replace("+00:00", "Z"),
+        cli_version=cli_version,
+        definition_count=0,
+        plan=_EMPTY_PLAN,
+    )
+    placeholder = [
+        "-- Empty migration scaffold. Write your SQL statements below.",
+        "-- Statements run in order and are separated by semicolons.",
+    ]
+    sql_text = "\n".join(header) + "\n\n" + "\n".join(placeholder) + "\n"
+    sql_path = _write_new_migration_file(migrations_dir, timestamp, name, sql_text)
+    return MigrationArtifact(id=sql_path.stem, sql_path=sql_path, checksum=checksum_sql(sql_text))
+
+
+def _write_new_migration_file(
+    migrations_dir: Path, timestamp: str, name: str, sql_text: str
+) -> Path:
+    """Write ``sql_text`` to a fresh file, adding a ``_NNN`` suffix on collision."""
+    collision = 0
+    while True:
+        candidate = _migration_filename(migrations_dir, timestamp, name, collision)
+        try:
+            with candidate.open("x", encoding="utf-8") as handle:
+                handle.write(sql_text)
+        except FileExistsError:
+            collision += 1
+            continue
+        return candidate
 
 
 def list_migrations(migrations_dir: Path) -> list[Path]:

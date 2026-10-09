@@ -8,6 +8,7 @@ from typing import Any, TypeAlias
 from pydantic import TypeAdapter
 
 from chkit.core.codec import render_codec
+from chkit.core.column_default import render_default
 from chkit.core.kafka import is_kafka_engine, render_kafka_setting
 from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
@@ -58,17 +59,6 @@ def _normalize_projection(projection: ProjectionInput) -> ProjectionDefinition:
     return projection
 
 
-def render_default(value: str | int | float | bool) -> str:
-    if isinstance(value, str):
-        if value.startswith("fn:"):
-            return value[3:]
-        escaped = value.replace("\\", "\\\\").replace("'", "''")
-        return f"'{escaped}'"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
 def _render_column(col: ColumnDefinition) -> str:
     type_text = f"Nullable({col.type})" if col.nullable else f"{col.type}"
     out = f"`{col.name}` {type_text}"
@@ -84,7 +74,8 @@ def _render_column(col: ColumnDefinition) -> str:
     return out
 
 
-def _render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
+def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
+    """Key clause columns as chkit renders them in DDL (TS ``renderKeyClauseColumns``)."""
     # Quote a token when it names a declared column (including names that need
     # quoting like `user-id`) or is a bare identifier. Only true expressions
     # (e.g. `toStartOfHour(ts)`) are emitted verbatim.
@@ -148,14 +139,14 @@ def _render_table_sql(definition: TableDefinition) -> str:
         clauses.append(f"PARTITION BY {definition.partition_by}")
     if not is_kafka_engine(definition.engine):
         clauses.append(
-            f"PRIMARY KEY ({_render_key_clause_columns(definition.primary_key, column_names)})"
+            f"PRIMARY KEY ({render_key_clause_columns(definition.primary_key, column_names)})"
         )
         clauses.append(
-            f"ORDER BY ({_render_key_clause_columns(definition.order_by, column_names)})"
+            f"ORDER BY ({render_key_clause_columns(definition.order_by, column_names)})"
         )
     if definition.unique_key is not None and len(definition.unique_key) > 0:
         clauses.append(
-            f"UNIQUE KEY ({_render_key_clause_columns(definition.unique_key, column_names)})"
+            f"UNIQUE KEY ({render_key_clause_columns(definition.unique_key, column_names)})"
         )
     if definition.ttl is not None:
         clauses.append(f"TTL {definition.ttl}")
@@ -291,7 +282,7 @@ def render_dictionary_sql(definition: DictionaryDefinition, replace: bool = Fals
         _render_dictionary_attribute(a) for a in definition.attributes
     )
     column_names = {attribute.name for attribute in definition.attributes}
-    pk = _render_key_clause_columns(definition.primary_key, column_names)
+    pk = render_key_clause_columns(definition.primary_key, column_names)
     clauses = [
         f"PRIMARY KEY {pk}",
         f"SOURCE({definition.source})",

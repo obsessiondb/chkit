@@ -130,6 +130,10 @@ class PluginConfig(BaseModel):
     max_window_hours: float | None = Field(default=None, alias="maxWindowHours", gt=0)
     min_chunk_minutes: float | None = Field(default=None, alias="minChunkMinutes", gt=0)
     state_dir: str | None = Field(default=None, alias="stateDir", min_length=1)
+    # Extra ClickHouse settings appended to every chunk INSERT (e.g. max_insert_threads).
+    insert_settings: dict[str, str | int | float | bool] | None = Field(
+        default=None, alias="insertSettings"
+    )
 
     # TS PluginConfigSchema is non-strict zod: unknown keys are stripped, not
     # rejected ("validated softly at load time").

@@ -60,10 +60,6 @@ Apart from those name arguments and source parameters, names inside string liter
 
 Qualify names in view SQL (`analytics.events`, not `events`). ClickHouse resolves an unqualified name against the session's current database, which `generate` can't see, so `generate` assumes the view's own database.
 
-:::caution[chkit-py]
-chkit-py still orders creates and drops by kind and name. Order dependent objects by hand, or generate the migration with the TypeScript CLI.
-:::
-
 ### Risk levels
 
 Every operation in the plan is assigned a risk level:

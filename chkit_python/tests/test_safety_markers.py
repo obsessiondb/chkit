@@ -16,6 +16,20 @@ from chkit.cli.safety_markers import (
 # ---------- extract_migration_operation_summaries ----------
 
 
+def test_extract_summaries_keeps_a_key_with_spaces_so_later_operations_stay_aligned() -> None:
+    sql = """
+      -- operation: create_table key=table:app.my events risk=safe
+      CREATE TABLE app.`my events` (id UInt64) ENGINE = MergeTree() ORDER BY id;
+      -- operation: create_view key=view:app.v1 risk=safe
+      CREATE VIEW app.v1 AS SELECT id FROM app.`my events`;
+    """
+    # migrate pairs the n-th summary with the n-th statement; a summary lost to
+    # the space would make it wait for v1 right after creating the table (#231).
+    assert [
+        f"{op.type} {op.key} {op.risk}" for op in extract_migration_operation_summaries(sql)
+    ] == ["create_table table:app.my events safe", "create_view view:app.v1 safe"]
+
+
 def test_extract_summaries_returns_empty_for_no_markers() -> None:
     sql = "CREATE TABLE t (id UInt64);"
     assert extract_migration_operation_summaries(sql) == []

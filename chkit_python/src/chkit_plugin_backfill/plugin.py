@@ -196,6 +196,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
     json_mode: bool,
     resume_from: BackfillProgress | None = None,
     replay_failed: bool = False,
+    insert_settings: dict[str, str | int | float | bool] | None = None,
 ) -> int:
     plan, _plan_path, resolved_state_dir = read_plan(
         plan_id=plan_id,
@@ -268,6 +269,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
                 source_target=plan.execution.source_target,
                 table=plan.chunk_plan.table,
                 mv_replay_queries=plan.execution.mv_replay_queries,
+                insert_settings=insert_settings,
                 target_columns=plan.execution.target_columns,
                 idempotency_token=(
                     generate_idempotency_token(plan.plan_id, plan_chunk.id)
@@ -465,6 +467,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
         clickhouse = _require_clickhouse(ctx, "execution")
 
         return _run_backfill(
+            insert_settings=plugin_options.insert_settings,
             plan_id=opts.plan_id,
             force_environment=opts.force_environment,
             concurrency=opts.concurrency,
@@ -514,6 +517,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
             return 0
 
         return _run_backfill(
+            insert_settings=plugin_options.insert_settings,
             plan_id=opts.plan_id,
             force_environment=opts.force_environment,
             concurrency=opts.concurrency,
