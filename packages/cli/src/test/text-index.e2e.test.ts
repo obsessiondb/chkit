@@ -21,6 +21,7 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getLiveEnv,
+  pollUntil,
   runCli,
   runCliWithRetry,
   waitForTable,
@@ -40,6 +41,9 @@ const docs = (name: string, index: TextSkipIndex): TableDefinition =>
     orderBy: ['id'],
     indexes: [index],
   })
+
+const ROWS = `(1, 'alpha  beta gamma'), (2, 'alpha beta gamma'), (3, 'alpha'), (4, 'é東京😀'), (5, 'a,b=c')`
+const ROW_COUNT = 5
 
 async function loadPulled(definition: TableDefinition, dir: string): Promise<TableDefinition> {
   const path = join(dir, `${definition.name}.ts`)
@@ -72,11 +76,13 @@ describe('text index live round trips', () => {
           `CREATE TABLE ${fullName} (id UInt64, body String, INDEX idx (${index.expression}) TYPE text(tokenizer = ${index.tokenizer}${index.preprocessor ? `, preprocessor = ${index.preprocessor}` : ''}) GRANULARITY 1) ENGINE=MergeTree ORDER BY id`,
         )
         await waitForTable(executor, definition.database, name)
-        await executor.command(
-          `INSERT INTO ${fullName} VALUES (1, 'alpha  beta gamma'), (2, 'alpha beta gamma'), (3, 'alpha'), (4, 'é東京😀'), (5, 'a,b=c')`,
-        )
-        const actual = (await executor.listTableDetails([definition.database])).find(
-          (item) => item.name === name,
+        await executor.command(`INSERT INTO ${fullName} VALUES ${ROWS}`)
+        const actual = await pollUntil(
+          async () =>
+            (await executor.listTableDetails([definition.database])).find(
+              (item) => item.name === name,
+            ),
+          (item) => item !== undefined,
         )
         if (!actual) throw new Error('Missing test table')
         expect(compareTableShape(definition, actual)).toBeNull()
@@ -84,16 +90,33 @@ describe('text index live round trips', () => {
         const pulled = await loadPulled({ ...definition, indexes: actual.indexes }, dir)
         expect(planDiff([definition], [pulled]).operations).toEqual([])
         await executor.command(toCreateSQL({ ...pulled, name: cloneName }))
-        await executor.command(
-          `INSERT INTO ${definition.database}.${cloneName} SELECT * FROM ${fullName}`,
+        await waitForTable(executor, definition.database, cloneName)
+        // Insert the rows directly rather than INSERT ... SELECT from the
+        // original: on a multi-replica service the copy can run on a replica
+        // that hasn't seen the original's rows yet and copy nothing.
+        const cloneFullName = `${definition.database}.${cloneName}`
+        await executor.command(`INSERT INTO ${cloneFullName} VALUES ${ROWS}`)
+        // Read both tables in one query so both come from the same replica, and
+        // re-read until that replica sees every row of both.
+        const search = (target: string) =>
+          `(SELECT groupArray(id) FROM (SELECT id FROM ${target} WHERE hasAllTokens(${index.expression}, ['alpha']) ORDER BY id))`
+        const observed = await pollUntil(
+          async () =>
+            (
+              await executor.query<{ counts: string[]; original: string[]; clone: string[] }>(
+                `SELECT [(SELECT count() FROM ${fullName}), (SELECT count() FROM ${cloneFullName})] AS counts, ${search(fullName)} AS original, ${search(cloneFullName)} AS clone`,
+              )
+            )[0],
+          // The text index can trail the rows it covers on a fresh replica, so
+          // also wait for the clone's results to match; on timeout the last
+          // observation is returned and a real mismatch fails below.
+          (row) =>
+            (row?.counts.every((count) => Number(count) === ROW_COUNT) ?? false) &&
+            JSON.stringify(row?.clone) === JSON.stringify(row?.original),
         )
-        const query = (target: string) =>
-          executor.query<{ id: number }>(
-            `SELECT id FROM ${target} WHERE hasAllTokens(${index.expression}, ['alpha']) ORDER BY id`,
-          )
-        const original = await query(fullName)
-        expect(await query(`${definition.database}.${cloneName}`)).toEqual(original)
-        if (label === 'two spaces') expect(original.map((row) => Number(row.id))).toEqual([1, 3])
+        expect(observed?.counts.map(Number)).toEqual([ROW_COUNT, ROW_COUNT])
+        expect(observed?.clone).toEqual(observed?.original)
+        if (label === 'two spaces') expect(observed?.original.map(Number)).toEqual([1, 3])
       } finally {
         await executor.command(`DROP TABLE IF EXISTS ${fullName} SYNC`)
         await executor.command(`DROP TABLE IF EXISTS ${definition.database}.${cloneName} SYNC`)

@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test'
 
 import { type ColumnDefinition, table } from '@chkit/core'
 
-import { compareSchemaObjects, compareTableShape, summarizeDriftReasons } from '../commands/drift/compare.js'
+import {
+  collectTableSqlFragments,
+  compareSchemaObjects,
+  compareTableShape,
+  type SqlCanonicalizer,
+  summarizeDriftReasons,
+} from '../commands/drift/compare.js'
 
 describe('@chkit/cli drift comparer', () => {
   test('emits missing_object reason code when expected object is absent', () => {
@@ -906,5 +912,159 @@ describe('@chkit/cli drift comparer with column expressions', () => {
     }
     const zero: ColumnDefinition = { name: 'zero', type: 'Int64', defaultKind: 'MATERIALIZED' }
     expect(compareColumn({ ...zero, default: "fn:defaultValueOfTypeName('Int64')" }, zero)?.changedColumns).toEqual(['zero'])
+  })
+})
+
+describe('@chkit/cli drift SQL canonicalization (#195)', () => {
+  // Stand-in for ClickHouse's formatter: collapse whitespace and space after
+  // commas, so `cityHash64(a,b)` and `cityHash64(a, b)` share a canonical form.
+  const fakeClickHouseFormat = (fragment: string): string =>
+    fragment.replace(/\s+/g, ' ').replace(/\s*,\s*/g, ', ').trim()
+  const canonicalizer: SqlCanonicalizer = {
+    expression: fakeClickHouseFormat,
+    query: fakeClickHouseFormat,
+  }
+
+  const withSkipIndex = (expression: string) => ({
+    database: 'app',
+    name: 'events',
+    engine: 'MergeTree()',
+    columns: [
+      { name: 'a', type: 'String' },
+      { name: 'b', type: 'String' },
+    ],
+    primaryKey: ['a'] as string[],
+    orderBy: ['a'] as string[],
+    indexes: [{ name: 'i', expression, type: 'minmax' as const, granularity: 1 }],
+  })
+
+  test('a skip-index expression that differs only in comma spacing reads clean', () => {
+    const expected = table(withSkipIndex('cityHash64(a,b)'))
+    const actual = {
+      engine: 'MergeTree()',
+      primaryKey: '(a)',
+      orderBy: '(a)',
+      columns: [
+        { name: 'a', type: 'String' },
+        { name: 'b', type: 'String' },
+      ],
+      settings: {},
+      // What ClickHouse actually stores for `cityHash64(a,b)`.
+      indexes: [{ name: 'i', expression: 'cityHash64(a, b)', type: 'minmax' as const, granularity: 1 }],
+      projections: [],
+    }
+
+    // Without the canonicalizer the spacing reads as drift (today's behavior)...
+    expect(compareTableShape(expected, actual)?.reasonCodes).toContain('index_mismatch')
+    // ...with it, the two are recognized as equal.
+    expect(compareTableShape(expected, actual, canonicalizer)).toBeNull()
+  })
+
+  test('a genuinely different index expression still drifts under canonicalization', () => {
+    const expected = table(withSkipIndex('cityHash64(a,b)'))
+    const actual = {
+      engine: 'MergeTree()',
+      primaryKey: '(a)',
+      orderBy: '(a)',
+      columns: [
+        { name: 'a', type: 'String' },
+        { name: 'b', type: 'String' },
+      ],
+      settings: {},
+      indexes: [{ name: 'i', expression: 'sipHash64(a, b)', type: 'minmax' as const, granularity: 1 }],
+      projections: [],
+    }
+
+    expect(compareTableShape(expected, actual, canonicalizer)?.reasonCodes).toContain('index_mismatch')
+  })
+
+  test('collectTableSqlFragments gathers index, ttl, clause elements, and projection queries', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'a', type: 'String' },
+        { name: 'b', type: 'String' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      primaryKey: ['a'],
+      orderBy: ['a', 'b'],
+      partitionBy: 'toYYYYMM(ts)',
+      ttl: 'ts + toIntervalDay(30)',
+      indexes: [{ name: 'i', expression: 'cityHash64(a,b)', type: 'minmax', granularity: 1 }],
+      projections: [
+        { name: 'p_sel', query: 'SELECT a, count() GROUP BY a' },
+        { name: 'p_idx', index: 'b', type: 'basic' },
+      ],
+    })
+    const actual = {
+      engine: 'MergeTree()',
+      primaryKey: undefined,
+      orderBy: '(a, b)',
+      columns: [
+        { name: 'a', type: 'String' },
+        { name: 'b', type: 'String' },
+        { name: 'ts', type: 'DateTime' },
+      ],
+      settings: {},
+      indexes: [{ name: 'i', expression: 'cityHash64(a, b)', type: 'minmax' as const, granularity: 1 }],
+      partitionBy: 'toYYYYMM(ts)',
+      ttl: 'ts + toIntervalDay(30)',
+      projections: [
+        { name: 'p_sel', query: 'SELECT a, count() GROUP BY a' },
+        { name: 'p_idx', index: 'b', type: 'basic' as const },
+      ],
+    }
+
+    const { expressions, queries } = collectTableSqlFragments(expected, actual)
+    // Index expressions and clause elements are collected as expressions...
+    expect(expressions).toContain('cityHash64(a,b)')
+    expect(expressions).toContain('cityHash64(a, b)')
+    expect(expressions).toContain('toYYYYMM(ts)')
+    expect(expressions).toContain('a')
+    expect(expressions).toContain('b')
+    // ...SELECT projections as queries, and the index-only projection is not.
+    expect(queries).toContain('SELECT a, count() GROUP BY a')
+    expect(queries).not.toContain('b')
+  })
+  test('key columns reach the canonicalizer still quoted', () => {
+    // Like ClickHouse, an unquoted `user--a` parses as `user` plus a comment, so
+    // two different names would canonicalize to the same thing.
+    const commentAwareFormat: SqlCanonicalizer = {
+      expression: (fragment) =>
+        fragment.startsWith('`') ? fragment : fragment.replace(/--.*$/, '').trim(),
+      query: (fragment) => fragment,
+    }
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'user--a', type: 'String' },
+      { name: 'user--b', type: 'String' },
+    ]
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns,
+      primaryKey: ['id'],
+      orderBy: ['id', 'user--a'],
+    })
+    const actual = (orderBy: string) => ({
+      engine: 'MergeTree',
+      primaryKey: '(id)',
+      orderBy,
+      columns,
+      settings: {},
+      indexes: [],
+      projections: [],
+    })
+
+    expect(collectTableSqlFragments(expected, actual('(id, `user--a`)')).expressions).toContain(
+      '`user--a`'
+    )
+    expect(compareTableShape(expected, actual('(id, `user--a`)'), commentAwareFormat)).toBeNull()
+    expect(
+      compareTableShape(expected, actual('(id, `user--b`)'), commentAwareFormat)?.reasonCodes
+    ).toEqual(['order_by_mismatch'])
   })
 })

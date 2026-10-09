@@ -1,16 +1,58 @@
 import { join } from 'node:path'
 
-import { isUnknownDatabaseError, type ClickHouseExecutor, type SchemaObjectRef } from '@chkit/clickhouse'
+import {
+  canonicalizeSqlFragments,
+  isUnknownDatabaseError,
+  type ClickHouseExecutor,
+  type IntrospectedTable,
+  type SchemaObjectRef,
+} from '@chkit/clickhouse'
 import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
 
 import { debug } from '../../runtime/debug.js'
 import type { TableScope } from '../../runtime/table-scope.js'
 import {
+  collectTableSqlFragments,
   compareSchemaObjects,
   compareTableShape,
   type ObjectDriftDetail,
+  type SqlCanonicalizer,
   type TableDriftDetail,
 } from './compare.js'
+
+/**
+ * Build a canonicalizer for every SQL fragment across the compared tables in a
+ * single ClickHouse round-trip. Returns undefined when there is nothing to
+ * canonicalize or ClickHouse can't format (old server, offline) — the comparer
+ * then falls back to plain string normalization.
+ */
+async function buildSqlCanonicalizer(
+  db: ClickHouseExecutor,
+  pairs: Array<{ expected: TableDefinition; actual: IntrospectedTable }>
+): Promise<SqlCanonicalizer | undefined> {
+  const expressions: string[] = []
+  const queries: string[] = []
+  for (const { expected, actual } of pairs) {
+    const fragments = collectTableSqlFragments(expected, actual)
+    expressions.push(...fragments.expressions)
+    queries.push(...fragments.queries)
+  }
+  if (expressions.length === 0 && queries.length === 0) return undefined
+
+  try {
+    const [expressionMap, queryMap] = await Promise.all([
+      canonicalizeSqlFragments(db, expressions, { wrap: true }),
+      canonicalizeSqlFragments(db, queries, { wrap: false }),
+    ])
+    return {
+      expression: (fragment) => expressionMap.get(fragment) ?? null,
+      query: (fragment) => queryMap.get(fragment) ?? null,
+    }
+  } catch (error) {
+    debug('drift', `sql canonicalization unavailable, using string comparison: ${String(error)}`)
+    return undefined
+  }
+}
 
 export interface DriftPayload {
   scope?: TableScope
@@ -119,12 +161,13 @@ export async function buildDriftPayload(
     expectedTables.map((table) => [`${table.database}.${table.name}`, table])
   )
   const actualTables = await db.listTableDetails([...expectedDatabases])
-  const tableDrift = actualTables
-    .map((actual) => {
-      const expected = expectedTableMap.get(`${actual.database}.${actual.name}`)
-      if (!expected) return null
-      return compareTableShape(expected, actual)
-    })
+  const pairs = actualTables.flatMap((actual) => {
+    const expected = expectedTableMap.get(`${actual.database}.${actual.name}`)
+    return expected ? [{ expected, actual }] : []
+  })
+  const canonicalizer = await buildSqlCanonicalizer(db, pairs)
+  const tableDrift = pairs
+    .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.table.localeCompare(b.table))
 
