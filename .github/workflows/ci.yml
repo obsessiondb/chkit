@@ -23,7 +23,7 @@ jobs:
 
       - name: Fallow analysis
         if: github.event_name == 'pull_request'
-        uses: fallow-rs/fallow@v2
+        uses: fallow-rs/fallow@v3
         with:
           format: sarif
           fail-on-issues: false
