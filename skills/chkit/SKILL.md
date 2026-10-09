@@ -4,15 +4,17 @@ description: ClickHouse schema management with chkit. Use when working with chki
 allowed-tools: [Read, Edit, Grep, Glob, Bash]
 ---
 
-# chkit — ClickHouse Schema & Migration Toolkit
+# chkit: ClickHouse Schema & Migration Toolkit
 
-chkit lets you define ClickHouse schemas in TypeScript, generate migrations automatically, detect drift, and run CI checks from a single CLI.
+chkit lets you define ClickHouse schemas in TypeScript, generate migration SQL, detect drift, and run CI checks from a single CLI.
 
 Docs: https://chkit.obsessiondb.com
 
+For application API source authoring with `@chkit/plugin-ingest`, use the separate `chkit-ingestion` skill (`npx skills add obsessiondb/chkit --skill chkit-ingestion`) and the [API sync guides](https://chkit.obsessiondb.com/api-sync.md). Its streams and checkpoints are separate from plugin-codegen's generated insert helpers.
+
 ## Configuration
 
-All chkit projects have a `clickhouse.config.ts` at the project root:
+Use `clickhouse.config.ts` at the TypeScript project root, or pass a custom path with `--config`:
 
 ```ts
 import { defineConfig } from '@chkit/core'
@@ -57,7 +59,7 @@ const events = table({
     { name: 'org_id', type: 'String' },
     { name: 'source', type: 'LowCardinality(String)' },
     { name: 'payload', type: 'String', nullable: true },
-    { name: 'received_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },
+    { name: 'received_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
     { name: 'status', type: 'String', default: 'pending', comment: 'Processing status' },
   ],
   engine: 'MergeTree()',
@@ -79,9 +81,12 @@ Optional: `partitionBy`, `uniqueKey`, `ttl`, `settings`, `indexes`, `projections
 
 ### Column defaults
 
-- String values are single-quoted: `default: 'pending'` → `DEFAULT 'pending'`
-- Numbers are literal: `default: 0` → `DEFAULT 0`
-- Function calls use `fn:` prefix: `default: 'fn:now64(3)'` → `DEFAULT now64(3)`
+- Strings are literals, single-quoted: `default: 'pending'` → `DEFAULT 'pending'`
+- Numbers and booleans are literals: `default: 0` → `DEFAULT 0`
+- SQL expressions use `{ expression }`: `default: { expression: 'now64(3)' }` → `DEFAULT now64(3)`. Comments in the expression are dropped from the rendered SQL
+- Never write a function call as a plain string: `default: 'now64(3)'` is the literal text `now64(3)`, which ClickHouse rejects for a DateTime64 column (and stores as NULL in a Nullable one). chkit newer than 0.2.0-beta.8 rejects it at `generate` when it is the `DEFAULT` or `EPHEMERAL` default of a non-string column (`column_default_looks_like_expression`), and rejects every plain string on a `MATERIALIZED` or `ALIAS` column (`column_expression_requires_fn`)
+- `default: 'fn:now64(3)'` is the legacy, equivalent spelling, and the only one chkit 0.2.0-beta.8 and older understand: they render `{ expression }` as `DEFAULT [object Object]`. If the generated migration shows that, use `fn:`
+- `defaultKind` picks the clause (`DEFAULT`, `MATERIALIZED`, `ALIAS`, `EPHEMERAL`); `default` keeps the same forms for every kind: `{ name: 'day', type: 'Date', defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } }` → `` `day` Date MATERIALIZED toDate(ts) ``. `MATERIALIZED` and `ALIAS` need a `default`, written as `{ expression }` (a constant string is `{ expression: "'text'" }`); `EPHEMERAL` may omit it
 
 ### Views
 
@@ -94,6 +99,10 @@ const activeUsers = view({
   as: 'SELECT id, email FROM app.users WHERE active = 1',
 })
 ```
+
+Write fully qualified `db.name` references in view SQL (`app.users`, not `users`): ClickHouse resolves an unqualified name against the session's current database. chkit newer than 0.2.0-beta.8 also reads these references to create a view after the views, materialized views, and dictionaries it uses.
+
+With chkit newer than 0.2.0-beta.8, `as` may span lines and contain SQL comments, as may the other SQL fields (materialized view `as`, `partitionBy`, `ttl`, index and projection SQL, dictionary `source`/`layout`/`lifetime`): chkit removes the comments before it writes the query on one line. Full-text (`type: 'text'`) index expressions are the exception: they only drop `--` and non-nested `/* */` comments. Check the generated migration: if a `--`, `//`, or `#` comment outside a string literal is still inside a one-line statement (a `CREATE VIEW`, or the TTL or PARTITION BY of a `CREATE TABLE`), the installed chkit does not strip comments and the comment swallows the rest of the statement. Upgrade chkit, or use `/* */` comments.
 
 ### Materialized views
 
@@ -123,7 +132,7 @@ export const events = table({ ... })
 
 All commands support `--json` for machine-readable output and `--config <path>` for custom config files.
 
-### init — Scaffold project
+### init: Scaffold project
 
 ```sh
 chkit init
@@ -131,7 +140,7 @@ chkit init
 
 Creates `clickhouse.config.ts` and `src/db/schema/example.ts`.
 
-### generate — Create migrations
+### generate: Create migrations
 
 ```sh
 chkit generate --name add-users-table
@@ -146,27 +155,31 @@ Diffs schema definitions against the last snapshot. Each operation gets a risk l
 - **caution**: settings changes
 - **danger**: `DROP TABLE`, `DROP COLUMN`
 
-### migrate — Apply migrations
+### migrate: Apply migrations
 
 ```sh
 chkit migrate                  # Preview pending
 chkit migrate --apply          # Apply all pending
 chkit migrate --apply --allow-destructive   # Allow danger operations
 chkit migrate --apply --table analytics.events
+chkit migrate --apply --retry <file>        # Resume a failed migration after editing its file
+chkit migrate --abandon <file> --apply      # Reset a failed migration so the next apply starts it over
 ```
 
 Verifies checksums before applying. Destructive operations require explicit `--allow-destructive` in CI.
 
-### status — Migration state
+A migration that fails part-way stays in progress, and `--apply` resumes it, skipping completed statements. With chkit newer than 0.2.0-beta.8, after an edit to its file `--apply` runs it from statement 1 if no statement is recorded as completed; otherwise use `--retry` or `--abandon`, which preview without `--apply`. Never edit the `_chkit_migrations` journal by hand. These versions also refuse to apply pending files without executable statements, such as an unfilled `generate --empty` stub.
+
+### status: Migration state
 
 ```sh
 chkit status
 # Output: Migrations: 5 total, 3 applied, 2 pending
 ```
 
-Read-only, no ClickHouse connection needed.
+Read-only; requires a ClickHouse connection to read the migration journal.
 
-### drift — Compare live vs expected
+### drift: Compare live vs expected
 
 ```sh
 chkit drift
@@ -175,7 +188,7 @@ chkit drift --table analytics.events
 
 Compares snapshot against live ClickHouse. Reports missing/extra objects and column-level differences.
 
-### check — CI gate
+### check: CI gate
 
 ```sh
 chkit check              # Run all policy checks
@@ -185,7 +198,18 @@ chkit check --json       # Machine-readable output
 
 Evaluates: pending migrations, checksum mismatches, schema drift, plugin checks. Exit code 1 on failure.
 
-### query — Run SQL against the configured target
+### snapshot: Repair snapshot.json after parallel branches
+
+Requires chkit newer than 0.2.0-beta.8.
+
+```sh
+chkit snapshot rebuild --dryrun   # Report the entries that differ from the current snapshot.json
+chkit snapshot rebuild            # Rewrite chkit/meta/snapshot.json from the schema definitions
+```
+
+Use when `snapshot.json` has merge conflict markers after merging or rebasing two branches that each ran `generate`. Resolve schema file conflicts first. Never take one side of the conflict or edit the file by hand: that drops the other branch's entries. A conflicted file cannot be compared, so review the rebuilt file before staging it: `git diff HEAD -- chkit/meta/snapshot.json`, then the same diff against `MERGE_HEAD` during a merge or `REBASE_HEAD` during a rebase. A rebuild records every definition as migrated, so rebuild only when every schema change has a migration file (`chkit generate --dryrun` reported 0 operations on each branch); after upgrading chkit, run `chkit generate` first. Restore the snapshot from git instead of rebuilding when the file is damaged but committed and no merge or rebase is in progress (`git checkout HEAD -- chkit/meta/snapshot.json`), or after abandoning a failed migration to generate it again. `--table` is not supported. If both branches changed the same table or view, add a migration that applies it again: https://chkit.obsessiondb.com/cli/snapshot/
+
+### query: Run SQL against the configured target
 
 ```sh
 chkit query "SELECT count() FROM users"
@@ -199,7 +223,7 @@ Uses the active executor: direct `clickhouse` config by default, or the Obsessio
 
 To rename a table or column without drop+recreate:
 
-**Table rename** — set `renamedFrom` on the table:
+**Table rename**: set `renamedFrom` on the table:
 ```ts
 const accounts = table({
   database: 'app',
@@ -209,7 +233,7 @@ const accounts = table({
 })
 ```
 
-**Column rename** — set `renamedFrom` on the column:
+**Column rename**: set `renamedFrom` on the column:
 ```ts
 columns: [
   { name: 'user_email', type: 'String', renamedFrom: 'email' },
@@ -278,7 +302,7 @@ Views and materialized views always use drop+recreate.
 
 ## Documentation
 
-Full documentation is at https://chkit.obsessiondb.com. The site supports content negotiation — request any page with `Accept: text/markdown` to receive raw source markdown instead of HTML. Fetch docs for details not covered in this skill file.
+Read the documentation at https://chkit.obsessiondb.com. Request pages with `Accept: text/markdown` for Markdown output. Fetch the relevant guide for details beyond this skill.
 
 ```sh
 curl -s -H "Accept: text/markdown" <url>

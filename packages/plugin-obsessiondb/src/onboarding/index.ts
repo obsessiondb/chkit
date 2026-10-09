@@ -61,8 +61,9 @@ export async function runOnboarding(options: OnboardingOptions): Promise<void> {
     return
   }
 
-  // Every connected path keeps obsessiondb() registered: Option 1 needs it to strip Shared
-  // engines for the vanilla target; Options 2/3 need it for the remote executor.
+  // Every connected path keeps obsessiondb() registered: Option 1 needs it to strip
+  // ObsessionDB settings such as storage_policy for the vanilla target; Options 2/3 need it
+  // for the remote executor.
   await ensureObsessiondbPlugin(options.configPath, print)
 
   const baseUrl = resolveBaseUrl()

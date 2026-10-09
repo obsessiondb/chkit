@@ -1,81 +1,88 @@
 # Release Process
 
-All packages are published to npm under the `@chkit` scope with the `beta` dist-tag.
+All 10 published packages share one semver version (a changesets `fixed` group) and publish together. While in beta, versions carry a `-beta.N` suffix.
 
-## Prerequisites
+## Releasing
 
-- On the `main` branch with a clean working tree
-- Authenticated to npm (`npm login` — bun reads auth from `~/.npmrc`)
-- `bun`, `git`, `npm` installed
-- At least one **new** pending changeset in `.changeset/` (see [Adding a Changeset](#adding-a-changeset) below)
+A release takes two steps. The version reaches git before npm, so any failure can simply be re-run.
 
-## Quick Reference
+1. **Run "Release: prepare"** (GitHub → Actions → Release: prepare → Run workflow; repo admins only). Pick a channel:
+   - `beta` cuts the next beta from the unreleased changesets.
+   - `stable` graduates the beta line to GA (e.g. `0.2.0-beta.N` becomes `0.2.0`). Outside pre mode it cuts a stable release from the unreleased changesets.
+
+   It versions the packages, pushes a `release/v<version>` branch, opens a `release: v<version>` PR with the changelog as its body, and starts CI on that branch.
+2. **Review and merge the release PR.** That is the release decision. Keep the squash title `release: v<version> (#N)`: "Release: publish" recognizes the release commit by it.
+
+"Release: publish" then runs the quality gates and release guards, publishes every package to npm, moves dist-tags, and creates the `v<version>` tag and GitHub release.
+
+| Version | npm dist-tags |
+|---------|---------------|
+| prerelease (`0.2.0-beta.9`) | `beta`, and `latest` is moved onto it (the docs use unqualified installs) |
+| stable (`0.2.0`) | `latest` |
+
+### When main moves before you merge
+
+If new changesets land on `main` after prepare, re-run "Release: prepare" before merging: it refreshes the PR. Publish refuses a release commit that still has unreleased changesets, because their changes would ship without a changelog entry. If that happens after a merge, re-run prepare to cut the next version.
+
+### Retrying a failed release
+
+Re-run the failed "Release: publish" run. Every step skips what is already done: published packages, dist-tags, the GitHub release. The publish job only runs for repo admins; if someone else merged the release PR, an admin re-runs it.
+
+A manual dispatch of "Release: publish" publishes whatever version `main` is at; `dry_run` rehearses it with `npm publish --dry-run`.
+
+## Previews
+
+Every push to `main` is published to [pkg.pr.new](https://pkg.pr.new), not npm:
 
 ```bash
-# Dry run (validates everything, does not publish)
-bun run release:manual -- --dry-run
-
-# Full release
-bun run release:manual
+bun add -d https://pkg.pr.new/chkit@<sha>   # a specific commit
+bun add -d https://pkg.pr.new/chkit@main    # latest main
 ```
 
-## How It Works
-
-The `release:manual` script (`scripts/manual-release.ts`) runs these steps:
-
-1. **Validate changesets** - confirms `.changeset/*.md` files exist and all bumps are `patch` (only patch is allowed during beta)
-2. **Check tools** - verifies bun, git, npm, changeset CLI are available
-3. **Check branch** - must be on `main`
-4. **Check working tree** - must be clean
-5. **Check npm auth** - verifies `npm whoami` succeeds (run `npm login` first if needed)
-6. **Quality gates** - runs lint, typecheck, test, build
-7. **Ensure beta prerelease mode** - enters changeset pre mode if not already active
-8. **Version packages** - runs `changeset version` to bump versions and update changelogs
-9. **OTP prompt** - asks for npm one-time password (2FA)
-10. **Publish** - runs `bun publish --tag beta` for each non-private package
-11. **Commit and push** - commits version/changelog changes and pushes to `origin/main`
+Sibling `@chkit/*` dependencies resolve to the same commit's previews.
 
 ## Adding a Changeset
 
-You **must** create at least one changeset before running `release:manual`. Without a new changeset, `changeset version` has nothing to bump, and the script will attempt to re-publish an already-published version.
+Every user-facing change needs a changeset. Without one, prepare has nothing to release.
 
 ```bash
 bun run changeset
 ```
 
-Follow the interactive prompts. Only `patch` bumps are allowed during the beta phase.
-
-Alternatively, create a file manually in `.changeset/` with this format:
+Or create a file in `.changeset/`:
 
 ```markdown
 ---
 "@chkit/core": patch
-"@chkit/clickhouse": patch
 ---
 
 Description of the change.
 ```
 
-## Why bun publish?
+Use `patch` while in beta. `major` changesets are rejected.
 
-This monorepo uses `workspace:*` for internal dependencies. `bun publish` resolves `workspace:*` references to concrete versions at publish time without modifying `package.json` on disk, keeping the working tree clean with workspace protocol references intact for development.
+## How publishing works
 
-## Authentication
+- **npm auth:** OIDC Trusted Publishing from GitHub Actions; no npm token for the publish itself. Trusted Publishing does not support self-hosted runners, so the job runs on GitHub-hosted `ubuntu-24.04` (Blacksmith runners register as self-hosted).
+- **`npm publish`, not `bun publish`:** bun cannot publish via OIDC. `npm publish` copies `workspace:*` into the tarball verbatim, so the script rewrites every internal dependency to the current workspace version before publishing and restores `package.json` afterwards (`scripts/workspace-deps.ts`). `check:packed-deps` packs with `npm pack` after the same rewrite and fails on any leftover `workspace:` or stale pin.
+- **dist-tags:** moving `latest` onto a beta (`npm dist-tag add`) authenticates via OIDC too, which needs npm >= 11.21.0. The workflow pins `npm@^11.21.0`. No npm token is stored anywhere.
+- **Quality gates:** `bun run verify` (typecheck, lint, test and build against the local test stack in `test/infra`), as in CI's `verify` job.
 
-Run `npm login` to authenticate before publishing:
+## One-time setup
+
+- On each of the 10 packages on npmjs.com: add a Trusted Publisher → GitHub Actions → `obsessiondb/chkit`, workflow `release-publish.yml`, environment `release`, and enable **Allow npm dist-tag** (off by default). Without it a beta release publishes but fails to move `latest`; enable it and re-run the run.
+- In the GitHub repo: create the `release` environment with deployment branches limited to `main`.
+- Install the [pkg.pr.new GitHub App](https://github.com/apps/pkg-pr-new) on the repo.
+
+## Without CI
+
+From a clean `main` that matches `origin/main`:
 
 ```bash
-npm login
+bun run release:prepare [--stable]   # opens the release PR as you
+bun run release:publish [--dry-run]  # after merging: publishes from local main, prompts for an npm OTP
 ```
-
-The release script verifies auth with `npm whoami` before proceeding. Your npm account must have 2FA enabled — the script will prompt for an OTP code.
 
 ## Prerelease Mode
 
-The repo is in changeset prerelease mode (`beta`). This is tracked in `.changeset/pre.json`. All published versions get a `-beta.N` suffix and are tagged as `beta` on npm, so `npm install @chkit/core` will not install beta versions unless explicitly requested with `@beta`.
-
-To exit prerelease mode (when ready for stable):
-
-```bash
-bun run changeset -- pre exit
-```
+The repo is in changesets prerelease mode (`beta`), tracked in `.changeset/pre.json`. In pre mode, released changeset files stay on disk and are listed in `pre.json`; a changeset counts as unreleased when its file is not listed there. A `stable` prepare exits pre mode; the next `beta` prepare enters it again.

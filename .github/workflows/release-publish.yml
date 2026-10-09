@@ -1,0 +1,99 @@
+name: "Release: publish"
+
+# Publishes a release once its PR (from "Release: prepare") is merged. Runs on
+# every push to main; the `detect` job lets only release commits through. To
+# retry a failed release, re-run its run: every step skips what is already done.
+# A manual dispatch publishes whatever version main is at, skipping the
+# release-commit check.
+#
+# Authenticates to npm via OIDC Trusted Publishing; no npm token is stored
+# anywhere. Because `bun publish` does not support OIDC, the publish runs
+# through the real `npm` CLI. Beta releases also move the `latest` dist-tag onto
+# the new beta, which `npm dist-tag add` authorizes via OIDC too (npm >= 11.21.0).
+#
+# Runs on a GitHub-hosted runner: npm Trusted Publishing does not support
+# self-hosted runners, which is what Blacksmith runners register as. The quality
+# gates run `bun run verify`, which starts the local test stack (test/infra) as
+# in ci.yml's verify job, never the shared ObsessionDB test database.
+#
+# Prerequisites (configured once, out of band):
+#   - npm Trusted Publisher on each of the 10 packages -> GitHub Actions,
+#     obsessiondb/chkit, workflow release-publish.yml, environment release,
+#     with "Allow npm dist-tag" enabled (off by default).
+#   - GitHub environment `release`, deployment branches limited to main.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (gates + guards + npm publish --dry-run; no publish, dist-tag or GitHub release)"
+        type: boolean
+        default: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.detect.outputs.release }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Detect release commit
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun run ./scripts/manual-release.ts detect
+
+  publish:
+    name: Publish v${{ needs.detect.outputs.version }}
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-24.04 # GitHub-hosted: required for npm Trusted Publishing
+    environment: release
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    permissions:
+      id-token: write # OIDC Trusted Publishing
+      contents: write # create the tag and GitHub release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restrict to repository admins
+        uses: ./.github/actions/require-admin
+
+      - name: Setup Node + npm registry (OIDC)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0" # >= 22.14.0 required for OIDC publishing
+          registry-url: "https://registry.npmjs.org"
+          # Intentionally NO token env here: a registry auth token in the
+          # ambient env would take precedence over the OIDC handshake.
+
+      - name: Upgrade npm to an OIDC-capable version
+        # >= 11.21.0 for OIDC on `npm dist-tag` (publish needs >= 11.5.1).
+        # npm 12 needs Node >= 22.22.2, so stay on 11 with Node 22.14.0.
+        run: npm install -g npm@^11.21.0
+
+      - name: Setup Bun + install dependencies
+        uses: ./.github/actions/setup
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+        run: bun run release:publish --ci ${{ inputs.dry_run && '--dry-run' || '' }}

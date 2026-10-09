@@ -1,0 +1,65 @@
+---
+title: Integrating ClickHouse with Lemlist
+description: Sync seven independent Lemlist resource streams into raw ClickHouse tables.
+---
+
+The Lemlist registry item syncs campaigns, contacts, companies, campaign leads, activities, inbox conversations, and inbox messages into separate raw ClickHouse tables.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+## Install
+
+```sh
+bunx chkit add lemlist
+bunx chkit check
+bunx chkit generate --name add_lemlist
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:lemlist
+```
+
+Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/lemlist/config.ts` for the account namespace, page size (1–100), initial activity date, overlap, interval length, and optional conversation user IDs. `pipeline.ts` groups seven independent streams in one account pipeline; select resources with tags. `sources/` contains the readers and `client.ts` uses `paginate()` for authenticated requests. `index.ts` exports the pipeline and raw schema. Child readers discover their own campaigns, contacts, or users; they do not depend on other streams running first.
+
+`createLemlistPipeline(config, deps)` binds reader settings and optional HTTP dependencies. Configure storage in the installation's `lemlistConfig` before schema discovery; factories use the exported raw tables.
+
+Keep each stream ID and destination tied to one account. The reader does not resolve the key's account identity; switching accounts requires new stream IDs and destinations so previous watermarks cannot skip history.
+
+<RegistryReference name="lemlist" section="resources" />
+
+## Sync behavior
+
+Activities use inclusive `minDate`/`maxDate` filters on `createdAt`, thirty-day intervals, and one day of overlap. Each completed interval checkpoints only after its pages have destination acknowledgement. A failed interval starts at offset zero; an explicit backfill resumes its completed interval frontier in an isolated namespace. Empty intervals also commit progress. Offset pages remain mutable, so their offsets are never persisted as change cursors.
+
+The [activities API](https://developer.lemlist.com/api-reference/endpoints/activities/get-many-activities) includes sent, replied, and bounced email events and can backfill metadata on older activities. Periodic historical replay refreshes such changes and late arrivals beyond the overlap.
+
+All six other resources use `fullSync()` because their list/export endpoints do not document reliable modification filters. Empty reads record completion; failures replay the selected stream's complete discovery from the beginning. Campaigns use creation-time ordering, while child streams revisit all current parents, including old campaigns and contacts. Full reads ignore date bounds and do not provide date-range backfills.
+
+The [contacts reader](https://developer.lemlist.com/api-reference/endpoints/contacts/get-many-contacts) hydrates full same-resource records in batches of at most 100 IDs, preserving custom fields and native campaign references. [Companies](https://developer.lemlist.com/api-reference/endpoints/companies/get-many-companies) use their paginated list. Campaign leads are distinct campaign membership records; the reader uses [the complete JSON export](https://developer.lemlist.com/api-reference/endpoints/campaigns/export-campaign-leads-v2) with `state=all` instead of the ordinary 500-record list without continuation. Exports do not guarantee `contactId`; join native lead IDs against contacts' `campaigns[].leadId` in ClickHouse.
+
+[Conversations](https://developer.lemlist.com/api-reference/endpoints/inbox/get-many-inboxes) discover all current team member IDs by default; set `inboxUserIds` to a nonempty list to restrict this stream. Empty or omitted means team-wide discovery. [Messages](https://developer.lemlist.com/api-reference/endpoints/inbox/get-contact-messages) independently discover every accessible contact and paginate complete history with `skip/limit`, including late replies on old contacts. The user list scopes only conversations. Message requests explicitly set `markAsRead=false`; retrieval uses GET requests without inbox actions.
+
+All five new resource envelopes contain `source_id` and untouched provider records under `data`; campaign leads, conversations, and messages also retain their parent IDs. Contacts/companies row IDs encode `[sourceId, providerId]`, and the three child resources encode `[sourceId, parentId, providerId]`; conversations retain distinct user inbox views. Existing campaign/activity keys remain native `_id` and their original tables remain installation-specific. Perform joins, field transformations, and denormalization afterward in ClickHouse.
+
+```sh
+bunx chkit ingest run --tag provider:lemlist --tag resource:activities --backfill reconcile-2026-10-04 --from 2000-01-01
+bunx chkit ingest status --tag provider:lemlist --json
+```
+
+Use a new backfill ID for each complete activity reconciliation; reusing an ID resumes that backfill. Narrowing a reused backfill's upper bound below its committed frontier is rejected. Full reads do not infer deletions; removed records remain stored. Pagination totals and continuations are validated, but live lists can change during retrieval and require replay. Lead exports require memory for one complete campaign response before bounded publication. Coverage remains limited to records accessible to the API key.
+
+Version 0.2.0 adds five tables; generate and review additive migrations. The two original tables, stream IDs and activity checkpoint state remain compatible. Keep one installation per account; changing accounts requires new stream namespaces and destinations. The raw tables require ClickHouse 25.3 or later. See the installed README and [registry installation](/cli/add/).
+
+## Test the reader
+
+```sh
+bunx chkit add lemlist --with-tests
+bun test src/integrations/lemlist/tests
+```
+
+## Changelog
+
+<RegistryReference name="lemlist" section="changelog" />
+
+## Related pages
+
+- [App registry](/integrations/)
+- [Ingestion plugin](/plugins/ingest/)

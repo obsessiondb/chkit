@@ -8,7 +8,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   waitForColumn,
@@ -18,7 +18,7 @@ import {
 
 describe('@chkit/cli sync migration resume e2e (#6)', () => {
   test('a partial failure resumes on re-run instead of replaying statement 1', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const journalTable = createJournalTableName('resume')

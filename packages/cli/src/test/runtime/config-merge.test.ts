@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ChxUserConfig } from '@chkit/core'
+import { resolveConfig, type ChxUserConfig } from '@chkit/core'
 
 import { mergeUserConfig, pluginNameOf } from '../../runtime/config-merge.js'
 
@@ -20,6 +20,20 @@ const profile: ChxUserConfig = {
 }
 
 describe('mergeUserConfig', () => {
+  test('project source mode replaces the inherited alternative', () => {
+    const entry = mergeUserConfig({ schema: './profile/**/*.ts' }, { entry: './src/chkit.ts' })
+    expect(resolveConfig(entry).schema).toEqual(['./src/chkit.ts'])
+    expect(entry.schema).toBeUndefined()
+
+    const globs = mergeUserConfig({ entry: './profile.ts' }, { schema: './src/schema/**/*.ts' })
+    expect(resolveConfig(globs).schema).toEqual(['./src/schema/**/*.ts'])
+    expect(globs.entry).toBeUndefined()
+
+    expect(resolveConfig(mergeUserConfig({ entry: './profile.ts' }, {})).entry).toBe('./profile.ts')
+    expect(resolveConfig(mergeUserConfig({ entry: './profile.ts' }, { schema: [] })).schema).toEqual([])
+    expect(() => resolveConfig(mergeUserConfig({}, { entry: './entry.ts', schema: './schema.ts' }))).toThrow('mutually exclusive')
+  })
+
   test('overlay scalar fields beat base', () => {
     const merged = mergeUserConfig(profile, {
       schema: ['./schema/*.ts'],

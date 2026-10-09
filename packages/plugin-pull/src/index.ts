@@ -11,10 +11,14 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  type ColumnDefaultValue,
   createPluginRunner,
   defineFlags,
+  type DictionaryDefinition,
   type FlagMapping,
   normalizeEngine,
+  isKafkaEngine,
+  parseKafkaSettings,
   type ResolvedChxConfig,
   type SafeParseable,
   type SchemaDefinition,
@@ -134,6 +138,35 @@ interface PullSchemaResult {
   databases: string[]
   skippedObjects: Array<{ kind: string; count: number }>
   content: string
+  warnings: string[]
+}
+
+const PASSWORD_LITERAL_RE = /password\s+'(?!\[HIDDEN\])(?:[^'\\]|\\.)*'/i
+
+// ClickHouse redacts a dictionary's SOURCE(...) password to `[HIDDEN]` on
+// introspection by default, and offers no way to recover the real value via
+// pull — flag it so the placeholder doesn't sit unnoticed in the schema
+// file. That redaction can also be turned off server-side (server config
+// `display_secrets_in_show_and_select` plus the `displaySecretsInShowAndSelect`
+// grant on the connecting user), in which case ClickHouse hands chkit the
+// real password and it's written verbatim into the schema file — chkit has
+// no way to detect or opt out of that, so flag it too.
+function dictionaryPasswordWarnings(definitions: SchemaDefinition[]): string[] {
+  return definitions
+    .filter((def): def is DictionaryDefinition => def.kind === 'dictionary')
+    .flatMap((def) => {
+      if (def.source.includes('[HIDDEN]')) {
+        return [
+          `Dictionary "${def.database}.${def.name}" SOURCE(...) password was redacted by ClickHouse to '[HIDDEN]' — chkit could not recover the real value. Replace it in the generated schema file before this dictionary's source can be diffed or migrated. To have ClickHouse reveal real passwords on introspection instead, grant the connecting user "displaySecretsInShowAndSelect" and enable the server-side "display_secrets_in_show_and_select" setting.`,
+        ]
+      }
+      if (PASSWORD_LITERAL_RE.test(def.source)) {
+        return [
+          `Dictionary "${def.database}.${def.name}" SOURCE(...) has a plain-text password — ClickHouse returned the real credential on introspection and it was written verbatim into the generated schema file.`,
+        ]
+      }
+      return []
+    })
 }
 
 function stringArrayFlag(value: string | string[] | boolean | undefined): string[] | undefined {
@@ -209,6 +242,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               databases: pulled.databases,
               skippedObjects: pulled.skippedObjects,
               dryrun,
+              warnings: pulled.warnings,
               ...(dryrun ? { content: pulled.content } : {}),
             }
 
@@ -227,6 +261,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
                 `Pulled ${pulled.definitionCount} objects from ${pulled.databases.join(', ') || '(none)'} to ${pulled.outFile}`
               )
             }
+            for (const warning of pulled.warnings) console.warn(`Warning: ${warning}`)
             return 0
           },
         }),
@@ -271,7 +306,11 @@ async function pullSchema(input: {
   }
 
   const outFile = resolve(process.cwd(), input.options.outFile)
-  let objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }> = []
+  let objects: Array<{
+    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+    database: string
+    name: string
+  }> = []
   let selectedDatabases = input.options.databases
 
   if (db && (!customIntrospector || selectedDatabases.length === 0)) {
@@ -292,6 +331,15 @@ async function pullSchema(input: {
   const content = renderSchemaFile(definitions)
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
+  const warnings = [
+    ...dictionaryPasswordWarnings(definitions),
+    ...definitions.flatMap((def) => def.kind === 'table' && isKafkaEngine(def.engine)
+      ? Object.entries(def.settings ?? {}).filter(([key]) => /password|secret|token/i.test(key)).map(([key, value]) =>
+        value === '[HIDDEN]'
+          ? `Kafka table "${def.database}.${def.name}" setting ${key} was redacted by ClickHouse. Restore it or use server-side configuration before generating migrations.`
+          : `Kafka table "${def.database}.${def.name}" setting ${key} contains a credential returned by ClickHouse and written into the schema file. Prefer server-side configuration.`)
+      : []),
+  ]
 
   return {
     outFile,
@@ -300,6 +348,7 @@ async function pullSchema(input: {
     databases: selectedDatabases,
     skippedObjects,
     content,
+    warnings,
   }
 }
 
@@ -330,7 +379,7 @@ function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefini
     ...(table.uniqueKey ? { uniqueKey: splitTopLevelCommaSeparated(table.uniqueKey) } : {}),
     ...(table.partitionBy ? { partitionBy: table.partitionBy } : {}),
     ...(table.ttl ? { ttl: table.ttl } : {}),
-    ...(Object.keys(table.settings).length > 0 ? { settings: table.settings } : {}),
+    ...(Object.keys(table.settings).length > 0 ? { settings: isKafkaEngine(table.engine ?? '') ? parseKafkaSettings(table.settings) : table.settings } : {}),
     ...(table.indexes.length > 0 ? { indexes: table.indexes } : {}),
     ...(table.projections.length > 0 ? { projections: table.projections } : {}),
   }
@@ -347,6 +396,21 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
         as: introspected.as,
       }
     }
+    if (introspected.kind === 'dictionary') {
+      return {
+        kind: 'dictionary',
+        database: introspected.database,
+        name: introspected.name,
+        attributes: introspected.attributes,
+        primaryKey: introspected.primaryKey,
+        source: introspected.source,
+        layout: introspected.layout,
+        lifetime: introspected.lifetime,
+        ...(introspected.range ? { range: introspected.range } : {}),
+        ...(introspected.settings ? { settings: introspected.settings } : {}),
+        ...(introspected.comment ? { comment: introspected.comment } : {}),
+      }
+    }
     return {
       kind: 'materialized_view',
       database: introspected.database,
@@ -359,16 +423,20 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
   return mapIntrospectedTableToDefinition(introspected)
 }
 
-function normalizeDefault(value: TableDefinition['columns'][number]['default']):
-  | TableDefinition['columns'][number]['default']
-  | undefined {
-  if (value === undefined) return undefined
-  if (typeof value === 'number' || typeof value === 'boolean') return value
-  return `fn:${value}`
+// Introspection returns the SQL that ClickHouse stores for a default
+// (`now64(3)`, `'web'`, `0`), so every string is an expression, never a
+// literal to quote again.
+function normalizeDefault(value: ColumnDefaultValue | undefined): ColumnDefaultValue | undefined {
+  if (typeof value === 'string') return { expression: value }
+  return value
 }
 
 function summarizeSkippedObjects(
-  objects: Array<{ kind: 'table' | 'view' | 'materialized_view'; database: string; name: string }>,
+  objects: Array<{
+    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+    database: string
+    name: string
+  }>,
   definitions: SchemaDefinition[],
   selectedDatabases: string[]
 ): Array<{ kind: string; count: number }> {
@@ -405,7 +473,7 @@ async function listNonTableRows(
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})
-  AND engine IN ('View', 'MaterializedView')`
+  AND engine IN ('View', 'MaterializedView', 'Dictionary')`
   )
 }
 

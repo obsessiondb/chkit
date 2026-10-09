@@ -1,6 +1,6 @@
 {
   "name": "chkit",
-  "version": "0.1.2-beta.5",
+  "version": "0.2.0-beta.9",
   "description": "ClickHouse schema and migration CLI for TypeScript projects",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -35,17 +35,27 @@
     "dev": "bun run src/bin/chkit.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun test src --concurrent --parallel --timeout 15000",
+    "test": "bun test src --parallel --timeout 15000",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "fast-glob": "^3.3.2",
     "@chkit/clickhouse": "workspace:*",
     "@chkit/codegen": "workspace:*",
     "@chkit/core": "workspace:*",
-    "@logtape/logtape": "^2.0.5"
+    "@logtape/logtape": "^2.0.5",
+    "fast-glob": "^3.3.2",
+    "micromatch": "^4.0.8",
+    "p-retry": "^7.1.1",
+    "semver": "^7.7.0",
+    "typescript": "^5.8.0",
+    "zod": "^4.3.6"
   },
   "optionalDependencies": {
     "@chkit/plugin-obsessiondb": "workspace:*"
+  },
+  "devDependencies": {
+    "@clickhouse/client": "^1.11.0",
+    "@types/micromatch": "^4.0.9",
+    "@types/semver": "^7.7.0"
   }
 }

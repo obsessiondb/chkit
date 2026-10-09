@@ -4,11 +4,11 @@ import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import { getRequiredEnv, runCli } from './e2e-testkit.js'
+import { getLiveEnv, runCli } from './e2e-testkit.js'
 
 describe('@chkit/cli auth error e2e', () => {
   test('a wrong password yields one clean line, not the raw ClickHouse server blurb (#7)', async () => {
-    const { clickhouseUrl, clickhouseUser, clickhouseDatabase } = getRequiredEnv()
+    const { clickhouseUrl, clickhouseUser, clickhouseDatabase } = getLiveEnv()
     const dir = await mkdtemp(join(tmpdir(), 'chkit-auth-e2e-'))
     const configPath = join(dir, 'clickhouse.config.ts')
     await writeFile(

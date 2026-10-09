@@ -1,0 +1,35 @@
+name: Preview
+
+# Publishes every package from each push to main to pkg.pr.new (not npm), so
+# unreleased main can be installed without adding versions to the registry:
+#
+#   bun add -d https://pkg.pr.new/chkit@<sha>   # or @main for the latest
+#
+# pkg.pr.new rewrites sibling @chkit/* dependencies to the same commit's
+# previews. Requires the pkg.pr.new GitHub App on the repository.
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  preview:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun + install dependencies
+        uses: ./.github/actions/setup
+
+      - name: Build packages
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+        run: bunx turbo run build --filter='./packages/*'
+
+      - name: Publish previews
+        run: bunx pkg-pr-new@0.0 publish './packages/*' --comment=off

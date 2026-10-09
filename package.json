@@ -14,18 +14,23 @@
   "workspaces": [
     "packages/*",
     "apps/*",
-    "examples/clickbench"
+    "registry",
+    "examples/clickbench",
+    "test/kafka"
   ],
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
     "docs:dev": "bun run --cwd apps/docs dev",
     "docs:build": "bun run --cwd apps/docs build",
+    "registry:build": "bun run scripts/build-registry.ts",
+    "registry:release": "bun run scripts/registry-releases.ts refresh",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "test:turbo": "turbo run test",
-    "test:env": "doppler run --project chkit --config ci -- bun run test",
+    "test:obsessiondb": "CHKIT_E2E_TARGET=obsessiondb turbo run test --filter=!@chkit/kafka-e2e",
+    "infra:up": "bun run scripts/infra-up.ts",
+    "infra:down": "docker compose -f test/infra/docker-compose.yml down -v",
     "cluster:up": "docker compose -f test/cluster/docker-compose.yml up -d --wait",
     "cluster:down": "docker compose -f test/cluster/docker-compose.yml down -v",
     "cluster:logs": "docker compose -f test/cluster/docker-compose.yml logs -f",
@@ -38,27 +43,33 @@
     "fallow:dead-code": "bunx fallow --only dead-code",
     "fallow:pr": "bunx fallow --changed-since main --summary || true",
     "fallow:ci": "bunx fallow --fail-on-issues",
-    "verify": "doppler run --project chkit --config ci -- turbo run typecheck lint test build",
+    "verify": "bun run check:workspace-deps && bun run check:registry-releases && turbo run typecheck lint test build && bun run check:packed-deps",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "bun run ./scripts/manual-release.ts",
     "check:examples": "bun run scripts/check-examples-manifest.ts",
     "check:workspace-deps": "bun run scripts/check-workspace-deps.ts",
+    "check:registry-releases": "bun run scripts/registry-releases.ts check",
     "check:packed-deps": "bun run scripts/check-packed-deps.ts",
     "clean": "turbo run clean",
     "chkit": "bun run ./packages/cli/src/bin/chkit.ts",
-    "deploy": "turbo run deploy"
+    "deploy": "turbo run deploy",
+    "release:prepare": "bun run ./scripts/manual-release.ts prepare",
+    "release:publish": "bun run ./scripts/manual-release.ts publish"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@changesets/cli": "^2.29.8",
     "@chkit/plugin-obsessiondb": "workspace:*",
-    "@orpc/client": "1.13.4",
-    "@orpc/contract": "1.13.4",
+    "@orpc/client": "1.15.4",
+    "@orpc/contract": "1.15.4",
     "@types/node": "^24.0.0",
     "p-map": "^7.0.4",
     "turbo": "^2.8.21",
     "typescript": "^5.8.0",
     "zod": "3.25.76"
+  },
+  "overrides": {
+    "@orpc/client": "1.15.4",
+    "@orpc/contract": "1.15.4"
   }
 }

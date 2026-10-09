@@ -103,7 +103,9 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const tableSelector = gf['--table']
   let tableScope: ReturnType<typeof resolveTableScope>
   try {
-    const definitions = await loadSchemaDefinitions(ctx.config.schema)
+    // Without --table the scope is unfiltered, so only a selector needs the schema.
+    // A plugin command that needs it loads it and reports its load errors itself.
+    const definitions = tableSelector ? await loadSchemaDefinitions(ctx.config.schema) : []
     tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
   } catch {
     tableScope = resolveTableScope(tableSelector, [])

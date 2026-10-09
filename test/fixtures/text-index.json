@@ -1,0 +1,100 @@
+[
+  {
+    "name": "default",
+    "tokenizer": "splitByNonAlpha"
+  },
+  {
+    "name": "quoted name",
+    "tokenizer": "'splitByNonAlpha'"
+  },
+  {
+    "name": "ngrams",
+    "tokenizer": "ngrams ( 3 )"
+  },
+  {
+    "name": "sparse grams",
+    "tokenizer": "sparseGrams(3, 5, 4)"
+  },
+  {
+    "name": "two spaces",
+    "tokenizer": "splitByString(['  '])"
+  },
+  {
+    "name": "actual tab and newline",
+    "tokenizer": "splitByString(['\t', '\n'])"
+  },
+  {
+    "name": "escaped tab and newline",
+    "tokenizer": "splitByString(['\\t', '\\n'])"
+  },
+  {
+    "name": "commas and equals",
+    "tokenizer": "splitByString([',', '=', '), tokenizer = bogus'])"
+  },
+  {
+    "name": "backslash at end",
+    "tokenizer": "splitByString(['\\\\', ','])"
+  },
+  {
+    "name": "escaped quote",
+    "tokenizer": "splitByString(['\\'', ';'])"
+  },
+  {
+    "name": "doubled quote",
+    "tokenizer": "splitByString(['''', ';'])"
+  },
+  {
+    "name": "unicode",
+    "tokenizer": "splitByString(['é', '東京', '😀'])"
+  },
+  {
+    "name": "hex escapes",
+    "tokenizer": "splitByString(['\\x20\\x20', '\\xc3\\xa9'])"
+  },
+  {
+    "name": "comment text in strings",
+    "tokenizer": "splitByString(['--', '/*', '*/', ';'])"
+  },
+  {
+    "name": "SQL comments",
+    "tokenizer": "splitByString(/* commas , = */ ['  ', -- keep line break\n ';'])"
+  },
+  {
+    "name": "preprocessor whitespace",
+    "tokenizer": "splitByNonAlpha",
+    "preprocessor": "replaceAll(body, '  ', ' ')"
+  },
+  {
+    "name": "preprocessor escaped literal",
+    "tokenizer": "splitByNonAlpha",
+    "preprocessor": "replaceAll(body, '\\\\', '  ')"
+  },
+  {
+    "name": "parenthesis in expression literal",
+    "expression": "concat(body, ')  (')",
+    "tokenizer": "splitByNonAlpha"
+  },
+  {
+    "name": "unknown escapes and regex",
+    "tokenizer": "splitByNonAlpha",
+    "preprocessor": "replaceRegexpAll(body, '\\s+', ' ')"
+  },
+  {
+    "name": "escaped unicode",
+    "tokenizer": "splitByString(['\\é', '\\😀'])"
+  },
+  {
+    "name": "escape and empty sequence",
+    "tokenizer": "splitByString(['\\e', 'a\\Nb'])"
+  },
+  {
+    "name": "quoted column expression",
+    "expression": "lower(`body`)",
+    "tokenizer": "splitByNonAlpha"
+  },
+  {
+    "name": "quoted column preprocessor",
+    "tokenizer": "splitByNonAlpha",
+    "preprocessor": "lower(\"body\")"
+  }
+]

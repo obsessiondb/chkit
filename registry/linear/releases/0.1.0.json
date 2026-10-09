@@ -1,0 +1,85 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "linear",
+  "type": "registry:item",
+  "title": "Linear",
+  "description": "Small, editable Linear API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "linear/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/linear/README.md",
+      "content": "# Linear raw ingestion example\n\nThis is a small editable starting point based on the Linear source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `LINEAR_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit the GraphQL `query` in `index.ts` to request the issue fields needed by the project. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_linear\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:linear\n```\n\n## Resources\n\n- `issues` → `linear_issues_raw`\n\nEvery run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.\n"
+    },
+    {
+      "path": "linear/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/linear/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, rawRows, rawTable, type FetchContext } from '@chkit/plugin-ingest'\n\nconst database = 'default'\nconst query = `query Issues($after: String) {\n  issues(first: 100, after: $after) {\n    nodes { id identifier title description url createdAt updatedAt completedAt canceledAt\n      team { id key name } state { name type } assignee { id name email }\n      comments(first: 100) { nodes { id body createdAt updatedAt } pageInfo { hasNextPage endCursor } }\n    }\n    pageInfo { hasNextPage endCursor }\n  }\n}`\ninterface Issue { id: string; [key: string]: unknown }\ninterface ResponseBody { data?: { issues: { nodes: Issue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } }; errors?: { message: string }[] }\n\nexport const linear_issuesRaw = rawTable({ database, name: 'linear_issues_raw' })\n\nexport const linearPipeline = definePipeline({\n  id: 'linear', tags: ['provider:linear'], maxFetches: 1,\n  streams: [defineStream({ id: 'linear.issues', tags: ['resource:issues'], destination: linear_issuesRaw,\n    async *read(context) {\n      let after: string | null = null\n      const seen = new Set<string>()\n      while (true) {\n        const body = await readPage(context, after)\n        const issues = body.data?.issues\n        if (body.errors?.length || !issues) throw new Error(`Linear query failed: ${body.errors?.map((item) => item.message).join('; ') ?? 'missing issues'}`)\n        if (issues.nodes.length) yield { rows: rawRows(issues.nodes, (issue) => issue.id) }\n        if (!issues.pageInfo.hasNextPage) return\n        after = issues.pageInfo.endCursor\n        if (!after || seen.has(after)) throw new Error('Linear returned no new issue cursor')\n        seen.add(after)\n      }\n    },\n  })],\n})\n\nasync function readPage(context: FetchContext, after: string | null): Promise<ResponseBody> {\n  return context.attempt(async (signal) => {\n    const token = process.env.LINEAR_API_KEY\n    if (!token) throw new Error('Set LINEAR_API_KEY')\n    const response = await fetch('https://api.linear.app/graphql', {\n      method: 'POST', signal,\n      headers: { Authorization: token, 'Content-Type': 'application/json' },\n      body: JSON.stringify({ query, variables: { after } }),\n    })\n    if (!response.ok) throw await HttpError.fromResponse(response)\n    return await response.json() as ResponseBody\n  }, { label: 'POST /graphql issues' })\n}\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/linear/",
+      "logo": "https://chkit.obsessiondb.com/logos/linear.svg",
+      "authentication": {
+        "method": "Personal API key",
+        "env": [
+          "LINEAR_API_KEY"
+        ],
+        "setup": [
+          "Provide LINEAR_API_KEY with read access to the selected resources.",
+          "Keep the API key in the runtime environment and rotate it according to the provider policy."
+        ],
+        "documentation": "https://linear.app/developers/graphql"
+      },
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/linear",
+      "entry": "index.ts",
+      "exports": [
+        "linearPipeline",
+        "linear_issuesRaw"
+      ],
+      "resources": [
+        {
+          "name": "issues",
+          "title": "Issues",
+          "table": "linear_issues_raw",
+          "description": "Issue fields and the first 100 comments per issue.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/graphql",
+              "documentation": "https://linear.app/developers/graphql"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:linear from a scheduler.",
+        "deletions": "Every run reads all accessible issues. The example requests the first 100 comments per issue; extend the query for complete discussions."
+      },
+      "env": {
+        "LINEAR_API_KEY": ""
+      },
+      "fileHashes": {
+        "src/integrations/linear/README.md": "a662a1f096fdaab07480f7bcc926102bd281f627f2a94c437fc4000851f5574b",
+        "src/integrations/linear/index.ts": "720d14baa3f9926a3ce8d290481de8f9d9c09a8ecf04a4d26705b22a0264be5a"
+      }
+    }
+  }
+}

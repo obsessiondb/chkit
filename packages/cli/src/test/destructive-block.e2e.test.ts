@@ -8,7 +8,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   waitForColumn,
@@ -16,7 +16,7 @@ import {
 
 describe('@chkit/cli destructive block e2e (#2)', () => {
   test('a hand-written DROP COLUMN with no markers is blocked, not silently applied', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const journalTable = createJournalTableName('destructive')

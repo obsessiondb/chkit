@@ -1,11 +1,20 @@
 import {
   normalizeEngine as coreNormalizeEngine,
+  isKafkaEngine,
+  parseKafkaSettings,
+  kafkaSettingFingerprint,
   isIndexProjection,
+  isSyntheticEphemeralDefault,
   normalizeProjectionIndex,
   normalizeSQLFragment,
+  renderDefault,
+  renderKeyClauseColumns,
+  sqlExpressionFingerprint,
+  unquoteIdentifiers,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
+  textIndexFingerprint,
   type TableDefinition,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
@@ -28,7 +37,7 @@ type ObjectDriftReasonCode = 'missing_object' | 'extra_object' | 'kind_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
 interface SchemaObjectShape {
-  kind: 'table' | 'view' | 'materialized_view'
+  kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
   database: string
   name: string
 }
@@ -181,23 +190,19 @@ export function summarizeDriftReasons(input: {
 }
 
 function normalizeColumnShape(column: ColumnDefinition): string {
-  const normalizeDefaultValue = (value: string): string => {
-    const normalized = normalizeSQLFragment(value)
-    const quoted = normalized.match(/^'(.*)'$/)
-    if (!quoted) return normalized
-    return (quoted[1] ?? '').replace(/''/g, "'")
-  }
-
-  const normalizedDefault = (() => {
-    if (column.default === undefined) return ''
-    const asString = String(column.default)
-    if (asString.startsWith('fn:')) return normalizeDefaultValue(asString.slice(3))
-    return normalizeDefaultValue(asString)
-  })()
+  const rendered = column.default === undefined ? undefined : renderDefault(column.default)
+  // ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
+  // which introspection reads back as no expression; an explicit one matches it.
+  const normalizedDefault =
+    rendered === undefined ||
+    (column.defaultKind === 'EPHEMERAL' && isSyntheticEphemeralDefault(rendered))
+      ? ''
+      : sqlExpressionFingerprint(rendered)
   const parts = [
     `type=${String(column.type).trim()}`,
     `nullable=${column.nullable ? '1' : '0'}`,
     `default=${normalizedDefault}`,
+    `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,
   ]
   return parts.join('|')
@@ -205,6 +210,8 @@ function normalizeColumnShape(column: ColumnDefinition): string {
 
 function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   switch (index.type) {
+    case 'text':
+      return textIndexFingerprint(index)
     case 'minmax':
       return 'minmax'
     case 'set':
@@ -220,9 +227,24 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   }
 }
 
+// chkit renders `INDEX name (expr)`, and ClickHouse keeps those parentheses in
+// system.data_skipping_indices.expr. Strip one pair only when it encloses the
+// whole expression, so `(a) + (b)` stays intact.
+function stripEnclosingParens(value: string): string {
+  if (!value.startsWith('(') || !value.endsWith(')')) return value
+  let depth = 0
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '(') depth++
+    else if (value[i] === ')') depth--
+    if (depth === 0 && i < value.length - 1) return value
+  }
+  return value.slice(1, -1).trim()
+}
+
 function normalizeIndexShape(index: SkipIndexDefinition): string {
+  if (index.type === 'text') return textIndexFingerprint(index)
   return [
-    `expr=${normalizeSQLFragment(index.expression)}`,
+    `expr=${stripEnclosingParens(normalizeSQLFragment(index.expression))}`,
     `type=${renderIndexTypeFingerprint(index)}`,
     `granularity=${index.granularity}`,
   ].join('|')
@@ -238,11 +260,18 @@ function normalizeProjectionShape(projection: ProjectionDefinition): string {
   return `query=${normalizeSQLFragment(projection.query)}`
 }
 
+// Key and partition clauses are compared as SQL: the schema's keys as chkit
+// renders them, the live clauses as ClickHouse reports them. Comments are
+// removed while quoted names still carry their backticks. Then the names are
+// unquoted, since ClickHouse re-renders identifiers with its own quoting and
+// escaping, and one pair of parentheses around the whole clause is dropped.
+// From there on only whitespace is collapsed: unquoted, `user--id` would read
+// as `user` followed by a comment.
 function normalizeClause(value: string | undefined): string {
   if (!value) return ''
-  const normalized = normalizeSQLFragment(value).replace(/`/g, '')
-  const wrapped = normalized.match(/^\((.*)\)$/)
-  return wrapped?.[1] ? normalizeSQLFragment(wrapped[1]) : normalized
+  const unquoted = unquoteIdentifiers(normalizeSQLFragment(value)).replace(/\s+/g, ' ').trim()
+  const wrapped = unquoted.match(/^\((.*)\)$/)
+  return wrapped?.[1] ? wrapped[1].trim() : unquoted
 }
 
 function normalizeEngine(value: string | undefined): string {
@@ -253,7 +282,13 @@ function normalizeEngine(value: string | undefined): string {
 export function compareTableShape(expected: TableDefinition, actual: ActualTableShape): TableDriftDetail | null {
   const columnDiff = diffByName(
     expected.columns,
-    actual.columns,
+    // system.columns stores SQL, whereas schema strings are literals unless fn:-prefixed.
+    actual.columns.map((column) => ({
+      ...column,
+      default: typeof column.default === 'string' && !column.default.startsWith('fn:')
+        ? `fn:${column.default}`
+        : column.default,
+    })),
     (column: ColumnDefinition) => column.name,
     normalizeColumnShape
   )
@@ -261,7 +296,14 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   const extraColumns = columnDiff.extra
   const changedColumns = columnDiff.changed
 
-  const settingDiffs = diffSettings(expected.settings ?? {}, actual.settings)
+  const kafka = isKafkaEngine(expected.engine)
+  const expectedSettings = kafka
+    ? Object.fromEntries(Object.entries(expected.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
+    : expected.settings ?? {}
+  const actualSettings = kafka
+    ? Object.fromEntries(Object.entries(parseKafkaSettings(actual.settings)).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
+    : actual.settings
+  const settingDiffs = diffSettings(expectedSettings, actualSettings)
 
   const expectedIndexes = new Map(
     (expected.indexes ?? []).map((idx) => [idx.name, normalizeIndexShape(idx)])
@@ -278,15 +320,23 @@ export function compareTableShape(expected: TableDefinition, actual: ActualTable
   // it from SHOW CREATE — so a table with only ORDER BY reports no primary key.
   // Mirror that on both sides (as canonical.ts does for the schema), else every
   // such table drifts forever (#194).
+  // Render expected keys as chkit emits them so declared column names (which may
+  // contain commas or backticks) are compared as single identifiers.
+  const columnNames = new Set(expected.columns.map((column) => column.name))
   const expectedPrimaryKey = normalizeClause(
-    (expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy).join(', ')
+    renderKeyClauseColumns(
+      expected.primaryKey.length > 0 ? expected.primaryKey : expected.orderBy,
+      columnNames
+    )
   )
   const actualPrimaryKey = normalizeClause(actual.primaryKey ?? actual.orderBy)
   const primaryKeyMismatch = expectedPrimaryKey !== actualPrimaryKey
-  const expectedOrderBy = normalizeClause(expected.orderBy.join(', '))
+  const expectedOrderBy = normalizeClause(renderKeyClauseColumns(expected.orderBy, columnNames))
   const actualOrderBy = normalizeClause(actual.orderBy)
   const orderByMismatch = expectedOrderBy !== actualOrderBy
-  const expectedUniqueKey = normalizeClause((expected.uniqueKey ?? []).join(', '))
+  const expectedUniqueKey = normalizeClause(
+    renderKeyClauseColumns(expected.uniqueKey ?? [], columnNames)
+  )
   const actualUniqueKey = normalizeClause(actual.uniqueKey)
   const uniqueKeyMismatch = expectedUniqueKey !== actualUniqueKey
   const expectedPartitionBy = normalizeClause(expected.partitionBy)

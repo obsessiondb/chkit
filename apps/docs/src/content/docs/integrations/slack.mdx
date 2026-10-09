@@ -1,0 +1,311 @@
+---
+title: Integrating ClickHouse with Slack
+description: Sync Slack conversations, users, message history, and thread replies into raw ClickHouse tables with editable API readers.
+sidebar:
+  label: Slack
+  order: 3
+---
+
+Sync Slack into ClickHouse to query conversation metadata, users, messages, and thread replies alongside product or business data.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+The [app registry](/integrations/) installs three raw tables, full scans for users and conversations, and checkpointed message history and threads as editable TypeScript source. The integration preserves the complete objects returned by Slack; add SQL views for the fields and relationships needed by the project.
+
+<RegistryReference name="slack" section="overview" />
+
+## Install the Slack integration
+
+Run these commands in a TypeScript project with a `package.json`. Use a chkit release that includes the registry and ingestion plugin; these examples use the beta release.
+
+```sh
+bun add -d chkit@beta
+bunx chkit registry inspect slack
+bunx chkit add slack --dry-run
+bunx chkit add slack
+```
+
+The installer copies source files, installs compatible dependencies, registers the ingestion plugin, and connects the exported schemas and pipeline to the project config. See [installation behavior](/cli/add/) for config wiring and conflicts. Subsequent runs execute the installed code without contacting the registry.
+
+### Configure the ClickHouse connection
+
+For a new project, the generated `clickhouse.config.ts` has this shape:
+
+```ts
+import { defineConfig } from '@chkit/core'
+import { ingest } from '@chkit/plugin-ingest'
+
+export default defineConfig({
+  entry: './src/integrations/slack/index.ts',
+  plugins: [ingest()],
+  clickhouse: {
+    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
+    username: process.env.CLICKHOUSE_USER ?? 'default',
+    password: process.env.CLICKHOUSE_PASSWORD ?? '',
+    database: process.env.CLICKHOUSE_DB ?? 'default',
+  },
+})
+```
+
+Set the connection variables for the intended destination. Preserve existing schema entries and plugins when adapting an existing project. Ingestion requires a direct ClickHouse connection and ClickHouse 25.3 or newer for native JSON.
+
+The copied `src/integrations/slack/config.ts` separately sets the database containing the Slack tables. Set its `database` too; changing `CLICKHOUSE_DB` alone does not rename these schema objects.
+
+## Create a Slack access token
+
+Use a Slack app installed in the intended workspace. A user OAuth token is recommended for reading public-channel history and threads. Create the app through [Slack app settings](https://docs.slack.dev/app-management/quickstart-app-settings/), then configure its scopes and installation:
+
+<RegistryReference name="slack" section="authentication" />
+
+The default public-channel integration requires the scopes below. No write scopes are needed.
+
+<RegistryReference name="slack" section="scopes" />
+
+Add scopes for each additional conversation type selected in `config.ts`:
+
+| Conversation type | Discovery scope | Message and reply scope |
+|---|---|---|
+| `public_channel` | `channels:read` | `channels:history` |
+| `private_channel` | `groups:read` | `groups:history` |
+| `im` | `im:read` | `im:history` |
+| `mpim` | `mpim:read` | `mpim:history` |
+
+The users stream needs `users:read`. Add `users:read.email` when email addresses should appear in returned profiles; missing email fields are retained as missing. See [Slack scopes](https://docs.slack.dev/reference/scopes/) and [`users.list`](https://docs.slack.dev/reference/methods/users.list/).
+
+The three raw streams are channels, users, and messages. [Thread replies](https://docs.slack.dev/reference/methods/conversations.replies/) are individual messages with their own `ts` and a `thread_ts` parent reference; they share the messages table. The messages reader discovers conversation IDs independently and can run before or without the metadata streams. Each resource owns its progress. Preserve returned nested message fields and join channel, user, and thread-parent records later in ClickHouse using source, workspace, channel, and native IDs.
+
+### Token type and conversation access
+
+User tokens with the appropriate history scope read public channels and private conversations the user can access. Bot history access requires the bot to belong to the conversation. A bot may list public channels it has not joined, so the default `channels: undefined` can fail on history access. For a bot token, select IDs of conversations the bot has joined. See [`conversations.history`](https://docs.slack.dev/reference/methods/conversations.history/).
+
+Thread reads also require the appropriate history scope and conversation access; see [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/). A user token is recommended for broad history and thread access. If an enabled thread request fails for the supplied token, the messages stream fails visibly. Fix the token's access or explicitly set `includeReplies: false` to ingest history without fetching threads.
+
+Set the access token in the project's `.env`, replacing the placeholder:
+
+```sh
+SLACK_API_TOKEN=replace-with-the-slack-access-token
+```
+
+Bun loads the project's `.env`. A scheduler must supply `SLACK_API_TOKEN` and the ClickHouse connection variables through its own environment or secret configuration. `.env.example` lists variable names and does not load credentials. Keep real tokens out of source control.
+
+The reader obtains the token when a request runs and sends it as an `Authorization: Bearer` header. Schema imports, migration generation, and `ingest list` need no Slack token. This integration does not issue or refresh OAuth tokens; manage that lifecycle separately using [Slack authentication](https://docs.slack.dev/authentication/).
+
+## Choose conversations and destination names
+
+The installed `config.ts` starts with:
+
+```ts
+export const slackConfig: SlackConfig = {
+  sourceId: 'slack.primary',
+  database: 'default',
+  tablePrefix: 'slack',
+  channels: undefined,
+  conversationTypes: ['public_channel'],
+  includeReplies: true,
+  pageSize: 200,
+  messagePageSize: 15,
+  requestIntervalMs: 3000,
+  messageIntervalMs: 60000,
+  historyFrom: undefined,
+  overlapMs: 86400000,
+}
+```
+
+| Setting | Effect |
+|---|---|
+| `sourceId` | Stable, non-secret identity used in stream and row IDs |
+| `database` | Database containing the three raw tables |
+| `tablePrefix` | Prefix before `_channels_raw`, `_users_raw`, and `_messages_raw` |
+| `channels` | Conversation IDs; `undefined` selects all discovered conversations; `[]` selects none |
+| `conversationTypes` | Types passed to discovery; default `['public_channel']`; also accepts `private_channel`, `im`, and `mpim` |
+| `includeReplies` | Fetch complete threads for discovered roots with replies; default `true` |
+| `pageSize` | Channel and user page size, integer `1`–`999`; default `200` |
+| `messagePageSize` | History and reply page size, integer `1`–`999` subject to Slack's app-specific limit; conservative default `15` |
+| `requestIntervalMs` | Delay before each authentication, conversation, and user request; default `3000` ms |
+| `messageIntervalMs` | Delay before each history and reply request; default `60000` ms |
+| `historyFrom` | Optional exact bootstrap lower bound; default `undefined` selects the recent overlap window |
+| `overlapMs` | Recent root overlap after the completed watermark; default one day |
+
+Set `channels: ['C012EXAMPLE', 'C034EXAMPLE']` to restrict conversation metadata and messages. Selection uses Slack IDs, not channel names. Unknown IDs, inaccessible conversations, or IDs excluded by `conversationTypes` fail visibly. User collection remains workspace-wide.
+
+Discovery includes archived conversations returned by Slack. Selecting private channels or direct messages changes the requested coverage and requires matching scopes and token access. Keep `sourceId` stable after ingestion begins. For another workspace, use a distinct source identity and a separate table prefix or database; copying the directory alone does not isolate pipeline and destination names.
+
+## Create tables and run the first sync
+
+```sh
+bunx chkit check
+bunx chkit ingest list --tag provider:slack
+bunx chkit generate --name add-slack
+bunx chkit migrate
+```
+
+Review the generated SQL, apply it, and run ingestion:
+
+```sh
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:slack
+bunx chkit query "SELECT count() FROM default.slack_messages_raw FINAL"
+```
+
+Queries in this guide use the default database and table prefix. Substitute configured names when they differ.
+
+## Included resources
+
+One installation pipeline contains independent streams for channels, users, and messages, each with its own raw table, resource tag, and journal progress. A channel or thread is an individual entity traversed within the messages resource. The `data` field in every row retains the complete returned provider object, including fields not listed here and fields introduced by Slack later.
+
+<RegistryReference name="slack" section="resources" />
+
+The channels stream retains the conversation objects returned by [`conversations.list`](https://docs.slack.dev/reference/methods/conversations.list/), including names, topics, purposes, flags, and other available metadata. These are Slack's list responses; the reader does not expand them with `conversations.info` or fetch membership lists.
+
+The users stream preserves returned profiles, custom fields, bots, and deleted-user flags. Channel selection does not filter users. The messages stream retains message text, timestamps, subtype, author references, thread fields, blocks, attachments, reactions, and file references when present. A file reference does not download the file. No separate reactions, files, pins, canvases, or search stream is included.
+
+### Requests and pagination
+
+Every API URL is relative to `https://slack.com/api/`. Each reader calls [`POST auth.test`](https://docs.slack.dev/reference/methods/auth.test/) to obtain the authenticated workspace's `team_id`; the data methods use GET requests.
+
+| Resource | Requests and selection |
+|---|---|
+| `channels` | `conversations.list` with configured `types`, archived conversations included, then configured ID selection |
+| `users` | `users.list` across the accessible workspace |
+| `messages` | Independent conversation discovery, then `conversations.history` for each selected conversation; `conversations.replies` for roots with `reply_count > 0` when replies are enabled |
+
+All three readers use the ingestion plugin's `paginate` helper. Channels and users yield selected pages as they arrive, following `response_metadata.next_cursor` until absent, null, or empty. Configured conversation IDs are validated when discovery finishes; a missing ID fails the stream while any loaded pages remain visible. Messages use exact `oldest` and `latest` time boundaries, preserving progress independently of temporary cursors. Their paginator crosses empty or parent-only pages and retains native `has_more` in metadata; a page with timestamp progress returns control to the message reader. Cursor expiration restarts the unfinished interval once. Repeated cursors and responses without a safe continuation fail visibly. Each stream discovers its workspace and parents independently.
+
+For each channel, history advances newest first. Read every selected reply for one history page before committing its history timestamp boundary and requesting older history. Replies advance oldest first with temporary local timestamp boundaries. Threads retain the parent returned by Slack under its history identity. Incomplete history pages replay with their replies, and no temporary cursor or thread frontier enters durable state.
+
+## How the sync works
+
+<RegistryReference name="slack" section="sync" />
+
+Channels and users remain full metadata reads. Messages initially read the recent 24 hours to a fixed cutoff; an explicit `historyFrom` expands that first bootstrap. Later runs select the completed watermark minus `overlapMs` (24 hours by default) through the new cutoff, preserving catch-up coverage between runs. Newly discovered channels use that same selected range. There is no periodic historical reconciliation. Old edits and late replies on roots outside the selected history range are outside normal coverage. Coverage depends on retention, API visibility, scopes, and access.
+
+Message checkpoints retain workspace/query scope, fixed bounds, channel position, and the exact completed history frontier. Child rows carry no advanced state. An empty progress marker flushes rows and advances history only after the entire page and its replies have destination acknowledgement. Failed or budget-limited runs keep the original bounds and replay the unfinished page, including previously loaded replies. The completed watermark moves only after all selected channels and their selected child work finish.
+
+Keep source identity, selection, reply policy, and time configuration stable. Changing them fails against saved state instead of reinterpreting progress. The message strategy uses version 2; incompatible checkpoints require explicit migration or a new stream identity. Earlier released templates had no message checkpoint: upgrading to version 0.2.0 bootstraps once while preserving raw tables and identities.
+
+### Rate limits and scan duration
+
+The default pipeline runs one stream, one fetch, and one load at a time. Metadata batches use a 500-row threshold; messages publish source pages individually and commit history progress after the page and all its replies finish. Requests wait before each attempt: metadata uses `requestIntervalMs: 3000`; history and replies use `messageIntervalMs: 60000` with pages of `15` messages.
+
+Slack documents a one-request-per-minute limit and a 15-object page limit for new commercially distributed applications outside the Slack Marketplace. Marketplace and internal customer-built apps retain Tier 3 limits. See the current [`conversations.history` reference](https://docs.slack.dev/reference/methods/conversations.history/), [`conversations.replies` reference](https://docs.slack.dev/reference/methods/conversations.replies/), and [rate-limit clarification](https://docs.slack.dev/changelog/2025/06/03/rate-limits-clarity/).
+
+For an internal app entitled to Tier 3, edit the copied config to use `messagePageSize: 200` and `messageIntervalMs: 1200`. Confirm the app's actual limits before changing these settings. Slack may still return fewer objects than requested or apply `429` responses.
+
+A full history read with many threads can take hours or days at the conservative defaults. Restrict conversation IDs and select only the necessary streams before scheduling runs. The CLI's default duration is `3600` seconds; set `--max-duration` for the expected scan. An interrupted message read resumes the completed history timestamp frontier and replays its incomplete page with its replies. That complete unit, including its checkpoint marker, must fit the duration and chunk budget. Otherwise every run can replay the same unit without moving its checkpoint. Reduce `messagePageSize`, increase the execution budget, or narrow the workload.
+
+### Retries and failures
+
+Requests have a 30-second timeout and run through the ingestion executor's cancellation and retry context. The pipeline allows five retries after the initial attempt, with exponential backoff starting at one second and capped at 60 seconds. HTTP `429` responses honor `Retry-After`. Slack `ratelimited` and `rate_limited` responses also retry, with a 60-second fallback when no header is present. Network and server failures, including Slack `internal_error`, `fatal_error`, `service_unavailable`, and `request_timeout`, use the same retry budget.
+
+Slack often reports errors in a successful HTTP response with `ok: false`. Authentication, permission, missing-scope, and unsupported-token errors fail with the Slack code and required scopes when supplied. Invalid payloads and identity fields also fail visibly. A failed request exhausts its budget before the stream fails; restarting the reader does not multiply its request retries.
+
+Writes become visible batch by batch. A failed or interrupted run leaves already loaded rows in place. Repeated IDs reconcile in ClickHouse; this does not provide an atomic workspace snapshot or exactly-once delivery. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed.
+
+## Raw tables and identity
+
+All three tables use these columns:
+
+| Column | ClickHouse type | Meaning |
+|---|---|---|
+| `id` | `String` | JSON-encoded composite source, resource, workspace, and entity identity |
+| `raw` | `JSON` | Envelope with `source_id`, `team_id`, and the complete provider object under `data`; messages also include `channel_id` |
+| `_chkit_batch_id` | `String` | Runtime batch identity |
+| `_chkit_run_id` | `String` | Ingestion run identity |
+| `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
+
+Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as the primary and ordering key. Later ingestion time wins during replacement; source edits are not ordered by a Slack version field. Use `FINAL` to query the latest observed row while physical tables still contain earlier versions awaiting merges.
+
+| Resource | Composite identity |
+|---|---|
+| `channels` | `[sourceId, 'channels', teamId, conversation.id]` |
+| `users` | `[sourceId, 'users', teamId, user.id]` |
+| `messages` | `[sourceId, 'messages', teamId, channelId, message.ts]` |
+
+Slack message timestamps remain strings throughout ingestion. Channel ID is part of message identity because a timestamp alone does not identify a message across channels. Names, email addresses, and message text are never row keys.
+
+The integration packages raw tables only. Create projections in the project's schema when typed fields or views are needed; the retained payloads support new SQL projections without another API fetch.
+
+### Query messages and threads
+
+**Inspect latest observed messages:**
+
+```sql
+WITH toJSONString(raw) AS payload
+SELECT
+  JSONExtractString(payload, 'team_id') AS team_id,
+  JSONExtractString(payload, 'channel_id') AS channel_id,
+  JSONExtractString(payload, 'data', 'ts') AS ts,
+  JSONExtractString(payload, 'data', 'thread_ts') AS thread_ts,
+  JSONExtractString(payload, 'data', 'user') AS user_id,
+  JSONExtractString(payload, 'data', 'text') AS text,
+  _chkit_ingested_at
+FROM default.slack_messages_raw FINAL
+LIMIT 20;
+```
+
+Preserve `source_id` and `team_id` when joining messages to users or conversations. Use `channel_id` and the string `thread_ts` to group replies with a root; a root without `thread_ts` uses its own `ts` as the thread identity.
+
+## Scheduling, verification, and recovery
+
+Schedule a finite ingestion command through cron, CI, or a job runner. The scheduler supplies the project directory, credentials, cadence, execution budget, and concurrency control. Run one ingestion process per project and ClickHouse target at a time; the pipeline's limits apply within a process.
+
+For a narrower messages run:
+
+```sh
+bunx chkit ingest list --tag provider:slack --tag resource:messages
+bunx chkit ingest run --tag provider:slack --tag resource:messages --max-duration 86400 --json
+bunx chkit ingest status --tag provider:slack --json
+```
+
+Repeated tags use AND matching. With the default source ID, `--tag stream:slack.primary.messages` selects the same stream. `status` reports message checkpoints; full metadata reads have no incremental bookmark. Verify the execution's stream outcomes and query known retained messages rather than relying only on a row count.
+
+After the first run, compare a known message and a reply in an old thread with their retained `raw.data`. Add a reply to that old thread, then run a messages-only backfill with a new ID and `--from` before the root's timestamp to confirm it is collected. Normal incremental runs revisit roots within the selected overlap; an old root outside that range needs an explicit backfill.
+
+After fixing credentials, permissions, or destination failures, rerun ingestion; messages resume saved work and metadata scans restart. Messages support isolated bounded backfills through `--backfill <id> --from <date> --to <date>`. Bounds select root/history timestamps, and their replies are read up to the upper cutoff. Unfinished bounds must match the saved backfill; use another ID for a different range. An omitted upper bound retains its original execution cutoff on resume. Channels and users do not interpret date bounds. Historical observations loaded later can replace newer raw payloads because versioning uses ingestion time.
+
+### Coverage and consistency limits
+
+Deleted messages, conversations removed from selection, and data made inaccessible remain in ClickHouse. Full reads update returned identities and do not clear the destination. Add deliberate reconciliation if an exact current snapshot is required; a failed or permission-limited scan does not establish that unseen messages were deleted.
+
+Slack retention and access restrictions limit historical coverage. Changes during pagination may cause a scan to miss or repeat objects. Raw replacement tables retain the latest observed payload and do not provide a complete permanent edit history. There are no webhooks, live change capture, OAuth refresh, or file downloads in this integration.
+
+## Customize the installed integration
+
+| File | Responsibility |
+|---|---|
+| `config.ts` | Source identity, destination names, conversation selection, replies, page sizes, pacing |
+| `client.ts` | Authentication, payload validation, pagination, request pacing, and row identity |
+| `state.ts` | Validated message windows, exact timestamp arithmetic, and source binding |
+| `sources/channels.ts` | Conversation reader and raw table |
+| `sources/users.ts` | User reader and raw table |
+| `sources/messages.ts` | History and thread reader and raw messages table |
+| `pipeline.ts` | Enabled streams, tags, batching, retries, and concurrency |
+| `index.ts` | Discoverable pipeline and schema exports |
+| `tests/slack.test.ts`, `tests/checkpoints.test.ts`, `tests/fixtures.ts` | Portable payload, page replay, boundary, scope, and recent-coverage tests |
+
+Remove a stream from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve the existing table under migration management. Removing a schema export can generate a drop operation; review that migration. Revisit pacing when changing concurrency or page sizes and run fixture tests for customized readers.
+
+`createSlackPipeline` binds source identity, conversation selection, page sizes, pacing, and message checkpoint settings when it creates the pipeline. Later config edits do not change an existing pipeline. Its runtime settings exclude `database` and `tablePrefix`: those names belong to the raw schemas declared from the installed `config.ts` during module loading. Change destination names before loading schemas and generating migrations.
+
+### Install and run fixture tests
+
+```sh
+bunx chkit add slack --with-tests
+bun test src/integrations/slack/tests/slack.test.ts src/integrations/slack/tests/checkpoints.test.ts
+```
+
+The optional tests mock Slack responses and use an in-memory destination. They need Bun, with no Slack token or ClickHouse server. Adjust the test path for a custom `--path`. Installed files belong to the project; reinstalling does not overwrite local edits or merge newer integration versions automatically.
+
+## Changelog
+
+<RegistryReference name="slack" section="changelog" />
+
+## Related pages
+
+- [Integration list](/integrations/): available apps and dedicated sync guides.
+- [`chkit registry`](/cli/registry/): inspect app coverage and installable files.
+- [`chkit add`](/cli/add/): installation flags, config wiring, and ownership.
+- [`chkit ingest`](/cli/ingest/): stream selection and execution budgets.
+- [Destinations and transformations](/api-sync/destinations/): raw JSON, replacement semantics, and deletion handling.
+- [Scheduling and recovery](/api-sync/operations/): scheduling, retries, and outcomes.
+- [Test a source](/api-sync/testing/): fixture checks for customized readers.

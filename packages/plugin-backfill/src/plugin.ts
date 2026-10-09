@@ -30,7 +30,7 @@ import {
   type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
-import { buildBackfillPlan } from './planner.js'
+import { assertBackfillTargetSafe, buildBackfillPlan } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
 import {
@@ -116,6 +116,9 @@ async function runBackfill(input: {
   const db = createClickHouseExecutor(input.clickhouse)
 
   try {
+    const [database, table] = plan.target.split('.')
+    if (!database || !table) throw new BackfillConfigError('Invalid backfill target.')
+    await assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) })
     const runState: BackfillRunState = {
       planId: plan.planId,
       target: plan.target,

@@ -1,0 +1,190 @@
+---
+title: Troubleshooting
+description: Common chkit errors mapped to their causes and fixes — missing dependencies, connection and auth failures, rejected migrations, blocked destructive operations, and drift.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A reference for the errors you are most likely to hit when running chkit, what causes each, and how to fix it. Errors are grouped by the stage where they surface: loading the project, connecting to ClickHouse, and running migrations.
+
+## Quick reference
+
+| Error message contains | Cause | Fix |
+|------------------------|-------|-----|
+| `could not load its dependencies: cannot find "@chkit/core"` | Dependencies not installed yet | Run `bun install` (or `npm`/`pnpm install`) in the project |
+| `Unknown file extension ".ts"` | Old chkit that could not load `.ts` configs under Node | Upgrade chkit — recent versions bundle a TypeScript loader |
+| `Failed to load schema file ...` | A schema file does not parse or throws when imported, for example because a merge left conflict markers in it | Fix the file the message names, then run the command again |
+| `Snapshot ... contains unresolved merge conflict markers` | Two branches each ran `generate`, and git could not merge `snapshot.json` | Resolve your schema files, then run `chkit snapshot rebuild` |
+| `Invalid snapshot JSON at ...` | `snapshot.json` is empty or not valid JSON | Restore it from git, or run `chkit snapshot rebuild` |
+| `Authentication failed for user "..."` | Wrong `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | Check the credentials in your environment |
+| `Could not connect to ClickHouse at ... (connection refused)` | Nothing listening at the URL | Confirm the server is running and `CLICKHOUSE_URL` host/port are correct |
+| `Could not connect to ClickHouse at ... (host not found)` | Typo'd or unresolvable host | Check the host in `CLICKHOUSE_URL` |
+| `Unknown data type family: ...` | A migration references an invalid ClickHouse type | Fix the column type in the schema/migration and regenerate |
+| `default expression and column type are incompatible` | A function call written as a plain string default (`default: 'now64(3)'`), which renders as a quoted literal | Write it as `{ expression: 'now64(3)' }`, remove the quotes in the failed migration, and re-run it (see below) |
+| `Syntax error: failed at position` or `Unknown expression identifier` on a generated view | The view's query has a SQL comment that an older chkit kept when it wrote the query on one line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)) | Upgrade chkit, then fix the comment in the failed migration and re-run it ([see below](#syntax-error-or-unknown-expression-identifier-on-a-generated-view)) |
+| `Blocked destructive migration execution` (exit code 3) | A `risk=danger` operation in non-interactive mode | Review, then re-run with `--allow-destructive` |
+| `Checksum mismatch detected on applied migrations` (exit code 1) | A migration file was edited after being applied | Restore the original file, or apply a new forward migration |
+| `failed at statement N of M` | ClickHouse rejected a statement; the migration stays in progress | Fix the cause and re-run `chkit migrate --apply`, or edit the file and re-run it |
+| `has in-progress journal state for checksum` | A migration that failed part-way was edited after some of its statements ran | `chkit migrate --apply --retry <file>`, or `chkit migrate --abandon <file> --apply` |
+| `contain no executable statements` | A pending migration holds only comments, such as an unfinished `generate --empty` stub | Add SQL to the file or delete it |
+| `extra_object` entries in `drift` / `check` | Tables chkit does not manage exist in the database | Expected on shared databases; only fails CI if you opt into `check.failOnExtraObjects` |
+
+## Project loading
+
+### `could not load its dependencies: cannot find "@chkit/core"`
+
+The config (`clickhouse.config.ts`) and your schema files import `@chkit/core`, but it is not installed yet. This commonly happens when you run a command immediately after `chkit init`, before installing.
+
+Install the dependencies in the project directory:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d chkit @chkit/core
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install chkit-py
+    ```
+    The Python equivalent of this error is a `ModuleNotFoundError: No module named 'chkit'` from your schema files — same cause, same fix.
+  </TabItem>
+</Tabs>
+
+### `Unknown file extension ".ts"`
+
+Older chkit versions could not load a TypeScript config under plain Node. Recent versions bundle a loader, so the fix is to upgrade:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```sh
+    bun add -d chkit@latest
+    ```
+    Under Bun this never occurred; under Node it now works the same way.
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install --upgrade chkit-py
+    ```
+    This error is TypeScript-specific; Python configs (`clickhouse.config.py`) are plain modules and never hit it.
+  </TabItem>
+</Tabs>
+
+### `Snapshot ... contains unresolved merge conflict markers`
+
+Two branches each ran `chkit generate`, and git could not merge `chkit/meta/snapshot.json`. Taking either side drops the other branch's entries. Resolve the conflicts in your schema files, then rewrite the snapshot from them with [`chkit snapshot rebuild`](/cli/snapshot/) and review its report before committing. Rebuild only when every schema change has a migration file: `chkit generate --dryrun` reported 0 operations on each branch before the merge. After upgrading chkit, run `chkit generate` before you rebuild. See [Working on parallel branches](/guides/migration-workflow/#working-on-parallel-branches) and [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
+
+### `Invalid snapshot JSON at <file>`
+
+`snapshot.json` is empty or not valid JSON. If the file is committed and no merge or rebase is in progress, restore it with `git checkout HEAD -- chkit/meta/snapshot.json`. Otherwise, including during a merge or rebase (where `HEAD` holds only one side of the conflict), rewrite it from your schema definitions with [`chkit snapshot rebuild`](/cli/snapshot/), after checking [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
+
+## Connecting to ClickHouse
+
+### `Authentication failed for user "<user>" at <url>`
+
+`CLICKHOUSE_USER` or `CLICKHOUSE_PASSWORD` is wrong. chkit collapses the raw ClickHouse auth blurb (Cloud reset URLs, server file paths) into this single line. Verify the credentials your environment exports.
+
+### `Could not connect to ClickHouse at <url> (<reason>)`
+
+The endpoint is unreachable. The reason narrows it down:
+
+- **connection refused** — nothing is listening on that host/port. Confirm the server is up and the port is right.
+- **host not found** — the host does not resolve. Check for a typo in `CLICKHOUSE_URL`.
+- **connection timed out** / **host unreachable** — a network or firewall issue between you and the server.
+
+If `CLICKHOUSE_URL` is unset, chkit falls back to `http://localhost:8123`; the message says so when that is what happened.
+
+## Running migrations
+
+### `Unknown data type family: <type>`
+
+ClickHouse rejected a statement because a column type is not valid (for example a typo like `NotARealType`). Fix the type in the schema definition, regenerate the migration, and re-apply.
+
+### `default expression and column type are incompatible`
+
+ClickHouse could not convert a column's default to the column type. The usual cause is a function call written as a plain string default, such as `default: 'now64(3)'` on a `DateTime64` column. A plain string is a literal, so the migration holds `DEFAULT 'now64(3)'`: the text, not the current time. chkit newer than 0.2.0-beta.8 refuses to generate it: it reports `column_default_looks_like_expression` for a `DEFAULT` or `EPHEMERAL` column, and `column_expression_requires_fn` for any plain string on a `MATERIALIZED` or `ALIAS` column; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
+
+To recover from a migration that failed this way:
+
+1. Write the default as an expression in the schema: `default: { expression: 'now64(3)' }`.
+2. In the failed migration file, change `DEFAULT 'now64(3)'` to `DEFAULT now64(3)`, or remove the quotes the same way after `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`.
+3. Re-run the migration. When the failed statement was the first in the file, `chkit migrate --apply` runs the edited file. Otherwise resume after the statements that completed:
+
+   ```sh
+   chkit migrate --apply --retry 20261002051452_add_events.sql
+   ```
+
+4. Run `chkit generate`. `chkit/meta/snapshot.json` still holds the quoted literal, so it plans one `MODIFY COLUMN ... DEFAULT now64(3)` that sets the default the column already has. For a `DEFAULT` or `MATERIALIZED` column it carries the usual warning that stored values are not rewritten. Apply it with `chkit migrate --apply`.
+
+On a `Nullable` number, date, time, UUID, or IP address column, ClickHouse accepted the quoted literal instead of failing, and every row inserted without the column got `NULL`. Fix the schema, run `chkit generate`, and apply the planned `MODIFY COLUMN` with `chkit migrate --apply`. Rows inserted after that get the expression's value; rows inserted earlier keep their `NULL`, except in an `ALIAS` column, which ClickHouse computes on every read.
+
+### `Syntax error` or `Unknown expression identifier` on a generated view
+
+chkit 0.2.0-beta.8 and older kept the SQL comments of a view query when they wrote it on one line, so a `--`, `//`, or `#` comment swallows the rest of that line (see [SQL fragments](/schema/dsl-reference/#sql-fragments)). ClickHouse then reports `Syntax error: failed at position ...`, or `Unknown expression identifier` when the comment swallowed the `FROM` clause. A `--` comment also swallows the `;`, so the view runs together with the next statement, and the error quotes that statement. In the migration file, the comment sits in the middle of the view's query:
+
+```sql
+CREATE VIEW IF NOT EXISTS analytics.meetings AS
+SELECT id, -- the meeting id name FROM analytics.events;
+```
+
+Upgrading chkit does not repair this migration: it stays in progress, and `chkit migrate --apply` runs the same statement again. After you upgrade:
+
+1. In the failed migration file, delete the comment from the view's query and keep the SQL after it: `SELECT id, name FROM analytics.events;`.
+2. Re-run the migration. When the view was the first statement in the file, `chkit migrate --apply` runs the edited file. Otherwise resume after the statements that completed:
+
+   ```sh
+   chkit migrate --apply --retry 20260929001110_add_meetings.sql
+   ```
+
+3. Run `chkit generate`. `chkit/meta/snapshot.json` still holds the query with its comment, so it plans a migration that drops the view and creates it again with the same query. Apply it with `chkit migrate --apply`.
+
+Regenerating the failed migration from a restored `snapshot.json` instead loses an existing view whose query changed only by the comment: the upgraded chkit plans no change for that view, while the failed migration already dropped it.
+
+### `Blocked destructive migration execution` (exit code 3)
+
+A migration contains a destructive operation (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DETACH`, …) and you are running non-interactively without approval. After reviewing the plan, re-run with `--allow-destructive` (or set `safety.allowDestructive: true` in config). See [`chkit migrate`](/cli/migrate/#destructive-operation-safety).
+
+### `Checksum mismatch detected on applied migrations` (exit code 1)
+
+A migration file changed on disk after it was already applied — chkit verifies SHA-256 checksums before applying. Restore the original file content, or, if the change is intentional, write a new forward migration instead of editing history.
+
+chkit 0.2.0-beta.8 and older recorded a `chkit generate --empty` stub without SQL as applied when it was pending during `chkit migrate --apply`. SQL added to that stub later causes this error. Delete the stub file and put its SQL in a new migration. chkit ignores the journal row of an applied migration whose file is gone, so this works both where the empty stub was recorded and where it never ran. If an environment already applied the stub with its SQL, make the new migration safe to run there again, for example with `IF NOT EXISTS`. Do not restore the stub's empty content instead: every environment that has not applied it would then hold an [empty pending migration](/cli/migrate/#empty-migrations), and `chkit migrate --apply` refuses to run there.
+
+### `Migration <file> failed at statement N of M`
+
+ClickHouse rejected a statement in the middle of a migration. The statements before it stay applied, and chkit records the migration as in progress rather than applied. When the cause is outside the file (a missing table, a permission, a transient error), fix it and re-run `chkit migrate --apply`: completed statements are skipped and the failed one runs again.
+
+When the file itself is wrong, edit it and re-run `chkit migrate --apply`. If no statement is recorded as completed, the edited file runs again from statement 1. Otherwise chkit stops with the error in the next entry.
+
+### `has in-progress journal state for checksum <a>, but the current file checksum is <b>`
+
+The migration failed part-way, and its file changed after some of its statements ran. chkit does not continue on its own, because those statements came from the old file. Resume with the edited file, skipping the statements that completed. They must keep their position and `-- operation:` marker. A completed `REMOVE DEFAULT` or `REMOVE MATERIALIZED` stays in the file too, even when only the `MODIFY COLUMN` after it needs the edit:
+
+```sh
+chkit migrate --apply --retry 20260929001110_funnel-model.sql
+```
+
+Or discard the partial run, so that the next apply runs the edited file from statement 1. The statements that completed stay applied and run again, so they must be safe to run twice. A completed `REMOVE DEFAULT` or `REMOVE MATERIALIZED` is not: ClickHouse rejects it once the column has no such expression, so delete it from the file first:
+
+```sh
+chkit migrate --abandon 20260929001110_funnel-model.sql           # preview
+chkit migrate --abandon 20260929001110_funnel-model.sql --apply
+chkit migrate --apply
+```
+
+Neither path needs edits to the `_chkit_migrations` journal table. See [failed migrations](/cli/migrate/#failed-migrations).
+
+### `contain no executable statements`
+
+A pending migration file holds only comments or whitespace, typically a `chkit generate --empty` stub committed before its SQL was written. `chkit migrate --apply` refuses to run rather than record an empty migration as applied. Add the SQL to the file, or delete it. See [empty migrations](/cli/migrate/#empty-migrations).
+
+### `extra_object` reported by `drift` / `check`
+
+On a shared or pre-existing database, every table chkit does not manage is reported as an `extra_object`. By default these are informational and do **not** fail `check`. They only flip the gate to failing if you opt in with `check.failOnExtraObjects: true`. See [`chkit drift`](/cli/drift/) and [`chkit check`](/cli/check/).
+
+## Related pages
+
+- [Configuration overview](/configuration/overview/) — config fields and environment variables
+- [`chkit migrate`](/cli/migrate/) — applying migrations and destructive-operation safety
+- [`chkit status`](/cli/status/) — inspecting migration state
+- [CI/CD Integration](/guides/ci-cd/) — running chkit unattended

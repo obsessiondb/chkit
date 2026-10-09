@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Default from '@astrojs/starlight/components/Head.astro';
+import { registryApps } from '../data/registry';
 
 // Advertise the raw-Markdown version of this page so agents and crawlers can
 // discover it from the HTML. The raw-markdown integration writes one .md per
@@ -16,7 +17,40 @@ const { entry } = Astro.locals.starlightRoute;
 const slug = Astro.url.pathname.replace(/\/$/, '').replace(/^\//, '');
 const sourceExists = !!entry?.filePath && existsSync(join(process.cwd(), entry.filePath));
 const mdHref = slug !== '' && sourceExists ? `/${slug}.md` : '/llms.txt';
+const app = registryApps.find((item) => item.href === `/${slug}/`);
+const site = Astro.site ?? new URL('https://chkit.obsessiondb.com');
+const structuredData = slug === 'integrations' ? {
+	'@context': 'https://schema.org',
+	'@type': 'CollectionPage',
+	name: entry.data.title,
+	description: entry.data.description,
+	url: new URL('/integrations/', site).href,
+	mainEntity: {
+		'@type': 'ItemList',
+		numberOfItems: registryApps.length,
+		itemListElement: registryApps.map((item, index) => ({
+			'@type': 'ListItem',
+			position: index + 1,
+			name: `Integrating ClickHouse with ${item.title}`,
+			url: item.documentation,
+		})),
+	},
+} : app ? {
+	'@context': 'https://schema.org',
+	'@type': 'TechArticle',
+	headline: entry.data.title,
+	description: entry.data.description,
+	url: app.documentation,
+	mainEntityOfPage: app.documentation,
+	image: app.logo ? new URL(app.logo, site).href : undefined,
+	keywords: ['ClickHouse', app.title, 'API sync', ...app.resources.map((resource) => resource.name)],
+	about: [
+		{ '@type': 'SoftwareApplication', name: app.title },
+		{ '@type': 'SoftwareApplication', name: 'ClickHouse' },
+	],
+} : undefined;
 ---
 
 <Default />
 <link rel="alternate" type="text/markdown" href={mdHref} />
+{structuredData && <script type="application/ld+json" set:html={JSON.stringify(structuredData).replaceAll('<', '\\u003c')} />}

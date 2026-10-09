@@ -1,20 +1,17 @@
-import { nextQuote } from './sql-scan.js'
+import { findQuoteEnd, isQuoteChar } from './sql-scan.js'
 
 export function splitTopLevelComma(input: string): string[] {
   const out: string[] = []
   let current = ''
   let depth = 0
-  let quote: "'" | '"' | '`' | null = null
 
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i] ?? ''
-    const prev = i > 0 ? (input[i - 1] ?? '') : ''
-    const quoteBefore = quote
-    quote = nextQuote(char, prev, quote)
 
-    // A char inside a quoted literal (body or delimiter) is never structural.
-    if (quoteBefore !== null || quote !== null) {
-      current += char
+    if (isQuoteChar(char)) {
+      const end = findQuoteEnd(input, i, char)
+      current += input.slice(i, end + 1)
+      i = end
       continue
     }
 
@@ -46,8 +43,18 @@ export function splitTopLevelComma(input: string): string[] {
   return out
 }
 
-export function normalizeKeyColumns(values: string[] | undefined): string[] {
-  return (values ?? []).flatMap((value) => splitTopLevelComma(value.trim()))
+/**
+ * Flattens key entries into one token per key part. An entry may hold several
+ * comma-separated parts (`'id, toDate(ts)'`), but one that exactly names a
+ * declared column is kept whole, since the name itself may contain a comma.
+ */
+export function normalizeKeyColumns(
+  values: string[] | undefined,
+  declaredColumns: ReadonlySet<string> = new Set()
+): string[] {
+  return (values ?? []).flatMap((value) =>
+    declaredColumns.has(value.trim()) ? [value.trim()] : splitTopLevelComma(value.trim())
+  )
 }
 
 const PLAIN_COLUMN_REFERENCE = /^[A-Za-z_][A-Za-z0-9_]*$/

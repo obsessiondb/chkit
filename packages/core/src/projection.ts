@@ -1,7 +1,7 @@
 import type { IndexProjectionDefinition, ProjectionDefinition } from './model-types.js'
 import { splitTopLevelComma } from './key-clause.js'
-import { nextQuote, stripWrappingParens } from './sql-scan.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
+import { findQuoteEnd, isQuoteChar, stripWrappingParens } from './sql-scan.js'
 
 export function isIndexProjection(
   projection: ProjectionDefinition
@@ -12,14 +12,12 @@ export function isIndexProjection(
 /** ClickHouse prints one space after every argument separator. */
 function spaceAfterCommas(input: string): string {
   let out = ''
-  let quote: "'" | '"' | '`' | null = null
   for (let i = 0; i < input.length; i += 1) {
     const char = input[i] ?? ''
-    const prev = i > 0 ? (input[i - 1] ?? '') : ''
-    const quoteBefore = quote
-    quote = nextQuote(char, prev, quote)
-    if (quoteBefore !== null || quote !== null) {
-      out += char
+    if (isQuoteChar(char)) {
+      const end = findQuoteEnd(input, i, char)
+      out += input.slice(i, end + 1)
+      i = end
       continue
     }
     // Whitespace is already collapsed to single spaces by normalizeSQLFragment,

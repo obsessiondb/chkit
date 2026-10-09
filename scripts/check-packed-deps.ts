@@ -103,11 +103,12 @@ interface PackedTarball {
  * package.json inside the tarball along with the list of shipped files.
  *
  * Mirrors scripts/manual-release.ts: resolve every `workspace:` specifier to
- * the current workspace version on disk, pack, then restore the original
- * source. This is required because `bun pm pack` resolves bare `workspace:`
- * specifiers to a STALE version from the lockfile (oven-sh/bun#24687) — the
- * exact bug that shipped the broken release — so we must pre-resolve to
- * concrete current versions before packing.
+ * the current workspace version on disk, `npm pack`, then restore the original
+ * source. The pre-resolution is the ONLY thing that makes the publish correct:
+ * `npm pack`/`npm publish` copy `workspace:*` into the tarball verbatim, and
+ * `bun pm pack` resolves it to a STALE lockfile version (oven-sh/bun#24687).
+ * Packing with npm — the publisher — means a specifier the resolver misses
+ * surfaces here as an unresolved `workspace:` instead of being papered over.
  */
 function packAndReadManifest(
 	wsPkg: WorkspacePackage,
@@ -136,13 +137,13 @@ function packAndExtract(wsPkg: WorkspacePackage): PackedTarball {
 	const outDir = mkdtempSync(join(tmpdir(), 'chkit-pack-'))
 
 	const packed = spawnSync(
-		'bun',
-		['pm', 'pack', '--quiet', '--destination', outDir],
+		'npm',
+		['pack', '--silent', '--pack-destination', outDir],
 		{ cwd: wsPkg.dir, encoding: 'utf8' },
 	)
 	if (packed.status !== 0) {
 		throw new Error(
-			`bun pm pack failed for ${wsPkg.pkg.name}:\n${packed.stderr || packed.stdout}`,
+			`npm pack failed for ${wsPkg.pkg.name}:\n${packed.stderr || packed.stdout}`,
 		)
 	}
 

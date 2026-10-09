@@ -28,6 +28,7 @@ const PROJECT_ONLY_COMMANDS = new Set([
   'status',
   'drift',
   'check',
+  'snapshot',
   'codegen',
   'pull',
 ])
@@ -154,6 +155,13 @@ async function run(): Promise<void> {
   // before config loading (like `init`).
   if (commandName === 'skills') {
     process.exitCode = await cmdSkills(argv.slice(1))
+    return
+  }
+
+  // Registry discovery and bootstrapping work before a project config exists.
+  if (commandName === 'add' || commandName === 'registry') {
+    const { cmdRegistry } = await import('../commands/registry.js')
+    await cmdRegistry(commandName, argv.slice(1))
     return
   }
 

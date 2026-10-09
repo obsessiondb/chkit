@@ -21,14 +21,19 @@ const ON_CLUSTER_ANCHORS = [
   'CREATE VIEW',
   'CREATE MATERIALIZED VIEW',
   'CREATE DATABASE',
+  'CREATE DICTIONARY',
+  // A structural dictionary change renders as `CREATE OR REPLACE DICTIONARY`
+  // (there is no `ALTER DICTIONARY`), which does NOT share the `CREATE
+  // DICTIONARY` prefix — it needs its own anchor or ON CLUSTER injection
+  // silently no-ops for every dictionary replace.
+  'CREATE OR REPLACE DICTIONARY',
   'ALTER TABLE',
   'DROP TABLE',
   'DROP VIEW',
+  'DROP DICTIONARY',
   // --- Not emitted by chkit yet; kept as a forward-compatible safety net ---
-  'CREATE DICTIONARY',
   'CREATE FUNCTION',
   'DROP DATABASE',
-  'DROP DICTIONARY',
   'ATTACH TABLE',
   'DETACH TABLE',
   'TRUNCATE TABLE',
@@ -37,13 +42,13 @@ const ON_CLUSTER_ANCHORS = [
 
 // Statements where `ON CLUSTER` goes at the very END, after the full object
 // list — not after the first name. RENAME and EXCHANGE take multiple object
-// references (`a TO b`, `a AND b`), so the clause can only be appended. Only
-// `RENAME TABLE` is emitted by chkit today; the rest are the same-family
-// safety net described above.
+// references (`a TO b`, `a AND b`), so the clause can only be appended.
+// `RENAME TABLE` and `RENAME DICTIONARY` are emitted by chkit today; the rest
+// are the same-family forward-compatible safety net described above.
 const ON_CLUSTER_TRAILING_ANCHORS = [
   'RENAME TABLE',
-  'RENAME DATABASE',
   'RENAME DICTIONARY',
+  'RENAME DATABASE',
   'EXCHANGE TABLES',
   'EXCHANGE DICTIONARIES',
 ] as const
@@ -61,6 +66,11 @@ export function onClusterClause(cluster: string | undefined): string {
 // keyword and the object reference. Preserved verbatim so the clause lands after
 // the object, never after the guard.
 const OBJECT_GUARD = /^IF\s+(?:NOT\s+)?EXISTS\s+/i
+
+// One identifier part: backtick-quoted (backslash-escaped or doubled backticks)
+// or a bare run up to the next space, `;`, `(`, or `.`.
+const IDENTIFIER_PART = /(?:`(?:[^`\\]|\\.|``)*`|[^\s;(.`]+)/.source
+const OBJECT_REFERENCE = new RegExp(`^${IDENTIFIER_PART}(?:\\.${IDENTIFIER_PART})*`)
 
 // Idempotency is checked positionally — an `ON CLUSTER` clause sitting exactly
 // where injection would place it — never by scanning the whole statement, so
@@ -86,9 +96,9 @@ function injectOnClusterClause(sql: string, clause: string): string {
     // after the object reference regardless of whether the statement carries it.
     const guard = rest.match(OBJECT_GUARD)?.[0] ?? ''
     const afterGuard = rest.slice(guard.length)
-    // The object reference (`db.name` or `db`) is the run of characters up to
-    // the next space, `;`, or `(` — `ON CLUSTER` slots in right after it.
-    const ref = afterGuard.match(/^[^\s;(]+/)?.[0]
+    // The object reference (`db.name` or `db`), where each part may be a
+    // backtick-quoted identifier containing spaces, dots or escaped backticks.
+    const ref = afterGuard.match(OBJECT_REFERENCE)?.[0]
     if (!ref) return sql
     const afterRef = afterGuard.slice(ref.length)
     // Idempotent: never double-inject into a statement that already carries the

@@ -1,3 +1,5 @@
+import { isTrivia, tokenizeSQL, type SQLToken } from './sql-lexer.js'
+
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
   let current = ''
@@ -22,12 +24,17 @@ export function splitSqlStatements(sql: string): string[] {
 
     if (inSingleQuote) {
       current += ch
+      if (ch === '\\' && next) {
+        current += next
+        i += 1
+        continue
+      }
       if (ch === "'" && next === "'") {
         current += next
         i += 1
         continue
       }
-      if (ch === "'" && sql[i - 1] !== '\\') {
+      if (ch === "'") {
         inSingleQuote = false
       }
       continue
@@ -35,7 +42,12 @@ export function splitSqlStatements(sql: string): string[] {
 
     if (inDoubleQuote) {
       current += ch
-      if (ch === '"' && sql[i - 1] !== '\\') {
+      if (ch === '\\' && next) {
+        current += next
+        i += 1
+        continue
+      }
+      if (ch === '"') {
         inDoubleQuote = false
       }
       continue
@@ -125,12 +137,17 @@ export function extractExecutableStatements(sql: string): string[] {
 
     if (inSingleQuote) {
       stripped += ch
+      if (ch === '\\' && next) {
+        stripped += next
+        i += 1
+        continue
+      }
       if (ch === "'" && next === "'") {
         stripped += next
         i += 1
         continue
       }
-      if (ch === "'" && sql[i - 1] !== '\\') {
+      if (ch === "'") {
         inSingleQuote = false
       }
       continue
@@ -138,7 +155,12 @@ export function extractExecutableStatements(sql: string): string[] {
 
     if (inDoubleQuote) {
       stripped += ch
-      if (ch === '"' && sql[i - 1] !== '\\') {
+      if (ch === '\\' && next) {
+        stripped += next
+        i += 1
+        continue
+      }
+      if (ch === '"') {
         inDoubleQuote = false
       }
       continue
@@ -187,5 +209,30 @@ export function extractExecutableStatements(sql: string): string[] {
     stripped += ch
   }
 
-  return splitSqlStatements(stripped)
+  const statements = splitSqlStatements(stripped)
+  // A statement made only of comments is not executable: ClickHouse rejects it
+  // as "Empty query" (for example a block comment after the last statement).
+  const executable = statements.filter(hasExecutableContent)
+  if (executable.length === statements.length) return statements
+  // The splitter does not know `#` and `//` line comments (#197). When one of
+  // them holds a `;`, the splitter cut that comment line in two; keeping the
+  // comment-only piece makes ClickHouse reject the file instead of running the
+  // commented-out text after the `;`.
+  if (tokenizeSQL(stripped).some(isLineCommentWithSemicolon)) return statements
+  return executable
+}
+
+// True unless every token is whitespace or a terminated comment (`/* */`,
+// nested or not, `# `, `#!`, `//`; `--` comments are already stripped). An
+// unterminated comment counts as content, so ClickHouse reports it.
+function hasExecutableContent(statement: string): boolean {
+  // Only a statement that starts like a comment can be made only of comments.
+  if (!/^[-/#]/.test(statement)) return true
+  // The splitter appended the `;`; a trailing line comment would swallow it.
+  const body = statement.endsWith(';') ? statement.slice(0, -1) : statement
+  return tokenizeSQL(body).some((token) => !isTrivia(token) || !token.terminated)
+}
+
+function isLineCommentWithSemicolon(token: SQLToken): boolean {
+  return token.kind === 'line_comment' && token.text.includes(';')
 }

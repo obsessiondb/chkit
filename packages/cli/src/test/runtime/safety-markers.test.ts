@@ -143,6 +143,22 @@ describe('extractExecutableStatements', () => {
     expect(ops[0]?.mode).toBe('sync')
   })
 
+  test('extractMigrationOperationSummaries keeps a key with spaces, so later operations stay aligned', () => {
+    const sql = `
+      -- operation: create_table key=table:app.my events risk=safe
+      CREATE TABLE app.\`my events\` (id UInt64) ENGINE = MergeTree() ORDER BY id;
+      -- operation: create_view key=view:app.v1 risk=safe
+      CREATE VIEW app.v1 AS SELECT id FROM app.\`my events\`;
+    `
+
+    // migrate pairs the n-th summary with the n-th statement; a summary lost to
+    // the space would make it wait for v1 right after creating the table.
+    expect(extractMigrationOperationSummaries(sql).map((op) => `${op.type} ${op.key} ${op.risk}`)).toEqual([
+      'create_table table:app.my events safe',
+      'create_view view:app.v1 safe',
+    ])
+  })
+
   test('ignores full-line comments while preserving executable statements', () => {
     const sql = `
       -- operation: alter_table_drop_column key=table:app.events:column:old_col risk=danger
@@ -164,6 +180,7 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     ['truncate', 'TRUNCATE TABLE default.events;', 'truncate_table'],
     ['drop view', 'DROP VIEW default.events_v;', 'drop_view'],
     ['drop materialized view', 'DROP MATERIALIZED VIEW default.events_mv;', 'drop_materialized_view'],
+    ['drop dictionary', 'DROP DICTIONARY default.users_dict;', 'drop_dictionary'],
     ['detach', 'DETACH TABLE default.events;', 'detach'],
     ['drop database', 'DROP DATABASE analytics;', 'drop_database'],
   ]
@@ -203,6 +220,18 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(marker?.warningCode).toBe('drop_column_irreversible')
     expect(marker?.summary).toContain('DROP COLUMN')
   })
+
+  test('synthesizes a danger marker (key + preview) for a hand-written DROP DICTIONARY', () => {
+    const sql = 'DROP DICTIONARY default.users_dict;'
+    const markers = collectUnmarkedDestructiveStatements('20260101_handwritten.sql', sql)
+    expect(markers).toHaveLength(1)
+    const marker = markers[0]
+    expect(marker?.type).toBe('drop_dictionary')
+    expect(marker?.risk).toBe('danger')
+    expect(marker?.key).toBe('default.users_dict')
+    expect(marker?.warningCode).toBe('drop_dictionary_dependency_break')
+    expect(marker?.summary).toContain('DROP DICTIONARY')
+  })
 })
 
 describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () => {
@@ -233,6 +262,19 @@ describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () =
     const markers = collectDestructiveOperationMarkers('20260101_drop.sql', sql)
     expect(markers).toHaveLength(1)
     expect(markers[0]?.warningCode).toBe('drop_table_data_loss')
+  })
+
+  test('a planner-emitted drop_dictionary gets the dependency-break warning', () => {
+    const sql = [
+      '-- operation: drop_dictionary key=dictionary:default.users_dict risk=danger',
+      'DROP DICTIONARY IF EXISTS default.users_dict;',
+    ].join('\n')
+
+    const markers = collectDestructiveOperationMarkers('20260101_drop_dict.sql', sql)
+    expect(markers).toHaveLength(1)
+    const marker = markers[0]
+    expect(marker?.type).toBe('drop_dictionary')
+    expect(marker?.warningCode).toBe('drop_dictionary_dependency_break')
   })
 
   test('dropping one table while creating a different one is not a recreate', () => {
