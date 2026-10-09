@@ -52,12 +52,50 @@ export type ColumnCodec = GeneralColumnCodec | PreprocessingColumnCodec | RawCol
 /** Single codec or a chain (preprocessors then exactly one general codec). */
 export type ColumnCodecSpec = ColumnCodec | ColumnCodec[]
 
+export type ColumnDefaultKind = 'DEFAULT' | 'MATERIALIZED' | 'ALIAS' | 'EPHEMERAL'
+
+/**
+ * Raw ClickHouse SQL, rendered unquoted (trimmed, with SQL comments removed)
+ * where chkit would otherwise render a literal: a column
+ * `default: { expression: 'now64(3)' }` renders `DEFAULT now64(3)`.
+ */
+export interface SQLExpression {
+  expression: string
+}
+
+/**
+ * A column default: a literal (strings are single-quoted, numbers and booleans
+ * render as written) or a {@link SQLExpression} rendered as SQL.
+ */
+export type ColumnDefaultValue = string | number | boolean | SQLExpression
+
 export interface ColumnDefinition {
   name: string
   type: PrimitiveColumnType | string
   renamedFrom?: string
   nullable?: boolean
-  default?: string | number | boolean
+  /**
+   * Value of the column's `defaultKind` clause (`DEFAULT` unless set).
+   * - `'pending'` → `DEFAULT 'pending'` (a string is always a literal)
+   * - `0` / `false` → `DEFAULT 0` / `DEFAULT false`
+   * - `{ expression: 'now64(3)' }` → `DEFAULT now64(3)` (SQL; comments are
+   *   dropped when rendered)
+   *
+   * `'fn:now64(3)'` is the legacy spelling of `{ expression: 'now64(3)' }`;
+   * snapshots store both as the `fn:` string. `generate` rejects a plain string
+   * that starts with a function call as the `DEFAULT` of a column that cannot
+   * hold a string (`column_default_looks_like_expression`), and any plain
+   * string on a `MATERIALIZED` or `ALIAS` column (`column_expression_requires_fn`).
+   */
+  default?: ColumnDefaultValue
+  /**
+   * How ClickHouse uses `default`: `DEFAULT` (the implicit kind),
+   * `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`. The literal and `{ expression }`
+   * forms of `default` work for every kind:
+   * `{ defaultKind: 'MATERIALIZED', default: { expression: 'toDate(ts)' } }`
+   * renders `MATERIALIZED toDate(ts)`.
+   */
+  defaultKind?: ColumnDefaultKind
   comment?: string
   codec?: ColumnCodecSpec
 }
@@ -68,6 +106,22 @@ interface SkipIndexBase {
   granularity: number
 }
 
+/** Full-text index. ClickHouse ignores granularity and uses one index per part. */
+export interface TextSkipIndex extends Omit<SkipIndexBase, 'granularity'> {
+  type: 'text'
+  /** SQL tokenizer, e.g. splitByNonAlpha or splitByString(['  ', ';']). */
+  tokenizer: string
+  granularity?: number
+  preprocessor?: string
+  /** Requires a ClickHouse version that supports postprocessing. */
+  postprocessor?: string
+  supportPhraseSearch?: boolean
+  dictionaryBlockSize?: number
+  dictionaryBlockFrontcodingCompression?: boolean
+  postingListBlockSize?: number
+  postingListCodec?: 'none' | 'bitpacking'
+}
+
 /**
  * Skip index with structured, discriminated args per type. Arg signatures
  * come from ClickHouse MergeTree docs:
@@ -76,11 +130,12 @@ interface SkipIndexBase {
  * - `bloom_filter([false_positive_rate])` — optional float, default 0.025
  * - `tokenbf_v1(size_bytes, n_hash, seed)` — 3 required ints
  * - `ngrambf_v1(n, size_bytes, n_hash, seed)` — 4 required ints
+ * - `text(tokenizer = ..., ...)` — named parameters, automatic granularity
  *
  * ClickHouse 26+ requires `set(0)` not bare `set`; `maxRows` is required
  * so this is encoded naturally.
  */
-export type SkipIndexDefinition = SkipIndexBase &
+export type SkipIndexDefinition = TextSkipIndex | SkipIndexBase &
   (
     | { type: 'minmax' }
     | { type: 'set'; maxRows: number }
@@ -142,6 +197,20 @@ export interface TableDefinition {
   plugins?: TablePlugins
 }
 
+/** Kafka queues do not have MergeTree sorting/storage clauses. */
+export type KafkaTableInput = Omit<TableDefinition,
+  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections'
+> & {
+  engine: 'Kafka' | `Kafka(${string})`
+  primaryKey?: never
+  orderBy?: never
+  partitionBy?: never
+  uniqueKey?: never
+  ttl?: never
+  indexes?: never
+  projections?: never
+}
+
 export interface ViewDefinition {
   kind: 'view'
   database: string
@@ -171,7 +240,45 @@ export interface MaterializedViewDefinition {
   comment?: string
 }
 
-export type SchemaDefinition = TableDefinition | ViewDefinition | MaterializedViewDefinition
+export interface DictionaryAttribute {
+  name: string
+  type: PrimitiveColumnType | string
+  /** DEFAULT / null_value for missing keys. A literal: ClickHouse accepts no expression here. */
+  default?: string | number | boolean
+  /** EXPRESSION — computed from source columns. Mutually exclusive with default. */
+  expression?: string
+  hierarchical?: boolean
+  /** Enables bidirectional parent/child lookups. Only valid alongside hierarchical. */
+  bidirectional?: boolean
+  injective?: boolean
+  isObjectId?: boolean
+}
+
+export interface DictionaryDefinition {
+  kind: 'dictionary'
+  database: string
+  name: string
+  renamedFrom?: { database?: string; name: string }
+  attributes: DictionaryAttribute[]
+  primaryKey: string[]
+  /** Raw SOURCE(...) body, e.g. `MYSQL(host '...' password '${env}' ...)`. */
+  source: string
+  /** Raw LAYOUT(...) body, e.g. `HASHED()` / `COMPLEX_KEY_HASHED()`. */
+  layout: string
+  /** Raw LIFETIME(...) body, e.g. `300` / `MIN 300 MAX 360`. */
+  lifetime: string
+  /** RANGE(MIN ... MAX ...) — required by RANGE_HASHED / COMPLEX_KEY_RANGE_HASHED layouts. */
+  range?: { min: string; max: string }
+  /** Raw SETTINGS(...) key/value pairs. */
+  settings?: Record<string, string | number>
+  comment?: string
+}
+
+export type SchemaDefinition =
+  | TableDefinition
+  | ViewDefinition
+  | MaterializedViewDefinition
+  | DictionaryDefinition
 
 export interface ChxCheckConfig {
   failOnPending?: boolean
@@ -228,7 +335,17 @@ export interface ChxInlinePluginRegistration<
 export type ChxPluginRegistration = ChxInlinePluginRegistration
 
 export interface ChxUserConfig {
-  schema: string | string[]
+  /**
+   * Glob patterns for schema files. Mutually exclusive with `entry`.
+   */
+  schema?: string | string[]
+  /**
+   * Single project entry module. It is imported once: exported schema
+   * definitions are collected from it, and exported plugin-domain definitions
+   * (for example ingestion pipelines) are collected by their plugins. Mutually
+   * exclusive with `schema`.
+   */
+  entry?: string
   outDir?: string
   migrationsDir?: string
   metaDir?: string
@@ -240,6 +357,7 @@ export interface ChxUserConfig {
 
 export interface ChxResolvedConfig {
   schema: string[]
+  entry?: string
   outDir: string
   migrationsDir: string
   metaDir: string
@@ -293,12 +411,16 @@ export type MigrationOperationType =
   | 'alter_table_drop_projection'
   | 'alter_table_reset_setting'
   | 'alter_table_modify_ttl'
+  | 'create_dictionary'
+  | 'drop_dictionary'
+  | 'rename_dictionary'
 
 export interface MigrationOperation {
   type: MigrationOperationType
   key: string
   risk: RiskLevel
   sql: string
+  warning?: string
 }
 
 export interface ColumnRenameSuggestion {
@@ -321,9 +443,16 @@ export interface MigrationPlan {
 }
 
 export type ValidationIssueCode =
+  | 'kafka_unsupported_clause'
+  | 'kafka_column_default'
+  | 'kafka_missing_setting'
+  | 'kafka_invalid_setting'
+  | 'kafka_change_requires_replacement'
+  | 'column_kind_change_unsupported'
   | 'duplicate_object_name'
   | 'duplicate_column_name'
   | 'duplicate_index_name'
+  | 'text_index_invalid_parameters'
   | 'duplicate_projection_name'
   | 'projection_ambiguous_kind'
   | 'projection_empty_index'
@@ -337,6 +466,23 @@ export type ValidationIssueCode =
   | 'codec_chain_must_end_with_general'
   | 'codec_chain_multiple_general'
   | 'codec_chain_empty'
+  | 'column_default_kind_invalid'
+  | 'column_expression_required'
+  | 'column_expression_requires_fn'
+  | 'column_kind_not_stored'
+  | 'column_ephemeral_in_projection'
+  | 'column_kind_codec_unsupported'
+  | 'column_default_looks_like_expression'
+  | 'column_default_invalid'
+  | 'dictionary_missing_primary_key'
+  | 'dictionary_primary_key_missing_attribute'
+  | 'dictionary_missing_source'
+  | 'dictionary_missing_layout'
+  | 'dictionary_missing_lifetime'
+  | 'dictionary_attribute_default_expression_exclusive'
+  | 'dictionary_range_missing_attribute'
+  | 'dictionary_bidirectional_requires_hierarchical'
+  | 'invalid_identifier'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

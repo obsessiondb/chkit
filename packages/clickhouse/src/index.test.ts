@@ -10,12 +10,21 @@ import {
   createStatelessClickHouseClient,
   formatConnectionError,
   inferSchemaKindFromEngine,
+  observableSystemTable,
+  parseCommentFromCreateDictionaryQuery,
+  parseDictionaryAttributesFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseDictionaryRangeFromCreateDictionaryQuery,
+  parseDictionarySettingsFromCreateDictionaryQuery,
   parseEngineFromCreateTableQuery,
+  parseLayoutFromCreateDictionaryQuery,
+  parseLifetimeFromCreateDictionaryQuery,
   parseOrderByFromCreateTableQuery,
   parsePartitionByFromCreateTableQuery,
   parsePrimaryKeyFromCreateTableQuery,
   parseProjectionsFromCreateTableQuery,
   parseSettingsFromCreateTableQuery,
+  parseSourceFromCreateDictionaryQuery,
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
 } from './index'
@@ -24,6 +33,7 @@ type InsertCall = {
   client: string
   table: string
   values: Array<Record<string, unknown>>
+  columns?: string[]
 }
 
 type MockClientOptions = {
@@ -53,8 +63,8 @@ function createMockClient(
         },
       }
     },
-    async insert(params: { table: string; values: Array<Record<string, unknown>> }) {
-      calls.push({ client: name, table: params.table, values: params.values })
+    async insert(params: { table: string; values: Array<Record<string, unknown>>; columns?: string[] }) {
+      calls.push({ client: name, table: params.table, values: params.values, columns: params.columns })
       return {
         query_id: `${name}-insert`,
         response_headers: opts.insertHeaders ?? {},
@@ -154,11 +164,26 @@ describe('@chkit/clickhouse smoke', () => {
     await executor.close()
   })
 
+  test('forwards a non-empty insert column list', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'default', secure: false },
+      createMockClient('plain', calls),
+    )
+
+    await executor.insert({ table: 'app.events', values: [{ id: 1 }], columns: ['id', '`raw length`'] })
+    // @clickhouse/client rejects an empty list, so it is omitted like an absent one.
+    await executor.insert({ table: 'app.events', values: [{ id: 2 }], columns: [] })
+
+    expect(calls.map((call) => call.columns)).toEqual([['id', '`raw length`'], undefined])
+    await executor.close()
+  })
+
   test('infers schema kind from ClickHouse engine', () => {
     expect(inferSchemaKindFromEngine('MergeTree')).toBe('table')
     expect(inferSchemaKindFromEngine('View')).toBe('view')
     expect(inferSchemaKindFromEngine('MaterializedView')).toBe('materialized_view')
-    expect(inferSchemaKindFromEngine('Dictionary')).toBeNull()
+    expect(inferSchemaKindFromEngine('Dictionary')).toBe('dictionary')
   })
 
   test('parses settings and ttl from create table query', () => {
@@ -561,5 +586,284 @@ describe('formatConnectionError', () => {
 
   test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
     expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
+  })
+})
+
+describe('create-dictionary-parser', () => {
+  const query = `CREATE DICTIONARY default.users_dict
+(
+  \`id\` UInt64,
+  \`name\` String,
+  \`email\` String DEFAULT '',
+  \`parent_id\` UInt64 HIERARCHICAL
+)
+PRIMARY KEY id
+SOURCE(MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users'))
+LAYOUT(HASHED())
+LIFETIME(MIN 0 MAX 300)
+COMMENT 'User lookup dictionary'`
+
+  test('parses attributes including defaults and modifiers', () => {
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(query)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      { name: 'name', type: 'String' },
+      { name: 'email', type: 'String', default: '' },
+      { name: 'parent_id', type: 'UInt64', hierarchical: true },
+    ])
+  })
+
+  test('parses primary key', () => {
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)).toEqual(['id'])
+  })
+
+  test('parses source, layout, lifetime, comment', () => {
+    expect(parseSourceFromCreateDictionaryQuery(query)).toBe(
+      "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')"
+    )
+    expect(parseLayoutFromCreateDictionaryQuery(query)).toBe('HASHED()')
+    expect(parseLifetimeFromCreateDictionaryQuery(query)).toBe('MIN 0 MAX 300')
+    expect(parseCommentFromCreateDictionaryQuery(query)).toBe('User lookup dictionary')
+  })
+
+  test('returns empty results for undefined query', () => {
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(undefined)).toEqual([])
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(undefined)).toEqual([])
+    expect(parseSourceFromCreateDictionaryQuery(undefined)).toBeUndefined()
+  })
+
+  test('parses a composite primary key and an expression attribute', () => {
+    const compositeQuery = `CREATE DICTIONARY default.pairs_dict
+(
+  \`a\` String,
+  \`b\` String,
+  \`full_name\` String EXPRESSION concat(a, ' ', b)
+)
+PRIMARY KEY a, b
+SOURCE(HTTP(url 'http://example.com/pairs' format 'TSV'))
+LAYOUT(COMPLEX_KEY_HASHED())
+LIFETIME(300)`
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(compositeQuery)).toEqual(['a', 'b'])
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(compositeQuery)).toEqual([
+      { name: 'a', type: 'String' },
+      { name: 'b', type: 'String' },
+      { name: 'full_name', type: 'String', expression: "concat(a, ' ', b)" },
+    ])
+  })
+
+  test('parses RANGE, SETTINGS, and BIDIRECTIONAL modifier', () => {
+    const rangeQuery = `CREATE DICTIONARY default.rates_dict
+(
+  \`id\` UInt64,
+  \`parent_id\` UInt64 HIERARCHICAL BIDIRECTIONAL,
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LIFETIME(MIN 0 MAX 300)
+LAYOUT(RANGE_HASHED())
+RANGE(MIN start_date MAX end_date)
+SETTINGS(dictionary_use_async_executor = 1, max_threads = 8)`
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(rangeQuery)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+      { name: 'start_date', type: 'DateTime' },
+      { name: 'end_date', type: 'DateTime' },
+    ])
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(rangeQuery)).toEqual({
+      min: 'start_date',
+      max: 'end_date',
+    })
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(rangeQuery)).toEqual({
+      dictionary_use_async_executor: 1,
+      max_threads: 8,
+    })
+  })
+
+  test('RANGE and SETTINGS return undefined when absent', () => {
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(query)).toBeUndefined()
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(query)).toBeUndefined()
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(undefined)).toBeUndefined()
+    expect(parseDictionarySettingsFromCreateDictionaryQuery(undefined)).toBeUndefined()
+  })
+
+  test('an EXPRESSION calling the range() array function does not shadow the real RANGE clause', () => {
+    // `range(...)` is a real ClickHouse array function, so it can legitimately
+    // appear inside an attribute's EXPRESSION. The parser must not mistake it
+    // for the dictionary-level RANGE(MIN ... MAX ...) clause.
+    const shadowedRangeQuery = `CREATE DICTIONARY default.rates_dict
+(
+  \`id\` UInt64,
+  \`buckets\` String EXPRESSION arrayStringConcat(arrayMap(x -> toString(x), range(1, 10)), ','),
+  \`start_date\` DateTime,
+  \`end_date\` DateTime
+)
+PRIMARY KEY id
+SOURCE(HTTP(url 'http://example.com/rates' format 'TSV'))
+LAYOUT(RANGE_HASHED())
+LIFETIME(MIN 0 MAX 300)
+RANGE(MIN start_date MAX end_date)`
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(shadowedRangeQuery)).toEqual([
+      { name: 'id', type: 'UInt64' },
+      {
+        name: 'buckets',
+        type: 'String',
+        expression: "arrayStringConcat(arrayMap(x -> toString(x), range(1, 10)), ',')",
+      },
+      { name: 'start_date', type: 'DateTime' },
+      { name: 'end_date', type: 'DateTime' },
+    ])
+    expect(parseDictionaryRangeFromCreateDictionaryQuery(shadowedRangeQuery)).toEqual({
+      min: 'start_date',
+      max: 'end_date',
+    })
+    expect(parseSourceFromCreateDictionaryQuery(shadowedRangeQuery)).toBe(
+      "HTTP(url 'http://example.com/rates' format 'TSV')"
+    )
+  })
+})
+
+
+describe('systemTableSource / observableSystemTable', () => {
+  test('named cluster uses clusterAllReplicas with that name', () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: 'moebel_cluster',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe(
+      "clusterAllReplicas('moebel_cluster', system.processes)",
+    )
+    expect(executor.systemTableSource?.('query_log')).toBe(
+      "clusterAllReplicas('moebel_cluster', system.query_log)",
+    )
+    expect(observableSystemTable(executor, 'processes')).toBe(
+      "clusterAllReplicas('moebel_cluster', system.processes)",
+    )
+  })
+
+  test('no cluster uses local system tables (does not emit literal cluster)', () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe('system.processes')
+    expect(executor.systemTableSource?.('query_log')).toBe('system.query_log')
+    expect(observableSystemTable(executor, 'processes')).toBe('system.processes')
+    expect(executor.systemTableSource?.('processes')).not.toContain("'cluster'")
+    expect(observableSystemTable(executor, 'query_log')).not.toContain(
+      "clusterAllReplicas('cluster'",
+    )
+  })
+
+  test('macro {cluster} is preserved in clusterAllReplicas', () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: '{cluster}',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe(
+      "clusterAllReplicas('{cluster}', system.processes)",
+    )
+  })
+
+  test("literal name 'cluster' still works when configured as such", () => {
+    const executor = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: 'cluster',
+      },
+      createMockClient('status', []),
+    )
+
+    expect(executor.systemTableSource?.('processes')).toBe(
+      "clusterAllReplicas('cluster', system.processes)",
+    )
+  })
+
+  test('observableSystemTable falls back to local tables when capability is absent', () => {
+    expect(observableSystemTable({}, 'processes')).toBe('system.processes')
+    expect(observableSystemTable({}, 'query_log')).toBe('system.query_log')
+  })
+
+  test('queryStatus SQL uses configured cluster (and local tables when unset)', async () => {
+    const queries: string[] = []
+    const capturingClient = {
+      async command() {
+        return { query_id: 'cmd', response_headers: {} }
+      },
+      async query(params: { query: string }) {
+        queries.push(params.query)
+        return {
+          query_id: 'q',
+          response_headers: {},
+          async json() {
+            return []
+          },
+        }
+      },
+      async insert() {
+        return { query_id: 'i', response_headers: {} }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+
+    const clustered = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+        cluster: 'moebel_cluster',
+      },
+      capturingClient,
+    )
+    await clustered.queryStatus('qid-1')
+    expect(queries[0]).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
+    expect(queries[1]).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
+    expect(queries.join('\n')).not.toContain("clusterAllReplicas('cluster'")
+
+    queries.length = 0
+    const local = createExecutorWithClient(
+      {
+        url: 'http://localhost:8123',
+        database: 'default',
+      },
+      capturingClient,
+    )
+    await local.queryStatus('qid-2')
+    expect(queries[0]).toContain('FROM system.processes')
+    expect(queries[0]).not.toContain('clusterAllReplicas')
+    expect(queries[1]).toContain('FROM system.query_log')
+    expect(queries[1]).not.toContain('clusterAllReplicas')
+  })
+})
+
+describe('create table parser with quoted identifiers', () => {
+  // Verbatim system.tables.create_table_query from ClickHouse 26.3.
+  const query =
+    'CREATE TABLE default.`we\\`ird(x) na,me` (`id` UInt64, `a b` String, `c\\`d` String, `e,f)` UInt8, INDEX `i x` `a b` TYPE minmax GRANULARITY 1, PROJECTION `p\\`q` (SELECT `a b` ORDER BY `c\\`d`)) ENGINE = MergeTree PRIMARY KEY (id, `a b`) ORDER BY (id, `a b`, `e,f)`) SETTINGS index_granularity = 8192'
+
+  test('locates table clauses despite parens and commas inside quoted names', () => {
+    expect(parseEngineFromCreateTableQuery(query)).toBe('MergeTree')
+    expect(parsePrimaryKeyFromCreateTableQuery(query)).toBe('(id, `a b`)')
+    expect(parseOrderByFromCreateTableQuery(query)).toBe('(id, `a b`, `e,f)`)')
+  })
+
+  test('parses projection names with escaped backticks', () => {
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p`q', query: 'SELECT `a b` ORDER BY `c\\`d`' },
+    ])
   })
 })

@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 
+import { getLiveEnv } from './e2e-testkit.js'
 import {
   BACKFILL_PLUGIN_ENTRY,
   CLI_ENTRY,
@@ -22,14 +23,13 @@ function getClickHouseEnv(): {
   password: string
   database: string
 } {
-  const host = process.env.CLICKHOUSE_HOST?.trim()
-  const url = process.env.CLICKHOUSE_URL?.trim() || (host ? `https://${host}` : '')
-  const username = process.env.CLICKHOUSE_USER?.trim() || 'default'
-  const password = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
-  const database = process.env.CLICKHOUSE_DB?.trim() || 'default'
-  if (!url) throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
-  if (!password) throw new Error('Missing CLICKHOUSE_PASSWORD')
-  return { url, username, password, database }
+  const env = getLiveEnv()
+  return {
+    url: env.clickhouseUrl,
+    username: env.clickhouseUser,
+    password: env.clickhousePassword,
+    database: env.clickhouseDatabase,
+  }
 }
 
 function clickhouseConfigBlock(env: { url: string; username: string; password: string; database: string }): string {

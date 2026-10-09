@@ -1,9 +1,11 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AstroIntegration } from 'astro';
+import { registryMarkdown, registryReferenceMarkdown, type RegistryReferenceSection } from '../data/registry';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
-const SITE_TAGLINE = 'ClickHouse schema management and migration toolkit for TypeScript.';
+const SITE_TAGLINE = 'ClickHouse schemas, migrations, and API sync in code. Schema workflows in TypeScript and Python; API sync in TypeScript.';
 
 interface DocEntry {
 	slug: string;
@@ -27,8 +29,12 @@ function extractFrontmatter(content: string): { title: string; description: stri
 }
 
 // Strip extension and collapse "index" / "<dir>/index" into the directory slug.
+// Windows `relative()` emits backslashes — normalize so slugs are URL-shaped.
 function toSlug(rel: string): string {
-	return rel.replace(/\.mdx?$/, '').replace(/(^|\/)index$/, '');
+	return rel
+		.replaceAll('\\', '/')
+		.replace(/\.mdx?$/, '')
+		.replace(/(^|\/)index$/, '');
 }
 
 function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
@@ -40,7 +46,7 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 			if (statSync(fullPath).isDirectory()) {
 				walk(fullPath);
 			} else if (/\.mdx?$/.test(entry)) {
-				const source = readFileSync(fullPath, 'utf-8');
+				const source = expandRegistryReferences(readFileSync(fullPath, 'utf-8'));
 				const slug = toSlug(relative(srcDir, fullPath));
 				const { title, description } = extractFrontmatter(source);
 
@@ -60,6 +66,16 @@ function collectMarkdownFiles(srcDir: string, destDir: string): DocEntry[] {
 
 	walk(srcDir);
 	return entries;
+}
+
+// Keep component examples in code fences intact while expanding rendered references.
+function expandRegistryReferences(source: string): string {
+	return source.split(/(^```[^\n]*\n[\s\S]*?^```[ \t]*(?:\n|$))/gm)
+		.map((part, index) => index % 2 === 1 ? part : part
+			.replace(/^import Registry(?:Apps|Reference) from .+;\n/gm, '')
+			.replace('<RegistryApps />', () => registryMarkdown())
+			.replace(/<RegistryReference name="([^"]+)" section="(overview|authentication|scopes|resources|views|sync|changelog)" \/>/g, (_match, name: string, section: RegistryReferenceSection) => registryReferenceMarkdown(name, section)))
+		.join('');
 }
 
 // Sort root pages first, then alphabetically by slug.
@@ -97,7 +113,7 @@ function generateLlmsTxt(entries: DocEntry[]): string {
 		'',
 		`> ${SITE_TAGLINE}`,
 		'',
-		'chkit defines ClickHouse schemas in TypeScript, diffs them into migration SQL, applies migrations, and verifies the live database stays in sync. Each link below points to the raw Markdown of that page.',
+		'chkit defines ClickHouse schemas, generates and applies reviewable migration SQL, detects drift, and syncs API data into schema-managed tables through TypeScript readers with retries and journaled checkpoints. Plugins add schema pulling, type generation, and SQL backfills. Each link below points to the raw Markdown of that page.',
 		'',
 		'## Docs',
 		'',
@@ -116,8 +132,8 @@ export default function rawMarkdown(): AstroIntegration {
 		name: 'raw-markdown',
 		hooks: {
 			'astro:build:done': ({ dir, logger }) => {
-				const srcDir = new URL('../src/content/docs/', dir).pathname;
-				const distDir = new URL(dir).pathname;
+				const srcDir = fileURLToPath(new URL('../src/content/docs/', dir));
+				const distDir = fileURLToPath(dir);
 				const rawDir = join(distDir, '_raw');
 
 				const entries = collectMarkdownFiles(srcDir, rawDir);

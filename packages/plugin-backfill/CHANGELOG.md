@@ -1,5 +1,82 @@
 # @chkit/plugin-backfill
 
+## 0.2.0-beta.9
+
+### Patch Changes
+
+- 2f53550: Support `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns with a new `defaultKind` column field. `default` holds the value or `fn:` expression for every kind, and `EPHEMERAL` may omit it. SQL rendering, `pull`, snapshots, and drift keep the kind; validation reports `column_expression_required` and `column_default_kind_invalid`.
+
+  - `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning that stored values are not rewritten, and removed expressions emit `REMOVE DEFAULT`/`REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail `generate` with `column_kind_change_unsupported`.
+  - Codegen emits `Row` (`SELECT *`), `RowExplicit` (all readable columns), and `RowInsert` (all insertable columns) for these tables; ingest helpers take `RowInsert`.
+  - Inserts into tables with `EPHEMERAL` columns name their columns: generated ingest helpers pass `columns`, which `@chkit/clickhouse` `insert()` and the ObsessionDB remote executor send, and the `@chkit/plugin-ingest` destination does the same.
+  - Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live column kinds first: a copy is blocked only when the target has both `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column, and a missing target fails with "does not exist or is not visible yet".
+  - `drift` and `check` compare defaults token by token. Write expressions in the canonical form ClickHouse stores, such as `CAST(x, 'String')`, to avoid drift.
+  - Fix string defaults containing backslashes: `C:\temp` now renders as `DEFAULT 'C:\\temp'`.
+
+- Updated dependencies [d072fe3]
+- Updated dependencies [2f53550]
+- Updated dependencies [98e3667]
+- Updated dependencies [96a18c6]
+- Updated dependencies [46cbf88]
+- Updated dependencies [46cbf88]
+- Updated dependencies [b59fc83]
+- Updated dependencies [c49f0a9]
+- Updated dependencies [672d67e]
+  - @chkit/core@0.2.0-beta.9
+  - @chkit/clickhouse@0.2.0-beta.9
+
+## 0.2.0-beta.8
+
+### Patch Changes
+
+- f85f568: Fix `mv_replay` backfill of a from-scratch empty aggregate target. Chunk planning now sizes chunks against the materialized view's source table (the one it reads `FROM`) instead of the target, so bootstrapping an empty rollup no longer fails with "No partitions found for &lt;target&gt;". The empty-check still guards the source, and multi-view fan-in from different sources keeps its existing behaviour.
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 9ad23f9: Refactor the backfill chunk-SQL rewriter (`chunking/sql.ts`): fold the duplicated quote/paren-aware scan loops into one shared `scanSqlTokens` primitive (with `findTopLevelKeywords`/`splitTopLevel` on top) and split the oversized `rewriteSelectColumns` into focused helpers. Behavior is unchanged — the same customer SQL rewriting is now covered by direct unit tests for quoted-string, escaped-quote, nested-subquery, and missing-FROM edge cases.
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+- Updated dependencies [65c90d6]
+- Updated dependencies [75d15e9]
+- Updated dependencies [3f1db03]
+- Updated dependencies [f8238db]
+- Updated dependencies [fedbf56]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+- Updated dependencies [256ec62]
+  - @chkit/core@0.2.0-beta.8
+  - @chkit/clickhouse@0.2.0-beta.8
+
+## 0.1.2-beta.7
+
+### Patch Changes
+
+- f85f568: Fix `mv_replay` backfill of a from-scratch empty aggregate target. Chunk planning now sizes chunks against the materialized view's source table (the one it reads `FROM`) instead of the target, so bootstrapping an empty rollup no longer fails with "No partitions found for &lt;target&gt;". The empty-check still guards the source, and multi-view fan-in from different sources keeps its existing behaviour.
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 9ad23f9: Refactor the backfill chunk-SQL rewriter (`chunking/sql.ts`): fold the duplicated quote/paren-aware scan loops into one shared `scanSqlTokens` primitive (with `findTopLevelKeywords`/`splitTopLevel` on top) and split the oversized `rewriteSelectColumns` into focused helpers. Behavior is unchanged — the same customer SQL rewriting is now covered by direct unit tests for quoted-string, escaped-quote, nested-subquery, and missing-FROM edge cases.
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.7
+  - @chkit/clickhouse@0.1.2-beta.7
+
+## 0.1.2-beta.6
+
+### Patch Changes
+
+- f85f568: Fix `mv_replay` backfill of a from-scratch empty aggregate target. Chunk planning now sizes chunks against the materialized view's source table (the one it reads `FROM`) instead of the target, so bootstrapping an empty rollup no longer fails with "No partitions found for &lt;target&gt;". The empty-check still guards the source, and multi-view fan-in from different sources keeps its existing behaviour.
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 9ad23f9: Refactor the backfill chunk-SQL rewriter (`chunking/sql.ts`): fold the duplicated quote/paren-aware scan loops into one shared `scanSqlTokens` primitive (with `findTopLevelKeywords`/`splitTopLevel` on top) and split the oversized `rewriteSelectColumns` into focused helpers. Behavior is unchanged — the same customer SQL rewriting is now covered by direct unit tests for quoted-string, escaped-quote, nested-subquery, and missing-FROM edge cases.
+- b501f5d: Extract shared plugin command scaffolding into `@chkit/core`: new `createPluginRunner` (binds a plugin's config-error class once and wraps command `run` handlers in the shared error-to-exit-code envelope) and `withFactoryDefaults` (layers plugin-factory options under parsed data). The backfill, codegen, and pull plugins now use these helpers instead of private copies — no behavior change, but the plugins require the matching `@chkit/core` version.
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.6
+  - @chkit/clickhouse@0.1.2-beta.6
+
 ## 0.1.2-beta.5
 
 ### Patch Changes

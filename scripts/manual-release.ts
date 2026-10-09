@@ -1,69 +1,79 @@
 #!/usr/bin/env bun
 /**
- * Single-command release script.
+ * Release script. A release takes two steps, so the version always reaches git
+ * before npm and any failure can simply be re-run:
  *
- * Handles the full release lifecycle:
- *   1. Prerequisite checks (tools, branch, npm auth)
- *   2. Prerelease mode:
- *        - default:   enters beta prerelease mode if needed
- *        - --stable:  exits prerelease mode so versions graduate to GA
- *   3. Applies pending changesets (version bump) if they exist,
- *      or detects already-bumped versions from a prior run, then
- *      regenerates the lockfile so it matches the bumped versions
- *   4. Runs quality gates (typecheck, lint, test, build)
- *   5. Runs release guards (internal workspace deps + packed tarballs)
- *   6. Publishes all public workspace packages via `bun publish`:
- *        - default:   publishes under the `beta` tag, then syncs the
- *                     `latest` dist-tag to match the documented installs
- *        - --stable:  publishes directly under the `latest` tag
- *   7. Commits version changes and pushes to origin/main
+ *   prepare  Versions every package from the unreleased changesets and opens a
+ *            `release/v<version>` PR against main. Merging that PR is the
+ *            release decision. Re-running it refreshes the PR.
+ *   publish  Publishes the version on main to npm, then tags it and creates the
+ *            GitHub release. Idempotent: packages already on npm are skipped,
+ *            so a failed run is re-run as-is.
+ *   detect   CI only: decides whether the pushed commit is a release commit
+ *            and writes `release` and `version` to $GITHUB_OUTPUT.
  *
- * Usage: bun run ./scripts/manual-release.ts [--dry-run] [--stable]
+ * Usage:
+ *   bun run ./scripts/manual-release.ts prepare [--stable]
+ *   bun run ./scripts/manual-release.ts publish [--dry-run] [--ci]
+ *   bun run ./scripts/manual-release.ts detect
  *
- * --stable graduates the current beta line to a GA release (e.g. the
- * 0.1.0-beta.N line becomes 0.1.0). It exits changesets pre mode, so the
- * accumulated changesets collapse into a single non-prerelease bump computed
- * from the pre-entry baseline. A safety check refuses to publish if the
- * resulting versions still carry a prerelease suffix.
+ * prepare cuts the next beta by default. --stable graduates the beta line to a
+ * GA release (e.g. 0.1.0-beta.N becomes 0.1.0): it exits changesets pre mode,
+ * so the accumulated changesets collapse into one non-prerelease bump computed
+ * from the pre-entry baseline. Outside pre mode, --stable cuts a regular stable
+ * release from the unreleased changesets.
+ *
+ * publish derives the channel from the version: a prerelease publishes under
+ * `beta` and moves `latest` onto it (the docs use unqualified installs); a
+ * stable version publishes straight to `latest`. It refuses a commit that still
+ * has unreleased changesets — main moved after prepare — because those changes
+ * would ship without a changelog entry.
+ *
+ * --ci (implied by CI=true) runs publish non-interactively in GitHub Actions:
+ *   - npm authenticates via OIDC Trusted Publishing: no OTP and no `npm whoami`
+ *     precheck (there is no logged-in user under OIDC).
+ *   - The beta `latest` sync (`npm dist-tag add`) authenticates via OIDC as
+ *     well. That needs npm >= 11.21.0 and "Allow npm dist-tag" on each
+ *     package's trusted publisher.
+ *
+ * publish --dry-run rehearses everything up to `npm publish --dry-run` without
+ * publishing, moving dist-tags or creating the GitHub release.
  */
 import { spawnSync } from 'node:child_process'
 import {
+	appendFileSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	statSync,
 	writeFileSync,
 } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 import {
 	buildWorkspaceVersions,
 	readWorkspacePackages,
 	resolveWorkspaceDeps,
+	type WorkspacePackage,
 } from './workspace-deps'
 
-type ReleaseArgs = {
-	dryRun: boolean
-	stable: boolean
-}
+type ReleaseArgs =
+	| { command: 'prepare'; stable: boolean }
+	| { command: 'publish'; dryRun: boolean; ci: boolean }
+	| { command: 'detect' }
+
+type PrepareArgs = Extract<ReleaseArgs, { command: 'prepare' }>
+type PublishArgs = Extract<ReleaseArgs, { command: 'publish' }>
 
 type CommandResult = {
 	stdout: string
 	stderr: string
 }
 
-type ChangesetValidationResult = {
-	files: string[]
-	invalidEntries: string[]
-}
-
-type PackageJson = {
-	name?: string
-	version?: string
-	private?: boolean
-	dependencies?: Record<string, string>
-	devDependencies?: Record<string, string>
+type PreState = {
+	mode?: string
+	tag?: string
+	changesets?: string[]
 }
 
 type ReleasedPackage = {
@@ -71,127 +81,72 @@ type ReleasedPackage = {
 	version: string
 }
 
+type ChangelogEntry = {
+	rank: number
+	text: string
+	packages: string[]
+}
+
 const TMP_DIR = resolve('.tmp')
 const LOG_FILE = resolve(TMP_DIR, `release-${Date.now()}.log`)
-const STATUS_FILE = resolve(TMP_DIR, `release-status-${Date.now()}.json`)
-const PUBLISH_TAG = 'beta'
+const CHANGESET_DIR = resolve('.changeset')
+const PRE_FILE = resolve(CHANGESET_DIR, 'pre.json')
+const BETA_TAG = 'beta'
 const DOCUMENTED_INSTALL_TAG = 'latest'
+const RELEASE_BRANCH_PREFIX = 'release/v'
+// Changelog headings in the order release notes list them.
+const CHANGE_HEADINGS = ['Major Changes', 'Minor Changes', 'Patch Changes']
+// GitHub rejects PR bodies over 65,536 characters.
+const MAX_PR_NOTES_LENGTH = 60_000
 
 export async function main(): Promise<void> {
 	mkdirSync(TMP_DIR, { recursive: true })
 	logLine(`Release log: ${LOG_FILE}`)
 
 	const args = parseArgs(process.argv.slice(2))
+	switch (args.command) {
+		case 'prepare':
+			prepareRelease(args)
+			return
+		case 'publish':
+			await publishRelease(args)
+			return
+		case 'detect':
+			detectRelease()
+			return
+	}
+}
 
-	// 1. Prerequisites
-	ensureRequiredTools()
+// ---------------------------------------------------------------------------
+// prepare
+// ---------------------------------------------------------------------------
+
+function prepareRelease({ stable }: PrepareArgs): void {
+	// 1. Prerequisites: cut the release branch from exactly what is on GitHub.
+	ensureTools(['bun', 'git', 'gh', 'changeset'])
 	ensureOnMainBranch()
-	ensureNpmAuth()
+	ensureCleanWorkingTree()
+	ensureUpToDateWithOrigin()
+	const baseSha = gitHead()
 
-	// 2. Prerelease mode: enter beta (default) or exit to graduate to GA (--stable)
-	if (args.stable) {
-		exitPrereleaseModeForStable(args.dryRun)
+	// 2. Prerelease mode: enter beta (default) or exit to graduate to GA. A
+	// stable release from pre mode may have nothing new to add: it graduates
+	// what the beta line already shipped.
+	const graduating = stable && getPreState() !== null
+	if (stable) {
+		exitPrereleaseModeForStable()
 	} else {
 		ensureBetaPrereleaseMode()
 	}
 
-	// 3. Apply pending changesets (auto-recovers from prior failed releases)
-	const hadPendingChangesets = applyPendingChangesets(args.dryRun, args.stable)
-
-	if (args.dryRun) {
-		logLine('Dry-run complete. No publish performed.')
-		return
+	// 3. Version
+	const unreleased = listUnreleasedChangesets()
+	if (unreleased.length === 0 && !graduating) {
+		fail('Nothing to release: no unreleased changesets in .changeset/.')
 	}
+	assertNoMajorChangesets()
 
-	// In beta mode the changeset files are the source of truth. In stable mode,
-	// `changeset version` deletes them once consumed, so a recovery re-run can
-	// legitimately have no pending changesets — the publish step (which skips
-	// already-published versions) becomes the source of truth instead.
-	if (!hadPendingChangesets && !args.stable) {
-		fail('Nothing to release: no pending changeset files found in .changeset/.')
-	}
-
-	// Safety net: never publish a prerelease version under the stable `latest`
-	// tag. If the versions still carry a `-beta.N` suffix here, the pre-mode
-	// exit did not take effect (or there was nothing to graduate).
-	if (args.stable) {
-		assertStableVersionsForPublish()
-	}
-
-	// 4. Quality gates (typecheck, lint, test, build)
-	runQualityGates()
-
-	// 5. Release guards — fail before publishing if any internal dependency
-	// would ship stale (this is the chkit -> plugin-obsessiondb skew class).
-	runReleaseGuards()
-
-	// 6. Publish
-	const otp = await promptForOtp()
-	publishWorkspacePackages(otp, args.stable)
-
-	// 7. Commit and push
-	commitAndPush()
-
-	logLine('Release complete.')
-}
-
-// ---------------------------------------------------------------------------
-// Changesets
-// ---------------------------------------------------------------------------
-
-/**
- * Checks for pending changeset files. If found, validates them and runs
- * `changeset version` to bump package versions.
- *
- * Handles the recovery scenario where a previous release attempt already
- * consumed the changesets (recorded in pre.json) but publishing failed.
- * In that case, the consumed entries are cleared from pre.json so
- * `changeset version` re-processes them and bumps to the next beta.
- */
-function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
-	const result = collectChangesetValidation()
-
-	if (result.files.length === 0) {
-		logLine('No pending changeset files found.')
-		return false
-	}
-
-	if (result.invalidEntries.length > 0) {
-		fail(
-			`Only patch changesets are allowed for this phase. Found non-patch entries:\n${result.invalidEntries.join('\n')}`,
-		)
-	}
-
-	// The consumed-changeset reset is a beta-recovery mechanism: in pre mode the
-	// .md files stay on disk and `changeset version` skips ones already recorded
-	// in pre.json. Stable mode exits pre mode, where `changeset version`
-	// consolidates and deletes every changeset itself, so the reset must be
-	// skipped — mutating pre.json here would interfere with that consolidation.
-	if (!stable) {
-		resetConsumedChangesets(result.files)
-	}
-
-	logLine(
-		`Found ${result.files.length} pending changeset(s). Bumping versions...`,
-	)
-
-	if (dryRun) {
-		// `changeset status --output` resolves the path relative to cwd, so an
-		// absolute path gets cwd prepended again (…/chkit/Users/marc/…). Pass a
-		// cwd-relative path; keep the absolute STATUS_FILE for the log message.
-		runCommand('bun', [
-			'run',
-			'changeset',
-			'--',
-			'status',
-			'--verbose',
-			'--output',
-			relative(process.cwd(), STATUS_FILE),
-		])
-		logLine(`Changeset status report: ${STATUS_FILE}`)
-		return true
-	}
-
+	logLine(`Versioning ${unreleased.length} unreleased changeset(s)...`)
 	runCommand('bun', ['run', 'version-packages'])
 
 	// `changeset version` rewrites package.json versions but never touches the
@@ -202,84 +157,476 @@ function applyPendingChangesets(dryRun: boolean, stable: boolean): boolean {
 	// CI's `bun install --frozen-lockfile` rejects the stale lockfile on main.
 	runCommand('bun', ['install', '--lockfile-only'])
 
-	return true
+	// Safety net: never cut a stable release that still carries a `-beta.N`
+	// suffix (the pre-mode exit did not take effect).
+	const version = readReleaseVersion()
+	if (stable && isPrerelease(version)) {
+		fail(
+			`Stable release aborted: versions are still at ${version}. Exiting ` +
+				'changesets pre mode did not graduate them; check .changeset/pre.json.',
+		)
+	}
+
+	// 4. Release branch + PR. Force-push so re-running prepare refreshes it.
+	const branch = `${RELEASE_BRANCH_PREFIX}${version}`
+	runCommand('git', ['checkout', '-B', branch])
+	runCommand('git', ['add', '-A'])
+	runCommand('git', ['commit', '-m', `release: v${version}`])
+	runCommand('git', ['push', '--force', 'origin', `HEAD:refs/heads/${branch}`])
+
+	const prUrl = upsertReleasePullRequest({ branch, version, baseSha })
+	runCommand('git', ['checkout', 'main'])
+
+	writeGithubOutput({ branch, version, pr: prUrl })
+	logLine(`Release PR ready: ${prUrl}`)
 }
 
 /**
- * In prerelease mode, `changeset version` keeps .md files on disk but records
- * them in pre.json's `changesets` array as consumed. If a prior release
- * attempt consumed them but publishing failed, `changeset version` won't
- * process them again — it thinks they're done.
- *
- * This function detects that scenario and removes the consumed entries from
- * pre.json so `changeset version` re-processes them (bumping to the next beta).
+ * Opens the release PR, or refreshes it when prepare re-runs for the same
+ * version, and closes release PRs for other versions so only one can merge.
  */
-function resetConsumedChangesets(changesetFiles: string[]): void {
-	const preFile = resolve('.changeset/pre.json')
+function upsertReleasePullRequest({
+	branch,
+	version,
+	baseSha,
+}: {
+	branch: string
+	version: string
+	baseSha: string
+}): string {
+	const title = `release: v${version}`
+	const bodyFile = resolve(TMP_DIR, `release-pr-${version}.md`)
+	writeFileSync(bodyFile, renderReleasePrBody(version, baseSha))
 
-	let preState: { mode?: string; tag?: string; changesets?: string[] }
-	try {
-		preState = JSON.parse(readFileSync(preFile, 'utf8'))
-	} catch {
-		return
+	const openPrs = JSON.parse(
+		runCommand('gh', [
+			'pr',
+			'list',
+			'--state',
+			'open',
+			'--base',
+			'main',
+			'--json',
+			'number,headRefName,url',
+		]).stdout,
+	) as { number: number; headRefName: string; url: string }[]
+
+	const existing = openPrs.find((pr) => pr.headRefName === branch)
+	let url: string
+	if (existing) {
+		runCommand('gh', [
+			'pr',
+			'edit',
+			String(existing.number),
+			'--title',
+			title,
+			'--body-file',
+			bodyFile,
+		])
+		url = existing.url
+	} else {
+		url = runCommand('gh', [
+			'pr',
+			'create',
+			'--base',
+			'main',
+			'--head',
+			branch,
+			'--title',
+			title,
+			'--body-file',
+			bodyFile,
+		]).stdout.trim()
 	}
 
-	const consumed = preState.changesets ?? []
-	if (consumed.length === 0) return
+	for (const pr of openPrs) {
+		if (pr.headRefName === branch) continue
+		if (!pr.headRefName.startsWith(RELEASE_BRANCH_PREFIX)) continue
+		runCommand('gh', [
+			'pr',
+			'close',
+			String(pr.number),
+			'--comment',
+			`Superseded by ${url}.`,
+			'--delete-branch',
+		])
+	}
 
-	const changesetNames = changesetFiles.map((f) => {
-		const base = f.split('/').pop() ?? ''
-		return base.replace(/\.md$/, '')
-	})
-
-	const alreadyConsumed = changesetNames.filter((name) =>
-		consumed.includes(name),
-	)
-
-	if (alreadyConsumed.length === 0) return
-
-	logLine(
-		`Detected ${alreadyConsumed.length} changeset(s) already consumed from a prior release attempt. Resetting for re-processing...`,
-	)
-
-	preState.changesets = consumed.filter(
-		(name) => !alreadyConsumed.includes(name),
-	)
-
-	writeFileSync(preFile, `${JSON.stringify(preState, null, 2)}\n`)
+	return url
 }
 
-function collectChangesetValidation(): ChangesetValidationResult {
-	const files = readdirSync(resolve('.changeset'))
-		.filter((name) => name.endsWith('.md') && name !== 'README.md')
-		.map((name) => resolve('.changeset', name))
+function renderReleasePrBody(version: string, baseSha: string): string {
+	const channel = isPrerelease(version)
+		? `beta (\`${BETA_TAG}\`, with \`${DOCUMENTED_INSTALL_TAG}\` moved onto it)`
+		: `stable (\`${DOCUMENTED_INSTALL_TAG}\`)`
 
-	const invalidEntries: string[] = []
+	let notes = buildReleaseNotes(version)
+	if (notes.length > MAX_PR_NOTES_LENGTH) {
+		notes = `${notes.slice(0, MAX_PR_NOTES_LENGTH)}\n\n…truncated; see the packages' CHANGELOG.md files.`
+	}
 
-	for (const file of files) {
-		const markdown = readFileSync(file, 'utf8')
-		const frontMatter = extractFrontMatter(markdown)
+	return [
+		`Release **v${version}**, channel: ${channel}.`,
+		'',
+		`Prepared from \`main\` at ${baseSha}. Merging this PR publishes every package to npm, then tags \`v${version}\` and creates the GitHub release.`,
+		'',
+		'> If new changesets land on `main` before you merge, re-run **Release: prepare** to refresh this PR. The publish job refuses a release commit that still has unreleased changesets.',
+		'',
+		'## Changes',
+		'',
+		notes,
+		'',
+	].join('\n')
+}
 
-		if (frontMatter.length === 0) {
+// ---------------------------------------------------------------------------
+// publish
+// ---------------------------------------------------------------------------
+
+async function publishRelease({ dryRun, ci }: PublishArgs): Promise<void> {
+	// 1. Prerequisites
+	ensureTools(['bun', 'git', 'npm', 'gh'])
+	ensureOnMainBranch()
+	// `npm whoami` has no logged-in user under OIDC, and a dry run needs no auth.
+	if (!ci && !dryRun) {
+		ensureNpmAuth()
+	}
+
+	const version = readReleaseVersion()
+	const stable = !isPrerelease(version)
+	logLine(`Releasing v${version} (${stable ? 'stable' : 'beta'} channel)...`)
+
+	const packages = readWorkspacePackages().filter(({ pkg }) => !pkg.private)
+	const unpublished = packages.filter(
+		({ pkg }) => pkg.name && !isVersionPublished(pkg.name, version),
+	)
+
+	if (unpublished.length > 0) {
+		// 2. Refuse a release commit whose changes the changelog would miss.
+		assertNoUnreleasedChangesets(version)
+
+		// 3. Quality gates (typecheck, lint, test, build) and release guards.
+		runQualityGates()
+		runReleaseGuards()
+	} else {
+		logLine(
+			`Every package is already on npm at ${version}; finishing dist-tags and the GitHub release.`,
+		)
+	}
+
+	// 4. Publish. CI authenticates via OIDC (no OTP); a human supplies one.
+	const otp = ci || dryRun ? undefined : await promptForOtp()
+	const released = publishWorkspacePackages({
+		packages,
+		version,
+		stable,
+		ci,
+		dryRun,
+		otp,
+	})
+
+	// Stable releases publish straight to `latest`. Beta releases move it so the
+	// documented unqualified installs resolve the freshest build.
+	if (!stable) {
+		syncDocumentedInstallDistTags(released, { dryRun, otp })
+	}
+
+	// 5. Tag + GitHub release
+	createGithubRelease(version, { stable, dryRun })
+
+	logLine(
+		dryRun
+			? 'Dry-run complete. Release rehearsed; nothing published.'
+			: `Released v${version}.`,
+	)
+}
+
+type PublishOptions = {
+	packages: WorkspacePackage[]
+	version: string
+	stable: boolean
+	ci: boolean
+	/** Run `npm publish --dry-run` and skip the dist-tag sync. */
+	dryRun: boolean
+	otp?: string
+}
+
+function publishWorkspacePackages({
+	packages,
+	version,
+	stable,
+	ci,
+	dryRun,
+	otp,
+}: PublishOptions): ReleasedPackage[] {
+	const publishTag = stable ? DOCUMENTED_INSTALL_TAG : BETA_TAG
+	const workspaceVersions = buildWorkspaceVersions(readWorkspacePackages())
+	const released: ReleasedPackage[] = []
+	let published = 0
+
+	for (const { dir, pkgJsonPath, pkg } of packages) {
+		if (!pkg.name) continue
+		released.push({ name: pkg.name, version })
+
+		if (isVersionPublished(pkg.name, version)) {
+			logLine(`Skipping ${pkg.name}@${version} (already published)`)
 			continue
 		}
 
-		const lines = frontMatter.split('\n')
-		for (const line of lines) {
-			const entry = parseReleaseEntry(line)
-			if (!entry) {
-				continue
-			}
+		// `npm publish` copies `workspace:*` into the tarball verbatim, so resolve
+		// every internal dependency to its current version first.
+		const originalContent = readFileSync(pkgJsonPath, 'utf8')
+		const resolved = resolveWorkspaceDeps(pkg, workspaceVersions)
+		if (resolved) {
+			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`)
+		}
 
-			if (entry.bumpType !== 'patch') {
-				invalidEntries.push(
-					`${file}: ${entry.packageName} -> ${entry.bumpType}`,
-				)
+		try {
+			logLine(`Publishing ${pkg.name}@${version} (tag: ${publishTag})...`)
+			// `npm publish` (not `bun publish`): CI authenticates via OIDC Trusted
+			// Publishing, which bun publish does not support. A local human run
+			// authenticates via `npm login` + an OTP.
+			const publishArgs = ['publish', '--tag', publishTag, '--access', 'public']
+			if (ci) {
+				// Emit provenance from the OIDC identity. Trusted publishing is
+				// meant to do this automatically, but the flag makes it explicit
+				// (and non-silent if the provenance context is ever missing).
+				// Requires the `id-token: write` CI context; it would fail locally.
+				publishArgs.push('--provenance')
+			}
+			if (otp) {
+				publishArgs.push('--otp', otp)
+			}
+			if (dryRun) {
+				publishArgs.push('--dry-run')
+			}
+			runCommand('npm', publishArgs, { cwd: dir })
+			published++
+		} finally {
+			// Restore original package.json with workspace:* references
+			if (resolved) {
+				writeFileSync(pkgJsonPath, originalContent)
 			}
 		}
 	}
 
-	return { files, invalidEntries }
+	logLine(
+		`${dryRun ? '[dry-run] Would publish' : 'Published'} ${published} package(s), skipped ${released.length - published}.`,
+	)
+	return released
+}
+
+/**
+ * The packages are still in beta, but the public docs use unqualified installs
+ * like `bunx chkit` and `bun add chkit @chkit/core`. Keep npm's `latest` tag
+ * aligned with the beta release so those commands do not resolve stale builds.
+ *
+ * In CI `npm dist-tag add` authenticates via OIDC, like `npm publish`. A
+ * package whose trusted publisher lacks "Allow npm dist-tag" fails here, after
+ * publishing; enable it and re-run (already-set tags are skipped).
+ */
+function syncDocumentedInstallDistTags(
+	packages: ReleasedPackage[],
+	{ dryRun, otp }: { dryRun: boolean; otp?: string },
+): void {
+	for (const pkg of packages) {
+		if (dryRun) {
+			logLine(
+				`[dry-run] Would sync ${DOCUMENTED_INSTALL_TAG} dist-tag for ${pkg.name}@${pkg.version}.`,
+			)
+			continue
+		}
+
+		logLine(
+			`Syncing ${DOCUMENTED_INSTALL_TAG} dist-tag for ${pkg.name}@${pkg.version}...`,
+		)
+		const args = [
+			'dist-tag',
+			'add',
+			`${pkg.name}@${pkg.version}`,
+			DOCUMENTED_INSTALL_TAG,
+		]
+		if (otp) {
+			args.push('--otp', otp)
+		}
+		runCommand('npm', args)
+	}
+}
+
+/**
+ * Creates the `v<version>` tag and GitHub release on the current commit, with
+ * notes built from the changelogs. Skipped when the release already exists, so
+ * a re-run only fills in what a failed run left out.
+ */
+function createGithubRelease(
+	version: string,
+	{ stable, dryRun }: { stable: boolean; dryRun: boolean },
+): void {
+	const tag = `v${version}`
+	if (githubReleaseExists(tag)) {
+		logLine(`GitHub release ${tag} already exists.`)
+		return
+	}
+	if (dryRun) {
+		logLine(`[dry-run] Would create GitHub release ${tag}.`)
+		return
+	}
+
+	const notesFile = resolve(TMP_DIR, `release-notes-${version}.md`)
+	writeFileSync(notesFile, `${buildReleaseNotes(version)}\n`)
+	const args = [
+		'release',
+		'create',
+		tag,
+		'--target',
+		gitHead(),
+		'--title',
+		tag,
+		'--notes-file',
+		notesFile,
+	]
+	if (!stable) {
+		args.push('--prerelease')
+	}
+	runCommand('gh', args)
+}
+
+function githubReleaseExists(tag: string): boolean {
+	const result = spawnSync(
+		'gh',
+		['release', 'view', tag, '--json', 'tagName'],
+		{
+			encoding: 'utf8',
+			env: process.env,
+		},
+	)
+	if (result.status === 0) return true
+	if (/release not found/i.test(result.stderr ?? '')) return false
+	fail(
+		`Could not check GitHub release ${tag}: ${result.stderr || result.stdout}`,
+	)
+}
+
+// ---------------------------------------------------------------------------
+// detect
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs on every push to main. A push is a release when its commit is a merged
+ * release PR (`release: v<version>` squash/rebase subject, or the merge commit
+ * of a `release/v<version>` branch) and that release is not finished yet. A
+ * manual dispatch skips the commit check and releases whatever main is at.
+ */
+function detectRelease(): void {
+	ensureTools(['git', 'npm', 'gh'])
+	const version = readReleaseVersion()
+
+	if (process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') {
+		const subject = runCommand('git', [
+			'log',
+			'-1',
+			'--format=%s',
+		]).stdout.trim()
+		const claimed = parseReleaseSubject(subject)
+		if (claimed === null) {
+			logLine('Not a release commit.')
+			writeGithubOutput({ release: 'false' })
+			return
+		}
+		if (claimed !== version) {
+			fail(
+				`Release commit claims v${claimed}, but the packages are at ${version}.`,
+			)
+		}
+	}
+
+	const complete =
+		readWorkspacePackages()
+			.filter(({ pkg }) => !pkg.private && pkg.name)
+			.every(({ pkg }) => pkg.name && isVersionPublished(pkg.name, version)) &&
+		githubReleaseExists(`v${version}`)
+	if (complete) {
+		logLine(`v${version} is already published and released.`)
+		writeGithubOutput({ release: 'false' })
+		return
+	}
+
+	logLine(`Release commit for v${version}.`)
+	writeGithubOutput({ release: 'true', version })
+}
+
+function parseReleaseSubject(subject: string): string | null {
+	const squash = /^release: v(\S+?)(?: \(#\d+\))?$/.exec(subject)
+	if (squash) return squash[1]
+
+	const merge = /^Merge pull request #\d+ from \S+?\/release\/v(\S+)$/.exec(
+		subject,
+	)
+	if (merge) return merge[1]
+
+	return null
+}
+
+// ---------------------------------------------------------------------------
+// Changesets
+// ---------------------------------------------------------------------------
+
+/**
+ * Changesets not yet part of a release. In pre mode `changeset version` keeps
+ * consumed .md files on disk and records them in pre.json; outside pre mode it
+ * deletes them, so every remaining file is unreleased.
+ */
+function listUnreleasedChangesets(): string[] {
+	const preState = getPreState()
+	const consumed = new Set(
+		preState?.mode === 'pre' ? (preState.changesets ?? []) : [],
+	)
+	return listChangesetFiles()
+		.map((file) => file.replace(/\.md$/, ''))
+		.filter((name) => !consumed.has(name))
+}
+
+/**
+ * A release commit with unreleased changesets means main moved after prepare:
+ * their changes would ship in this version without a changelog entry (and,
+ * for a `minor` changeset, under too small a bump).
+ */
+function assertNoUnreleasedChangesets(version: string): void {
+	const unreleased = listUnreleasedChangesets()
+	if (unreleased.length === 0) return
+
+	fail(
+		`Refusing to publish v${version}: ${unreleased.length} changeset(s) landed on main after this release was prepared, so their changes would ship without a changelog entry:\n` +
+			unreleased.map((name) => `  .changeset/${name}.md`).join('\n') +
+			'\nRe-run the "Release: prepare" workflow to cut the next version, then merge that PR.',
+	)
+}
+
+function assertNoMajorChangesets(): void {
+	const majors: string[] = []
+
+	for (const file of listChangesetFiles()) {
+		const markdown = readFileSync(join(CHANGESET_DIR, file), 'utf8')
+		for (const line of extractFrontMatter(markdown).split('\n')) {
+			const entry = parseReleaseEntry(line)
+			// Beta phase: allow feature minors alongside patches; still refuse majors.
+			if (entry?.bumpType === 'major') {
+				majors.push(`${file}: ${entry.packageName} -> major`)
+			}
+		}
+	}
+
+	if (majors.length > 0) {
+		fail(
+			`Only patch and minor changesets are allowed for this phase. Found disallowed entries:\n${majors.join('\n')}`,
+		)
+	}
+}
+
+function listChangesetFiles(): string[] {
+	return readdirSync(CHANGESET_DIR).filter(
+		(name) => name.endsWith('.md') && name !== 'README.md',
+	)
 }
 
 function extractFrontMatter(markdown: string): string {
@@ -290,13 +637,8 @@ function extractFrontMatter(markdown: string): string {
 function parseReleaseEntry(
 	line: string,
 ): { packageName: string; bumpType: string } | null {
-	const trimmed = line.trim()
-	if (trimmed.length === 0) {
-		return null
-	}
-
 	const match = /^['"]?([^'"]+)['"]?\s*:\s*(patch|minor|major)\s*$/.exec(
-		trimmed,
+		line.trim(),
 	)
 	if (!match) {
 		return null
@@ -317,7 +659,7 @@ function ensureBetaPrereleaseMode(): void {
 
 	if (preState === null) {
 		logLine('Entering beta prerelease mode...')
-		runCommand('bun', ['run', 'changeset', '--', 'pre', 'enter', 'beta'])
+		runCommand('bun', ['run', 'changeset', '--', 'pre', 'enter', BETA_TAG])
 		return
 	}
 
@@ -327,9 +669,9 @@ function ensureBetaPrereleaseMode(): void {
 		)
 	}
 
-	if (preState.tag !== 'beta') {
+	if (preState.tag !== BETA_TAG) {
 		fail(
-			`Prerelease mode already active for '${preState.tag}'. Expected 'beta'.`,
+			`Prerelease mode already active for '${preState.tag}'. Expected '${BETA_TAG}'.`,
 		)
 	}
 }
@@ -339,23 +681,14 @@ function ensureBetaPrereleaseMode(): void {
  * mode. `changeset pre exit` flips pre.json to `mode: "exit"`; the subsequent
  * `changeset version` then collapses every accumulated changeset into a single
  * non-prerelease bump computed from the pre-entry baseline (e.g. the
- * 0.1.0-beta.N line becomes 0.1.0) and removes the consumed changeset files.
- *
- * Idempotent: a no-op if already exited, and a clear failure if the repo was
- * never in pre mode (there is nothing to graduate).
+ * 0.1.0-beta.N line becomes 0.1.0) and removes pre.json and the consumed
+ * changeset files. Outside pre mode there is nothing to exit.
  */
-function exitPrereleaseModeForStable(dryRun: boolean): void {
+function exitPrereleaseModeForStable(): void {
 	const preState = getPreState()
 
 	if (preState === null) {
-		// A successful exit + `changeset version` removes pre.json. Reaching here
-		// usually means a prior stable run already graduated the versions and only
-		// the publish/push failed — continue and let the version safety check and
-		// the already-published skip logic handle recovery.
-		logLine(
-			'Not in prerelease mode (.changeset/pre.json missing). Assuming ' +
-				'versions were graduated in a prior run; continuing recovery.',
-		)
+		logLine('Not in prerelease mode; cutting a stable release.')
 		return
 	}
 
@@ -370,153 +703,43 @@ function exitPrereleaseModeForStable(dryRun: boolean): void {
 		)
 	}
 
-	if (dryRun) {
-		logLine('[dry-run] Would exit beta prerelease mode (changeset pre exit).')
-		return
-	}
-
 	logLine('Exiting beta prerelease mode to graduate to a stable release...')
 	runCommand('bun', ['run', 'changeset', '--', 'pre', 'exit'])
 }
 
-function getPreState(): { mode?: string; tag?: string } | null {
-	const preFile = resolve('.changeset/pre.json')
-
+function getPreState(): PreState | null {
 	try {
-		const raw = readFileSync(preFile, 'utf8')
-		return JSON.parse(raw) as { mode?: string; tag?: string }
+		return JSON.parse(readFileSync(PRE_FILE, 'utf8')) as PreState
 	} catch {
 		return null
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Publishing
+// Versions and release notes
 // ---------------------------------------------------------------------------
 
-function publishWorkspacePackages(otp: string, stable: boolean): void {
-	// Beta releases publish under `beta` and then sync `latest` so the
-	// documented unqualified installs resolve the freshest build. Stable
-	// releases publish directly under `latest`, so no separate sync is needed.
-	const publishTag = stable ? DOCUMENTED_INSTALL_TAG : PUBLISH_TAG
-	const packagesDir = resolve('packages')
-	const packageDirs = readdirSync(packagesDir).filter((name) => {
-		const pkgJsonPath = join(packagesDir, name, 'package.json')
-		try {
-			statSync(pkgJsonPath)
-			return true
-		} catch {
-			return false
-		}
-	})
-
-	// Build a map of workspace package names to their current versions
-	const workspaceVersions = buildWorkspaceVersions(readWorkspacePackages())
-
-	let published = 0
-	let skipped = 0
-	const releasedPackages: ReleasedPackage[] = []
-
-	for (const dir of packageDirs) {
-		const pkgJsonPath = join(packagesDir, dir, 'package.json')
-		const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as PackageJson
-
-		if (pkg.private) continue
-		if (!pkg.name || !pkg.version) continue
-
-		if (isVersionPublished(pkg.name, pkg.version)) {
-			logLine(`Skipping ${pkg.name}@${pkg.version} (already published)`)
-			skipped++
-			releasedPackages.push({ name: pkg.name, version: pkg.version })
-			continue
-		}
-
-		// Resolve workspace:* references to actual versions before publishing
-		const originalContent = readFileSync(pkgJsonPath, 'utf8')
-		const resolved = resolveWorkspaceDeps(pkg, workspaceVersions)
-		if (resolved) {
-			writeFileSync(pkgJsonPath, `${JSON.stringify(pkg, null, 2)}\n`)
-		}
-
-		try {
-			logLine(`Publishing ${pkg.name}@${pkg.version} (tag: ${publishTag})...`)
-			runCommand(
-				'bun',
-				['publish', '--tag', publishTag, '--access', 'public', '--otp', otp],
-				{ cwd: join(packagesDir, dir) },
-			)
-			published++
-			releasedPackages.push({ name: pkg.name, version: pkg.version })
-		} finally {
-			// Restore original package.json with workspace:* references
-			if (resolved) {
-				writeFileSync(pkgJsonPath, originalContent)
-			}
-		}
-	}
-
-	// Stable releases publish straight to `latest`, so no dist-tag realignment
-	// is required. Beta releases need it to keep the documented installs fresh.
-	if (!stable) {
-		syncDocumentedInstallDistTags(releasedPackages, otp)
-	}
-
-	if (published === 0 && skipped > 0) {
+/**
+ * Every publishable package shares one version (they are a changesets "fixed"
+ * group), which is the release version.
+ */
+function readReleaseVersion(): string {
+	const versions = new Set(
+		readWorkspacePackages()
+			.filter(({ pkg }) => !pkg.private)
+			.map(({ pkg }) => pkg.version ?? '(none)'),
+	)
+	const [version] = versions
+	if (versions.size !== 1 || !version || version === '(none)') {
 		fail(
-			`All ${skipped} package version(s) are already published on npm. Nothing to do.`,
+			`Expected every publishable package to share one version (changesets "fixed" group), found: ${[...versions].join(', ')}`,
 		)
 	}
-
-	logLine(`Published ${published} package(s), skipped ${skipped}.`)
+	return version
 }
 
-/**
- * The packages are still in beta, but the public docs use unqualified installs
- * like `bunx chkit` and `bun add chkit @chkit/core`. Keep npm's `latest` tag
- * aligned with the beta release so those commands do not resolve stale builds.
- */
-function syncDocumentedInstallDistTags(
-	packages: ReleasedPackage[],
-	otp: string,
-): void {
-	if (packages.length === 0) return
-
-	for (const pkg of packages) {
-		logLine(
-			`Syncing ${DOCUMENTED_INSTALL_TAG} dist-tag for ${pkg.name}@${pkg.version}...`,
-		)
-		runCommand('npm', [
-			'dist-tag',
-			'add',
-			`${pkg.name}@${pkg.version}`,
-			DOCUMENTED_INSTALL_TAG,
-			'--otp',
-			otp,
-		])
-	}
-}
-
-/**
- * Guards the stable publish: after `changeset version` runs in exit mode, every
- * publishable workspace package must carry a non-prerelease version. A lingering
- * `-beta.N` suffix means the pre-mode exit did not take effect, and we must not
- * push a prerelease build to the `latest` tag.
- */
-function assertStableVersionsForPublish(): void {
-	const prerelease = readWorkspacePackages()
-		.map(({ pkg }) => pkg)
-		.filter((pkg) => !pkg.private && pkg.name && pkg.version)
-		.filter((pkg) => pkg.version?.includes('-'))
-		.map((pkg) => `${pkg.name}@${pkg.version}`)
-
-	if (prerelease.length > 0) {
-		fail(
-			'Stable release aborted: the following versions still carry a ' +
-				`prerelease suffix:\n${prerelease.join('\n')}\n` +
-				'Exiting changesets pre mode did not graduate them. Check ' +
-				'.changeset/pre.json and that pending changesets exist.',
-		)
-	}
+function isPrerelease(version: string): boolean {
+	return version.includes('-')
 }
 
 function isVersionPublished(name: string, version: string): boolean {
@@ -528,61 +751,176 @@ function isVersionPublished(name: string, version: string): boolean {
 	return result.status === 0 && result.stdout.trim() === version
 }
 
-// ---------------------------------------------------------------------------
-// Git
-// ---------------------------------------------------------------------------
+/**
+ * Release notes for `version`, built from every publishable package's
+ * CHANGELOG. A changeset that touches several packages appears verbatim in each
+ * of their changelogs, so identical entries are merged and list the packages
+ * they apply to. (Not by commit hash: changesets added in one commit share it.)
+ * "Updated dependencies" bookkeeping is dropped.
+ */
+function buildReleaseNotes(version: string): string {
+	const entries = new Map<string, ChangelogEntry>()
 
-function commitAndPush(): void {
-	logLine('Committing version changes...')
-	runCommand('git', ['add', '-A'])
+	for (const { dir, pkg } of readWorkspacePackages()) {
+		if (pkg.private || !pkg.name) continue
+		let changelog: string
+		try {
+			changelog = readFileSync(join(dir, 'CHANGELOG.md'), 'utf8')
+		} catch {
+			continue
+		}
 
-	const result = runCommand('git', ['status', '--porcelain'])
-	if (result.stdout.trim().length === 0) {
-		logLine('No changes to commit.')
-		return
+		for (const entry of parseChangelogSection(changelog, version)) {
+			const existing = entries.get(entry.text)
+			if (!existing) {
+				entries.set(entry.text, { ...entry, packages: [pkg.name] })
+				continue
+			}
+			if (!existing.packages.includes(pkg.name)) {
+				existing.packages.push(pkg.name)
+			}
+			existing.rank = Math.min(existing.rank, entry.rank)
+		}
 	}
 
-	runCommand('git', ['commit', '-m', 'chore: version packages'])
-	runCommand('git', ['push', 'origin', 'main'])
+	if (entries.size === 0) {
+		return '_No changelog entries._'
+	}
+
+	return CHANGE_HEADINGS.flatMap((heading, rank) => {
+		const items = [...entries.values()].filter((entry) => entry.rank === rank)
+		if (items.length === 0) return []
+		return [
+			`### ${heading}`,
+			'',
+			...items.map(
+				(entry) =>
+					`${entry.text}\n  <sub>${entry.packages.map((name) => `\`${name}\``).join(', ')}</sub>`,
+			),
+			'',
+		]
+	})
+		.join('\n')
+		.trimEnd()
+}
+
+/** Top-level bullets under `## <version>` in a changesets CHANGELOG. */
+function parseChangelogSection(
+	changelog: string,
+	version: string,
+): Omit<ChangelogEntry, 'packages'>[] {
+	const lines = changelog.split('\n')
+	const start = lines.findIndex((line) => line.trim() === `## ${version}`)
+	if (start === -1) return []
+
+	const entries: Omit<ChangelogEntry, 'packages'>[] = []
+	let rank = CHANGE_HEADINGS.length - 1
+	let current: string[] | null = null
+
+	const flush = () => {
+		if (current === null) return
+		const text = current.join('\n').trimEnd()
+		if (!text.startsWith('- Updated dependencies')) {
+			entries.push({ rank, text })
+		}
+		current = null
+	}
+
+	for (const line of lines.slice(start + 1)) {
+		if (line.startsWith('## ')) break
+		if (line.startsWith('### ')) {
+			flush()
+			const headingRank = CHANGE_HEADINGS.indexOf(line.slice(4).trim())
+			rank = headingRank === -1 ? CHANGE_HEADINGS.length - 1 : headingRank
+			continue
+		}
+		if (line.startsWith('- ')) {
+			flush()
+			current = [line]
+			continue
+		}
+		current?.push(line)
+	}
+	flush()
+
+	return entries
 }
 
 // ---------------------------------------------------------------------------
-// Preconditions
+// Preconditions and gates
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv: string[]): ReleaseArgs {
-	let dryRun = false
-	let stable = false
+	const [command, ...flags] = argv
+	const unknown = (allowed: string[]) =>
+		flags.filter((flag) => !allowed.includes(flag))
 
-	for (const arg of argv) {
-		if (arg === '--dry-run') {
-			dryRun = true
-			continue
+	switch (command) {
+		case 'prepare': {
+			const extra = unknown(['--stable'])
+			if (extra.length > 0)
+				fail(`Unknown argument(s) for prepare: ${extra.join(' ')}`)
+			return { command, stable: flags.includes('--stable') }
 		}
-
-		if (arg === '--stable') {
-			stable = true
-			continue
+		case 'publish': {
+			const extra = unknown(['--dry-run', '--ci'])
+			if (extra.length > 0)
+				fail(`Unknown argument(s) for publish: ${extra.join(' ')}`)
+			// CI runners set CI=true; treat that as the non-interactive OIDC path
+			// even if the flag was omitted.
+			return {
+				command,
+				dryRun: flags.includes('--dry-run'),
+				ci: flags.includes('--ci') || process.env.CI === 'true',
+			}
 		}
-
-		fail(`Unknown argument: ${arg}. Supported args: --dry-run, --stable`)
+		case 'detect': {
+			if (flags.length > 0)
+				fail(`Unknown argument(s) for detect: ${flags.join(' ')}`)
+			return { command }
+		}
+		default:
+			fail(
+				`Unknown command: ${command ?? '(none)'}. Usage: manual-release.ts prepare [--stable] | publish [--dry-run] [--ci] | detect`,
+			)
 	}
-
-	return { dryRun, stable }
 }
 
-function ensureRequiredTools(): void {
-	runCommand('bun', ['--version'])
-	runCommand('git', ['--version'])
-	runCommand('npm', ['--version'])
-	runCommand('bun', ['run', 'changeset', '--', '--version'])
+function ensureTools(
+	tools: ('bun' | 'git' | 'npm' | 'gh' | 'changeset')[],
+): void {
+	for (const tool of tools) {
+		if (tool === 'changeset') {
+			runCommand('bun', ['run', 'changeset', '--', '--version'])
+		} else {
+			runCommand(tool, ['--version'])
+		}
+	}
 }
 
 function ensureOnMainBranch(): void {
-	const result = runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'])
-	const branch = result.stdout.trim()
+	const branch = runCommand('git', [
+		'rev-parse',
+		'--abbrev-ref',
+		'HEAD',
+	]).stdout.trim()
 	if (branch !== 'main') {
 		fail(`Release must run on main. Current branch: ${branch}`)
+	}
+}
+
+function ensureCleanWorkingTree(): void {
+	const status = runCommand('git', ['status', '--porcelain']).stdout.trim()
+	if (status.length > 0) {
+		fail(`Working tree is not clean:\n${status}`)
+	}
+}
+
+function ensureUpToDateWithOrigin(): void {
+	runCommand('git', ['fetch', 'origin', 'main'])
+	const remote = runCommand('git', ['rev-parse', 'origin/main']).stdout.trim()
+	if (gitHead() !== remote) {
+		fail(`Local main is not origin/main (${remote}). Pull or push first.`)
 	}
 }
 
@@ -590,8 +928,13 @@ function ensureNpmAuth(): void {
 	runCommand('npm', ['whoami'])
 }
 
+function gitHead(): string {
+	return runCommand('git', ['rev-parse', 'HEAD']).stdout.trim()
+}
+
 function runQualityGates(): void {
 	logLine('Running quality gates (typecheck, lint, test, build)...')
+	// `verify` starts the local test stack itself, as in ci.yml's verify job.
 	runCommand('bun', ['run', 'verify'])
 }
 
@@ -608,8 +951,7 @@ function runReleaseGuards(): void {
 		'Running release guards (lockfile + internal workspace deps + packed tarballs)...',
 	)
 	// Fail here if the committed lockfile does not satisfy the bumped versions —
-	// the same check CI runs on main. This catches a stale lockfile before the
-	// release is pushed rather than after.
+	// the same check CI runs on main.
 	runCommand('bun', ['install', '--frozen-lockfile'])
 	runCommand('bun', ['run', 'check:workspace-deps'])
 	runCommand('bun', ['run', 'check:packed-deps'])
@@ -631,6 +973,18 @@ async function promptForOtp(): Promise<string> {
 	} finally {
 		rl.close()
 	}
+}
+
+/** Writes step outputs in GitHub Actions; a no-op elsewhere. */
+function writeGithubOutput(values: Record<string, string>): void {
+	const outputFile = process.env.GITHUB_OUTPUT
+	if (!outputFile) return
+	appendFileSync(
+		outputFile,
+		Object.entries(values)
+			.map(([key, value]) => `${key}=${value}\n`)
+			.join(''),
+	)
 }
 
 function runCommand(

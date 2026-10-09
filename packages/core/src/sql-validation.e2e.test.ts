@@ -13,8 +13,8 @@ import type {
   SkipIndexDefinition,
   TableDefinition,
 } from './model-types.js'
-import { table, view, materializedView } from './model.js'
-import { toCreateSQL } from './sql.js'
+import { table, view, materializedView, dictionary } from './model.js'
+import { toCreateSQL, renderDictionarySQL } from './sql.js'
 import {
   renderAlterAddColumn,
   renderAlterModifyColumn,
@@ -35,14 +35,19 @@ import { planDiff } from './planner.js'
 // Environment — hard-fail on missing env (never skip)
 // ---------------------------------------------------------------------------
 
-function getRequiredEnv() {
+// Same target rules as getLiveEnv in @chkit/clickhouse/e2e-testkit, which core
+// cannot depend on: without CLICKHOUSE_URL or CLICKHOUSE_HOST, use the local
+// test stack (test/infra).
+function getLiveEnv() {
   const host = process.env.CLICKHOUSE_HOST?.trim()
   const url = process.env.CLICKHOUSE_URL?.trim() || (host ? `https://${host}` : '')
+  if (!url) {
+    return { url: 'http://localhost:8123', username: 'default', password: 'chkit-ci', database: 'default' }
+  }
   const username = process.env.CLICKHOUSE_USER?.trim() || 'default'
   const password = process.env.CLICKHOUSE_PASSWORD?.trim() || ''
   const database = process.env.CLICKHOUSE_DB?.trim() || 'default'
 
-  if (!url) throw new Error('Missing CLICKHOUSE_URL or CLICKHOUSE_HOST')
   if (!password) throw new Error('Missing CLICKHOUSE_PASSWORD')
 
   return { url, username, password, database }
@@ -58,7 +63,7 @@ interface QueryClient {
 }
 
 function createQueryClient(): QueryClient {
-  const env = getRequiredEnv()
+  const env = getLiveEnv()
   const client = createClient({
     url: env.url,
     username: env.username,
@@ -240,6 +245,20 @@ describe('SQL validation via EXPLAIN AST', () => {
         label: 'fn: toDate(now())',
         col: { name: 'created_date', type: 'Date', default: 'fn:toDate(now())' },
       },
+      {
+        label: 'expression object now64(3)',
+        col: { name: 'updated_at', type: "DateTime64(3, 'UTC')", default: { expression: 'now64(3)' } },
+      },
+      {
+        label: 'MATERIALIZED expression object with a comment',
+        col: {
+          name: 'created_date',
+          type: 'Date',
+          defaultKind: 'MATERIALIZED',
+          default: { expression: 'toDate(now()) -- day of insert' },
+          comment: 'insert day',
+        },
+      },
     ]
 
     for (const { label, col } of defaults) {
@@ -250,6 +269,19 @@ describe('SQL validation via EXPLAIN AST', () => {
         await assertValidSQL(client, toCreateSQL(def))
       })
     }
+
+    // #234: rendered as written, the `--` comment would swallow the comma
+    // before the next column.
+    test('default: expression with a line comment before another column', async () => {
+      const def = baseTable({
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'ts', type: 'DateTime', default: { expression: 'now() -- set on insert' } },
+          { name: 'n', type: 'UInt8' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
   })
 
   // =========================================================================
@@ -880,6 +912,95 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
   })
 
   // =========================================================================
+  // CREATE DICTIONARY
+  // =========================================================================
+
+  describe('CREATE DICTIONARY', () => {
+    const baseDictionary = {
+      database: 'default',
+      name: 'test_dict',
+      attributes: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'name', type: 'String' },
+      ],
+      primaryKey: ['id'],
+      source: "FILE(path '/dev/null' format 'CSV')",
+      layout: 'FLAT()',
+      lifetime: '300',
+    } as const
+
+    test('minimal dictionary', async () => {
+      const def = dictionary({ ...baseDictionary })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with DEFAULT / EXPRESSION / HIERARCHICAL attributes', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'name', type: 'String', default: '' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true },
+          { name: 'upper_name', type: 'String', expression: 'upper(name)' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with COMPLEX_KEY_HASHED layout and composite primary key', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'a', type: 'String' },
+          { name: 'b', type: 'String' },
+          { name: 'value', type: 'String' },
+        ],
+        primaryKey: ['a', 'b'],
+        layout: 'COMPLEX_KEY_HASHED()',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with comment', async () => {
+      const def = dictionary({ ...baseDictionary, comment: 'A test dictionary' })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('CREATE OR REPLACE DICTIONARY', async () => {
+      const def = dictionary({ ...baseDictionary })
+      await assertValidSQL(client, renderDictionarySQL(def, true))
+    })
+
+    test('dictionary with RANGE_HASHED layout, RANGE, and SETTINGS', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'start_date', type: 'Date' },
+          { name: 'end_date', type: 'Date' },
+          { name: 'value', type: 'String' },
+        ],
+        layout: 'RANGE_HASHED()',
+        range: { min: 'start_date', max: 'end_date' },
+        settings: { dictionary_use_async_executor: 1, max_threads: 4 },
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('dictionary with a BIDIRECTIONAL hierarchical attribute', async () => {
+      const def = dictionary({
+        ...baseDictionary,
+        attributes: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'parent_id', type: 'UInt64', hierarchical: true, bidirectional: true },
+          { name: 'name', type: 'String' },
+        ],
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+  })
+
+  // =========================================================================
   // ALTER TABLE — MODIFY REFRESH
   // =========================================================================
 
@@ -932,6 +1053,11 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       { label: 'nullable', col: { name: 'email', type: 'String', nullable: true } },
       { label: 'with default', col: { name: 'score', type: 'Float64', default: 0 } },
       { label: 'with fn default', col: { name: 'ts', type: 'DateTime', default: 'fn:now()' } },
+      { label: 'with expression default', col: { name: 'ts', type: 'DateTime', default: { expression: 'now()' } } },
+      {
+        label: 'with commented expression default and a comment',
+        col: { name: 'ts', type: 'DateTime', default: { expression: 'now() -- set on insert' }, comment: 'insert time' },
+      },
       { label: 'with comment', col: { name: 'notes', type: 'String', comment: 'User notes' } },
       { label: 'complex type', col: { name: 'tags', type: 'Array(String)' } },
     ]
@@ -1216,6 +1342,50 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       })
       const plan = planDiff([oldMV], [newMV])
       expect(plan.operations.length).toBe(2)
+      for (const op of plan.operations) {
+        await assertValidSQL(client, op.sql)
+      }
+    })
+
+    test('dictionary structural change — CREATE OR REPLACE', async () => {
+      const oldDict = dictionary({
+        database: 'default',
+        name: 'plan_dict',
+        attributes: [{ name: 'id', type: 'UInt64' }, { name: 'name', type: 'String' }],
+        primaryKey: ['id'],
+        source: "FILE(path '/dev/null' format 'CSV')",
+        layout: 'FLAT()',
+        lifetime: '300',
+      })
+      const newDict = dictionary({
+        database: 'default',
+        name: 'plan_dict',
+        attributes: [{ name: 'id', type: 'UInt64' }, { name: 'name', type: 'String' }],
+        primaryKey: ['id'],
+        source: "FILE(path '/dev/null' format 'CSV')",
+        layout: 'FLAT()',
+        lifetime: '600',
+      })
+      const plan = planDiff([oldDict], [newDict])
+      expect(plan.operations.length).toBe(1)
+      for (const op of plan.operations) {
+        await assertValidSQL(client, op.sql)
+      }
+    })
+
+    test('dictionary drop', async () => {
+      const oldDict = dictionary({
+        database: 'default',
+        name: 'plan_dict_drop',
+        attributes: [{ name: 'id', type: 'UInt64' }],
+        primaryKey: ['id'],
+        source: "FILE(path '/dev/null' format 'CSV')",
+        layout: 'FLAT()',
+        lifetime: '300',
+      })
+      const plan = planDiff([oldDict], [])
+      expect(plan.operations.length).toBe(1)
+      expect(plan.operations[0]?.type).toBe('drop_dictionary')
       for (const op of plan.operations) {
         await assertValidSQL(client, op.sql)
       }

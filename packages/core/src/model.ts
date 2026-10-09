@@ -5,6 +5,8 @@ import type {
   ChxConfigInput,
   ChxResolvedConfig,
   ChxUserConfig,
+  DictionaryDefinition,
+  KafkaTableInput,
   MaterializedViewDefinition,
   SchemaDefinition,
   TableDefinition,
@@ -52,8 +54,16 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
   const migrationsDir = config.migrationsDir ?? join(outDir, 'migrations')
   const metaDir = config.metaDir ?? join(outDir, 'meta')
 
+  const schemaGlobs = config.schema === undefined ? [] : Array.isArray(config.schema) ? config.schema : [config.schema]
+  if (config.entry !== undefined && schemaGlobs.length > 0) {
+    throw new Error('Config fields "entry" and "schema" are mutually exclusive. Use one project entry module or schema globs, not both.')
+  }
+
   return {
-    schema: Array.isArray(config.schema) ? config.schema : [config.schema],
+    // In entry mode the entry module is the only schema source: its exported
+    // definitions are collected exactly like any other schema file.
+    schema: config.entry !== undefined ? [config.entry] : schemaGlobs,
+    entry: config.entry,
     outDir,
     migrationsDir,
     metaDir,
@@ -82,8 +92,10 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
   }
 }
 
-export function table(input: Omit<TableDefinition, 'kind'>): TableDefinition {
-  return { ...input, kind: 'table' }
+export function table(input: KafkaTableInput): TableDefinition
+export function table(input: Omit<TableDefinition, 'kind'>): TableDefinition
+export function table(input: KafkaTableInput | Omit<TableDefinition, 'kind'>): TableDefinition {
+  return { ...input, primaryKey: input.primaryKey ?? [], orderBy: input.orderBy ?? [], kind: 'table' }
 }
 
 export function view(input: Omit<ViewDefinition, 'kind'>): ViewDefinition {
@@ -96,6 +108,12 @@ export function materializedView(
   return { ...input, kind: 'materialized_view' }
 }
 
+export function dictionary(
+  input: Omit<DictionaryDefinition, 'kind'>
+): DictionaryDefinition {
+  return { ...input, kind: 'dictionary' }
+}
+
 export function schema(...definitions: SchemaDefinition[]): SchemaDefinition[] {
   return definitions
 }
@@ -103,5 +121,7 @@ export function schema(...definitions: SchemaDefinition[]): SchemaDefinition[] {
 export function isSchemaDefinition(value: unknown): value is SchemaDefinition {
   if (!value || typeof value !== 'object') return false
   const kind = (value as { kind?: string }).kind
-  return kind === 'table' || kind === 'view' || kind === 'materialized_view'
+  return (
+    kind === 'table' || kind === 'view' || kind === 'materialized_view' || kind === 'dictionary'
+  )
 }

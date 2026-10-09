@@ -126,9 +126,11 @@ export function resolveStripBehavior(
 	config: ResolvedChxConfig,
 	flags: Record<string, string | string[] | boolean | undefined>,
 ): boolean {
-	if (flags['force-shared-engines']) return false
-	if (flags['no-shared-engines']) return true
-	// Auto-detect: if targeting ObsessionDB, keep Shared engines
+	// Parsed flags keep their `--` prefix (see `parseFlags`), like `--service`.
+	if (flags['--force-shared-engines']) return false
+	if (flags['--no-shared-engines']) return true
+	// Auto-detect: keep ObsessionDB settings such as storage_policy when
+	// targeting ObsessionDB
 	const url = config.clickhouse?.url
 	if (url && isObsessionDBHost(url)) return false
 	return true
@@ -185,6 +187,12 @@ function stripCloudSettings(
 	}
 }
 
+/**
+ * Strip the `Shared` engine prefix and ObsessionDB settings such as
+ * storage_policy. Definitions the CLI loads are canonicalized first, and core's
+ * normalizeEngine already writes the standard engine name for every target, so
+ * on that path only the settings strip changes anything.
+ */
 export function rewriteSharedEngines(definitions: SchemaDefinition[]): {
 	definitions: SchemaDefinition[]
 	count: number
@@ -220,17 +228,23 @@ function createObsessionDBPlugin(
 		commands: [...AUTH_COMMANDS, SERVICE_COMMAND] as unknown as PluginCommand[],
 		extendCommands: [
 			{
-				command: ['generate', 'migrate', 'status', 'drift', 'check'],
+				// Only `generate` and `snapshot rebuild` run the onSchemaLoaded hooks,
+				// so only they act on these flags. migrate, status, drift and check
+				// keep accepting them, so existing scripts that pass them to those
+				// commands don't break.
+				command: ['generate', 'migrate', 'status', 'drift', 'check', 'snapshot'],
 				flags: [
 					{
 						name: '--force-shared-engines',
 						type: 'boolean',
-						description: 'Keep Shared engine prefixes (skip stripping)',
+						description:
+							'Keep the storage_policy table setting even when the URL is not recognized as ObsessionDB (takes effect in generate and snapshot rebuild)',
 					},
 					{
 						name: '--no-shared-engines',
 						type: 'boolean',
-						description: 'Strip Shared engine prefixes (even on ObsessionDB)',
+						description:
+							'Strip the storage_policy table setting even when targeting ObsessionDB (takes effect in generate and snapshot rebuild)',
 					},
 				],
 			},

@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 interface DeviceCodeResponse {
   device_code: string
@@ -81,7 +82,7 @@ export async function pollDeviceToken(
   let pollInterval = interval * 1000
 
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollInterval))
+    await sleep(pollInterval)
 
     const res = await fetch(`${baseUrl}/api/auth/device/token`, {
       method: 'POST',

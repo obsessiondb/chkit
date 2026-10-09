@@ -41,6 +41,10 @@ export function confirmApply(): Promise<boolean> {
   return promptYes('Apply pending migrations now? [no/yes]: ')
 }
 
+export function confirmAbandon(migration: string): Promise<boolean> {
+  return promptYes(`Abandon the in-progress state of ${migration} now? [no/yes]: `)
+}
+
 export async function confirmDestructiveExecution(
   markers: DestructiveOperationMarker[],
 ): Promise<boolean> {

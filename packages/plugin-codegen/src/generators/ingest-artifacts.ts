@@ -2,6 +2,7 @@ import { dirname, relative } from 'node:path'
 
 import {
   canonicalizeDefinitions,
+  insertColumnList,
   type TableDefinition,
 } from '@chkit/core'
 
@@ -11,7 +12,7 @@ import type {
 } from '../types.js'
 import { normalizeCodegenOptions } from '../options.js'
 import { resolveTableNames } from '../naming.js'
-import { renderHeader } from './shared.js'
+import { insertTypeName, renderHeader } from './shared.js'
 
 function computeRelativeImportPath(fromFile: string, toFile: string): string {
   const fromDir = dirname(fromFile)
@@ -34,24 +35,27 @@ function renderIngestFunction(
 ): string[] {
   const funcName = `ingest${stripRowSuffix(interfaceName)}`
   const tableFqn = `${table.database}.${table.name}`
+  const inputType = insertTypeName(table, interfaceName)
+  const columns = insertColumnList(table)
+  const columnsPart = columns ? `, columns: [${columns.map(renderStringLiteral).join(', ')}]` : ''
   const lines: string[] = []
 
   if (emitZod) {
     lines.push(`export async function ${funcName}(`)
     lines.push(`  ingestor: Ingestor,`)
-    lines.push(`  rows: ${interfaceName}[],`)
+    lines.push(`  rows: ${inputType}[],`)
     lines.push(`  options?: IngestOptions`)
     lines.push(`): Promise<void> {`)
-    lines.push(`  const data = options?.validate ? rows.map(row => ${interfaceName}Schema.parse(row)) : rows`)
-    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: data, compressed: options?.compressed ?? true })`)
+    lines.push(`  const data = options?.validate ? rows.map(row => ${inputType}Schema.parse(row)) : rows`)
+    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: data${columnsPart}, compressed: options?.compressed ?? true })`)
     lines.push(`}`)
   } else {
     lines.push(`export async function ${funcName}(`)
     lines.push(`  ingestor: Ingestor,`)
-    lines.push(`  rows: ${interfaceName}[],`)
+    lines.push(`  rows: ${inputType}[],`)
     lines.push(`  options?: IngestOptions`)
     lines.push(`): Promise<void> {`)
-    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: rows, compressed: options?.compressed ?? true })`)
+    lines.push(`  await ingestor.insert({ table: '${tableFqn}', values: rows${columnsPart}, compressed: options?.compressed ?? true })`)
     lines.push(`}`)
   }
 
@@ -76,9 +80,12 @@ export function generateIngestArtifacts(
   const typeImports: string[] = []
   const valueImports: string[] = []
   for (const entry of resolved) {
-    typeImports.push(entry.interfaceName)
+    const name = entry.definition.kind === 'table'
+      ? insertTypeName(entry.definition, entry.interfaceName)
+      : entry.interfaceName
+    typeImports.push(name)
     if (normalized.emitZod) {
-      valueImports.push(`${entry.interfaceName}Schema`)
+      valueImports.push(`${name}Schema`)
     }
   }
 
@@ -94,7 +101,13 @@ export function generateIngestArtifacts(
 
   lines.push('')
   lines.push('export interface Ingestor {')
-  lines.push('  insert(params: { table: string; values: Record<string, unknown>[]; compressed?: boolean }): Promise<void>')
+  // Only schemas with EPHEMERAL inputs need a column list; others keep their output unchanged.
+  if (tables.some(hasEphemeralColumns)) {
+    lines.push('  /** Forward `columns` as the INSERT column list: without it ClickHouse drops EPHEMERAL inputs. */')
+    lines.push('  insert(params: { table: string; values: Record<string, unknown>[]; compressed?: boolean; columns?: string[] }): Promise<void>')
+  } else {
+    lines.push('  insert(params: { table: string; values: Record<string, unknown>[]; compressed?: boolean }): Promise<void>')
+  }
   lines.push('}')
   lines.push('')
   lines.push('export interface IngestOptions {')
@@ -117,4 +130,12 @@ export function generateIngestArtifacts(
     outFile: normalized.ingestOutFile,
     functionCount: resolved.length,
   }
+}
+
+function hasEphemeralColumns(table: TableDefinition): boolean {
+  return table.columns.some((column) => column.defaultKind === 'EPHEMERAL')
+}
+
+function renderStringLiteral(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }

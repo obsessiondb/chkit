@@ -23,6 +23,16 @@ import {
   isoWithoutZone,
   upsertOperation,
 } from './async-apply.js'
+import { inProgressChecksumMismatchError } from './errors.js'
+import {
+  hasStatementProgress,
+  rebaseInProgressState,
+  retryMismatchError,
+  statementIdentities,
+  statementIdentity,
+  verifyRetryEdit,
+  type StatementIdentity,
+} from './recovery.js'
 
 type JournalStore = ReturnType<typeof createJournalStore>
 
@@ -93,8 +103,13 @@ export async function applyMigration(input: {
   flags: ParsedFlags
   migrationsDir: string
   file: string
+  /** Set when --retry verified an edit of this in-progress migration before the run (#233). */
+  retry?: { previousChecksum: string; checksum: string }
+  /** Progress lines; the command sends them to stderr in --json mode. */
+  log?: (line: string) => void
 }): Promise<MigrationJournalEntry> {
-  const { db, journalStore, pluginRuntime, config, tableScope, flags, migrationsDir, file } = input
+  const { db, journalStore, pluginRuntime, config, tableScope, flags, migrationsDir, file, retry } = input
+  const log = input.log ?? ((line: string) => console.log(line))
 
   debug('migrate', `applying ${file}`)
   const sql = await readFile(join(migrationsDir, file), 'utf8')
@@ -117,16 +132,22 @@ export async function applyMigration(input: {
   // Resume support (#6): if a prior run left per-statement journal state for
   // this migration, statements already marked completed are skipped instead of
   // replayed — so a partial failure no longer bricks the migration on re-run
-  // with "column already exists". Guard against resuming across a file edit.
+  // with "column already exists". Resuming across a file edit needs care (#233).
   const initialState = await journalStore.readMigrationState(file)
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&
     initialState.checksum !== migrationChecksum
   ) {
-    throw new Error(
-      `Migration ${file} has in-progress journal state for checksum ${initialState.checksum}, but the current file checksum is ${migrationChecksum}. Restore the original migration file or clear the in-progress journal state before retrying.`,
-    )
+    await acceptEditedMigration({
+      file,
+      state: initialState,
+      checksum: migrationChecksum,
+      identities: statementIdentities(operationSummaries, statements.length),
+      retry,
+      journalStore,
+      log,
+    })
   }
 
   for (let i = 0; i < statements.length; i++) {
@@ -144,7 +165,7 @@ export async function applyMigration(input: {
           operationType: operation.type,
           operationKey: operation.key,
           beforeRetry: operation.beforeRetry,
-          log: (line) => console.log(line),
+          log,
         })
       } catch (error) {
         throw statementError({ file, index: i, total: statements.length, statement, error })
@@ -159,8 +180,7 @@ export async function applyMigration(input: {
       debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
       continue
     }
-    const opType = operation?.type ?? 'sql_statement'
-    const opKey = operation?.key ?? `statement:${i}`
+    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
     const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
     await journalStore.writeMigrationState(
       upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
@@ -209,4 +229,44 @@ export async function applyMigration(input: {
   })
 
   return entry
+}
+
+// An in-progress migration whose file changed resumes when this run's --retry
+// verified the edit, or when no statement is recorded as completed or started
+// (the first statement failed, or --abandon marked every statement failed):
+// the file then runs again from statement 1. The state is re-keyed to the new
+// checksum before anything runs, so a later failure resumes without --retry.
+async function acceptEditedMigration(input: {
+  file: string
+  state: MigrationRowState
+  checksum: string
+  identities: StatementIdentity[]
+  retry: { previousChecksum: string; checksum: string } | undefined
+  journalStore: JournalStore
+  log: (line: string) => void
+}): Promise<void> {
+  const { file, state, checksum, identities, retry, journalStore } = input
+  const retryVerified =
+    retry !== undefined && retry.previousChecksum === state.checksum && retry.checksum === checksum
+  if (retryVerified) {
+    // --retry checked the file's statements; apply indexes the statements the
+    // plugins returned, so check those too.
+    const check = verifyRetryEdit(state.operations, identities)
+    if (!check.ok) throw retryMismatchError(file, check)
+    debug('migrate', `${file}: --retry accepted checksum ${state.checksum} → ${checksum}`)
+  } else if (hasStatementProgress(state)) {
+    throw inProgressChecksumMismatchError({
+      migration: file,
+      journalChecksum: state.checksum,
+      fileChecksum: checksum,
+      async: false,
+    })
+  } else {
+    input.log(
+      `${file} changed since its last failed attempt; no statement is recorded as completed, so it runs again from statement 1.`,
+    )
+  }
+  await journalStore.writeMigrationState(
+    rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) }),
+  )
 }

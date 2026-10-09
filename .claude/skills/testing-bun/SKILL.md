@@ -12,7 +12,7 @@ metadata:
 - Use `bun:test` imports (`describe`, `test`, `expect`, etc.)
 - Use Bun test runner (`bun test`), typically via workspace scripts (`bun run test`)
 - Do not introduce Vitest/Jest in this repo
-- For local e2e/integration runs that need env vars, use Doppler (`bun run test:env`)
+- `bun run test` starts the local test stack (ClickHouse + Kafka, `test/infra`) through Turbo; e2e tests target it unless `CLICKHOUSE_URL`/`CLICKHOUSE_HOST` is set
 
 ## Critical Rules
 
@@ -57,7 +57,7 @@ test('calls API', async () => {
 })
 ```
 
-### 3. No Hidden Skips for Missing Env Vars
+### 3. No Hidden Skips
 
 ```ts
 // Bad
@@ -68,10 +68,11 @@ if (!process.env.CLICKHOUSE_URL) {
   test.skip('requires CLICKHOUSE_URL', () => {})
 }
 
-// Good
+// Good: getLiveEnv() targets the local stack unless CLICKHOUSE_* points elsewhere
+import { createLiveExecutor, getLiveEnv } from '@chkit/clickhouse/e2e-testkit'
+
 describe('integration', () => {
-  const url = process.env.CLICKHOUSE_URL
-  expect(url).toBeTruthy()
+  const db = createLiveExecutor(getLiveEnv())
 })
 ```
 
@@ -79,12 +80,14 @@ describe('integration', () => {
 
 - E2E tests must never be conditional on env availability.
 - Never use `skip`, `skipIf`, guard `return`, or branching that bypasses e2e execution when env vars are absent.
-- Missing required env vars must cause test failure immediately.
-- Local e2e execution must use Doppler so required vars are injected.
+- Read the target through `getLiveEnv()`; an unreachable server fails the test.
 
 ```bash
-# Required local command for env-dependent suites
-bun run test:env
+# Unit and e2e tests together, against the local test stack
+bun run test
+
+# The same suite against ObsessionDB (CLICKHOUSE_* from Doppler)
+doppler run --project chkit --config ci -- bun run test:obsessiondb
 ```
 
 ### 5. Prefer Inline Setup Over `beforeEach`
@@ -99,8 +102,7 @@ Use inline setup unless lifecycle hooks are required for async cleanup/reset.
 
 ## Env-Dependent Tests
 
-If tests require Doppler-provided vars:
-1. Ensure var is in package `turbo.json` `passThroughEnv`
-2. Ensure CI mapping in `.github/workflows/ci.yml`
-3. Run local e2e/integration suites with `bun run test:env`
-4. Treat missing vars as a hard failure, not a skip path
+If tests need a new env var:
+1. Ensure var is in `turbo.json` `passThroughEnv` for the `test` task
+2. Ensure CI mapping in `.github/workflows/ci.yml` if the ObsessionDB job needs it
+3. Treat a missing var as a hard failure, not a skip path

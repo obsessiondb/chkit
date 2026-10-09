@@ -9,7 +9,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
 } from './e2e-testkit.js'
@@ -21,7 +21,7 @@ import {
  */
 describe('@chkit/cli status applied scope e2e (#31)', () => {
   test('Applied counts only this project\'s migrations, not foreign rows in a shared journal', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     // One journal table shared by two independent projects — the multi-tenant

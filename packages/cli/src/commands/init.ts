@@ -6,6 +6,9 @@ import { ensureProjectDependencies } from '../runtime/deps.js'
 
 type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
 
+/** The example schema `init` writes to src/db/schema/example.ts. */
+export const INIT_SCHEMA_TEMPLATE = `import { schema, table } from '@chkit/core'\n\nconst events = table({\n  database: 'default',\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`
+
 interface InitOptions {
   connect?: ConnectChoice
   email?: string
@@ -25,10 +28,7 @@ export async function cmdInit(argv: string[] = []): Promise<void> {
     `import { defineConfig } from '@chkit/core'\n\nexport default defineConfig({\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [\n    // Register plugins inline. Example:\n    // import { codegen } from '@chkit/plugin-codegen'\n    // codegen({ emitZod: true }),\n  ],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n})\n`
   )
 
-  const wroteSchema = await writeIfMissing(
-    schemaPath,
-    `import { schema, table } from '@chkit/core'\n\nconst events = table({\n  database: 'default',\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: 'fn:now64(3)' },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`
-  )
+  const wroteSchema = await writeIfMissing(schemaPath, INIT_SCHEMA_TEMPLATE)
 
   if (wroteConfig) console.log(`Created ${relative(cwd, configPath)}`)
   if (wroteSchema) console.log(`Created ${relative(cwd, schemaPath)}`)

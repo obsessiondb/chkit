@@ -26,6 +26,8 @@ bun run build        # build all packages
 
 E2E tests run against a live ClickHouse instance and require `CLICKHOUSE_HOST` (or `CLICKHOUSE_URL`) and `CLICKHOUSE_PASSWORD` to be set. See [CLAUDE.md](CLAUDE.md#testing) for the full list.
 
+Pull request CI starts its own ClickHouse service and seeds the test fixtures, including for contributions from forks. After changes land on `main`, CI also runs the test suite against ObsessionDB before deployment.
+
 ## Pull requests
 
 - Branch off `main`, PR back to `main`.

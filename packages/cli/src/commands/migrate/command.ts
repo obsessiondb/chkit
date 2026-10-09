@@ -1,4 +1,6 @@
 import { mkdir } from 'node:fs/promises'
+import { join, relative } from 'node:path'
+import process from 'node:process'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
@@ -25,15 +27,22 @@ import {
 } from '../../runtime/migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
 
+import { abandonMigrationState, abandonReport, readAbandonableState } from './abandon.js'
 import { applyMigration } from './apply.js'
 import { scanDestructive } from './destructive.js'
+import { findEmptyMigrations } from './empty.js'
+import { emptyMigrationsError, MigrateError } from './errors.js'
 import {
+  emitAbandonJson,
   emitApplySummaryJson,
   emitChecksumMismatchJson,
   emitDestructiveBlockedJson,
+  emitEmptyMigrationsBlockedJson,
   emitNoPending,
   emitNoScopeMatch,
   emitPlanJson,
+  renderAbandonPlanOnlyNotice,
+  renderAbandonText,
   renderApplied,
   renderApplySummary,
   renderMigrationLog,
@@ -42,17 +51,32 @@ import {
   type MigrateMode,
 } from './output.js'
 import {
+  confirmAbandon,
   confirmApply,
   confirmDestructiveExecution,
   isBackgroundOrCI,
   printDestructiveOperationDetails,
 } from './prompts.js'
+import { resolveRecoveryTargets } from './recovery.js'
+import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
 
 const MIGRATE_FLAGS = defineFlags([
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
   { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
   { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
+  {
+    name: '--retry',
+    type: 'string',
+    description: 'Resume a failed migration after editing its file (skips completed statements)',
+    placeholder: '<migration>',
+  },
+  {
+    name: '--abandon',
+    type: 'string',
+    description: 'Reset a failed migration so the next apply runs it from statement 1 (journal only; previews without --apply)',
+    placeholder: '<migration>',
+  },
 ] as const)
 
 export const migrateCommand: ChxPluginCommand = {
@@ -71,6 +95,7 @@ interface MigrateContext {
   allowDestructive: boolean
   mode: MigrateMode
   migrationsDir: string
+  metaDir: string
   db: ClickHouseExecutor
   journalStore: JournalStore
   config: ResolvedChxConfig
@@ -78,36 +103,67 @@ interface MigrateContext {
   pluginRuntime: PluginRuntime
   tableScope: TableScope
   journal: MigrationJournal
+  files: string[]
+  appliedNames: ReadonlySet<string>
   pendingAll: string[]
+  retryTarget: string | undefined
+  abandonTarget: string | undefined
 }
 
 interface ScopeResolution {
-  /** Set when the run terminates during scope resolution; otherwise continue. */
-  exit?: number
+  /** --table matched no table, so no migration is selected. */
+  noScopeMatch: boolean
   pending: string[]
   undeterminedScope: string[]
 }
 
+/** What this run would apply, resolved before any gate. */
+interface PendingPlan extends ScopeResolution {
+  emptyMigrations: string[]
+  retry: RetryResolution | undefined
+}
+
+/** The parts of the migrate context that --abandon reads. */
+type AbandonContext = Pick<
+  MigrateContext,
+  'jsonMode' | 'executeRequested' | 'journalStore' | 'tableScope' | 'appliedNames' | 'files' | 'metaDir'
+>
+
+/** How --abandon asks before it changes the journal without --apply. */
+interface AbandonPrompt {
+  /** Whether someone can answer a prompt: a TTY outside CI. */
+  isInteractive: () => boolean
+  confirm: (migration: string) => Promise<boolean>
+}
+
+const TERMINAL_PROMPT: AbandonPrompt = {
+  isInteractive: () => !isBackgroundOrCI(),
+  confirm: confirmAbandon,
+}
+
 async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | number> {
   const ctx = await prepareMigration(runCtx)
+  if (ctx.abandonTarget !== undefined) return runAbandon(ctx, ctx.abandonTarget)
 
   const checksumExit = await runChecksumGate(ctx)
   if (checksumExit !== undefined) return checksumExit
 
-  const scope = await resolvePendingScope(ctx)
-  if (scope.exit !== undefined) return scope.exit
-  const { pending, undeterminedScope } = scope
+  const plan = await resolvePendingPlan(ctx)
+  if (plan.pending.length === 0) return renderNothingPending(ctx, plan)
 
-  const planExit = await renderPlan(ctx, pending, undeterminedScope)
+  const planExit = await renderPlan(ctx, plan)
   if (planExit !== undefined) return planExit
+
+  const emptyExit = runEmptyMigrationGate(ctx, plan.emptyMigrations)
+  if (emptyExit !== undefined) return emptyExit
 
   const confirmExit = await runConfirmGate(ctx)
   if (confirmExit !== undefined) return confirmExit
 
-  const destructiveExit = await runDestructiveGate(ctx, pending)
+  const destructiveExit = await runDestructiveGate(ctx, plan.pending)
   if (destructiveExit !== undefined) return destructiveExit
 
-  return applyPending(ctx, pending, undeterminedScope)
+  return applyPending(ctx, plan)
 }
 
 /** Parse flags, resolve deps, run onConfigLoaded, and load the pending set. */
@@ -118,16 +174,23 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const allowDestructive = f['--allow-destructive'] === true
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
+  const { retryTarget, abandonTarget } = resolveRecoveryTargets(flags)
 
   const { migrationsDir, metaDir } = resolveDirs(config)
-  debug('migrate', `flags: execute=${executeRequested}, allowDestructive=${allowDestructive}, json=${jsonMode}`)
+  debug(
+    'migrate',
+    `flags: execute=${executeRequested}, allowDestructive=${allowDestructive}, json=${jsonMode}, ` +
+      `retry=${retryTarget ?? '-'}, abandon=${abandonTarget ?? '-'}`,
+  )
 
   if (!pluginContext.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
   const db = pluginContext.executor
   const journalStore = createJournalStore(db, config.clickhouse?.cluster)
-  const snapshot = await readSnapshot(metaDir)
+  // --abandon only changes the journal and rejects --table, so it does not
+  // read snapshot.json: a conflicted snapshot cannot block it.
+  const snapshot = abandonTarget === undefined ? await readSnapshot(metaDir) : null
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
   const mode: MigrateMode = executeRequested ? 'execute' : 'plan'
 
@@ -141,6 +204,12 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
 
   await mkdir(migrationsDir, { recursive: true })
   const files = await listMigrations(migrationsDir)
+  if (retryTarget !== undefined && !files.includes(retryTarget)) {
+    throw new MigrateError(
+      'migration_not_found',
+      `--retry: no migration file named ${retryTarget} in ${migrationsDir}. To reset the journal state of a migration whose file was deleted, use chkit migrate --abandon ${retryTarget}.`,
+    )
+  }
   const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pendingAll = files.filter((file) => !appliedNames.has(file))
@@ -152,6 +221,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     allowDestructive,
     mode,
     migrationsDir,
+    metaDir,
     db,
     journalStore,
     config,
@@ -159,8 +229,59 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     pluginRuntime,
     tableScope,
     journal,
+    files,
+    appliedNames,
     pendingAll,
+    retryTarget,
+    abandonTarget,
   }
+}
+
+/**
+ * --abandon <migration>: reset the journal state of a failed migration so the
+ * next apply runs it from statement 1. Without --apply it only previews, like
+ * the rest of migrate, or asks first in an interactive terminal. Runs before
+ * every other gate and applies nothing.
+ */
+export async function runAbandon(
+  ctx: AbandonContext,
+  migration: string,
+  prompt: AbandonPrompt = TERMINAL_PROMPT,
+): Promise<number> {
+  const { jsonMode, executeRequested, journalStore, tableScope } = ctx
+  const state = await readAbandonableState({ migration, appliedNames: ctx.appliedNames }, { journalStore })
+  const report = abandonReport(state)
+  const textInput = {
+    fileExists: ctx.files.includes(migration),
+    snapshotFile: relative(process.cwd(), join(ctx.metaDir, 'snapshot.json')),
+  }
+
+  if (!executeRequested) {
+    if (jsonMode) {
+      emitAbandonJson({ mode: 'plan', scope: tableScope, abandon: report })
+      return 0
+    }
+    renderAbandonText(report, { ...textInput, performed: false })
+    if (!prompt.isInteractive()) {
+      renderAbandonPlanOnlyNotice()
+      return 0
+    }
+    if (!(await prompt.confirm(migration))) {
+      console.log('Abandon cancelled by user.')
+      return 0
+    }
+    await abandonMigrationState(state, { journalStore })
+    console.log(`Abandoned in-progress migration ${migration}.`)
+    return 0
+  }
+
+  await abandonMigrationState(state, { journalStore })
+  if (jsonMode) {
+    emitAbandonJson({ mode: 'execute', scope: tableScope, abandon: report })
+    return 0
+  }
+  renderAbandonText(report, { ...textInput, performed: true })
+  return 0
 }
 
 /** Gate 1: block when applied migrations no longer match their recorded checksum. */
@@ -179,49 +300,72 @@ async function runChecksumGate(ctx: MigrateContext): Promise<number | undefined>
   )
 }
 
-/** Resolve table scope, filter the pending set, and short-circuit empty runs. */
+/**
+ * Filter the pending set by table scope, find the files without statements,
+ * and resolve --retry, before any gate runs. --retry is resolved even when
+ * nothing is pending, so every run reports what it did.
+ */
+async function resolvePendingPlan(ctx: MigrateContext): Promise<PendingPlan> {
+  const { migrationsDir, retryTarget, journalStore, appliedNames } = ctx
+  const scope = await resolvePendingScope(ctx)
+  const emptyMigrations = await findEmptyMigrations(migrationsDir, scope.pending)
+  const retry =
+    retryTarget === undefined
+      ? undefined
+      : await resolveRetry(
+          { migration: retryTarget, migrationsDir, pending: scope.pending, emptyMigrations, appliedNames },
+          { journalStore },
+        )
+  return { ...scope, emptyMigrations, retry }
+}
+
+/** Resolve the table scope and filter the pending set by it. */
 async function resolvePendingScope(ctx: MigrateContext): Promise<ScopeResolution> {
-  const { tableScope, jsonMode, mode, migrationsDir, pendingAll } = ctx
+  const { tableScope, migrationsDir, pendingAll } = ctx
+  if (!tableScope.enabled) return { noScopeMatch: false, pending: pendingAll, undeterminedScope: [] }
+  if (tableScope.matchCount === 0) return { noScopeMatch: true, pending: [], undeterminedScope: [] }
+  const scoped = await filterPendingByScope(migrationsDir, pendingAll, new Set(tableScope.matchedTables))
+  return { noScopeMatch: false, pending: scoped.inScope, undeterminedScope: scoped.undetermined }
+}
 
-  if (tableScope.enabled && tableScope.matchCount === 0) {
-    emitNoScopeMatch({ jsonMode, mode, scope: tableScope })
-    return { exit: 0, pending: [], undeterminedScope: [] }
-  }
-
-  let pending = pendingAll
-  let undeterminedScope: string[] = []
-  if (tableScope.enabled) {
-    const scoped = await filterPendingByScope(migrationsDir, pendingAll, new Set(tableScope.matchedTables))
-    pending = scoped.inScope
-    undeterminedScope = scoped.undetermined
-  }
-
-  if (pending.length === 0) {
-    emitNoPending({ jsonMode, mode, scope: tableScope })
-    return { exit: 0, pending, undeterminedScope }
-  }
-
-  return { pending, undeterminedScope }
+/** Nothing to apply: say why, with what --retry did. */
+function renderNothingPending(ctx: MigrateContext, plan: PendingPlan): number {
+  const { jsonMode, mode, tableScope } = ctx
+  const input = { jsonMode, mode, scope: tableScope, retry: plan.retry }
+  if (plan.noScopeMatch) emitNoScopeMatch(input)
+  else emitNoPending(input)
+  return 0
 }
 
 /** Render the pending plan (JSON early-return in plan mode, text otherwise). */
-async function renderPlan(
-  ctx: MigrateContext,
-  pending: string[],
-  undeterminedScope: string[],
-): Promise<number | undefined> {
+async function renderPlan(ctx: MigrateContext, plan: PendingPlan): Promise<number | undefined> {
   const { jsonMode, executeRequested, mode, tableScope, migrationsDir } = ctx
+  const { pending, undeterminedScope, emptyMigrations, retry } = plan
 
   if (jsonMode && !executeRequested) {
-    emitPlanJson({ mode, scope: tableScope, pending, undeterminedScope })
+    emitPlanJson({ mode, scope: tableScope, pending, undeterminedScope, emptyMigrations, retry })
     return 0
   }
 
   if (!jsonMode) {
-    await renderPlanText({ migrationsDir, scope: tableScope, undeterminedScope, pending })
+    await renderPlanText({ migrationsDir, scope: tableScope, undeterminedScope, pending, emptyMigrations, retry })
   }
 
   return undefined
+}
+
+/** Gate: refuse to apply pending files without executable statements; a plan-only run just warns. */
+function runEmptyMigrationGate(ctx: MigrateContext, emptyMigrations: string[]): number | undefined {
+  const { executeRequested, jsonMode, mode, tableScope } = ctx
+  if (emptyMigrations.length === 0) return undefined
+  // A JSON plan already returned from renderPlan, so jsonMode here means --apply.
+  const applyPossible = executeRequested || (!jsonMode && !isBackgroundOrCI())
+  if (!applyPossible) return undefined
+  if (jsonMode) {
+    emitEmptyMigrationsBlockedJson({ mode, scope: tableScope, emptyMigrations })
+    return 1
+  }
+  throw emptyMigrationsError(emptyMigrations)
 }
 
 /** Gate 2: in plan mode, stop unless the user confirms an interactive apply. */
@@ -281,12 +425,11 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
 }
 
 /** Apply each pending migration, journal it, and emit the final summary. */
-async function applyPending(
-  ctx: MigrateContext,
-  pending: string[],
-  undeterminedScope: string[],
-): Promise<number> {
+async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<number> {
   const { jsonMode, migrationsDir, db, journalStore, pluginRuntime, config, tableScope, flags } = ctx
+  const { pending, undeterminedScope, retry } = plan
+  // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
+  const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
 
   const appliedNow: MigrationJournalEntry[] = []
   for (const file of pending) {
@@ -300,13 +443,15 @@ async function applyPending(
       flags,
       migrationsDir,
       file,
+      retry: retry?.action === 'resume' && retry.migration === file ? retry : undefined,
+      log,
     })
     appliedNow.push(entry)
     if (!jsonMode) renderApplied(file)
   }
 
   if (jsonMode) {
-    emitApplySummaryJson({ scope: tableScope, applied: appliedNow, undeterminedScope })
+    emitApplySummaryJson({ scope: tableScope, applied: appliedNow, undeterminedScope, retry })
     return 0
   }
 

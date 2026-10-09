@@ -36,6 +36,8 @@ Writes two files relative to the current working directory, leaving any that alr
 1. **`clickhouse.config.ts`** — project config with sensible defaults: `schema: './src/db/schema/**/*.ts'`, `outDir: './chkit'`, `migrationsDir: './chkit/migrations'`, `metaDir: './chkit/meta'`, an empty `plugins` array, and a `clickhouse` block reading from `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, and `CLICKHOUSE_DB`.
 2. **`src/db/schema/example.ts`** — a starter `MergeTree` table named `events` with columns `id` (`UInt64`), `source` (`String`), and `ingested_at` (`DateTime64(3)`).
 
+Under [chkit-py](/python/overview/), the same command writes `clickhouse.config.py` and `src/db/schema/example.py` instead.
+
 ### 2. Install dependencies
 
 If `@chkit/core` does not already resolve from the project, `init` makes the project runnable: it writes a minimal `package.json` when none exists, then installs `chkit`, `@chkit/core`, and `@chkit/plugin-obsessiondb` as dev dependencies using the detected package manager (`npm`, `pnpm`, `yarn`, or `bun`; defaults to `bun`). This is why `init` works in a brand-new empty folder, not just an existing project. A failed install never aborts `init` — it prints the manual install command and continues.

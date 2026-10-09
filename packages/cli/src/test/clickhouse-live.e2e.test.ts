@@ -10,7 +10,7 @@ import {
   createPrefix,
   createStatelessLiveExecutor,
   formatTestDiagnostic,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
   runCliWithRetry,
@@ -46,7 +46,7 @@ async function createFixture(input: {
   const migrationsDir = join(outDir, 'migrations')
   const metaDir = join(outDir, 'meta')
 
-  const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+  const { clickhouseUrl, clickhouseUser, clickhousePassword } = getLiveEnv()
 
   await writeFile(schemaPath, renderBaseSchema(input.database, input.usersTableName), 'utf8')
 
@@ -60,7 +60,7 @@ async function createFixture(input: {
 }
 
 describe('@chkit/cli doppler env e2e', () => {
-  const liveEnv = getRequiredEnv()
+  const liveEnv = getLiveEnv()
 
   test(
     'runs init + generate + migrate + status against live ClickHouse',
@@ -260,7 +260,7 @@ describe('@chkit/cli doppler env e2e', () => {
       const migrationsDir = join(outDir, 'migrations')
       const metaDir = join(outDir, 'meta')
 
-      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getLiveEnv()
 
       const schemaContent = `import { schema, table, materializedView } from '${CORE_ENTRY}'
 
@@ -367,7 +367,7 @@ export default schema(events, eventCounts, eventCountsMv)
       const migrationsDir = join(outDir, 'migrations')
       const metaDir = join(outDir, 'meta')
 
-      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getRequiredEnv()
+      const { clickhouseUrl, clickhouseUser, clickhousePassword } = getLiveEnv()
 
       const renderSchema = (options: {
         includeRmv: boolean

@@ -1,5 +1,94 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.9
+
+### Patch Changes
+
+- 2f53550: Support `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns with a new `defaultKind` column field. `default` holds the value or `fn:` expression for every kind, and `EPHEMERAL` may omit it. SQL rendering, `pull`, snapshots, and drift keep the kind; validation reports `column_expression_required` and `column_default_kind_invalid`.
+
+  - `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning that stored values are not rewritten, and removed expressions emit `REMOVE DEFAULT`/`REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail `generate` with `column_kind_change_unsupported`.
+  - Codegen emits `Row` (`SELECT *`), `RowExplicit` (all readable columns), and `RowInsert` (all insertable columns) for these tables; ingest helpers take `RowInsert`.
+  - Inserts into tables with `EPHEMERAL` columns name their columns: generated ingest helpers pass `columns`, which `@chkit/clickhouse` `insert()` and the ObsessionDB remote executor send, and the `@chkit/plugin-ingest` destination does the same.
+  - Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live column kinds first: a copy is blocked only when the target has both `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column, and a missing target fails with "does not exist or is not visible yet".
+  - `drift` and `check` compare defaults token by token. Write expressions in the canonical form ClickHouse stores, such as `CAST(x, 'String')`, to avoid drift.
+  - Fix string defaults containing backslashes: `C:\temp` now renders as `DEFAULT 'C:\\temp'`.
+
+- 96a18c6: Recover a migration that failed part-way without editing the journal table by hand (#233). When no statement of the in-progress migration had completed or was interrupted while running, an edited file now runs again from statement 1 on the next `chkit migrate --apply`. Otherwise `chkit migrate --apply --retry <migration>` resumes with the edited file: chkit checks that every statement that completed keeps its position and `-- operation:` marker, and that statements sharing such a marker (a column's `REMOVE DEFAULT` or `REMOVE MATERIALIZED` and the `MODIFY COLUMN` after it) all stay in the file, records the new checksum, and continues from the first statement that did not complete. For any other migration `--retry` has no effect and the output says so, also when nothing is pending, so pipelines can pass it to every environment. `chkit migrate --abandon <migration>` shows what it would reset and, with `--apply`, writes a new journal version in which every recorded statement failed, so the next apply runs the file from statement 1; it lists the statements that stay applied in ClickHouse, runs no migration SQL (its only write is a journal INSERT), and needs neither the migration file nor a readable `snapshot.json`. The refusal for an edited in-progress migration names both commands, and these errors carry stable `--json` error codes. An async statement now only trusts `system.query_log` entries of queries that started after it was submitted, so a load that an earlier attempt finished is no longer reported as finished when the edited statement fails before it starts; such a failure is recorded as failed. A re-run that attaches to a still-running attempt likewise only trusts entries of queries that started no earlier than that attempt, so it no longer records an earlier attempt's result for it. The ObsessionDB remote executor now compares these bounds with the query's start time, as a direct connection does: its status checks failed with `TYPE_MISMATCH` on such a bound, so a retried async statement was never journaled as completed and each re-run loaded its data again. It also reports how long a running query has run, which an attach needs for its bound. In `--json` mode, async progress lines go to stderr instead of stdout. `chkit migrate --apply` refuses to apply a pending migration file without executable statements, such as a `generate --empty` stub without SQL, instead of recording it as applied; plan mode lists these files. In `@chkit/core`, `extractExecutableStatements` no longer returns a statement made only of comments, which ClickHouse rejects as `Empty query` (for example a block comment after the last statement).
+- b59fc83: The ObsessionDB remote executor now sends per-insert `settings` (such as `insert_deduplication_token`) with `insert`. Before, it silently dropped them, so an insert retried through it was not deduplicated.
+- cfabb19: Fix `--force-shared-engines` and `--no-shared-engines`. The plugin looked the parsed flags up without their `--` prefix, so both overrides were silently ignored and host auto-detection always decided whether the `storage_policy` table setting was stripped. `--force-shared-engines` now keeps it for a URL not recognized as ObsessionDB (for example a service behind a custom domain), and `--no-shared-engines` strips it even when targeting ObsessionDB. The flags take effect in `chkit generate` and `chkit snapshot rebuild`, which now accepts them too, so a rebuilt snapshot matches what `generate` writes; `migrate`, `status`, `drift` and `check` still accept them but ignore them. The flag help no longer claims to keep `Shared` engines, and the docs now state that chkit writes the standard engine name (`SharedMergeTree` becomes `MergeTree()`) for every target while the plugin only strips `storage_policy`.
+- Updated dependencies [d072fe3]
+- Updated dependencies [2f53550]
+- Updated dependencies [98e3667]
+- Updated dependencies [96a18c6]
+- Updated dependencies [46cbf88]
+- Updated dependencies [46cbf88]
+- Updated dependencies [b59fc83]
+- Updated dependencies [c49f0a9]
+- Updated dependencies [672d67e]
+  - @chkit/core@0.2.0-beta.9
+  - @chkit/clickhouse@0.2.0-beta.9
+  - @chkit/plugin-backfill@0.2.0-beta.9
+
+## 0.2.0-beta.8
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- 4ded781: Print the "Next steps" block once and with the correct runner for the selected package manager. `create-chkit` previously printed it twice — once package-manager-aware and once from onboarding with a hardcoded `bunx` — so `--package-manager npm` users were told to run `bunx chkit …`. Onboarding now derives the runner (`npx` / `pnpm dlx` / `yarn dlx` / `bunx`) from the package manager, and `create-chkit` only prints its own next-steps when onboarding is skipped, removing the duplicate.
+- 75d15e9: Stop `chkit drift` from reporting `index_mismatch` for skip indexes it just created. Introspection read `system.data_skipping_indices.type`, which holds only the index name (`ngrambf_v1`), so every argument parsed as 0; it now reads `type_full` (`ngrambf_v1(3, 4096, 2, 0)`). chkit renders `INDEX name (expr)` and ClickHouse keeps those parentheses in `expr`, so the comparison now drops one pair when it encloses the whole expression. chkit-py introspection reads `type_full` as well.
+- 4ded781: Make `--json` always emit a JSON object, never a bare JSON-encoded string. `printOutput` now wraps any plain string printed under `--json` in `{ schemaVersion, message }`, closing the whole class of bug at the serializer so no command can leak a bare string. `chkit obsessiondb whoami` gains a structured envelope (`status: logged_in | not_logged_in | session_expired`), and `chkit obsessiondb service list` emits a single object with a `services[]` array instead of one JSON line per service (which was not valid single-JSON). Previously these commands `JSON.stringify`'d a prose string (e.g. `"Not logged in…"`), breaking any pipe to `jq`. Text-mode output is unchanged. Note: this changes the `--json` output shape of `whoami` and `service list` from a string to an object.
+- 4ded781: `chkit obsessiondb logout` now reports "No active session." when there are no stored credentials, instead of always printing "Logged out." (which implied it had ended a session that never existed). Logout stays idempotent and exits 0 either way; only the message changes.
+- 3cc768d: Pin `@orpc/client` and `@orpc/contract` to 1.15.4 to fix prototype pollution (CVE-2026-28794) and include the subsequent deserializer validation fix (GHSA-4p2c-m292-ghmh). Keep exact versions and align the oRPC dependency family.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [65c90d6]
+- Updated dependencies [75d15e9]
+- Updated dependencies [3f1db03]
+- Updated dependencies [f8238db]
+- Updated dependencies [fedbf56]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+- Updated dependencies [256ec62]
+  - @chkit/plugin-backfill@0.2.0-beta.8
+  - @chkit/core@0.2.0-beta.8
+  - @chkit/clickhouse@0.2.0-beta.8
+
+## 0.1.2-beta.7
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.7
+  - @chkit/core@0.1.2-beta.7
+  - @chkit/clickhouse@0.1.2-beta.7
+
+## 0.1.2-beta.6
+
+### Patch Changes
+
+- 3f9a246: Fix `backfill` mv_replay so it rebuilds **every** materialized view feeding the target table, not just the first. ClickHouse allows several MVs to share one destination table; previously only the first-declared MV was replayed and the rest were silently dropped, leaving the backfill incomplete. Each chunk now runs one `INSERT INTO target … SELECT … UNION ALL SELECT …` covering all matching MVs, so a single query id and idempotency token still cover the chunk. Single-MV plans are unchanged.
+- Updated dependencies [f85f568]
+- Updated dependencies [3f9a246]
+- Updated dependencies [9ad23f9]
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [8296b8a]
+- Updated dependencies [b501f5d]
+  - @chkit/plugin-backfill@0.1.2-beta.6
+  - @chkit/core@0.1.2-beta.6
+  - @chkit/clickhouse@0.1.2-beta.6
+
 ## 0.1.2-beta.5
 
 ### Patch Changes
