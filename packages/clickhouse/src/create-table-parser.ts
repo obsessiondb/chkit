@@ -1,5 +1,7 @@
 import {
+  findQuoteEnd,
   findTopLevelSQLPattern,
+  isQuoteChar,
   normalizeProjectionIndex,
   normalizeSQLFragment,
   splitTopLevelComma,
@@ -43,19 +45,10 @@ function findColumnListBounds(
 ): { open: number; close: number } | undefined {
   let depth = 0
   let openIndex = -1
-  let quote: string | undefined
   for (let i = 0; i < createTableQuery.length; i += 1) {
     const char = createTableQuery[i]
-    if (quote) {
-      if (char === '\\') i += 1
-      else if (char === quote) {
-        if (createTableQuery[i + 1] === quote) i += 1
-        else quote = undefined
-      }
-      continue
-    }
-    if (char === "'" || char === '"' || char === '`') {
-      quote = char
+    if (isQuoteChar(char)) {
+      i = findQuoteEnd(createTableQuery, i, char)
       continue
     }
     if (char === '(') {

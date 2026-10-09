@@ -1,4 +1,5 @@
 import { isPlainColumnReference } from './key-clause.js'
+import { findQuoteEnd } from './sql-scan.js'
 
 // ASCII control characters (incl. NUL). ClickHouse cannot round-trip them in a
 // name reliably, and they are never intentional in a schema object name.
@@ -64,19 +65,6 @@ export function unquoteIdentifiers(sql: string): string {
     i += 1
   }
   return out
-}
-
-// Index of the quote closing the one at `start`; honours backslash escapes and
-// doubled quotes. Unterminated input runs to the end of the string.
-export function findQuoteEnd(sql: string, start: number, quote: string): number {
-  for (let i = start + 1; i < sql.length; i += 1) {
-    if (sql[i] === '\\') i += 1
-    else if (sql[i] === quote) {
-      if (sql[i + 1] === quote) i += 1
-      else return i
-    }
-  }
-  return sql.length
 }
 
 export function unescapeQuoted(body: string, quote = '`'): string {

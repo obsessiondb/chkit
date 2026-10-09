@@ -512,6 +512,65 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).toContain('{ name: "raw", type: "String", defaultKind: "EPHEMERAL" },')
   })
 
+  test('unwraps key tuples whose identifiers contain parens', async () => {
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          database: 'app',
+          name: 'events',
+          engine: 'MergeTree()',
+          primaryKey: '(`w)x`, id)',
+          orderBy: '(`w)x`, id)',
+          columns: [
+            { name: 'id', type: 'UInt64' },
+            { name: 'w)x', type: 'String' },
+          ],
+          settings: {},
+          indexes: [],
+          projections: [],
+        },
+      ],
+    })
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({ databases: ['app'] }),
+      rawOptions: { databases: ['app'] },
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    const payload = logs[0] as { content: string }
+    expect(payload.content).toContain('orderBy: ["`w)x`", "id"],')
+    expect(payload.content).toContain('primaryKey: ["`w)x`", "id"],')
+  })
+
   test('excludes ObsessionDB metadata tables from pulled schema output', async () => {
     const introspectedTable = (name: string) => ({
       database: 'app',
