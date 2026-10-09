@@ -1,4 +1,4 @@
-import { canonicalJson, digest, emptyCheckpoint, type JournalRow } from './journal.js'
+import { canonicalJson, digest, emptyCheckpoint, type JournalRow } from './journal-records.js'
 import type { CheckpointEnvelope, CommittedCheckpoint } from './types.js'
 
 const EVENT_KINDS = new Set(['run_started', 'work_planned', 'attempt_started', 'retry_scheduled', 'batch_committed', 'work_finished', 'run_finished'])
