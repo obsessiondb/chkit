@@ -165,6 +165,20 @@ _DEFAULT_CASES = [
         "fn toDate now()",
         {"name": "created_date", "type": "Date", "default": "fn:toDate(now())"},
     ),
+    (
+        "expression object now64(3)",
+        {"name": "updated_at", "type": "DateTime64(3, 'UTC')", "default": {"expression": "now64(3)"}},
+    ),
+    (
+        "MATERIALIZED expression object with a comment",
+        {
+            "name": "created_date",
+            "type": "Date",
+            "default_kind": "MATERIALIZED",
+            "default": {"expression": "toDate(now()) -- day of insert"},
+            "comment": "insert day",
+        },
+    ),
 ]
 
 
@@ -173,6 +187,19 @@ def test_create_table_column_default(
     assert_valid_sql, label: str, col: dict[str, Any]
 ) -> None:
     def_ = _base_table(columns=[{"name": "id", "type": "UInt64"}, col])
+    assert_valid_sql(to_create_sql(def_))
+
+
+def test_create_table_expression_default_with_line_comment_before_another_column(
+    assert_valid_sql,
+) -> None:
+    # #234: rendered as written, the `--` comment would swallow the comma
+    # before the next column.
+    def_ = _base_table(columns=[
+        {"name": "id", "type": "UInt64"},
+        {"name": "ts", "type": "DateTime", "default": {"expression": "now() -- set on insert"}},
+        {"name": "n", "type": "UInt8"},
+    ])
     assert_valid_sql(to_create_sql(def_))
 
 
@@ -861,6 +888,11 @@ _ADD_COLUMN_CASES = [
     ("nullable", {"name": "email", "type": "String", "nullable": True}),
     ("with default", {"name": "score", "type": "Float64", "default": 0}),
     ("with fn default", {"name": "ts", "type": "DateTime", "default": "fn:now()"}),
+    ("with expression default",
+     {"name": "ts", "type": "DateTime", "default": {"expression": "now()"}}),
+    ("with commented expression default and a comment",
+     {"name": "ts", "type": "DateTime", "default": {"expression": "now() -- set on insert"},
+      "comment": "insert time"}),
     ("with comment", {"name": "notes", "type": "String", "comment": "User notes"}),
     ("complex type", {"name": "tags", "type": "Array(String)"}),
 ]

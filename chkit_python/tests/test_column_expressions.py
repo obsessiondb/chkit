@@ -16,7 +16,14 @@ from chkit.clickhouse.introspect import (
     SystemColumnRow,
     normalize_column_from_system_row,
 )
-from chkit.core.model import ChxValidationError, Snapshot, TableDefinition
+from chkit.core.canonical import canonicalize_definitions
+from chkit.core.model import (
+    ChxValidationError,
+    Snapshot,
+    SQLExpression,
+    TableDefinition,
+    ValidationIssue,
+)
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
@@ -346,26 +353,72 @@ def issue_messages(definition: TableDefinition, code: str) -> list[str]:
     return [issue.message for issue in validate_definitions([definition]) if issue.code == code]
 
 
-@pytest.mark.parametrize(
-    ("kind", "default", "flagged"),
-    [
-        ("MATERIALIZED", "toDate(ts)", True),
-        ("ALIAS", "label", True),
-        ("ALIAS", "fn:'label'", False),
-        ("MATERIALIZED", 7, False),
-        ("ALIAS", True, False),
-        ("DEFAULT", "label", False),
-        ("EPHEMERAL", "label", False),
-    ],
-)
-def test_expression_kinds_reject_plain_string_defaults(kind: str, default: Any, flagged: bool) -> None:
-    messages = issue_messages(definition(default_kind=kind, default=default), "column_expression_requires_fn")
-    expected = (
-        f'Column "day" is {kind} with a plain string default, which ClickHouse would store as the '
-        f"text '{default}'. Prefix SQL expressions with fn: (for example fn:toDate(ts)); "
-        "write fn:'<text>' for a constant string."
+@pytest.mark.parametrize("kind", ["MATERIALIZED", "ALIAS"])
+def test_expression_kinds_require_sql_expression_for_string_defaults(kind: str) -> None:
+    plain = definition(default_kind=kind, default="toDate(ts)")
+    issue = ValidationIssue(
+        code="column_expression_requires_fn",
+        kind="table",
+        database="default",
+        name="events",
+        message=(
+            f'Table default.events column "day" is {kind} with plain string default "toDate(ts)", '
+            "which renders as the quoted literal 'toDate(ts)' instead of SQL. Use "
+            f'default: {{ expression: "toDate(ts)" }} to render {kind} toDate(ts) (legacy spelling: '
+            '"fn:toDate(ts)"), or default: { expression: "\'toDate(ts)\'" } for a constant string.'
+        ),
     )
-    assert messages == ([expected] if flagged else [])
+    assert validate_definitions([plain]) == [issue]
+    assert validate_definitions(canonicalize_definitions([plain])) == [issue]
+    with pytest.raises(ChxValidationError):
+        to_create_sql(plain)
+    with pytest.raises(ChxValidationError):
+        plan_diff([], [plain])
+    code = "column_expression_requires_fn"
+    # The suggested expression renders without its comments.
+    assert issue_messages(definition(default_kind=kind, default="toDate(ts) -- the day"), code) == [
+        f'Table default.events column "day" is {kind} with plain string default '
+        "\"toDate(ts) -- the day\", which renders as the quoted literal 'toDate(ts) -- the day' "
+        f'instead of SQL. Use default: {{ expression: "toDate(ts) -- the day" }} to render {kind} '
+        'toDate(ts) (legacy spelling: "fn:toDate(ts) -- the day"), or '
+        "default: { expression: \"'toDate(ts) -- the day'\" } for a constant string."
+    ]
+    assert issue_messages(definition(default_kind=kind, default=" "), code) == [
+        f'Table default.events column "day" is {kind} with plain string default " ", which renders '
+        "as the quoted literal ' ' instead of SQL. Use default: { expression: \"<sql>\" } for a SQL "
+        "expression, or default: { expression: \"' '\" } for a constant string."
+    ]
+    # No suggestion that validation rejects in turn: a leftover fn: prefix (the
+    # space hides it from the legacy spelling), a stray #, an open string.
+    assert issue_messages(definition(default_kind=kind, default=" fn:toDate(ts)"), code) == [
+        f'Table default.events column "day" is {kind} with plain string default " fn:toDate(ts)", '
+        "which renders as the quoted literal ' fn:toDate(ts)' instead of SQL. Use "
+        'default: { expression: "<sql>" } for a SQL expression, or '
+        "default: { expression: \"' fn:toDate(ts)'\" } for a constant string."
+    ]
+    for value in ["toDate(ts) #", "concat('a"]:
+        [message] = issue_messages(definition(default_kind=kind, default=value), code)
+        assert 'Use default: { expression: "<sql>" } for a SQL expression, or' in message
+        assert "\n" not in message
+    # Raw definitions (to_create_sql) keep SQLExpression; canonical ones
+    # (plan_diff, snapshot rebuild) hold it as the fn: string.
+    for value in [
+        "fn:'text'",
+        SQLExpression(expression="toDate(ts)"),
+        {"expression": "'text'"},
+        1,
+        True,
+    ]:
+        defn = definition(default_kind=kind, default=value)
+        assert validate_definitions([defn]) == []
+        assert validate_definitions(canonicalize_definitions([defn])) == []
+
+
+@pytest.mark.parametrize("kind", ["DEFAULT", "EPHEMERAL"])
+def test_literal_kinds_keep_plain_string_defaults(kind: str) -> None:
+    assert issue_messages(
+        definition(default_kind=kind, default="label"), "column_expression_requires_fn"
+    ) == []
 
 
 @pytest.mark.parametrize(
@@ -438,6 +491,9 @@ def test_projections_reading_ephemeral_columns(projection: dict[str, Any], flagg
         ({"default_kind": "EPHEMERAL", "default": "fn:today()"}, False),
         ({"default_kind": "EPHEMERAL", "comment": "input"}, False),
         ({"default_kind": "MATERIALIZED", "default": "fn:toDate(ts)"}, False),
+        ({"default_kind": "ALIAS", "default": {"expression": "toDate(ts)"}}, True),
+        ({"default_kind": "EPHEMERAL", "default": {"expression": "toDate(ts) -- parsed input"}},
+         False),
     ],
 )
 def test_codecs_on_columns_without_storage(column: dict[str, Any], flagged: bool) -> None:
@@ -447,3 +503,11 @@ def test_codecs_on_columns_without_storage(column: dict[str, Any], flagged: bool
         if flagged
         else []
     )
+
+
+def test_comment_only_expression_on_codec_column_reports_one_issue() -> None:
+    # An expression of only comments renders empty, which is its own mistake.
+    defn = definition(
+        default_kind="EPHEMERAL", default={"expression": "-- todo"}, codec={"kind": "LZ4"}
+    )
+    assert [issue.code for issue in validate_definitions([defn])] == ["column_expression_required"]

@@ -12,8 +12,9 @@ projections). Returns ``None`` when shapes are identical.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal, Protocol, TypeAlias
 
 from chkit.cli.commands.drift_diff import (
     diff_by_name,
@@ -21,7 +22,10 @@ from chkit.cli.commands.drift_diff import (
     diff_settings,
 )
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectKind
+from chkit.core.column_default import render_default
+from chkit.core.identifier import unquote_identifiers
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
+from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ColumnDefinition,
     ProjectionDefinition,
@@ -29,7 +33,8 @@ from chkit.core.model import (
     TableDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql import render_default
+from chkit.core.sql import render_key_clause_columns
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
     normalize_engine,
@@ -37,8 +42,6 @@ from chkit.core.sql_normalizer import (
     sql_expression_fingerprint,
 )
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
-
-_MIN_QUOTED_LEN = 2
 
 ObjectDriftReasonCode: TypeAlias = Literal[
     "missing_object", "extra_object", "kind_mismatch"
@@ -60,6 +63,49 @@ TableDriftReasonCode: TypeAlias = Literal[
 ]
 
 DriftReasonCode: TypeAlias = ObjectDriftReasonCode | TableDriftReasonCode
+
+
+class SqlCanonicalizer(Protocol):
+    """Canonicalizes SQL fragments to the exact form ClickHouse stores.
+
+    A schema fragment then compares equal to what a live table reports even when
+    the two are spelled differently (``cityHash64(a,b)`` vs ``cityHash64(a, b)``,
+    ``n*2+1`` vs ``(n * 2) + 1``, ``INTERVAL 5 YEAR`` vs ``toIntervalYear(5)``).
+    Only ClickHouse's own formatter can produce this, so it is injected by the
+    drift command; when it is absent (offline, or a fragment ClickHouse couldn't
+    parse) each field falls back to plain string normalization (#195).
+    """
+
+    def expression(self, fragment: str) -> str | None: ...
+
+    def query(self, fragment: str) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MapSqlCanonicalizer:
+    """A canonicalizer backed by pre-formatted fragment maps."""
+
+    expressions: dict[str, str]
+    queries: dict[str, str]
+
+    def expression(self, fragment: str) -> str | None:
+        return self.expressions.get(fragment)
+
+    def query(self, fragment: str) -> str | None:
+        return self.queries.get(fragment)
+
+
+@dataclass(frozen=True, slots=True)
+class TableSqlFragments:
+    expressions: list[str]
+    queries: list[str]
+
+
+def _canonicalize_expression(base: str, canonicalizer: SqlCanonicalizer | None) -> str:
+    if canonicalizer is None:
+        return base
+    canonical = canonicalizer.expression(base)
+    return base if canonical is None else canonical
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,19 +331,28 @@ def _strip_enclosing_parens(value: str) -> str:
     return value[1:-1].strip()
 
 
-def _normalize_index_shape(index: SkipIndexDefinition) -> str:
+def _index_expression_base(index: SkipIndexDefinition) -> str:
+    return _strip_enclosing_parens(normalize_sql_fragment(index.expression))
+
+
+def _normalize_index_shape(
+    index: SkipIndexDefinition, canonicalizer: SqlCanonicalizer | None = None
+) -> str:
     if index.type == "text":
         return text_index_fingerprint(index)
+    expression = _canonicalize_expression(_index_expression_base(index), canonicalizer)
     return "|".join(
         [
-            f"expr={_strip_enclosing_parens(normalize_sql_fragment(index.expression))}",
+            f"expr={expression}",
             f"type={_render_index_type_fingerprint(index)}",
             f"granularity={index.granularity}",
         ]
     )
 
 
-def _normalize_projection_shape(projection: ProjectionDefinition) -> str:
+def _normalize_projection_shape(
+    projection: ProjectionDefinition, canonicalizer: SqlCanonicalizer | None = None
+) -> str:
     if is_index_projection(projection):
         type_text = projection.type.strip() if projection.type is not None else ""
         return "|".join(
@@ -306,20 +361,70 @@ def _normalize_projection_shape(projection: ProjectionDefinition) -> str:
                 f"type={type_text}",
             ]
         )
-    return f"query={normalize_sql_fragment(projection.query or '')}"
+    base = normalize_sql_fragment(projection.query or "")
+    canonical = canonicalizer.query(base) if canonicalizer is not None else None
+    return f"query={base if canonical is None else canonical}"
 
 
-def _normalize_clause(value: str | None) -> str:
+_WRAPPED_RE = re.compile(r"^\((.*)\)$")
+
+
+def _normalize_clause(value: str | None, canonicalizer: SqlCanonicalizer | None = None) -> str:
+    # Key and partition clauses are compared as SQL: comments are removed while
+    # quoted names still carry their backticks (#232), then the names are
+    # unquoted, since ClickHouse re-renders identifiers with its own quoting and
+    # escaping, and one pair of parentheses around the whole clause is dropped.
+    # From there on only whitespace is collapsed: unquoted, `user--id` would
+    # read as `user` followed by a comment. For the same reason a canonicalizer
+    # sees each element while its names are still quoted.
     if not value:
         return ""
-    normalized = normalize_sql_fragment(value).replace("`", "")
-    if (
-        len(normalized) >= _MIN_QUOTED_LEN
-        and normalized.startswith("(")
-        and normalized.endswith(")")
-    ):
-        return normalize_sql_fragment(normalized[1:-1])
-    return normalized
+    sql = normalize_sql_fragment(value)
+    canonical = (
+        ", ".join(
+            _canonicalize_expression(element, canonicalizer) for element in _clause_elements(sql)
+        )
+        if canonicalizer is not None
+        else sql
+    )
+    unquoted = js_trim(JS_WHITESPACE_RUN.sub(" ", unquote_identifiers(canonical)))
+    wrapped = _WRAPPED_RE.match(unquoted)
+    return js_trim(wrapped.group(1)) if wrapped is not None and wrapped.group(1) else unquoted
+
+
+def _clause_elements(sql: str) -> list[str]:
+    """The elements of a key/partition clause, canonicalized one by one so a
+    function expression (``cityHash64(a,b)``) matches ClickHouse's spelling."""
+    wrapped = _WRAPPED_RE.match(sql)
+    return split_top_level_comma(wrapped.group(1) if wrapped is not None else sql)
+
+
+def _table_clauses(
+    expected: TableDefinition, actual: IntrospectedTable
+) -> dict[str, tuple[str | None, str | None]]:
+    """The key/partition clauses compared for a table, schema side vs live side."""
+    # ClickHouse derives PRIMARY KEY from ORDER BY when it is omitted, then
+    # omits it from SHOW CREATE — so a table with only ORDER BY reports no
+    # primary key. Mirror that on both sides (as canonical.py does for the
+    # schema), else every such table drifts forever (#194).
+    # Keys compare as chkit renders them (backticked names), so a comment
+    # marker inside a column name (`user--id`) is not read as a comment (#232).
+    column_names = {column.name for column in expected.columns}
+
+    def rendered_keys(columns: list[str] | None) -> str:
+        return render_key_clause_columns(columns or [], column_names)
+
+    return {
+        # `is not None` (not truthiness) mirrors TS `actual.primaryKey ?? actual.orderBy`:
+        # an empty-string primary key must compare as-is, not fall back.
+        "primary_key": (
+            rendered_keys(expected.primary_key if expected.primary_key else expected.order_by),
+            actual.primary_key if actual.primary_key is not None else actual.order_by,
+        ),
+        "order_by": (rendered_keys(expected.order_by), actual.order_by),
+        "unique_key": (rendered_keys(expected.unique_key), actual.unique_key),
+        "partition_by": (expected.partition_by, actual.partition_by),
+    }
 
 
 def _normalize_engine_for_compare(value: str | None) -> str:
@@ -328,8 +433,39 @@ def _normalize_engine_for_compare(value: str | None) -> str:
     return normalize_engine(normalize_sql_fragment(value)).lower()
 
 
-def compare_table_shape(  # noqa: PLR0912, PLR0915
+def collect_table_sql_fragments(
     expected: TableDefinition, actual: IntrospectedTable
+) -> TableSqlFragments:
+    """Every SQL fragment ``compare_table_shape`` will look up in a canonicalizer.
+
+    Collected at the exact granularity it looks them up (whole expressions for
+    index/ttl, per-element for key/partition clauses, whole query for SELECT
+    projections). The drift command collects these across all compared tables,
+    formats them in one round-trip, and hands back a map-backed canonicalizer.
+    """
+    expressions = [
+        _index_expression_base(index)
+        for index in [*(expected.indexes or []), *actual.indexes]
+        if index.type != "text"
+    ]
+    expressions.extend(normalize_sql_fragment(ttl) for ttl in (expected.ttl, actual.ttl) if ttl)
+    for pair in _table_clauses(expected, actual).values():
+        for clause in pair:
+            if clause:
+                expressions.extend(_clause_elements(normalize_sql_fragment(clause)))
+    queries = [
+        normalize_sql_fragment(projection.query or "")
+        for projection in [*(expected.projections or []), *actual.projections]
+        if not is_index_projection(projection)
+    ]
+
+    return TableSqlFragments(expressions=expressions, queries=queries)
+
+
+def compare_table_shape(  # noqa: PLR0912, PLR0915
+    expected: TableDefinition,
+    actual: IntrospectedTable,
+    canonicalizer: SqlCanonicalizer | None = None,
 ) -> TableDriftDetail | None:
     """Compare every shape-bearing field on the table. Returns None if identical."""
     column_diff = diff_by_name(
@@ -361,50 +497,48 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         setting_diffs = diff_settings(expected.settings or {}, actual.settings)
 
     expected_indexes = {
-        idx.name: _normalize_index_shape(idx) for idx in (expected.indexes or [])
+        idx.name: _normalize_index_shape(idx, canonicalizer) for idx in (expected.indexes or [])
     }
-    actual_indexes = {idx.name: _normalize_index_shape(idx) for idx in actual.indexes}
+    actual_indexes = {
+        idx.name: _normalize_index_shape(idx, canonicalizer) for idx in actual.indexes
+    }
     index_diffs = diff_named_shape_maps(expected_indexes, actual_indexes)
 
-    expected_ttl = normalize_sql_fragment(expected.ttl) if expected.ttl else ""
-    actual_ttl = normalize_sql_fragment(actual.ttl) if actual.ttl else ""
+    expected_ttl = _canonicalize_expression(
+        normalize_sql_fragment(expected.ttl) if expected.ttl else "", canonicalizer
+    )
+    actual_ttl = _canonicalize_expression(
+        normalize_sql_fragment(actual.ttl) if actual.ttl else "", canonicalizer
+    )
     ttl_mismatch = expected_ttl != actual_ttl
 
     engine_mismatch = _normalize_engine_for_compare(
         expected.engine
     ) != _normalize_engine_for_compare(actual.engine)
 
-    # ClickHouse derives PRIMARY KEY from ORDER BY when it is omitted, then
-    # omits it from SHOW CREATE — so a table with only ORDER BY reports no
-    # primary key. Mirror that on both sides (as canonical.py does for the
-    # schema), else every such table drifts forever (#194).
-    expected_pk = _normalize_clause(
-        ", ".join(expected.primary_key if expected.primary_key else expected.order_by)
-    )
-    # `is not None` (not truthiness) mirrors TS `actual.primaryKey ?? actual.orderBy`:
-    # an empty-string primary key must compare as-is, not fall back.
-    actual_pk = _normalize_clause(
-        actual.primary_key if actual.primary_key is not None else actual.order_by
-    )
+    clauses = _table_clauses(expected, actual)
+    expected_pk = _normalize_clause(clauses["primary_key"][0], canonicalizer)
+    actual_pk = _normalize_clause(clauses["primary_key"][1], canonicalizer)
     primary_key_mismatch = expected_pk != actual_pk
 
-    expected_order_by = _normalize_clause(", ".join(expected.order_by))
-    actual_order_by = _normalize_clause(actual.order_by)
+    expected_order_by = _normalize_clause(clauses["order_by"][0], canonicalizer)
+    actual_order_by = _normalize_clause(clauses["order_by"][1], canonicalizer)
     order_by_mismatch = expected_order_by != actual_order_by
 
-    expected_unique_key = _normalize_clause(", ".join(expected.unique_key or []))
-    actual_unique_key = _normalize_clause(actual.unique_key)
+    expected_unique_key = _normalize_clause(clauses["unique_key"][0], canonicalizer)
+    actual_unique_key = _normalize_clause(clauses["unique_key"][1], canonicalizer)
     unique_key_mismatch = expected_unique_key != actual_unique_key
 
-    expected_partition_by = _normalize_clause(expected.partition_by)
-    actual_partition_by = _normalize_clause(actual.partition_by)
+    expected_partition_by = _normalize_clause(clauses["partition_by"][0], canonicalizer)
+    actual_partition_by = _normalize_clause(clauses["partition_by"][1], canonicalizer)
     partition_by_mismatch = expected_partition_by != actual_partition_by
 
     expected_projections = {
-        p.name: _normalize_projection_shape(p) for p in (expected.projections or [])
+        p.name: _normalize_projection_shape(p, canonicalizer)
+        for p in (expected.projections or [])
     }
     actual_projections = {
-        p.name: _normalize_projection_shape(p) for p in actual.projections
+        p.name: _normalize_projection_shape(p, canonicalizer) for p in actual.projections
     }
     projection_diffs = diff_named_shape_maps(expected_projections, actual_projections)
 

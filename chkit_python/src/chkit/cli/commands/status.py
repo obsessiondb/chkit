@@ -26,6 +26,7 @@ from chkit.cli.migration_store import (
     list_migration_filenames,
     read_snapshot,
 )
+from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     resolve_table_scope,
     table_keys_from_definitions,
@@ -53,6 +54,10 @@ def run(
             ),
         ),
     ] = None,
+    # Accepted so existing scripts keep working; only generate and snapshot
+    # rebuild run the on_schema_loaded hooks that read them (as in TS).
+    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
+    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="status"))
     if config.clickhouse is None:

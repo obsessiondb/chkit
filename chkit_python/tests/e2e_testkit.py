@@ -28,9 +28,12 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from urllib.parse import urlparse
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -130,13 +133,15 @@ def live_env_to_client_kwargs(env: LiveEnv) -> dict[str, Any]:
 
 
 def quote_ident(value: str) -> str:
-    """Return ``value`` wrapped in backticks with any embedded backticks doubled.
+    """Return ``value`` wrapped in backticks, escaping backslashes and backticks.
 
-    Direct port of TS ``quoteIdent``. Use when building DDL by string
-    concatenation in a test — the SQL renderer in production code has its own
-    quoting; this is for hand-built statements only.
+    Direct port of TS ``quoteIdent`` (core ``quoteIdentifier``): the name can
+    never terminate the quoted identifier early, and the escaping matches
+    ClickHouse's own formatting of quoted identifiers. Use when building DDL by
+    string concatenation in a test.
     """
-    return f"`{value.replace('`', '``')}`"
+    escaped = value.replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{escaped}`"
 
 
 def _random_suffix() -> str:
@@ -182,6 +187,106 @@ def create_journal_table_name(label: str) -> str:
     return f"_chkit_migrations_{label}_{run_tag}"
 
 
+def poll_until(
+    read: Callable[[], T],
+    predicate: Callable[[T], bool],
+    *,
+    timeout: float = 30.0,
+    interval: float = 0.5,
+) -> T:
+    """Re-read ``read()`` until ``predicate`` accepts its value or ``timeout`` elapses.
+
+    Port of TS ``pollUntil``. Running out of time returns the last observed
+    value instead of raising, so the caller's own assert reports the real diff.
+    A read that keeps raising until the deadline re-raises its last error.
+
+    Put the whole observation inside ``read``: on multi-replica services each
+    attempt may land on a different replica, so a one-off preparation step
+    can't be relied on.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            value = read()
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(interval)
+            continue
+        if predicate(value) or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
+
+
+# Errors a statement gets when it lands on a replica that hasn't applied an
+# earlier DDL yet. Such a failure changes nothing, so the statement can run again.
+_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE",)
+
+
+def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: float = 0.5) -> T:
+    """Run a statement that needs an object an earlier DDL created.
+
+    On a multi-replica service (ObsessionDB) each request may land on a
+    different replica, and one that hasn't applied the CREATE yet answers
+    ``UNKNOWN_TABLE`` even after ``wait_for_table`` saw the table on another
+    one. Such a failure changes nothing, so the statement is re-run until the
+    replica serving it sees the object; any other error raises at once.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return run()
+        except Exception as error:
+            if time.monotonic() >= deadline or not any(
+                code in str(error) for code in _NOT_YET_VISIBLE_ERRORS
+            ):
+                raise
+        time.sleep(interval)
+
+
+def wait_for_table_on_every_replica(
+    client: Any, database: str, table: str, *, timeout: float = 30.0
+) -> None:
+    """Poll until every replica of the service lists ``database.table``.
+
+    ``wait_for_table`` sees one replica per attempt, so on a multi-replica
+    service (ObsessionDB) the next request can still land on one that has not
+    applied the CREATE. When the server names a cluster for parallel replicas,
+    count the replicas listing the table through ``clusterAllReplicas`` until
+    all of them do; otherwise (a single node) ``system.tables`` is enough.
+    ``client.query(sql)`` must return an object with ``rows``.
+    """
+    cluster_rows = client.query(
+        "SELECT getSetting('cluster_for_parallel_replicas') AS cluster"
+    ).rows
+    cluster = str(cluster_rows[0]["cluster"]) if cluster_rows else ""
+    db = database.replace("\\", "\\\\").replace("'", "\\'")
+    name = table.replace("\\", "\\\\").replace("'", "\\'")
+    if cluster:
+        quoted_cluster = cluster.replace("\\", "\\\\").replace("'", "\\'")
+        sql = (
+            f"SELECT (SELECT count() FROM clusterAllReplicas('{quoted_cluster}', system.one))"
+            f" AS replicas, (SELECT count() FROM clusterAllReplicas('{quoted_cluster}', "
+            f"system.tables) WHERE database = '{db}' AND name = '{name}') AS listed"
+        )
+    else:
+        sql = (
+            "SELECT 1 AS replicas, count() AS listed FROM system.tables "
+            f"WHERE database = '{db}' AND name = '{name}'"
+        )
+    row = poll_until(
+        lambda: client.query(sql).rows[0],
+        lambda value: int(value["listed"]) >= int(value["replicas"]),
+        timeout=timeout,
+    )
+    if int(row["listed"]) < int(row["replicas"]):
+        msg = (
+            f"{database}.{table} is listed on {row['listed']} of "
+            f"{row['replicas']} replicas after {timeout}s"
+        )
+        raise AssertionError(msg)
+
+
 class _CliResultLike(Protocol):
     """Structural type covering ``typer.testing.Result`` and ad-hoc CLI results.
 
@@ -223,6 +328,9 @@ __all__ = [
     "format_test_diagnostic",
     "get_required_env",
     "live_env_to_client_kwargs",
+    "poll_until",
     "quote_ident",
     "resolve_live_env",
+    "run_once_visible",
+    "wait_for_table_on_every_replica",
 ]

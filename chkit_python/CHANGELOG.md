@@ -3,6 +3,29 @@
 ## Unreleased
 
 ### Added
+- `chkit snapshot rebuild [--dryrun] [--json]` rewrites `snapshot.json` from the schema
+  definitions after a merge or rebase conflict, reports added, removed and changed
+  entries, and prints git review and restore commands.
+- `migrate --retry <migration>` resumes a failed migration after its file was edited,
+  skipping completed statements, and refuses edits that move or change a statement that
+  already ran. `migrate --abandon <migration>` resets a failed migration so the next apply
+  runs it from statement 1 (previews without `--apply`). An edited failed migration with
+  no completed statement runs again from statement 1 without a flag.
+- Every statement's progress is recorded in `_chkit_migrations`, so a re-run after a
+  partial failure skips completed statements. Failures name the file, the statement
+  number and the SQL, and `migrate --json` errors use the JSON error envelope.
+- `chkit generate --empty` scaffolds a blank manual migration and leaves the snapshot
+  untouched.
+- `SQLExpression` column defaults (`default=SQLExpression(expression="now64(3)")` or
+  `{"expression": ...}`) for every `default_kind`. Snapshots keep the `fn:` string, so
+  switching spellings plans nothing. New validation codes
+  `column_default_looks_like_expression` and `column_default_invalid`. `pull` writes
+  `SQLExpression(...)` and `init` scaffolds it.
+- `--force-shared-engines` / `--no-shared-engines` on `generate` and `snapshot rebuild`
+  override ObsessionDB host detection for stripping `storage_policy`; `migrate`, `status`,
+  `drift` and `check` accept and ignore them.
+- backfill: `insert_settings` (`insertSettings`) plugin option, appended to every chunk
+  INSERT's `SETTINGS` clause for local runs and ObsessionDB managed submit.
 - Add `SkipIndexText` for full-text index generation, introspection, pull, and drift.
   Preserve quoted SQL literals, normalize ClickHouse’s fixed granularity, and reject
   malformed or unsupported metadata. Exercise adversarial round trips and actual
@@ -30,6 +53,24 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- Migrations create views, materialized views, dictionaries and tables whose column
+  expressions call `dictGet` after the objects they read, and drop them in reverse.
+- SQL comments in view queries, `partition_by`, `ttl`, index expressions, projections,
+  dictionary clauses and expression defaults are removed before whitespace is collapsed,
+  so a line comment no longer swallows the rest of the statement, and drift ignores them.
+- `chkit drift` compares index, TTL, key, partition and projection expressions in
+  ClickHouse's canonical form (`cityHash64(a,b)` vs `cityHash64(a, b)`,
+  `INTERVAL 5 YEAR` vs `toIntervalYear(5)`), falling back to string comparison.
+- `chkit pull` keeps projections and key clauses intact when a backtick-quoted column
+  name contains a paren or comma, and no longer emits ObsessionDB's `metadata_*` tables.
+- `migrate --apply` refuses pending files with no executable statements; statements made
+  only of comments are dropped. Async statements no longer pick up an earlier attempt's
+  query-log entry.
+- Reading a conflicted `snapshot.json` names the conflict markers, and a schema file that
+  fails to load names the file, the position and any conflict markers.
+- The journal never builds on a row version older than its own last write, so a read
+  that lands on a lagging replica can no longer mark a migration completed with a
+  statement still recorded as `started`.
 - Preserve quoted clause names, delimiters, whitespace, and escaped trailing
   backslashes in table introspection and migration statement splitting.
 - Escape backslashes in string defaults: `C:\temp` renders as `DEFAULT 'C:\\temp'`.

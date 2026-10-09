@@ -8,6 +8,7 @@ from operator import attrgetter
 from typing import Final, TypeVar
 
 from chkit.core.codec import canonicalize_codec
+from chkit.core.column_default import canonicalize_column_default
 from chkit.core.key_clause import normalize_key_columns
 from chkit.core.model import (
     ColumnDefinition,
@@ -60,6 +61,11 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
             "type": canon_type,
             "comment": column.comment.strip() if column.comment is not None else None,
             "codec": canonicalize_codec(column.codec) if column.codec is not None else None,
+            # `SQLExpression` becomes the legacy `fn:` string, so snapshots,
+            # plans, drift and chkit (TS) share one representation (#234).
+            "default": canonicalize_column_default(column.default)
+            if column.default is not None
+            else None,
         }
     )
 
@@ -76,6 +82,14 @@ def _sorted_settings(
     if settings is None:
         return None
     return {k: settings[k] for k in sorted(settings.keys())}
+
+
+def _normalize_optional_clause(value: str | None) -> str | None:
+    # A clause that is only comments is no clause: `ttl='-- ts + INTERVAL 1 DAY'`
+    # must render `REMOVE TTL`, not `MODIFY TTL ;`.
+    if not value:
+        return None
+    return normalize_sql_fragment(value) or None
 
 
 def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
@@ -118,10 +132,8 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
             "unique_key": normalize_key_columns(definition.unique_key)
             if definition.unique_key is not None
             else None,
-            "partition_by": normalize_sql_fragment(definition.partition_by)
-            if definition.partition_by is not None
-            else None,
-            "ttl": normalize_sql_fragment(definition.ttl) if definition.ttl is not None else None,
+            "partition_by": _normalize_optional_clause(definition.partition_by),
+            "ttl": _normalize_optional_clause(definition.ttl),
             "settings": settings,
             "indexes": indexes,
             "projections": projections,

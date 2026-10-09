@@ -5,7 +5,7 @@ sidebar:
   order: 12
 ---
 
-Rewrites `chkit/meta/snapshot.json` from your schema definitions without writing a migration, for example when two branches that each ran `chkit generate` conflict on it. TypeScript only: [chkit-py](/python/overview/#differences-from-the-typescript-version) does not have this command yet.
+Rewrites `chkit/meta/snapshot.json` from your schema definitions without writing a migration, for example when two branches that each ran `chkit generate` conflict on it.
 
 ## Synopsis
 

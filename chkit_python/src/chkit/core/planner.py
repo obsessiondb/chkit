@@ -10,6 +10,7 @@ from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
 from chkit.core.model import (
     ChxValidationError,
+    ColumnDefaultValue,
     ColumnDefinition,
     ColumnRenameSuggestion,
     DictionaryDefinition,
@@ -24,6 +25,12 @@ from chkit.core.model import (
     ValidationIssue,
     ViewDefinition,
     _RiskSummary,
+)
+from chkit.core.object_dependencies import (
+    DependencyGraph,
+    build_dependency_graph,
+    invert_dependency_graph,
+    order_by_dependencies,
 )
 from chkit.core.sql import (
     render_alter_add_column,
@@ -249,9 +256,7 @@ def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
     return _column_identity_without_codec(old) == _column_identity_without_codec(new)
 
 
-def _same_default(
-    left: str | int | float | bool | None, right: str | int | float | bool | None
-) -> bool:
+def _same_default(left: ColumnDefaultValue | None, right: ColumnDefaultValue | None) -> bool:
     """Mirror TS ``===``: Python treats ``0 == False`` and ``1 == True``."""
     return isinstance(left, bool) == isinstance(right, bool) and left == right
 
@@ -655,11 +660,10 @@ def _diff_tables(
 
 
 def _rank(op: MigrationOperation) -> int:
+    # drop_* 0, alter_* 1, create_database 2, create_table 3, create_view 4, other creates 5.
     t = op.type
     if t.startswith("drop_"):
         return 0
-    if t == "alter_materialized_view_modify_refresh":
-        return 1
     if t.startswith("alter_"):
         return 1
     if t == "create_database":
@@ -669,6 +673,27 @@ def _rank(op: MigrationOperation) -> int:
     if t == "create_view":
         return 4
     return 5
+
+
+def _order_operations(
+    ordered: list[MigrationOperation],
+    *,
+    drop: DependencyGraph,
+    create: DependencyGraph,
+) -> list[MigrationOperation]:
+    """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
+
+    Drops run dependents first, creates run dependencies first (#231). Alters
+    and create_database keep their place.
+    """
+    drops = [op for op in ordered if _rank(op) == 0]
+    middle = [op for op in ordered if _rank(op) in (1, 2)]
+    creates = [op for op in ordered if _rank(op) >= 3]  # noqa: PLR2004
+    return [
+        *order_by_dependencies(drops, lambda op: op.key, lambda key: drop.get(key, ())),
+        *middle,
+        *order_by_dependencies(creates, lambda op: op.key, lambda key: create.get(key, ())),
+    ]
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:
@@ -771,7 +796,14 @@ def plan_diff(
     for database in sorted(databases_to_create):
         _push_create_database(operations, database, "safe")
 
+    # The sort is stable, so operations that share a key keep the order
+    # _diff_tables pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
     operations.sort(key=lambda op: (_rank(op), op.key))
+    operations = _order_operations(
+        operations,
+        drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
+        create=build_dependency_graph(new_canonical),
+    )
 
     counts: dict[RiskLevel, int] = {"safe": 0, "caution": 0, "danger": 0}
     for op in operations:

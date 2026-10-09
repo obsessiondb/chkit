@@ -139,11 +139,11 @@ def test_R4_wait_for_projection_absent_returns_when_no_rows() -> None:
 
 
 def test_R4_parse_operation_key_recognizes_index_and_projection() -> None:
-    parsed_col = _parse_operation_key("table:d.t:column:c")
+    parsed_col = _parse_operation_key("alter_table_add_column", "table:d.t:column:c")
     assert parsed_col == ("d", "t", "c", None, None)
-    parsed_idx = _parse_operation_key("table:d.t:index:ix1")
+    parsed_idx = _parse_operation_key("alter_table_add_index", "table:d.t:index:ix1")
     assert parsed_idx == ("d", "t", None, "ix1", None)
-    parsed_proj = _parse_operation_key("table:d.t:projection:p1")
+    parsed_proj = _parse_operation_key("alter_table_add_projection", "table:d.t:projection:p1")
     assert parsed_proj == ("d", "t", None, None, "p1")
 
 

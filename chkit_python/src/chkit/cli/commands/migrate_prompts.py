@@ -4,6 +4,7 @@
 
 - ``is_background_or_ci()`` — auto-skip prompts in CI / non-TTY runs.
 - ``confirm_apply()`` — "Apply pending migrations now? [no/yes]:" prompt.
+- ``confirm_abandon(migration)`` — confirms ``--abandon`` without ``--apply``.
 - ``confirm_destructive_execution(markers)`` — prints per-op details and
   asks "Apply destructive operations? [no/yes]:".
 - ``print_destructive_operation_details(markers)`` — pure printer used by
@@ -47,6 +48,13 @@ def _prompt_yes(message: str) -> bool:
 def confirm_apply() -> bool:
     """Prompt the user before applying pending migrations."""
     return _prompt_yes("Apply pending migrations now? [no/yes]: ")
+
+
+def confirm_abandon(migration: str) -> bool:
+    """Prompt the user before ``--abandon`` rewrites the journal state."""
+    return _prompt_yes(
+        f"Abandon the in-progress state of {migration} now? [no/yes]: "
+    )
 
 
 def print_destructive_operation_details(

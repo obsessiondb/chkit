@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.projection import normalize_projection_index
 from chkit.core.sql_normalizer import normalize_sql_fragment
-from chkit.core.sql_scan import find_top_level_sql_pattern
+from chkit.core.sql_scan import find_quote_end, find_top_level_sql_pattern, is_quote_char
 
 __all__ = [
     "ProjectionDefinitionShape",
@@ -48,7 +48,7 @@ class ProjectionDefinitionShape:
 _SETTINGS_RE = re.compile(r"\bSETTINGS\b", re.IGNORECASE)
 _SETTINGS_STOP = re.compile(r"\bCOMMENT\b|;", re.IGNORECASE)
 _TTL_RE = re.compile(r"\bTTL\b(.*?)(?:\bSETTINGS\b|;|$)", re.IGNORECASE | re.DOTALL)
-_BODY_ENGINE_RE = re.compile(r"\)\s*ENGINE\s*=", re.IGNORECASE)
+_ENGINE_AFTER_BODY_RE = re.compile(r"\s*ENGINE\s*=", re.IGNORECASE)
 
 _ENGINE_START = re.compile(r"\bENGINE\s*=\s*", re.IGNORECASE)
 _ENGINE_STOP = re.compile(
@@ -131,39 +131,28 @@ def _find_column_list_bounds(query: str) -> tuple[int, int] | None:
 
     The close is the one right before the table-level ``ENGINE =``. Returns
     ``None`` when there is no balanced column list (e.g. a view, or a query we
-    can't parse).
+    can't parse). Quoted strings and identifiers are skipped, so parens or
+    commas inside a quoted table or column name never count.
     """
-    engine_match = _BODY_ENGINE_RE.search(query)
-    if engine_match is None:
-        return None
-    # Up to and including the closing ')' before ENGINE.
-    left = query[: engine_match.start() + 1]
-    open_index = left.find("(")
-    if open_index == -1:
-        return None
-
     depth = 0
-    in_string = False
-    string_quote = "'"
-    for i in range(open_index, len(left)):
-        char = left[i]
-        if not char:
-            continue
-        if in_string:
-            if char == string_quote and (i == 0 or left[i - 1] != "\\"):
-                in_string = False
-            continue
-        if char in {"'", '"'}:
-            in_string = True
-            string_quote = char
+    open_index = -1
+    i = 0
+    while i < len(query):
+        char = query[i]
+        if is_quote_char(char):
+            i = find_quote_end(query, i, char) + 1
             continue
         if char == "(":
+            if depth == 0:
+                open_index = i
             depth += 1
-            continue
-        if char == ")":
+        elif char == ")":
             depth -= 1
             if depth == 0:
-                return (open_index, i)
+                if _ENGINE_AFTER_BODY_RE.match(query, i + 1):
+                    return (open_index, i)
+                return None
+        i += 1
     return None
 
 

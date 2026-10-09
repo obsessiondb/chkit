@@ -66,8 +66,9 @@ implementations can share a database without divergence.
   validation, diff/replace planning, `--rename-dictionary`, pull
   introspection, codegen), index-only projections, and function
   expressions in `primaryKey`/`orderBy`.
-- All CLI commands: `init`, `generate`, `migrate`, `status`, `check`,
-  `drift` (with live-DB compare), `pull`, `query`, `plugin`. Codegen
+- All CLI commands: `init`, `generate` (incl. `--empty`), `migrate` (incl.
+  `--retry` / `--abandon`), `status`, `check`, `drift` (with live-DB compare),
+  `snapshot rebuild`, `pull`, `query`, `plugin`. Codegen
   runs automatically after `chkit generate` when the plugin is
   registered (via the `on_plan_created` hook).
 - Flag surface — `--rename-table` / `--rename-column`, `--table

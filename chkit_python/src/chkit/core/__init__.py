@@ -15,10 +15,16 @@ from chkit.core.codec import (
     parse_codec,
     render_codec,
 )
+from chkit.core.column_default import (
+    ParsedColumnDefault,
+    parse_column_default,
+    render_default,
+)
 from chkit.core.config_path import (
     SYNTHESIZED_CONFIG_PATH,
     is_synthesized_config_path,
 )
+from chkit.core.conflict_markers import has_conflict_markers
 from chkit.core.flags import (
     FlagDef,
     MissingFlagValueError,
@@ -37,6 +43,7 @@ from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
     ColumnDefaultKind,
+    ColumnDefaultValue,
     ColumnDefinition,
     DictionaryAttribute,
     DictionaryDefinition,
@@ -56,6 +63,7 @@ from chkit.core.model import (
     SkipIndexDefinition,
     Snapshot,
     SnapshotV1,
+    SQLExpression,
     TableDefinition,
     TableRef,
     ValidationIssue,
@@ -77,12 +85,19 @@ from chkit.core.plugin_error import wrap_plugin_run
 from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.schema_loader import (
     NO_MATCH_MESSAGE,
+    SchemaFileLoadError,
     SchemaLoaderError,
     load_schema_definitions,
 )
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import render_dictionary_sql, to_create_sql
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.sql_scan import (
+    find_quote_end,
+    find_top_level_sql_pattern,
+    is_quote_char,
+    strip_wrapping_parens,
+)
 from chkit.core.sql_splitter import (
     extract_executable_statements,
     split_sql_statements,
@@ -101,6 +116,7 @@ __all__ = [
     "ColumnCodec",
     "ColumnCodecSpec",
     "ColumnDefaultKind",
+    "ColumnDefaultValue",
     "ColumnDefinition",
     "DictionaryAttribute",
     "DictionaryDefinition",
@@ -114,13 +130,16 @@ __all__ = [
     "MigrationPlan",
     "MissingFlagValueError",
     "ModuleLoadError",
+    "ParsedColumnDefault",
     "ParsedFlags",
     "PreprocessingColumnCodec",
     "PrimitiveColumnType",
     "ProjectionDefinition",
     "RawColumnCodec",
     "RiskLevel",
+    "SQLExpression",
     "SchemaDefinition",
+    "SchemaFileLoadError",
     "SchemaLoaderError",
     "SkipIndexDefinition",
     "Snapshot",
@@ -145,10 +164,14 @@ __all__ = [
     "definition_key",
     "dictionary",
     "extract_executable_statements",
+    "find_quote_end",
+    "find_top_level_sql_pattern",
+    "has_conflict_markers",
     "import_module_file",
     "is_general_codec",
     "is_index_projection",
     "is_preprocessor_codec",
+    "is_quote_char",
     "is_raw_codec",
     "is_schema_definition",
     "is_synthesized_config_path",
@@ -160,14 +183,17 @@ __all__ = [
     "normalize_sql_fragment",
     "on_cluster_clause",
     "parse_codec",
+    "parse_column_default",
     "parse_flags",
     "plan_diff",
     "render_codec",
+    "render_default",
     "render_dictionary_sql",
     "resolve_config",
     "schema",
     "split_sql_statements",
     "split_top_level_comma",
+    "strip_wrapping_parens",
     "table",
     "to_create_sql",
     "validate_definitions",

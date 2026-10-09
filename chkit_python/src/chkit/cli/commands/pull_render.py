@@ -33,10 +33,12 @@ import re
 from collections.abc import Sequence
 
 from chkit.core.canonical import canonicalize_definitions
+from chkit.core.column_default import parse_column_default
 from chkit.core.kafka import is_kafka_engine
 from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
+    ColumnDefaultValue,
     ColumnDefinition,
     DictionaryAttribute,
     DictionaryDefinition,
@@ -82,6 +84,14 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
         for d in canonical
     )
     has_column_def = has_table
+    has_sql_expression = any(
+        isinstance(d, TableDefinition)
+        and any(
+            c.default is not None and parse_column_default(c.default).kind == "expression"
+            for c in d.columns
+        )
+        for d in canonical
+    )
     has_raw_codec = any(
         isinstance(d, TableDefinition)
         and any(c.codec is not None and _codec_contains_raw(c.codec) for c in d.columns)
@@ -132,6 +142,8 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
         imports.append("TableRef")
     if has_column_def:
         imports.append("ColumnDefinition")
+    if has_sql_expression:
+        imports.append("SQLExpression")
     if has_projection:
         imports.append("ProjectionDefinition")
     if has_raw_codec:
@@ -222,12 +234,20 @@ def _render_column(column: ColumnDefinition) -> str:
     if column.default_kind and column.default_kind != "DEFAULT":
         parts.append(f"default_kind={_render_string(column.default_kind)}")
     if column.default is not None:
-        parts.append(f"default={_render_literal(column.default)}")
+        parts.append(f"default={_render_column_default(column.default)}")
     if column.comment:
         parts.append(f"comment={_render_string(column.comment)}")
     if column.codec is not None:
         parts.append(f"codec={_render_codec(column.codec)}")
     return f"ColumnDefinition({', '.join(parts)})"
+
+
+def _render_column_default(value: ColumnDefaultValue) -> str:
+    """Expression defaults (canonical ``fn:`` strings) are written as ``SQLExpression``."""
+    parsed = parse_column_default(value)
+    if parsed.kind == "expression":
+        return f"SQLExpression(expression={_render_string(parsed.sql)})"
+    return _render_literal(parsed.value)
 
 
 def _render_index(index: SkipIndexDefinition) -> str:

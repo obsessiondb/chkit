@@ -134,7 +134,7 @@ Creates a table definition.
             {"name": "org_id", "type": "String"},
             {"name": "source", "type": "LowCardinality(String)"},
             {"name": "payload", "type": "String", "nullable": True},
-            {"name": "received_at", "type": "DateTime64(3)", "default": "fn:now64(3)"},
+            {"name": "received_at", "type": "DateTime64(3)", "default": {"expression": "now64(3)"}},
             {"name": "status", "type": "String", "default": "pending", "comment": "Event processing status"},
         ],
         engine="MergeTree",
@@ -286,11 +286,11 @@ Use `{ expression }` for anything ClickHouse evaluates: function calls, arithmet
     columns=[
         {"name": "status", "type": "String", "default": "pending"},
         # SQL: `status` String DEFAULT 'pending'
-        {"name": "received_at", "type": "DateTime64(3, 'UTC')", "default": "fn:now64(3)"},
+        {"name": "received_at", "type": "DateTime64(3, 'UTC')", "default": {"expression": "now64(3)"}},
         # SQL: `received_at` DateTime64(3, 'UTC') DEFAULT now64(3)
     ]
     ```
-    chkit-py does not accept the `{"expression": ...}` form or run the `column_default_looks_like_expression` and `column_default_invalid` checks yet. Write expression defaults with the `fn:` prefix.
+    Python also accepts `SQLExpression(expression="now64(3)")` from `chkit`. A `default` object other than an expression is rejected when the column is built, not reported as `column_default_invalid`.
   </TabItem>
 </Tabs>
 
@@ -321,7 +321,7 @@ If a migration that an older chkit generated already failed this way, see [Troub
 Choose `DEFAULT` (the implicit default), `MATERIALIZED`, `ALIAS`, or `EPHEMERAL`.
 Python also accepts `default_kind`. The [`default`](#default-string--number--boolean--sqlexpression-optional)
 field holds the value or expression for every kind: strings remain SQL literals, and
-`{ expression }` marks a SQL expression (`fn:` in chkit-py).
+`{ expression }` marks a SQL expression.
 
 | Kind | Behavior |
 | --- | --- |
@@ -346,10 +346,10 @@ field holds the value or expression for every kind: strings remain SQL literals,
     ```python
     columns=[
         {"name": "ts", "type": "DateTime"},
-        {"name": "day", "type": "Date", "default_kind": "MATERIALIZED", "default": "fn:toDate(ts)"},
-        {"name": "label", "type": "String", "default_kind": "ALIAS", "default": "fn:toString(day)"},
+        {"name": "day", "type": "Date", "default_kind": "MATERIALIZED", "default": {"expression": "toDate(ts)"}},
+        {"name": "label", "type": "String", "default_kind": "ALIAS", "default": {"expression": "toString(day)"}},
         {"name": "raw", "type": "String", "default_kind": "EPHEMERAL"},
-        {"name": "size", "type": "UInt64", "default": "fn:length(raw)"},
+        {"name": "size", "type": "UInt64", "default": {"expression": "length(raw)"}},
     ]
     ```
   </TabItem>
@@ -359,7 +359,7 @@ field holds the value or expression for every kind: strings remain SQL literals,
 plain string fails with `column_expression_requires_fn`: `default: 'toDate(ts)'` would
 render the quoted literal `MATERIALIZED 'toDate(ts)'` instead of SQL. Write
 `{ expression: 'toDate(ts)' }`, or `{ expression: "'text'" }` for a constant string
-(`fn:toDate(ts)` and `fn:'text'` in the legacy spelling, which chkit-py uses). Numbers
+(`fn:toDate(ts)` and `fn:'text'` in the legacy spelling). Numbers
 and booleans render as written. `EPHEMERAL` may omit `default` and keeps a plain string
 as a literal.
 ClickHouse normally excludes all three from `SELECT *` and accepts `EPHEMERAL` values
@@ -652,7 +652,7 @@ Creates a view definition.
   </TabItem>
 </Tabs>
 
-A view can read tables, other views, materialized views, and dictionaries. `chkit generate` creates a view after the objects it reads and drops it before them, whatever their names; chkit-py still orders by kind and name. Write qualified names (`app.users`) in `as` so every reference is detected. See [Operation order](/cli/generate/#operation-order).
+A view can read tables, other views, materialized views, and dictionaries. `chkit generate` creates a view after the objects it reads and drops it before them, whatever their names. Write qualified names (`app.users`) in `as` so every reference is detected. See [Operation order](/cli/generate/#operation-order).
 
 ## `materializedView()`
 
@@ -864,10 +864,6 @@ Before chkit compares a fragment, stores it in `snapshot.json`, or writes it int
 Editing the text of a comment does not produce a migration, and neither does adding or removing a comment that whitespace separates from the rest of the SQL. Whitespace inside string literals collapses too: each run of spaces, tabs, or newlines inside a literal becomes one space.
 
 Full-text indexes (`type: 'text'`) are the exception: chkit reads their SQL with a separate parser that keeps whitespace inside string literals and recognizes only `--` and non-nested `/* */` comments.
-
-:::caution[chkit-py]
-chkit-py does not remove comments from these fields yet: it collapses the fragment onto one line with its comments, so a line comment swallows the rest of the query. With chkit-py, keep comments out of SQL fragments.
-:::
 
 ## Type system reference
 

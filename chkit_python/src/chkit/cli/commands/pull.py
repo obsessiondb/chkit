@@ -56,6 +56,7 @@ from chkit.clickhouse.introspect import (
     list_table_details,
 )
 from chkit.core.kafka import is_kafka_engine, parse_kafka_settings
+from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ChxConfigEnv,
     DictionaryDefinition,
@@ -68,6 +69,7 @@ from chkit.core.model import (
     SkipIndexSet,
     SkipIndexText,
     SkipIndexTokenBF,
+    SQLExpression,
     TableDefinition,
     TableRef,
     ViewDefinition,
@@ -76,6 +78,7 @@ from chkit.core.model import (
     table,
     view,
 )
+from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.plugins import ChxOnPullIntrospectContext, ChxPlugin
 
 
@@ -108,7 +111,10 @@ def _introspected_table_to_definition(
         name=item.name,
         engine=item.engine or "MergeTree",
         columns=[
-            column.model_copy(update={"default": f"fn:{column.default}"})
+            # Introspection returns the SQL ClickHouse stores for a default
+            # (`now64(3)`, `'web'`, `0`), so every string is an expression,
+            # never a literal to quote again.
+            column.model_copy(update={"default": SQLExpression(expression=column.default)})
             if isinstance(column.default, str) else column
             for column in item.columns
         ],
@@ -138,17 +144,31 @@ def _coerce_setting_value(value: str) -> str | int | float | bool:
 
 
 def _split_clause(clause: str | None) -> list[str]:
-    """Crude parser for ``(a, b, c)`` or ``a, b, c`` clauses returned by introspect."""
+    """Split an introspected key clause into its elements (TS ``splitTopLevelCommaSeparated``).
+
+    Quote-aware: a backtick-quoted name containing a comma or a paren stays one
+    element, and keeps its quotes (#196).
+    """
     if not clause:
         return []
-    inner = clause.strip()
-    if inner.startswith("(") and inner.endswith(")"):
-        inner = inner[1:-1]
-    return [
-        part.strip().lstrip("`\"").rstrip("`\"")
-        for part in inner.split(",")
-        if part.strip()
-    ]
+    return [strip_wrapping_parens(part) for part in split_top_level_comma(clause)]
+
+
+# ObsessionDB provisions these product-metadata tables inside customer
+# databases. They are ObsessionDB internals, not part of the user's schema, so
+# pull must neither emit them nor count them as skipped/unsupported (#126).
+_OBSESSIONDB_METADATA_TABLES = frozenset(
+    {"metadata_folder", "metadata_table_folder", "metadata_table_tag"}
+)
+
+
+def _is_obsessiondb_metadata_table(item: object) -> bool:
+    # An object is a table when it says so or has no ``kind`` at all, mirroring
+    # how a bare introspected table is treated.
+    kind = getattr(item, "kind", None)
+    return (kind is None or kind == "table") and getattr(
+        item, "name", None
+    ) in _OBSESSIONDB_METADATA_TABLES
 
 
 def _refresh_shape_to_model(
@@ -464,15 +484,15 @@ def run(  # noqa: PLR0917
         definitions = list(custom)
     else:
         with ClickHouseClient.connect(config.clickhouse) as client:
+            # Capture objects so we can summarize what got skipped, even when
+            # --database was passed explicitly.
+            raw_objects = [
+                o for o in list_schema_objects(client) if not _is_obsessiondb_metadata_table(o)
+            ]
             if not selected:
-                objects = list_schema_objects(client)
-                raw_objects = list(objects)
-                selected = sorted({o.database for o in objects})
-            else:
-                # Capture objects so we can summarize what got skipped, even
-                # when --database was passed explicitly.
-                raw_objects = list(list_schema_objects(client))
+                selected = sorted({getattr(o, "database", "") for o in raw_objects})
             definitions = _pull_definitions(client, selected)
+    definitions = [d for d in definitions if not _is_obsessiondb_metadata_table(d)]
 
     content = render_schema_file(definitions)
     out_file_abs = (Path.cwd() / out_file).resolve()

@@ -125,7 +125,7 @@ export default schema(app_events, app_events_view, app_events_mv)
   <TabItem label="Python">
     ```python
     # Schema pulled from live ClickHouse metadata via `chkit pull`.
-    from chkit import ColumnDefinition, TableRef, materialized_view, schema, table, view
+    from chkit import ColumnDefinition, SQLExpression, TableRef, materialized_view, schema, table, view
 
     app_events = table(
         database="app",
@@ -133,7 +133,7 @@ export default schema(app_events, app_events_view, app_events_mv)
         engine="MergeTree()",
         columns=[
             ColumnDefinition(name="id", type="UInt64"),
-            ColumnDefinition(name="received_at", type="DateTime64(3)", default="fn:now64(3)"),
+            ColumnDefinition(name="received_at", type="DateTime64(3)", default=SQLExpression(expression="now64(3)")),
         ],
         primary_key=["id"],
         order_by=["id"],
@@ -155,7 +155,6 @@ export default schema(app_events, app_events_view, app_events_mv)
 
     definitions = schema(app_events, app_events_view, app_events_mv)
     ```
-    chkit-py does not support the `{ expression }` form, so it writes the same defaults with the `fn:` prefix: `default="fn:now64(3)"`.
   </TabItem>
 </Tabs>
 

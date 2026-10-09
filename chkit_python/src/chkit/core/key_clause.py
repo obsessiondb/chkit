@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Final
 
+from chkit.core.sql_scan import find_quote_end, is_quote_char
+
 _PLAIN_COLUMN_REFERENCE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -23,46 +25,30 @@ def split_top_level_comma(text: str) -> list[str]:
     out: list[str] = []
     current: list[str] = []
     depth = 0
-    quote: str | None = None
-    skip_next = False
-    for i, ch in enumerate(text):
-        if skip_next:
-            skip_next = False
-            continue
-        nxt = text[i + 1] if i + 1 < len(text) else ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
 
-        if quote is not None:
-            current.append(ch)
-            if nxt and (ch == "\\" or ch == quote == nxt):
-                current.append(nxt)
-                skip_next = True
-            elif ch == quote:
-                quote = None
-            continue
-
-        if ch in ("'", '"', "`"):
-            quote = ch
-            current.append(ch)
+        if is_quote_char(ch):
+            end = find_quote_end(text, i, ch)
+            current.append(text[i : end + 1])
+            i = end + 1
             continue
 
         if ch == "(":
             depth += 1
-            current.append(ch)
-            continue
-
-        if ch == ")":
+        elif ch == ")":
             depth = max(0, depth - 1)
-            current.append(ch)
-            continue
-
-        if ch == "," and depth == 0:
+        elif ch == "," and depth == 0:
             token = "".join(current).strip()
             if token:
                 out.append(token)
             current = []
+            i += 1
             continue
 
         current.append(ch)
+        i += 1
 
     tail = "".join(current).strip()
     if tail:

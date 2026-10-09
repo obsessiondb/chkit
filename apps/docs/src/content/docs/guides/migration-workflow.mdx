@@ -78,7 +78,7 @@ Nothing in this loop asks a developer to generate against a live ClickHouse. Doi
 
 Before you merge or rebase, check that each branch is fully generated: `chkit generate --dryrun` reports 0 operations on it. After upgrading chkit, run `chkit generate` and commit any migration it writes before you rebuild.
 
-While `snapshot.json` has conflict markers, every command that reads it stops with `contains unresolved merge conflict markers`. Resolve the conflict with [`chkit snapshot rebuild`](/cli/snapshot/) (TypeScript only; [chkit-py](/python/overview/#differences-from-the-typescript-version) does not have it yet):
+While `snapshot.json` has conflict markers, every command that reads it stops with `contains unresolved merge conflict markers`. Resolve the conflict with [`chkit snapshot rebuild`](/cli/snapshot/):
 
 1. Resolve the conflicts in your schema files first. The snapshot is rebuilt from them, and a schema file that still has conflict markers stops the rebuild.
 2. Rebuild the snapshot and compare it with both sides. A conflicted `snapshot.json` cannot be compared entry by entry, so the review happens on the rebuilt file. During a merge the other branch is `MERGE_HEAD`; during a rebase the commit being replayed is `REBASE_HEAD`.

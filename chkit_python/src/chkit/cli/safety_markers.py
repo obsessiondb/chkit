@@ -55,7 +55,7 @@ _PREVIEW_TRUNCATE_LEN = 117
 _BEFORE_RETRY_PREFIX = "-- before-retry:"
 
 _OPERATION_LINE = re.compile(
-    r"^([a-z_]+)\s+key=(\S+)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$"
+    r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$"
 )
 
 _OBJECT_KEY_RE = re.compile(

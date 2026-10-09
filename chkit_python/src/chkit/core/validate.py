@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Iterable
@@ -9,6 +10,16 @@ from typing import Final
 
 from chkit.core.canonical import definition_key
 from chkit.core.codec import canonicalize_codec, is_general_codec, is_raw_codec
+from chkit.core.column_default import (
+    LEGACY_EXPRESSION_PREFIX,
+    column_type_accepts_string_literal,
+    parse_column_default,
+    reads_unparsable_ephemeral_literal_as_null,
+    render_default,
+    starts_with_function_call,
+    stores_unparsable_literal_as_null,
+    trim_expression,
+)
 from chkit.core.kafka import is_kafka_engine
 from chkit.core.key_clause import (
     is_plain_column_reference,
@@ -17,19 +28,20 @@ from chkit.core.key_clause import (
 )
 from chkit.core.model import (
     ChxValidationError,
+    ColumnDefaultKind,
     ColumnDefinition,
     DictionaryDefinition,
     MaterializedViewDefinition,
     SchemaDefinition,
+    SQLExpression,
     TableDefinition,
     ValidationIssue,
     ValidationIssueCode,
 )
-from chkit.core.projection import (
-    is_index_projection,
-    normalize_projection_index,
-    strip_wrapping_parens,
-)
+from chkit.core.projection import is_index_projection, normalize_projection_index
+from chkit.core.sql_lexer import SQLToken, js_trim, tokenize_sql
+from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.text_index import render_text_index_type
 from chkit.core.text_index_sql import text_sql_tokens
 
@@ -189,31 +201,10 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
             )
 
 
-def _validate_column_expression(
+def _validate_unstored_column_codec(
     definition: TableDefinition, column: ColumnDefinition, issues: list[ValidationIssue]
 ) -> None:
-    if (
-        column.default_kind in {"MATERIALIZED", "ALIAS"} and column.default is None
-    ) or (
-        isinstance(column.default, str)
-        and column.default.startswith("fn:")
-        and not column.default[3:].strip()
-    ):
-        _push(
-            issues,
-            definition,
-            "column_expression_required",
-            f'Column "{column.name}" requires a non-empty expression; '
-            "use fn: for SQL expressions",
-        )
     kind = column.default_kind
-    if kind in {"MATERIALIZED", "ALIAS"} and isinstance(column.default, str) and (
-        not column.default.startswith("fn:")
-    ):
-        _push(issues, definition, "column_expression_requires_fn",
-              f'Column "{column.name}" is {kind} with a plain string default, which ClickHouse '
-              f"would store as the text '{column.default}'. Prefix SQL expressions with fn: "
-              "(for example fn:toDate(ts)); write fn:'<text>' for a constant string.")
     # A bare `EPHEMERAL CODEC(...)` parses the codec as the default expression;
     # after an EPHEMERAL default or comment ClickHouse accepts the codec.
     bare_ephemeral = kind == "EPHEMERAL" and column.default is None and not column.comment
@@ -221,6 +212,203 @@ def _validate_column_expression(
         _push(issues, definition, "column_kind_codec_unsupported",
               f'Column "{column.name}" is {kind} and cannot have a codec; '
               "ClickHouse stores no data for it.")
+
+
+def _validate_column_default(
+    definition: TableDefinition, column: ColumnDefinition, issues: list[ValidationIssue]
+) -> None:
+    """Default checks (#216, #234, #237).
+
+    Runs on raw definitions (``to_create_sql``) and canonical ones
+    (``plan_diff``), where ``SQLExpression`` is already the ``fn:`` string;
+    ``parse_column_default`` reads both. Pydantic already rejects a default
+    object that is not an ``SQLExpression``.
+    """
+    subject = f'Table {definition.database}.{definition.name} column "{column.name}"'
+    kind: ColumnDefaultKind = column.default_kind or "DEFAULT"
+    value = column.default
+    if value is None:
+        if kind in ("MATERIALIZED", "ALIAS"):
+            _push(issues, definition, "column_expression_required",
+                  f"{subject} is {kind} and requires a non-empty expression. "
+                  'Set default: { expression: "<sql>" }.')
+        return
+    parsed = parse_column_default(value)
+    if parsed.kind == "expression":
+        _validate_default_expression(definition, subject, kind, parsed.sql, issues)
+        return
+    if not isinstance(parsed.value, str):
+        return
+    # A string renders as a quoted literal for every kind. MATERIALIZED and
+    # ALIAS compute their value, so there it is almost always SQL written
+    # without { expression }; a constant string is spelled { expression: "'text'" }.
+    if kind in ("MATERIALIZED", "ALIAS"):
+        _push(issues, definition, "column_expression_requires_fn",
+              _describe_plain_string_expression(subject, kind, parsed.value))
+        return
+    # DEFAULT and EPHEMERAL keep a string as a literal. On a column that cannot
+    # hold a string, one that starts with a function call is SQL written
+    # without { expression }: ClickHouse rejects the literal, or reads it as NULL (#234).
+    if not starts_with_function_call(parsed.value):
+        return
+    type_ = js_trim(column.type)
+    if column_type_accepts_string_literal(type_):
+        return
+    effective_type = f"Nullable({type_})" if column.nullable else type_
+    _push(issues, definition, "column_default_looks_like_expression",
+          _describe_quoted_function_default(subject, kind, effective_type, parsed.value))
+
+
+def _validate_default_expression(
+    definition: TableDefinition,
+    subject: str,
+    kind: ColumnDefaultKind,
+    sql: str,
+    issues: list[ValidationIssue],
+) -> None:
+    rendered = render_default(SQLExpression(expression=sql))
+    if rendered == "":
+        removable = kind not in ("MATERIALIZED", "ALIAS")
+        _push(issues, definition, "column_expression_required",
+              f"{subject} has an empty default expression. Put the SQL in "
+              f'default: {{ expression: "<sql>" }}{", or remove default" if removable else ""}.')
+        return
+    # The expression is rendered mid-statement, so an open string, quoted
+    # identifier or block comment would swallow the SQL after it, the next
+    # statements of the migration file included.
+    tokens = tokenize_sql(sql)
+    unterminated = next((token for token in tokens if not token.terminated), None)
+    if unterminated is not None:
+        _push(issues, definition, "column_default_invalid",
+              f"{subject} has default expression {_js_string(sql)} with an unterminated "
+              f"{_describe_open_token(unterminated)}, which would swallow the rest of the "
+              "generated SQL. Close it or remove it.")
+    # ClickHouse reads `#` as a comment only before a space or `!`; any other
+    # `#` is a syntax error. Report it here instead of at migrate: at the end of
+    # an expression it used to turn the ` COMMENT` or ` CODEC` rendered after
+    # it into a comment, and the statement applied without them.
+    if any(_is_stray_hash(token) for token in tokens):
+        _push(issues, definition, "column_default_invalid",
+              f"{subject} has default expression {_js_string(sql)} with a # that starts no "
+              "comment, which ClickHouse rejects. Remove it, or put a space after it to "
+              'start a comment: "# note".')
+    # The prefix only marks a plain string as SQL. Inside an expression it is
+    # text: `SQLExpression(expression='fn:now()')` would render `DEFAULT fn:now()`.
+    if _keeps_legacy_prefix(rendered):
+        unprefixed = js_trim(rendered[len(LEGACY_EXPRESSION_PREFIX) :])
+        _push(issues, definition, "column_default_invalid",
+              f"{subject} has default expression {_js_string(rendered)}, which keeps the "
+              f"legacy fn: prefix and would render {kind} {rendered}, a syntax error. Remove "
+              f"the prefix: default: {{ expression: {_js_string(unprefixed)} }}.")
+
+
+def _passes_expression_checks(sql: str) -> bool:
+    # Whether _validate_default_expression accepts `sql`, so that a message can
+    # suggest it as the fix.
+    rendered = render_default(SQLExpression(expression=sql))
+    return (
+        rendered != ""
+        and not _keeps_legacy_prefix(rendered)
+        and all(token.terminated and not _is_stray_hash(token) for token in tokenize_sql(sql))
+    )
+
+
+def _keeps_legacy_prefix(sql: str) -> bool:
+    # `fn::String` is not a leftover prefix: it casts a column named fn.
+    prefix_length = len(LEGACY_EXPRESSION_PREFIX)
+    next_char = sql[prefix_length : prefix_length + 1]
+    return sql.startswith(LEGACY_EXPRESSION_PREFIX) and next_char != ":"
+
+
+def _is_stray_hash(token: SQLToken) -> bool:
+    return token.kind == "punctuation" and token.text == "#"
+
+
+def _describe_open_token(token: SQLToken) -> str:
+    # The lexer leaves only strings, quoted identifiers and block comments open.
+    if token.kind == "block_comment":
+        return "block comment"
+    if token.kind == "quoted_identifier":
+        return "quoted identifier"
+    return "string literal"
+
+
+def _describe_plain_string_expression(subject: str, kind: ColumnDefaultKind, value: str) -> str:
+    literal = render_default(value)
+    fix = _suggested_expression(value)
+    if fix is None:
+        as_sql = 'default: { expression: "<sql>" } for a SQL expression'
+    else:
+        expression, rendered = fix
+        legacy = _js_string(f"{LEGACY_EXPRESSION_PREFIX}{expression}")
+        as_sql = (
+            f"default: {{ expression: {_js_string(expression)} }} to render {kind} {rendered} "
+            f"(legacy spelling: {legacy})"
+        )
+    return (
+        f"{subject} is {kind} with plain string default {_js_string(value)}, which renders "
+        f"as the quoted literal {literal} instead of SQL. Use {as_sql}, or "
+        f"default: {{ expression: {_js_string(literal)} }} for a constant string."
+    )
+
+
+def _describe_quoted_function_default(
+    subject: str, kind: ColumnDefaultKind, effective_type: str, value: str
+) -> str:
+    # `effective_type` is the type as rendered, with `nullable=True` applied.
+    # The quoted-text option is for a type chkit misreads, such as a string type
+    # it does not know: on the types it recognizes, that literal is what fails.
+    literal = render_default(value)
+    fix = _suggested_expression(value)
+    ephemeral = kind == "EPHEMERAL"
+    reads_null = (
+        reads_unparsable_ephemeral_literal_as_null(effective_type)
+        if ephemeral
+        else stores_unparsable_literal_as_null(effective_type)
+    )
+    if reads_null:
+        outcome = (
+            f"which ClickHouse accepts for type {effective_type} but "
+            f"{'reads' if ephemeral else 'stores'} as NULL"
+        )
+    else:
+        outcome = f"which ClickHouse rejects for type {effective_type}"
+    if fix is None:
+        as_sql = 'Use default: { expression: "<sql>" } for a SQL expression.'
+    else:
+        expression, rendered = fix
+        as_sql = (
+            f"Use default: {{ expression: {_js_string(expression)} }} to render {kind} {rendered}."
+        )
+    return (
+        f"{subject} has default {_js_string(value)}, a plain string that looks like a SQL "
+        f"function call. Plain strings render as quoted literals ({kind} {literal}), "
+        f"{outcome}. {as_sql} If chkit misjudged the type and the column should "
+        f"{'hold' if ephemeral else 'store'} this text, use "
+        f"default: {{ expression: {_js_string(literal)} }}."
+    )
+
+
+def _suggested_expression(value: str) -> tuple[str, str] | None:
+    """The plain string as the ``{ expression }`` a message suggests.
+
+    Returns the expression and the SQL it renders on one line, or ``None`` when
+    validation would reject that expression too (no SQL, a leftover ``fn:``
+    prefix, an unterminated token or a stray ``#``).
+    """
+    expression = trim_expression(value)
+    if not _passes_expression_checks(expression):
+        return None
+    rendered = "".join(
+        " " if token.kind == "whitespace" else token.text
+        for token in tokenize_sql(render_default(SQLExpression(expression=expression)))
+    )
+    return expression, rendered
+
+
+def _js_string(value: str) -> str:
+    """``JSON.stringify`` of a string, so messages match the TS port byte for byte."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _validate_unstored_column_references(
@@ -236,13 +424,19 @@ def _validate_unstored_column_references(
     if not unstored:
         return
     label = f"Table {definition.database}.{definition.name}"
-    partition = strip_wrapping_parens((definition.partition_by or "").strip())
+    # Fragments are read without their comments, as canonicalization stores
+    # them (#232), so raw definitions (to_create_sql) and canonical ones
+    # (plan_diff) check the same fragment text.
+    partition = strip_wrapping_parens(normalize_sql_fragment(definition.partition_by or ""))
     references = [
         *(("orderBy", part) for part in normalize_key_columns(definition.order_by)),
         *(("primaryKey", part) for part in normalize_key_columns(definition.primary_key)),
         *(("partitionBy", part) for part in split_top_level_comma(partition)),
         *(("engine", part) for part in _engine_arguments(definition.engine)),
-        *((f'index "{index.name}"', index.expression) for index in definition.indexes or []),
+        *(
+            (f'index "{index.name}"', normalize_sql_fragment(index.expression))
+            for index in definition.indexes or []
+        ),
     ]
     for field, part in references:
         name = _unquote(part)
@@ -255,7 +449,9 @@ def _validate_unstored_column_references(
     for projection in definition.projections or []:
         try:
             tokens = text_sql_tokens(
-                projection.index if projection.index is not None else projection.query or ""
+                normalize_sql_fragment(
+                    projection.index if projection.index is not None else projection.query or ""
+                )
             )
         except (ValueError, IndexError):
             continue
@@ -290,6 +486,7 @@ def _unquote(name: str) -> str:
 
 
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
+    kafka = is_kafka_engine(definition.engine)
     _validate_kafka_table(definition, issues)
     column_seen: set[str] = set()
     column_set: set[str] = set()
@@ -305,8 +502,14 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
             continue
         column_seen.add(column.name)
         column_set.add(column.name)
-        _validate_column_expression(definition, column, issues)
+        # Kafka already rejects every default and column kind
+        # (kafka_column_default), which also covers the codec of an ALIAS or
+        # EPHEMERAL column; one error per mistake.
+        if not kafka:
+            _validate_unstored_column_codec(definition, column, issues)
         _validate_column_codec(definition, column, issues)
+        if not kafka:
+            _validate_column_default(definition, column, issues)
 
     _validate_indexes(definition, issues)
 

@@ -18,7 +18,13 @@ Key invariants:
   line) runs only on resubmit, never on first attempt.
 - Status ``unknown`` is a transient state (just-submitted or
   just-finished gap); loop until ``running`` / ``finished`` / ``failed``
-  unless the submit itself rejected.
+  unless the submit itself rejected, which is recorded as failed.
+- The query id is deterministic, so ``system.query_log`` can still hold
+  entries of an earlier attempt of the same statement (abandoned, or
+  retried after an edit). A new submission only trusts entries of queries
+  started after it, and an attach only those started no earlier than the
+  attempt it attaches to. The bound comes from the server clock minus a
+  margin for clock skew between replicas.
 """
 
 from __future__ import annotations
@@ -30,6 +36,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_recovery import has_statement_progress
 from chkit.cli.journal_store import (
     JournalStore,
     MigrationRowState,
@@ -38,6 +46,12 @@ from chkit.cli.journal_store import (
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus
 
 POLL_INTERVAL_SECONDS = 5.0
+# query_status compares whole seconds, so the margin stays more than a second
+# below POLL_INTERVAL_SECONDS: an earlier attempt that a previous run polled to
+# its end started at least one poll interval ago and always falls before the bound.
+QUERY_LOG_SKEW_MARGIN_MS = 2_000
+# query_status's own default: every query_log entry for the id counts.
+UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
 MAX_TRANSIENT_POLL_ERRORS = 20
 _BYTES_KIB = 1024
 _BYTES_MIB = _BYTES_KIB * 1024
@@ -155,19 +169,11 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     query_id = make_deterministic_query_id(
         input_.migration_name, input_.statement_index
     )
-    initial_state = journal_store.read_migration_state(input_.migration_name)
-    if (
-        initial_state is not None
-        and not initial_state.migration_completed
-        and initial_state.checksum != input_.migration_checksum
-    ):
-        msg = (
-            f"Migration {input_.migration_name} has in-progress async journal state "
-            f"for checksum {initial_state.checksum}, but the current file checksum "
-            f"is {input_.migration_checksum}. Restore the original migration file "
-            f"or clear the in-progress journal state before retrying."
-        )
-        raise RuntimeError(msg)
+    initial_state = _accept_changed_checksum(
+        journal_store.read_migration_state(input_.migration_name),
+        input_.migration_name,
+        input_.migration_checksum,
+    )
     prior_op = None
     if initial_state is not None:
         prior_op = next(
@@ -188,6 +194,10 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         return AsyncApplyResult(kind="skipped", operation=prior_op)
 
     # 2. Currently in flight on the server → attach (no submit, just poll).
+    # The server clock is read before the check, so the start derived from it
+    # and the attempt's elapsed time never falls after the start that
+    # query_log records for the attempt.
+    server_now_ms = _read_server_now_ms(client)
     in_flight = client.query_status(query_id)
     if in_flight.status == "running":
         input_.log(
@@ -198,8 +208,8 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             input_=input_,
             migration_state=initial_state,
             query_id=query_id,
-            poll_after_time="1970-01-01 00:00:00",
-            submit_failed=False,
+            poll_after_time=_attach_lower_bound(server_now_ms, in_flight.elapsed_ms),
+            submit_error=None,
             started_at=prior_op.started_at
             if prior_op is not None
             else iso_without_zone(datetime.now(tz=UTC)),
@@ -223,15 +233,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             f"  {input_.operation_type}: submitting async (query_id={query_id})"
         )
 
-    now = datetime.now(tz=UTC)
-    started_at = iso_without_zone(now)
-    # On a retry, exclude rows older than 1 min before "now" from the query_log
-    # poll so we don't accidentally see the prior attempt's terminal row.
-    submit_after_time: str | None = (
-        iso_without_zone(datetime.fromtimestamp(now.timestamp() - 60, tz=UTC))
-        if prior_op is not None
-        else None
-    )
+    started_at = iso_without_zone(datetime.now(tz=UTC))
 
     base_state = initial_state or fresh_migration_state(
         input_.migration_name, input_.migration_checksum
@@ -255,22 +257,23 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
 
     state_after_start = journal_store.read_migration_state(input_.migration_name)
 
-    submit_failed = False
+    poll_after_time = _query_log_lower_bound(_read_server_now_ms(client), 0)
+    submit_error: Exception | None = None
     try:
         client.submit(input_.sql, query_id=query_id)
-    except Exception as submit_error:
-        submit_failed = True
+    except Exception as error:
+        submit_error = error
         input_.log(
             f"  {input_.operation_type}: submit raised "
-            f"({_describe_error(submit_error)}) — polling for the server-side state"
+            f"({_describe_error(error)}) — polling for the server-side state"
         )
 
     return _poll_until_terminal(
         input_=input_,
         migration_state=state_after_start,
         query_id=query_id,
-        poll_after_time=submit_after_time,
-        submit_failed=submit_failed,
+        poll_after_time=poll_after_time,
+        submit_error=submit_error,
         started_at=started_at,
     )
 
@@ -280,8 +283,8 @@ def _poll_until_terminal(
     input_: AsyncApplyInput,
     migration_state: MigrationRowState | None,
     query_id: str,
-    poll_after_time: str | None,
-    submit_failed: bool,
+    poll_after_time: str,
+    submit_error: Exception | None,
     started_at: str,
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
@@ -369,14 +372,86 @@ def _poll_until_terminal(
             input_.log(_progress_line(input_.operation_type, status, elapsed_sec))
             continue
 
-        # status is "unknown" here
-        if submit_failed:
-            msg = (
-                f"Async migration step {input_.operation_type} (query_id {query_id}): "
-                f"submit failed and query is not visible in query_log."
+        # status is "unknown" here. If submit already raised, the query never
+        # made it server-side (e.g. SQL parse error): record the attempt as
+        # failed and surface that error. Otherwise it's a transient gap.
+        if submit_error is not None:
+            input_.journal_store.write_migration_state(
+                upsert_operation(
+                    base_state,
+                    OperationState.model_validate(
+                        {
+                            "operationIndex": input_.statement_index,
+                            "operationKey": input_.operation_key,
+                            "operationType": input_.operation_type,
+                            "queryId": query_id,
+                            "status": "failed",
+                            "startedAt": started_at,
+                            "finishedAt": iso_without_zone(datetime.now(tz=UTC)),
+                            "lastError": _describe_error(submit_error),
+                        }
+                    ),
+                    iso_without_zone(datetime.now(tz=UTC)),
+                )
             )
-            raise RuntimeError(msg)
+            raise submit_error
         input_.log(
             f"  {input_.operation_type}: status unknown — still polling "
             f"(elapsed {elapsed_sec}s)"
         )
+
+
+def _accept_changed_checksum(
+    state: MigrationRowState | None,
+    migration_name: str,
+    migration_checksum: str,
+) -> MigrationRowState | None:
+    """Defense in depth behind apply's re-keying of an edited in-progress state.
+
+    A state whose checksum still differs is accepted only when no statement
+    is recorded as completed or started, and the writes that follow carry
+    the new checksum.
+    """
+    if (
+        state is None
+        or state.migration_completed
+        or state.checksum == migration_checksum
+    ):
+        return state
+    if has_statement_progress(state):
+        raise in_progress_checksum_mismatch_error(
+            migration=migration_name,
+            journal_checksum=state.checksum,
+            file_checksum=migration_checksum,
+            is_async=True,
+        )
+    return state.model_copy(update={"checksum": migration_checksum})
+
+
+def _attach_lower_bound(server_now_ms: int, elapsed_ms: int | None) -> str:
+    """Bound an attach by the attached attempt's start.
+
+    Without an elapsed time its start is unknown, and only the unbounded
+    lookup still finds its entry.
+    """
+    if elapsed_ms is None:
+        return UNBOUNDED_POLL_AFTER_TIME
+    return _query_log_lower_bound(server_now_ms, elapsed_ms)
+
+
+def _query_log_lower_bound(server_now_ms: int, started_ms_ago: int) -> str:
+    bound_ms = server_now_ms - started_ms_ago - QUERY_LOG_SKEW_MARGIN_MS
+    return (
+        datetime.fromtimestamp(bound_ms / 1000, tz=UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _read_server_now_ms(client: ClickHouseClient) -> int:
+    rows = client.query("SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms").rows
+    try:
+        return int(rows[0]["now_ms"])
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        msg = "Could not read the ClickHouse server time for an async statement."
+        raise RuntimeError(msg) from error

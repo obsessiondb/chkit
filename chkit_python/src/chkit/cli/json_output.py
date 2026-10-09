@@ -27,6 +27,7 @@ Command = Literal[
     "status",
     "drift",
     "check",
+    "snapshot",
     "plugin",
     "query",
     "pull",

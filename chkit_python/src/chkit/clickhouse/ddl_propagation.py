@@ -27,9 +27,34 @@ MAX_ATTEMPTS = 20
 RETRY_DELAY_SECONDS = 0.5
 
 
+# What each ALTER or rename appends to the `<kind>:<database>.<name>` key of
+# the object it changes. Creates and drops use the bare key.
+_KEY_SUFFIXES: dict[str, str] = {
+    "alter_materialized_view_modify_refresh": ":refresh",
+    "alter_table_add_column": ":column:",
+    "alter_table_modify_column": ":column:",
+    "alter_table_drop_column": ":column:",
+    "alter_table_rename_column": ":column_rename:",
+    "alter_table_add_index": ":index:",
+    "alter_table_drop_index": ":index:",
+    "alter_table_add_projection": ":projection:",
+    "alter_table_drop_projection": ":projection:",
+    "alter_table_modify_setting": ":setting:",
+    "alter_table_reset_setting": ":setting:",
+    "alter_table_modify_ttl": ":ttl",
+    "alter_table_rename_table": ":rename_table",
+    "rename_dictionary": ":rename_dictionary",
+}
+_OBJECT_KEY_PREFIXES = ("table:", "dictionary:", "view:", "materialized_view:")
+
+
 def _quote(value: str) -> str:
-    """Escape single quotes for embedding in a SQL string literal."""
-    return value.replace("'", "''")
+    """Escape a value for embedding in a single-quoted SQL string literal.
+
+    Object names may contain quotes and backslashes (DDL backtick-quotes them),
+    so the names compared against system tables are escaped string literals.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _poll(
@@ -270,53 +295,43 @@ def wait_for_projection_absent(
 
 
 def _parse_operation_key(
-    key: str,
+    operation_type: str, key: str
 ) -> tuple[str, str, str | None, str | None, str | None] | None:
     """Parse an operation key into (database, table, column, index, projection).
 
-    Supported shapes:
-        - ``table:db.t``
-        - ``table:db.t:column:c``
-        - ``table:db.t:index:i``
-        - ``table:db.t:projection:p``
-        - ``dictionary:db.d``
+    Keys look like ``table:app.users``, ``table:app.users:column:name``,
+    ``dictionary:app.users_dict``, ``view:app.active_users`` or
+    ``materialized_view:app.events_mv:refresh``. ``table`` is the object's name
+    in system.tables, which lists views and dictionaries too.
+
+    Names may contain ':', so the object's name runs to the last occurrence of
+    the suffix its operation type appends; without a known suffix the rest of
+    the key is the name. The database runs to the first '.': the key cannot
+    tell a '.' inside a database name from the separator, so objects in such a
+    database are not found.
     """
-    if key.startswith("table:"):
-        rest = key[len("table:") :]
-    elif key.startswith("dictionary:"):
-        rest = key[len("dictionary:") :]
-    else:
+    prefix = next((p for p in _OBJECT_KEY_PREFIXES if key.startswith(p)), None)
+    if prefix is None:
         return None
+    rest = key[len(prefix) :]
     dot = rest.find(".")
-    if dot == -1:
+    if dot < 1 or dot == len(rest) - 1:
         return None
     database = rest[:dot]
-    after_db = rest[dot + 1 :]
-    colon = after_db.find(":")
-    table = after_db if colon == -1 else after_db[:colon]
-    column: str | None = None
-    index: str | None = None
-    projection: str | None = None
-    if colon != -1:
-        suffix = after_db[colon + 1 :]
-        kinds = (
-            ("column:", "column"),
-            ("index:", "index"),
-            ("projection:", "projection"),
-        )
-        for prefix, setter in kinds:
-            if suffix.startswith(prefix):
-                rest_after = suffix[len(prefix) :]
-                next_colon = rest_after.find(":")
-                value = rest_after if next_colon == -1 else rest_after[:next_colon]
-                if setter == "column":
-                    column = value
-                elif setter == "index":
-                    index = value
-                else:
-                    projection = value
-                break
-    return database, table, column, index, projection
+    name = rest[dot + 1 :]
+
+    suffix = _KEY_SUFFIXES.get(operation_type)
+    at = -1 if suffix is None else name.rfind(suffix)
+    if suffix is None or at < 1:
+        return database, name, None, None, None
+    member = name[at + len(suffix) :]
+    return (
+        database,
+        name[:at],
+        member if suffix == ":column:" else None,
+        member if suffix == ":index:" else None,
+        member if suffix == ":projection:" else None,
+    )
 
 
 def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
@@ -339,7 +354,7 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     - alter_table_drop_projection                     → wait_for_projection_absent
     - everything else (modify_setting, modify_ttl …) → wait_for_table (best-effort)
     """
-    parsed = _parse_operation_key(operation_key)
+    parsed = _parse_operation_key(operation_type, operation_key)
     if parsed is None:
         # database-level ops or unrecognised keys — nothing to poll for.
         return
