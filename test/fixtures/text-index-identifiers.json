@@ -1,0 +1,16 @@
+[
+  "null",
+  "true",
+  "false",
+  "inf",
+  "infinity",
+  "nan",
+  "distinct",
+  "all",
+  "some",
+  "table",
+  "select",
+  "from",
+  "top",
+  "values"
+]

@@ -26,6 +26,16 @@ export interface GenerateArtifactsOutput {
   snapshot: Snapshot
 }
 
+export interface WriteSnapshotInput {
+  metaDir: string
+  definitions: SchemaDefinition[]
+}
+
+export interface WriteSnapshotOutput {
+  snapshotFile: string
+  snapshot: Snapshot
+}
+
 export interface GenerateEmptyMigrationInput {
   migrationsDir: string
   migrationName?: string
@@ -126,7 +136,11 @@ function buildMigrationContent(input: {
   )
 
   const body = input.plan.operations
-    .map((op) => [`-- operation: ${op.type} key=${op.key} risk=${op.risk}`, op.sql].join('\n'))
+    .map((op) => [
+      `-- operation: ${op.type} key=${op.key} risk=${op.risk}`,
+      ...(op.warning ? [`-- Warning: ${op.warning.replace(/[\r\n]/g, ' ')}`] : []),
+      op.sql,
+    ].join('\n'))
     .join('\n\n')
 
   const withHints = [...header, ...renameHints]
@@ -157,7 +171,6 @@ export async function generateArtifacts(input: GenerateArtifactsInput): Promise<
   const migrationName = safeName(input.migrationName ?? 'auto')
 
   await mkdir(input.migrationsDir, { recursive: true })
-  await mkdir(input.metaDir, { recursive: true })
 
   const generatedAt = now.toISOString()
   const sql = buildMigrationContent({
@@ -175,10 +188,10 @@ export async function generateArtifacts(input: GenerateArtifactsInput): Promise<
           sql,
         })
       : null
-  const snapshotFile = join(input.metaDir, 'snapshot.json')
-  const snapshot = createSnapshot(input.definitions)
-
-  await writeFile(snapshotFile, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
+  const { snapshotFile, snapshot } = await writeSnapshot({
+    metaDir: input.metaDir,
+    definitions: input.definitions,
+  })
 
   return {
     migrationFile,
@@ -186,6 +199,24 @@ export async function generateArtifacts(input: GenerateArtifactsInput): Promise<
     sql,
     snapshot,
   }
+}
+
+/** Render a snapshot exactly as `chkit generate` writes it: 2-space JSON plus a trailing newline. */
+export function serializeSnapshot(snapshot: Snapshot): string {
+  return `${JSON.stringify(snapshot, null, 2)}\n`
+}
+
+/**
+ * Write `<metaDir>/snapshot.json` for `definitions`. Shared by `chkit generate`
+ * and `chkit snapshot rebuild`, so both produce byte-identical files (apart from
+ * `generatedAt`).
+ */
+export async function writeSnapshot(input: WriteSnapshotInput): Promise<WriteSnapshotOutput> {
+  await mkdir(input.metaDir, { recursive: true })
+  const snapshotFile = join(input.metaDir, 'snapshot.json')
+  const snapshot = createSnapshot(input.definitions)
+  await writeFile(snapshotFile, serializeSnapshot(snapshot), 'utf8')
+  return { snapshotFile, snapshot }
 }
 
 /**

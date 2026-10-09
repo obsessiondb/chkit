@@ -1,9 +1,12 @@
 type Command =
+  | 'add'
+  | 'registry'
   | 'generate'
   | 'migrate'
   | 'status'
   | 'drift'
   | 'check'
+  | 'snapshot'
   | 'plugin'
   | 'query'
 

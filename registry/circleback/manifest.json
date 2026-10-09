@@ -1,0 +1,174 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "circleback",
+  "type": "registry:item",
+  "title": "Circleback",
+  "description": "Five independent Circleback raw resource streams with complete full reads, transcript availability evidence, and native relationships.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/README.md"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/index.ts"
+    },
+    { "path": "config.ts", "type": "registry:file", "target": "src/integrations/circleback/config.ts" },
+    { "path": "client.ts", "type": "registry:file", "target": "src/integrations/circleback/client.ts" },
+    { "path": "pipeline.ts", "type": "registry:file", "target": "src/integrations/circleback/pipeline.ts" },
+    { "path": "sources/meetings.ts", "type": "registry:file", "target": "src/integrations/circleback/sources/meetings.ts" },
+    { "path": "sources/meeting-transcripts.ts", "type": "registry:file", "target": "src/integrations/circleback/sources/meeting-transcripts.ts" },
+    { "path": "sources/action-items.ts", "type": "registry:file", "target": "src/integrations/circleback/sources/action-items.ts" },
+    { "path": "sources/people.ts", "type": "registry:file", "target": "src/integrations/circleback/sources/people.ts" },
+    { "path": "sources/companies.ts", "type": "registry:file", "target": "src/integrations/circleback/sources/companies.ts" },
+    {
+      "path": "tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/tests/basic.test.ts",
+      "role": "test"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Provide one configurable account pipeline with independent meetings, meeting transcripts, action items, people, and companies raw streams.",
+            "Use native full-sync completion and safe first-page replay with scoped identities and validated Link pagination that preserves query filters.",
+            "Revisit every eligible meeting for late transcripts; retain successful snapshots separately from forbidden/not-found read outcomes.",
+            "Read action items for anyone across both native PENDING and DONE statuses; preserve people and company relationships without inventing numeric company IDs.",
+            "Store complete tag names as string arrays and raw provider payloads in source-scoped envelopes; adopting this layout requires reingestion or migration of earlier unscoped meeting observations.",
+            "Add portable fixtures for independently selected resources, reversed stream order, malformed responses, pagination, late transcripts, and source/destination recovery.",
+            "Consume full pagination pages and use shared continuation-cycle detection while preserving independent resource checkpoints and provider Link validation."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw meeting ingestion with transcript enrichment."
+          ]
+        }
+      ],
+      "documentation": "https://chkit.obsessiondb.com/integrations/circleback/",
+      "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/circleback",
+      "entry": "index.ts",
+      "exports": [
+        "circlebackPipeline",
+        "createCirclebackPipeline",
+        "circleback_meetingsRaw",
+        "circleback_meetingTranscriptsRaw",
+        "circleback_actionItemsRaw",
+        "circleback_peopleRaw",
+        "circleback_companiesRaw"
+      ],
+      "resources": [
+        {
+          "name": "meetings",
+          "title": "Meetings",
+          "table": "circleback_meetings_raw",
+          "description": "Accessible meeting provider objects and notes, with tag names as string arrays.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/meetings",
+              "documentation": "https://circleback.ai/docs/api/meetings/list-meetings"
+            }
+          ]
+        },
+        {
+          "name": "meeting_transcripts",
+          "title": "Meeting transcripts",
+          "table": "circleback_meeting_transcripts_raw",
+          "description": "Whole transcript snapshots per meeting and separate latest read outcomes; availability failures preserve earlier successful text.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/meetings",
+              "documentation": "https://circleback.ai/docs/api/meetings/list-meetings"
+            },
+            {
+              "method": "GET",
+              "path": "/meeting/{meetingId}/transcript",
+              "documentation": "https://circleback.ai/docs/api/meetings/get-meeting-transcript"
+            }
+          ]
+        },
+        {
+          "name": "action_items",
+          "title": "Action items",
+          "table": "circleback_action_items_raw",
+          "description": "Raw action items for any assignee, fully paginated across PENDING and DONE completion statuses.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [{ "method": "GET", "path": "/action-items", "documentation": "https://circleback.ai/docs/api/action-items/list-action-items" }]
+        },
+        {
+          "name": "people",
+          "title": "People",
+          "table": "circleback_people_raw",
+          "description": "Complete same-person listing and detail fields, preserving external references and native person/company IDs.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            { "method": "GET", "path": "/people", "documentation": "https://circleback.ai/docs/api/people/list-people" },
+            { "method": "GET", "path": "/person/{profileId}", "documentation": "https://circleback.ai/docs/api/people/get-person" }
+          ]
+        },
+        {
+          "name": "companies",
+          "title": "Companies",
+          "table": "circleback_companies_raw",
+          "description": "Domain-keyed company listing and detail fields with a nullable, corroborated native numeric company ID for joins.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            { "method": "GET", "path": "/companies", "documentation": "https://circleback.ai/docs/api/companies/list-companies" },
+            { "method": "GET", "path": "/company/{domain}", "documentation": "https://circleback.ai/docs/api/companies/get-company" }
+          ]
+        }
+      ],
+      "env": {
+        "CIRCLEBACK_API_KEY": ""
+      },
+      "authentication": {
+        "method": "Bearer API key",
+        "env": [
+          "CIRCLEBACK_API_KEY"
+        ],
+        "documentation": "https://circleback.ai/docs/api",
+        "setup": [
+          "Provide CIRCLEBACK_API_KEY with read access to the selected resources.",
+          "Keep the API key in the runtime environment and rotate it according to the provider policy."
+        ]
+      },
+      "views": [],
+      "sync": {
+        "description": "Each resource fully reads its own provider collection and records independent successful completion after writes. Interrupted reads restart at the first page. Transcripts own complete meeting discovery and revisit late availability on unchanged old meetings.",
+        "schedule": "Run bunx chkit ingest run --tag provider:circleback from a scheduler.",
+        "deletions": "Absent resources remain stored. Transcript 403 and 404 responses update explicit read outcomes without deleting prior successful content; neither proves deletion or temporary processing."
+      }
+    }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
+}

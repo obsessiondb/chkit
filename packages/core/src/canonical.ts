@@ -1,5 +1,7 @@
 import type {
   ColumnDefinition,
+  DictionaryAttribute,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   SchemaDefinition,
@@ -10,7 +12,9 @@ import type {
 import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
 import { canonicalizeCodec } from './codec.js'
+import { canonicalizeColumnDefault } from './column-default.js'
 import { canonicalizeProjection } from './projection.js'
+import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
@@ -20,25 +24,41 @@ function sortByName<T extends { name: string }>(items: T[]): T[] {
 function sortKind(kind: SchemaDefinition['kind']): number {
   if (kind === 'table') return 0
   if (kind === 'view') return 1
-  return 2
+  if (kind === 'materialized_view') return 2
+  return 3
 }
 
 function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
+  const { defaultKind, ...rest } = column
   return {
-    ...column,
+    ...rest,
+    defaultKind: defaultKind === 'DEFAULT' ? undefined : defaultKind,
     name: column.name.trim(),
     renamedFrom: column.renamedFrom?.trim(),
     type: typeof column.type === 'string' ? column.type.trim() : column.type,
     comment: column.comment?.trim(),
     codec: column.codec ? canonicalizeCodec(column.codec) : undefined,
+    // `{ expression }` becomes the legacy `fn:` string, so snapshots, plans,
+    // drift and chkit-py share one representation (#234). A column without a
+    // default gains no key, and an overwritten key keeps the position the
+    // spread gave it, so JSON-based column comparisons are unchanged.
+    ...(column.default !== undefined ? { default: canonicalizeColumnDefault(column.default) } : {}),
   }
 }
 
 function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
+  if (index.type === 'text') return canonicalizeTextIndex(index)
   return {
     ...index,
     expression: normalizeSQLFragment(index.expression),
   }
+}
+
+// A clause that is only comments is no clause: `ttl: '-- ts + INTERVAL 1 DAY'`
+// must render `REMOVE TTL`, not `MODIFY TTL ;`.
+function normalizeOptionalClause(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  return normalizeSQLFragment(value) || undefined
 }
 
 function canonicalizeTable(def: TableDefinition): TableDefinition {
@@ -53,11 +73,12 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     ? sortByName(def.projections).map(canonicalizeProjection)
     : undefined
 
-  const orderBy = normalizeKeyColumns(def.orderBy)
+  const columnNames = new Set(def.columns.map((column) => column.name.trim()))
+  const orderBy = normalizeKeyColumns(def.orderBy, columnNames)
   // ClickHouse derives the primary key from ORDER BY when PRIMARY KEY is
   // omitted. Mirror that so a table with `orderBy` but no `primaryKey` is
   // valid instead of crashing on `undefined.flatMap`.
-  const primaryKey = normalizeKeyColumns(def.primaryKey)
+  const primaryKey = normalizeKeyColumns(def.primaryKey, columnNames)
 
   return {
     ...def,
@@ -73,9 +94,9 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     columns: def.columns.map(canonicalizeColumn),
     primaryKey: primaryKey.length > 0 ? primaryKey : orderBy,
     orderBy,
-    uniqueKey: def.uniqueKey ? normalizeKeyColumns(def.uniqueKey) : undefined,
-    partitionBy: def.partitionBy ? normalizeSQLFragment(def.partitionBy) : undefined,
-    ttl: def.ttl ? normalizeSQLFragment(def.ttl) : undefined,
+    uniqueKey: def.uniqueKey ? normalizeKeyColumns(def.uniqueKey, columnNames) : undefined,
+    partitionBy: normalizeOptionalClause(def.partitionBy),
+    ttl: normalizeOptionalClause(def.ttl),
     settings,
     indexes,
     projections,
@@ -161,9 +182,49 @@ function canonicalizeMaterializedView(def: MaterializedViewDefinition): Material
   return canonical
 }
 
+function canonicalizeDictionaryAttribute(attribute: DictionaryAttribute): DictionaryAttribute {
+  return {
+    ...attribute,
+    name: attribute.name.trim(),
+    type: typeof attribute.type === 'string' ? attribute.type.trim() : attribute.type,
+  }
+}
+
+function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition {
+  const settings = def.settings
+    ? Object.fromEntries(Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b)))
+    : undefined
+
+  return {
+    ...def,
+    database: def.database.trim(),
+    name: def.name.trim(),
+    renamedFrom: def.renamedFrom
+      ? {
+          database: def.renamedFrom.database?.trim(),
+          name: def.renamedFrom.name.trim(),
+        }
+      : undefined,
+    attributes: def.attributes.map(canonicalizeDictionaryAttribute),
+    primaryKey: normalizeKeyColumns(
+      def.primaryKey,
+      new Set(def.attributes.map((attribute) => attribute.name.trim()))
+    ),
+    source: normalizeSQLFragment(def.source),
+    layout: normalizeSQLFragment(def.layout),
+    lifetime: normalizeSQLFragment(def.lifetime),
+    range: def.range
+      ? { min: def.range.min.trim(), max: def.range.max.trim() }
+      : undefined,
+    settings: settings && Object.keys(settings).length > 0 ? settings : undefined,
+    comment: def.comment?.trim(),
+  }
+}
+
 export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition {
   if (def.kind === 'table') return canonicalizeTable(def)
   if (def.kind === 'view') return canonicalizeView(def)
+  if (def.kind === 'dictionary') return canonicalizeDictionary(def)
   return canonicalizeMaterializedView(def)
 }
 

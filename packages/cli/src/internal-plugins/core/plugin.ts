@@ -4,6 +4,7 @@ import { generateCommand } from '../../commands/generate/command.js'
 import { migrateCommand } from '../../commands/migrate/command.js'
 import { pluginCommand } from '../../commands/plugin.js'
 import { queryCommand } from '../../commands/query.js'
+import { snapshotCommand } from '../../commands/snapshot/command.js'
 import { statusCommand } from '../../commands/status.js'
 import { definePlugin } from '../../plugins.js'
 
@@ -15,6 +16,7 @@ export const corePlugin = definePlugin({
     statusCommand,
     driftCommand,
     checkCommand,
+    snapshotCommand,
     queryCommand,
     pluginCommand,
   ],

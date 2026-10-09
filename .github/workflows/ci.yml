@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+  # "Release: prepare" opens its PR with GITHUB_TOKEN, which does not start
+  # pull_request runs, so it dispatches CI on the release branch instead.
+  workflow_dispatch:
 
 jobs:
   verify:
@@ -12,15 +15,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: ./.github/actions/setup
-
-      - name: Verify lockfile unchanged
-        run: git diff --exit-code bun.lock
-
-      - name: Check internal workspace deps
-        run: bun run check:workspace-deps
 
       - name: Fallow analysis
         if: github.event_name == 'pull_request'
@@ -35,31 +34,122 @@ jobs:
         with:
           sarif_file: fallow-results.sarif
 
+      # Same command as locally: Turbo starts the test stack (test/infra) and
+      # runs typecheck, lint, test and build.
       - name: Verify
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
-          CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
-        run: bunx turbo run typecheck lint test build
+        run: bun run verify
 
-      - name: Check packed tarball deps
-        run: bun run check:packed-deps
-
-  deploy:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+  obsessiondb:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: verify
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Fixture tables are shared on the managed test database. Let an active
+    # run finish before another run reseeds them.
+    concurrency:
+      group: obsessiondb-tests
+      cancel-in-progress: false
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check ObsessionDB test configuration
+        run: |
+          : "${CLICKHOUSE_HOST:?Set the CLICKHOUSE_HOST repository secret}"
+          : "${CLICKHOUSE_PASSWORD:?Set the CLICKHOUSE_PASSWORD repository secret}"
+
       - name: Setup Bun
         uses: ./.github/actions/setup
 
-      - name: Deploy
+      - name: Test against ObsessionDB
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+        run: bun run test:obsessiondb
+
+  deploy:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [verify, obsessiondb]
+    # ObsessionDB tests run only on main. PR previews need verify to pass,
+    # while production still requires both test jobs to succeed.
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+        needs.obsessiondb.result == 'success') ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.actor != 'dependabot[bot]'))
+    permissions:
+      contents: read
+      deployments: write
+    concurrency:
+      group: docs-deploy-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for docs changes
+        id: docs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = 'push' ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            changed_files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- \
+              apps/docs/ registry/ scripts/build-registry.ts \
+              scripts/registry-catalog.ts scripts/check-registry-docs.ts \
+              packages/cli/src/registry/ package.json bun.lock turbo.json \
+              .github/workflows/ci.yml .github/actions/setup/)"
+            if [ -n "$changed_files" ]; then
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Setup Bun
+        if: steps.docs.outputs.changed == 'true'
+        uses: ./.github/actions/setup
+
+      - name: Deploy production
+        if: github.event_name == 'push'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: bun run deploy
+
+      - name: Build docs preview
+        if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        env:
+          PUBLIC_AGENTATION_ENABLED: 'true'
+        run: bun run docs:build
+
+      - name: Deploy docs preview
+        id: preview
+        if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/docs
+          packageManager: bun
+          command: pages deploy dist --project-name=chkit-docs --branch=pr-${{ github.event.pull_request.number }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show docs preview URL
+        if: github.event_name == 'pull_request' && steps.docs.outputs.changed == 'true'
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.pages-deployment-alias-url }}
+          DEPLOYMENT_URL: ${{ steps.preview.outputs.deployment-url }}
+        run: |
+          echo "[Open docs preview](${PREVIEW_URL:-$DEPLOYMENT_URL})" >> "$GITHUB_STEP_SUMMARY"

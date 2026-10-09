@@ -2,10 +2,13 @@ import { createRequire } from 'node:module'
 import {
 	type ChxConfig,
 	type ColumnDefinition,
+	isSyntheticEphemeralDefault,
 	normalizeSQLFragment,
 	type ProjectionDefinition,
 	parseCodec,
 	type SkipIndexDefinition,
+	parseTextIndexParams,
+	normalizeTextIndexSQL,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
@@ -42,6 +45,14 @@ export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
 	table: string
 	values: T[]
 	compressed?: boolean
+	/** Per-insert settings, e.g. a stable `insert_deduplication_token`. */
+	settings?: ClickHouseSettings
+	/**
+	 * Explicit INSERT column list as SQL identifiers (quote names that need it).
+	 * Required to supply EPHEMERAL inputs: without it ClickHouse treats their
+	 * keys as unknown fields and silently drops them.
+	 */
+	columns?: string[]
 }
 
 export interface ClickHouseJsonQueryResult<
@@ -57,6 +68,8 @@ export interface ClickHouseJsonQueryResult<
 	}
 	query_id?: string
 }
+
+export type ObservableSystemTable = 'processes' | 'query_log'
 
 export interface ClickHouseExecutor {
 	command(sql: string): Promise<void>
@@ -88,11 +101,27 @@ export interface ClickHouseExecutor {
 		options?: { afterTime?: string },
 	): Promise<QueryStatus>
 
+	/** Optional capability: FROM-clause source for cluster-aware system table polling.
+	 *  Native executors return `clusterAllReplicas(...)` when `clickhouse.cluster` is set.
+	 *  Remote / ObsessionDB executors may omit this and keep local `system.*` tables. */
+	systemTableSource?(table: ObservableSystemTable): string
+
 	close(): Promise<void>
 }
 
+/**
+ * Resolve the system table expression used for async query observation.
+ * Prefers `executor.systemTableSource` when present; otherwise local `system.<table>`.
+ */
+export function observableSystemTable(
+	executor: Pick<ClickHouseExecutor, 'systemTableSource'>,
+	table: ObservableSystemTable,
+): string {
+	return executor.systemTableSource?.(table) ?? `system.${table}`
+}
+
 export interface SchemaObjectRef {
-	kind: 'table' | 'view' | 'materialized_view'
+	kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
 	database: string
 	name: string
 }
@@ -159,13 +188,25 @@ export {
 	parseTTLFromCreateTableQuery,
 	parseUniqueKeyFromCreateTableQuery,
 } from './create-table-parser.js'
+export {
+	parseCommentFromCreateDictionaryQuery,
+	parseDictionaryAttributesFromCreateDictionaryQuery,
+	parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+	parseDictionaryRangeFromCreateDictionaryQuery,
+	parseDictionarySettingsFromCreateDictionaryQuery,
+	parseLayoutFromCreateDictionaryQuery,
+	parseLifetimeFromCreateDictionaryQuery,
+	parseSourceFromCreateDictionaryQuery,
+	type ParsedDictionaryAttribute,
+} from './create-dictionary-parser.js'
 
 export function inferSchemaKindFromEngine(
 	engine: string,
 ): SchemaObjectRef['kind'] | null {
 	if (engine === 'View') return 'view'
 	if (engine === 'MaterializedView') return 'materialized_view'
-	if (!engine || engine === 'Dictionary') return null
+	if (engine === 'Dictionary') return 'dictionary'
+	if (!engine) return null
 	return 'table'
 }
 
@@ -176,8 +217,17 @@ export function normalizeColumnFromSystemRow(
 	const type = nullableMatch?.[1] ? nullableMatch[1] : row.type
 	const nullable = Boolean(nullableMatch?.[1])
 	let defaultValue: ColumnDefinition['default'] | undefined
-	if (row.default_expression && row.default_kind === 'DEFAULT') {
-		defaultValue = normalizeSQLFragment(row.default_expression)
+	const defaultKind = row.default_kind
+	if (defaultKind && !['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(defaultKind)) {
+		throw new Error(`Unsupported column default kind: ${defaultKind}`)
+	}
+	if (row.default_expression && defaultKind) {
+		// Preserve whitespace inside SQL string literals when pulling expressions.
+		defaultValue = row.default_expression.trim()
+	}
+	// A bare EPHEMERAL column reads back as its synthesized default.
+	if (defaultKind === 'EPHEMERAL' && defaultValue !== undefined && isSyntheticEphemeralDefault(String(defaultValue))) {
+		defaultValue = undefined
 	}
 	const codecSteps = parseCodec(row.compression_codec)
 	return {
@@ -185,12 +235,16 @@ export function normalizeColumnFromSystemRow(
 		type,
 		nullable: nullable || undefined,
 		default: defaultValue,
+		defaultKind: defaultKind && defaultKind !== 'DEFAULT'
+			? defaultKind as ColumnDefinition['defaultKind']
+			: undefined,
 		comment: row.comment?.trim() || undefined,
 		codec: codecSteps,
 	}
 }
 
 type ParsedIndexShape =
+	| ({ type: 'text' } & ReturnType<typeof parseTextIndexParams>)
 	| { type: 'minmax' }
 	| { type: 'set'; maxRows: number }
 	| { type: 'bloom_filter'; falsePositiveRate?: number }
@@ -217,8 +271,9 @@ function splitArgs(args: string | undefined): number[] {
 }
 
 function parseIndexType(value: string): ParsedIndexShape {
-	const match = value.match(/^(\w+)\((.+)\)$/)
+	const match = value.match(/^(\w+)\((.*)\)$/s)
 	const baseName = match?.[1] ?? value
+	if (baseName === 'text') return { type: 'text', ...parseTextIndexParams(match?.[2] ?? '') }
 	const args = splitArgs(match?.[2])
 
 	switch (baseName) {
@@ -254,7 +309,7 @@ export function normalizeIndexFromSystemRow(
 	const parsed = parseIndexType(row.type)
 	return {
 		name: row.name,
-		expression: normalizeSQLFragment(row.expr),
+		expression: parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr),
 		granularity: row.granularity,
 		...parsed,
 	}
@@ -296,7 +351,7 @@ export function buildIntrospectedTables(
 			return {
 				database: row.database,
 				name: row.name,
-				engine: parseEngineFromCreateTableQuery(row.create_table_query),
+					engine: parseEngineFromCreateTableQuery(row.create_table_query) ?? row.engine,
 				primaryKey: parsePrimaryKeyFromCreateTableQuery(row.create_table_query),
 				orderBy: parseOrderByFromCreateTableQuery(row.create_table_query),
 				uniqueKey: parseUniqueKeyFromCreateTableQuery(row.create_table_query),
@@ -468,6 +523,7 @@ export function assertStreamedQuerySucceeded(input: {
 export {
 	waitForColumn,
 	waitForDDLPropagation,
+	waitForDictionary,
 	waitForTable,
 	waitForTableAbsent,
 	waitForView,
@@ -722,6 +778,8 @@ export function createExecutorWithClient(
 					table: params.table,
 					values: params.values,
 					format: 'JSONEachRow',
+					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
+					...(params.settings ? { clickhouse_settings: params.settings } : {}),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -747,13 +805,23 @@ export function createExecutorWithClient(
 			}
 			return id
 		},
+		systemTableSource(table: ObservableSystemTable): string {
+			// `config.cluster` is validated at resolveConfig (assertValidClusterName), so it is
+			// safe to interpolate into the single-quoted clusterAllReplicas argument — same
+			// contract as onClusterClause. Never guess a default name like 'cluster'.
+			if (config.cluster) {
+				return `clusterAllReplicas('${config.cluster}', system.${table})`
+			}
+			return `system.${table}`
+		},
 		async queryStatus(
 			queryId: string,
 			options?: { afterTime?: string },
 		): Promise<QueryStatus> {
 			try {
+				const processesFrom = observableSystemTable(this, 'processes')
 				const running = await client.query({
-					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM clusterAllReplicas('cluster', system.processes) WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
 					query_params: { qid: queryId },
 					format: 'JSONEachRow',
 				})
@@ -777,9 +845,10 @@ export function createExecutorWithClient(
 				}
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
+				const queryLogFrom = observableSystemTable(this, 'query_log')
 				const log = await client.query({
 					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
-FROM clusterAllReplicas('cluster', system.query_log)
+FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
@@ -871,7 +940,7 @@ FROM system.columns
 WHERE database IN (${quotedDatabases})`,
 			)
 			const indexes = await this.query<SystemSkippingIndexRow>(
-				`SELECT database, table, name, expr, type, granularity
+				`SELECT database, table, name, expr, type_full AS type, granularity
 FROM system.data_skipping_indices
 WHERE database IN (${quotedDatabases})`,
 			)
@@ -919,4 +988,9 @@ export function createStatelessClickHouseExecutor(
 				}),
 		},
 	)
+}
+
+// @clickhouse/client only accepts a non-empty column list.
+function isNonEmpty<T>(values: T[] | undefined): values is [T, ...T[]] {
+	return values !== undefined && values.length > 0
 }

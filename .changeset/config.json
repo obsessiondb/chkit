@@ -12,6 +12,7 @@
       "@chkit/plugin-codegen",
       "@chkit/plugin-pull",
       "@chkit/plugin-backfill",
+      "@chkit/plugin-ingest",
       "@chkit/plugin-obsessiondb"
     ]
   ],

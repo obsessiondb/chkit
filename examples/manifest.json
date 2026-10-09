@@ -1,6 +1,10 @@
 {
-  "default": "clickbench",
+  "default": "hello",
   "examples": [
+    {
+      "name": "hello",
+      "description": "Two small tables and one migration. Claim a free ObsessionDB instance or use local ClickHouse."
+    },
     {
       "name": "clickbench",
       "description": "Full ClickBench schema and dataset load against ObsessionDB or ClickHouse."

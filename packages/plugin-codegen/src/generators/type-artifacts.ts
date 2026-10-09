@@ -1,6 +1,7 @@
 import {
   canonicalizeDefinitions,
   type ColumnDefinition,
+  type DictionaryDefinition,
   type MaterializedViewDefinition,
   type TableDefinition,
   type ViewDefinition,
@@ -16,7 +17,7 @@ import type {
 import { UnsupportedTypeError } from '../errors.js'
 import { normalizeCodegenOptions } from '../options.js'
 import { renderPropertyName, resolveTableNames } from '../naming.js'
-import { renderHeader } from './shared.js'
+import { insertTypeName, renderHeader } from './shared.js'
 
 const LARGE_INTEGER_TYPES = new Set([
   'Int64',
@@ -230,17 +231,18 @@ export function mapColumnType(
   return { tsType, zodType: resolved.zodType, nullable }
 }
 
-function renderTableInterface(
-  table: TableDefinition,
+function renderFieldsInterface(
+  fields: ColumnDefinition[],
   interfaceName: string,
+  pathPrefix: string,
   options: Required<CodegenPluginOptions>
 ): { lines: string[]; findings: CodegenFinding[] } {
   const lines: string[] = [`export type ${interfaceName} = {`]
   const findings: CodegenFinding[] = []
   const zodFields: string[] = []
 
-  for (const column of table.columns) {
-    const path = `${table.database}.${table.name}.${column.name}`
+  for (const column of fields) {
+    const path = `${pathPrefix}.${column.name}`
     const mapped = mapColumnType({ column, path }, options)
     if (mapped.finding) findings.push(mapped.finding)
     lines.push(`  ${renderPropertyName(column.name)}: ${mapped.tsType}`)
@@ -259,6 +261,60 @@ function renderTableInterface(
     lines.push(`export type ${interfaceName}Output = z.output<typeof ${interfaceName}Schema>`)
   }
   return { lines, findings }
+}
+
+function renderTableInterface(
+  table: TableDefinition,
+  interfaceName: string,
+  options: Required<CodegenPluginOptions>
+): { lines: string[]; findings: CodegenFinding[] } {
+  const path = `${table.database}.${table.name}`
+  const read = renderFieldsInterface(
+    table.columns.filter((column) => !column.defaultKind || column.defaultKind === 'DEFAULT'),
+    interfaceName, path, options
+  )
+  const insertName = insertTypeName(table, interfaceName)
+  if (insertName === interfaceName) return read
+  const insert = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'MATERIALIZED' && column.defaultKind !== 'ALIAS'),
+    insertName, path, options
+  )
+  const explicit = renderFieldsInterface(
+    table.columns.filter((column) => column.defaultKind !== 'EPHEMERAL'),
+    `${interfaceName}Explicit`, path, options
+  )
+  return {
+    lines: [...read.lines, '', ...explicit.lines, '', ...insert.lines],
+    // Ordinary columns appear in all three shapes; report each defect once.
+    findings: uniqueFindings([...read.findings, ...explicit.findings, ...insert.findings]),
+  }
+}
+
+function uniqueFindings(findings: CodegenFinding[]): CodegenFinding[] {
+  const seen = new Set<string>()
+  return findings.filter((finding) => {
+    const key = `${finding.code}\u0000${finding.path}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function renderDictionaryInterface(
+  definition: DictionaryDefinition,
+  interfaceName: string,
+  options: Required<CodegenPluginOptions>
+): { lines: string[]; findings: CodegenFinding[] } {
+  const fields: ColumnDefinition[] = definition.attributes.map((attribute) => ({
+    name: attribute.name,
+    type: attribute.type,
+  }))
+  return renderFieldsInterface(
+    fields,
+    interfaceName,
+    `${definition.database}.${definition.name}`,
+    options
+  )
 }
 
 function renderViewInterface(
@@ -284,11 +340,15 @@ export function generateTypeArtifacts(
   const normalized = normalizeCodegenOptions(input.options)
   const definitions = canonicalizeDefinitions(input.definitions)
   const sortedDefinitions = definitions
-    .filter((definition): definition is TableDefinition | ViewDefinition | MaterializedViewDefinition => {
-      if (definition.kind === 'table') return true
-      if (!normalized.includeViews) return false
-      return definition.kind === 'view' || definition.kind === 'materialized_view'
-    })
+    .filter(
+      (
+        definition
+      ): definition is TableDefinition | ViewDefinition | MaterializedViewDefinition | DictionaryDefinition => {
+        if (definition.kind === 'table' || definition.kind === 'dictionary') return true
+        if (!normalized.includeViews) return false
+        return definition.kind === 'view' || definition.kind === 'materialized_view'
+      }
+    )
     .sort((a, b) => {
       if (a.database !== b.database) return a.database.localeCompare(b.database)
       return a.name.localeCompare(b.name)
@@ -302,7 +362,9 @@ export function generateTypeArtifacts(
     const rendered =
       entry.definition.kind === 'table'
         ? renderTableInterface(entry.definition, entry.interfaceName, normalized)
-        : renderViewInterface(entry.definition, entry.interfaceName)
+        : entry.definition.kind === 'dictionary'
+          ? renderDictionaryInterface(entry.definition, entry.interfaceName, normalized)
+          : renderViewInterface(entry.definition, entry.interfaceName)
     findings.push(...rendered.findings)
     bodyLines.push(...rendered.lines)
     bodyLines.push('')

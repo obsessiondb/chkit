@@ -22,3 +22,6 @@ CLAUDE.local.md
 
 clickhouse.config.ts
 !examples/**/clickhouse.config.ts
+
+# Local ObsessionDB service selection (per developer)
+.chkit/obsessiondb.json

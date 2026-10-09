@@ -1,0 +1,379 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "attio",
+  "type": "registry:item",
+  "title": "Attio",
+  "description": "Editable Attio CRM schemas, raw data readers, typed views, and independent streams for People, Companies, configured custom types, and workspace resources.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.10",
+    "@chkit/plugin-ingest@^0.2.0-beta.10"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "type": "registry:file",
+      "target": "src/integrations/attio/README.md"
+    },
+    {
+      "path": "client.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/client.ts"
+    },
+    {
+      "path": "config.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/config.ts"
+    },
+    {
+      "path": "index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/index.ts"
+    },
+    {
+      "path": "pipeline.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/pipeline.ts"
+    },
+    {
+      "path": "sources/objects.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/objects.ts"
+    },
+    {
+      "path": "sources/object-attributes.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/object-attributes.ts"
+    },
+    {
+      "path": "sources/records.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/records.ts"
+    },
+    {
+      "path": "sources/lists.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/lists.ts"
+    },
+    {
+      "path": "sources/list-attributes.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/list-attributes.ts"
+    },
+    {
+      "path": "sources/entries.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/entries.ts"
+    },
+    {
+      "path": "sources/notes.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/notes.ts"
+    },
+    {
+      "path": "sources/tasks.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/tasks.ts"
+    },
+    {
+      "path": "sources/members.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/members.ts"
+    },
+    {
+      "path": "tests/attio.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/tests/attio.test.ts",
+      "role": "test"
+    },
+    {
+      "path": "tests/fixtures.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/tests/fixtures.ts",
+      "role": "test"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.2.0",
+      "changelog": [
+        {
+          "version": "0.2.0",
+          "changes": [
+            "Give People, Companies, each configured object type, and each configured list independent ingestion streams using chkit pagination.",
+            "Group those resource streams in one installation pipeline and bind factory reader settings independently of setup-time storage definitions.",
+            "Make object and list selection explicit, with People and Companies enabled by default; replay interrupted mutable offset reads from the beginning of that stream.",
+            "Preserve raw tables, scoped row identities, and typed views while changing child stream IDs; include fixtures for stream independence and failure recovery.",
+            "Consume the ingestion plugin's full pagination pages, preserving continuations and empty terminal pages with independent resource checkpoints."
+          ]
+        },
+        {
+          "version": "0.1.2",
+          "changes": [
+            "Consolidate schemas and readers into resource modules, include portable fixture tests, and document authentication, resources, views, and sync behavior."
+          ]
+        },
+        {
+          "version": "0.1.1",
+          "changes": [
+            "Add integration guide and logo metadata; distributed source is unchanged."
+          ]
+        },
+        {
+          "version": "0.1.0",
+          "changes": [
+            "Introduce raw CRM objects, attributes, records, lists, entries, notes, tasks, and workspace members, with People, Companies, and Deals views."
+          ]
+        }
+      ],
+      "documentation": "https://chkit.obsessiondb.com/integrations/attio/",
+      "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
+      "language": "typescript",
+      "license": "MIT",
+      "chkit": "^0.2.0-beta.10",
+      "ingest": "^0.2.0-beta.10",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/attio",
+      "entry": "index.ts",
+      "exports": [
+        "attio",
+        "createAttioPipeline",
+        "attioObjectsRaw",
+        "attioObjectAttributesRaw",
+        "attioRecordsRaw",
+        "attioPeople",
+        "attioCompanies",
+        "attioDeals",
+        "attioListsRaw",
+        "attioListAttributesRaw",
+        "attioEntriesRaw",
+        "attioNotesRaw",
+        "attioTasksRaw",
+        "attioMembersRaw"
+      ],
+      "resources": [
+        {
+          "name": "objects",
+          "description": "Accessible standard and custom object definitions, IDs, API slug, singular and plural names, creation time",
+          "scopes": [
+            "object_configuration:read"
+          ],
+          "strategy": "full",
+          "title": "Objects",
+          "table": "attio_objects_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/objects",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/list-objects"
+            }
+          ]
+        },
+        {
+          "name": "object_attributes",
+          "description": "Attribute IDs, slug, title, description, type, flags, defaults, relationship definitions, configuration, creation time; includes archived definitions",
+          "scopes": [
+            "object_configuration:read"
+          ],
+          "strategy": "full",
+          "title": "Object attributes",
+          "table": "attio_object_attributes_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}/attributes",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
+            }
+          ]
+        },
+        {
+          "name": "records",
+          "description": "Independent records streams for configured object types (People and Companies by default), IDs, creation time, Attio URL, and the complete values object with all returned attribute arrays",
+          "scopes": [
+            "object_configuration:read",
+            "record_permission:read"
+          ],
+          "strategy": "full",
+          "title": "Records",
+          "table": "attio_records_raw",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/objects/{object_id}/records/query",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/records/list-records"
+            },
+            {
+              "method": "GET",
+              "path": "/objects/{object_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/objects/get-an-object"
+            }
+          ]
+        },
+        {
+          "name": "lists",
+          "description": "List IDs, slug, name, parent objects, workspace and member access configuration, creator, creation time",
+          "scopes": [
+            "list_configuration:read"
+          ],
+          "strategy": "full",
+          "title": "Lists",
+          "table": "attio_lists_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/lists",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/list-all-lists"
+            }
+          ]
+        },
+        {
+          "name": "list_attributes",
+          "description": "Attribute definitions for selected lists, including types, configuration, flags, defaults, relationships, and archived definitions",
+          "scopes": [
+            "list_configuration:read"
+          ],
+          "strategy": "full",
+          "title": "List attributes",
+          "table": "attio_list_attributes_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}/attributes",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/attributes/list-attributes"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
+            }
+          ]
+        },
+        {
+          "name": "entries",
+          "description": "Entry IDs, parent object and record ID, creation time, and the complete entry_values object",
+          "scopes": [
+            "list_configuration:read",
+            "list_entry:read"
+          ],
+          "strategy": "full",
+          "title": "List entries",
+          "table": "attio_entries_raw",
+          "endpoints": [
+            {
+              "method": "POST",
+              "path": "/lists/{list_id}/entries/query",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries"
+            },
+            {
+              "method": "GET",
+              "path": "/lists/{list_id}",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/lists/get-a-list"
+            }
+          ]
+        },
+        {
+          "name": "notes",
+          "description": "Note IDs, parent record links, title, plaintext and Markdown content, tags, creator, creation time, and meeting reference when returned",
+          "scopes": [
+            "note:read",
+            "object_configuration:read",
+            "record_permission:read"
+          ],
+          "strategy": "full",
+          "title": "Notes",
+          "table": "attio_notes_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/notes",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/notes/list-notes"
+            }
+          ]
+        },
+        {
+          "name": "tasks",
+          "description": "Task IDs, plaintext content, deadline, completion state and time, linked records, assignees, creator, creation time",
+          "scopes": [
+            "task:read",
+            "object_configuration:read",
+            "record_permission:read",
+            "user_management:read"
+          ],
+          "strategy": "full",
+          "title": "Tasks",
+          "table": "attio_tasks_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/tasks",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/tasks/list-tasks"
+            }
+          ]
+        },
+        {
+          "name": "members",
+          "description": "Member IDs, first and last name, email address, avatar URL, access level, creation time",
+          "scopes": [
+            "user_management:read"
+          ],
+          "strategy": "full",
+          "title": "Workspace members",
+          "table": "attio_members_raw",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/workspace_members",
+              "documentation": "https://docs.attio.com/rest-api/endpoint-reference/workspace-members/list-workspace-members"
+            }
+          ]
+        }
+      ],
+      "env": {
+        "ATTIO_API_TOKEN": ""
+      },
+      "authentication": {
+        "method": "Bearer token",
+        "env": [
+          "ATTIO_API_TOKEN"
+        ],
+        "documentation": "https://attio.com/help/reference/apps/generating-an-api-key",
+        "setup": [
+          "As a workspace admin, open the workspace-name dropdown in Attio and select Workspace settings.",
+          "Open Developers, select + New access token, and name the token (for example, chkit ClickHouse).",
+          "Grant the read scopes listed for the resources to sync.",
+          "Click the token on the Developers page to copy it. Set ATTIO_API_TOKEN in the project .env file or the scheduler secret environment."
+        ]
+      },
+      "views": [
+        {
+          "name": "attio_people",
+          "source": "records",
+          "description": "Names, email addresses, and linked companies for people records."
+        },
+        {
+          "name": "attio_companies",
+          "source": "records",
+          "description": "Names, domains, and descriptions for company records."
+        },
+        {
+          "name": "attio_deals",
+          "source": "records",
+          "description": "Deal names, stages, values, currencies, and linked people and companies."
+        }
+      ],
+      "sync": {
+        "description": "People, Companies, each configured custom object/list, and workspace resources have independent full-sync streams. Each reader paginates one collection through chkit-ingest; interrupted mutable offset reads replay that collection from zero. Completed and empty reads are recorded by the executor journal without a custom scan checkpoint. Custom types and lists must be configured explicitly.",
+        "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler; the template does not start a background worker.",
+        "deletions": "Records absent from a later API response remain in ClickHouse. The template does not propagate deletions or consume webhooks."
+      }
+    }
+  },
+  "devDependencies": [
+    "@types/bun@^1.2.0"
+  ]
+}

@@ -1,5 +1,6 @@
 import type {
 	ClickHouseExecutor,
+	ClickHouseInsertParams,
 	ClickHouseJsonQueryResult,
 	ClickHouseSettings,
 	QueryStatus,
@@ -12,6 +13,7 @@ import {
 	type SystemSkippingIndexRow,
 	type SystemTableRow,
 } from '@chkit/clickhouse'
+import { unquoteIdentifiers } from '@chkit/core'
 import type { Credentials } from '../auth/index.js'
 import { type ApiClient, createApiClient } from '../client.js'
 
@@ -70,6 +72,37 @@ export function normalizeQueryJsonResult<T extends Record<string, unknown>>(
 	return out
 }
 
+/**
+ * The `INSERT ... VALUES` statement for an insert, or undefined when there are no
+ * rows. An explicit column list (required to supply EPHEMERAL inputs) takes
+ * precedence over the first row's keys. A field a row omits takes the column's
+ * DEFAULT; an explicit null is sent as NULL.
+ */
+export function renderValuesInsert<T extends Record<string, unknown>>(
+	params: ClickHouseInsertParams<T>,
+): string | undefined {
+	const [firstValue] = params.values
+	if (!firstValue) return undefined
+	const columns = params.columns?.length
+		? params.columns.map((sql) => ({ sql, key: unquoteIdentifiers(sql) }))
+		: Object.keys(firstValue).map((key) => ({ sql: key, key }))
+	const rows = params.values
+		.map(
+			(row) =>
+				`(${columns
+					.map(({ key }) => {
+						const val = row[key]
+						if (val === undefined) return 'DEFAULT'
+						if (val === null) return 'NULL'
+						if (typeof val === 'number') return String(val)
+						return quoteString(String(val))
+					})
+					.join(', ')})`,
+		)
+		.join(', ')
+	return `INSERT INTO ${params.table} (${columns.map(({ sql }) => sql).join(', ')}) VALUES ${rows}`
+}
+
 export function createRemoteExecutor(deps: {
 	credentials: Credentials
 	serviceSlug: string
@@ -108,31 +141,20 @@ export function createRemoteExecutor(deps: {
 			return normalizeQueryJsonResult<T>(res)
 		},
 
-		async insert<T extends Record<string, unknown>>(params: {
-			table: string
-			values: T[]
-			compressed?: boolean
-		}) {
-			if (params.values.length === 0) return
-			const [firstValue] = params.values
-			if (!firstValue) return
-			const columns = Object.keys(firstValue)
-			const rows = params.values
-				.map(
-					(row) =>
-						`(${columns
-							.map((col) => {
-								const val = row[col]
-								if (val === null || val === undefined) return 'NULL'
-								if (typeof val === 'number') return String(val)
-								return `'${String(val).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
-							})
-							.join(', ')})`,
-				)
-				.join(', ')
-			await executor.command(
-				`INSERT INTO ${params.table} (${columns.join(', ')}) VALUES ${rows}`,
-			)
+		async insert<T extends Record<string, unknown>>(
+			params: ClickHouseInsertParams<T>,
+		) {
+			const query = renderValuesInsert(params)
+			if (!query) return
+			// Per-insert settings such as insert_deduplication_token must reach
+			// ClickHouse, so this cannot go through command(), which sends none.
+			const apiSettings = toApiSettings(params.settings)
+			const res = await client.workbench.query.execute({
+				serviceSlug,
+				query,
+				...(apiSettings ? { settings: apiSettings } : {}),
+			})
+			throwIfError(res)
 		},
 
 		async submit(sql, queryId?) {
@@ -146,14 +168,26 @@ export function createRemoteExecutor(deps: {
 		},
 
 		async queryStatus(queryId, options?) {
+			// afterTime bounds the query's start, as in the native executor. A
+			// string compared with a DateTime column may carry neither fractional
+			// seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
+			// '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
 			const afterFilter = options?.afterTime
-				? `AND event_time >= '${options.afterTime}'`
+				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
 				: ''
 
-			const running = await executor.query<{ query_id: string }>(
-				`SELECT query_id FROM system.processes WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1`,
+			// migrate bounds an attach by how long the running attempt has run.
+			// The API returns every cell as a string.
+			const running = await executor.query<{ elapsed: string }>(
+				`SELECT elapsed FROM system.processes WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1`,
 			)
-			if (running.length > 0) return { status: 'running' as const }
+			const [proc] = running
+			if (proc) {
+				return {
+					status: 'running' as const,
+					elapsedMs: Math.round(Number(proc.elapsed) * 1000),
+				}
+			}
 
 			const log = await executor.query<{
 				type: string
@@ -227,7 +261,7 @@ WHERE is_temporary = 0
 					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position FROM system.columns WHERE database IN (${quoted})`,
 				),
 				executor.query<SystemSkippingIndexRow>(
-					`SELECT database, \`table\`, name, expr, type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,
+					`SELECT database, \`table\`, name, expr, type_full AS type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,
 				),
 			])
 
@@ -238,4 +272,8 @@ WHERE is_temporary = 0
 	}
 
 	return executor
+}
+
+function quoteString(value: string): string {
+	return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }

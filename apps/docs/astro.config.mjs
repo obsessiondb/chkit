@@ -7,6 +7,7 @@ import sitemap from '@astrojs/sitemap';
 import rawMarkdown from './src/integrations/raw-markdown';
 
 const isDev = process.argv.includes('dev');
+const enableAgentation = isDev || process.env.PUBLIC_AGENTATION_ENABLED === 'true';
 
 // https://astro.build/config
 export default defineConfig({
@@ -17,7 +18,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'chkit Docs',
-			description: 'Public documentation for chkit, the ClickHouse schema and migration CLI.',
+			description: 'Define ClickHouse schemas, review migrations, and sync API data into your tables with chkit.',
 			customCss: ['./src/styles/custom.css'],
 			// Blog lives at /blog. `navigation: 'none'` so the plugin doesn't
 			// override SiteTitle/ThemeSelect (we already override both) — we add
@@ -75,6 +76,38 @@ export default defineConfig({
 					autogenerate: { directory: 'schema' },
 				},
 				{
+					label: 'Apps & integrations',
+					autogenerate: { directory: 'integrations' },
+				},
+				{
+					label: 'API Sync',
+					items: [
+						{ label: 'Overview', slug: 'api-sync' },
+						{ label: 'Quickstart', slug: 'api-sync/quickstart' },
+						{ label: 'Provider templates', slug: 'api-sync/templates' },
+						{ label: 'Authoring skill', slug: 'api-sync/agent-skill' },
+						{
+							label: 'Build a source',
+							collapsed: true,
+							items: [
+								{ slug: 'api-sync/readers' },
+								{ slug: 'api-sync/destinations' },
+								{ slug: 'api-sync/incremental-syncs' },
+								{ slug: 'api-sync/loading' },
+								{ slug: 'api-sync/registry-authoring' },
+							],
+						},
+						{
+							label: 'Run and verify',
+							collapsed: true,
+							items: [
+								{ slug: 'api-sync/operations' },
+								{ slug: 'api-sync/testing' },
+							],
+						},
+					],
+				},
+				{
 					label: 'ObsessionDB',
 					autogenerate: { directory: 'obsessiondb' },
 				},
@@ -83,13 +116,17 @@ export default defineConfig({
 					autogenerate: { directory: 'plugins' },
 				},
 				{
+					label: 'Python',
+					autogenerate: { directory: 'python' },
+				},
+				{
 					label: 'CLI Reference',
 					autogenerate: { directory: 'cli' },
 				},
 			],
 		}),
 		sitemap(),
-		...(isDev ? [react()] : []),
+		...(enableAgentation ? [react()] : []),
 		rawMarkdown(),
 	],
 });

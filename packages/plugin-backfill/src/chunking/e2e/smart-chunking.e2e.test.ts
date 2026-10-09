@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import {
   createLiveExecutor,
   createStatelessLiveExecutor,
-  getRequiredEnv,
+  getLiveEnv,
 } from '@chkit/clickhouse/e2e-testkit'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
@@ -23,7 +23,7 @@ let plannerQuery: PlannerQuery
 let db: string
 
 beforeAll(() => {
-  const env = getRequiredEnv()
+  const env = getLiveEnv()
   executor = createLiveExecutor(env)
   db = env.clickhouseDatabase
 
@@ -52,8 +52,8 @@ async function requireSeededTable(table: string): Promise<number> {
   const count = Number(result?.cnt ?? 0)
   if (count === 0) {
     throw new Error(
-      `Table ${db}.${table} is empty. Run the seed script first:\n` +
-      `  bun run seed:env`,
+      `Table ${db}.${table} is empty. The package's test script seeds it first:\n` +
+      `  bun run src/chunking/e2e/seed-datasets.script.ts`,
     )
   }
   return count

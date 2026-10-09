@@ -1,0 +1,98 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "circleback",
+  "type": "registry:item",
+  "title": "Circleback",
+  "description": "Small, editable Circleback API ingestion example with raw ClickHouse tables.",
+  "dependencies": [
+    "@chkit/core@^0.2.0-beta.8",
+    "@chkit/plugin-ingest@^0.2.0-beta.8"
+  ],
+  "files": [
+    {
+      "path": "circleback/README.md",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/README.md",
+      "content": "# Circleback raw ingestion example\n\nThis is a small editable starting point based on the Circleback source in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync). It stores provider responses as native JSON without Brain's memory or sales projections.\n\nSet `CIRCLEBACK_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit the reader in `index.ts` to select meetings and decide whether to fetch transcripts. Native JSON requires ClickHouse 25.3 or later.\n\n```sh\nbunx chkit check\nbunx chkit generate --name add_circleback\n# Review the migration before applying it.\nbunx chkit migrate --apply\nbunx chkit ingest run --tag provider:circleback\n```\n\n## Resources\n\n- `meetings` → `circleback_meetings_raw`\n\nThe meetings endpoint is scanned on every run. Missing transcripts remain null; removed meetings remain stored. A failed API request fails the stream. Raw rows use provider IDs and keep the last observed value; there is no deletion reconciliation. Edit the readers, select fewer streams, or add SQL views for a specific use case. Run one ingestion process per ClickHouse target at a time.\n"
+    },
+    {
+      "path": "circleback/index.ts",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/index.ts",
+      "content": "import { definePipeline, defineStream, HttpError, rawRows, rawTable } from '@chkit/plugin-ingest'\n\nconst database = 'default'\nconst baseUrl = 'https://circleback.ai/api'\n\ninterface Meeting { id: string; [key: string]: unknown }\n\nexport const circleback_meetingsRaw = rawTable({ database, name: 'circleback_meetings_raw' })\n\nexport const circlebackPipeline = definePipeline({\n  id: 'circleback', tags: ['provider:circleback'], maxFetches: 1,\n  streams: [defineStream({\n    id: 'circleback.meetings', tags: ['resource:meetings'], destination: circleback_meetingsRaw,\n    async *read(context) {\n      let next: string | undefined = `${baseUrl}/meetings?ownership=All`\n      const seen = new Set<string>()\n      while (next) {\n        if (seen.has(next)) throw new Error('Circleback repeated a page URL')\n        seen.add(next)\n        const current: string = next\n        const response = await context.attempt((signal) => request(current, signal), { label: 'GET /meetings' })\n        if (!response) throw new Error('Circleback returned no meetings response')\n        const meetings = await response.json() as Meeting[]\n        if (!Array.isArray(meetings)) throw new Error('Circleback meetings response is not an array')\n        const rows = []\n        for (const meeting of meetings) {\n          if (!meeting.id) throw new Error('Circleback meeting has no ID')\n          const transcript = await context.attempt(async (signal) => {\n            const result = await request(`${baseUrl}/meeting/${encodeURIComponent(meeting.id)}/transcript`, signal, true)\n            return result ? await result.json() : null\n          }, { label: 'GET meeting transcript' })\n          rows.push({ ...meeting, transcript })\n        }\n        if (rows.length) yield { rows: rawRows(rows, (meeting) => meeting.id) }\n        next = response.headers.get('link')?.split(',').map((part) => /<([^>]+)>\\s*;.*rel=\"?next\"?/.exec(part)?.[1]).find(Boolean)\n        if (next) next = new URL(next, current).toString()\n      }\n    },\n  })],\n})\n\nasync function request(url: string, signal: AbortSignal, optional = false): Promise<Response | null> {\n  const token = process.env.CIRCLEBACK_API_KEY\n  if (!token) throw new Error('Set CIRCLEBACK_API_KEY')\n  const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } })\n  if (optional && (response.status === 403 || response.status === 404)) return null\n  if (!response.ok) throw await HttpError.fromResponse(response)\n  return response\n}\n"
+    },
+    {
+      "path": "circleback/tests/basic.test.ts",
+      "type": "registry:file",
+      "target": "src/integrations/circleback/tests/basic.test.ts",
+      "role": "test",
+      "content": "import { afterEach, expect, test } from 'bun:test'\nimport { runIngestion, selectStreams } from '@chkit/plugin-ingest'\nimport { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'\n\nimport { circlebackPipeline } from '../index.js'\n\nconst originalFetch = globalThis.fetch\nconst originalToken = process.env.CIRCLEBACK_API_KEY\n\nfunction setFetch(handler: (...args: Parameters<typeof fetch>) => Promise<Response>): void {\n  globalThis.fetch = Object.assign(handler, { preconnect: originalFetch.preconnect })\n}\n\nafterEach(() => {\n  globalThis.fetch = originalFetch\n  if (originalToken === undefined) delete process.env.CIRCLEBACK_API_KEY\n  else process.env.CIRCLEBACK_API_KEY = originalToken\n})\n\ntest.serial('Circleback follows the Link cursor and joins available transcripts', async () => {\n  process.env.CIRCLEBACK_API_KEY = 'fixture'\n  const paths: string[] = []\n  setFetch(async (input) => {\n    const url = new URL(String(input))\n    paths.push(url.pathname + url.search)\n    if (url.pathname.endsWith('/transcript')) return url.pathname.includes('/b/') ? new Response('', { status: 404 }) : Response.json([{ text: 'Hello' }])\n    if (url.searchParams.has('cursor')) return Response.json([{ id: 'b', name: 'Second' }])\n    return Response.json([{ id: 'a', name: 'First' }], { headers: { Link: '</api/meetings?cursor=next>; rel=\"next\"' } })\n  })\n  const destination = createMemoryDestination()\n  const result = await runIngestion({ selected: selectStreams([circlebackPipeline], []), backfill: undefined }, { journal: createMemoryJournal(), destination })\n  expect(result.ok).toBe(true)\n  expect(paths).toEqual(['/api/meetings?ownership=All', '/api/meeting/a/transcript', '/api/meetings?cursor=next', '/api/meeting/b/transcript'])\n  const rows = destination.tables.get('default.circleback_meetings_raw') ?? []\n  expect(rows.map((row) => row.id)).toEqual(['a', 'b'])\n  expect(rows[0]?.raw).toMatchObject({ transcript: [{ text: 'Hello' }] })\n  expect(rows[1]?.raw).toMatchObject({ transcript: null })\n})\n"
+    }
+  ],
+  "meta": {
+    "chkit": {
+      "formatVersion": 1,
+      "version": "0.1.0",
+      "language": "typescript",
+      "license": "MIT",
+      "documentation": "https://chkit.obsessiondb.com/integrations/circleback/",
+      "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
+      "authentication": {
+        "method": "Bearer API key",
+        "env": [
+          "CIRCLEBACK_API_KEY"
+        ],
+        "setup": [
+          "Provide CIRCLEBACK_API_KEY with read access to the selected resources.",
+          "Keep the API key in the runtime environment and rotate it according to the provider policy."
+        ],
+        "documentation": "https://circleback.ai/docs/api"
+      },
+      "chkit": "^0.2.0-beta.8",
+      "ingest": "^0.2.0-beta.8",
+      "clickhouse": ">=25.3.0",
+      "root": "src/integrations/circleback",
+      "entry": "index.ts",
+      "exports": [
+        "circlebackPipeline",
+        "circleback_meetingsRaw"
+      ],
+      "resources": [
+        {
+          "name": "meetings",
+          "title": "Meetings",
+          "table": "circleback_meetings_raw",
+          "description": "Meeting metadata and notes, with a transcript where access permits it.",
+          "scopes": [],
+          "strategy": "full",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/meetings",
+              "documentation": "https://circleback.ai/docs/api/meetings/list-meetings"
+            },
+            {
+              "method": "GET",
+              "path": "/meeting/{meetingId}/transcript",
+              "documentation": "https://circleback.ai/docs/api/meetings/get-meeting-transcript"
+            }
+          ]
+        }
+      ],
+      "views": [],
+      "sync": {
+        "description": "A full read runs for each enabled stream. Stable IDs keep the latest observed record.",
+        "schedule": "Run bunx chkit ingest run --tag provider:circleback from a scheduler.",
+        "deletions": "The meetings endpoint is scanned on every run. Missing transcripts remain null; removed meetings remain stored."
+      },
+      "env": {
+        "CIRCLEBACK_API_KEY": ""
+      },
+      "fileHashes": {
+        "src/integrations/circleback/README.md": "151577e751dcdc8b8c80e965de95be8e456e2446a4cb5b7324b39f3bccbd48f3",
+        "src/integrations/circleback/index.ts": "586873e5e9d9588151a19b16a60cceabc0263718689799cdc7b88e35521d35ea",
+        "src/integrations/circleback/tests/basic.test.ts": "d273bd0daf45fa64972c9ac2db0ba02fbf6594d3d7fe80c7a40474aa77d443d3"
+      }
+    }
+  }
+}

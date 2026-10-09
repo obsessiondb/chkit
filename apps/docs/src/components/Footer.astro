@@ -3,8 +3,7 @@
  * Override of Starlight's Footer.
  * Renders the default per-page footer (pagination / meta) followed by the
  * site-wide footer (brand + link columns). The Agentation overlay is
- * rendered only under `import.meta.env.DEV`, so the production build drops
- * it (and its react island) via dead-code elimination.
+ * enabled for local development and explicitly enabled preview builds.
  */
 import Default from '@astrojs/starlight/components/Footer.astro';
 import AgentationDev from './AgentationDev';
@@ -18,7 +17,7 @@ const repo = 'https://github.com/obsessiondb/chkit';
 	<div class="chk-site-footer-inner">
 		<div class="chk-footer-brand">
 			<a href="/" class="chk-wordmark chk-footer-wordmark"><span translate="no">ch-kit</span></a>
-			<p class="chk-footer-tagline">Headless TypeScript O(A)RM for ClickHouse!</p>
+			<p class="chk-footer-tagline">Manage ClickHouse schemas and sync API data.</p>
 			<div class="chk-footer-social">
 				<a href={repo} target="_blank" rel="noopener noreferrer" aria-label="GitHub">
 					<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -41,17 +40,18 @@ const repo = 'https://github.com/obsessiondb/chkit';
 					<li><a href="/cli/overview/">CLI reference</a></li>
 					<li><a href="/configuration/overview/">Configuration</a></li>
 					<li><a href="/schema/dsl-reference/">Schema</a></li>
+					<li><a href="/api-sync/">API Sync</a></li>
 				</ul>
 			</div>
 			<div class="chk-footer-col">
 				<p class="chk-footer-col-title">Ports</p>
 				<ul>
 					<li><a href="https://npmx.dev/org/chkit" target="_blank" rel="noopener noreferrer">TypeScript</a></li>
-					<li><span class="chk-footer-soon">Python (coming soon)</span></li>
+					<li><a href="https://pypi.org/project/chkit-py/" target="_blank" rel="noopener noreferrer">Python (chkit-py)</a></li>
 				</ul>
 			</div>
 		</div>
 	</div>
 </footer>
 
-{import.meta.env.DEV && <AgentationDev client:only="react" />}
+{(import.meta.env.DEV || import.meta.env.PUBLIC_AGENTATION_ENABLED === 'true') && <AgentationDev client:only="react" />}

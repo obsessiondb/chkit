@@ -6,7 +6,9 @@
   "entryPoints": [
     "packages/**/*.test.ts",
     "packages/**/*.spec.ts",
-    "packages/**/*.e2e.test.ts"
+    "packages/**/*.e2e.test.ts",
+    "registry/*/tests/**/*.test.ts",
+    "scripts/**/*.test.ts"
   ],
   "alwaysUsed": [
     "apps/docs/functions/**/*.ts",

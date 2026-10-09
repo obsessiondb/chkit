@@ -5,7 +5,9 @@ import { join } from 'node:path'
 
 import fg from 'fast-glob'
 
-import { canonicalizeDefinitions, type MigrationOperation, type SchemaDefinition, type Snapshot } from '@chkit/core'
+import type { MigrationOperation, Snapshot } from '@chkit/core'
+
+import { parseSnapshotDocument, type SnapshotUnreadableReason } from './snapshot-document.js'
 
 export interface MigrationJournalEntry {
   name: string
@@ -24,28 +26,29 @@ interface ChecksumMismatch {
   actual: string
 }
 
-function parseJSONOrThrow<T>(raw: string, filePath: string, kind: string): T {
-  try {
-    return JSON.parse(raw) as T
-  } catch {
-    throw new Error(`Invalid ${kind} JSON at ${filePath}. Fix or remove the file and retry.`)
-  }
-}
-
 export async function readSnapshot(metaDir: string): Promise<Snapshot | null> {
   const file = join(metaDir, 'snapshot.json')
   if (!existsSync(file)) return null
-  const raw = await readFile(file, 'utf8')
-  const parsed = parseJSONOrThrow<Partial<Snapshot> & { definitions?: SchemaDefinition[] }>(
-    raw,
-    file,
-    'snapshot'
-  )
-  return {
-    version: 1,
-    generatedAt: parsed.generatedAt ?? '',
-    definitions: canonicalizeDefinitions(parsed.definitions ?? []),
+  const parsed = parseSnapshotDocument(await readFile(file, 'utf8'))
+  if (parsed.status === 'ok') return parsed.snapshot
+  throw new Error(describeUnreadableSnapshot(file, parsed.reason))
+}
+
+function describeUnreadableSnapshot(file: string, reason: SnapshotUnreadableReason): string {
+  if (reason === 'conflict_markers') {
+    return (
+      `Snapshot ${file} contains unresolved merge conflict markers. ` +
+      'Resolve any conflicts in your schema files, then run `chkit snapshot rebuild` to rewrite snapshot.json from them, ' +
+      'and review its report before committing. See https://chkit.obsessiondb.com/cli/snapshot/'
+    )
   }
+  const detail = reason === 'empty' ? ' (the file is empty)' : ''
+  // During a merge or rebase the committed version is only one side of the conflict.
+  return (
+    `Invalid snapshot JSON at ${file}${detail}. ` +
+    'Outside a merge or rebase, restore the committed version from git. ' +
+    'Otherwise, or if the file was never committed, run `chkit snapshot rebuild` to rewrite it from your schema definitions.'
+  )
 }
 
 export function summarizePlan(operations: MigrationOperation[]): string[] {

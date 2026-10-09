@@ -1,0 +1,67 @@
+---
+title: Integrating ClickHouse with Google Calendar
+description: Install canonical Google Calendar ingestion with resumable pages and sync-token checkpoints.
+---
+
+The Google Calendar registry item copies a canonical event reader with journaled page and sync-token progress into a chkit project.
+
+import RegistryReference from '../../../components/RegistryReference.astro';
+
+## Install
+
+```sh
+bunx chkit add google-calendar --with-tests
+bunx chkit check
+bunx chkit generate --name add_google_calendar
+bunx chkit migrate --apply
+bunx chkit ingest run --tag provider:google-calendar
+bunx chkit ingest status --tag provider:google-calendar
+```
+
+Set `GOOGLE_CALENDAR_ACCESS_TOKEN` with `calendar.readonly` access before ingestion. Review installation settings and chunk limits in `src/integrations/google-calendar/config.ts`. `primary` is resolved through calendar metadata to detect a different account reusing the checkpoint. Schema imports do not request credentials or call Google.
+
+<RegistryReference name="google-calendar" section="resources" />
+
+## Pipeline and stream
+
+One installation exports one pipeline with a canonical `events` stream. `pipeline.ts` defines its destination and strategy; `sources/events.ts` handles acknowledged sync-token progress, and `client.ts` handles HTTP requests.
+
+`sourceId` identifies the installation in raw rows and checkpoint scope. `streamPrefix` determines journal IDs; defaults preserve `google-calendar.events`. A separate installation needs both a distinct source label and stream prefix. The pipeline factory binds configuration and injectable request dependencies while using the exported destination. Edit `database` in `config.ts` before schema imports to change table placement.
+
+## Sync behavior
+
+The first run reads canonical events with recurring masters and exceptions, using `singleEvents=false` and `showDeleted=true`. Later runs request changes through Google's `syncToken`. Cancellation payloads remain unmodified. Recurring occurrences require a separate bounded instances reader or application projection.
+
+Events are the only synced resource. Attendees, organizer, recurrence, reminders, attachments, and `conferenceData` stay inside the native [event payload](https://developers.google.com/workspace/calendar/api/v3/reference/events). Calendar metadata resolves identity without creating another raw table. Build projections and joins with other integrations in ClickHouse; retain source and calendar keys in those joins. A sparse cancellation replaces the previous observation of the same event without copying fields from its old payload or recurring master.
+
+Each acknowledged page stores its next-page position and retains the same input sync token. Only a loaded terminal page promotes `nextSyncToken`, including an empty page. Rerun after interruption to resume; failed loads leave the previous checkpoint. Requests use fixed parameters, and validation rejects changed source scope or malformed pagination. Native JSON requires ClickHouse 25.3 or later.
+
+The reader uses `paginate()` for requests and continuation validation. Each full page includes raw events and a complete checkpoint candidate in metadata; the reader explicitly yields that candidate as chunk state. A rejected token becomes an empty reset page with a fresh continuation and retained recovery debt, using the same pagination loop. The existing checkpoint format is preserved.
+
+Google forbids `timeMin`, `timeMax`, `updatedMin`, and `orderBy` on sync-token requests. This canonical reader rejects explicit `--from`/`--to` bounds. A named backfill without bounds runs an independent canonical sync. See [Google synchronization](https://developers.google.com/workspace/calendar/api/guides/sync) and [events.list parameters](https://developers.google.com/workspace/calendar/api/v3/reference/events/list).
+
+## Expiry and stored data
+
+`410 Gone` resets provider progress and starts a new baseline without deleting raw rows. A rejected page token replays its collection once. The destination keeps the latest observed payload per `[sourceId, resolvedCalendarId, event.id]`; absent records are not reconciled after a reset. A current-calendar view requires completed-baseline generations or explicit reconciliation before treating absence as removal.
+
+The checkpoint retains the recovery count until the terminal sync page is acknowledged. Pauses and successful nonterminal replay pages keep that count; a second token rejection for the unfinished sync fails across executions. Adjust `maxChunks` in `config.ts`, execution duration, or polling frequency so the sync finishes while tokens remain valid. After reviewing coverage and correcting those conditions, migrate saved state explicitly or use a new stream identity for a fresh sync.
+
+Version 0.2.0 changes the former rolling occurrence-window semantics and row identities. Keep old tables as archives and start a new canonical dataset, or migrate identities explicitly; old expanded occurrences are not removed automatically. The installed README describes upgrade and recovery details.
+
+## Fixture verification
+
+```sh
+bun test src/integrations/google-calendar/tests/basic.test.ts
+```
+
+Fixtures cover page resumption, empty deltas, sink failures before token promotion, cancellation payloads, expired tokens, and calendar-account changes. Schedule repeat runs externally with one ingestion process per destination at a time.
+
+## Changelog
+
+<RegistryReference name="google-calendar" section="changelog" />
+
+## Related pages
+
+- [App registry](/integrations/)
+- [Ingestion plugin](/plugins/ingest/)
+- [Ingestion CLI](/cli/ingest/)

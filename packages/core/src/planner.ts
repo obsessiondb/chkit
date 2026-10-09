@@ -3,6 +3,7 @@ import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
   ColumnRenameSuggestion,
+  DictionaryDefinition,
   MaterializedViewDefinition,
   MaterializedViewRefresh,
   MigrationOperation,
@@ -10,6 +11,7 @@ import type {
   RiskLevel,
   SchemaDefinition,
   TableDefinition,
+  ValidationIssue,
 } from './model.js'
 import {
   renderAlterAddColumn,
@@ -23,10 +25,22 @@ import {
   renderAlterModifySetting,
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
+  renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
+  renderDictionarySQL,
   toCreateSQL,
 } from './sql.js'
+import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
+import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
+import { ChxValidationError } from './model.js'
+import { isKafkaEngine, kafkaSettingFingerprint } from './kafka.js'
+import {
+  buildDependencyGraph,
+  invertDependencyGraph,
+  orderByDependencies,
+  type DependencyGraph,
+} from './object-dependencies.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -42,7 +56,7 @@ function pushDropOperation(
       type: 'drop_table',
       key: definitionKey(def),
       risk,
-      sql: `DROP TABLE IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP TABLE IF EXISTS ${renderQualifiedName(def.database, def.name)}${isKafkaEngine(def.engine) ? ' SYNC' : ''};`,
     })
     return
   }
@@ -51,7 +65,16 @@ function pushDropOperation(
       type: 'drop_view',
       key: definitionKey(def),
       risk,
-      sql: `DROP VIEW IF EXISTS ${def.database}.${def.name};`,
+      sql: `DROP VIEW IF EXISTS ${renderQualifiedName(def.database, def.name)};`,
+    })
+    return
+  }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'drop_dictionary',
+      key: definitionKey(def),
+      risk,
+      sql: `DROP DICTIONARY IF EXISTS ${renderQualifiedName(def.database, def.name)};`,
     })
     return
   }
@@ -59,7 +82,7 @@ function pushDropOperation(
     type: 'drop_materialized_view',
     key: definitionKey(def),
     risk,
-    sql: `DROP TABLE IF EXISTS ${def.database}.${def.name} SYNC;`,
+    sql: `DROP TABLE IF EXISTS ${renderQualifiedName(def.database, def.name)} SYNC;`,
   })
 }
 
@@ -86,6 +109,15 @@ function pushCreateOperation(
     })
     return
   }
+  if (def.kind === 'dictionary') {
+    operations.push( {
+      type: 'create_dictionary',
+      key: definitionKey(def),
+      risk,
+      sql: toCreateSQL(def),
+    })
+    return
+  }
   operations.push( {
     type: 'create_materialized_view',
     key: definitionKey(def),
@@ -103,7 +135,7 @@ function pushCreateDatabaseOperation(
     type: 'create_database',
     key: `database:${database}`,
     risk,
-    sql: `CREATE DATABASE IF NOT EXISTS ${database};`,
+    sql: `CREATE DATABASE IF NOT EXISTS ${renderIdentifier(database)};`,
   })
 }
 
@@ -190,7 +222,7 @@ function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, t
   // IF EXISTS makes the rename idempotent: once it has run (the `from` column is
   // gone), a replay after a partial migration failure is a safe no-op rather
   // than an "unknown identifier" brick. ClickHouse supports the clause.
-  return `ALTER TABLE ${table.database}.${table.name} RENAME COLUMN IF EXISTS \`${from}\` TO \`${to}\`;`
+  return `ALTER TABLE ${renderQualifiedName(table.database, table.name)} RENAME COLUMN IF EXISTS ${quoteIdentifier(from)} TO ${quoteIdentifier(to)};`
 }
 
 function inferColumnRenameSuggestions(
@@ -271,7 +303,7 @@ function diffMaterializedView(
         type: 'drop_materialized_view',
         key: definitionKey(newDef),
         risk: 'caution',
-        sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name} SYNC;`,
+        sql: `DROP TABLE IF EXISTS ${renderQualifiedName(newDef.database, newDef.name)} SYNC;`,
       },
       {
         type: 'create_materialized_view',
@@ -296,7 +328,58 @@ function diffMaterializedView(
   return []
 }
 
+// `chkit pull` writes ClickHouse's own introspection placeholder
+// (`password '[HIDDEN]'`) into `source` when it can't recover a dictionary's
+// real credential. That placeholder must never drive a diff — rendering it
+// would deploy the literal string "[HIDDEN]" as the password. A real
+// password value, by contrast, is fully known to chkit (it's a plain string
+// in the schema file) and a change to it is a genuine diff like any other.
+function dictionarySourceIsHidden(source: string): boolean {
+  return source.includes('[HIDDEN]')
+}
+
+function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
+  if (!omitSource) return def
+  const { source, ...rest } = def
+  return rest
+}
+
+function diffDictionary(
+  oldDef: DictionaryDefinition,
+  newDef: DictionaryDefinition
+): MigrationOperation[] {
+  const omitSource = dictionarySourceIsHidden(newDef.source)
+  const unchanged =
+    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
+    JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
+  if (unchanged) return []
+
+  return [
+    {
+      type: 'create_dictionary',
+      key: definitionKey(newDef),
+      risk: 'caution',
+      sql: renderDictionarySQL(newDef, true),
+    },
+  ]
+}
+
 function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiffResult {
+  if (isKafkaEngine(oldDef.engine) || isKafkaEngine(newDef.engine)) {
+    const settings = (def: TableDefinition) => Object.fromEntries(
+      Object.entries(def.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)])
+    )
+    if (requiresTableRecreate(oldDef, newDef)
+      || JSON.stringify(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== JSON.stringify(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
+      || diffSettings(settings(oldDef), settings(newDef)).changes.length > 0
+      || (oldDef.comment ?? '') !== (newDef.comment ?? '')) {
+      throw new ChxValidationError([{
+        code: 'kafka_change_requires_replacement', kind: 'table', database: newDef.database, name: newDef.name,
+        message: `Kafka table ${newDef.database}.${newDef.name} requires an explicit replacement; column, engine and setting ALTERs are not supported. Remove the queue and its consuming materialized views from the schema and generate a drop migration, then re-add the updated definitions and generate a create migration. Review both migrations and consumer-group/offset behavior before applying with --allow-destructive.`,
+      }])
+    }
+    return { operations: [], renameSuggestions: [] }
+  }
   if (requiresTableRecreate(oldDef, newDef)) {
     return {
       operations: [
@@ -304,7 +387,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
           type: 'drop_table',
           key: definitionKey(newDef),
           risk: 'danger',
-          sql: `DROP TABLE IF EXISTS ${newDef.database}.${newDef.name};`,
+          sql: `DROP TABLE IF EXISTS ${renderQualifiedName(newDef.database, newDef.name)};`,
         },
         {
           type: 'create_table',
@@ -326,6 +409,17 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   )
   const addedColumns = columnDiff.added
   const droppedColumns = columnDiff.removed
+  // Report every blocked column of the table at once, not one per generate run.
+  const kindChangeIssues = columnDiff.changed.flatMap(({ name, oldItem, newItem }): ValidationIssue[] => {
+    const oldKind = oldItem.defaultKind ?? 'DEFAULT'
+    const newKind = newItem.defaultKind ?? 'DEFAULT'
+    if (oldKind === newKind || ![oldKind, newKind].some((kind) => kind === 'ALIAS' || kind === 'EPHEMERAL')) return []
+    return [{
+      code: 'column_kind_change_unsupported', kind: 'table', database: newDef.database, name: newDef.name,
+      message: `Cannot automatically change column ${newDef.database}.${newDef.name}.${name} from ${oldKind} to ${newKind}; storage-kind conversions involving ALIAS or EPHEMERAL are not supported. Keep the column declared as ${oldKind} in the schema.`,
+    }]
+  })
+  if (kindChangeIssues.length > 0) throw new ChxValidationError(kindChangeIssues)
   for (const column of columnDiff.added) {
     ops.push( {
       type: 'alter_table_add_column',
@@ -335,14 +429,23 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
   for (const { name, oldItem, newItem } of columnDiff.changed) {
+    const oldKind = oldItem.defaultKind ?? 'DEFAULT'
+    const newKind = newItem.defaultKind ?? 'DEFAULT'
+    const key = `table:${newDef.database}.${newDef.name}:column:${name}`
+    const removeExpression = renderAlterRemoveColumnExpression(newDef, newItem, oldItem)
+    // Its own operation: migrate pairs each `-- operation:` marker with exactly one statement.
+    if (removeExpression) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: removeExpression })
     const sql = isCodecRemoval(oldItem, newItem)
       ? renderAlterRemoveCodec(newDef, name)
       : renderAlterModifyColumn(newDef, newItem)
     ops.push( {
       type: 'alter_table_modify_column',
-      key: `table:${newDef.database}.${newDef.name}:column:${name}`,
+      key,
       risk: 'caution',
       sql,
+      ...((oldKind === 'DEFAULT' || oldKind === 'MATERIALIZED' || newKind === 'DEFAULT' || newKind === 'MATERIALIZED') && (oldItem.default !== newItem.default || oldKind !== newKind)
+        ? { warning: `Changing the expression for ${newDef.database}.${newDef.name}.${name} does not rewrite stored historical values. Review a separate MATERIALIZE COLUMN migration if a rewrite is required; never reconstruct values from discarded EPHEMERAL inputs.` }
+        : {}),
     })
   }
   for (const column of columnDiff.removed) {
@@ -358,7 +461,9 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.indexes ?? [],
     newDef.indexes ?? [],
     (index) => index.name,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    (left, right) => left.type === 'text' && right.type === 'text'
+      ? textIndexFingerprint(left) === textIndexFingerprint(right)
+      : JSON.stringify(left) === JSON.stringify(right)
   )
   for (const index of indexDiff.added) {
     ops.push( {
@@ -462,49 +567,6 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
   }
 }
 
-/**
- * Creation depth of each refreshable materialized view, derived from its
- * `refresh.dependsOn` edges (#41). A view declared `DEPENDS ON other_mv` must
- * be created AFTER `other_mv` exists, so ordering create operations by
- * ascending depth puts every dependency before the views that depend on it.
- * Names alone are unsafe: a dependent MV whose name sorts first would otherwise
- * be created first and fail.
- */
-function materializedViewCreationDepth(
-  definitions: SchemaDefinition[],
-  byKey: Map<string, SchemaDefinition>
-): Map<string, number> {
-  const depth = new Map<string, number>()
-  const visiting = new Set<string>()
-
-  const compute = (key: string): number => {
-    const cached = depth.get(key)
-    if (cached !== undefined) return cached
-    // A dependency cycle has no valid creation order; stop recursing and let
-    // the alphabetical tiebreak apply rather than looping forever.
-    if (visiting.has(key)) return 0
-    const def = byKey.get(key)
-    if (!def || def.kind !== 'materialized_view') {
-      depth.set(key, 0)
-      return 0
-    }
-    visiting.add(key)
-    let result = 0
-    for (const dep of def.refresh?.dependsOn ?? []) {
-      const depKey = `materialized_view:${dep.database}.${dep.name}`
-      if (byKey.has(depKey)) result = Math.max(result, 1 + compute(depKey))
-    }
-    visiting.delete(key)
-    depth.set(key, result)
-    return result
-  }
-
-  for (const def of definitions) {
-    if (def.kind === 'materialized_view') compute(definitionKey(def))
-  }
-  return depth
-}
-
 export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
   const oldCanonical = canonicalizeDefinitions(oldDefinitions)
   const newCanonical = canonicalizeDefinitions(newDefinitions)
@@ -550,6 +612,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
       continue
     }
 
+    if (newDef.kind === oldDef.kind && newDef.kind === 'dictionary' && oldDef.kind === 'dictionary') {
+      operations.push(...diffDictionary(oldDef, newDef))
+      continue
+    }
+
     if (newDef.kind !== oldDef.kind) {
       pushDropOperation(operations, oldDef, 'danger')
     }
@@ -568,35 +635,18 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
-  const mvCreationDepth = materializedViewCreationDepth(newCanonical, newMap)
-  operations.sort((a, b) => {
-    const rank = (op: MigrationOperation): number => {
-      if (op.type.startsWith('drop_')) return 0
-      if (op.type === 'alter_materialized_view_modify_refresh') return 1
-      if (op.type.startsWith('alter_')) return 1
-      if (op.type === 'create_database') return 2
-      if (op.type === 'create_table') return 3
-      if (op.type === 'create_view') return 4
-      return 5
-    }
-    const rankOrder = rank(a) - rank(b)
-    if (rankOrder !== 0) return rankOrder
-    // Within materialized-view creates, order a DEPENDS ON target before the
-    // view that depends on it (#41), then fall back to a stable name order.
-    if (a.type === 'create_materialized_view' && b.type === 'create_materialized_view') {
-      const depthOrder = (mvCreationDepth.get(a.key) ?? 0) - (mvCreationDepth.get(b.key) ?? 0)
-      if (depthOrder !== 0) return depthOrder
-    }
-    return a.key.localeCompare(b.key)
+  const ordered = orderOperations(operations.sort(compareOperations), {
+    drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
+    create: buildDependencyGraph(newCanonical),
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
-  for (const operation of operations) {
+  for (const operation of ordered) {
     riskSummary[operation.risk] = (riskSummary[operation.risk] ?? 0) + 1
   }
 
   return {
-    operations,
+    operations: ordered,
     riskSummary,
     renameSuggestions: renameSuggestions.sort((a, b) => {
       const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
@@ -606,4 +656,39 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
       return a.to.localeCompare(b.to)
     }),
   }
+}
+
+// drop_* 0, alter_* 1, create_database 2, create_table 3, create_view 4, other creates 5.
+function operationRank(op: MigrationOperation): number {
+  if (op.type.startsWith('drop_')) return 0
+  if (op.type.startsWith('alter_')) return 1
+  if (op.type === 'create_database') return 2
+  if (op.type === 'create_table') return 3
+  if (op.type === 'create_view') return 4
+  return 5
+}
+
+// The sort is stable, so operations that share a key keep the order diffTables
+// pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
+function compareOperations(a: MigrationOperation, b: MigrationOperation): number {
+  return operationRank(a) - operationRank(b) || a.key.localeCompare(b.key)
+}
+
+/**
+ * Reorders the drop and create segments of a (rank, key)-sorted plan by object
+ * dependencies (#231): drops run dependents first, creates run dependencies
+ * first. Alters and create_database keep their place.
+ */
+function orderOperations(
+  sorted: MigrationOperation[],
+  prerequisites: { drop: DependencyGraph; create: DependencyGraph }
+): MigrationOperation[] {
+  const drops = sorted.filter((op) => operationRank(op) === 0)
+  const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
+  const creates = sorted.filter((op) => operationRank(op) >= 3)
+  return [
+    ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
+    ...middle,
+    ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
+  ]
 }

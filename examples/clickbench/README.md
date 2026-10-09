@@ -28,3 +28,12 @@ bun run migrate -- --service <service-name-or-alias>
 - `20260525133130_load_clickbench_data.sql` truncates `hits` and loads the full partitioned Parquet dataset from `https://fsn1.your-objectstorage.com/obsessiondb-datasets/clickbench/` via ClickHouse's `s3()` table function.
 
 The benchmark query set is intentionally not included yet; this example focuses on schema creation and dataset loading.
+
+## Dependency security
+
+This example uses published chkit packages. Its exact oRPC overrides replace the
+vulnerable versions pinned by those older releases, including when the example is
+copied outside the monorepo. The root manifest repeats these overrides because
+Bun uses the workspace root's overrides for in-repo installs. Keep both sets in
+sync until the example's published chkit dependencies include the patched oRPC
+versions.

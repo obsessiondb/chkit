@@ -349,4 +349,71 @@ describe('syncProgress', () => {
     expect(synced.c1.status).toBe('failed')
     expect(synced.c1.error).toBe('Memory limit exceeded')
   })
+
+  test('uses systemTableSource when executor provides clustered tables', async () => {
+    const queries: string[] = []
+    const executor = createMockExecutor(new Map())
+    executor.systemTableSource = (table) =>
+      `clusterAllReplicas('moebel_cluster', system.${table})`
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      queries.push(sql)
+      return [] as T[]
+    }
+
+    await syncProgress(
+      executor,
+      PLAN_ID,
+      [{ id: 'c1' }],
+      { c1: { status: 'pending' } },
+    )
+
+    expect(queries[0]).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
+    expect(queries[1]).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
+    expect(queries.join('\n')).not.toContain("clusterAllReplicas('cluster'")
+  })
+
+  test('falls back to local system tables when capability is absent', async () => {
+    const queries: string[] = []
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      queries.push(sql)
+      return [] as T[]
+    }
+
+    await syncProgress(
+      executor,
+      PLAN_ID,
+      [{ id: 'c1' }],
+      { c1: { status: 'pending' } },
+    )
+
+    expect(queries[0]).toContain('FROM system.processes')
+    expect(queries[0]).not.toContain('clusterAllReplicas')
+    expect(queries[1]).toContain('FROM system.query_log')
+    expect(queries[1]).not.toContain('clusterAllReplicas')
+  })
+
+  test('observable fallback still works when systemTableSource is undefined', async () => {
+    const queries: string[] = []
+    const executor = createMockExecutor(new Map())
+    // Explicitly no capability (default mock omits it)
+    expect(executor.systemTableSource).toBeUndefined()
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      queries.push(sql)
+      if (sql.includes('system.processes')) {
+        return [{ query_id: `backfill-${PLAN_ID}-c1` }] as T[]
+      }
+      return [] as T[]
+    }
+
+    const synced = await syncProgress(
+      executor,
+      PLAN_ID,
+      [{ id: 'c1' }],
+      { c1: { status: 'pending' } },
+    )
+
+    expect(synced.c1.status).toBe('running')
+    expect(queries[0]).toMatch(/FROM system\.processes/)
+  })
 })

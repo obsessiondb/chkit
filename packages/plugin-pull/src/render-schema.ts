@@ -1,10 +1,15 @@
 import {
   canonicalizeDefinitions,
+  isKafkaEngine,
   isIndexProjection,
   isRawCodec,
+  parseColumnDefault,
   type ColumnCodec,
   type ColumnCodecSpec,
+  type ColumnDefaultValue,
   type ColumnDefinition,
+  type DictionaryAttribute,
+  type DictionaryDefinition,
   type MaterializedViewDefinition,
   type MaterializedViewRefresh,
   type ProjectionDefinition,
@@ -41,6 +46,7 @@ function renderImportStatement(canonical: SchemaDefinition[]): string {
   const hasTable = canonical.some((definition) => definition.kind === 'table')
   const hasView = canonical.some((definition) => definition.kind === 'view')
   const hasMaterializedView = canonical.some((definition) => definition.kind === 'materialized_view')
+  const hasDictionary = canonical.some((definition) => definition.kind === 'dictionary')
   const hasRawCodec = canonical.some(
     (definition) =>
       definition.kind === 'table' &&
@@ -50,6 +56,7 @@ function renderImportStatement(canonical: SchemaDefinition[]): string {
   if (hasTable) imports.push('table')
   if (hasView) imports.push('view')
   if (hasMaterializedView) imports.push('materializedView')
+  if (hasDictionary) imports.push('dictionary')
   if (hasRawCodec) imports.push('codec')
   return `import { ${imports.join(', ')} } from '@chkit/core'`
 }
@@ -60,6 +67,8 @@ function renderDefinition(definition: SchemaDefinition, variableName: string): s
       return renderTableDefinition(definition, variableName)
     case 'view':
       return renderViewDefinition(definition, variableName)
+    case 'dictionary':
+      return renderDictionaryDefinition(definition, variableName)
     default:
       return renderMaterializedViewDefinition(definition, variableName)
   }
@@ -73,8 +82,10 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
     lines.push(`    ${renderColumn(column)},`)
   }
   lines.push('  ],')
-  lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
-  lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
+  if (!isKafkaEngine(definition.engine)) {
+    lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
+    lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
+  }
   if (definition.uniqueKey && definition.uniqueKey.length > 0) {
     lines.push(`  uniqueKey: ${renderStringArray(definition.uniqueKey)},`)
   }
@@ -118,6 +129,53 @@ function renderMaterializedViewDefinition(
   return lines
 }
 
+const HIDDEN_SECRET_NOTE =
+  "// NOTE: password redacted by ClickHouse — replace '[HIDDEN]' with your credential (e.g. process.env.X)."
+
+function renderDictionaryDefinition(definition: DictionaryDefinition, variableName: string): string[] {
+  const lines: string[] = []
+  if (definition.source.includes('[HIDDEN]')) {
+    lines.push(HIDDEN_SECRET_NOTE)
+  }
+  lines.push(...renderDeclarationHeader('dictionary', variableName, definition.database, definition.name))
+  lines.push('  attributes: [')
+  for (const attribute of definition.attributes) {
+    lines.push(`    ${renderDictionaryAttribute(attribute)},`)
+  }
+  lines.push('  ],')
+  lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
+  lines.push(`  source: ${renderString(definition.source)},`)
+  lines.push(`  layout: ${renderString(definition.layout)},`)
+  lines.push(`  lifetime: ${renderString(definition.lifetime)},`)
+  if (definition.range) {
+    lines.push(
+      `  range: { min: ${renderString(definition.range.min)}, max: ${renderString(definition.range.max)} },`
+    )
+  }
+  if (definition.settings && Object.keys(definition.settings).length > 0) {
+    lines.push(...renderSettingsLines(definition.settings, '  '))
+  }
+  if (definition.comment) {
+    lines.push(`  comment: ${renderString(definition.comment)},`)
+  }
+  lines.push('})')
+  return lines
+}
+
+function renderDictionaryAttribute(attribute: DictionaryAttribute): string {
+  const parts: string[] = [`name: ${renderString(attribute.name)}`, `type: ${renderString(attribute.type)}`]
+  if (attribute.expression !== undefined) {
+    parts.push(`expression: ${renderString(attribute.expression)}`)
+  } else if (attribute.default !== undefined) {
+    parts.push(`default: ${renderLiteral(attribute.default)}`)
+  }
+  if (attribute.hierarchical) parts.push('hierarchical: true')
+  if (attribute.bidirectional) parts.push('bidirectional: true')
+  if (attribute.injective) parts.push('injective: true')
+  if (attribute.isObjectId) parts.push('isObjectId: true')
+  return `{ ${parts.join(', ')} }`
+}
+
 function renderDeclarationHeader(
   factory: string,
   variableName: string,
@@ -137,10 +195,18 @@ function renderColumn(column: ColumnDefinition): string {
     `type: ${renderString(column.type)}`,
   ]
   if (column.nullable) parts.push('nullable: true')
-  if (column.default !== undefined) parts.push(`default: ${renderLiteral(column.default)}`)
+  if (column.defaultKind && column.defaultKind !== 'DEFAULT') parts.push(`defaultKind: ${renderString(column.defaultKind)}`)
+  if (column.default !== undefined) parts.push(`default: ${renderColumnDefault(column.default)}`)
   if (column.comment) parts.push(`comment: ${renderString(column.comment)}`)
   if (column.codec) parts.push(`codec: ${renderCodecSource(column.codec)}`)
   return `{ ${parts.join(', ')} }`
+}
+
+/** Expression defaults (canonical `fn:` strings) are written in the documented `{ expression }` form. */
+function renderColumnDefault(value: ColumnDefaultValue): string {
+  const parsed = parseColumnDefault(value)
+  if (parsed.kind === 'expression') return `{ expression: ${renderString(parsed.sql)} }`
+  return renderLiteral(parsed.value)
 }
 
 function renderIndexLines(indexes: SkipIndexDefinition[]): string[] {
@@ -159,6 +225,13 @@ function renderIndex(index: SkipIndexDefinition): string {
     `type: ${renderString(index.type)}`,
   ]
   switch (index.type) {
+    case 'text':
+      for (const field of ['tokenizer', 'preprocessor', 'postprocessor', 'supportPhraseSearch',
+        'dictionaryBlockSize', 'dictionaryBlockFrontcodingCompression', 'postingListBlockSize', 'postingListCodec'] as const) {
+        const value = index[field]
+        if (value !== undefined) parts.push(`${field}: ${typeof value === 'string' ? renderString(value) : value}`)
+      }
+      break
     case 'minmax':
       break
     case 'set':
@@ -185,7 +258,7 @@ function renderIndex(index: SkipIndexDefinition): string {
       )
       break
   }
-  parts.push(`granularity: ${index.granularity}`)
+  if (index.type !== 'text') parts.push(`granularity: ${index.granularity}`)
   return `{ ${parts.join(', ')} }`
 }
 

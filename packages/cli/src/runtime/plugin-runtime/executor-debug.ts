@@ -33,7 +33,10 @@ export function wrapExecutorWithDebug(
   if (!isDebugEnabled()) return executor
   const queryJson = executor.queryJson?.bind(executor)
 
+  const systemTableSource = executor.systemTableSource?.bind(executor)
+
   return {
+    ...(systemTableSource ? { systemTableSource } : {}),
     command(sql: string): Promise<void> {
       debug('clickhouse', `command: ${truncate(sql)}`)
       return trace('command', null, () => executor.command(sql))

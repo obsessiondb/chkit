@@ -1,4 +1,6 @@
-import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
+import { setTimeout as sleep } from 'node:timers/promises'
+
+import { observableSystemTable, type ClickHouseExecutor, type QueryStatus } from '@chkit/clickhouse'
 import pMap from 'p-map'
 
 export interface BackfillOptions {
@@ -45,10 +47,6 @@ export interface BackfillResult {
   completed: number
   failed: number
   progress: BackfillProgress
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Build the deterministic query ID for a chunk. */
@@ -148,8 +146,11 @@ export async function syncProgress(
   // Escape single-quotes in the prefix for safe SQL embedding
   const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
 
+  const processesFrom = observableSystemTable(executor, 'processes')
+  const queryLogFrom = observableSystemTable(executor, 'query_log')
+
   const runningRows = await executor.query<{ query_id: string }>(
-    `SELECT query_id FROM clusterAllReplicas('cluster', system.processes) WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
+    `SELECT query_id FROM ${processesFrom} WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
   )
   const runningSet = new Set(runningRows.map((r) => r.query_id))
 
@@ -162,7 +163,7 @@ export async function syncProgress(
     exception: string
   }>(
     `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
-FROM clusterAllReplicas('cluster', system.query_log)
+FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id LIKE '${safePrefix}%'
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')

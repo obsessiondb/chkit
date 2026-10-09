@@ -248,4 +248,23 @@ describe('createJournalStore', () => {
     expect(insert).toBeDefined()
     expect(insert).toContain("It\\'s broken: \\'unterminated")
   })
+
+  test.each(['recovers', 'exhausts', 'permanent'] as const)('migration insert retry policy %s', async (mode) => {
+    const { db } = createScriptedExecutor(new Map())
+    let attempts = 0
+    const failure = new Error(mode === 'permanent' ? 'access denied' : 'Please retry the INSERT')
+    db.command = async (sql) => {
+      if (!sql.startsWith('INSERT INTO')) return
+      attempts += 1
+      if (mode !== 'recovers' || attempts < 3) throw failure
+    }
+    const write = createJournalStore(db).writeMigrationState({
+      name: 'retry.sql', appliedAt: '2026-05-26 12:00:00.000', checksum: 'cs',
+      chkitVersion: 'v', migrationCompleted: true, operations: [],
+    })
+    if (mode === 'recovers') await write
+    else await expect(write).rejects.toBe(failure)
+    expect(attempts).toBe(mode === 'recovers' ? 3 : mode === 'exhausts' ? 5 : 1)
+  })
+
 })

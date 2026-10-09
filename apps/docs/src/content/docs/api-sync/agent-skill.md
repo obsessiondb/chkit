@@ -1,0 +1,52 @@
+---
+title: API sync authoring skill
+description: Install a concise agent skill for implementing new chkit API sync sources.
+---
+
+Install `chkit-ingestion` to give your coding agent source-authoring instructions and links to the relevant guides.
+
+## Install
+
+From the application project:
+
+```sh
+npx skills add obsessiondb/chkit --skill chkit-ingestion
+```
+
+The TypeScript CLI also provides a pass-through:
+
+```sh
+chkit skills add obsessiondb/chkit --skill chkit-ingestion
+```
+
+Choose the agent in the installer. Install `@chkit/plugin-ingest` and configure credentials through the [quickstart](/api-sync/quickstart/) before running a sync. The separate `chkit` skill covers schema and migration workflows.
+
+To test unpublished changes to the skill, install it from a local checkout of the chkit repository:
+
+```sh
+npx skills add ./skills/chkit-ingestion
+```
+
+## Use it
+
+For an agent supporting explicit skill invocation:
+
+```text
+Use $chkit-ingestion to add a source for our helpdesk tickets.
+Inspect the existing schema and provider documentation first.
+Explain the choices for stored shape, transformations, incremental state,
+and loading, then implement the reader and tests.
+```
+
+Include provider documentation, example responses, freshness needs, and any restrictions on storing raw fields. The agent should derive decisions from those facts and the existing project.
+
+## Skill scope
+
+The skill covers bounded readers, provider-specific sync strategies, durable checkpoint ordering, write identity, and scheduling. For official registry integrations, it requires a source contract and recovery design, raw payload preservation, explicit freshness coverage, and portable interruption/replay tests. Prefer coarse checkpoints and replay when affordable; reconcile older changes when the chosen coverage requires it. Sync tokens, timestamp windows, and checkpointed full scans follow the provider's actual capabilities. Use the linked docs for complete examples and tradeoffs.
+
+## Related pages
+
+- [Destinations and transformations](/api-sync/destinations/): choose storage and mapping for the source.
+- [Quickstart](/api-sync/quickstart/): a working first source.
+- [Publish a registry](/api-sync/registry-authoring/): metadata, portable tests, and immutable releases.
+- [For AI agents](/ai-agents/): general chkit setup and schema workflows.

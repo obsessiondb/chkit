@@ -1,5 +1,70 @@
 # @chkit/codegen
 
+## 0.2.0-beta.9
+
+### Patch Changes
+
+- 2f53550: Support `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns with a new `defaultKind` column field. `default` holds the value or `fn:` expression for every kind, and `EPHEMERAL` may omit it. SQL rendering, `pull`, snapshots, and drift keep the kind; validation reports `column_expression_required` and `column_default_kind_invalid`.
+
+  - `DEFAULT`/`MATERIALIZED` expression changes emit `MODIFY COLUMN` with a warning that stored values are not rewritten, and removed expressions emit `REMOVE DEFAULT`/`REMOVE MATERIALIZED`. Conversions to or from `ALIAS`/`EPHEMERAL` fail `generate` with `column_kind_change_unsupported`.
+  - Codegen emits `Row` (`SELECT *`), `RowExplicit` (all readable columns), and `RowInsert` (all insertable columns) for these tables; ingest helpers take `RowInsert`.
+  - Inserts into tables with `EPHEMERAL` columns name their columns: generated ingest helpers pass `columns`, which `@chkit/clickhouse` `insert()` and the ObsessionDB remote executor send, and the `@chkit/plugin-ingest` destination does the same.
+  - Automatic backfills omit `MATERIALIZED` and `ALIAS` columns and check live column kinds first: a copy is blocked only when the target has both `EPHEMERAL` and `MATERIALIZED` columns, `mv_replay` by any `EPHEMERAL` column, and a missing target fails with "does not exist or is not visible yet".
+  - `drift` and `check` compare defaults token by token. Write expressions in the canonical form ClickHouse stores, such as `CAST(x, 'String')`, to avoid drift.
+  - Fix string defaults containing backslashes: `C:\temp` now renders as `DEFAULT 'C:\\temp'`.
+
+- c49f0a9: Add `chkit snapshot rebuild` to repair `snapshot.json` when two branches conflict on it (#235). Every `chkit generate` rewrites the whole snapshot, so two branches that each generated a migration always conflicted on it, and taking either side of the conflict dropped the other branch's entries. `snapshot rebuild` rewrites the snapshot from the schema definitions with the same plugin hooks, validation, and writer as `generate`. It never writes a migration, tolerates a snapshot with conflict markers or invalid JSON, lists the entries it added, removed, or changed, leaves an up-to-date snapshot untouched, and supports `--dryrun` and `--json`. After a conflict it prints the `git diff` commands to compare the result with both sides: `HEAD`, and `MERGE_HEAD` during a merge or `REBASE_HEAD` during a rebase. Commands that read a snapshot with unresolved conflict markers now say so and point to `chkit snapshot rebuild`, and the error for other invalid snapshot JSON no longer suggests deleting the file.
+
+  Under Bun, a schema file that did not load, such as one that still had conflict markers during a rebase, could make `generate` and other commands exit 0 with no output. They now exit 1. Under Bun and Node, the error names the schema file that failed to load and says when conflict markers caused it, including markers in a module the file imports. Commands that do not use the schema no longer import it unless `--table` is set.
+
+  `@chkit/codegen` exports `writeSnapshot` and `serializeSnapshot`, and `@chkit/core` exports `definitionKey` and `hasConflictMarkers`.
+
+- Updated dependencies [d072fe3]
+- Updated dependencies [2f53550]
+- Updated dependencies [98e3667]
+- Updated dependencies [96a18c6]
+- Updated dependencies [46cbf88]
+- Updated dependencies [b59fc83]
+- Updated dependencies [c49f0a9]
+- Updated dependencies [672d67e]
+  - @chkit/core@0.2.0-beta.9
+
+## 0.2.0-beta.8
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [f8238db]
+- Updated dependencies [fedbf56]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+- Updated dependencies [256ec62]
+  - @chkit/core@0.2.0-beta.8
+
+## 0.1.2-beta.7
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.7
+
+## 0.1.2-beta.6
+
+### Patch Changes
+
+- 278e4fa: Add `chkit generate --empty` to scaffold a blank manual migration. Unlike a normal `generate`, empty mode skips the schema diff, plugin pipeline, and table scoping entirely and writes a timestamped `.sql` stub with the standard migration header (`operation-count: 0`) plus a placeholder comment. The snapshot is left untouched, so an empty migration never absorbs pending schema drift. Use it for DDL that chkit does not model — backfills, `OPTIMIZE`, dictionary reloads, or one-off data fixes. The `--name` (default `manual`) and `--migration-id` flags apply; `migrate` picks the file up like any generated one. New `generateEmptyMigration` helper exported from `@chkit/codegen`.
+- Updated dependencies [65c90d6]
+- Updated dependencies [3f1db03]
+- Updated dependencies [5a8d805]
+- Updated dependencies [b501f5d]
+  - @chkit/core@0.1.2-beta.6
+
 ## 0.1.2-beta.5
 
 ### Patch Changes

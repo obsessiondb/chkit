@@ -8,14 +8,14 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
-  getRequiredEnv,
+  getLiveEnv,
   quoteIdent,
   runCli,
 } from './e2e-testkit.js'
 
 describe('@chkit/cli migrate statement-error context e2e (#10)', () => {
   test('a rejected statement reports the migration file, statement position, and SQL preview', async () => {
-    const liveEnv = getRequiredEnv()
+    const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const journalTable = createJournalTableName('stmterr')

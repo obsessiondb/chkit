@@ -33,6 +33,14 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
+### SQL comments
+
+ClickHouse does not store SQL comments. chkit removes them from TTL, partition, skip index, and projection expressions, and from expression column defaults, before comparing them with the live table, so a comment that whitespace separates from the rest of the clause, such as one at the end of a line, does not read as drift. Comment markers inside a literal column default (`default: 'a -- b'`) are part of the value. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
+
+### Expression defaults
+
+Column defaults are compared token by token with `default_expression` in `system.columns`. chkit removes the comments from an expression default (`{ expression }` or `fn:`), then ignores whitespace, outer parentheses, and quotes around plain identifiers, so `now()+1` matches the stored `now() + 1`. A literal default is compared as a value: `default: 'web'` matches the stored `'web'`. ClickHouse stores some expressions in a canonical form, and an expression written another way reports `changed_column` although the default is the same: `NOW()` is stored as `now()`, `x::String` as `CAST(x, 'String')`, and `now() + INTERVAL 1 DAY` as `now() + toIntervalDay(1)`. Write expression defaults in the stored form; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
+
 ### Drift reason codes
 
 **Object-level drift:**
@@ -49,7 +57,7 @@ When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This pre
 |------|---------|
 | `missing_column` | Column in snapshot not found in live table |
 | `extra_column` | Column in live table not in snapshot |
-| `changed_column` | Column exists but type or default differs |
+| `changed_column` | Column exists but type, default, or column kind differs |
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |
