@@ -1686,8 +1686,8 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   service each request may hit a different replica, and `SYSTEM SYNC REPLICA`
   on one request does not make the next read see the write, so the apply loop's
   read-modify-write could mark a migration completed while copying a stale
-  `started` statement. **TS `journal-store.ts` has the same race** (same
-  `appendEntry` read-then-write); port this guard back.
+  `started` statement. TS `journal-store.ts` had the same race; the same
+  guard lands there in #268.
 - `SQLExpression` defaults: a `default` object that is not an expression is a
   Pydantic `ValidationError` when the column is built, not a
   `column_default_invalid` issue.
