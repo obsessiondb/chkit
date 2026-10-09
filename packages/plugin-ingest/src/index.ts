@@ -4,7 +4,8 @@ export { fullSync, timestampWindow, cursorState, type TimestampRange, type Times
 export { paginate, type Page } from './paginate.js'
 export { simpleLoader } from './loader.js'
 export { ingestionColumns, rawTable, rawRows, createClickHouseDestination, type RawRow } from './destination.js'
-export { createClickHouseJournal } from './journal.js'
+export { createClickHouseJournal, type ClickHouseJournalOptions } from './journal.js'
+export { doctorJournal, repairJournal, planJournalRepair, type JournalRecoveryOptions, type JournalRepairPlan, type JournalRepairResult } from './recovery.js'
 export { runIngestion, type BackfillRequest, type ExecutionEnv, type ExecutionRequest } from './executor.js'
 export { HttpError, FetchFailure, IngestConfigError } from './errors.js'
 export type {

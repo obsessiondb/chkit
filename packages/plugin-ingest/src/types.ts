@@ -222,18 +222,22 @@ export interface JournalEvent {
 export interface CommittedCheckpoint {
   version: number
   envelope: CheckpointEnvelope | undefined
-  /** Highest journal sequence observed for the namespace (any event kind). */
+  /** Identity of the last state advancement; empty for an initial checkpoint. */
+  checkpointId: string
+  /** Identity of the last successful sync; separates new syncs from crash replay. */
+  successId: string
+  /** Last sequence observed within the selected run, not a shared allocator. */
   headSeq: number
-  /** Last successful work_finished sequence, or zero. Separates new syncs from replays. */
+  /** Local sequence of the last successful work_finished, or zero. */
   lastSuccessSeq: number
 }
 
-/** Authoritative append-only control state. Checkpoints are projections of it. */
+/** Append-only run histories; checkpoints are projections of acknowledged work. */
 export interface Journal {
   ensure(): Promise<void>
   /**
-   * Appends facts atomically: all land or none do. Facts that are always written
-   * together share one insert, so the journal insert rate tracks the batch rate.
+   * Facts written together share one insert. Retry an ambiguous failure with
+   * the exact same run-scoped identities and payloads.
    */
   append(events: readonly JournalEvent[]): Promise<void>
   readCheckpoint(namespaceId: string): Promise<CommittedCheckpoint>

@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto'
 import { waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { IngestConfigError } from './errors.js'
-import type { CheckpointEnvelope, CommittedCheckpoint, Journal, JournalEvent } from './types.js'
+import { validateJournalHistory } from './journal-history.js'
+import type { CommittedCheckpoint, Journal, JournalEvent } from './types.js'
 
 export const DEFAULT_JOURNAL_TABLE = '_chkit_ingestion_journal'
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -40,158 +41,41 @@ export interface ClickHouseJournalOptions {
   now?: () => Date
 }
 
-/**
- * Append-only, target-linked journal. It is the sole authority for durable
- * ingestion control state: checkpoints are read as a projection over
- * `batch_committed` facts and never stored anywhere else.
- */
+/** Immutable run-scoped facts are projected from one ClickHouse snapshot. */
 export function createClickHouseJournal(options: ClickHouseJournalOptions): Journal {
   const table = options.table ?? DEFAULT_JOURNAL_TABLE
-  if (!TABLE_NAME_PATTERN.test(table)) throw new IngestConfigError(`Invalid journal table name "${table}".`)
-  if (!TABLE_NAME_PATTERN.test(options.database)) {
-    throw new IngestConfigError(`Invalid journal database name "${options.database}".`)
-  }
-  const qualified = `\`${options.database}\`.\`${table}\``
+  validateTableName(table)
+  validateTableName(options.database)
   const now = options.now ?? (() => new Date())
-
-  // Two runs that claimed the same sequence numbers each wrote a history that is
-  // valid on its own. Runs that resumed from the same checkpoint derive the same
-  // event ids, so the collision shows up as drifting payloads rather than
-  // conflicting owners; both are detected by more than one run per sequence.
-  // valid on its own. The run that started first keeps its facts; every later
-  // run's facts are removed, and the next run resumes from the survivor's
-  // checkpoint. Rows the removed runs loaded stay in the destination
-  // (at-least-once), so the resumed run may duplicate them.
-  async function conflictRepair(namespaceId: string): Promise<string> {
-    const scope = `target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)}`
-    const runs = await options.executor.query<{ run_id: string }>(
-      `SELECT run_id
-FROM ${qualified}
-WHERE ${scope} AND run_id IN (
-  SELECT run_id FROM ${qualified}
-  WHERE ${scope} AND event_seq IN (
-    SELECT event_seq FROM ${qualified} WHERE ${scope} GROUP BY event_seq HAVING uniqExact(run_id) > 1
-  )
-)
-GROUP BY run_id
-ORDER BY min(event_at) ASC, run_id ASC`,
-      { select_sequential_consistency: '1' }
-    )
-    const [kept, ...removed] = runs.map((run) => run.run_id)
-    if (!kept || removed.length === 0) return ''
-    return ` To repair it, keep run ${kept} (the first to start) and delete the facts of the later run(s) with:\n  DELETE FROM ${qualified} WHERE ${scope} AND run_id IN (${removed.map(sqlString).join(', ')});\nThe next run resumes from the kept run's checkpoint; rows the deleted runs loaded stay in the destination and may be loaded again.`
-  }
+  const qualified = `\`${options.database}\`.\`${table}\``
 
   return {
     async ensure() {
       await options.executor.command(journalTableSql(qualified))
-      // Replicated/shared catalogs (ObsessionDB) can acknowledge the CREATE
-      // before the replica serving the next request knows the table.
       await waitForTable(options.executor, options.database, table)
     },
-
     async append(events) {
+      if (events.length === 0) return
       const at = now()
       const rows = events.map((event) => toJournalRow(event, options.targetId, at))
-      // One insert block into one monthly partition (a shared event_at) is atomic.
-      // A retried append of the same deterministic facts is suppressed while the
-      // deduplication window lasts; readers canonicalize by event_id anyway.
-      const [first, ...rest] = rows
-      if (!first) return
-      const token = rest.length === 0 ? first.event_id : digest(rows.map((row) => row.event_id))
       await options.executor.insert({
-        table: `${options.database}.${table}`,
-        values: rows,
-        settings: { insert_deduplication_token: token, async_insert: 0 },
+        table: `${options.database}.${table}`, values: rows,
+        settings: { insert_deduplication_token: digest(rows.flatMap((row) => [row.event_id, row.payload_hash])), async_insert: 0 },
       })
     },
-
     async readCheckpoint(namespaceId) {
-      // Physical retry duplicates are allowed, so facts are canonicalized per
-      // sequence number first. The history is then validated before anything is
-      // projected from it: a checkpoint read from a damaged journal is worthless.
-      const facts = `SELECT
-    event_seq,
-    uniqExact(event_id) AS owners,
-    uniqExact(payload_hash) AS payloads,
-    uniqExact(run_id) AS runs,
-    any(event_kind) AS fact_kind,
-    any(work_state) AS fact_work_state,
-    any(expected_checkpoint_version) AS fact_expected,
-    any(checkpoint_version) AS fact_version,
-    any(checkpoint_json) AS fact_checkpoint
-  FROM ${qualified}
-  WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)}
-  GROUP BY event_seq`
-      const settings = { select_sequential_consistency: '1' }
-      const [health, transitions] = await Promise.all([
-        options.executor.query<{
-          head_seq: string
-          last_success_seq: string
-          sequences: string
-          conflicting_owners: string
-          drifted: string
-          conflicting_runs: string
-          checkpoint_version: string
-          checkpoint_json: string
-        }>(
-          `SELECT
-  max(event_seq) AS head_seq,
-  maxIf(event_seq, fact_kind = 'work_finished' AND fact_work_state = 'succeeded') AS last_success_seq,
-  count() AS sequences,
-  countIf(owners > 1) AS conflicting_owners,
-  countIf(payloads > 1) AS drifted,
-  countIf(runs > 1) AS conflicting_runs,
-  argMaxIf(fact_version, event_seq, fact_kind = 'batch_committed') AS checkpoint_version,
-  argMaxIf(fact_checkpoint, event_seq, fact_kind = 'batch_committed') AS checkpoint_json
-FROM (${facts})`,
-          settings
-        ),
-        // Every commit must start from the version the previous commit produced,
-        // advance it by at most one, and only change the envelope when it advances.
-        // The two reads are not one snapshot; that is sound because V1 runs a
-        // single executor process and reads a namespace before appending to it.
-        options.executor.query<{ invalid: string }>(
-          `SELECT countIf(
-  fact_expected != previous_version OR fact_version < fact_expected OR fact_version > fact_expected + 1
-  OR (fact_version = fact_expected AND fact_checkpoint != previous_checkpoint)
-) AS invalid
-FROM (
-  SELECT
-    fact_expected,
-    fact_version,
-    fact_checkpoint,
-    lagInFrame(fact_version, 1, toUInt64(0)) OVER (ORDER BY event_seq ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS previous_version,
-    lagInFrame(fact_checkpoint, 1, '') OVER (ORDER BY event_seq ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS previous_checkpoint
-  FROM (${facts})
-  WHERE fact_kind = 'batch_committed'
-)`,
-          settings
-        ),
-      ])
-      const row = health[0]
-      if (!row || Number(row.sequences) === 0) return emptyCheckpoint()
-
-      const problems = [
-        Number(row.head_seq) !== Number(row.sequences) ? `sequence gap (head ${row.head_seq}, ${row.sequences} facts)` : '',
-        Number(row.conflicting_owners) > 0 ? `${row.conflicting_owners} sequence number(s) owned by conflicting facts` : '',
-        Number(row.drifted) > 0 ? `${row.drifted} fact(s) with drifting payloads` : '',
-        Number(transitions[0]?.invalid ?? 0) > 0 ? `${transitions[0]?.invalid} invalid checkpoint transition(s)` : '',
-      ].filter((problem) => problem !== '')
-      if (problems.length > 0) {
-        const repair = Number(row.conflicting_runs) > 0 ? await conflictRepair(namespaceId) : ''
-        throw new Error(
-          `Ingestion journal for "${namespaceId}" is not a valid history: ${problems.join('; ')}. Refusing to project a checkpoint from it; more than one executor process may have been active, or a restarted run read a stale journal.${repair}`
-        )
-      }
-      return {
-        version: Number(row.checkpoint_version),
-        envelope: parseEnvelope(row.checkpoint_json),
-        headSeq: Number(row.head_seq),
-        lastSuccessSeq: Number(row.last_success_seq),
-      }
+      const rows = await options.executor.query<JournalRow>(
+        `SELECT * FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
+        { select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1 })
+      // A stale snapshot can cause replay, but its runs cannot overwrite the
+      // identities or checkpoint lineage of another run.
+      return validateJournalHistory(rows, namespaceId).checkpoint
     },
   }
+}
+
+function validateTableName(name: string): void {
+  if (!TABLE_NAME_PATTERN.test(name)) throw new IngestConfigError(`Invalid journal table or database name "${name}".`)
 }
 
 export function toJournalRow(event: JournalEvent, targetId: string, at: Date): JournalRow {
@@ -200,7 +84,7 @@ export function toJournalRow(event: JournalEvent, targetId: string, at: Date): J
   // Identity covers what makes the fact unique; the payload hash covers every
   // authoritative field a retry of that same fact must reproduce. Only the
   // physical append time (event_at) is excluded.
-  const eventId = digest([targetId, event.namespaceId, String(event.eventSeq), event.eventKind, event.workId, event.batchId, String(event.attemptNo)])
+  const eventId = digest([targetId, event.namespaceId, event.runId, String(event.eventSeq), event.eventKind, event.workId, event.batchId, String(event.attemptNo)])
   const payload = digest([
     eventId,
     String(event.expectedCheckpointVersion),
@@ -236,22 +120,6 @@ export function toJournalRow(event: JournalEvent, targetId: string, at: Date): J
   }
 }
 
-function parseEnvelope(json: string): CheckpointEnvelope | undefined {
-  if (json === '') return undefined
-  const parsed: unknown = JSON.parse(json)
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    !('strategy' in parsed) ||
-    typeof parsed.strategy !== 'string' ||
-    !('version' in parsed) ||
-    typeof parsed.version !== 'number'
-  ) {
-    throw new Error('Committed checkpoint is not a valid ChKit checkpoint envelope.')
-  }
-  return { strategy: parsed.strategy, version: parsed.version, state: 'state' in parsed ? parsed.state : undefined }
-}
-
 /** Stable key order so equal values always serialize identically. */
 export function canonicalJson(value: unknown): string {
   // JSON.stringify(undefined) is undefined, not a string.
@@ -269,10 +137,10 @@ export function digest(parts: readonly string[]): string {
 }
 
 export function emptyCheckpoint(): CommittedCheckpoint {
-  return { version: 0, envelope: undefined, headSeq: 0, lastSuccessSeq: 0 }
+  return { version: 0, envelope: undefined, checkpointId: '', successId: '', headSeq: 0, lastSuccessSeq: 0 }
 }
 
-function journalTableSql(qualified: string): string {
+export function journalTableSql(qualified: string): string {
   return `CREATE TABLE IF NOT EXISTS ${qualified}
 (
     target_id LowCardinality(String),

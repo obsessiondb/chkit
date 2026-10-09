@@ -1,18 +1,20 @@
 ---
 title: "chkit ingest"
-description: "Run, list, or inspect the ingestion streams your project exports."
+description: "Run, inspect, diagnose, or repair the ingestion streams your project exports."
 sidebar:
   order: 11
 ---
 
-Runs the TypeScript ingestion streams provided by [`@chkit/plugin-ingest`](/plugins/ingest/), lists them, or shows their committed checkpoints.
+Runs the TypeScript ingestion streams provided by [`@chkit/plugin-ingest`](/plugins/ingest/) and inspects or repairs their ClickHouse journal history.
 
 ## Synopsis
 
-```
+```sh
 chkit ingest run [flags]
 chkit ingest list [flags]
 chkit ingest status [flags]
+chkit ingest doctor [flags]
+chkit ingest repair [flags]
 ```
 
 `chkit ingest <subcommand>` is equivalent to `chkit plugin ingest <subcommand>`.
@@ -25,14 +27,25 @@ chkit ingest status [flags]
 |------|------|---------|-------------|
 | `--tag <tag>` | string[] | — | Exact tag every selected stream must carry. Repeat for AND matching |
 
+### Namespace selection (`run`, `doctor`, and `repair`)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--backfill <id>` | string | — | Select the isolated `<stream id>#backfill:<id>` checkpoint namespace |
+
 ### `run` only
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--backfill <id>` | string | — | Stable backfill ID. Runs in an isolated checkpoint namespace |
 | `--from <timestamp>` | string | — | Backfill range lower bound (ISO timestamp). Requires `--backfill` |
 | `--to <timestamp>` | string | — | Backfill range upper bound (ISO timestamp). Requires `--backfill` |
 | `--max-duration <seconds>` | string | `3600` | Execution budget. Overrides the plugin's `maxDurationSeconds` option |
+
+### `repair` only
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply <fingerprint>` | string | — | Materialize the exact reviewed plan. Stop writers first; requires exactly one selected stream |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -42,7 +55,9 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 The ingest plugin must be registered in `plugins`, and the modules loaded from `entry` (or from `schema` globs) must export at least one `definePipeline(...)` value. Without an exported pipeline, every subcommand fails with exit code 2.
 
-`run` and `status` require a direct `clickhouse` connection in the config. Host-provided executors, including the ObsessionDB workbench executor, are rejected. `list` reads only the definition graph and needs no connection.
+`run`, `status`, `doctor`, and `repair` require a direct `clickhouse` connection in the config. Host-provided executors, including the ObsessionDB workbench executor, are rejected. `list` reads only the definition graph and needs no connection.
+
+Create and apply destination schema migrations before ingestion. The journal uses ordinary ClickHouse CREATE, SELECT, and INSERT operations. Overlapping runs record independent histories, and valid legacy journal evidence remains readable.
 
 ### Stream selection
 
@@ -52,11 +67,11 @@ A `--tag` filter that matches no stream fails with exit code 2 before any work r
 
 ### `run`
 
-Executes the selected streams from their committed checkpoints and records progress in the ingestion journal (`_chkit_ingestion_journal` by default). Progress advances only after writes succeed; a later run resumes from the last committed checkpoint.
+Executes the selected streams from validated checkpoints in the ingestion journal (`_chkit_ingestion_journal` by default). Each run records its starting checkpoint and local event sequence. Progress advances after writes succeed; a later run resumes from a selected valid checkpoint.
 
 The run ends when every selected stream finishes, the execution budget is exhausted, or the process receives `SIGINT` or `SIGTERM`. A budget-exhausted or interrupted run keeps committed progress and exits with code 1. Each stream reports one outcome: `succeeded`, `failed`, `budget_exhausted`, or `cancelled`.
 
-Run at most one ingestion process per project and target at a time. See [Scheduling and recovery](/api-sync/operations/).
+Overlapping processes write independent run-scoped identities. A stale valid read can replay work without colliding with another run's event sequence. Snapshot validation diagnoses malformed tails and retains valid acknowledged progress. Destination delivery remains at-least-once. See [Scheduling and recovery](/api-sync/operations/).
 
 ### Backfills
 
@@ -72,7 +87,19 @@ Prints each selected stream with its destination table and effective tags.
 
 Prints the committed checkpoint of each selected stream's scheduled namespace. Streams that have never committed progress show `(no checkpoint)`.
 
-`status` is not read-only: it runs `CREATE TABLE IF NOT EXISTS` for the journal before reading it, so on a target without a journal the connection needs permission to create that table.
+`status` ensures the journal table exists before reading, so the connection needs CREATE permission. Its checkpoint read validates the complete namespace snapshot and selects valid progress.
+
+### `doctor`
+
+Reads one complete source-table snapshot and validates the selected namespace's run histories. Reports the selected checkpoint, run count, evidence counts, and malformed tails. Valid overlapping runs are healthy. It does not create or mutate tables, fetch source data, or change destination rows.
+
+### `repair`
+
+Without `--apply`, prints a read-only recovery plan with its fingerprint, selected valid checkpoint, evidence counts, and activation instructions. Materializing a plan requires exactly one selected stream and the fingerprint from its preview. Stop all writers using the journal table before previewing and applying recovery. Any source-table change invalidates the fingerprint and requires a new review.
+
+Applied repair verifies a full archive and a separate replacement journal. The replacement retains the selected namespace's valid facts and copies other targets and namespaces unchanged. The original journal remains intact. A failed verification leaves the active configuration unchanged. Missing source evidence requires restoration before repair.
+
+Keep writers stopped after materialization. Configure `ingest({ journalTable: '<replacementTable>' })` with the returned table, then restart them. `--apply` creates the reviewed artifacts; activation remains this explicit configuration change. Uncertain destination writes may be replayed and duplicated.
 
 ## Examples
 
@@ -100,18 +127,28 @@ chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
 chkit ingest run --tag pipeline:helpdesk --max-duration 600
 ```
 
-**Inspect progress as JSON:**
+**Inspect progress or diagnose a backfill:**
 
 ```sh
 chkit ingest status --tag pipeline:helpdesk --json
+chkit ingest doctor --tag stream:helpdesk.tickets --backfill jan --json
+```
+
+**Preview and materialize reviewed recovery:**
+
+```sh
+chkit ingest repair --tag stream:helpdesk.tickets --json
+# Stop all journal writers, review the output, and use the printed fingerprint.
+chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
+# Keep writers stopped; configure ingest({ journalTable: '<replacementTable>' }).
 ```
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success. For `run`, every selected stream succeeded |
-| 1 | Error, including an unknown flag or a flag without a value, or a `run` with any stream that did not succeed |
+| 0 | Success. For `run`, every selected stream succeeded; for `doctor`, every history is healthy; a repair preview completed or the reviewed replacement was materialized |
+| 1 | Error, including an unknown flag or missing flag value, an unhealthy `doctor` report, or a `run` with any stream that did not succeed |
 | 2 | Configuration error: no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
 
 ## JSON output
@@ -194,7 +231,58 @@ A failed stream sets `outcome` to `failed` and includes an `error` message; the 
 }
 ```
 
-## Related
+**`repair` preview:**
+
+```json
+{
+  "ok": true,
+  "command": "repair",
+  "targetId": "clickhouse.example.com:8443/crm",
+  "streams": [
+    {
+      "streamId": "helpdesk.tickets",
+      "pipelineId": "helpdesk",
+      "destination": "crm.tickets",
+      "strategy": "chkit.timestamp_window@1",
+      "tags": ["schedule:1h", "pipeline:helpdesk", "stream:helpdesk.tickets"],
+      "applied": false,
+      "activated": false,
+      "plan": {
+        "namespaceId": "helpdesk.tickets",
+        "sourceTable": "_chkit_ingestion_journal",
+        "fingerprint": "19e549d09d1d64d8c899b998fbf50e8b984046e0757b3452d4fd98a9b8f36ba7",
+        "healthy": false,
+        "repairable": true,
+        "problems": ["Malformed trailing evidence in run sync-42"],
+        "evidenceRows": 12,
+        "selectedEvidenceRows": 8,
+        "retainedFacts": 10,
+        "runs": 2,
+        "checkpoint": {
+          "version": 1,
+          "headSeq": 4,
+          "lastSuccessSeq": 4,
+          "checkpointId": "sync-41:3",
+          "successId": "sync-41:4",
+          "envelope": {
+            "strategy": "chkit.timestamp_window",
+            "version": 1,
+            "state": { "watermark": "2026-09-24T09:00:00.000Z" }
+          }
+        },
+        "archiveTable": "_chkit_ingestion_journal_archive_19e549d09d1d64d8c899b998",
+        "replacementTable": "_chkit_ingestion_journal_repair_19e549d09d1d64d8c899b998",
+        "activation": "Stop all ingestion writers, materialize the reviewed repair, then configure the returned journal table before restarting them.",
+        "replayWarning": "The next run resumes from the selected valid checkpoint. Uncertain destination writes may be loaded again (at least once)."
+      }
+    }
+  ]
+}
+```
+
+Materialized output sets `applied` to `true`, keeps `activated` at `false`, and adds a unique copy ID to the archive and replacement names. Its `activation` field names the exact `journalTable` configuration to adopt. `doctor` uses the same plan fields under each stream's `report`; its top-level `ok` is `false` when any selected history has diagnostic problems.
+
+## Related commands
 
 - [Ingest plugin reference](/plugins/ingest/) — plugin setup, options, and stream definitions
 - [API sync quickstart](/api-sync/quickstart/) — define a first stream and run it

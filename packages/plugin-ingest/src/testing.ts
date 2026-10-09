@@ -1,4 +1,5 @@
-import { emptyCheckpoint, toJournalRow, type JournalRow } from './journal.js'
+import { validateJournalHistory } from './journal-history.js'
+import { toJournalRow, type JournalRow } from './journal.js'
 import type { CommittedCheckpoint, DestinationAdapter, Journal, JournalEvent, Row } from './types.js'
 
 export interface MemoryJournal extends Journal {
@@ -13,29 +14,35 @@ export interface MemoryDestination extends DestinationAdapter {
 }
 
 /** In-memory journal with the same projection semantics as the ClickHouse one. */
-export function createMemoryJournal(): MemoryJournal {
+export function createMemoryJournal(options: { now?: () => Date } = {}): MemoryJournal {
   const events: JournalEvent[] = []
   const rows: JournalRow[] = []
+  const now = options.now ?? (() => new Date())
   return {
     events,
     rows,
     async ensure() {},
     async append(appended) {
-      events.push(...appended)
-      rows.push(...appended.map((event) => toJournalRow(event, 'memory', new Date(0))))
+      for (const event of appended) {
+        const row = toJournalRow(event, 'memory', now())
+        if (rows.some((existing) => existing.event_id === row.event_id && existing.payload_hash === row.payload_hash)) continue
+        events.push(event)
+        rows.push(row)
+      }
     },
     async readCheckpoint(namespaceId): Promise<CommittedCheckpoint> {
-      const scoped = events.filter((event) => event.namespaceId === namespaceId)
-      if (scoped.length === 0) return emptyCheckpoint()
-      const headSeq = Math.max(...scoped.map((event) => event.eventSeq))
-      const lastSuccessSeq = Math.max(0, ...scoped
-        .filter((event) => event.eventKind === 'work_finished' && event.workState === 'succeeded')
-        .map((event) => event.eventSeq))
-      const committed = scoped
-        .filter((event) => event.eventKind === 'batch_committed')
-        .sort((a, b) => a.checkpointVersion - b.checkpointVersion || a.eventSeq - b.eventSeq)
-        .at(-1)
-      return { version: committed?.checkpointVersion ?? 0, envelope: committed?.checkpoint, headSeq, lastSuccessSeq }
+      // Older test fixtures restore a journal by copying its public events.
+      // Materialize any such events before projecting the checkpoint so the
+      // in-memory adapter preserves that supported testing workflow.
+      const known = new Set(rows.map((row) => `${row.event_id}\0${row.payload_hash}`))
+      for (const event of events) {
+        const row = toJournalRow(event, 'memory', now())
+        const identity = `${row.event_id}\0${row.payload_hash}`
+        if (known.has(identity)) continue
+        known.add(identity)
+        rows.push(row)
+      }
+      return validateJournalHistory(rows.filter((row) => row.namespace_id === namespaceId), namespaceId).checkpoint
     },
   }
 }

@@ -247,7 +247,7 @@ Preserve `source_id` and `team_id` when joining messages to users or conversatio
 
 ## Scheduling, verification, and recovery
 
-Schedule a finite ingestion command through cron, CI, or a job runner. The scheduler supplies the project directory, credentials, cadence, execution budget, and concurrency control. Run one ingestion process per project and ClickHouse target at a time; the pipeline's limits apply within a process.
+Schedule a finite ingestion command through cron, CI, or a job runner. The scheduler supplies the project directory, credentials, cadence, and execution budget. ChKit records independent histories for [overlapping runs](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery). Scheduler concurrency controls limit provider requests and resource use; pipeline limits apply within a process.
 
 For a narrower messages run:
 

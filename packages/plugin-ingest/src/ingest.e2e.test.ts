@@ -143,7 +143,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
       async *read() { yield { rows: rawRows([{ id: '1', value }], (item) => item.id) } },
     })
     const selected = selectStreams([definePipeline({ id: `${prefix}raw_pipeline`, streams: [stream] })], [])
-    let lastSuccessSeq = 0
+    let lastSuccessId = ''
     for (const next of ['A', 'B', 'A']) {
       value = next
       const journal = createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable })
@@ -153,8 +153,9 @@ describe('@chkit/plugin-ingest live env e2e', () => {
       expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', error: undefined })
       expect(result.ok).toBe(true)
       const checkpoint = await journal.readCheckpoint(stream.id)
-      expect(checkpoint.lastSuccessSeq).toBeGreaterThan(lastSuccessSeq)
-      lastSuccessSeq = checkpoint.lastSuccessSeq
+      expect(checkpoint.successId).not.toBe(lastSuccessId)
+      expect(checkpoint.successId).not.toBe('')
+      lastSuccessId = checkpoint.successId
       const rows = await executor.query<{ raw: { value: string } }>(
         `SELECT raw FROM ${quoteIdent(database)}.${quoteIdent(landing.name)} FINAL`,
         { select_sequential_consistency: '1' }

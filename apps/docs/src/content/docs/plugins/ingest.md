@@ -1,6 +1,6 @@
 ---
 title: Ingest Plugin
-description: Load application API data into ClickHouse with TypeScript readers and journaled checkpoints.
+description: Load application API data into ClickHouse with TypeScript readers and overlap-tolerant journal checkpoints.
 sidebar:
   order: 5
 ---
@@ -12,7 +12,7 @@ Start with the [API sync quickstart](/api-sync/quickstart/) for a complete first
 ## Capabilities
 
 - Runs finite pulls from application APIs into chkit-managed tables.
-- Keeps progress in an append-only ingestion journal inside the target database. Checkpoints are a projection of that journal.
+- Records independent run histories in an append-only ClickHouse journal, supporting overlapping executions.
 - Records progress after writes succeed. A retry can reread rows from the last committed checkpoint.
 - Retries source requests with backoff, `Retry-After`, and failure classification.
 - Selects streams by exact tags so any external scheduler (cron, CI, Kubernetes) can drive it.
@@ -36,6 +36,14 @@ export default defineConfig({
   clickhouse: { url: process.env.CLICKHOUSE_URL ?? '' },
 })
 ```
+
+### Journal and overlapping runs
+
+The target needs CREATE, SELECT, and INSERT permissions for the journal and destination tables. ChKit stores checkpoints entirely in ClickHouse journal evidence.
+
+Every run records its starting checkpoint and local event sequence. Event identity includes the run, so overlapping executions and stale reads cannot reuse another run's identities. Complete snapshot validation selects acknowledged progress from valid histories. Malformed tails are diagnosed and excluded; normal overlapping runs need no repair. A stale valid snapshot may replay work, so destination keys and versioning must reconcile repeats.
+
+See [Scheduling and recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) for execution and recovery behavior.
 
 ## Writing a stream
 
@@ -185,12 +193,16 @@ chkit ingest run                        # run every stream
 chkit ingest run --tag schedule:1h      # exact tag match; repeat --tag for AND
 chkit ingest run --tag stream:helpdesk.tickets
 chkit ingest status                     # committed checkpoint per stream
+chkit ingest doctor --tag stream:helpdesk.tickets
+chkit ingest repair --tag stream:helpdesk.tickets
 chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
 ```
 
 Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
 
 A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. The bundled `fullSync()` and `cursorState()` strategies do not interpret date bounds; custom provider strategies may honor or reject them. See the source's documentation and [Backfill source data](/api-sync/operations/#backfill-source-data).
+
+`doctor` reads and validates evidence without changing tables. `repair` previews recovery by default. After reviewing the plan, pass its fingerprint to `repair --apply <fingerprint>` with exactly one selected stream. Add `--backfill <id>` to either command to inspect or repair that historical namespace. With writers stopped, repair preserves evidence and materializes a separately validated journal. Set `ingest({ journalTable: '<replacementTable>' })` to the returned table before restarting writers; activation is explicit. Uncertain work may be replayed. See the [command reference](/cli/ingest/#repair) for details.
 
 `chkit check` verifies that every stream destination carries the ingestion metadata columns. See [`chkit ingest`](/cli/ingest/) for the full flag reference, exit codes, and JSON output.
 
@@ -202,13 +214,13 @@ Successful syncs start a new batch identity cycle, recorded by the existing jour
 
 The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle. Terminal journal appends are bounded by the duration budget while the run is live. After cancellation or budget exhaustion, each one gets a separate five-second limit. Interrupted writes never count as successful ingestion.
 
-Run at most one ingestion process per project and target at a time. Use your scheduler's concurrency control (for example a GitHub Actions concurrency group) to enforce it.
+Overlapping processes record independent histories. Scheduler concurrency controls limit resource use; a stale valid read may replay acknowledged work. ChKit validates journal facts before using their checkpoint.
 
 ## Options
 
 | Option | Default | Description |
 |---|---|---|
-| `journalTable` | `_chkit_ingestion_journal` | Journal table name in the configured database |
+| `journalTable` | `_chkit_ingestion_journal` | Append-only checkpoint journal in the configured database |
 | `maxDurationSeconds` | `3600` | Execution budget. Exhausting it ends the run as incomplete and keeps committed progress |
 | `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading |
 

@@ -16,6 +16,7 @@ import { IngestConfigError } from './errors.js'
 import { runIngestion, type BackfillRequest } from './executor.js'
 import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE } from './journal.js'
 import { collectPipelines, selectStreams, type SelectedStream } from './registry.js'
+import { doctorJournal, repairJournal } from './recovery.js'
 import type { PipelineDefinition } from './types.js'
 
 const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
@@ -40,6 +41,16 @@ const RUN_FLAGS = defineFlags([
   { name: '--from', type: 'string', description: 'Backfill range lower bound (ISO timestamp)', placeholder: '<timestamp>' },
   { name: '--to', type: 'string', description: 'Backfill range upper bound (ISO timestamp)', placeholder: '<timestamp>' },
   { name: '--max-duration', type: 'string', description: 'Execution budget in seconds', placeholder: '<seconds>' },
+] as const)
+
+const RECOVERY_FLAGS = defineFlags([
+  ...SELECTION_FLAGS,
+  { name: '--backfill', type: 'string', description: 'Inspect an isolated backfill checkpoint namespace', placeholder: '<id>' },
+] as const)
+
+const REPAIR_FLAGS = defineFlags([
+  ...RECOVERY_FLAGS,
+  { name: '--apply', type: 'string', description: 'Materialize the reviewed fingerprint with writers stopped (select one stream)', placeholder: '<fingerprint>' },
 ] as const)
 
 interface IngestPluginCommandContext {
@@ -131,6 +142,89 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
               }
             }
             return 0
+          },
+        }),
+      },
+      {
+        name: 'doctor',
+        description: 'Validate journal evidence and diagnose uncertain run histories',
+        flags: RECOVERY_FLAGS,
+        optionsSchema,
+        run: runCommand({
+          command: 'doctor',
+          label: 'Ingest doctor',
+          fn: async (context) => {
+            const selected = await loadSelection(context)
+            const backfill = parseBackfill(context.flags)
+            const target = openTarget(context)
+            try {
+              const streams = await Promise.all(selected.map(async (entry) => {
+                const namespaceId = backfill ? `${entry.stream.id}#backfill:${backfill.id}` : entry.stream.id
+                const report = await doctorJournal(namespaceId, {
+                  executor: target.executor, database: target.database, targetId: target.targetId, table: context.options.journalTable,
+                })
+                return { ...describeStream(entry), report }
+              }))
+              const ok = streams.every((stream) => stream.report.healthy)
+              if (context.jsonMode) {
+                context.print({ ok, command: 'doctor', targetId: target.targetId, streams })
+              } else {
+                for (const { report } of streams) {
+                  context.print(`${report.namespaceId}: ${report.healthy ? 'healthy' : report.problems.join('; ')} (${report.runs} runs, selected checkpoint v${report.checkpoint.version}, ${report.selectedEvidenceRows} stream evidence rows)`)
+                }
+              }
+              return ok ? 0 : 1
+            } finally {
+              await target.close()
+            }
+          },
+        }),
+      },
+      {
+        name: 'repair',
+        description: 'Review recovery; --apply materializes a verified journal for explicit configuration activation',
+        flags: REPAIR_FLAGS,
+        optionsSchema,
+        run: runCommand({
+          command: 'repair',
+          label: 'Ingest repair',
+          fn: async (context) => {
+            const selected = await loadSelection(context)
+            const backfill = parseBackfill(context.flags)
+            const apply = context.flags['--apply']
+            if (typeof apply === 'string' && selected.length !== 1) {
+              throw new IngestConfigError('--apply requires exactly one selected stream; use --tag to narrow the selection.')
+            }
+            const target = openTarget(context)
+            try {
+              const streams = []
+              for (const entry of selected) {
+                const namespaceId = backfill ? `${entry.stream.id}#backfill:${backfill.id}` : entry.stream.id
+                const result = await repairJournal(namespaceId, typeof apply === 'string' ? apply : undefined, {
+                  executor: target.executor, database: target.database, targetId: target.targetId, table: context.options.journalTable,
+                })
+                streams.push({ ...describeStream(entry), ...result })
+              }
+              if (context.jsonMode) {
+                context.print({ ok: true, command: 'repair', targetId: target.targetId, streams })
+              } else {
+                for (const { applied, plan } of streams) {
+                  if (plan.healthy) {
+                    context.print(`${plan.namespaceId}: healthy; ${plan.runs} runs, selected checkpoint v${plan.checkpoint.version}.`)
+                    continue
+                  }
+                  context.print(`${plan.namespaceId}: ${applied ? 'repair materialized; configuration activation required' : 'repair plan'}; retain ${plan.retainedFacts} facts, selected checkpoint v${plan.checkpoint.version}.`)
+                  for (const problem of plan.problems) context.print(problem)
+                  context.print(`Evidence: ${plan.evidenceRows} rows ${applied ? 'preserved in' : 'will be archived to'} ${applied ? plan.archiveTable : `${plan.archiveTable}_<copy id>`}; original table retained.`)
+                  context.print(plan.replayWarning)
+                  context.print(plan.activation)
+                  if (!applied && !plan.healthy && plan.repairable) context.print(`Review this plan, then run ingest repair --tag stream:${plan.namespaceId.split('#backfill:')[0]}${backfill ? ` --backfill ${backfill.id}` : ''} --apply ${plan.fingerprint}`)
+                }
+              }
+              return 0
+            } finally {
+              await target.close()
+            }
           },
         }),
       },

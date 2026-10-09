@@ -13,7 +13,7 @@ Start with **API → reader → raw table → SQL view** when the final shape ma
 - A **pipeline** groups streams, tags, concurrency limits, and retry defaults. It has no durable state and does not order dependent streams.
 - A **run** executes a selection of streams once. Cron, CI, or another scheduler starts the next run.
 
-Use TypeScript and a direct `clickhouse` connection, including for ObsessionDB databases. The workbench executor does not support API sync. Create destination tables through schema migrations; ingestion creates its journal and writes data.
+Use TypeScript and a direct `clickhouse` connection, including for ObsessionDB databases. The workbench executor does not support API sync. Create destination tables through schema migrations; ingestion creates its append-only checkpoint journal before writing data. [Overlapping runs](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) record independent histories and may replay acknowledged work.
 
 ## Start
 

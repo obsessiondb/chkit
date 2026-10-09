@@ -9,6 +9,8 @@ Ingest the small [JSONPlaceholder posts dataset](https://jsonplaceholder.typicod
 
 Use a TypeScript project, Bun, a direct ClickHouse connection, and a chkit release that includes `@chkit/plugin-ingest`. This example uses native JSON; use ClickHouse 25.3+ for production support of that type. See [compatibility](/guides/clickhouse-compatibility/).
 
+Grant CREATE, SELECT, and INSERT permissions for the journal and destination tables. ChKit records independent run histories entirely in ClickHouse; see [overlapping runs and checkpoint recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
+
 JSONPlaceholder is a public demonstration API with a small dataset, so use a full sync. For larger sources, add [pagination](/api-sync/readers/) and [incremental reads](/api-sync/incremental-syncs/) based on the provider API.
 
 ## Install and configure

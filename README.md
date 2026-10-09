@@ -195,7 +195,7 @@ bunx chkit ingest list
 bunx chkit ingest run --tag pipeline:content
 ```
 
-Use `check` in CI for migration state and schema drift. Schedule ingestion through cron, CI, or another job runner, with one ingestion process per target. Incremental sources resume from committed state; this full-sync demo reads the dataset again. See [scheduling and recovery](https://chkit.obsessiondb.com/api-sync/operations/).
+Use `check` in CI for migration state and schema drift. Schedule ingestion through cron, CI, or another job runner. Overlapping processes record independent journal histories; destination keys and versioning reconcile repeated writes. Incremental sources resume from committed state; this full-sync demo reads the dataset again. See [scheduling and recovery](https://chkit.obsessiondb.com/api-sync/operations/).
 
 ## Set up chkit for your project
 

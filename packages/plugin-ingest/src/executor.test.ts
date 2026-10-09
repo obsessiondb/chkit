@@ -411,8 +411,8 @@ describe('runtime contracts', () => {
     })
     const pipeline = definePipeline({ id: 'app', streams: [stream] })
     expect((await run(pipeline, { journal, destination })).ok).toBe(true)
-    const firstSuccess = (await journal.readCheckpoint(stream.id)).lastSuccessSeq
-    expect(firstSuccess).toBeGreaterThan(0)
+    const firstSuccess = (await journal.readCheckpoint(stream.id)).successId
+    expect(firstSuccess).not.toBe('')
 
     label = 'B'
     const lossy: DestinationAdapter = { async insert(input) {
@@ -420,7 +420,7 @@ describe('runtime contracts', () => {
       throw new Error('acknowledgement lost')
     } }
     expect((await run(pipeline, { journal, destination: lossy })).ok).toBe(false)
-    expect((await journal.readCheckpoint(stream.id)).lastSuccessSeq).toBe(firstSuccess)
+    expect((await journal.readCheckpoint(stream.id)).successId).toBe(firstSuccess)
     expect((await run(pipeline, { journal, destination })).ok).toBe(true)
 
     label = 'A'
@@ -428,6 +428,62 @@ describe('runtime contracts', () => {
     expect(destination.tables.get('app.events')?.map((row) => row.label)).toEqual(['A', 'B', 'A'])
     expect((await journal.readCheckpoint(stream.id)).envelope).toBeUndefined()
   })
+
+  test('full sync boundaries advance with a fixed clock while local sequences restart', async () => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    const now = () => new Date('2026-10-09T00:00:00Z')
+    let value = 'A'
+    const stream = defineStream({
+      id: 'app.fixed_clock', destination: events,
+      async *read() { yield { rows: [{ id: 1, value }], id: 'page:1' } },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+    const successes = new Set<string>()
+    for (const next of ['A', 'B', 'A']) {
+      value = next
+      const result = await run(pipeline, { journal, destination, now })
+      expect(result.ok).toBe(true)
+      const checkpoint = await journal.readCheckpoint(stream.id)
+      expect(checkpoint.successId).toBe(`${result.runId}:4`)
+      expect(successes.has(checkpoint.successId)).toBe(false)
+      successes.add(checkpoint.successId)
+      expect(journal.events.filter((event) => event.namespaceId === stream.id && event.runId === result.runId).map((event) => event.eventSeq)).toEqual([1, 2, 3, 4])
+    }
+    expect(destination.tables.get('app.events')?.map((row) => row.value)).toEqual(['A', 'B', 'A'])
+  })
+
+  test('a checkpoint whose acknowledgement is always lost is resumed by the next run', async () => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    const append = journal.append.bind(journal)
+    const stream = defineStream({
+      id: 'app.lost_checkpoint', destination: events, batchSize: 1,
+      incremental: cursorState({ id: 'test.cursor', version: 1, parse: (value) => Number(value) }),
+      retry: { retries: 0 },
+      async *read({ state }) {
+        for (let id = state ?? 0; id < 2; id += 1) yield { rows: [{ id }], state: id + 1 }
+      },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+    let ambiguousAttempts = 0
+    journal.append = async (appended) => {
+      await append(appended)
+      if (appended.some((event) => event.eventKind === 'batch_committed')) {
+        ambiguousAttempts += 1
+        throw new Error('checkpoint acknowledgement lost')
+      }
+    }
+    const first = await run(pipeline, { journal, destination })
+    expect(first.ok).toBe(false)
+    expect(ambiguousAttempts).toBe(4)
+    expect((await journal.readCheckpoint(stream.id)).envelope?.state).toBe(1)
+    journal.append = append
+    const second = await run(pipeline, { journal, destination })
+    expect(second.ok).toBe(true)
+    expect((await journal.readCheckpoint(stream.id)).envelope?.state).toBe(2)
+    expect(destination.tables.get('app.events')?.map((row) => row.id)).toEqual([0, 1])
+  }, 10_000)
 
   test.each(['deadline', 'cancel'] as const)('a hung destination never reports success after %s', async (mode) => {
     const journal = createMemoryJournal()

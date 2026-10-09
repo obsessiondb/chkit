@@ -1,9 +1,9 @@
 ---
 title: Scheduling and recovery
-description: Select streams, configure retries and limits, backfill source data, and inspect ingestion progress.
+description: Select streams, configure retries, handle overlapping runs, and review ingestion recovery.
 ---
 
-Run ingestion as a finite process and use an external scheduler to control cadence and prevent overlapping executions.
+Run ingestion as a finite process, use an external scheduler for cadence, and resume from validated ClickHouse journal evidence.
 
 ## Execute a run
 
@@ -13,7 +13,7 @@ Start by running the source once with the CLI:
 chkit ingest run --tag stream:helpdesk.tickets
 ```
 
-The CLI uses the configured ClickHouse journal and destination. Check the result, then schedule the command with cron, CI, or a job runner.
+Apply destination schema migrations first. The CLI uses the configured ClickHouse journal and destination. Check the result, then schedule the command with cron, CI, or a job runner.
 
 ## Schedule and select streams
 
@@ -29,7 +29,17 @@ Tags are exact and case-sensitive. Effective tags combine pipeline tags, stream 
 
 `schedule:1h` is only a naming convention. Choose cron for a simple host, CI for an existing automation environment, or a job scheduler for managed execution. None of these is built into chkit.
 
-Run at most one ingestion process per project and target at a time, including historical runs. Configure concurrency control across all schedules and tag selections; pipeline limits do not lock out another process. Within a run, independent streams can run concurrently and a normal failure in one does not prevent the others from being attempted.
+Overlapping executions of a stream are supported. Independent streams can run concurrently within one run, and a normal failure in one does not prevent the others from being attempted. Scheduler concurrency limits control resource use and provider request volume.
+
+## Overlapping runs and checkpoint recovery
+
+The append-only ClickHouse journal stores each run's starting checkpoint and a local event sequence. Event identity includes the run, so two processes that read the same checkpoint write independent histories. Progress is recorded only after destination acknowledgement. A lost acknowledgement retries the same facts; interruption leaves previously acknowledged progress available.
+
+Before resuming, ChKit reads the complete namespace in one SELECT snapshot and validates each run's facts, checkpoint transitions, and starting checkpoint. Valid histories are selected deterministically; malformed tails are diagnosed and excluded from progress. Older legacy journal rows remain readable. Overlapping valid runs require no journal repair.
+
+`timestampWindow` resumes from the greatest validated watermark. Custom cursor state remains opaque: recorded checkpoint ancestry and deterministic run ordering select one valid state. A selected cursor does not merge progress from concurrent branches, so already acknowledged work from another branch may be replayed.
+
+Journal reads disable the query cache and request `select_sequential_consistency = 1`. An older valid snapshot can cause work to be replayed. Run-scoped identities keep that replay independent of another process's journal facts. Destination delivery remains at-least-once; choose keys and versioning that reconcile repeats.
 
 ## Retries and provider errors
 
@@ -69,7 +79,7 @@ An exhausted request retry budget fails the stream; reader recovery does not mul
 
 A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
 
-Treat the journal as durable operational state. Changing its name or the configured target identity starts a different checkpoint history. Do not use a journal-table change as routine retry handling.
+Treat the journal as durable operational state. Changing the journal name or configured target identity starts a different checkpoint history. Do not change them as routine retry handling.
 
 ## Backfill source data
 
@@ -106,9 +116,37 @@ chkit ingest status --tag pipeline:helpdesk --json
 | Incompatible checkpoint | Strategy ID/version or state format changed |
 | Direct connection required | Configure `clickhouse`; workbench authentication alone is insufficient |
 | Authentication failure | Correct provider credentials/scopes before rerunning |
-| Journal is not a valid history | Two runs claimed the same sequence numbers (concurrent processes, or a restart that read a stale journal). Run the `DELETE` printed in the error to keep the first run's facts, then rerun |
+| Overlapping runs use more requests than expected | Adjust scheduler concurrency or provider request limits |
+| Journal source table is missing | Restore its evidence before repair; changing table names does not restore history |
+| Doctor reports a malformed run tail | Review the retained checkpoint and repair plan; valid acknowledged progress remains resumable |
 
-Retry with `ingest run` after fixing the error; the journal supplies committed state. Keep the stream ID to preserve its checkpoint history. Changing the ID starts a new history.
+Retry with `ingest run` after fixing the error; the validated journal supplies committed state. Keep the stream ID to preserve its checkpoint history. Changing the ID starts a new history.
+
+### Review and materialize journal recovery
+
+1. Diagnose the selected namespace without changing data:
+
+   ```sh
+   chkit ingest doctor --tag stream:helpdesk.tickets --json
+   ```
+
+2. If recovery is needed, stop every writer using the journal table. Review the retained checkpoint, evidence counts, activation instructions, and fingerprint:
+
+   ```sh
+   chkit ingest repair --tag stream:helpdesk.tickets --json
+   ```
+
+3. Materialize the exact reviewed snapshot:
+
+   ```sh
+   chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
+   ```
+
+4. Keep writers stopped. Set `ingest({ journalTable: '<replacementTable>' })` in the project config to the replacement table returned by the command, then restart ingestion.
+
+Add `--backfill <id>` to both diagnostic and repair commands for an isolated historical namespace. Applying recovery requires exactly one selected stream. Any source-table change invalidates the fingerprint and requires a new review.
+
+Repair verifies a full archive of the original table and a separate replacement containing the selected namespace's valid facts. Other targets and namespaces are copied unchanged. The original journal remains intact. Activation is a manual configuration change; writers must remain stopped until that change is complete. Uncertain destination writes may be loaded again. Missing source evidence requires restoration before repair.
 
 ## More execution patterns
 
