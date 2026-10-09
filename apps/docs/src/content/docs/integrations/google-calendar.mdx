@@ -54,7 +54,7 @@ Version 0.2.0 changes the former rolling occurrence-window semantics and row ide
 bun test src/integrations/google-calendar/tests/basic.test.ts
 ```
 
-Fixtures cover page resumption, empty deltas, sink failures before token promotion, cancellation payloads, expired tokens, and calendar-account changes. Schedule repeat runs externally with one ingestion process per destination at a time.
+Fixtures cover page resumption, empty deltas, sink failures before token promotion, cancellation payloads, expired tokens, and calendar-account changes. Schedule repeat runs externally; ChKit supports [overlapping runs with independent journal histories](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
 
 ## Changelog
 

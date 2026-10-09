@@ -45,7 +45,7 @@ The saved state contains scope, watermark, optional historical bounds, and the u
 
 An interrupted page repeats its child reads from the beginning under the same bounds; completed discovery pages remain skipped. No child cursor, cached page, or child completion index is persisted. Configure small discovery pages and enough budget to finish one page's children plus the checkpoint marker. Defaults are `pageSize: 1` and `maxChunks: 200`; increase the cap or `--max-duration` for unusually large conferences. Native JSON requires ClickHouse 25.3 or later.
 
-Rejected tokens restart their collection once. Discovery recovery debt persists across resumed executions until the phase finishes. Child collections restart naturally when their parent page replays. Repeated rejection and cyclic/malformed pagination fail visibly. Strategy version 2 rejects incompatible saved state; scope changes require deliberate migration or a new `streamPrefix`. Schedule externally with one ingestion process per target.
+Rejected tokens restart their collection once. Discovery recovery debt persists across resumed executions until the phase finishes. Child collections restart naturally when their parent page replays. Repeated rejection and cyclic/malformed pagination fail visibly. Strategy version 2 rejects incompatible saved state; scope changes require deliberate migration or a new `streamPrefix`. Schedule externally; ChKit supports [overlapping runs with independent journal histories](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
 
 ## Raw updates and historical ranges
 

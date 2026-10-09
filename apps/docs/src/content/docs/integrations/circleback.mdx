@@ -46,7 +46,7 @@ Link pagination preserves ownership, assignee and completion filters even on cur
 
 Transcripts are rechecked for every listed meeting, including unchanged old meetings. A meeting's `updatedAt` is not treated as transcript readiness. The [action-item listing](https://circleback.ai/docs/api/action-items/list-action-items) explicitly uses `assigneeType=Anyone` and separately exhausts `PENDING` and `DONE`, the native statuses verified in the [official OpenAPI](https://circleback.ai/docs/api/openapi.json) and [update contract](https://circleback.ai/docs/api/action-items/update-action-item). Unexpected statuses fail instead of silently producing a partial export.
 
-Full reads and status partitions are mutable, not atomic snapshots. A subsequent full run reconciles late availability, edits and status changes. Absent resources remain stored, and inaccessible transcripts do not prove deletion. Full-sync readers ignore date backfill bounds and provide no date-range backfill. Use an external scheduler and one ingestion process per ClickHouse target.
+Full reads and status partitions are mutable, not atomic snapshots. A subsequent full run reconciles late availability, edits and status changes. Absent resources remain stored, and inaccessible transcripts do not prove deletion. Full-sync readers ignore date backfill bounds and provide no date-range backfill. Use an external scheduler; ChKit supports [overlapping runs with independent journal histories](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
 
 ## Identities and joins
 

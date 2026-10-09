@@ -53,7 +53,7 @@ bunx chkit ingest run --tag provider:github --tag resource:issue_comments --back
 bunx chkit ingest status --tag provider:github --json
 ```
 
-Use a new backfill ID for each reconciliation. Full-sync resources ignore date bounds. A failed stream does not advance another stream's progress. Schedule finite ingestion runs externally, with one process per ClickHouse target at a time.
+Use a new backfill ID for each reconciliation. Full-sync resources ignore date bounds. A failed stream does not advance another stream's progress. Schedule finite ingestion runs externally; [overlapping processes](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) retain independent journal histories. Scheduler concurrency limits control provider requests and resource use.
 
 ## Existing datasets
 

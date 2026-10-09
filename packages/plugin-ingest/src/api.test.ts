@@ -57,6 +57,16 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
+describe('recovery command registration', () => {
+  test('offers read-only doctor and review-first repair with an explicit fingerprint', () => {
+    const commands = createIngestPlugin().commands
+    expect(commands.map((command) => command.name)).toEqual(['run', 'list', 'doctor', 'repair', 'status'])
+    const repair = commands.find((command) => command.name === 'repair')
+    expect(repair?.flags.find((flag) => flag.name === '--apply')).toMatchObject({ type: 'string' })
+    expect(repair?.flags.find((flag) => flag.name === '--backfill')).toBeDefined()
+  })
+})
+
 describe('exported pipeline discovery', () => {
   test('side-effect imports stay inactive; re-exports activate pipelines even after a cached import', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'chkit-exports-'))

@@ -372,7 +372,7 @@ After the first successful run, schedule this finite command through cron, CI, o
 bunx chkit ingest run --tag provider:attio --max-duration 3600 --json
 ```
 
-The scheduler supplies the project directory, credentials, runtime, cadence, and concurrency control. Run at most one ingestion process per project and ClickHouse target at a time, including runs that select different tags. Pipeline limits apply within one process and do not lock out another process.
+The scheduler supplies the project directory, credentials, runtime, and cadence. ChKit records independent journal histories for overlapping runs. Scheduler concurrency controls limit provider requests and resource use; pipeline limits govern concurrency within one process. See [overlapping runs and checkpoint recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
 
 For a narrower run, select all configured records streams:
 

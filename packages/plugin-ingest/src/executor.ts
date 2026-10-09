@@ -7,7 +7,7 @@ import pRetry, { AbortError } from 'p-retry'
 
 import { toJsonRows } from './destination.js'
 import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError } from './errors.js'
-import { canonicalJson, digest } from './journal.js'
+import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
 import { createBoundedQueue } from './queue.js'
 import type { SelectedStream } from './registry.js'
@@ -15,6 +15,7 @@ import { mergeRetry, runAttempt } from './retry.js'
 import type {
   AnyStreamDefinition,
   CheckpointEnvelope,
+  CommittedCheckpoint,
   DestinationAdapter,
   ExecutionResult,
   Journal,
@@ -27,7 +28,7 @@ import type {
 } from './types.js'
 
 // Run facts are correlation only, so each run owns its own namespace: two
-// overlapping processes (a deployment mistake) must not poison a shared one.
+// overlapping processes never share the telemetry namespace.
 const RUN_NAMESPACE_PREFIX = '@run:'
 const DEFAULT_BATCH_SIZE = 10_000
 const DEFAULT_PREFETCH_BATCHES = 1
@@ -87,12 +88,15 @@ interface PendingBatch {
 }
 
 interface StreamProgress {
-  /** Last journal sequence confirmed for this namespace. */
+  base: CommittedCheckpoint
+  startedAt: string
+  /** Last journal sequence confirmed within this run. */
   seq: number
   /** Serializes appends so a sequence number is only consumed by a confirmed fact. */
   appendChain: Promise<void>
   version: number
-  lastSuccessSeq: number
+  checkpointId: string
+  successId: string
   envelope: CheckpointEnvelope | undefined
   rows: number
   batches: number
@@ -159,7 +163,7 @@ async function executeSelectedStream(
 ): Promise<StreamResult> {
   const { stream, pipeline } = entry
   const namespaceId = backfill ? `${stream.id}#backfill:${backfill.id}` : stream.id
-  const progress: StreamProgress = { seq: 0, appendChain: Promise.resolve(), version: 0, lastSuccessSeq: 0, envelope: undefined, rows: 0, batches: 0, chunks: 0 }
+  const progress: StreamProgress = { base: emptyCheckpoint(), startedAt: cutoff.toISOString(), seq: 0, appendChain: Promise.resolve(), version: 0, checkpointId: '', successId: '', envelope: undefined, rows: 0, batches: 0, chunks: 0 }
   const result = (outcome: StreamOutcome, error: string | undefined): StreamResult => ({
     streamId: stream.id,
     pipelineId: pipeline.id,
@@ -210,9 +214,10 @@ async function executeStream(input: {
 }): Promise<StreamOutcome> {
   const { stream, pipeline, namespaceId, progress, env } = input
   const committed = await abortable(() => env.journal.readCheckpoint(namespaceId), env.signal)
-  progress.seq = committed.headSeq
+  progress.base = committed
   progress.version = committed.version
-  progress.lastSuccessSeq = committed.lastSuccessSeq
+  progress.checkpointId = committed.checkpointId
+  progress.successId = committed.successId
   progress.envelope = committed.envelope
 
   const retry = mergeRetry(pipeline.retry, stream.retry)
@@ -229,7 +234,7 @@ async function executeStream(input: {
         cutoff: input.cutoff,
         range: input.backfill ? { from: input.backfill.from, to: input.backfill.to } : undefined,
       })
-      const nextWorkId = digest([namespaceId, String(progress.lastSuccessSeq), String(progress.version), canonicalJson(selection)]).slice(0, 24)
+      const nextWorkId = digest([namespaceId, progress.successId, progress.checkpointId, canonicalJson(selection)]).slice(0, 24)
       // A newly planned unit of work and its first attempt share one insert.
       const planned = nextWorkId === workId ? [] : [{
         eventKind: 'work_planned' as const,
@@ -376,8 +381,8 @@ async function readAndLoad(input: {
   }
 
   const consume = async () => {
-    // Batch identity uses the last successful sync, the committed checkpoint
-    // version and the batch's position since that version, so a
+    // Batch identity uses the last successful sync and checkpoint identities,
+    // plus the batch's position since that boundary, so a
     // replay in a fresh process reproduces the same id and deduplication token.
     // Declared source-interval ids complete the identity; without them a
     // content hash does, preferring a possible duplicate over suppressing rows
@@ -385,7 +390,7 @@ async function readAndLoad(input: {
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
       const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(toJsonRows(batch.rows))}`
-      const batchId = digest([namespaceId, String(progress.lastSuccessSeq), String(progress.version), String(sinceBoundary), discriminator]).slice(0, 32)
+      const batchId = digest([namespaceId, progress.successId, progress.checkpointId, String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       if (abandoned) return
       const envelope: CheckpointEnvelope | undefined = batch.state
@@ -528,13 +533,20 @@ function appendFacts(input: AppendInput, facts: ReadonlyArray<{ eventKind: Journ
       sinkEvidence: fields.sinkEvidence ?? '',
       retryAt: fields.retryAt,
       errorClass: fields.errorClass ?? '',
-      detail: fields.detail ?? {},
+      detail: progress.seq === 0 && index === 0
+        ? { ...fields.detail, journal: { version: 2, startedAt: progress.startedAt, base: progress.base } }
+        : fields.detail ?? {},
     }))
     await pRetry(() => abortable(() => env.journal.append(events), signal), {
       retries: JOURNAL_APPEND_ATTEMPTS - 1,
       minTimeout: 250,
       signal,
     })
+    for (const event of events) {
+      if (event.eventKind === 'batch_committed' && event.checkpointVersion > event.expectedCheckpointVersion) {
+        progress.checkpointId = `${event.runId}:${event.eventSeq}`
+      }
+    }
     progress.seq += events.length
   })
   // A fact that could not be confirmed poisons the chain: a later append must
