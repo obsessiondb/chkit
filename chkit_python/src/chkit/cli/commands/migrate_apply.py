@@ -185,7 +185,12 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
             # Poll system.tables / system.columns until the DDL is visible.
             # Critical for Replicated / ObsessionDB Shared engines.
             try:
-                wait_for_ddl_propagation(input_.client, operation.type, operation.key)
+                wait_for_ddl_propagation(
+                    input_.client,
+                    operation.type,
+                    operation.key,
+                    cluster=input_.config.clickhouse.cluster if input_.config.clickhouse else None,
+                )
             except Exception as wait_error:
                 input_.warn(
                     f"  ⚠ DDL propagation wait failed for {operation.key}: {wait_error}"

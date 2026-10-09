@@ -39,6 +39,7 @@ from chkit.cli.migration_store import (
     now_iso,
 )
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.replicas import resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
 
 OperationStatus = Literal["started", "completed", "failed"]
@@ -312,6 +313,34 @@ class JournalStore:
             f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
         )
 
+    def _journal_rows(self, where: str, *, limit: str = "") -> str:
+        """The rows to read the journal from.
+
+        A single replica reads the table with FINAL. With several replicas
+        (#265), the replica a read lands on may not have the latest version
+        yet, while the replica that ran an INSERT always has it: read every
+        replica and keep the newest version per migration. Each write stamps
+        ``applied_at`` in milliseconds as the row version, which is what
+        ``ReplacingMergeTree(applied_at)`` keeps too.
+        """
+        fanout = resolve_replica_fanout(self._client, self._cluster)
+        if fanout is None:
+            return (
+                f"SELECT name, applied_at, checksum, chkit_version, "
+                f"migration_completed, toJSONString(operations) AS operations "
+                f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit} "
+                f"SETTINGS select_sequential_consistency = 1"
+            )
+        return (
+            "SELECT name, latest.1 AS applied_at, latest.2 AS checksum, "
+            "latest.3 AS chkit_version, latest.4 AS migration_completed, "
+            "latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, "
+            "checksum, chkit_version, migration_completed, toJSONString(operations)), "
+            "applied_at) AS latest FROM clusterAllReplicas("
+            f"'{_escape_sql_string(fanout.cluster)}', currentDatabase(), '{self._table}') "
+            f"GROUP BY name) WHERE {where} ORDER BY name{limit}"
+        )
+
     def _try_sync_replica(self) -> None:
         # Non-replicated/single-node setups don't support SYSTEM SYNC REPLICA.
         with contextlib.suppress(Exception):
@@ -338,11 +367,7 @@ class JournalStore:
                 f"'{_escape_sql_string(name)}'" for name in project_files
             )
             where = f"{where} AND name IN ({quoted})"
-        result = self._client.query(
-            f"SELECT name, applied_at, checksum FROM {self._table} FINAL "
-            f"WHERE {where} ORDER BY name "
-            f"SETTINGS select_sequential_consistency = 1"
-        )
+        result = self._client.query(self._journal_rows(where))
         applied = [
             MigrationJournalEntry(
                 name=str(row["name"]),
@@ -374,11 +399,7 @@ class JournalStore:
             return None
         self._try_sync_replica()
         result = self._client.query(
-            f"SELECT name, applied_at, checksum, chkit_version, "
-            f"migration_completed, toJSONString(operations) AS operations "
-            f"FROM {self._table} FINAL "
-            f"WHERE name = '{_escape_sql_string(migration_name)}' "
-            f"LIMIT 1 SETTINGS select_sequential_consistency = 1"
+            self._journal_rows(f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1")
         )
         written = self._last_written.get(migration_name)
         if not result.rows:

@@ -95,3 +95,14 @@ def assert_valid_sql(ch_client: _QueryClient):
             )
 
     return _assert
+
+
+@pytest.fixture
+def single_replica(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the replica probe to a single replica (#265).
+
+    Unit tests whose fake clients script every query model a single-replica
+    server; without this the probe would consume one of their scripted answers.
+    """
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.resolve_replica_fanout", lambda *_: None)
+    monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout", lambda *_: None)
