@@ -39,6 +39,7 @@ from chkit.cli.migration_store import (
     now_iso,
 )
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.clickhouse.replicas import resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
 
@@ -282,6 +283,7 @@ class JournalStore:
         try:
             self._client.query(f"SELECT name FROM {self._table} LIMIT 0")
             self._ensure_schema_upgraded()
+            self._wait_for_every_replica()
             self._bootstrapped = True
             return
         except Exception as exc:
@@ -297,7 +299,21 @@ class JournalStore:
                 self._bootstrapped = True
                 return
             raise
+        self._wait_for_every_replica()
         self._bootstrapped = True
+
+    def _wait_for_every_replica(self) -> None:
+        """Wait until every replica has the journal table (#265).
+
+        A multi-replica target reads the journal from every replica, which
+        fails while one of them does not have the table yet, e.g. right after
+        the CREATE above or another process's. A single replica needs no wait.
+        """
+        if resolve_replica_fanout(self._client, self._cluster) is None:
+            return
+        rows = self._client.query("SELECT currentDatabase() AS database").rows
+        database = str(rows[0]["database"]) if rows else "default"
+        wait_for_table(self._client, database, self._table, cluster=self._cluster)
 
     def _ensure_schema_upgraded(self) -> None:
         # Old journal tables predate per-operation tracking. Add the columns

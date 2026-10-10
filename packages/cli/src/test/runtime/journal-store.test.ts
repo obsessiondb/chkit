@@ -369,13 +369,25 @@ describe('createJournalStore', () => {
   })
 
   describe('reads across replicas on a multi-replica target (#265)', () => {
-    function multiReplicaStore(replicas: number) {
+    function multiReplicaStore(replicas: number, journalOnReplicas: number[] = [replicas]) {
+      let journalPolls = 0
       const { db } = createScriptedExecutor(
         new Map<string | RegExp, unknown[]>([
           [/SELECT name FROM .* LIMIT 0/, []],
           [/system\.one/, [{ replicas }]],
+          [/currentDatabase\(\) AS database/, [{ database: 'default' }]],
         ]),
       )
+      // How many replicas list the journal table on each successive poll.
+      const scripted = db.query.bind(db)
+      db.query = async <T>(sql: string): Promise<T[]> => {
+        if (sql.includes('system.tables')) {
+          const seen = journalOnReplicas[Math.min(journalPolls, journalOnReplicas.length - 1)]
+          journalPolls += 1
+          return [{ replicas: seen }] as T[]
+        }
+        return scripted<T>(sql)
+      }
       const queries: string[] = []
       const query = db.query.bind(db)
       db.query = async <T>(sql: string): Promise<T[]> => {
@@ -404,6 +416,17 @@ describe('createJournalStore', () => {
       const read = queries.find((sql) => sql.includes('migration_completed = true'))
       expect(read).toContain('clusterAllReplicas(')
       expect(read).toContain('GROUP BY name')
+    })
+
+    test('waits until every replica lists the journal table before reading it', async () => {
+      const { store, queries } = multiReplicaStore(2, [1, 2])
+
+      await store.readMigrationState('m.sql')
+
+      const tablePolls = queries.filter((sql) => sql.includes('system.tables'))
+      expect(tablePolls).toHaveLength(2)
+      const firstRead = queries.findIndex((sql) => sql.includes("name = 'm.sql'"))
+      expect(firstRead).toBeGreaterThan(queries.lastIndexOf(tablePolls[1] as string))
     })
 
     test('a single replica keeps the FINAL read', async () => {

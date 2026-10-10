@@ -40,7 +40,7 @@ class _ReplicaClient:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": self.replicas}])
-        if "_chkit_migrations" in sql:
+        if "_chkit_migrations" in sql and "system.tables" not in sql:
             return _Result([])
         polls = sum(1 for q in self.queries if "system.columns" in q or "system.tables" in q)
         return _Result([{"replicas": self.visible[min(polls - 1, len(self.visible) - 1)]}])
@@ -127,3 +127,27 @@ def test_a_single_replica_keeps_the_final_read() -> None:
     read = next(q for q in client.queries if "name = 'm.sql'" in q)
     assert "FINAL" in read
     assert "clusterAllReplicas(" not in read
+
+
+def test_waits_until_every_replica_lists_the_journal_table_before_reading_it() -> None:
+    client = _ReplicaClient([1, 2])
+    real_query = client.query
+
+    def query(sql: str) -> _Result:
+        if sql.startswith("SELECT currentDatabase()"):
+            client.queries.append(sql)
+            return _Result([{"database": "default"}])
+        if "LIMIT 0" in sql:
+            client.queries.append(sql)
+            return _Result([])
+        return real_query(sql)
+
+    client.query = query  # type: ignore[method-assign]
+    store = JournalStore(client)  # type: ignore[arg-type]
+
+    store.read_migration_state("m.sql")
+
+    table_polls = [i for i, q in enumerate(client.queries) if "system.tables" in q]
+    first_read = next(i for i, q in enumerate(client.queries) if "name = 'm.sql'" in q)
+    assert len(table_polls) == 2
+    assert first_read > table_polls[-1]

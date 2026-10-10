@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { isUnknownDatabaseError, resolveReplicaFanout, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { isUnknownDatabaseError, resolveReplicaFanout, waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
 import pRetry from 'p-retry'
 
@@ -195,6 +195,7 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', 'journal table exists — checking schema')
       await ensureSchemaUpgraded()
+      await waitForEveryReplica()
       bootstrapped = true
       return
     } catch (error) {
@@ -221,7 +222,17 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
     }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
+    await waitForEveryReplica()
     bootstrapped = true
+  }
+
+  // A multi-replica target reads the journal from every replica (#265), which
+  // fails while one of them does not have the table yet, e.g. right after the
+  // CREATE above or another process's. A single replica needs no wait.
+  async function waitForEveryReplica(): Promise<void> {
+    if (!(await resolveReplicaFanout(db, cluster))) return
+    const [row] = await db.query<{ database: string }>('SELECT currentDatabase() AS database')
+    await waitForTable(db, row?.database ?? 'default', journalTable, { cluster })
   }
 
   async function ensureSchemaUpgraded(): Promise<void> {
