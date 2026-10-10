@@ -21,6 +21,8 @@ from chkit.clickhouse.ddl_propagation import (
     wait_for_view,
 )
 
+pytestmark = pytest.mark.usefixtures("single_replica")
+
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:

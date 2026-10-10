@@ -11,7 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from chkit.cli.journal_store import JournalStore, MigrationRowState, OperationState
+
+pytestmark = pytest.mark.usefixtures("single_replica")
 
 
 @dataclass

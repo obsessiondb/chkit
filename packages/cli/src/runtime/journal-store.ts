@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { isUnknownDatabaseError, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { isUnknownDatabaseError, resolveReplicaFanout, waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
 import pRetry from 'p-retry'
 
@@ -195,6 +195,7 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', 'journal table exists — checking schema')
       await ensureSchemaUpgraded()
+      await waitForEveryReplica()
       bootstrapped = true
       return
     } catch (error) {
@@ -221,7 +222,17 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
     }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
+    await waitForEveryReplica()
     bootstrapped = true
+  }
+
+  // A multi-replica target reads the journal from every replica (#265), which
+  // fails while one of them does not have the table yet, e.g. right after the
+  // CREATE above or another process's. A single replica needs no wait.
+  async function waitForEveryReplica(): Promise<void> {
+    if (!(await resolveReplicaFanout(db, cluster))) return
+    const [row] = await db.query<{ database: string }>('SELECT currentDatabase() AS database')
+    await waitForTable(db, row?.database ?? 'default', journalTable, { cluster })
   }
 
   async function ensureSchemaUpgraded(): Promise<void> {
@@ -235,6 +246,24 @@ SETTINGS index_granularity = 1`
     await db.command(
       `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
     )
+  }
+
+  /**
+   * The rows to read the journal from. A single replica reads the table with
+   * FINAL. With several replicas (#265), the replica a read lands on may not
+   * have the latest version yet, while the replica that ran an INSERT always
+   * has it: read every replica and keep the newest version per migration. Each
+   * write stamps applied_at in milliseconds as the row version, which is what
+   * ReplacingMergeTree(applied_at) keeps too.
+   */
+  async function journalRows(where: string, limit = ''): Promise<string> {
+    const fanout = await resolveReplicaFanout(db, cluster)
+    const columns = 'name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations'
+    if (!fanout) {
+      return `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit} SETTINGS select_sequential_consistency = 1`
+    }
+    debug('journal', `reading the journal across ${fanout.replicas} replicas of cluster ${fanout.cluster}`)
+    return `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`
   }
 
   async function trySyncReplica(): Promise<void> {
@@ -258,9 +287,7 @@ SETTINGS index_granularity = 1`
         return { version: 1, applied: [] }
       }
       await trySyncReplica()
-      const rows = await db.query<MigrationRow>(
-        `SELECT name, applied_at, checksum, chkit_version FROM ${journalTable} FINAL WHERE migration_completed = true ORDER BY name SETTINGS select_sequential_consistency = 1`,
-      )
+      const rows = await db.query<MigrationRow>(await journalRows('migration_completed = true'))
       debug('journal', `journal has ${rows.length} applied entries`)
       return {
         version: 1,
@@ -277,7 +304,7 @@ SETTINGS index_granularity = 1`
       if (_databaseMissing) return null
       await trySyncReplica()
       const rows = await db.query<MigrationRow>(
-        `SELECT name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations FROM ${journalTable} FINAL WHERE name = '${escapeSqlString(migrationName)}' LIMIT 1 SETTINGS select_sequential_consistency = 1`,
+        await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1'),
       )
       const written = lastWritten.get(migrationName)
       const row = rows[0]

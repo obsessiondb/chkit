@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation, wait_for_table
+from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 from tests.e2e_testkit import create_prefix, quote_ident, run_once_visible
 
 
@@ -29,8 +30,15 @@ class _LiveClient:
         return SimpleNamespace(rows=list(self._client.query(sql).named_results()))
 
 
+# The target's replicas, probed by ``_recorder``: one replica reads the system
+# table directly, several count the replicas that show the change (#265).
+_fanout: ReplicaFanout | None = None
+
+
 def _recorder(live: _LiveClient) -> Callable[[str, str], list[str]]:
     """Run ``wait_for_ddl_propagation`` and return the distinct polling queries it sent."""
+    global _fanout  # noqa: PLW0603
+    _fanout = resolve_replica_fanout(live)
 
     def run(operation_type: str, operation_key: str) -> list[str]:
         live.queries.clear()
@@ -40,26 +48,36 @@ def _recorder(live: _LiveClient) -> Callable[[str, str], list[str]]:
     return run
 
 
+def _polled(source: str, where: str) -> str:
+    if _fanout is None:
+        return f"SELECT 1 AS x FROM {source} WHERE {where}"
+    return (
+        "SELECT count(DISTINCT hostName()) AS replicas "
+        f"FROM {all_replicas(_fanout, source)} WHERE {where}"
+    )
+
+
 # The polling queries for names that need no escaping in a string literal.
 def _listed(db: str, name: str) -> str:
-    return f"SELECT 1 AS x FROM system.tables WHERE database = '{db}' AND name = '{name}'"
+    return _polled("system.tables", f"database = '{db}' AND name = '{name}'")
 
 
 def _listed_as_view(db: str, name: str) -> str:
-    return f"{_listed(db, name)} AND engine LIKE '%View%'"
+    return _polled(
+        "system.tables", f"database = '{db}' AND name = '{name}' AND engine LIKE '%View%'"
+    )
 
 
 def _column_listed(db: str, table: str, column: str) -> str:
-    return (
-        f"SELECT 1 AS x FROM system.columns WHERE database = '{db}' "
-        f"AND table = '{table}' AND name = '{column}'"
+    return _polled(
+        "system.columns", f"database = '{db}' AND table = '{table}' AND name = '{column}'"
     )
 
 
 def _index_listed(db: str, table: str, index: str) -> str:
-    return (
-        f"SELECT 1 AS x FROM system.data_skipping_indices WHERE database = '{db}' "
-        f"AND table = '{table}' AND name = '{index}'"
+    return _polled(
+        "system.data_skipping_indices",
+        f"database = '{db}' AND table = '{table}' AND name = '{index}'",
     )
 
 

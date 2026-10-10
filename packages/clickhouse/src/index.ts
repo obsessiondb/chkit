@@ -522,13 +522,16 @@ export function assertStreamedQuerySucceeded(input: {
 }
 
 export {
+	type PropagationOptions,
 	waitForColumn,
+	waitForColumnAbsent,
 	waitForDDLPropagation,
 	waitForDictionary,
 	waitForTable,
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
+export { allReplicas, resolveReplicaFanout, type ReplicaFanout } from './replicas.js'
 
 function parseSummaryFromHeaders(
 	headers: Record<string, string | string[] | undefined>,

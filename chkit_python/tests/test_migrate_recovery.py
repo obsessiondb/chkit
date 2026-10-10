@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -58,6 +59,8 @@ from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.safety_markers import MigrationOperationSummary
 from chkit.clickhouse.client import QueryResult
 from chkit.core.sql_splitter import extract_executable_statements, split_sql_statements
+
+pytestmark = pytest.mark.usefixtures("single_replica")
 
 A = Marker(type="create_table", key="table:db.a")
 B = Marker(type="create_table", key="table:db.b")
@@ -1015,7 +1018,7 @@ def _apply(
             client=cast(Any, client),
             journal_store=cast(Any, store),
             plugin_runtime=cast(Any, runtime or _FakeRuntime()),
-            config=cast(Any, None),
+            config=cast(Any, SimpleNamespace(clickhouse=None)),
             table_scope=cast(Any, None),
             migrations_dir=migrations_dir,
             file="m.sql",

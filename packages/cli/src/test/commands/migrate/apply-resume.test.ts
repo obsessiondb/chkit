@@ -169,7 +169,9 @@ describe('applyMigration sync resume (#6)', () => {
       async command() {
         events.push('command')
       },
-      async query() {
+      async query(sql: string) {
+        // The replica probe (#265): answer as a single-replica server.
+        if (sql.includes('system.one')) return []
         // Used by waitForDDLPropagation → waitForTable; a non-empty row means
         // the table is already visible, so the wait returns immediately.
         events.push('propagation-query')

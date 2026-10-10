@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
+
+from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 
 MAX_ATTEMPTS = 20
 RETRY_DELAY_SECONDS = 0.5
@@ -81,217 +83,239 @@ def _poll(
     raise RuntimeError(msg)
 
 
-def wait_for_table(client: Any, database: str, table_name: str) -> None:
+def wait_for_table(
+    client: Any, database: str, table_name: str, *, cluster: str | None = None
+) -> None:
     """Poll ``system.tables`` until ``database.table_name`` appears."""
-    sql = (
-        f"SELECT 1 AS x FROM system.tables "
-        f"WHERE database = '{_quote(database)}' AND name = '{_quote(table_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.tables",
+        where=f"database = '{_quote(database)}' AND name = '{_quote(table_name)}'",
+        want="present",
+        label=f"wait_for_table: {database}.{table_name} not yet visible",
+        cluster=cluster,
     )
 
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) == 0:
-            msg = f"wait_for_table: {database}.{table_name} not yet visible"
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
-
-def wait_for_view(client: Any, database: str, view_name: str) -> None:
+def wait_for_view(
+    client: Any, database: str, view_name: str, *, cluster: str | None = None
+) -> None:
     """Poll ``system.tables`` until ``database.view_name`` appears as a view."""
-    sql = (
-        f"SELECT 1 AS x FROM system.tables "
-        f"WHERE database = '{_quote(database)}' AND name = '{_quote(view_name)}' "
-        f"AND engine LIKE '%View%'"
+    _wait_for_system_rows(
+        client,
+        source="system.tables",
+        where=(
+            f"database = '{_quote(database)}' AND name = '{_quote(view_name)}' "
+            "AND engine LIKE '%View%'"
+        ),
+        want="present",
+        label=f"wait_for_view: {database}.{view_name} not yet visible",
+        cluster=cluster,
     )
 
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) == 0:
-            msg = f"wait_for_view: {database}.{view_name} not yet visible"
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
-
-def wait_for_dictionary(client: Any, database: str, dictionary_name: str) -> None:
+def wait_for_dictionary(
+    client: Any, database: str, dictionary_name: str, *, cluster: str | None = None
+) -> None:
     """Poll ``system.dictionaries`` until ``database.dictionary_name`` appears."""
-    sql = (
-        f"SELECT 1 AS x FROM system.dictionaries "
-        f"WHERE database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.dictionaries",
+        where=f"database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}'",
+        want="present",
+        label=f"wait_for_dictionary: {database}.{dictionary_name} not yet visible",
+        cluster=cluster,
     )
-
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) == 0:
-            msg = f"wait_for_dictionary: {database}.{dictionary_name} not yet visible"
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
 
 def wait_for_column(
-    client: Any, database: str, table_name: str, column_name: str
+    client: Any,
+    database: str,
+    table_name: str,
+    column_name: str,
+    *,
+    cluster: str | None = None,
 ) -> None:
     """Poll ``system.columns`` until the column appears under the table."""
-    sql = (
-        f"SELECT 1 AS x FROM system.columns "
-        f"WHERE database = '{_quote(database)}' "
-        f"AND table = '{_quote(table_name)}' "
-        f"AND name = '{_quote(column_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.columns",
+        where=(
+            f"database = '{_quote(database)}' "
+            f"AND table = '{_quote(table_name)}' "
+            f"AND name = '{_quote(column_name)}'"
+        ),
+        want="present",
+        label=f"wait_for_column: {database}.{table_name}.{column_name} not yet visible",
+        cluster=cluster,
     )
 
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) == 0:
-            msg = (
-                f"wait_for_column: {database}.{table_name}.{column_name} "
-                f"not yet visible"
-            )
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
-
-def wait_for_table_absent(client: Any, database: str, table_name: str) -> None:
+def wait_for_table_absent(
+    client: Any, database: str, table_name: str, *, cluster: str | None = None
+) -> None:
     """Poll ``system.tables`` until ``database.table_name`` no longer appears."""
-    sql = (
-        f"SELECT 1 AS x FROM system.tables "
-        f"WHERE database = '{_quote(database)}' AND name = '{_quote(table_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.tables",
+        where=f"database = '{_quote(database)}' AND name = '{_quote(table_name)}'",
+        want="absent",
+        label=f"wait_for_table_absent: {database}.{table_name} still present",
+        cluster=cluster,
     )
-
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) > 0:
-            msg = f"wait_for_table_absent: {database}.{table_name} still present"
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
 
 def wait_for_column_absent(
-    client: Any, database: str, table_name: str, column_name: str
+    client: Any,
+    database: str,
+    table_name: str,
+    column_name: str,
+    *,
+    cluster: str | None = None,
 ) -> None:
     """Poll ``system.columns`` until the column is gone from the table."""
-    sql = (
-        f"SELECT 1 AS x FROM system.columns "
-        f"WHERE database = '{_quote(database)}' "
-        f"AND table = '{_quote(table_name)}' "
-        f"AND name = '{_quote(column_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.columns",
+        where=(
+            f"database = '{_quote(database)}' "
+            f"AND table = '{_quote(table_name)}' "
+            f"AND name = '{_quote(column_name)}'"
+        ),
+        want="absent",
+        label=f"wait_for_column_absent: {database}.{table_name}.{column_name} still present",
+        cluster=cluster,
     )
-
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) > 0:
-            msg = (
-                f"wait_for_column_absent: {database}.{table_name}.{column_name} "
-                f"still present"
-            )
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
 
 def wait_for_index(
-    client: Any, database: str, table_name: str, index_name: str
+    client: Any,
+    database: str,
+    table_name: str,
+    index_name: str,
+    *,
+    cluster: str | None = None,
 ) -> None:
     """Poll ``system.data_skipping_indices`` until the index appears."""
-    sql = (
-        f"SELECT 1 AS x FROM system.data_skipping_indices "
-        f"WHERE database = '{_quote(database)}' "
-        f"AND table = '{_quote(table_name)}' "
-        f"AND name = '{_quote(index_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.data_skipping_indices",
+        where=(
+            f"database = '{_quote(database)}' "
+            f"AND table = '{_quote(table_name)}' "
+            f"AND name = '{_quote(index_name)}'"
+        ),
+        want="present",
+        label=f"wait_for_index: {database}.{table_name}.{index_name} not yet visible",
+        cluster=cluster,
     )
-
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) == 0:
-            msg = (
-                f"wait_for_index: {database}.{table_name}.{index_name} "
-                f"not yet visible"
-            )
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
 
 def wait_for_index_absent(
-    client: Any, database: str, table_name: str, index_name: str
+    client: Any,
+    database: str,
+    table_name: str,
+    index_name: str,
+    *,
+    cluster: str | None = None,
 ) -> None:
     """Poll ``system.data_skipping_indices`` until the index is gone."""
-    sql = (
-        f"SELECT 1 AS x FROM system.data_skipping_indices "
-        f"WHERE database = '{_quote(database)}' "
-        f"AND table = '{_quote(table_name)}' "
-        f"AND name = '{_quote(index_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.data_skipping_indices",
+        where=(
+            f"database = '{_quote(database)}' "
+            f"AND table = '{_quote(table_name)}' "
+            f"AND name = '{_quote(index_name)}'"
+        ),
+        want="absent",
+        label=f"wait_for_index_absent: {database}.{table_name}.{index_name} still present",
+        cluster=cluster,
     )
-
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) > 0:
-            msg = (
-                f"wait_for_index_absent: {database}.{table_name}.{index_name} "
-                f"still present"
-            )
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
 
 def wait_for_projection(
-    client: Any, database: str, table_name: str, projection_name: str
+    client: Any,
+    database: str,
+    table_name: str,
+    projection_name: str,
+    *,
+    cluster: str | None = None,
 ) -> None:
     """Poll ``system.projections`` until the projection appears."""
-    sql = (
-        f"SELECT 1 AS x FROM system.projections "
-        f"WHERE database = '{_quote(database)}' "
-        f"AND table = '{_quote(table_name)}' "
-        f"AND name = '{_quote(projection_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.projections",
+        where=(
+            f"database = '{_quote(database)}' "
+            f"AND table = '{_quote(table_name)}' "
+            f"AND name = '{_quote(projection_name)}'"
+        ),
+        want="present",
+        label=f"wait_for_projection: {database}.{table_name}.{projection_name} not yet visible",
+        cluster=cluster,
     )
-
-    def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) == 0:
-            msg = (
-                f"wait_for_projection: {database}.{table_name}.{projection_name} "
-                f"not yet visible"
-            )
-            raise RuntimeError(msg)
-        return True
-
-    _poll(_check)
-
 
 def wait_for_projection_absent(
-    client: Any, database: str, table_name: str, projection_name: str
+    client: Any,
+    database: str,
+    table_name: str,
+    projection_name: str,
+    *,
+    cluster: str | None = None,
 ) -> None:
     """Poll ``system.projections`` until the projection is gone."""
-    sql = (
-        f"SELECT 1 AS x FROM system.projections "
-        f"WHERE database = '{_quote(database)}' "
-        f"AND table = '{_quote(table_name)}' "
-        f"AND name = '{_quote(projection_name)}'"
+    _wait_for_system_rows(
+        client,
+        source="system.projections",
+        where=(
+            f"database = '{_quote(database)}' "
+            f"AND table = '{_quote(table_name)}' "
+            f"AND name = '{_quote(projection_name)}'"
+        ),
+        want="absent",
+        label=(
+            f"wait_for_projection_absent: {database}.{table_name}.{projection_name} "
+            "still present"
+        ),
+        cluster=cluster,
     )
 
+def _wait_for_system_rows(
+    client: Any,
+    *,
+    source: str,
+    where: str,
+    want: Literal["present", "absent"],
+    label: str,
+    cluster: str | None,
+) -> None:
+    """Poll ``source`` until rows matching ``where`` are present (or absent).
+
+    On a target with several replicas (#265) the wait holds until every
+    replica shows the change: the next statement may land on any of them, and
+    an ALTER that runs on a replica that has not applied the previous one can
+    write back its stale schema. Pass the configured ``clickhouse.cluster``;
+    without one the ``default`` cluster is probed (ObsessionDB).
+    """
+    fanout = resolve_replica_fanout(client, cluster)
+
     def _check() -> bool:
-        result = client.query(sql)
-        if len(result.rows) > 0:
-            msg = (
-                f"wait_for_projection_absent: "
-                f"{database}.{table_name}.{projection_name} still present"
-            )
-            raise RuntimeError(msg)
+        if not _system_rows_match(client, source, where, want, fanout):
+            raise RuntimeError(label)
         return True
 
     _poll(_check)
+
+
+def _system_rows_match(
+    client: Any,
+    source: str,
+    where: str,
+    want: Literal["present", "absent"],
+    fanout: ReplicaFanout | None,
+) -> bool:
+    if fanout is None:
+        rows = client.query(f"SELECT 1 AS x FROM {source} WHERE {where}").rows
+        return len(rows) > 0 if want == "present" else len(rows) == 0
+    rows = client.query(
+        "SELECT count(DISTINCT hostName()) AS replicas "
+        f"FROM {all_replicas(fanout, source)} WHERE {where}"
+    ).rows
+    replicas = int(rows[0]["replicas"]) if rows else 0
+    return replicas >= fanout.replicas if want == "present" else replicas == 0
 
 
 def _parse_operation_key(
@@ -335,7 +359,7 @@ def _parse_operation_key(
 
 
 def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
-    client: Any, operation_type: str, operation_key: str
+    client: Any, operation_type: str, operation_key: str, *, cluster: str | None = None
 ) -> None:
     """Dispatch the right ``wait_for_*`` based on the operation type + key.
 
@@ -361,21 +385,21 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     database, table, column, index, projection = parsed
 
     if operation_type in {"create_table", "alter_rename_table"}:
-        wait_for_table(client, database, table)
+        wait_for_table(client, database, table, cluster=cluster)
         return
     if operation_type in {"create_view", "create_materialized_view"}:
-        wait_for_view(client, database, table)
+        wait_for_view(client, database, table, cluster=cluster)
         return
     if operation_type == "create_dictionary":
-        wait_for_dictionary(client, database, table)
+        wait_for_dictionary(client, database, table, cluster=cluster)
         return
     if operation_type in {"alter_table_add_column", "alter_table_modify_column"}:
         if column is not None:
-            wait_for_column(client, database, table, column)
+            wait_for_column(client, database, table, column, cluster=cluster)
         return
     if operation_type == "alter_table_drop_column":
         if column is not None:
-            wait_for_column_absent(client, database, table, column)
+            wait_for_column_absent(client, database, table, column, cluster=cluster)
         return
     if operation_type in {
         "drop_table",
@@ -383,21 +407,21 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
         "drop_materialized_view",
         "drop_dictionary",
     }:
-        wait_for_table_absent(client, database, table)
+        wait_for_table_absent(client, database, table, cluster=cluster)
         return
     if operation_type == "alter_table_add_index" and index is not None:
-        wait_for_index(client, database, table, index)
+        wait_for_index(client, database, table, index, cluster=cluster)
         return
     if operation_type == "alter_table_drop_index" and index is not None:
-        wait_for_index_absent(client, database, table, index)
+        wait_for_index_absent(client, database, table, index, cluster=cluster)
         return
     if operation_type == "alter_table_add_projection" and projection is not None:
-        wait_for_projection(client, database, table, projection)
+        wait_for_projection(client, database, table, projection, cluster=cluster)
         return
     if operation_type == "alter_table_drop_projection" and projection is not None:
-        wait_for_projection_absent(client, database, table, projection)
+        wait_for_projection_absent(client, database, table, projection, cluster=cluster)
         return
 
     # alter_table_modify_setting, alter_table_modify_ttl, alter_table_reset_setting,
     # alter_materialized_view_modify_refresh, etc. → basic table presence check.
-    wait_for_table(client, database, table)
+    wait_for_table(client, database, table, cluster=cluster)
