@@ -20,10 +20,6 @@ export default defineConfig({
 		'/ingestion': '/sync/',
 		'/ingestion/cli': '/sync/cli/',
 	},
-	server: {
-		// Temporary workspace preview host; remove this server block before merging the PR.
-		allowedHosts: ['4321-i8wibl6j3fu358l9cofcw.e2b.app'],
-	},
 	integrations: [
 		starlight({
 			title: 'chkit Docs',
