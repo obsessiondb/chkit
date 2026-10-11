@@ -1,19 +1,19 @@
 ---
-title: Backfill Plugin
-description: Plan, execute, and monitor time-windowed backfill operations with async query submission, concurrent execution, and checkpointed progress.
+title: Backfill Plugin (beta)
+description: Plan, execute, and monitor time-windowed SQL backfills with the beta backfill plugin.
 sidebar:
   order: 4
   badge:
-    text: Alpha
+    text: Beta
     variant: caution
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-This document covers practical usage of the optional `backfill` plugin.
+The beta `backfill` plugin replays stored data in time-windowed chunks with checkpointed progress.
 
-:::caution[Alpha]
-The `backfill` plugin is in alpha. Its API, configuration, and CLI flags may change between releases.
+:::caution[Beta]
+The `backfill` plugin is in beta. Its API, configuration, and CLI flags may change between releases.
 :::
 
 ## What it does
@@ -101,7 +101,7 @@ export default defineConfig({
         }
     )
     ```
-    The Python plugin is at full parity with the TypeScript plugin: `plan`, `run`, `resume`, `status`, `cancel`, `doctor`, and managed `submit` all work end-to-end.
+    Python support is in alpha. Its backfill plugin supports the same commands as TypeScript: `plan`, `run`, `resume`, `status`, `cancel`, `doctor`, and managed `submit`.
   </TabItem>
 </Tabs>
 
@@ -383,4 +383,3 @@ chkit plugin backfill submit --target analytics.events --from 2025-01-01 --to 20
 ```sh
 chkit check   # fails if pending backfills exist
 ```
-

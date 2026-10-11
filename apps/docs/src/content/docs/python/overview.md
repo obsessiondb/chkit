@@ -1,11 +1,14 @@
 ---
-title: Python Overview
-description: Define ClickHouse schemas and run migrations in Python with chkit-py.
+title: Python Overview (alpha)
+description: Define ClickHouse schemas and run migrations with the alpha Python implementation, chkit-py.
 sidebar:
   order: 1
+  badge:
+    text: Alpha
+    variant: caution
 ---
 
-Use `chkit-py` to define ClickHouse schemas and run the chkit migration workflow in Python.
+Use `chkit-py` to define ClickHouse schemas and run the chkit migration workflow in Python. Python support is in alpha; its API and CLI behavior may change between releases.
 
 ## Install
 
@@ -22,6 +25,7 @@ The package is named `chkit-py` on PyPI; the import name is `chkit`.
 pip install chkit-py
 chkit init                    # scaffold clickhouse.config.py + example schema
 chkit generate --name init    # diff schema vs snapshot, write migrations/*.sql
+chkit migrate --json          # inspect the pending plan without applying
 chkit migrate --apply         # apply pending migrations
 chkit status                  # show applied / pending counts
 chkit check --strict          # CI gate (pending, drift, checksum)
@@ -49,8 +53,7 @@ The schema/migration CLI and backfill engine share the TypeScript workflow. The 
 
 - `chkit skills` proxy and the `create-chkit` scaffolder: use `chkit init` instead.
 - `deps.ts`-style dependency auto-install: install packages explicitly with `pip`.
-- [`@chkit/plugin-ingest`](/api-sync/) and the project `entry` module: API sync source authoring requires TypeScript.
-- [`chkit add`](/cli/add/) and [`chkit registry`](/cli/registry/): registry items are TypeScript `@chkit/plugin-ingest` integrations.
+- The project `entry` module: use `schema` globs to select Python schema files.
 
 ## These pages
 

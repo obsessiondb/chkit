@@ -1,6 +1,6 @@
 ---
 title: Publish a registry
-description: Build and host versioned chkit templates containing editable schemas and ingestion source.
+description: Build and host versioned templates for chkit Sync (beta) with editable schemas and API readers.
 ---
 
 A registry distributes source files, package requirements, and provider metadata as static JSON artifacts.

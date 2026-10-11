@@ -1,9 +1,11 @@
 ---
 title: Integrating ClickHouse with GitHub
-description: Install independent GitHub issue, pull-request, discussion, review, commit, and stargazer streams into raw ClickHouse tables.
+description: Sync GitHub issues, pull requests, discussions, reviews, commits, and stargazers into ClickHouse with chkit Sync (beta).
 ---
 
 The GitHub registry item installs one pipeline with independently selected resource streams and separate raw ClickHouse destinations.
+
+This integration is part of [chkit Sync (beta)](/sync/), the optional TypeScript ingestion layer built on chkit Schema.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -77,4 +79,4 @@ Fixtures cover isolated resource selection, join keys, narrow commit data, recen
 
 - [App registry](/integrations/)
 - [Ingestion plugin](/plugins/ingest/)
-- [Ingestion CLI](/cli/ingest/)
+- [Sync CLI](/cli/ingest/)

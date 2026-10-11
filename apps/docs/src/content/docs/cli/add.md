@@ -1,11 +1,13 @@
 ---
 title: "chkit add"
-description: "Copy a provider template, register its exports, and install its dependencies."
+description: "Install an editable provider template and its dependencies for chkit Sync (beta)."
 sidebar:
   order: 12
 ---
 
 Installs an editable provider template into a TypeScript project, including its schema, ingestion readers, environment examples, and required packages.
+
+This command belongs to [chkit Sync (beta)](/sync/). Schema management does not require provider templates.
 
 ## Synopsis
 

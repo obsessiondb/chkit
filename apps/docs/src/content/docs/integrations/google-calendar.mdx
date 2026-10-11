@@ -1,9 +1,11 @@
 ---
 title: Integrating ClickHouse with Google Calendar
-description: Install canonical Google Calendar ingestion with resumable pages and sync-token checkpoints.
+description: Sync Google Calendar events with resumable pages and sync-token checkpoints using chkit Sync (beta).
 ---
 
 The Google Calendar registry item copies a canonical event reader with journaled page and sync-token progress into a chkit project.
+
+This integration is part of [chkit Sync (beta)](/sync/), the optional TypeScript ingestion layer built on chkit Schema.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -64,4 +66,4 @@ Fixtures cover page resumption, empty deltas, sink failures before token promoti
 
 - [App registry](/integrations/)
 - [Ingestion plugin](/plugins/ingest/)
-- [Ingestion CLI](/cli/ingest/)
+- [Sync CLI](/cli/ingest/)

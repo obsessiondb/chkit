@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Default from '@astrojs/starlight/components/Head.astro';
 import { registryApps } from '../data/registry';
+import { getDocsSearchScope } from '../data/docs-search';
 
 // Advertise the raw-Markdown version of this page so agents and crawlers can
 // discover it from the HTML. The raw-markdown integration writes one .md per
@@ -14,6 +15,7 @@ import { registryApps } from '../data/registry';
 // source (e.g. the starlight-blog index claims src/content/docs/blog.md), and
 // the homepage has no per-page .md — both fall back to the llms.txt index.
 const { entry } = Astro.locals.starlightRoute;
+const searchScope = getDocsSearchScope(Astro.locals.starlightRoute.id);
 const slug = Astro.url.pathname.replace(/\/$/, '').replace(/^\//, '');
 const sourceExists = !!entry?.filePath && existsSync(join(process.cwd(), entry.filePath));
 const mdHref = slug !== '' && sourceExists ? `/${slug}.md` : '/llms.txt';
@@ -52,5 +54,6 @@ const structuredData = slug === 'integrations' ? {
 ---
 
 <Default />
+<meta name="chkit-docs-product" content={searchScope} data-pagefind-filter="product[content]" />
 <link rel="alternate" type="text/markdown" href={mdHref} />
 {structuredData && <script type="application/ld+json" set:html={JSON.stringify(structuredData).replaceAll('<', '\\u003c')} />}

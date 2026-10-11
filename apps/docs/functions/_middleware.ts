@@ -6,8 +6,15 @@ export const onRequest: PagesFunction<{ ASSETS: Fetcher }> = async (context) => 
 		return Response.redirect(url.toString(), 301);
 	}
 
-	// The Ingestion section moved to /api-sync/. Keep old links (READMEs,
-	// installed agent skills, search results) working, including .md URLs.
+	// The product landing and CLI overview now live under /sync/.
+	// Redirect their old HTML and Markdown URLs before the legacy guide rule.
+	if (/^\/ingestion(?:\/cli)?(?:\/|\.md)?$/.test(url.pathname)) {
+		url.pathname = url.pathname.replace(/^\/ingestion/, '/sync');
+		return Response.redirect(url.toString(), 301);
+	}
+
+	// Older source-authoring guides moved to /api-sync/. Keep those published
+	// links working, including .md URLs.
 	const moved = url.pathname.match(/^\/ingestion(\/.*|\.md)?$/);
 	if (moved) {
 		url.pathname = `/api-sync${moved[1] ?? '/'}`;

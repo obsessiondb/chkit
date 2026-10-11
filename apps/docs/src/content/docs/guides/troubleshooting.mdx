@@ -167,7 +167,7 @@ chkit migrate --apply --retry 20260929001110_funnel-model.sql
 Or discard the partial run, so that the next apply runs the edited file from statement 1. The statements that completed stay applied and run again, so they must be safe to run twice. A completed `REMOVE DEFAULT` or `REMOVE MATERIALIZED` is not: ClickHouse rejects it once the column has no such expression, so delete it from the file first:
 
 ```sh
-chkit migrate --abandon 20260929001110_funnel-model.sql           # preview
+chkit migrate --abandon 20260929001110_funnel-model.sql --json    # preview
 chkit migrate --abandon 20260929001110_funnel-model.sql --apply
 chkit migrate --apply
 ```

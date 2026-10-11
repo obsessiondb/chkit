@@ -41,11 +41,10 @@ Some plugins have top-level CLI shortcuts:
 
 - `chkit codegen` is equivalent to `chkit plugin codegen codegen`
 - `chkit pull` is equivalent to `chkit plugin pull schema` (TypeScript; in Python `pull` is a built-in command with no plugin behind it)
-- `chkit ingest <subcommand>` is equivalent to `chkit plugin ingest <subcommand>` (see [`chkit ingest`](/cli/ingest/))
 
 ### Plugin registration
 
-Plugins are registered inline in the `plugins` array of your config:
+Plugins are registered inline in the `plugins` array of your config. Python support is in alpha; see the [Python overview](/python/overview/).
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -143,4 +142,4 @@ chkit plugin backfill plan --target analytics.events --from 2025-01-01 --to 2025
 
 - [Codegen plugin](/plugins/codegen/)
 - [Pull plugin](/plugins/pull/)
-- [Backfill plugin](/plugins/backfill/)
+- [Backfill plugin (beta)](/plugins/backfill/)

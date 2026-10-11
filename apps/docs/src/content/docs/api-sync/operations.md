@@ -1,6 +1,6 @@
 ---
 title: Scheduling and recovery
-description: Select streams, configure retries, handle overlapping runs, and review ingestion recovery.
+description: Schedule chkit Sync (beta), select streams, configure retries, and recover overlapping or interrupted runs.
 ---
 
 Run ingestion as a finite process, use an external scheduler for cadence, and resume from validated ClickHouse journal evidence.

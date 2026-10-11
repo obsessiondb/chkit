@@ -1,12 +1,12 @@
 # @chkit/plugin-backfill
 
-Plugin for data backfill operations in chkit.
+Beta plugin for checkpointed SQL backfill operations in chkit. Its API, configuration, and CLI flags may change between releases.
 
 Part of the [chkit](https://github.com/obsessiondb/chkit) monorepo. This plugin extends the [`chkit`](https://www.npmjs.com/package/chkit) CLI with data backfill commands.
 
 ## Install
 
-```bash
+```sh
 bun add -d @chkit/plugin-backfill
 ```
 
@@ -33,7 +33,7 @@ export default defineConfig({
 
 ## Documentation
 
-See the [chkit documentation](https://chkit.obsessiondb.com).
+See the [backfill plugin documentation (beta)](https://chkit.obsessiondb.com/plugins/backfill/).
 
 ## SDK
 

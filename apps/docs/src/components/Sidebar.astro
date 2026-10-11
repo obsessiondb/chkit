@@ -1,0 +1,35 @@
+---
+import Default from '@astrojs/starlight/components/Sidebar.astro';
+import { DOCS_PRODUCTS, getDocsProduct } from '../data/docs-products';
+
+const { id } = Astro.locals.starlightRoute;
+const isBlog = id === 'blog' || id.startsWith('blog/');
+const product = getDocsProduct(id);
+---
+
+{!isBlog && (
+	<details class="product-picker">
+		<summary>
+			<span class="product-caption">chkit documentation</span>
+			<span class="product-label">{DOCS_PRODUCTS[product].label}<span aria-hidden="true">⌄</span></span>
+		</summary>
+		<nav aria-label="Documentation product">
+			{Object.entries(DOCS_PRODUCTS).map(([key, { label, href }]) => (
+				<a href={href} aria-current={key === product ? 'true' : undefined}>{label}</a>
+			))}
+		</nav>
+	</details>
+)}
+
+<Default />
+
+<style>
+	.product-picker { margin-bottom: 1.5rem; border: 1px solid var(--line-2); background: var(--bg-2); }
+	.product-picker summary { padding: 0.8rem; cursor: pointer; list-style: none; }
+	.product-picker summary::-webkit-details-marker { display: none; }
+	.product-caption { display: block; margin-bottom: 0.4rem; color: var(--ink-2); font: 0.65rem var(--sl-font-mono); }
+	.product-label { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; color: var(--ink); font-size: 0.85rem; font-weight: 600; }
+	.product-picker nav { display: grid; padding: 0.25rem; border-top: 1px solid var(--line-2); }
+	.product-picker a { padding: 0.65rem; color: var(--ink-2); font-size: 0.8rem; text-decoration: none; }
+	.product-picker a:hover, .product-picker a[aria-current] { color: var(--accent); background: var(--accent-dim); }
+</style>

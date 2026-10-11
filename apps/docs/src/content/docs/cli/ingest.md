@@ -1,11 +1,13 @@
 ---
 title: "chkit ingest"
-description: "Run, inspect, diagnose, or repair the ingestion streams your project exports."
+description: "Run, inspect, diagnose, or repair streams with chkit Sync (beta)."
 sidebar:
   order: 11
 ---
 
 Runs the TypeScript ingestion streams provided by [`@chkit/plugin-ingest`](/plugins/ingest/) and inspects or repairs their ClickHouse journal history.
+
+This command belongs to [chkit Sync (beta)](/sync/). See the [Sync CLI overview](/sync/cli/) for the template installation and first-run workflow.
 
 ## Synopsis
 
@@ -47,7 +49,7 @@ chkit ingest repair [flags]
 |------|------|---------|-------------|
 | `--apply <fingerprint>` | string | — | Materialize the exact reviewed plan. Stop writers first; requires exactly one selected stream |
 
-Global flags documented on [CLI Overview](/cli/overview/#global-flags).
+See the [shared CLI flags](/cli/overview/#global-flags) for `--config`, `--json`, and other global options.
 
 ## Behavior
 
@@ -284,7 +286,7 @@ Materialized output sets `applied` to `true`, keeps `activated` at `false`, and 
 
 ## Related commands
 
-- [Ingest plugin reference](/plugins/ingest/) — plugin setup, options, and stream definitions
-- [API sync quickstart](/api-sync/quickstart/) — define a first stream and run it
+- [Sync plugin reference](/plugins/ingest/) — plugin setup, options, and stream definitions
+- [Sync quickstart](/api-sync/quickstart/) — define a first stream and run it
 - [Scheduling and recovery](/api-sync/operations/) — tags, retries, budgets, and backfills
 - [`chkit check`](/cli/check/) — verifies that stream destinations carry the ingestion metadata columns

@@ -20,8 +20,8 @@ chkit migrate [flags]
 | `--apply` | boolean | `false` | Apply pending migrations without prompting |
 | `--execute` | boolean | `false` | Alias for `--apply` |
 | `--allow-destructive` | boolean | `false` | Allow destructive operations (required in non-interactive mode) |
-| `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` |
-| `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Previews without `--apply`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
+| `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
+| `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
 | `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -30,9 +30,9 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 ### Plan vs execute
 
-By default, `chkit migrate` shows the list of pending migrations without applying them. Pass `--apply` (or `--execute`) to apply.
+Use `chkit migrate --json` to preview pending migrations without applying them. After reviewing the plan and SQL, pass `--apply` (or `--execute`) to apply.
 
-In interactive mode (TTY), the CLI prompts for confirmation before applying. In non-interactive mode (CI, piped input), `--apply` is required — otherwise the command only reports the plan.
+In interactive mode (TTY), a plain `chkit migrate` prints the plan and prompts for confirmation before applying. In non-interactive mode (CI, piped input), it only reports the plan unless `--apply` is present. JSON mode suppresses the interactive prompt, so `--json` without `--apply` always previews.
 
 ### CI / non-interactive detection
 
@@ -99,17 +99,17 @@ chkit migrate --apply --retry 20260929001110_funnel-model.sql
 - An [async statement](#async-operations-modeasync) that may still be running must also keep its position and marker.
 - If a completed statement moved or its marker changed, `--retry` refuses and lists the statements. Restore them, or [abandon](#abandoning-a-failed-migration) the partial run.
 - Statements can share a marker: a column's generated `REMOVE DEFAULT` or `REMOVE MATERIALIZED` carries the marker of the `MODIFY COLUMN` after it. Keep both in the file and edit only the one that failed. `--retry` cannot tell them apart, so it also refuses an edit that leaves fewer statements with a completed statement's marker than the failed run recorded, such as one that deletes the completed `REMOVE`.
-- `--retry` changes nothing on its own: like `--allow-destructive`, it takes effect when `--apply` (or the interactive confirmation) applies migrations. Without `--apply`, the plan shows where the migration will resume.
+- The retry takes effect when `--apply` or interactive confirmation applies migrations. Add `--json` without `--apply` to preview where the migration will resume.
 - When the named migration has no in-progress state, did not change since it failed, is already applied, has no executable statements, or is outside the `--table` scope, `--retry` has no effect and the output says so, also when nothing is pending, so the same command can run against every environment. A name that matches no migration file is an error.
 
 ### Abandoning a failed migration
 
 ```sh
-chkit migrate --abandon 20260929001110_funnel-model.sql          # preview
+chkit migrate --abandon 20260929001110_funnel-model.sql --json   # preview
 chkit migrate --abandon 20260929001110_funnel-model.sql --apply  # reset
 ```
 
-Resets the journal state of a failed migration so the next `chkit migrate --apply` runs it from statement 1. Without `--apply` the command only reports what it would reset; an interactive terminal asks for confirmation. It runs no migration SQL and applies no migration. It reads neither the migration file nor `snapshot.json`, so it works after the file was deleted or while `snapshot.json` has merge conflicts. It cannot be combined with `--retry`, `--table`, or `--allow-destructive`.
+Resets the journal state of a failed migration so the next `chkit migrate --apply` runs it from statement 1. Use `--json` without `--apply` to report what it would reset. Without either flag, an interactive terminal asks for confirmation to reset the journal; a non-interactive run only reports the plan. It runs no migration SQL and applies no migration. It reads neither the migration file nor `snapshot.json`, so it works after the file was deleted or while `snapshot.json` has merge conflicts. It cannot be combined with `--retry`, `--table`, or `--allow-destructive`.
 
 The report lists the statements that completed. They **stay applied** in ClickHouse, and the next apply runs them again with the rest of the file:
 
@@ -193,7 +193,7 @@ The annotation is opt-in and forward-compatible: statements without `mode=async`
 **Preview pending migrations:**
 
 ```sh
-chkit migrate
+chkit migrate --json
 ```
 
 **Apply in CI:**
@@ -343,7 +343,7 @@ When `--retry` has no effect, `retry` is `{ "action": "none", "migration": "…"
 
 ### Abandon
 
-Without `--apply`, `mode` is `plan` and nothing changes; with `--apply`, it is `execute`. `operations` is the progress of each statement before the reset. `completedStatements` also counts statements that completed before an earlier `--abandon`: their `lastError` reads `abandoned via chkit migrate --abandon (was completed)`, and abandoning again keeps it.
+In JSON mode, without `--apply`, `mode` is `plan` and nothing changes; with `--apply`, it is `execute`. `operations` is the progress of each statement before the reset. `completedStatements` also counts statements that completed before an earlier `--abandon`: their `lastError` reads `abandoned via chkit migrate --abandon (was completed)`, and abandoning again keeps it.
 
 ```json
 {

@@ -1,16 +1,16 @@
 ---
-title: chkit is now available in Python
-description: "chkit-py brings the full ClickHouse schema-as-code toolkit to Python, at parity with the TypeScript original. What it covers, how the two implementations stay in sync, and what is different in Python."
+title: chkit is now available in Python (alpha)
+description: "chkit-py is the alpha Python implementation of the ClickHouse schema-as-code toolkit, sharing migration artifacts with TypeScript chkit."
 date: 2026-08-11
 authors: obsessiondb
-excerpt: "We closed our last post with a promise: a Python port in the coming weeks. It shipped. pip install chkit-py gets you the entire toolkit, at parity with the TypeScript original: same DSL semantics, same planner, same journal table, same CLI."
+excerpt: "The Python port is available in alpha. Install chkit-py for the schema DSL, migration planner, drift checks, and CLI, with the same migration artifacts as TypeScript chkit."
 tags:
   - announcement
   - clickhouse
   - python
 ---
 
-We closed [our last post](/blog/olap-deserves-better-tooling/) with a promise: if you do not use TypeScript but Python, a port was coming. It shipped.
+We closed [our last post](/blog/olap-deserves-better-tooling/) with a promise: if you do not use TypeScript but Python, a port was coming. It is now available in alpha, with API and CLI behavior that may change between releases.
 
 ```sh
 pip install chkit-py
@@ -72,7 +72,7 @@ The CLI is the same CLI. Same commands, same flags, same exit codes, same `--jso
 
 ```sh
 chkit generate --name add_events_table
-chkit migrate            # shows the plan
+chkit migrate --json     # shows the plan without applying
 chkit migrate --apply    # applies, journals, verifies checksums
 chkit drift
 chkit check --strict     # your CI gate
@@ -119,7 +119,7 @@ Last time we argued that ClickHouse deserves the migration tooling relational da
 
 Same disclosure as last time: we run [ObsessionDB](https://obsessiondb.com), a managed ClickHouse offering, and chkit-py, like chkit, runs against ObsessionDB, ClickHouse Cloud, Altinity, or any self-hosted ClickHouse. No lock-in; the tooling is for the ecosystem.
 
-It is beta, like its TypeScript sibling: the CLI surface and the DSL are stable, but we may make small breaking changes before 1.0. If something is missing, or the Python ergonomics could be better, issues and PRs are welcome. Improvements land in both languages.
+The Python port is in alpha. Its CLI and APIs may change as the port develops. If something is missing, or the Python ergonomics could be better, issues and PRs are welcome. Improvements land in both languages.
 
 Stay tuned!
 

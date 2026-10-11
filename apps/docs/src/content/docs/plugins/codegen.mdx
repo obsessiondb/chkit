@@ -1,13 +1,15 @@
 ---
 title: Codegen Plugin
-description: Generate TypeScript row types, optional Zod schemas, ingestion functions, and runtime migration modules from chkit schema definitions.
+description: Generate TypeScript row types, optional Zod schemas, typed insert helpers, and runtime migration modules from chkit schema definitions.
 sidebar:
   order: 2
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-This document covers practical usage of the optional `codegen` plugin. In TypeScript it emits row types (plus optional Zod schemas, ingest helpers, and a runtime migration module); in Python it emits Pydantic models for every table and dictionary — Pydantic covers both static typing and runtime validation, so there is no separate Zod-style output.
+The optional `codegen` plugin emits TypeScript row types (plus optional Zod schemas, typed insert helpers, and a runtime migration module), or Python Pydantic models for every table and dictionary.
+
+Pydantic covers both static typing and runtime validation, so Python has no separate Zod-style output.
 
 ## What it does
 
@@ -15,7 +17,7 @@ This document covers practical usage of the optional `codegen` plugin. In TypeSc
 - Generates separate read and insert types for [tables with generated columns](#tables-with-generated-columns).
 - Generates a typed interface (and optional Zod schema) for each `dictionary()` from its `attributes` — dictionaries are always included, regardless of `includeViews`.
 - Optionally generates Zod schemas from the same definitions.
-- Optionally generates typed ingestion functions for inserting rows into ClickHouse tables. Generated ingest helpers gzip-compress request bodies by default and can opt out per call.
+- Optionally generates typed insert helpers for ClickHouse tables. Request-body compression is enabled by default and can be disabled per call.
 - Optionally generates a self-contained runtime migration module with all migration SQL inlined, for environments without filesystem access (e.g., Cloudflare Workers).
 
 ## How it fits your workflow
@@ -99,7 +101,7 @@ Register `codegen(...)` in your config's `plugins` array.
     )
     ```
 
-    The output is a single module with Pydantic models for every table and dictionary. The `emitZod` / `emitIngest` / `emitMigrations` emitters are TypeScript-only by design — Pydantic already provides runtime validation, and the ingest/migration-module emitters target JS runtimes.
+    The output is a single module with Pydantic models for every table and dictionary. The `emitZod` / `emitIngest` / `emitMigrations` emitters are TypeScript-only by design — Pydantic already provides runtime validation, and the insert helper and migration module emitters target JS runtimes.
   </TabItem>
 </Tabs>
 
@@ -130,8 +132,8 @@ Invalid option values fail fast at startup via plugin config validation.
   - Fails with:
     - `codegen_missing_output` (types file missing)
     - `codegen_stale_output` (types content drift)
-    - `codegen_missing_ingest_output` (ingest file missing, when `emitIngest` is enabled)
-    - `codegen_stale_ingest_output` (ingest content drift, when `emitIngest` is enabled)
+    - `codegen_missing_ingest_output` (generated insert helper file missing, when `emitIngest` is enabled)
+    - `codegen_stale_ingest_output` (generated insert helper content drift, when `emitIngest` is enabled)
     - `codegen_missing_migrations_output` (migrations file missing, when `emitMigrations` is enabled)
     - `codegen_stale_migrations_output` (migrations content drift, when `emitMigrations` is enabled)
 
@@ -158,9 +160,11 @@ A table with [`MATERIALIZED`, `ALIAS`, or `EPHEMERAL`](/schema/dsl-reference/#de
 
 The names extend the table's type name, for example `DefaultEventsRowInsert`. `Row` assumes the default `SELECT *`; with `asterisk_include_materialized_columns` or `asterisk_include_alias_columns`, name the columns and use `RowExplicit`.
 
-## Generated ingest helpers
+<a id="generated-ingest-helpers"></a>
 
-When `emitIngest` is enabled, generated ingest helpers accept runtime options. Request-body compression is enabled by default for these helpers:
+## Generated insert helpers
+
+When `emitIngest` is enabled, codegen emits functions named `ingest<TableName>`. Each helper passes schema-typed rows to the supplied `Ingestor.insert` implementation and accepts runtime options. Request-body compression is enabled by default:
 
 ```ts
 await ingestDefaultUsers(db, rows)
@@ -178,9 +182,11 @@ When `emitZod` is enabled, the same options object also controls validation:
 await ingestDefaultUsers(db, rows, { validate: true })
 ```
 
-### Ingesting into tables with generated columns
+<a id="ingesting-into-tables-with-generated-columns"></a>
 
-Ingest helpers take `RowInsert[]` for these tables. ClickHouse drops `EPHEMERAL` values unless the `INSERT` names its columns, so for a table with `EPHEMERAL` columns the helper passes `columns` to `ingestor.insert`, and the generated `Ingestor` interface gains `columns?: string[]`. The `@chkit/clickhouse` executor sends it as the `INSERT` column list; a custom `Ingestor` must do the same (`@clickhouse/client` takes it as the `columns` option of `insert()`). The list comes from the schema, so apply pending migrations before ingesting.
+### Inserting rows into tables with generated columns
+
+Insert helpers take `RowInsert[]` for these tables. ClickHouse drops `EPHEMERAL` values unless the `INSERT` names its columns, so for a table with `EPHEMERAL` columns the helper passes `columns` to `ingestor.insert`, and the generated `Ingestor` interface gains `columns?: string[]`. The `@chkit/clickhouse` executor sends it as the `INSERT` column list; a custom `Ingestor` must do the same (`@clickhouse/client` takes it as the `columns` option of `insert()`). The list comes from the schema, so apply pending migrations before inserting rows.
 
 ## CI / check integration
 
@@ -241,3 +247,9 @@ When `runOnGenerate` is enabled (the default), the migration module is regenerat
 - Query-level type inference is not included.
 - Arbitrary SQL expression typing is not included.
 - Views/materialized views are opt-in (`includeViews`) and emitted conservatively (`{ [key: string]: unknown }`). Dictionaries are always included and typed from `attributes`, since their shape is structured rather than an arbitrary query.
+
+## Related pages
+
+- [`chkit codegen`](/cli/codegen/) — command flags and generated-artifact checks
+- [Schema DSL reference](/schema/dsl-reference/) — define the tables and dictionaries used for generation
+- [CI/CD integration](/guides/ci-cd/) — enforce fresh generated types during validation

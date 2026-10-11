@@ -1,9 +1,9 @@
 ---
-title: API Sync
-description: Read application APIs into ClickHouse with TypeScript streams and durable checkpoints.
+title: API sync model
+description: Understand the streams, pipelines, and checkpoints used by chkit Sync (beta).
 ---
 
-chkit API sync runs finite pulls from application APIs, loads rows into schema-managed ClickHouse tables, and records progress after writes succeed.
+[chkit Sync (beta)](/sync/) runs finite pulls from application APIs, loads rows into schema-managed ClickHouse tables, and records progress after writes succeed.
 
 ## How it fits together
 
@@ -13,7 +13,9 @@ Start with **API → reader → raw table → SQL view** when the final shape ma
 - A **pipeline** groups streams, tags, concurrency limits, and retry defaults. It has no durable state and does not order dependent streams.
 - A **run** executes a selection of streams once. Cron, CI, or another scheduler starts the next run.
 
-Use TypeScript and a direct `clickhouse` connection, including for ObsessionDB databases. The workbench executor does not support API sync. Create destination tables through schema migrations; ingestion creates its append-only checkpoint journal before writing data. [Overlapping runs](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) record independent histories and may replay acknowledged work.
+Use TypeScript and a direct `clickhouse` connection, including for ObsessionDB databases. The workbench executor does not support API sync. Create destination tables through [chkit Schema migrations](/tutorials/first-schema/); ingestion creates its append-only checkpoint journal before writing data. [Overlapping runs](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) record independent histories and may replay acknowledged work.
+
+Schema management defines the destination structure. chkit Sync adds readers and execution: a run does not generate or apply destination migrations, and it does not schedule the next run.
 
 ## Start
 
@@ -32,8 +34,9 @@ Use TypeScript and a direct `clickhouse` connection, including for ObsessionDB d
 - [Loading and batching](/api-sync/loading/): use the default loader and tune it when needed.
 - [Publish a registry](/api-sync/registry-authoring/): distribute provider source files as versioned templates.
 
-## Operate
+## Related pages
 
 - [Scheduling and recovery](/api-sync/operations/): tags, retries, budgets, backfills, and monitoring.
 - [Test a source](/api-sync/testing/): exercise checkpoints and recovery without a live database.
 - [Plugin reference](/plugins/ingest/): configuration and command summary.
+- [Sync CLI](/sync/cli/): discover templates, install providers, and operate streams.

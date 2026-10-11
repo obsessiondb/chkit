@@ -1,13 +1,13 @@
 ---
-title: Ingest Plugin
-description: Load application API data into ClickHouse with TypeScript readers and overlap-tolerant journal checkpoints.
+title: Sync plugin reference
+description: Configure chkit Sync (beta) with TypeScript readers and overlap-tolerant ClickHouse journal checkpoints.
 sidebar:
   order: 5
 ---
 
-Use `@chkit/plugin-ingest` to load application API data into tables defined in your chkit schema.
+`@chkit/plugin-ingest` implements [chkit Sync (beta)](/sync/), the optional TypeScript layer for loading application API data into tables defined with chkit Schema.
 
-Start with the [API sync quickstart](/api-sync/quickstart/) for a complete first sync. Read the [API sync guides](/api-sync/) for reader, storage, and checkpoint choices, or install the [authoring skill](/api-sync/agent-skill/) for a coding agent.
+Start with the [Sync quickstart](/api-sync/quickstart/) for a complete first sync. Read the [API sync model](/api-sync/) for stream and checkpoint concepts, or install the [authoring skill](/api-sync/agent-skill/) for a coding agent.
 
 ## Capabilities
 
@@ -17,7 +17,7 @@ Start with the [API sync quickstart](/api-sync/quickstart/) for a complete first
 - Retries source requests with backoff, `Retry-After`, and failure classification.
 - Selects streams by exact tags so any external scheduler (cron, CI, Kubernetes) can drive it.
 
-Create and change destination tables through schema migrations before running ingestion.
+Create and change destination tables through [chkit Schema migrations](/tutorials/first-schema/) before running ingestion. Schema management works independently; registering this plugin adds ingestion commands and stream validation to the project.
 
 ## Plugin setup
 

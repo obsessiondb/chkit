@@ -371,7 +371,7 @@ h1 {
 		margin-inline-end: auto;
 	}
 
-	/* Center the primary nav (Home, Documentation) in the header; search
+	/* Center the primary nav in the header; search
 	   and the controls sit on the right. */
 	header.header .chk-topnav {
 		position: absolute;
@@ -393,7 +393,7 @@ h1 {
 	gap: 0.5rem;
 }
 
-/* Primary header nav (Home, Documentation) — same mono uppercase face as
+/* Primary header nav — same mono uppercase face as
    the "What you will find here" label, with generous spacing. */
 .chk-topnav {
 	display: flex;
@@ -402,6 +402,11 @@ h1 {
 }
 
 .chk-topnav a {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+	padding-block: 0.5rem;
+	border-bottom: 2px solid transparent;
 	font-family: var(--sl-font-mono);
 	font-size: 0.6875rem;
 	letter-spacing: 0.08em;
@@ -413,6 +418,34 @@ h1 {
 
 .chk-topnav a:hover {
 	color: var(--accent);
+}
+
+.chk-topnav a[aria-current] {
+	color: var(--accent);
+	border-bottom-color: var(--accent);
+}
+
+.chk-nav-beta {
+	padding: 0.1em 0.35em;
+	border: 1px solid var(--accent-dim);
+	background: var(--accent-dim);
+	color: var(--accent);
+	font-size: 0.8em;
+	line-height: 1.2;
+}
+
+/* Keep both product links clear of the wordmark and header controls
+   on smaller desktop screens. */
+@media (min-width: 50em) and (max-width: 75em) {
+	.chk-topnav {
+		gap: 0.75rem;
+	}
+}
+
+@media (min-width: 50em) and (max-width: 65em) {
+	.chk-wordmark-badge {
+		display: none;
+	}
 }
 
 /* Hide the centered nav on mobile (below 50em), matching Starlight's
@@ -471,6 +504,9 @@ h1 {
 }
 
 .chk-navmenu-list a {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
 	padding: 0.7rem 0.95rem;
 	font-family: var(--sl-font-mono);
 	font-size: 0.6875rem;
@@ -489,6 +525,11 @@ h1 {
 .chk-navmenu-list a:hover {
 	color: var(--accent);
 	background: var(--surface-2);
+}
+
+.chk-navmenu-list a[aria-current] {
+	color: var(--accent);
+	background: var(--accent-dim);
 }
 
 @media (max-width: 50em) {
@@ -632,14 +673,29 @@ starlight-toc a[aria-current='true'] {
 }
 
 /* Offset the columns down to clear the fixed subheader (sidebar pages only). */
+:root:has(.chk-subheader) {
+	scroll-padding-top: calc(1.5rem + var(--sl-nav-height) + var(--sl-mobile-toc-height, 0px) + var(--chk-subheader-h));
+}
+
 [data-has-sidebar] .sidebar-pane {
 	inset-block-start: calc(var(--sl-nav-height) + var(--chk-subheader-h));
 }
 [data-has-sidebar] .main-frame {
 	padding-top: calc(var(--sl-nav-height) + var(--sl-mobile-toc-height, 0px) + var(--chk-subheader-h));
 }
-[data-has-sidebar] .right-sidebar {
-	padding-top: calc(var(--sl-nav-height) + var(--chk-subheader-h));
+@media (min-width: 72em) {
+	[data-has-sidebar] .right-sidebar {
+		padding-top: calc(var(--sl-nav-height) + var(--chk-subheader-h));
+	}
+}
+
+/* Keep mobile section navigation below the fixed breadcrumb bar. */
+mobile-starlight-toc nav {
+	top: calc(var(--sl-nav-height) + var(--chk-subheader-h) - 1px);
+}
+
+mobile-starlight-toc .dropdown {
+	max-height: calc(85vh - var(--sl-nav-height) - var(--sl-mobile-toc-height) - var(--chk-subheader-h));
 }
 
 @media (min-width: 50em) {
@@ -1105,6 +1161,36 @@ starlight-toc a[aria-current='true'] {
 	font-weight: 400;
 }
 
+/* Sync landing page: purpose first, followed by the app-to-ClickHouse visual. */
+.sync-landing-intro {
+	margin-block: 2rem;
+}
+
+.sync-landing-intro h2 {
+	margin: 0;
+	color: var(--ink);
+	font-size: clamp(1.8rem, 3vw, 2.5rem);
+	line-height: 1.15;
+	letter-spacing: -0.035em;
+}
+
+.sync-landing-intro p {
+	max-width: 65ch;
+	margin-block: 1rem 1.25rem;
+	color: var(--ink-2);
+	line-height: 1.7;
+}
+
+.sync-landing-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem;
+}
+
+.sync-landing-actions .sl-link-button {
+	margin: 0;
+}
+
 .sl-link-button {
 	border-radius: 0;
 }
@@ -1179,6 +1265,17 @@ button[data-open-modal] > kbd kbd {
    that the rule above force-shows, so the search trigger doesn't overlap the
    fixed mobile menu (hamburger) button on the right. */
 @media (max-width: 50em) {
+	button[data-open-modal] > kbd {
+		display: none;
+	}
+}
+
+@media (min-width: 50em) and (max-width: 75em) {
+	button[data-open-modal] {
+		width: auto;
+	}
+
+	button[data-open-modal] > span,
 	button[data-open-modal] > kbd {
 		display: none;
 	}
@@ -1696,6 +1793,11 @@ html {
 .home-next p { display: flex; justify-content: center; flex-wrap: wrap; gap: 1rem 2rem; }
 .home-next a { color: var(--accent); font-size: 0.9rem; text-decoration: none; }
 .home-next a:hover { text-decoration: underline; }
+
+.home-ingestion-beta { margin-top: 3rem; padding-block: 1.5rem; border-top: 1px solid var(--line-2); }
+.home-ingestion-beta h2 { margin: 0; color: var(--ink-2); font-size: 1rem; }
+.home-ingestion-beta p { max-width: 80ch; color: var(--ink-2); font-size: 0.85rem; line-height: 1.7; }
+.home-ingestion-beta a { color: var(--accent); }
 
 @media (max-width: 49.99rem) {
   .home-capabilities { grid-template-columns: 1fr; margin-bottom: 3rem; }

@@ -1,6 +1,6 @@
 ---
-title: Getting Started
-description: Set up chkit from an example or add it to an existing project.
+title: Getting Started with Schema Management
+description: Define a ClickHouse schema, review the generated migration SQL, and deploy the first change.
 sidebar:
   order: 0
   label: Overview
@@ -9,12 +9,12 @@ sidebar:
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 import CopyPromptButton from '../../../components/CopyPromptButton.astro';
 
-chkit manages ClickHouse schemas and migrations in TypeScript and Python, and ingests application APIs through TypeScript streams. Pick the path that matches what you're working on.
+chkit manages ClickHouse schemas and migrations in TypeScript and Python: define tables in code, generate SQL, review the migration, and apply it to the database.
 
-For API data, start with the [API sync quickstart](/api-sync/quickstart/) or [install the authoring skill](/api-sync/agent-skill/).
+Start with the first-schema tutorial to learn the workflow from an empty folder, or add chkit to an existing application.
 
-:::note[Working in Python?]
-Install [chkit-py](/python/overview/) with `pip install chkit-py`. Use the Python tabs in the schema and CLI reference pages.
+:::note[Python support is in alpha]
+Install [chkit-py](/python/overview/) with `pip install chkit-py`. Use the Python tabs in the schema and CLI reference pages. Its API and CLI behavior may change between releases.
 :::
 
 ## Let an agent set it up
@@ -23,13 +23,13 @@ Paste this prompt into your coding agent to install chkit, configure the project
 
 <CopyPromptButton prompt="Set up chkit (ClickHouse schema management) in this repo. First fetch https://chkit.obsessiondb.com/ai-agents.md and follow the instructions there: install the agent skill, scaffold the config, recommend any plugins this project needs, and walk me through the first migration. Don't apply anything to the database without confirming with me first." />
 
-For manual setup, start with an example or add chkit to an existing project.
+## Set up manually
 
 <CardGrid>
   <LinkCard
-    title="Start with an example"
-    href="/getting-started/with-an-example/"
-    description="Scaffold the hello example with create-chkit: two tables and one migration. ClickBench stays available for a full dataset load."
+    title="Build your first schema"
+    href="/tutorials/first-schema/"
+    description="Initialize a project, deploy a table, then add a column through a reviewed migration. TypeScript and Python examples."
   />
   <LinkCard
     title="Add to an existing project"
@@ -38,12 +38,16 @@ For manual setup, start with an example or add chkit to an existing project.
   />
 </CardGrid>
 
+Prefer a complete TypeScript starter? [Start with the schema example](/getting-started/with-an-example/) to scaffold two tables and their migration.
+
+Already have tables in ClickHouse? Use [schema introspection](/plugins/pull/) to import their definitions before planning changes. For typed application code, add [row model generation](/plugins/codegen/) after defining the schema.
+
 ## Prerequisites
 
-Both paths need the same baseline:
+Choose the runtime for the project's language and a database target:
 
-- Node.js 20+ or Bun 1.3.5+
-- A ClickHouse endpoint (`CLICKHOUSE_URL`, optionally `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`): ClickHouse 24.x or newer (see [compatibility](/guides/clickhouse-compatibility/)). The [example path](/getting-started/with-an-example/) can claim a free ObsessionDB dev instance from the scaffold prompt instead.
+- Node.js 20+ or Bun 1.3.5+ for TypeScript, or Python 3.11+ for Python
+- A ClickHouse 24.x or newer endpoint (see [compatibility](/guides/clickhouse-compatibility/)), or a free ObsessionDB dev instance claimed during setup. For a direct connection, set `CLICKHOUSE_URL` and any required `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` values.
 
 ## Where to next
 

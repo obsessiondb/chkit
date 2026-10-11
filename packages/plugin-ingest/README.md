@@ -1,6 +1,6 @@
 # @chkit/plugin-ingest
 
-Write TypeScript readers to load application API data into ClickHouse with [chkit](https://www.npmjs.com/package/chkit). Use an external scheduler for repeated runs.
+`@chkit/plugin-ingest` implements **chkit Sync (beta)**, the optional TypeScript layer for syncing business application data into ClickHouse. Define and migrate destination tables with [chkit](https://www.npmjs.com/package/chkit), then add readers to load them. Use an external scheduler for repeated runs.
 
 The executor records progress after writes succeed. Run-scoped journal identities keep overlapping executions independent. A retry resumes from a validated checkpoint and may reread rows.
 
@@ -32,7 +32,7 @@ chkit ingest repair --tag stream:helpdesk.tickets
 
 Overlapping valid runs need no repair. For damaged evidence, stop all ingestion writers and review the plan. `chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>` materializes a verified archive and replacement journal while preserving the original. Keep writers stopped, set `ingest({ journalTable: '<replacementTable>' })` to the returned table, then restart them. The command leaves activation to this explicit configuration change. Other streams' evidence is copied unchanged.
 
-Documentation: https://chkit.obsessiondb.com/api-sync/
+Documentation: [chkit Sync (beta)](https://chkit.obsessiondb.com/sync/)
 
 For raw storage, typed rows, and where to map fields, see [Destinations and transformations](https://chkit.obsessiondb.com/api-sync/destinations/).
 
