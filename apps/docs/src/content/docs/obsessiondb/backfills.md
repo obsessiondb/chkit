@@ -1,11 +1,11 @@
 ---
 title: Backfill Jobs
-description: Run backfills as managed ObsessionDB jobs — submit a plan, track it in the console, and let the backend execute the chunks server-side.
+description: Use the beta backfill plugin to submit managed ObsessionDB jobs and track their progress in the console.
 sidebar:
   order: 5
 ---
 
-The [backfill plugin](/plugins/backfill/) runs a backfill in one of two venues: locally against a direct ClickHouse connection, or as a **managed job** on ObsessionDB. This page covers the managed path — submitting a plan to the ObsessionDB job backend and tracking it from the console.
+The [backfill plugin (beta)](/plugins/backfill/) runs a backfill in one of two venues: locally against a direct ClickHouse connection, or as a **managed job** on ObsessionDB. This page covers the managed path — submitting a plan to the ObsessionDB job backend and tracking it from the console.
 
 The chunking algorithm is identical either way. `submit` builds the exact same plan `run` would, then hands the chunks to the backend instead of streaming them from your machine.
 
@@ -75,6 +75,6 @@ Each chunk renders the same idempotent `INSERT … SELECT` the local executor wo
 
 ## Related
 
-- [Backfill Plugin](/plugins/backfill/) — full command reference, planning options, and local execution.
+- [Backfill Plugin (beta)](/plugins/backfill/) — full command reference, planning options, and local execution.
 - [Services](/obsessiondb/services/) — select and override the ObsessionDB service jobs run against.
 - [Overview](/obsessiondb/overview/) — install and register the ObsessionDB plugin.

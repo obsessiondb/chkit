@@ -1,13 +1,15 @@
 ---
-title: API sync quickstart
-description: Read a public API into a raw ClickHouse table and query it through a SQL view.
+title: Sync quickstart
+description: Install chkit Sync (beta), load a public API into ClickHouse, and query it through a SQL view.
 ---
 
-Ingest the small [JSONPlaceholder posts dataset](https://jsonplaceholder.typicode.com/guide/) into ClickHouse, then query typed fields through a view.
+Use [chkit Sync (beta)](/sync/) to load the small [JSONPlaceholder posts dataset](https://jsonplaceholder.typicode.com/guide/) into ClickHouse, then query typed fields through a view.
 
 ## Prerequisites
 
 Use a TypeScript project, Bun, a direct ClickHouse connection, and a chkit release that includes `@chkit/plugin-ingest`. This example uses native JSON; use ClickHouse 25.3+ for production support of that type. See [compatibility](/guides/clickhouse-compatibility/).
+
+Destination tables use chkit Schema's generate, review, and migrate workflow. Read the [first schema tutorial](/tutorials/first-schema/) for an introduction; this quickstart includes the destination definitions and migration commands needed for the example.
 
 Grant CREATE, SELECT, and INSERT permissions for the journal and destination tables. ChKit records independent run histories entirely in ClickHouse; see [overlapping runs and checkpoint recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
 
@@ -83,7 +85,7 @@ export const demo = definePipeline({ id: 'demo', streams: [postStream] })
 ```sh
 bunx chkit ingest list
 bunx chkit generate --name add-posts-ingestion
-bunx chkit migrate
+bunx chkit migrate --json
 ```
 
 Review the generated migration, then apply it to the intended development database:

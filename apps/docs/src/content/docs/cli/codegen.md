@@ -1,11 +1,11 @@
 ---
 title: "chkit codegen"
-description: "Generate typed row models (TypeScript types or Pydantic models), plus TypeScript-only ingestion functions and runtime migration modules from schema definitions."
+description: "Generate typed row models (TypeScript types or Pydantic models), plus TypeScript-only insert helpers and runtime migration modules from schema definitions."
 sidebar:
   order: 9
 ---
 
-Shortcut for `chkit plugin codegen codegen`. Generates TypeScript row types, optional Zod schemas (in Python: Pydantic models), ingestion functions, and runtime migration modules from your schema definitions.
+Shortcut for `chkit plugin codegen codegen`. Generates TypeScript row types, optional Zod schemas (in Python: Pydantic models), typed insert helpers, and runtime migration modules from schema definitions.
 
 ## Synopsis
 
@@ -21,9 +21,9 @@ chkit codegen [flags]
 | `--out-file <path>` | string | — | Override output file path |
 | `--emit-zod` | boolean | — | Enable Zod validator generation |
 | `--no-emit-zod` | boolean | — | Disable Zod validator generation |
-| `--emit-ingest` | boolean | — | Enable ingestion function generation |
-| `--no-emit-ingest` | boolean | — | Disable ingestion function generation |
-| `--ingest-out-file <path>` | string | — | Override ingestion output file path |
+| `--emit-ingest` | boolean | — | Enable typed insert helper generation |
+| `--no-emit-ingest` | boolean | — | Disable typed insert helper generation |
+| `--ingest-out-file <path>` | string | — | Override the generated insert helper file path |
 | `--emit-migrations` | boolean | — | Enable runtime migration module generation |
 | `--no-emit-migrations` | boolean | — | Disable runtime migration module generation |
 | `--migrations-out-file <path>` | string | — | Override migrations output file path |
@@ -39,7 +39,7 @@ This command delegates to the codegen plugin's `codegen` command. The codegen pl
 If the codegen plugin is not configured, the command fails with:
 _"Codegen plugin is not configured. Add a plugin with manifest.name "codegen" to config.plugins."_
 
-Generated ingest helpers gzip-compress request bodies by default. Pass `{ compressed: false }` as the third argument to opt out for a specific call.
+Generated insert helpers, named `ingest<TableName>`, pass typed rows to the supplied `Ingestor.insert` implementation. Request-body compression is enabled by default. Pass `{ compressed: false }` as the third argument to opt out for a specific call.
 
 ### Check mode
 
@@ -47,8 +47,8 @@ With `--check`, the command validates that generated artifacts are current witho
 
 - `codegen_missing_output` — types file missing
 - `codegen_stale_output` — types content has drifted
-- `codegen_missing_ingest_output` — ingest file missing (when `emitIngest` is enabled)
-- `codegen_stale_ingest_output` — ingest content has drifted
+- `codegen_missing_ingest_output` — generated insert helper file missing (when `emitIngest` is enabled)
+- `codegen_stale_ingest_output` — generated insert helper content has drifted
 - `codegen_missing_migrations_output` — migrations file missing (when `emitMigrations` is enabled)
 - `codegen_stale_migrations_output` — migrations content has drifted
 

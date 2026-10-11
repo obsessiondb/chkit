@@ -10,8 +10,6 @@ chkit lets you define ClickHouse schemas in TypeScript, generate migration SQL, 
 
 Docs: https://chkit.obsessiondb.com
 
-For application API source authoring with `@chkit/plugin-ingest`, use the separate `chkit-ingestion` skill (`npx skills add obsessiondb/chkit --skill chkit-ingestion`) and the [API sync guides](https://chkit.obsessiondb.com/api-sync.md). Its streams and checkpoints are separate from plugin-codegen's generated insert helpers.
-
 ## Configuration
 
 Use `clickhouse.config.ts` at the TypeScript project root, or pass a custom path with `--config`:
@@ -158,7 +156,7 @@ Diffs schema definitions against the last snapshot. Each operation gets a risk l
 ### migrate: Apply migrations
 
 ```sh
-chkit migrate                  # Preview pending
+chkit migrate --json           # Preview pending without applying
 chkit migrate --apply          # Apply all pending
 chkit migrate --apply --allow-destructive   # Allow danger operations
 chkit migrate --apply --table analytics.events
@@ -168,7 +166,7 @@ chkit migrate --abandon <file> --apply      # Reset a failed migration so the ne
 
 Verifies checksums before applying. Destructive operations require explicit `--allow-destructive` in CI.
 
-A migration that fails part-way stays in progress, and `--apply` resumes it, skipping completed statements. With chkit newer than 0.2.0-beta.8, after an edit to its file `--apply` runs it from statement 1 if no statement is recorded as completed; otherwise use `--retry` or `--abandon`, which preview without `--apply`. Never edit the `_chkit_migrations` journal by hand. These versions also refuse to apply pending files without executable statements, such as an unfilled `generate --empty` stub.
+A migration that fails part-way stays in progress, and `--apply` resumes it, skipping completed statements. With chkit newer than 0.2.0-beta.8, after an edit to its file `--apply` runs it from statement 1 if no statement is recorded as completed; otherwise use `--retry` or `--abandon`, which preview with `--json` and without `--apply`. Never edit the `_chkit_migrations` journal by hand. These versions also refuse to apply pending files without executable statements, such as an unfilled `generate --empty` stub.
 
 ### status: Migration state
 
@@ -314,7 +312,7 @@ curl -s -H "Accept: text/markdown" <url>
 |------|-----|----------|
 | Schema DSL Reference | `https://chkit.obsessiondb.com/schema/dsl-reference/` | Full field specs, column types, validation rules |
 | Configuration | `https://chkit.obsessiondb.com/configuration/overview/` | All config options and defaults |
-| Codegen Plugin | `https://chkit.obsessiondb.com/plugins/codegen/` | TypeScript types, Zod schemas, ingest functions |
+| Codegen Plugin | `https://chkit.obsessiondb.com/plugins/codegen/` | TypeScript types, Zod schemas, typed insert helpers |
 | Pull Plugin | `https://chkit.obsessiondb.com/plugins/pull/` | Introspecting live ClickHouse into schema files |
 | Backfill Plugin | `https://chkit.obsessiondb.com/plugins/backfill/` | Time-windowed data backfill with checkpoints |
 | CI/CD Integration | `https://chkit.obsessiondb.com/guides/ci-cd/` | Pipeline setup, check commands, deployment |

@@ -1,9 +1,11 @@
 ---
 title: Integrating ClickHouse with Google Meet
-description: Install six independent raw Google Meet streams with recent discovery and coarse page replay.
+description: Load six independent Google Meet resources into ClickHouse with chkit Sync (beta).
 ---
 
 The Google Meet registry item copies raw resource readers with a 24-hour lookback and independently journaled discovery-page checkpoints into a chkit project.
+
+This integration is part of [chkit Sync (beta)](/sync/), the optional TypeScript ingestion layer built on chkit Schema.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -79,4 +81,4 @@ Fixtures cover independent resources, coarse replay/resume, lost sink acknowledg
 
 - [App registry](/integrations/)
 - [Ingestion plugin](/plugins/ingest/)
-- [Ingestion CLI](/cli/ingest/)
+- [Sync CLI](/cli/ingest/)

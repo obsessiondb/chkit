@@ -1,13 +1,13 @@
 ---
-title: Plugins Overview
-description: How chkit plugins work and which official plugins are available.
+title: Schema Plugins
+description: Extend schema management with row model generation, live schema imports, SQL backfills, and database connections.
 sidebar:
   order: 1
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Add plugins for code generation, schema imports, API sync, or SQL backfills. Install TypeScript plugins as npm packages. Python plugins ship inside `chkit-py`; API sync requires TypeScript. Register plugins in your config:
+Extend the schema workflow with row model generation, imports from a live database, and SQL backfills. Install TypeScript plugins as npm packages; plugins for the alpha Python implementation ship inside `chkit-py`. The backfill plugin is in beta. Register plugins in the schema configuration:
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -55,11 +55,16 @@ Follow the plugin reference to configure a published plugin. Use the lifecycle h
 
 You can author your own plugins; the existing official plugins are the reference. See [Contributing](https://github.com/obsessiondb/chkit/blob/main/CONTRIBUTING.md#plugins) for the entry point.
 
-## Official plugins
+## Schema workflow plugins
 
 For `@chkit/plugin-obsessiondb` (Python: `chkit_plugin_obsessiondb`), see the [ObsessionDB section](/obsessiondb/overview/).
 
 - [`@chkit/plugin-codegen`](/plugins/codegen/): TypeScript row types and optional Zod schemas (Python: Pydantic models), generated from your schema files.
 - [`@chkit/plugin-pull`](/plugins/pull/): introspect a live ClickHouse database into local schema files. Useful for adopting chkit on an existing database. Built into the Python CLI as `chkit pull`.
-- [`@chkit/plugin-backfill`](/plugins/backfill/): time-windowed data backfill with checkpoints, for materialized views and historical data loads.
-- [`@chkit/plugin-ingest`](/api-sync/): API sync with an external scheduler with journaled checkpoints (TypeScript only). The dedicated guides cover source readers, storage, checkpoints, loading, and an [installable skill](/api-sync/agent-skill/).
+- [`@chkit/plugin-backfill` (beta)](/plugins/backfill/): time-windowed data backfill with checkpoints, for materialized views and historical data loads.
+
+## Related pages
+
+- [Configuration](/configuration/overview/) — register plugins alongside schema and connection settings
+- [`chkit plugin`](/cli/plugin/) — inspect and run configured plugin commands
+- [Migration workflow](/guides/migration-workflow/) — generate, review, and deploy schema changes

@@ -1,11 +1,13 @@
 ---
 title: "chkit registry"
-description: "Browse registry apps, inspect sync resources and integration guides, and build versioned provider templates."
+description: "Browse, inspect, and build versioned provider templates for chkit Sync (beta)."
 sidebar:
   order: 13
 ---
 
 Discovers provider templates and builds source catalogs into static, installable JSON artifacts.
+
+This command belongs to [chkit Sync (beta)](/sync/). See the [Sync CLI overview](/sync/cli/) for the relationship between registry browsing, installation, and stream execution.
 
 ## Synopsis
 

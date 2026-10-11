@@ -1,0 +1,59 @@
+---
+title: chkit Sync (beta)
+description: Sync data from business apps into ClickHouse with editable TypeScript integrations and checkpointed API pulls.
+---
+
+chkit Sync is a beta toolkit for syncing business app data into ClickHouse for analytics, reporting, and queries across apps.
+
+import { LinkButton } from '@astrojs/starlight/components';
+import SyncFlow from '../../../components/SyncFlow.astro';
+
+<div className="sync-landing-intro not-content">
+  <h2>Sync business app data<br />into ClickHouse.</h2>
+  <p>Bring CRM records, conversations, meetings, outreach, and issue data into tables you can query together with SQL. Install an integration, configure credentials, and run a sync from your own project.</p>
+  <div className="sync-landing-actions">
+    <LinkButton href="/integrations/" icon="right-arrow">Choose an integration</LinkButton>
+    <LinkButton href="/api-sync/quickstart/" variant="secondary">Run your first sync</LinkButton>
+  </div>
+</div>
+
+<SyncFlow />
+
+## Apps you can sync
+
+Start with [Attio](/integrations/attio/), [Slack](/integrations/slack/), [Circleback](/integrations/circleback/), [GitHub](/integrations/github/), [Google Calendar](/integrations/google-calendar/), [Google Meet](/integrations/google-meet/), [lemlist](/integrations/lemlist/), or [Linear](/integrations/linear/). Each guide lists the records it syncs, required permissions, and its coverage limits.
+
+The integrations copy editable TypeScript schemas, API readers, and pipelines into the project. Change the source to select records, shape destination tables, or add another API.
+
+## How it works
+
+1. **Install an integration.** Use `chkit add` to copy a provider template into the project, then configure the app credentials and ClickHouse connection.
+2. **Prepare the tables.** [chkit Schema](/getting-started/) defines destination tables and generates reviewable migrations. Apply them before the first sync.
+3. **Run and repeat.** `chkit ingest` pulls API records, writes them to ClickHouse, and saves checkpoints after successful writes. Schedule recurring runs through cron, CI, or an existing scheduler.
+
+Sync uses the `@chkit/plugin-ingest` package and the `chkit ingest` command.
+
+Each run is a finite API pull. Checkpoints support incremental syncs and recovery; destination keys and versioning handle replayed rows. Record coverage and deletion behavior vary by integration.
+
+## Get started
+
+| Goal | Start here |
+|---|---|
+| Sync a business app | [Apps & integrations](/integrations/) and [provider templates](/api-sync/templates/) |
+| Run a first sync | [Sync quickstart](/api-sync/quickstart/) with a small public API |
+| Build a custom API source | [Readers and pagination](/api-sync/readers/) |
+| Understand streams and checkpoints | [API sync model](/api-sync/) |
+
+## Operate your syncs
+
+Use [destinations and transformations](/api-sync/destinations/) to shape tables and [incremental syncs](/api-sync/incremental-syncs/) to track source progress. [Loading and batching](/api-sync/loading/) covers writes; [testing a source](/api-sync/testing/) covers checkpoint behavior with fixtures.
+
+[Scheduling and recovery](/api-sync/operations/) covers stream selection, execution budgets, retries, historical syncs, and journal diagnostics. chkit executes each run once; the scheduler determines when the next run starts.
+
+## Next
+
+- [Apps & integrations](/integrations/): choose an app and follow its setup guide.
+- [Sync quickstart](/api-sync/quickstart/): install the beta packages and run a first source.
+- [Sync CLI](/sync/cli/): template and stream commands.
+- [Sync plugin reference](/plugins/ingest/): TypeScript configuration and APIs.
+- [Publish a registry](/api-sync/registry-authoring/): distribute custom provider templates.

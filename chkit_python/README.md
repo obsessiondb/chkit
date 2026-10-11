@@ -1,11 +1,12 @@
 # chkit-py
 
-A Python port of [chkit](https://chkit.obsessiondb.com) — ClickHouse schema
-management and migration toolkit, written in strict, imperative Python.
+The alpha Python implementation of [chkit](https://chkit.obsessiondb.com) — a
+ClickHouse schema management and migration toolkit, written in strict,
+imperative Python. Its API and CLI behavior may change between releases.
 
 ## Install
 
-```bash
+```sh
 pip install chkit-py
 chkit --help
 ```
@@ -35,7 +36,7 @@ src/chkit/
 
 In a fresh project:
 
-```bash
+```sh
 pip install chkit-py
 chkit init                           # scaffold clickhouse.config.py + example schema
 chkit generate --name init           # diff schema vs snapshot -> writes migrations/*.sql
@@ -83,7 +84,7 @@ implementations can share a database without divergence.
   generator, including dictionary attribute models),
   `chkit_plugin_obsessiondb` (auth, service management, remote
   executor, backfill routing, `Shared*`-engine rewrites),
-  `chkit_plugin_backfill` (full chunking + execution engine: smart
+  `chkit_plugin_backfill` (beta backfill engine: smart
   size-aware chunk planning, async submit/poll execution loop with
   checkpoint + resume, mv_replay detection, and the managed-job
   `submit` path via ObsessionDB).
@@ -106,7 +107,7 @@ port choice, known limitation, and won't-port item.
 
 ## Development
 
-```bash
+```sh
 git clone https://github.com/obsessiondb/chkit
 cd chkit_python
 python -m venv .venv

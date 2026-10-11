@@ -5,19 +5,33 @@
  * configured site title) in the Goldman display face. Styling — font and
  * neutral (non-accent) colour — lives in custom.css (.chk-wordmark).
  */
-const { siteTitleHref, entry } = Astro.locals.starlightRoute;
+import { DOCS_PRODUCTS, getDocsProduct } from '../data/docs-products';
+
+const { siteTitleHref, entry, id } = Astro.locals.starlightRoute;
 const isSplash = entry.data.template === 'splash';
+const product = getDocsProduct(id);
+const currentPath = Astro.url.pathname.replace(/\/+$/, '') || '/';
+const isBlog = currentPath === '/blog' || currentPath.startsWith('/blog/');
+const activeSection = currentPath === '/' ? 'home' : isBlog ? 'blog' : product;
+const navItems = [
+	{ key: 'home', label: 'Home', href: '/' },
+	{ key: 'schema', label: 'Schema Docs', href: DOCS_PRODUCTS.schema.href },
+	{ key: 'ingestion', label: 'Sync Docs', href: DOCS_PRODUCTS.ingestion.href },
+	{ key: 'blog', label: 'Blog', href: '/blog/' },
+];
 ---
 
 <a href={siteTitleHref} class="site-title sl-flex chk-wordmark">
 	<span translate="no">ch-kit</span>
-	{!isSplash && <span class="chk-wordmark-badge">Docs</span>}
+	{!isSplash && <span class="chk-wordmark-badge">{product === 'ingestion' ? 'Sync · beta' : 'Schema'}</span>}
 </a>
 
 <nav class="chk-topnav" aria-label="Primary">
-	<a href="/">Home</a>
-	<a href="/getting-started/">Documentation</a>
-	<a href="/blog/">Blog</a>
+	{navItems.map(({ key, label, href }) => (
+		<a href={href} aria-current={key === activeSection ? 'true' : undefined}>
+			{label}{key === 'ingestion' && <span class="chk-nav-beta">beta</span>}
+		</a>
+	))}
 </nav>
 
 {
@@ -32,9 +46,11 @@ const isSplash = entry.data.template === 'splash';
 				</svg>
 			</summary>
 			<nav class="chk-navmenu-list" aria-label="Primary">
-				<a href="/">Home</a>
-				<a href="/getting-started/">Documentation</a>
-				<a href="/blog/">Blog</a>
+				{navItems.map(({ key, label, href }) => (
+					<a href={href} aria-current={key === activeSection ? 'true' : undefined}>
+						{label}{key === 'ingestion' && <span class="chk-nav-beta">beta</span>}
+					</a>
+				))}
 			</nav>
 		</details>
 	)

@@ -1,6 +1,6 @@
 ---
-title: CLI Overview
-description: Command surface of the chkit CLI.
+title: Schema CLI Overview
+description: Commands for ClickHouse schema definitions, migrations, introspection, and drift checks.
 sidebar:
   order: 1
 ---
@@ -8,15 +8,13 @@ sidebar:
 import { Image } from 'astro:assets';
 import commandConnections from '../../../assets/command-connections.png';
 
-Use the `chkit` CLI to define ClickHouse schemas in TypeScript or Python, review migrations, and check for drift. Add `@chkit/plugin-ingest` to run TypeScript API readers against those tables.
+Use the `chkit` CLI to define ClickHouse schemas in TypeScript or Python, generate and review migration SQL, deploy changes, and check for drift.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | [`chkit init`](/cli/init/) | Scaffold a new project with config and example schema |
-| [`chkit add`](/cli/add/) | Copy a provider template and wire its schema and ingestion exports into a TypeScript project |
-| [`chkit registry`](/cli/registry/) | Browse apps and integration guides, inspect sync coverage, or build source templates |
 | [`chkit generate`](/cli/generate/) | Diff schema definitions against the last snapshot and produce migration SQL |
 | [`chkit migrate`](/cli/migrate/) | Apply pending migration files to ClickHouse |
 | [`chkit status`](/cli/status/) | Show migration status (total, applied, pending, checksum mismatches) |
@@ -27,20 +25,6 @@ Use the `chkit` CLI to define ClickHouse schemas in TypeScript or Python, review
 | [`chkit pull`](/cli/pull/) | Introspect live ClickHouse and generate a schema file |
 | [`chkit codegen`](/cli/codegen/) | Generate typed row models from schema definitions |
 | [`chkit plugin`](/cli/plugin/) | List or run plugin commands |
-| [`chkit ingest`](/cli/ingest/) | Run, list, or inspect API sync streams (`@chkit/plugin-ingest`, TypeScript only) |
-
-## Install an app integration
-
-Browse the [app registry](/integrations/) for supported integrations and their complete sync guides, or discover the same apps in the terminal:
-
-```sh
-bunx chkit registry list
-bunx chkit registry inspect attio
-bunx chkit add attio --dry-run
-bunx chkit add attio
-```
-
-These commands prepare editable source and configuration without a ClickHouse connection. Follow the app's guide to configure credentials, review and apply migrations, and run the first sync. `registry list --json` includes resource coverage and guide links for automation.
 
 ## Connection requirements
 
@@ -54,12 +38,13 @@ Generate migrations from local files without a connection or credentials. Config
 
 ## Typical workflow
 
-```
-chkit init          # scaffold config + example schema
-chkit generate      # diff schema → produce migration SQL + snapshot
-chkit migrate       # apply pending migrations to ClickHouse
-chkit status        # verify migration state
-chkit check         # CI gate: pending, checksums, drift, plugins
+```sh
+chkit init                   # scaffold config + example schema
+chkit generate --name init   # produce migration SQL + snapshot
+chkit migrate --json         # inspect the pending plan without applying
+chkit migrate --apply        # apply reviewed migrations to ClickHouse
+chkit status                 # verify migration state
+chkit check                  # CI gate: pending, checksums, drift, plugins
 ```
 
 ## Global flags
@@ -97,3 +82,10 @@ Read debug logs from stderr and `--json` output from stdout:
 ```sh
 CHKIT_DEBUG=1 chkit migrate --apply
 ```
+
+## Related pages
+
+- [First-schema tutorial](/tutorials/first-schema/) — complete the schema workflow from an empty folder
+- [Migration workflow](/guides/migration-workflow/) — understand snapshots, SQL files, and the migration journal
+- [Configuration](/configuration/overview/) — select schema files and a database connection
+- [Schema plugins](/plugins/overview/) — import live schemas and generate row models

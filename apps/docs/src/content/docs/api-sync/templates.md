@@ -1,9 +1,9 @@
 ---
 title: Provider templates
-description: Copy provider schemas and ingestion readers into a TypeScript project with one command.
+description: Install editable provider schemas and readers for chkit Sync (beta) with one command.
 ---
 
-Provider templates install editable TypeScript source for an API's ClickHouse schema, readers, and ingestion pipeline.
+Provider templates install editable TypeScript source for an API's ClickHouse schema, readers, and [chkit Sync (beta)](/sync/) pipeline.
 
 Browse the [app registry and integration list](/integrations/) for available providers, logos, and a dedicated guide to each app's records and sync behavior.
 
@@ -55,7 +55,7 @@ Installation prepares source files and project configuration. Set the provider c
 ```sh
 bunx chkit ingest list
 bunx chkit generate --name add-attio
-bunx chkit migrate
+bunx chkit migrate --json
 ```
 
 Review the migration SQL before applying it. For the Attio template, run:

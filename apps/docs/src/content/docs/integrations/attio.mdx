@@ -1,12 +1,14 @@
 ---
 title: Integrating ClickHouse with Attio
-description: Sync Attio CRM records, custom objects, lists, notes, tasks, and workspace members into ClickHouse with editable readers and SQL views.
+description: Sync Attio CRM records, custom objects, lists, notes, tasks, and members into ClickHouse with chkit Sync (beta).
 sidebar:
   label: Attio
   order: 2
 ---
 
 Sync Attio into ClickHouse to query CRM records, relationships, list membership, notes, and tasks alongside product or business data.
+
+This integration is part of [chkit Sync (beta)](/sync/), the optional TypeScript ingestion layer built on chkit Schema.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -129,7 +131,7 @@ Keep `sourceId` stable after ingestion starts. For a second workspace, use a dis
 bunx chkit check
 bunx chkit ingest list --tag provider:attio
 bunx chkit generate --name add-attio
-bunx chkit migrate
+bunx chkit migrate --json
 ```
 
 Review the generated SQL, then apply it and run ingestion:

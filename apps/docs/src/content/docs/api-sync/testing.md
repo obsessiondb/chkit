@@ -1,6 +1,6 @@
 ---
 title: Test a source
-description: Verify source selection, checkpoint safety, and replay using in-memory ingestion adapters.
+description: Verify chkit Sync (beta) source selection, checkpoint safety, and replay with in-memory adapters.
 ---
 
 Use fixture responses and the in-memory adapters to test source behavior before connecting the reader to a live destination.

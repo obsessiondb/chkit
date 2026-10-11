@@ -1,18 +1,18 @@
 ---
-title: Apps & integrations
-description: Browse the chkit app registry for ClickHouse integrations, synced records, setup guides, and editable API sync templates.
+title: Sync integrations
+description: Browse editable API integrations for chkit Sync (beta), including synced records, setup guides, and limitations.
 sidebar:
   label: Integration list
   order: 1
 ---
 
-The chkit app registry provides installable ClickHouse integrations with editable schemas, API readers, and sync pipelines.
+The [chkit Sync (beta)](/sync/) registry provides installable ClickHouse integrations with editable schemas, API readers, and sync pipelines.
 
 import RegistryApps from '../../../components/RegistryApps.astro';
 
 ## Available integrations
 
-Choose an app to see its setup guide, every resource it syncs, required permissions, and how data reaches ClickHouse. These integrations copy TypeScript source into the project, where the readers and schemas remain editable.
+Choose an app to see its setup guide, every resource it syncs, required permissions, and how data reaches ClickHouse. These beta integrations copy TypeScript source into the project, where the readers and schemas remain editable. Coverage and deletion behavior vary by provider.
 
 <RegistryApps />
 
@@ -48,4 +48,5 @@ Build readers for an API using the [source authoring guide](/api-sync/readers/),
 - [Provider templates](/api-sync/templates/): installation, source ownership, and updates.
 - [`chkit registry`](/cli/registry/): list, inspect, and build commands.
 - [`chkit add`](/cli/add/): installation flags and conflict handling.
-- [API sync](/api-sync/): build and operate custom sources.
+- [chkit Sync (beta)](/sync/): product scope and starting points.
+- [API sync model](/api-sync/): streams, pipelines, and checkpoints.

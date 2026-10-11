@@ -1,9 +1,9 @@
 ---
-title: API sync authoring skill
-description: Install a concise agent skill for implementing new chkit API sync sources.
+title: Sync authoring skill
+description: Install an agent skill for implementing new sources with chkit Sync (beta).
 ---
 
-Install `chkit-ingestion` to give your coding agent source-authoring instructions and links to the relevant guides.
+Install `chkit-ingestion` to give a coding agent source-authoring instructions and relevant guides for [chkit Sync (beta)](/sync/).
 
 ## Install
 

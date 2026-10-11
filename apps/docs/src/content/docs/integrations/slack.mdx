@@ -1,12 +1,14 @@
 ---
 title: Integrating ClickHouse with Slack
-description: Sync Slack conversations, users, message history, and thread replies into raw ClickHouse tables with editable API readers.
+description: Sync Slack conversations, users, message history, and thread replies into ClickHouse with chkit Sync (beta).
 sidebar:
   label: Slack
   order: 3
 ---
 
 Sync Slack into ClickHouse to query conversation metadata, users, messages, and thread replies alongside product or business data.
+
+This integration is part of [chkit Sync (beta)](/sync/), the optional TypeScript ingestion layer built on chkit Schema.
 
 import RegistryReference from '../../../components/RegistryReference.astro';
 
@@ -136,7 +138,7 @@ Discovery includes archived conversations returned by Slack. Selecting private c
 bunx chkit check
 bunx chkit ingest list --tag provider:slack
 bunx chkit generate --name add-slack
-bunx chkit migrate
+bunx chkit migrate --json
 ```
 
 Review the generated SQL, apply it, and run ingestion:

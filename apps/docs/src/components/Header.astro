@@ -7,6 +7,7 @@
  * the columns are offset downward by --chk-subheader-h in custom.css.
  */
 import Default from '@astrojs/starlight/components/Header.astro';
+import { DOCS_PRODUCTS, getDocsProduct } from '../data/docs-products';
 
 const { sidebar, entry } = Astro.locals.starlightRoute;
 const title = entry.data.title;
@@ -30,11 +31,11 @@ function findGroupTrail(entries: SidebarItem[], trail: string[]): string[] | nul
 
 const groups = isSplash ? [] : findGroupTrail(sidebar as SidebarItem[], []) ?? [];
 
-// Root crumb: "Blog" on blog routes, "Docs" elsewhere.
 const path = Astro.url.pathname.replace(/\/$/, '');
 const isBlog = path === '/blog' || path.startsWith('/blog/');
-const rootLabel = isBlog ? 'Blog' : 'Docs';
-const rootHref = isBlog ? '/blog/' : '/';
+const product = DOCS_PRODUCTS[getDocsProduct(path)];
+const rootLabel = isBlog ? 'Blog' : product.label;
+const rootHref = isBlog ? '/blog/' : product.href;
 // Skip the root crumb on a section's own index so it doesn't read "Blog › Blog".
 const isRootIndex = groups.length === 0 && title === rootLabel;
 ---

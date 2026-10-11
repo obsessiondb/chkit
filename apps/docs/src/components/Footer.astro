@@ -7,8 +7,22 @@
  */
 import Default from '@astrojs/starlight/components/Footer.astro';
 import AgentationDev from './AgentationDev';
+import { getDocsProduct } from '../data/docs-products';
 
 const repo = 'https://github.com/obsessiondb/chkit';
+const isIngestion = getDocsProduct(Astro.locals.starlightRoute.id) === 'ingestion';
+const docLinks = isIngestion ? [
+	{ href: '/sync/', label: 'Sync overview' },
+	{ href: '/api-sync/quickstart/', label: 'Get started' },
+	{ href: '/integrations/', label: 'Apps & integrations' },
+	{ href: '/sync/cli/', label: 'CLI reference' },
+	{ href: '/api-sync/operations/', label: 'Scheduling & recovery' },
+] : [
+	{ href: '/getting-started/', label: 'Get started' },
+	{ href: '/cli/overview/', label: 'CLI reference' },
+	{ href: '/configuration/overview/', label: 'Configuration' },
+	{ href: '/schema/dsl-reference/', label: 'Schema reference' },
+];
 ---
 
 <Default><slot /></Default>
@@ -17,7 +31,7 @@ const repo = 'https://github.com/obsessiondb/chkit';
 	<div class="chk-site-footer-inner">
 		<div class="chk-footer-brand">
 			<a href="/" class="chk-wordmark chk-footer-wordmark"><span translate="no">ch-kit</span></a>
-			<p class="chk-footer-tagline">Manage ClickHouse schemas and sync API data.</p>
+			<p class="chk-footer-tagline">{isIngestion ? 'Sync business app data into ClickHouse. chkit Sync is in beta.' : 'Manage ClickHouse schemas in code.'}</p>
 			<div class="chk-footer-social">
 				<a href={repo} target="_blank" rel="noopener noreferrer" aria-label="GitHub">
 					<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -34,22 +48,18 @@ const repo = 'https://github.com/obsessiondb/chkit';
 
 		<div class="chk-footer-cols">
 			<div class="chk-footer-col">
-				<p class="chk-footer-col-title">Documentation</p>
+				<p class="chk-footer-col-title">{isIngestion ? 'Sync (beta)' : 'Schema Management'}</p>
 				<ul>
-					<li><a href="/getting-started/">Get started</a></li>
-					<li><a href="/cli/overview/">CLI reference</a></li>
-					<li><a href="/configuration/overview/">Configuration</a></li>
-					<li><a href="/schema/dsl-reference/">Schema</a></li>
-					<li><a href="/api-sync/">API Sync</a></li>
+					{docLinks.map(({ href, label }) => <li><a {href}>{label}</a></li>)}
 				</ul>
 			</div>
-			<div class="chk-footer-col">
-				<p class="chk-footer-col-title">Ports</p>
+			{!isIngestion && <div class="chk-footer-col">
+				<p class="chk-footer-col-title">Language support</p>
 				<ul>
 					<li><a href="https://npmx.dev/org/chkit" target="_blank" rel="noopener noreferrer">TypeScript</a></li>
-					<li><a href="https://pypi.org/project/chkit-py/" target="_blank" rel="noopener noreferrer">Python (chkit-py)</a></li>
+					<li><a href="https://pypi.org/project/chkit-py/" target="_blank" rel="noopener noreferrer">Python (alpha · chkit-py)</a></li>
 				</ul>
-			</div>
+			</div>}
 		</div>
 	</div>
 </footer>
