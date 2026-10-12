@@ -53,6 +53,10 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- `migrate` on multi-replica targets (#265): after each DDL statement it waits until
+  every replica of `clickhouse.cluster` (or `default`) shows the change, and journal
+  reads keep the newest row per migration across all replicas. Single-replica and
+  self-hosted targets keep the previous behavior.
 - Migrations create views, materialized views, dictionaries and tables whose column
   expressions call `dictGet` after the objects they read, and drop them in reverse.
 - SQL comments in view queries, `partition_by`, `ttl`, index expressions, projections,

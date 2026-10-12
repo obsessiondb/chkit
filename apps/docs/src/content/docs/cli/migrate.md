@@ -142,6 +142,15 @@ The journal is written as each statement runs, not batched. The table is created
 
 The table is a `ReplacingMergeTree` keyed by `name`: every change inserts a newer version of the row, and chkit reads it with `FINAL`, which returns the newest version. A `SELECT` without `FINAL` can show several rows per migration until background merges collapse them. `--abandon` writes a new version too, so it needs no privilege beyond the `INSERT` that every journal write uses.
 
+### Multi-replica targets
+
+On a service whose endpoint spreads requests over several replicas, such as a multi-replica ObsessionDB service, a read can land on a replica that has not applied the latest DDL or journal write yet. chkit counts the replicas of the cluster set in `clickhouse.cluster`, or of the `default` cluster when none is set, once per run. With more than one replica:
+
+- After each DDL statement, `migrate` waits until every replica shows the change (the new table, view, or column, or the dropped one) before it runs the next statement. An `ALTER` that ran on a replica that had not applied the previous one could otherwise write back the old schema.
+- The journal is read from every replica with `clusterAllReplicas`, keeping the newest version of each migration's row, so a lagging replica cannot make `migrate` replay a statement that already completed.
+
+When the cluster does not exist, has a single replica, or the user cannot query it, chkit reads the local replica as before.
+
 ### Table scoping
 
 The `--table` flag filters pending migrations to those containing operations targeting the matched tables. Migration SQL files are parsed for `-- operation:` comment markers to determine which tables they affect.

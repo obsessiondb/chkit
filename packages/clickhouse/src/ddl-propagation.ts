@@ -1,6 +1,7 @@
 import type { MigrationOperationType } from '@chkit/core'
 import pRetry from 'p-retry'
 import type { ClickHouseExecutor } from './index.js'
+import { allReplicas, resolveReplicaFanout, stringLiteral, type ReplicaFanout } from './replicas.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
 
@@ -23,49 +24,57 @@ const KEY_SUFFIXES: ReadonlyMap<string, string> = new Map<MigrationOperationType
   ['rename_dictionary', ':rename_dictionary'],
 ])
 
+/**
+ * Where a propagation wait looks. Pass the configured `clickhouse.cluster`;
+ * without one the `default` cluster is probed (ObsessionDB). On a target with
+ * several replicas the wait holds until every replica shows the change: the
+ * next statement may land on any of them, and an ALTER that runs on a replica
+ * that has not applied the previous one can write back its stale schema.
+ */
+export interface PropagationOptions {
+  cluster?: string
+}
+
 export async function waitForTable(
   executor: ClickHouseExecutor,
   database: string,
   tableName: string,
+  options?: PropagationOptions,
 ): Promise<void> {
-  await pRetry(async () => {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)}`,
-    )
-    if (rows.length === 0) {
-      throw new Error(`waitForTable: ${database}.${tableName} not yet visible`)
-    }
-  }, RETRY_OPTIONS)
+  await waitForSystemRows(executor, {
+    source: 'system.tables',
+    where: `database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)}`,
+    want: 'present',
+    label: `waitForTable: ${database}.${tableName} not yet visible`,
+  }, options)
 }
 
 export async function waitForView(
   executor: ClickHouseExecutor,
   database: string,
   viewName: string,
+  options?: PropagationOptions,
 ): Promise<void> {
-  await pRetry(async () => {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(viewName)} AND engine LIKE '%View%'`,
-    )
-    if (rows.length === 0) {
-      throw new Error(`waitForView: ${database}.${viewName} not yet visible`)
-    }
-  }, RETRY_OPTIONS)
+  await waitForSystemRows(executor, {
+    source: 'system.tables',
+    where: `database = ${stringLiteral(database)} AND name = ${stringLiteral(viewName)} AND engine LIKE '%View%'`,
+    want: 'present',
+    label: `waitForView: ${database}.${viewName} not yet visible`,
+  }, options)
 }
 
 export async function waitForDictionary(
   executor: ClickHouseExecutor,
   database: string,
   dictionaryName: string,
+  options?: PropagationOptions,
 ): Promise<void> {
-  await pRetry(async () => {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.dictionaries WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)}`,
-    )
-    if (rows.length === 0) {
-      throw new Error(`waitForDictionary: ${database}.${dictionaryName} not yet visible`)
-    }
-  }, RETRY_OPTIONS)
+  await waitForSystemRows(executor, {
+    source: 'system.dictionaries',
+    where: `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)}`,
+    want: 'present',
+    label: `waitForDictionary: ${database}.${dictionaryName} not yet visible`,
+  }, options)
 }
 
 export async function waitForColumn(
@@ -73,17 +82,29 @@ export async function waitForColumn(
   database: string,
   tableName: string,
   columnName: string,
+  options?: PropagationOptions,
 ): Promise<void> {
-  await pRetry(async () => {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name = ${stringLiteral(columnName)}`,
-    )
-    if (rows.length === 0) {
-      throw new Error(
-        `waitForColumn: ${database}.${tableName}.${columnName} not yet visible`,
-      )
-    }
-  }, RETRY_OPTIONS)
+  await waitForSystemRows(executor, {
+    source: 'system.columns',
+    where: columnWhere(database, tableName, columnName),
+    want: 'present',
+    label: `waitForColumn: ${database}.${tableName}.${columnName} not yet visible`,
+  }, options)
+}
+
+export async function waitForColumnAbsent(
+  executor: ClickHouseExecutor,
+  database: string,
+  tableName: string,
+  columnName: string,
+  options?: PropagationOptions,
+): Promise<void> {
+  await waitForSystemRows(executor, {
+    source: 'system.columns',
+    where: columnWhere(database, tableName, columnName),
+    want: 'absent',
+    label: `waitForColumnAbsent: ${database}.${tableName}.${columnName} still present`,
+  }, options)
 }
 
 /**
@@ -110,17 +131,14 @@ export async function waitForTableAbsent(
   executor: ClickHouseExecutor,
   database: string,
   tableName: string,
+  options?: PropagationOptions,
 ): Promise<void> {
-  await pRetry(async () => {
-    const rows = await executor.query<{ x: number }>(
-      `SELECT 1 AS x FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)}`,
-    )
-    if (rows.length > 0) {
-      throw new Error(
-        `waitForTableAbsent: ${database}.${tableName} still present`,
-      )
-    }
-  }, RETRY_OPTIONS)
+  await waitForSystemRows(executor, {
+    source: 'system.tables',
+    where: `database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)}`,
+    want: 'absent',
+    label: `waitForTableAbsent: ${database}.${tableName} still present`,
+  }, options)
 }
 
 /**
@@ -167,20 +185,21 @@ export async function waitForDDLPropagation(
   executor: ClickHouseExecutor,
   operationType: string,
   operationKey: string,
+  options?: PropagationOptions,
 ): Promise<void> {
   const parsed = parseOperationKey(operationType, operationKey)
   if (!parsed) return // database-level ops or unrecognized keys — no wait needed
 
   switch (operationType) {
     case 'create_table':
-      return waitForTable(executor, parsed.database, parsed.table)
+      return waitForTable(executor, parsed.database, parsed.table, options)
 
     case 'create_view':
     case 'create_materialized_view':
-      return waitForView(executor, parsed.database, parsed.table)
+      return waitForView(executor, parsed.database, parsed.table, options)
 
     case 'create_dictionary':
-      return waitForDictionary(executor, parsed.database, parsed.table)
+      return waitForDictionary(executor, parsed.database, parsed.table, options)
 
     case 'alter_table_add_column':
     case 'alter_table_modify_column':
@@ -190,9 +209,16 @@ export async function waitForDDLPropagation(
           parsed.database,
           parsed.table,
           parsed.column,
+          options,
         )
       }
       return
+
+    case 'alter_table_drop_column':
+      if (parsed.column) {
+        return waitForColumnAbsent(executor, parsed.database, parsed.table, parsed.column, options)
+      }
+      return waitForTable(executor, parsed.database, parsed.table, options)
 
     case 'drop_table':
     case 'drop_view':
@@ -202,18 +228,51 @@ export async function waitForDDLPropagation(
         executor,
         parsed.database,
         parsed.table,
+        options,
       )
 
     default:
       // alter_table_add_index, alter_table_modify_setting,
       // alter_materialized_view_modify_refresh, etc.
       // Wait for the table to exist as a basic sanity check.
-      return waitForTable(executor, parsed.database, parsed.table)
+      return waitForTable(executor, parsed.database, parsed.table, options)
   }
 }
 
-// Object names may contain quotes and backslashes (DDL backtick-quotes them),
-// so the names compared against system tables are escaped string literals.
-function stringLiteral(value: string): string {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+interface SystemRowsWait {
+  source: string
+  where: string
+  want: 'present' | 'absent'
+  label: string
+}
+
+async function waitForSystemRows(
+  executor: ClickHouseExecutor,
+  wait: SystemRowsWait,
+  options: PropagationOptions | undefined,
+): Promise<void> {
+  const fanout = await resolveReplicaFanout(executor, options?.cluster)
+  await pRetry(async () => {
+    if (!(await systemRowsMatch(executor, wait, fanout))) throw new Error(wait.label)
+  }, RETRY_OPTIONS)
+}
+
+async function systemRowsMatch(
+  executor: ClickHouseExecutor,
+  wait: SystemRowsWait,
+  fanout: ReplicaFanout | undefined,
+): Promise<boolean> {
+  if (!fanout) {
+    const rows = await executor.query<{ x: number }>(`SELECT 1 AS x FROM ${wait.source} WHERE ${wait.where}`)
+    return wait.want === 'present' ? rows.length > 0 : rows.length === 0
+  }
+  const rows = await executor.query<{ replicas: number | string }>(
+    `SELECT count(DISTINCT hostName()) AS replicas FROM ${allReplicas(fanout, wait.source)} WHERE ${wait.where}`,
+  )
+  const replicas = Number(rows[0]?.replicas ?? 0)
+  return wait.want === 'present' ? replicas >= fanout.replicas : replicas === 0
+}
+
+function columnWhere(database: string, tableName: string, columnName: string): string {
+  return `database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name = ${stringLiteral(columnName)}`
 }

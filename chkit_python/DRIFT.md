@@ -1710,3 +1710,13 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `poll_until` exist because `.env.test` has 2 replicas behind a load balancer
   where a session does not pin a replica. The MV-replay visibility helpers live
   inside that test file.
+
+### Multi-replica migrate (#265)
+- Same design as TS: `chkit.clickhouse.replicas.resolve_replica_fanout` probes
+  `clusterAllReplicas(<cluster>, system.one)` once per client (cached by
+  `id(client)`), DDL waits count the replicas that show the change, and the journal
+  reads `argMax(tuple(...), applied_at)` across replicas.
+- Python's finer-grained waits (indexes, projections, column absent) use the same
+  all-replica check; TS gained the column-absent wait for `DROP COLUMN` in this change.
+- Unit tests whose fake clients script every query use the `single_replica` fixture,
+  which pins the probe to a single replica.

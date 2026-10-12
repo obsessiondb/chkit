@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { waitForDDLPropagation } from './ddl-propagation.js'
 import { createLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from './e2e-testkit.js'
 import type { ClickHouseExecutor, ClickHouseSettings } from './index.js'
+import { allReplicas, resolveReplicaFanout } from './replicas.js'
 
 /**
  * `migrate` calls waitForDDLPropagation after every statement. On managed
@@ -22,7 +23,7 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
     const view = `${p}v`
     const materializedView = `${p}mv`
     const object = (name: string) => `${quoteIdent(db)}.${quoteIdent(name)}`
-    const pollingQueries = recordPollingQueries(executor)
+    const { pollingQueries, listed, listedAsView, columnListed } = await recordPollingQueries(executor)
 
     try {
       await executor.command(`CREATE TABLE ${object(source)} (id UInt64) ENGINE = MergeTree ORDER BY id`)
@@ -99,7 +100,7 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
     // Ends like a MODIFY REFRESH key, so only the key's last `:refresh` is cut.
     const materializedView = `${p}mv:refresh`
     const object = (name: string) => `${quoteIdent(db)}.${quoteIdent(name)}`
-    const pollingQueries = recordPollingQueries(executor)
+    const { pollingQueries, listed, listedAsView, columnListed } = await recordPollingQueries(executor)
 
     try {
       await executor.command(`CREATE TABLE ${object(table)} (id UInt64) ENGINE = MergeTree ORDER BY id`)
@@ -148,11 +149,11 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
 
 /**
  * Wraps the live executor so each call runs waitForDDLPropagation and returns
- * the distinct polling queries it sent.
+ * the distinct polling queries it sent, along with the queries it should send
+ * on this target: one replica reads the system table directly, several replicas
+ * count the replicas that show the change (#265).
  */
-function recordPollingQueries(
-  executor: ClickHouseExecutor
-): (operationType: string, operationKey: string) => Promise<string[]> {
+async function recordPollingQueries(executor: ClickHouseExecutor) {
   const queries: string[] = []
   const recording: ClickHouseExecutor = {
     ...executor,
@@ -161,22 +162,23 @@ function recordPollingQueries(
       return executor.query<T>(sql, settings)
     },
   }
-  return async (operationType, operationKey) => {
-    queries.length = 0
-    await waitForDDLPropagation(recording, operationType, operationKey)
-    return [...new Set(queries)]
+  const fanout = await resolveReplicaFanout(recording)
+  const polled = (source: string, where: string) =>
+    fanout
+      ? `SELECT count(DISTINCT hostName()) AS replicas FROM ${allReplicas(fanout, source)} WHERE ${where}`
+      : `SELECT 1 AS x FROM ${source} WHERE ${where}`
+  // The polling queries for names that need no escaping in a string literal.
+  const listed = (db: string, name: string) => polled('system.tables', `database = '${db}' AND name = '${name}'`)
+  return {
+    async pollingQueries(operationType: string, operationKey: string): Promise<string[]> {
+      queries.length = 0
+      await waitForDDLPropagation(recording, operationType, operationKey)
+      return [...new Set(queries)]
+    },
+    listed,
+    listedAsView: (db: string, name: string) =>
+      polled('system.tables', `database = '${db}' AND name = '${name}' AND engine LIKE '%View%'`),
+    columnListed: (db: string, table: string, column: string) =>
+      polled('system.columns', `database = '${db}' AND table = '${table}' AND name = '${column}'`),
   }
-}
-
-// The polling queries for names that need no escaping in a string literal.
-function listed(db: string, name: string): string {
-  return `SELECT 1 AS x FROM system.tables WHERE database = '${db}' AND name = '${name}'`
-}
-
-function listedAsView(db: string, name: string): string {
-  return `${listed(db, name)} AND engine LIKE '%View%'`
-}
-
-function columnListed(db: string, table: string, column: string): string {
-  return `SELECT 1 AS x FROM system.columns WHERE database = '${db}' AND table = '${table}' AND name = '${column}'`
 }

@@ -13,6 +13,8 @@ from __future__ import annotations
 import inspect
 from unittest.mock import MagicMock
 
+import pytest
+
 from chkit import (
     ColumnDefinition,
     MaterializedViewRefresh,
@@ -32,6 +34,8 @@ from chkit.clickhouse.ddl_propagation import (
 from chkit.core import canonicalize_definition, canonicalize_definitions
 from chkit.core.validate import validate_definitions
 from chkit_plugin_obsessiondb import service_claim as obsessiondb_service_claim
+
+pytestmark = pytest.mark.usefixtures("single_replica")
 
 # ---------- #R1: canonical primary_key fallback ----------
 
