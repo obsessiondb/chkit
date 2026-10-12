@@ -80,4 +80,33 @@ describe('waitForDDLPropagation across replicas', () => {
 
     expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(2)
   })
+
+  test('waits until every replica stores the same dictionary definition in the catalog', async () => {
+    const queries: string[] = []
+    let poll = 0
+    // A replace leaves the row in place. One replica still on the previous
+    // definition reports agreed = 0; the loader table is not consulted.
+    const visible = [
+      { replicas: 2, agreed: 0 },
+      { replicas: 2, agreed: 1 },
+    ]
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        queries.push(sql)
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        const row = visible[Math.min(poll, visible.length - 1)]
+        poll += 1
+        return [row] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+
+    await waitForDDLPropagation(db, 'create_dictionary', 'dictionary:app.users_dict')
+
+    const polls = queries.filter((sql) => sql.includes('system.tables'))
+    expect(polls).toHaveLength(2)
+    expect(polls[0]).toContain("clusterAllReplicas('default', system.tables)")
+    expect(polls[0]).toContain("engine = 'Dictionary'")
+    expect(polls[0]).toContain('create_table_query')
+    expect(polls[0]).not.toContain('system.dictionaries')
+  })
 })

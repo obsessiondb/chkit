@@ -16,6 +16,7 @@ from chkit.clickhouse.ddl_propagation import (
     MAX_ATTEMPTS,
     wait_for_column,
     wait_for_ddl_propagation,
+    wait_for_dictionary,
     wait_for_table,
     wait_for_table_absent,
     wait_for_view,
@@ -127,6 +128,15 @@ def test_wait_for_table_absent_raises_when_still_present() -> None:
 
 
 # ---------- wait_for_ddl_propagation dispatcher ----------
+
+
+def test_wait_for_dictionary_reads_the_catalog_not_the_loader() -> None:
+    client = _ScriptedClient([[{"x": 1}]])
+    wait_for_dictionary(client, "db", "users_dict")
+    assert "system.tables" in client.queries[0]
+    assert "engine = 'Dictionary'" in client.queries[0]
+    assert "name = 'users_dict'" in client.queries[0]
+    assert "system.dictionaries" not in client.queries[0]
 
 
 def test_dispatch_create_table_calls_wait_for_table() -> None:
