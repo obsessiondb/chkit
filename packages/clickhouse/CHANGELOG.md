@@ -1,5 +1,14 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- 28762f3: Fix equivalent nullable column types reporting drift or generating unnecessary migrations, preserve the final JSONEachRow query row when the response has no trailing newline, and stop successful `assert_backfill` guards from waiting for a nonexistent table (#274).
+- 17f9033: Make `migrate` safe on multi-replica targets such as multi-replica ObsessionDB services (#265). After each DDL statement it waits until every replica shows the change, not just the one that answered, so a following `ALTER` can no longer run on a lagging replica and lose the previous change. Journal reads take the newest row per migration across all replicas, so a lagging replica can no longer make `migrate` replay a completed statement. The replica count comes from `clusterAllReplicas` on `clickhouse.cluster` (or `default`); single-replica and self-hosted targets keep the previous behavior.
+- Updated dependencies [28762f3]
+  - @chkit/core@0.2.0-beta.12
+
 ## 0.2.0-beta.11
 
 ### Patch Changes
