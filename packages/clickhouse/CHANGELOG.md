@@ -1,5 +1,21 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.10
+
+### Patch Changes
+
+- cb56b91: Fix `chkit pull` leaving a key tuple wrapped (`orderBy: ["(\`w)x\`, id)"]`instead of`["\`w)x\`", "id"]`) when a key column has a quoted name containing a parenthesis. The pull plugin had its own paren-stripper that ignored quotes; it now uses the shared `stripWrappingParens`from`@chkit/core`.
+
+  The quote-aware SQL scanners (`splitTopLevelComma`, `stripWrappingParens`, the projection index normalizer, `findTopLevelSQLPattern`, and the create-table column-list finder) now share a single quote skipper, `findQuoteEnd`, so backslash escapes and doubled quotes are handled identically everywhere (#197). Previously `stripWrappingParens` and the projection index normalizer mis-read a string ending in an escaped backslash (`'a\\'`).
+
+- 76a0579: `chkit drift` no longer reports false drift when a schema expression is spelled differently from how ClickHouse stores it. ClickHouse reformats expressions on the way in — spacing argument separators and operators, adding precedence parentheses, and rewriting `INTERVAL 5 YEAR` to `toIntervalYear(5)` — so a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` written as `cityHash64(a,b)` was stored as `cityHash64(a, b)` and reported as permanent drift that no migration could fix (#195).
+
+  `drift` now normalizes expressions through ClickHouse's own formatter (`formatQuerySingleLine`) before comparing, in a single batched round-trip, so equivalent expressions match regardless of spelling. When the connected server can't format a fragment — an older server without the function, or an expression it can't parse — that fragment falls back to plain text comparison, so behavior is never worse than before. `@chkit/clickhouse` gains `canonicalizeSqlFragments` for this.
+
+- 3c546e8: `@chkit/clickhouse/e2e-testkit`: `getRequiredEnv` is now `getLiveEnv`. Without `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` it targets the local test stack (`http://localhost:8123`, the repository's `test/infra` Docker Compose stack) instead of throwing.
+- Updated dependencies [cb56b91]
+  - @chkit/core@0.2.0-beta.10
+
 ## 0.2.0-beta.9
 
 ### Patch Changes
