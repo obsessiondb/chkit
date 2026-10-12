@@ -1,5 +1,20 @@
 # @chkit/plugin-pull
 
+## 0.2.0-beta.10
+
+### Patch Changes
+
+- cb56b91: Fix `chkit pull` leaving a key tuple wrapped (`orderBy: ["(\`w)x\`, id)"]`instead of`["\`w)x\`", "id"]`) when a key column has a quoted name containing a parenthesis. The pull plugin had its own paren-stripper that ignored quotes; it now uses the shared `stripWrappingParens`from`@chkit/core`.
+
+  The quote-aware SQL scanners (`splitTopLevelComma`, `stripWrappingParens`, the projection index normalizer, `findTopLevelSQLPattern`, and the create-table column-list finder) now share a single quote skipper, `findQuoteEnd`, so backslash escapes and doubled quotes are handled identically everywhere (#197). Previously `stripWrappingParens` and the projection index normalizer mis-read a string ending in an escaped backslash (`'a\\'`).
+
+- 5ddb1d2: `chkit pull` no longer emits ObsessionDB product-metadata tables (`metadata_folder`, `metadata_table_folder`, `metadata_table_tag`) into generated schema files. These are ObsessionDB internals provisioned inside customer databases, not part of the user's schema — emitting them polluted the schema and caused drift against tables the user does not own. They are now excluded before rendering and are not counted as skipped/unsupported objects.
+- Updated dependencies [cb56b91]
+- Updated dependencies [76a0579]
+- Updated dependencies [3c546e8]
+  - @chkit/clickhouse@0.2.0-beta.10
+  - @chkit/core@0.2.0-beta.10
+
 ## 0.2.0-beta.9
 
 ### Patch Changes
