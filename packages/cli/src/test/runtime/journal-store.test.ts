@@ -393,6 +393,13 @@ describe('createJournalStore', () => {
   })
 
   describe('reads across replicas on a multi-replica target (#265)', () => {
+    // Visibility polls count hostName() over clusterAllReplicas(system.tables).
+    // The engine lookup (SELECT engine FROM system.tables) is a separate query
+    // and is not a wait poll.
+    function isJournalReplicaPoll(sql: string): boolean {
+      return sql.includes('count(DISTINCT hostName())') && sql.includes('system.tables')
+    }
+
     function multiReplicaStore(replicas: number, journalOnReplicas: number[] = [replicas]) {
       let journalPolls = 0
       const { db } = createScriptedExecutor(
@@ -400,12 +407,15 @@ describe('createJournalStore', () => {
           [/SELECT name FROM .* LIMIT 0/, []],
           [/system\.one/, [{ replicas }]],
           [/currentDatabase\(\) AS database/, [{ database: 'default' }]],
+          // Created without a cluster option, so the journal engine is
+          // ReplacingMergeTree and SYSTEM SYNC REPLICA is skipped.
+          [/SELECT engine FROM system\.tables/, [{ engine: 'ReplacingMergeTree' }]],
         ]),
       )
-      // How many replicas list the journal table on each successive poll.
+      // How many replicas list the journal table on each successive visibility poll.
       const scripted = db.query.bind(db)
       db.query = async <T>(sql: string): Promise<T[]> => {
-        if (sql.includes('system.tables')) {
+        if (isJournalReplicaPoll(sql)) {
           const seen = journalOnReplicas[Math.min(journalPolls, journalOnReplicas.length - 1)]
           journalPolls += 1
           return [{ replicas: seen }] as T[]
@@ -447,7 +457,7 @@ describe('createJournalStore', () => {
 
       await store.readMigrationState('m.sql')
 
-      const tablePolls = queries.filter((sql) => sql.includes('system.tables'))
+      const tablePolls = queries.filter(isJournalReplicaPoll)
       expect(tablePolls).toHaveLength(2)
       const firstRead = queries.findIndex((sql) => sql.includes("name = 'm.sql'"))
       expect(firstRead).toBeGreaterThan(queries.lastIndexOf(tablePolls[1] as string))
