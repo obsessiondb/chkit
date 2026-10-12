@@ -197,6 +197,11 @@ export interface TableDefinition {
   plugins?: TablePlugins
 }
 
+/** Omitted primary keys inherit ORDER BY, matching ClickHouse MergeTree semantics. */
+export type TableInput = Omit<TableDefinition, 'kind' | 'primaryKey'> & {
+  primaryKey?: string[]
+}
+
 /** Kafka queues do not have MergeTree sorting/storage clauses. */
 export type KafkaTableInput = Omit<TableDefinition,
   'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections'
@@ -332,7 +337,7 @@ export interface ChxInlinePluginRegistration<
   options?: TOptions
 }
 
-export type ChxPluginRegistration = ChxInlinePluginRegistration
+export type ChxPluginRegistration = ChxInlinePluginRegistration<unknown, object>
 
 export interface ChxUserConfig {
   /**

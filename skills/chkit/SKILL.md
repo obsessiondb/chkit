@@ -10,35 +10,52 @@ chkit lets you define ClickHouse schemas in TypeScript, generate migration SQL, 
 
 Docs: https://chkit.obsessiondb.com
 
+## Connection and authorization
+
+Use choices, target details and apply authorization already supplied by the user; ask only for missing information. Keep the workflow focused on TypeScript schema management unless the user asks for Sync or Python.
+
+For a direct ClickHouse target, obtain `CLICKHOUSE_URL` (HTTP/S endpoint and port), `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` (explicitly empty is valid), and `CLICKHOUSE_DB`. Never infer localhost, a default username, an empty password or the database `default` as the user's verified target. Do not provision a managed instance unless requested.
+
+Without credentials, install dependencies and prepare definitions offline. Generate migration SQL only after the database namespace is explicitly chosen. Do not run connected `pull`, `query`, `status`, `drift`, `check` or `migrate` against guessed endpoints. If the database name is unknown, ask for it and leave generation pending; do not invent a namespace. If a previous attempt emitted SQL against a placeholder, retarget definitions and regenerate only **never-applied** initial artifacts before connecting. Record what is prepared and what remains unverified.
+
+Keep real credentials in the process environment or an ignored `.env`, never schema/migration/handoff files. Bun loads a root `.env`; npm/Node commands need explicit loading, such as `node --env-file=.env ./node_modules/chkit/dist/bin/chkit.js check --strict --json` from the root. Nested configs need a loader that resolves the root `.env` deliberately.
+
+Before applying, verify the actual database identity and review generated SQL. Honor explicit development-database authorization without asking for repeat approval; obtain authorization for consequential writes that the task has not authorized. Missing credentials are required input, not a reason to stop offline work.
+
 ## Configuration
 
-Use `clickhouse.config.ts` at the TypeScript project root, or pass a custom path with `--config`:
+Use `clickhouse.config.ts` at the project root, or pass a custom path with `--config`. Share the chosen database name with schema files; every managed object's `database` must target the intended database.
 
 ```ts
 import { defineConfig } from '@chkit/core'
 
-export default defineConfig({
-  schema: './src/db/schema/**/*.ts',    // Glob to schema files
-  outDir: './chkit',                     // Artifact root
-  migrationsDir: './chkit/migrations',   // SQL migration files
-  metaDir: './chkit/meta',               // snapshot.json, journal.json
-  plugins: [],                           // Plugin registrations
-  clickhouse: {
-    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
-    username: process.env.CLICKHOUSE_USER ?? 'default',
-    password: process.env.CLICKHOUSE_PASSWORD ?? '',
-    database: process.env.CLICKHOUSE_DB ?? 'default',
+function required(name: string): string {
+  const value = process.env[name]
+  if (value === undefined || (name !== 'CLICKHOUSE_PASSWORD' && !value.trim())) {
+    throw new Error(`Missing ${name}; configure the connection first.`)
+  }
+  return value
+}
+
+export default defineConfig(({ command }) => ({
+  schema: './src/db/schema/**/*.ts',
+  outDir: './chkit',
+  migrationsDir: './chkit/migrations',
+  metaDir: './chkit/meta', // snapshot.json; applied history is in ClickHouse
+  plugins: [],
+  // Preserve target metadata when supplied, including during generation.
+  clickhouse: !process.env.CLICKHOUSE_URL && (command === 'generate' || command === 'snapshot') ? undefined : {
+    url: required('CLICKHOUSE_URL'),
+    username: required('CLICKHOUSE_USER'),
+    password: required('CLICKHOUSE_PASSWORD'),
+    database: required('CLICKHOUSE_DB'),
   },
-  check: {
-    failOnPending: true,
-    failOnChecksumMismatch: true,
-    failOnDrift: true,
-  },
-  safety: {
-    allowDestructive: false,
-  },
-})
+  check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+  safety: { allowDestructive: false },
+}))
 ```
+
+`generate` is offline and diffs definitions against the snapshot. The live `_chkit_migrations` table stores applied history; there is no local `journal.json`. A connected migration preview may bootstrap that journal even though it does not execute pending migration statements.
 
 ## Schema DSL
 
@@ -175,7 +192,7 @@ chkit status
 # Output: Migrations: 5 total, 3 applied, 2 pending
 ```
 
-Read-only; requires a ClickHouse connection to read the migration journal.
+Requires a ClickHouse connection to read the migration journal. Connected setup can create the journal if it is absent; it does not apply pending migration statements.
 
 ### drift: Compare live vs expected
 
@@ -260,7 +277,7 @@ export default defineConfig({
 |--------|---------|---------|---------|
 | `@chkit/plugin-codegen` | `bun add -d @chkit/plugin-codegen` | `chkit codegen` | Generate TypeScript types + Zod schemas |
 | `@chkit/plugin-pull` | `bun add -d @chkit/plugin-pull` | `chkit pull` | Introspect live ClickHouse into schema files |
-| `@chkit/plugin-backfill` | `bun add -d @chkit/plugin-backfill` | `chkit backfill` | Time-windowed data backfill with checkpoints |
+| `@chkit/plugin-backfill` | `bun add -d @chkit/plugin-backfill` | `chkit plugin backfill` | Partition/sort-key replay with checkpoints |
 | `@chkit/plugin-obsessiondb` | `bun add -d @chkit/plugin-obsessiondb` | `chkit query --service <name>` | Route commands through an ObsessionDB service |
 
 ## Common Workflows
@@ -289,6 +306,10 @@ chkit check --strict --json
 # Fails if: pending migrations, checksum mismatches, schema drift, or plugin errors
 ```
 
+### Adopt an existing populated database
+
+Follow [the complete adoption guide](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/). Pull imports definitions, not applied history. Review a generated baseline against live definitions; `CREATE ... IF NOT EXISTS` alone does not validate a pre-existing object. Remove only redundant database provisioning from the unapplied baseline when using an existing scoped target, apply normally, then verify data/view preservation, journal checksums and live drift before the next ALTER. Never edit the journal or rebuild a snapshot to pretend adoption is applied.
+
 ## Structural vs Alterable Properties
 
 When a property changes, chkit determines whether ALTER or DROP+CREATE is needed:
@@ -297,6 +318,10 @@ When a property changes, chkit determines whether ALTER or DROP+CREATE is needed
 - **Alterable** (ALTER in place): columns, indexes, projections, settings, TTL, comment
 
 Views and materialized views always use drop+recreate.
+
+For populated structural changes, do not apply the generated DROP/CREATE as a data-preservation solution. Use [the staged copy/validate/cutover recipe](https://chkit.obsessiondb.com/guides/data-preserving-migrations/), with explicit writer coordination, recovery and tracked SQL migrations.
+
+The backfill plugin currently chunks by physical partitions and sorting keys; `--from`/`--to` select partitions using metadata, not arbitrary timestamp-column row predicates. `--time-column` and `--chunk-hours` are not current planning flags. A new plan gets a new identity; resume the saved plan rather than replanning to retry. MV replay is for historical aggregate targets; a same-table copy can duplicate ordinary MergeTree rows. Use tracked SQL for an arbitrary source-to-shadow transformation and inspect the generated plugin SQL before execution.
 
 ## Documentation
 
@@ -314,7 +339,7 @@ curl -s -H "Accept: text/markdown" <url>
 | Configuration | `https://chkit.obsessiondb.com/configuration/overview/` | All config options and defaults |
 | Codegen Plugin | `https://chkit.obsessiondb.com/plugins/codegen/` | TypeScript types, Zod schemas, typed insert helpers |
 | Pull Plugin | `https://chkit.obsessiondb.com/plugins/pull/` | Introspecting live ClickHouse into schema files |
-| Backfill Plugin | `https://chkit.obsessiondb.com/plugins/backfill/` | Time-windowed data backfill with checkpoints |
+| Backfill Plugin | `https://chkit.obsessiondb.com/plugins/backfill/` | Partition/sort-key replay with checkpoints |
 | CI/CD Integration | `https://chkit.obsessiondb.com/guides/ci-cd/` | Pipeline setup, check commands, deployment |
 
 ### Discover all pages

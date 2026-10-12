@@ -16,7 +16,7 @@ export function normalizePluginRegistration(
     plugin: entry.plugin as ChxPlugin,
     nameHint: entry.name,
     enabled: entry.enabled !== false,
-    options: entry.options ?? {},
+    options: { ...entry.options },
   }
 }
 

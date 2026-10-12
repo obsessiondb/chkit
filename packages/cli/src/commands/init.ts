@@ -7,7 +7,7 @@ import { ensureProjectDependencies } from '../runtime/deps.js'
 type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
 
 /** The example schema `init` writes to src/db/schema/example.ts. */
-export const INIT_SCHEMA_TEMPLATE = `import { schema, table } from '@chkit/core'\n\nconst events = table({\n  database: 'default',\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`
+export const INIT_SCHEMA_TEMPLATE = `import { schema, table } from '@chkit/core'\n\n// Offline generation still needs the real schema namespace.\nconst database = process.env.CLICKHOUSE_DB\nif (!database?.trim()) {\n  throw new Error('Set CLICKHOUSE_DB to the intended database before generating migrations.')\n}\n\nconst events = table({\n  database,\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`
 
 interface InitOptions {
   connect?: ConnectChoice
@@ -18,6 +18,20 @@ interface InitOptions {
 }
 
 export async function cmdInit(argv: string[] = []): Promise<void> {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(`chkit init [options]
+
+Create a TypeScript config and example schema; install project dependencies.
+
+  -y, --yes                 Skip interactive onboarding
+  --connect <choice>        claim, account, clickhouse, or later
+  --email <email>           Email for account onboarding
+  --code <code>             Verification code
+  --org-name <name>         Organization name
+  -h, --help                Show help without creating files or connecting
+`)
+    return
+  }
   const cwd = process.cwd()
   const configPath = resolve(cwd, DEFAULT_CONFIG_FILE)
   const schemaPath = resolve(cwd, 'src/db/schema/example.ts')
@@ -25,7 +39,7 @@ export async function cmdInit(argv: string[] = []): Promise<void> {
 
   const wroteConfig = await writeIfMissing(
     configPath,
-    `import { defineConfig } from '@chkit/core'\n\nexport default defineConfig({\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [\n    // Register plugins inline. Example:\n    // import { codegen } from '@chkit/plugin-codegen'\n    // codegen({ emitZod: true }),\n  ],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n})\n`
+    `import { defineConfig } from '@chkit/core'\n\nfunction requiredEnv(name: string): string {\n  const value = process.env[name]\n  if (value === undefined || (name !== 'CLICKHOUSE_PASSWORD' && value.trim() === '')) {\n    throw new Error(\`Set \${name} explicitly before connecting to ClickHouse (an empty password is allowed).\`)\n  }\n  return value\n}\n\nexport default defineConfig({\n  schema: './src/db/schema/**/*.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [\n    // Register plugins inline. Example:\n    // import { codegen } from '@chkit/plugin-codegen'\n    // codegen({ emitZod: true }),\n  ],\n  // Preserve an explicitly supplied target for offline generation as well.\n  // Without a URL, a registered provider plugin may supply the connection.\n  clickhouse: process.env.CLICKHOUSE_URL ? {\n    url: requiredEnv('CLICKHOUSE_URL'),\n    username: requiredEnv('CLICKHOUSE_USER'),\n    password: requiredEnv('CLICKHOUSE_PASSWORD'),\n    database: requiredEnv('CLICKHOUSE_DB'),\n    cluster: process.env.CLICKHOUSE_CLUSTER,\n  } : undefined,\n})\n`
   )
 
   const wroteSchema = await writeIfMissing(schemaPath, INIT_SCHEMA_TEMPLATE)
@@ -45,10 +59,11 @@ export async function cmdInit(argv: string[] = []): Promise<void> {
   if (wroteConfig || wroteSchema) {
     console.log('')
     console.log('Next steps:')
-    console.log('  1. Set CLICKHOUSE_URL (and CLICKHOUSE_USER / CLICKHOUSE_PASSWORD / CLICKHOUSE_DB if needed).')
+    console.log('  1. Set CLICKHOUSE_DB to the intended database before generating migrations.')
     console.log('  2. Edit src/db/schema/example.ts to match your data.')
     console.log('  3. Run: npx chkit generate --name init')
-    console.log('  4. Run: npx chkit migrate --apply')
+    console.log('  4. Set CLICKHOUSE_URL, CLICKHOUSE_USER, and CLICKHOUSE_PASSWORD explicitly before connecting.')
+    console.log('  5. Run: npx chkit migrate --apply')
     console.log('')
     console.log('Docs: https://chkit.obsessiondb.com/getting-started/add-to-existing-project/')
   }

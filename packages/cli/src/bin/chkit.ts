@@ -5,6 +5,7 @@ import type { ParsedFlags } from '@chkit/core'
 import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
+import { normalizeGlobalArgs } from '../runtime/argv.js'
 import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { loadConfig } from '../runtime/config.js'
@@ -32,6 +33,8 @@ const PROJECT_ONLY_COMMANDS = new Set([
   'codegen',
   'pull',
 ])
+
+let activeCommand = 'chkit'
 
 function firstPluginPositional(argv: string[]): string | undefined {
   const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(
@@ -129,12 +132,27 @@ function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRunt
   })
 }
 
+function createInternalRegistry(): ReturnType<typeof createCommandRegistry> {
+  return createCommandRegistry({
+    globalFlags: GLOBAL_FLAGS,
+    pluginExtensions: [],
+    pluginCommands: getInternalPlugins().map((plugin) => ({
+      pluginName: plugin.manifest.name,
+      manifestName: plugin.manifest.name,
+      commands: plugin.commands ?? [],
+    })),
+  })
+}
+
 async function run(): Promise<void> {
   configureCliLogging()
 
-  const argv = process.argv.slice(2)
+  const argv = normalizeGlobalArgs(process.argv.slice(2))
   const commandName = argv[0]
+  activeCommand = commandName ?? 'chkit'
   debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
+  const includePluginHelp = argv.includes('--help-plugins')
+  const wantsHelp = includePluginHelp || argv.includes('--help') || argv.includes('-h')
 
   if (!commandName || commandName === '-h' || commandName === '--help') {
     await printGlobalHelp(argv)
@@ -147,22 +165,34 @@ async function run(): Promise<void> {
   }
 
   if (commandName === 'init') {
-    await cmdInit(argv.slice(1))
+    await cmdInit(wantsHelp ? ['--help'] : argv.slice(1))
     return
   }
 
   // `skills` proxies to the external `skills` CLI and needs no project config, so handle it
   // before config loading (like `init`).
   if (commandName === 'skills') {
-    process.exitCode = await cmdSkills(argv.slice(1))
+    process.exitCode = await cmdSkills(wantsHelp ? ['--help'] : argv.slice(1))
     return
   }
 
   // Registry discovery and bootstrapping work before a project config exists.
   if (commandName === 'add' || commandName === 'registry') {
     const { cmdRegistry } = await import('../commands/registry.js')
-    await cmdRegistry(commandName, argv.slice(1))
+    await cmdRegistry(commandName, wantsHelp ? ['--help'] : argv.slice(1))
     return
+  }
+
+  // Built-in help must work in an empty directory, with missing credentials,
+  // or with an invalid config. In particular, do not run initialization hooks
+  // (which may connect or bootstrap metadata) just to describe a command.
+  if (wantsHelp && !includePluginHelp) {
+    const registry = createInternalRegistry()
+    const command = registry.get(commandName)
+    if (command) {
+      console.log(formatCommandHelp(command, registry.globalFlags))
+      return
+    }
   }
 
   const configPathArg = extractConfigPath(argv)
@@ -203,8 +233,7 @@ async function run(): Promise<void> {
     resolved &&
     !resolved.subcommands &&
     commandName !== 'plugin' &&
-    !argv.includes('--help') &&
-    !argv.includes('-h')
+    !wantsHelp
   ) {
     const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
     if (!parsed) return
@@ -218,6 +247,21 @@ async function run(): Promise<void> {
     jsonMode: argv.includes('--json'),
     flags: initFlags,
     config,
+  }
+
+  if (wantsHelp) {
+    if (resolved) {
+      console.log(formatCommandHelp(resolved, registry.globalFlags))
+    } else {
+      reportUsageError({
+        command: commandName,
+        code: 'unknown_command',
+        message: `Unknown command: ${commandName}`,
+        jsonMode: argv.includes('--json'),
+        onText: () => console.log(formatGlobalHelp(registry, CLI_VERSION)),
+      })
+    }
+    return
   }
 
   await pluginRuntime.runOnInit(initCtx)
@@ -258,11 +302,6 @@ async function run(): Promise<void> {
       return
     }
 
-    if (argv.includes('--help') || argv.includes('-h')) {
-      console.log(formatCommandHelp(resolved, registry.globalFlags))
-      return
-    }
-
     await runResolvedCommand({
       argv,
       commandName,
@@ -288,9 +327,9 @@ async function run(): Promise<void> {
 }
 
 async function printGlobalHelp(argv: string[]): Promise<void> {
-  const configPathArg = extractConfigPath(argv)
-  let registry: ReturnType<typeof createCommandRegistry>
-  try {
+  let registry = createInternalRegistry()
+  if (argv.includes('--help-plugins')) {
+    const configPathArg = extractConfigPath(argv)
     const { config, path: configPath } = await loadConfig(configPathArg)
     const pluginRuntime = await loadPluginRuntime({
       config,
@@ -302,17 +341,6 @@ async function printGlobalHelp(argv: string[]): Promise<void> {
       globalFlags: GLOBAL_FLAGS,
       pluginExtensions: collectExtensions(pluginRuntime),
       pluginCommands: collectPluginCommands(pluginRuntime),
-    })
-  } catch {
-    const internal = getInternalPlugins()
-    registry = createCommandRegistry({
-      globalFlags: GLOBAL_FLAGS,
-      pluginExtensions: [],
-      pluginCommands: internal.flatMap((plugin) => {
-        const commands = plugin.commands
-        if (!commands || commands.length === 0) return []
-        return [{ pluginName: plugin.manifest.name, commands, manifestName: plugin.manifest.name }]
-      }),
     })
   }
   console.log(formatGlobalHelp(registry, CLI_VERSION))
@@ -339,7 +367,7 @@ run()
     // structured JSON payload. The human-readable message always goes to
     // stderr — stdout stays parseable, stderr stays diagnostic.
     if (jsonMode && !hasEmittedJson()) {
-      emitJsonError(argv[0] ?? 'chkit', toJsonError(error))
+      emitJsonError(activeCommand, toJsonError(error))
     }
     console.error(formatFatalError(error))
     process.exit(1)

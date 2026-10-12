@@ -1,6 +1,6 @@
 ---
 title: Backfill Plugin (beta)
-description: Plan, execute, and monitor time-windowed SQL backfills with the beta backfill plugin.
+description: Plan and resume partition/sort-key SQL replays, including historical materialized-view aggregates.
 sidebar:
   order: 4
   badge:
@@ -8,378 +8,166 @@ sidebar:
     variant: caution
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+`@chkit/plugin-backfill` builds a saved plan from ClickHouse's physical partitions and sorting keys, then executes its chunks with local checkpoints or a managed job. This page describes the current TypeScript planner.
 
-The beta `backfill` plugin replays stored data in time-windowed chunks with checkpointed progress.
-
-:::caution[Beta]
-The `backfill` plugin is in beta. Its API, configuration, and CLI flags may change between releases.
+:::caution[Choose the data operation first]
+A backfill writes rows. A direct-table replay selects from and inserts into the **same table**; on ordinary MergeTree this can duplicate logical rows. For a transformation into a replacement table, use the [data-preserving migration recipe](/guides/data-preserving-migrations/), rather than treating table replay as UPDATE.
 :::
 
-## What it does
+## Choose a strategy
 
-- Builds deterministic, immutable backfill plans that divide a time window into chunks.
-- Executes backfills via async query submission with configurable concurrency and server-side polling.
-- Runs either locally against a direct ClickHouse connection or as a managed job on [ObsessionDB](/obsessiondb/backfills/) — the same plan, a different execution venue.
-- Detects materialized views and automatically generates correct CTE-wrapped replay queries.
-- Supports resume from checkpoint, cancel, status monitoring, and doctor-style diagnostics.
-- Integrates with [`chkit check`](/cli/check/) for CI enforcement of pending backfills.
-- Persists all state as JSON on disk.
+| Requirement | Approach |
+| --- | --- |
+| Populate an existing MV's empty destination from historical source rows | `mv_replay`, selected automatically from your schema's materialized views |
+| Replay rows into the same table | Table copy, only after reviewing the engine and retry/duplicate semantics |
+| Change sorting/partition keys or transform source rows into a shadow table | Reviewed tracked SQL migration with copy, validation and cutover |
 
-## How it fits your workflow
+MV replay runs each materialized view's SELECT over the source chunks and inserts the result into its destination. A destination fed by several views replays their queries together with `UNION ALL`. Source-based chunking requires every view to resolve to the same simple `FROM` table; verify that source in the saved plan. Unresolved or different sources fall back to destination metadata and are unsuitable for this empty-target bootstrap. With a resolved source, chunk sizing uses the **source** table, so the destination may start empty. Define the source, destination and MVs in the configured schema before planning.
 
-The plugin follows a plan-then-execute lifecycle:
+Use an empty historical aggregate target and coordinate writers so live materialization does not overlap the historical replay. Compare the final grouped totals with the source; a completed checkpoint alone does not establish aggregate correctness.
 
-1. `plan` — Build an immutable backfill plan dividing the time window into chunks.
-2. `run` — Submit chunks as async queries to ClickHouse with concurrent execution and progress polling.
-3. `status` — Monitor chunk progress and run state.
+## Setup
 
-Additional commands: `resume` (continue from checkpoint with optional failed-chunk replay), `cancel` (mark run as cancelled), `doctor` (actionable diagnostics).
+```sh
+bun add -d @chkit/plugin-backfill
+# npm alternative:
+npm install --save-dev @chkit/plugin-backfill
+```
 
-To run the plan on a managed backend instead of your own machine, replace `run` with `submit` — see **Execution modes** below.
-
-[`chkit check`](/cli/check/) integration reports pending or failed backfills in CI.
-
-## Execution modes: local vs managed jobs
-
-Backfills run in one of two venues. Both build the identical chunk plan with the same chunking algorithm — only where the chunks execute differs.
-
-**Local execution** (`run`, `resume`) — Opens a direct ClickHouse connection and submits chunks as async queries from your machine, polling for completion. This is the default and requires a `clickhouse` block in your config. Plan and run checkpoint state live on disk under `stateDir`, so `resume`, `status`, `cancel`, and `doctor` operate on local files.
-
-**Managed job** (`submit`) — Builds the same plan and hands the chunks to a managed job backend, which runs them server-side. Nothing streams from your machine and there is no local checkpoint to babysit — the command prints a job ID and a console link to track progress. Today the only managed backend is [ObsessionDB](/obsessiondb/backfills/); `submit` requires an authenticated session with a selected service.
-
-When ObsessionDB is the active target (logged in with a service selected), `plan`, `run`, and `resume` are refused rather than silently opening a direct connection that bypasses ObsessionDB. Use `submit` to run the backfill as a managed job, or pass `--local` to force local execution against a direct ClickHouse connection. See [Backfill Jobs](/obsessiondb/backfills/) for the managed path in detail.
-
-## Plugin setup
-
-Register `backfill(...)` in your config's `plugins` array.
-
-<Tabs syncKey="lang">
-  <TabItem label="TypeScript">
-    ```ts
-    import { defineConfig } from '@chkit/core'
-    import { backfill } from '@chkit/plugin-backfill'
-
-export default defineConfig({
-  schema: './src/db/schema/**/*.ts',
-  plugins: [
-    backfill({
-      stateDir: './chkit/backfill',
-      chunkHours: 6,
-      maxParallelChunks: 1,
-      maxRetriesPerChunk: 3,
-      requireIdempotencyToken: true,
-      timeColumn: 'created_at',
-      requireDryRunBeforeRun: true,
-      requireExplicitWindow: true,
-      blockOverlappingRuns: true,
-      failCheckOnRequiredPendingBackfill: true,
-      maxWindowHours: 720,
-      minChunkMinutes: 15,
-    }),
-  ],
-})
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    from chkit import define_config
-    from chkit_plugin_backfill import backfill
-
-    config = define_config(
-        {
-            "schema": "./src/db/schema/**/*.py",
-            "plugins": [
-                backfill(
-                    {
-                        "stateDir": "./chkit/backfill",
-                        "chunkHours": 6,
-                        "timeColumn": "created_at",
-                    }
-                ),
-            ],
-        }
-    )
-    ```
-    Python support is in alpha. Its backfill plugin supports the same commands as TypeScript: `plan`, `run`, `resume`, `status`, `cancel`, `doctor`, and managed `submit`.
-  </TabItem>
-</Tabs>
-
-The `run` and `resume` commands execute SQL against ClickHouse when a connection is configured. Configure `clickhouse` at the top level of `clickhouse.config.ts`:
+Register it alongside your existing schema/connection configuration:
 
 ```ts
+import { defineConfig } from '@chkit/core'
+import { backfill } from '@chkit/plugin-backfill'
+
 export default defineConfig({
-  clickhouse: {
-    url: process.env.CLICKHOUSE_URL || 'http://localhost:8123',
-    username: 'default',
-    password: '',
-    database: 'default',
-  },
   schema: './src/db/schema/**/*.ts',
-  plugins: [backfill(...)],
+  plugins: [backfill({
+    stateDir: './chkit/backfill',
+    maxChunkBytes: 1024 ** 3,
+    requireIdempotencyToken: true,
+    failCheckOnRequiredPendingBackfill: true,
+  })],
+  // Keep your explicitly configured clickhouse connection here.
 })
 ```
 
-The URL and credentials can come from environment variables in CI environments.
+Planning and local execution require the real `clickhouse` connection. Obtain URL, username, password and database; do not substitute localhost/default credentials when these are unknown. Use matching chkit/core/plugin versions. Python is in alpha; consult its [separate documentation](/python/overview/) rather than assuming identical planning flags.
 
-## Backfill strategies
+## Partition selection and chunk boundaries
 
-The plugin supports two strategies for backfilling data, chosen automatically based on your schema:
+The planner reads active physical partitions from `system.parts`, sizes them using uncompressed input-byte metadata (falling back to on-disk bytes when necessary), and divides large partitions along sorting-key ranges. Plans contain partition IDs and the range predicates used to select rows.
 
-**Table backfill** (`table` strategy): For direct table targets, inserts data by selecting from the same table within the time window. This is the most common case.
+- `--max-chunk-bytes` controls approximate uncompressed input bytes per chunk. It is not a hard upper bound: unsplittable keys or tables without usable sorting keys can exceed it. It is not a time interval.
+- Optional `--from` and `--to` filter partitions using `system.parts.min_time` / `max_time`. Partitions whose metadata overlaps the interval are eligible.
+- These flags **do not add an exact timestamp-column WHERE filter** to every row. An overlapping partition can include rows outside the supplied interval.
+- Unpartitioned or non-temporal partitioned tables can report epoch timestamps in this metadata. A recent date filter may therefore select no partitions even though a timestamp column contains recent rows. For whole-table replay, omit both filters and review all selected partitions. For an exact row-level interval, use explicit reviewed SQL with the required predicate or design a suitable source; do not reinterpret the partition filter as that predicate.
 
-**Materialized view replay** (`mv_replay` strategy): When the target is the `to` table of one or more materialized views, the plugin replays each view's aggregation query over every chunk window, re-materializing the aggregation for that window and ensuring correctness for aggregate backfills. A target fed by several materialized views replays them all in a single `INSERT … SELECT … UNION ALL …` per chunk, so no view's rows are missed. Because the chunks are sized from the view's **source** table (the one it reads `FROM`) rather than the target, a from-scratch **empty** aggregate target is fine — it's the case being bootstrapped. Requires `requireIdempotencyToken: true` for safe resumable retries.
+`--time-column`, `--chunk-hours`, `--force-large-window` and `--force` are not current planning flags. Older time-windowed examples do not describe this planner. The accepted legacy config fields `timeColumn`/`chunkHours` do not switch it back to timestamp-column chunking.
 
-## Target safety checks
+## Local plan, run and verify
 
-Automatic backfills omit [`MATERIALIZED` and `ALIAS`](/schema/dsl-reference/#defaultkind-optional) columns from the insert and cannot supply `EPHEMERAL` inputs. Before writing, `plan`, `submit`, `run`, and `resume` read the live target's column kinds and stop when:
-
-- a table copy targets a table with both `EPHEMERAL` and `MATERIALIZED` columns, because recomputed `MATERIALIZED` values may read the `EPHEMERAL` inputs;
-- a materialized view replay targets a table with any `EPHEMERAL` column;
-- the column metadata is unreadable or reports an unknown kind;
-- the target does not exist, failing with `Backfill target <db.table> does not exist or is not visible yet`. On managed ClickHouse (e.g. ObsessionDB), DDL may still be propagating; retry shortly.
-
-Backfill a blocked target with an explicit `INSERT` that maps the source data to the `EPHEMERAL` inputs.
-
-## Time column resolution
-
-The backfill plugin needs a time column to build WHERE clauses for each chunk. It resolves the column through a layered fallback chain:
-
-1. **CLI flag** — `--time-column <column>` on the `plan` command.
-2. **Schema-level config** — `plugins.backfill.timeColumn` on the table definition.
-3. **Global default** — `defaults.timeColumn` in the plugin options.
-4. **Auto-detection** — Scans ORDER BY columns and common time column names (`created_at`, `timestamp`, `event_time`, etc.) for DateTime/DateTime64 types.
-
-Schema-level configuration is the recommended approach when different tables use different time columns. Define it directly in the `table()` call:
-
-<Tabs syncKey="lang">
-  <TabItem label="TypeScript">
-    ```ts
-    import { table } from '@chkit/core'
-
-    export const events = table({
-      database: 'app',
-      name: 'events',
-      columns: [
-        { name: 'event_time', type: 'DateTime' },
-        { name: 'id', type: 'UInt64' },
-      ],
-      engine: 'MergeTree',
-      orderBy: ['event_time', 'id'],
-      primaryKey: ['event_time', 'id'],
-      plugins: {
-        backfill: { timeColumn: 'event_time' },
-      },
-    })
-    ```
-
-    This requires importing `@chkit/plugin-backfill` somewhere in the project (typically in `clickhouse.config.ts`) to activate the type augmentation. The `plugins.backfill` object is fully typed — autocomplete and type errors work as expected.
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    from chkit import table
-
-    events = table(
-        database="app",
-        name="events",
-        columns=[
-            {"name": "event_time", "type": "DateTime"},
-            {"name": "id", "type": "UInt64"},
-        ],
-        engine="MergeTree",
-        order_by=["event_time", "id"],
-        primary_key=["event_time", "id"],
-        plugins={
-            "backfill": {"timeColumn": "event_time"},
-        },
-    )
-    ```
-
-    In Python `plugins` is a plain dict; the field is metadata only and never affects diffing.
-  </TabItem>
-</Tabs>
-
-## Options
-
-All options are passed as a flat object to `backfill({...})`. They are grouped here by function for readability.
-
-- `stateDir` (default: `<metaDir>/backfill`) — Directory for plan and run state files.
-
-**Planning defaults:**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `chunkHours` | `number` | `6` | Hours per chunk |
-| `maxChunkBytes` | `string \| number` | `10G` | Max bytes per chunk (accepts suffixes: `K`, `M`, `G`, `T`) |
-| `maxParallelChunks` | `number` | `1` | Max concurrent chunks in plan |
-| `maxRetriesPerChunk` | `number` | `3` | Retry budget per chunk |
-| `retryDelayMs` | `number` | `1000` | Exponential backoff delay between retries (milliseconds) |
-| `requireIdempotencyToken` | `boolean` | `true` | Generate deterministic tokens |
-| `timeColumn` | `string` | auto-detect | Fallback column name for time-based WHERE clause (overridden by schema-level config) |
-
-**Policy:**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `requireDryRunBeforeRun` | `boolean` | `true` | Require plan before run |
-| `requireExplicitWindow` | `boolean` | `true` | Require `--from`/`--to` |
-| `blockOverlappingRuns` | `boolean` | `true` | Prevent concurrent runs |
-| `failCheckOnRequiredPendingBackfill` | `boolean` | `true` | Fail `chkit check` on incomplete backfills |
-
-**Limits:**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `maxWindowHours` | `number` | `720` (30 days) | Maximum window size |
-| `minChunkMinutes` | `number` | `15` | Minimum chunk size |
-
-Invalid option values fail fast at startup via plugin config validation.
-
-## Commands
-
-All commands exit with: 0 (success), 1 (runtime error), 2 (config error).
-
-### `chkit plugin backfill plan`
-
-Build a deterministic backfill plan and persist immutable plan state.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--target <db.table>` | Yes | Target table in `database.table` format |
-| `--from <timestamp>` | Yes | Window start (ISO timestamp) |
-| `--to <timestamp>` | Yes | Window end (ISO timestamp) |
-| `--chunk-hours <n>` | No | Override chunk size (defaults to `defaults.chunkHours`) |
-| `--time-column <column>` | No | Time column for WHERE clause (auto-detected if omitted) |
-| `--force-large-window` | No | Allow windows exceeding `limits.maxWindowHours` |
-| `--force` | No | Delete existing plan and regenerate from scratch |
-
-### `chkit plugin backfill submit`
-
-Build the plan with the same chunking algorithm as `run`, then submit it to a managed job backend instead of executing it locally. Requires an authenticated [ObsessionDB](/obsessiondb/backfills/) session with a selected service (`chkit obsessiondb login`, then `chkit obsessiondb service select`); without one, the command explains how to set it up or fall back to `run --local`. On success it prints the job ID and a console link to track progress — the backend runs the chunks, so no local polling is needed. See [Backfill Jobs](/obsessiondb/backfills/) for the full managed flow.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--target <db.table>` | Yes | Target table in `database.table` format |
-| `--from <timestamp>` | No | Window start (ISO timestamp; defaults to the table's earliest partition) |
-| `--to <timestamp>` | No | Window end (ISO timestamp; defaults to the table's latest partition) |
-| `--max-chunk-bytes <size>` | No | Max bytes per chunk (e.g. `10G`, `500M`) |
-| `--title <title>` | No | Human-readable job title shown in the console |
-| `--concurrency <n>` | No | Max concurrent tasks the backend runs (1–48) |
-
-### `chkit plugin backfill run`
-
-Execute a planned backfill by submitting chunks as async queries to ClickHouse with concurrent execution and progress polling.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-| `--concurrency <n>` | No | Max concurrent async queries (default: `3`) |
-| `--poll-interval <ms>` | No | Polling interval in milliseconds (default: `5000`) |
-| `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
-
-### `chkit plugin backfill resume`
-
-Resume a backfill run from last checkpoint. Picks up where the previous run left off, executing only pending chunks.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-| `--concurrency <n>` | No | Max concurrent async queries (default: `3`) |
-| `--poll-interval <ms>` | No | Polling interval in milliseconds (default: `5000`) |
-| `--replay-failed` | No | Reset failed chunks to pending and re-execute them |
-| `--force-environment` | No | Skip environment mismatch check (plan was created for a different ClickHouse cluster/database) |
-
-### `chkit plugin backfill status`
-
-Show checkpoint and chunk progress for a backfill run.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-
-### `chkit plugin backfill cancel`
-
-Cancel an in-progress backfill run and prevent further chunk execution.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-
-### `chkit plugin backfill doctor`
-
-Provide actionable remediation steps for failed or pending backfill runs.
-
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--plan-id <hex16>` | Yes | Plan ID (16-char hex) |
-
-## CI / check integration
-
-When configured, [`chkit check`](/cli/check/) includes a `plugins.backfill` block in JSON output and can fail with `plugin:backfill`.
-
-Finding codes:
-
-- `backfill_required_pending` — A plan has no run or the run is not completed.
-- `backfill_chunk_failed_retry_exhausted` — A run has exhausted retries on a failed chunk.
-- `backfill_policy_relaxed` — `failCheckOnRequiredPendingBackfill` is disabled (warning only).
-
-When `failCheckOnRequiredPendingBackfill` is `true` (default), pending backfills cause [`chkit check`](/cli/check/) to fail with an error. When `false`, they emit a warning instead.
-
-## State management
-
-All state is persisted to the configured `stateDir`:
-
-```
-<stateDir>/
-  plans/<planId>.json       # Immutable plan state (written once)
-  runs/<planId>.json        # Mutable run checkpoint (updated per chunk)
-```
-
-Plan IDs are deterministic: `sha256("<target>|<from>|<to>|<chunkHours>|<timeColumn>|<envFingerprint>")` truncated to 16 hex characters. When a ClickHouse connection is configured, an environment fingerprint is included in the plan ID, so different clusters/databases automatically produce different plan files. Re-planning with the same parameters produces the same plan ID.
-
-### Environment binding
-
-When `clickhouse` is configured in `clickhouse.config.ts`, backfill plans are **bound to the specific ClickHouse cluster and database** to prevent accidental cross-environment execution. The plan file stores:
-
-- `environment.fingerprint` — A 16-char hash of the URL origin + database name
-- `environment.url` — The cluster URL (for human readability)
-- `environment.database` — The target database
-
-When running or resuming a plan, chkit verifies the plan's environment matches the current config. If there's a mismatch (e.g., you created the plan against staging but switched to production), execution is blocked with a clear error message.
-
-To override the check (e.g., intentionally backfilling production using a staging plan), use `--force-environment` on the `run` or `resume` command.
-
-Plans created without a ClickHouse config (offline/dry-run) have no environment binding and can run against any environment.
-
-## Common workflows
-
-**Basic backfill:**
+First migrate the target table and materialized view through the normal schema workflow. Verify that the historical target is empty and that the source contains the expected rows. Pause writers for a simple bootstrap; concurrent ingestion requires a separately designed boundary.
 
 ```sh
-chkit plugin backfill plan --target analytics.events --from 2025-01-01 --to 2025-02-01
-chkit plugin backfill run --plan-id <planId>
-chkit plugin backfill status --plan-id <planId>
+# Example: replay the complete source history into an empty MV destination.
+chkit plugin backfill plan --target analytics.daily_event_counts --max-chunk-bytes 1G --json > backfill-plan.json
 ```
 
-**Failed chunk recovery:**
+Read the returned `planId` and `planPath`, then inspect that saved JSON. For this aggregate bootstrap, require the returned `strategy` to be `mv_replay` and the saved `chunkPlan.table` to identify the intended source. Schema-loading failures can fall back to table-copy mode; do not execute that plan against an aggregate destination. Confirm the target, source queries, selected partitions, sort-key ranges and environment before running. `plan` reads live metadata and saves local state but does not execute replay INSERTs.
 
 ```sh
-chkit plugin backfill plan --target analytics.events --from 2025-01-01 --to 2025-02-01
-chkit plugin backfill run --plan-id <planId>   # some chunks fail
-chkit plugin backfill resume --plan-id <planId>   # automatically retries failed chunks
+chkit plugin backfill run --plan-id <planId> --concurrency 1 --json
+chkit plugin backfill status --plan-id <planId> --json
+chkit status --json
+chkit check --strict --json
 ```
 
-**Managed backfill on ObsessionDB:**
+Check the data separately. For a destination with `day`, `event_type`, and `total`, compare its grouped totals with the source query used by the MV:
+
+```sh
+chkit query "SELECT toDate(occurred_at) AS day, event_type, count() AS total FROM analytics.events GROUP BY day, event_type ORDER BY day, event_type" --json
+chkit query "SELECT day, event_type, sum(total) AS total FROM analytics.daily_event_counts GROUP BY day, event_type ORDER BY day, event_type" --json
+```
+
+The result rows must match exactly; also verify that the source rows are unchanged. Store review evidence without committing sensitive production data.
+
+## Resume and duplicate protection
+
+```sh
+chkit plugin backfill resume --plan-id <samePlanId> --json
+# To retry failed chunks deliberately:
+chkit plugin backfill resume --plan-id <samePlanId> --replay-failed --json
+chkit plugin backfill doctor --plan-id <samePlanId> --json
+```
+
+Resume uses saved progress and skips completed chunks. A completed run returns a successful no-op; it does not create a new plan. `run` refuses an existing run and directs you to resume. `--replay-failed` resets failed chunks for retry; the default resume does not request failed-chunk replay.
+
+Each chunk has a stable token within its saved plan. ClickHouse's actual deduplication depends on the table engine, settings and deduplication window; a token is **not** a universal exactly-once guarantee. A crash after an INSERT but before checkpoint persistence needs engine-specific recovery testing. Verify totals before and after resuming.
+
+Calling `plan` again generates a **new random plan ID**, even for the same target/options. It is a new replay, not an idempotent lookup of the previous job, and can duplicate aggregates. Preserve and reuse the original plan/checkpoint.
+
+## Commands and flags
+
+All commands support the usual `--json` and `--config` flags. Replace `chkit` with `bunx chkit` or `npx chkit` for a local installation.
+
+### `plan`
+
+| Flag | Required | Meaning |
+| --- | --- | --- |
+| `--target <database.table>` | Yes | Existing destination table |
+| `--from <timestamp>` | No | Lower partition-metadata selection bound |
+| `--to <timestamp>` | No | Upper partition-metadata selection bound |
+| `--max-chunk-bytes <size>` | No | Chunk-size override, e.g. `1G`, `500M` |
+
+### `run` and `resume`
+
+| Flag | Required | Meaning |
+| --- | --- | --- |
+| `--plan-id <hex16>` | Yes | Saved plan ID |
+| `--concurrency <n>` | No | Concurrent async queries, default `3` |
+| `--poll-interval <ms>` | No | Poll interval, default `5000` |
+| `--force-environment` | No | Explicitly bypass the saved environment check |
+| `--replay-failed` | Resume only | Reset failed chunks for retry |
+
+`status`, `cancel`, and `doctor` accept `--plan-id`. `cancel` marks the saved run as cancelled; it does not kill ClickHouse queries or reliably interrupt a runner that is already executing. Stop that runner separately and inspect resulting data before planning further work.
+
+### Managed `submit`
+
+`submit` builds the same partition/sort-key plan and hands it to a managed backend. It accepts `--target`, optional `--from`/`--to`, `--max-chunk-bytes`, `--title`, and `--concurrency` (1–48). First register the [ObsessionDB plugin](/obsessiondb/overview/) alongside `backfill()`; it supplies the account/service commands. Submission requires an authenticated ObsessionDB session and selected service:
 
 ```sh
 chkit obsessiondb login
 chkit obsessiondb service select
-chkit plugin backfill submit --target analytics.events --from 2025-01-01 --to 2025-02-01
-# prints a job ID and a console link — the backend runs the chunks server-side
+chkit plugin backfill submit --target analytics.daily_event_counts --max-chunk-bytes 1G
 ```
 
-**CI enforcement:**
+The result supplies a job ID and console link. See [managed backfill jobs](/obsessiondb/backfills/). If ObsessionDB is the active target, local `plan`/`run`/`resume` require an explicit `--local` choice; they do not silently bypass the selected managed service.
 
-```sh
-chkit check   # fails if pending backfills exist
+## Configuration and persisted state
+
+Useful current configuration fields:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `stateDir` | `<metaDir>/backfill` | Local plans/checkpoints |
+| `maxChunkBytes` | `10737418240` (10 GiB) | Numeric approximate input-byte target |
+| `maxParallelChunks` | `1` | Stored planning concurrency option |
+| `requireIdempotencyToken` | `true` | Include stable per-chunk insert tokens |
+| `failCheckOnRequiredPendingBackfill` | `true` | Fail the plugin check for unfinished plans |
+
+The execution command's `--concurrency` controls local async query submission. Inspect `--help` and the saved plan when changing options; legacy time-window/retry-policy fields in the schema are not evidence of timestamp-column chunking or universal automatic retry guarantees.
+
+```text
+chkit/backfill/
+  plans/<planId>.json    # saved target, environment, chunk boundaries and queries
+  runs/<planId>.json     # mutable progress checkpoint
 ```
+
+The plan stores an environment fingerprint derived from URL origin and database. A changed URL origin or configured database is refused unless `--force-environment` is explicitly supplied. This fingerprint does not verify URL paths, credentials, schema or data identity. Plan creation requires a connection; there is no offline metadata plan to treat as verified.
+
+## Target safety and CI
+
+Automatic replay omits `MATERIALIZED` and `ALIAS` target columns and cannot supply `EPHEMERAL` inputs. Planning/execution refuses unsafe column combinations, unreadable metadata and missing targets. For a blocked target, use an explicitly mapped, reviewed SQL migration instead.
+
+`chkit check --strict --json` includes `plugins.backfill`. For each saved plan, a missing, unfinished or failed local run can fail the gate; a relaxed policy is surfaced. If the plans directory is missing or empty, the check passes with `requiredCount: 0`: it cannot discover omitted historical work. The check does not poll managed jobs, and a completed remote submission does not create a completed local run checkpoint; validate managed job completion separately. Keep the state directory available to the machine running that check—local checkpoints are not migration-journal rows. A passing plugin check does not replace source preservation and aggregate validation.

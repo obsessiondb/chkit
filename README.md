@@ -1,164 +1,157 @@
 # chkit
 
-**ClickHouse schema management in TypeScript, with Python support in alpha.**
+**ClickHouse schema management in TypeScript.**
 
 [![npm version](https://img.shields.io/npm/v/chkit?label=npm)](https://www.npmjs.com/package/chkit)
 [![CI](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml/badge.svg)](https://github.com/obsessiondb/chkit/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-chkit.obsessiondb.com-blue)](https://chkit.obsessiondb.com)
 
-chkit is an open-source toolkit for defining ClickHouse schemas in code, generating SQL migrations, and keeping databases in sync with version-controlled definitions. Review the SQL before applying it, then check migration state and schema drift from the terminal or CI.
+Define ClickHouse schemas in code, generate reviewable SQL migrations, and detect live schema drift from the terminal or CI. chkit manages tables, views, materialized views and dictionaries alongside your application.
 
-[Get started](https://chkit.obsessiondb.com/getting-started/) · [First-schema tutorial](https://chkit.obsessiondb.com/tutorials/first-schema/) · [Documentation](https://chkit.obsessiondb.com)
+**Define → generate → review → migrate → check.**
 
-## TL;DR
+[Getting started](https://chkit.obsessiondb.com/getting-started/) · [Adopt an existing database](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) · [Data-preserving migrations](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) · [Documentation](https://chkit.obsessiondb.com)
 
-**Define → generate → preview → migrate → check.** Keep tables, views, materialized views, and dictionaries alongside application code. chkit diffs definitions against the previous snapshot and writes reviewable migration files. Apply those files to ClickHouse, then use `chkit check` to detect pending migrations, modified migration checksums, and live schema drift.
+## Quickstart
 
-Use TypeScript with `chkit` and `@chkit/core`, or the alpha Python implementation with [`chkit-py`](https://chkit.obsessiondb.com/python/overview/). Both workflows use the same migration SQL, snapshots, and ClickHouse journal.
+For a ready-made TypeScript project with two tables and an existing migration:
 
-## Why chkit
+```sh
+bun create chkit@latest my-app --example hello
+# npm alternative:
+npm create chkit@latest my-app -- --example hello
+```
 
-- **Schema as code.** Define ClickHouse-native types, engines, sorting keys, partitions, views, and dictionaries in TypeScript or Python.
-- **Reviewable migrations.** Generate timestamped SQL files from schema changes, with rename metadata and operation risk levels.
-- **Controlled deployment.** Preview pending migrations, apply reviewed SQL, and track completed statements in the migration journal.
-- **Drift checks in CI.** Catch pending migrations, checksum mismatches, and out-of-band changes with `chkit check`.
-- **Adopt an existing database.** Pull a live ClickHouse schema into local definitions with `@chkit/plugin-pull`.
-- **Extend the schema workflow.** Generate TypeScript row types and Zod schemas, or use the beta backfill plugin to update stored data after schema changes.
-
-## A first schema
-
-In a TypeScript project, install the CLI and schema DSL:
+For an existing TypeScript project, install the CLI and schema DSL:
 
 ```sh
 bun add -d chkit @chkit/core
+# npm alternative (Node.js 22+):
+npm install --save-dev chkit @chkit/core
 ```
 
-Create `clickhouse.config.ts`. Set `CLICKHOUSE_URL` to a development ClickHouse endpoint, with `CLICKHOUSE_USER` and `CLICKHOUSE_PASSWORD` if required. This example manages a table in the `default` database.
+Use matching versions of chkit and its plugins, and commit your package-manager lockfile. The examples below run from the project root; use `npx chkit` instead of `bunx chkit` with npm.
+
+### 1. Configure the target
+
+Supply your actual development database connection through `CLICKHOUSE_URL` (HTTP/HTTPS endpoint and port), `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, and `CLICKHOUSE_DB`. An intentionally blank password is allowed; an absent password is missing information. Keep credentials out of Git.
+
+If you don't have a connection yet, prepare definitions and generate offline after choosing the database namespace. Ask for missing values before any connected command; don't assume localhost, a default user, or a default database is the intended target.
+
+Create `src/db/database.ts`:
+
+```ts
+export const database = process.env.CLICKHOUSE_DB
+if (!database) throw new Error('Set CLICKHOUSE_DB to the database you intend to manage.')
+```
+
+Create `clickhouse.config.ts`:
 
 ```ts
 import { defineConfig } from '@chkit/core'
+import { database } from './src/db/database'
 
-export default defineConfig({
+function required(name: string): string {
+  const value = process.env[name]
+  if (value === undefined || (name !== 'CLICKHOUSE_PASSWORD' && !value.trim())) {
+    throw new Error(`Missing ${name}; configure the connection before running this command.`)
+  }
+  return value
+}
+
+export default defineConfig(({ command }) => ({
   schema: './src/db/schema/**/*.ts',
   outDir: './chkit',
-  clickhouse: {
-    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
-    username: process.env.CLICKHOUSE_USER ?? 'default',
-    password: process.env.CLICKHOUSE_PASSWORD ?? '',
-    database: 'default',
+  // Preserve target metadata when supplied, including during generation.
+  clickhouse: !process.env.CLICKHOUSE_URL && (command === 'generate' || command === 'snapshot') ? undefined : {
+    url: required('CLICKHOUSE_URL'),
+    username: required('CLICKHOUSE_USER'),
+    password: required('CLICKHOUSE_PASSWORD'),
+    database,
   },
-})
+}))
 ```
 
-### 1. Define
+Export these variables in your shell or CI. Bun also loads a root `.env`; for npm/Node, explicitly load it:
+
+```sh
+# Add .env to .gitignore first. Run from the project root with Node.js 22+:
+node --env-file=.env ./node_modules/chkit/dist/bin/chkit.js status
+# Use the same prefix for generate, migrate, check and other commands.
+```
+
+### 2. Define a table
 
 Create `src/db/schema/events.ts`:
 
 ```ts
 import { schema, table } from '@chkit/core'
+import { database } from '../database'
 
-const events = table({
-  database: 'default',
+export default schema(table({
+  database,
   name: 'events',
   engine: 'MergeTree',
   columns: [
     { name: 'id', type: 'UInt64' },
     { name: 'source', type: 'String' },
-    { name: 'occurred_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
+    { name: 'occurred_at', type: 'DateTime64(3)' },
   ],
   primaryKey: ['id'],
   orderBy: ['id'],
   partitionBy: 'toYYYYMM(occurred_at)',
-})
-
-export default schema(events)
+}))
 ```
 
-### 2. Generate and review
+### 3. Generate, review and apply
 
 ```sh
 bunx chkit generate --name create-events
-```
-
-Open the generated SQL under `chkit/migrations/`. The first migration creates the table; subsequent migrations describe changes from the previous snapshot. Commit the schema, migration files, and `chkit/meta/` together.
-
-### 3. Preview and migrate
-
-```sh
+# Read chkit/migrations/*.sql before proceeding.
 bunx chkit migrate --json
-
-# After reviewing the SQL and pending migration plan:
 bunx chkit migrate --apply
+bunx chkit status --json
+bunx chkit check --strict --json
 ```
 
-Without `--apply`, JSON mode prints the plan without applying migrations. Destructive operations require explicit approval; see the [migration workflow](https://chkit.obsessiondb.com/guides/migration-workflow/).
+The initial migration can include `CREATE DATABASE`. If the target already exists and your account manages only its contents, remove that provisioning statement from the **unapplied** migration before applying; retain the table statements. Never change SQL already recorded as applied.
 
-### 4. Check and repeat
+`migrate --json` previews pending work without applying its migration statements, but a connected command may initialize the journal. Commit definitions, migration SQL and `chkit/meta/snapshot.json` together. `check --strict` exits nonzero for pending migrations, modified checksums or live drift. `drift --json` describes differences; use `check` as the CI failure gate.
 
-```sh
-bunx chkit status
-bunx chkit check
-```
-
-Change a definition, generate another migration, review it, and apply it. Run `chkit check` in CI to verify migration state and the live schema. Use `chkit drift` for a detailed schema comparison.
-
-For a complete walkthrough with inserts, queries, and a schema change, follow the [first-schema tutorial](https://chkit.obsessiondb.com/tutorials/first-schema/). It also covers claiming a free ObsessionDB development instance. To scaffold a ready-made project, run `bun create chkit@latest my-app --example hello` or start from [`examples/hello`](examples/hello).
-
-## Python (alpha)
-
-Python support is in alpha. Install [`chkit-py`](https://pypi.org/project/chkit-py/) and initialize a project:
-
-```sh
-pip install chkit-py
-chkit init
-```
-
-Define schemas in Python modules and configure the connection in `clickhouse.config.py`. Use the same `generate`, `migrate`, `status`, `drift`, and `check` commands as the TypeScript workflow. See the [Python overview](https://chkit.obsessiondb.com/python/overview/) and [`chkit_python/`](chkit_python).
+For existing tables, start with the [adoption guide](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) instead of generating a replacement schema. For changes to sorting/partition keys or stored values, follow the [data-preserving migration recipe](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) and review the data copy and recovery plan before applying.
 
 ## Documentation
 
 | Goal | Start here |
 | --- | --- |
-| Manage a new schema | [Getting started](https://chkit.obsessiondb.com/getting-started/) |
-| Adopt an existing database | [Pull a live schema](https://chkit.obsessiondb.com/plugins/pull/) |
-| Define tables and views | [Schema DSL reference](https://chkit.obsessiondb.com/schema/dsl-reference/) |
-| Deploy migrations in CI | [CI/CD integration](https://chkit.obsessiondb.com/guides/ci-cd/) |
-| Generate application types | [TypeScript codegen](https://chkit.obsessiondb.com/plugins/codegen/) |
-| Recompute stored data | [SQL backfills (beta)](https://chkit.obsessiondb.com/plugins/backfill/) |
-| Work with a coding agent | [Agent skills](https://chkit.obsessiondb.com/ai-agents/) |
-
-See the [CLI reference](https://chkit.obsessiondb.com/cli/overview/) for commands, flags, and JSON output.
+| Build a first schema, insert/query data and evolve it | [First-schema tutorial](https://chkit.obsessiondb.com/tutorials/first-schema/) |
+| Adopt populated tables and establish migration history | [Existing-database adoption](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) |
+| Change layout and backfill without discarding data | [Data-preserving migrations](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) |
+| Define tables, views and dictionaries | [Schema DSL reference](https://chkit.obsessiondb.com/schema/dsl-reference/) |
+| Deploy migrations and enforce checks in CI | [CI/CD integration](https://chkit.obsessiondb.com/guides/ci-cd/) |
+| Generate TypeScript row types and Zod schemas | [Codegen](https://chkit.obsessiondb.com/plugins/codegen/) |
+| Replay historical data through materialized views | [Backfill plugin (beta)](https://chkit.obsessiondb.com/plugins/backfill/) |
+| Onboard with a coding agent | [Agent instructions](https://chkit.obsessiondb.com/ai-agents/) |
 
 ## Packages
 
 | Package | Description |
 | --- | --- |
-| [`chkit`](packages/cli) | CLI for the schema and migration workflow |
-| [`@chkit/core`](packages/core) | TypeScript schema DSL, configuration, and diff engine |
-| [`@chkit/plugin-pull`](packages/plugin-pull) | Pull a live schema into local definitions |
-| [`@chkit/plugin-codegen`](packages/plugin-codegen) | Generate TypeScript row types and Zod schemas |
-| [`@chkit/plugin-backfill`](packages/plugin-backfill) | Checkpointed SQL backfills for data migrations (beta) |
-| [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | Connect to ObsessionDB and run schema commands remotely |
+| [`chkit`](packages/cli) | Schema and migration CLI |
+| [`@chkit/core`](packages/core) | TypeScript schema DSL, configuration and diff engine |
+| [`@chkit/plugin-pull`](packages/plugin-pull) | Import live schema definitions |
+| [`@chkit/plugin-codegen`](packages/plugin-codegen) | Generate TypeScript types and Zod schemas |
+| [`@chkit/plugin-backfill`](packages/plugin-backfill) | Checkpointed partition/sort-key backfills (beta) |
+| [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB connection and remote execution |
 
-`@chkit/clickhouse` and `@chkit/codegen` are internal packages used by the CLI. Install matching versions of the CLI, core, and plugins; the public API is still evolving before 1.0.
+Python support is in alpha through [`chkit-py`](https://pypi.org/project/chkit-py/). See the [Python documentation](https://chkit.obsessiondb.com/python/overview/) for its setup and limitations.
 
-## ObsessionDB
+## ObsessionDB and chkit Sync
 
-The [ObsessionDB](https://obsessiondb.com) team builds chkit and provides a managed ClickHouse service. Use chkit with self-hosted ClickHouse, ClickHouse Cloud, or ObsessionDB. The [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) plugin connects to managed services, and the release pipeline runs its E2E suite against ObsessionDB.
+The [ObsessionDB](https://obsessiondb.com) team builds chkit. Use schema management with self-hosted ClickHouse, ClickHouse Cloud or ObsessionDB. We're also building **chkit Sync**, a separate beta workflow for syncing business applications into ClickHouse; see the [Sync documentation](https://chkit.obsessiondb.com/sync/).
 
-## chkit Sync (beta)
+## Community and contributing
 
-We're also building **chkit Sync**, a beta toolkit for syncing data from business applications into ClickHouse. It builds on chkit's schema management and has its own [Sync documentation](https://chkit.obsessiondb.com/sync/).
+Follow [@ObsessionDB](https://x.com/ObsessionDB), report bugs through [GitHub Issues](https://github.com/obsessiondb/chkit/issues), and see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
 
-## Community
-
-- [@ObsessionDB on X](https://x.com/ObsessionDB): release notes and updates
-- [GitHub Issues](https://github.com/obsessiondb/chkit/issues): bugs and feature requests
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
-
-## License
-
-[MIT](LICENSE)
+[MIT license](LICENSE).

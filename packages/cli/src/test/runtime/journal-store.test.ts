@@ -41,6 +41,30 @@ function createScriptedExecutor(
 }
 
 describe('createJournalStore', () => {
+  test('does not issue unsupported SYNC REPLICA against a plain journal engine', async () => {
+    const { db, commandCalls } = createScriptedExecutor(new Map([
+      [/SELECT engine FROM system.tables/, [{ engine: 'ReplacingMergeTree' }]],
+    ]))
+    const store = createJournalStore(db)
+    await store.readJournal()
+    await store.readJournal()
+    expect(commandCalls.some((sql) => sql.startsWith('SYSTEM SYNC REPLICA'))).toBe(false)
+  })
+
+  test('still synchronizes a replicated journal even without a cluster option', async () => {
+    const { db, commandCalls } = createScriptedExecutor(new Map([
+      [/SELECT engine FROM system.tables/, [{ engine: 'ReplicatedReplacingMergeTree' }]],
+    ]))
+    await createJournalStore(db).readJournal()
+    expect(commandCalls.some((sql) => sql.startsWith('SYSTEM SYNC REPLICA'))).toBe(true)
+  })
+
+  test('keeps best-effort synchronization when engine metadata is unavailable', async () => {
+    const { db, commandCalls } = createScriptedExecutor(new Map())
+    await createJournalStore(db).readJournal()
+    expect(commandCalls.some((sql) => sql.startsWith('SYSTEM SYNC REPLICA'))).toBe(true)
+  })
+
   test('readMigrationState parses named-tuple operations returned as objects (JSONEachRow shape)', async () => {
     // Regression: ClickHouse's JSONEachRow format returns named Tuple columns
     // as objects keyed by tuple field names, NOT positional arrays. An earlier

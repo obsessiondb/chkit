@@ -52,11 +52,14 @@ The record of which migrations have run is deliberately not a file. It lives in 
 
 This is the workflow for a team where only some developers can reach production. Assume one person has a one-time connection to prod and nobody else does.
 
-1. **Seed the project once.** The person with access runs [`chkit pull`](/cli/pull/) against prod to introspect the existing schema into schema files, then `chkit generate` to produce the initial snapshot. Commit the schema files, the migration(s), and `snapshot.json`.
+1. **Seed the project once.** The person with access runs [`chkit pull`](/cli/pull/) against prod to introspect the existing schema into schema files, then `chkit generate` to produce a reviewed, idempotent baseline migration and the initial snapshot. Apply that baseline through `migrate` to establish the database journal, and verify the live schema and data before making a separate schema change. Follow the complete [existing-database adoption walkthrough](/getting-started/add-to-existing-project/); `pull` or `generate` alone does not mark any migration applied. Commit the schema files, the reviewed migration(s), and `snapshot.json`.
 
    ```sh
    chkit pull --out-file ./src/db/schema/pulled.ts   # connects to prod, one time
-   chkit generate --name baseline                    # offline; writes snapshot.json
+   chkit generate --name baseline                    # offline; writes SQL + snapshot.json
+   # Review the baseline SQL and preserve existing data; then:
+   chkit migrate --apply                             # connects; establishes the journal
+   chkit check                                       # connects; verifies the live schema
    ```
 
 2. **Everyone else works offline.** Any developer edits the schema files and runs `generate`. No production access and no local ClickHouse are needed, because the snapshot is the baseline being diffed against.
@@ -130,10 +133,12 @@ Run `chkit migrate` and it is picked up like any generated migration, applied in
 - **Destructive statements** (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, …) require `--allow-destructive` in CI, even when hand-written. See [destructive operation safety](/cli/migrate/#destructive-operation-safety).
 - **Large data loads**, such as a multi-minute `INSERT ... SELECT` or a backfill, can be marked `mode=async` so chkit submits the query without blocking on the HTTP response and polls for progress. See [async operations](/cli/migrate/#async-operations-modeasync).
 
-For structural changes that must preserve data, the common pattern is a hand-written migration that creates a new table, runs `INSERT INTO new SELECT ... FROM old`, then swaps names. See the [DSL reference](/schema/dsl-reference/).
+For structural changes that must preserve data, use a reviewed copy, validation, and cutover instead of applying a generated drop/recreate. The [data-preserving structural migration recipe](/guides/data-preserving-migrations/) walks through a populated table, an exact transformed-row comparison, an atomic swap, snapshot alignment, and recovery with writers paused. Use the [backfill plugin](/plugins/backfill/) for supported same-table or materialized-view replay; arbitrary source-to-replacement transformations belong in tracked SQL.
 
 ## Related pages
 
+- [Adopt an existing database](/getting-started/add-to-existing-project/) — establish a reviewed baseline and preserve existing rows/views
+- [Data-preserving structural migrations](/guides/data-preserving-migrations/) — copy, validate, atomically swap, and retain a recovery table
 - [Tutorial: your first schema](/tutorials/first-schema/) — the same loop, hands-on from an empty folder
 - [`chkit generate`](/cli/generate/) — the offline diff-and-write command in detail
 - [`chkit migrate`](/cli/migrate/) — applying migrations, the journal, checksums, and destructive-operation safety

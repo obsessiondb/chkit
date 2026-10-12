@@ -89,6 +89,7 @@ export function formatCommandHelp(command: RegisteredCommand, globalFlags: reado
   for (const flag of globalFlags) {
     lines.push(formatFlagLine(flag))
   }
+  lines.push(formatFlagLine({ name: '-h, --help', type: 'boolean', description: 'Show help; use --help-plugins to include configured extensions' }))
 
   appendDocsHelp(lines)
 

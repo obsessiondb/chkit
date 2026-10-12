@@ -21,6 +21,7 @@ chkit init [flags]
 | `--email <email>` | string | — | Email for the ObsessionDB `claim` / `account` paths (implies an interactive connect step). |
 | `--code <code>` | string | — | One-time email code, to verify a signup without re-prompting. |
 | `--org-name <name>` | string | — | Override the auto-created ObsessionDB organization name. |
+| `--help`, `-h` | boolean | `false` | Print help without writing files, installing packages or connecting. |
 | `--yes`, `-y` | boolean | `false` | Skip the connect prompt and just write files — keeps `init` a silent scaffolder for scripts. |
 
 See [global flags](/cli/overview/#global-flags).
@@ -33,8 +34,8 @@ See [global flags](/cli/overview/#global-flags).
 
 Writes two files relative to the current working directory, leaving any that already exist untouched:
 
-1. **`clickhouse.config.ts`** — project config with sensible defaults: `schema: './src/db/schema/**/*.ts'`, `outDir: './chkit'`, `migrationsDir: './chkit/migrations'`, `metaDir: './chkit/meta'`, an empty `plugins` array, and a `clickhouse` block reading from `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, and `CLICKHOUSE_DB`.
-2. **`src/db/schema/example.ts`** — a starter `MergeTree` table named `events` with columns `id` (`UInt64`), `source` (`String`), and `ingested_at` (`DateTime64(3)`).
+1. **`clickhouse.config.ts`** — project config with sensible defaults: `schema: './src/db/schema/**/*.ts'`, `outDir: './chkit'`, `migrationsDir: './chkit/migrations'`, `metaDir: './chkit/meta'`, an empty `plugins` array, and a `clickhouse` block enabled when `CLICKHOUSE_URL` is supplied. A direct connection requires explicit `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` (intentionally empty is allowed), and `CLICKHOUSE_DB`; optional `CLICKHOUSE_CLUSTER` preserves cluster DDL metadata. Supplied target metadata remains available during offline generation. Without a URL, a registered provider plugin may supply the connection instead.
+2. **`src/db/schema/example.ts`** — a starter `MergeTree` table named `events` with columns `id` (`UInt64`), `source` (`String`), and `ingested_at` (`DateTime64(3)`, default expression `now64(3)`). The schema requires `CLICKHOUSE_DB` before generation; it does not invent a database namespace.
 
 Under [chkit-py](/python/overview/), the same command writes `clickhouse.config.py` and `src/db/schema/example.py` instead.
 
@@ -55,7 +56,7 @@ Configure later
 
 Claiming or logging in registers the `@chkit/plugin-obsessiondb` plugin in your config and writes the selected service to `.chkit/obsessiondb.json`. See [Getting Started with ObsessionDB](/obsessiondb/getting-started/) for each path in detail, including the non-interactive and agent-friendly (`--json`) variants.
 
-Pass `--yes` to skip this step and just write files. In a non-interactive environment (no TTY) without connect flags, `init` skips onboarding entirely — it writes files and prints static next steps (set `CLICKHOUSE_URL`, edit the schema, then `generate` and `migrate`). When an explicit connect path is requested but cannot complete — for example `--connect claim` with no email, or a wrong code — `init` exits non-zero so scripts can detect the failure.
+Pass `--yes` to skip this step and just write files. Without a TTY or explicit connect flags, the onboarding flow prints its non-interactive runbook. For offline work, set the intended `CLICKHOUSE_DB`, edit the schema and generate; obtain the remaining connection values before any connected command. When an explicit connect path is requested but cannot complete — for example `--connect claim` with no email, or a wrong code — `init` exits non-zero so scripts can detect the failure.
 
 ## Examples
 
@@ -69,6 +70,7 @@ chkit init
 
 ```sh
 chkit init --yes
+# Set CLICKHOUSE_DB to the namespace you intend to manage before generate.
 ```
 
 **Preselect the claim path (still prompts for the emailed code):**
