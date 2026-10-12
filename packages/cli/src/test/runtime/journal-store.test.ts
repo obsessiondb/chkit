@@ -400,12 +400,13 @@ describe('createJournalStore', () => {
           [/SELECT name FROM .* LIMIT 0/, []],
           [/system\.one/, [{ replicas }]],
           [/currentDatabase\(\) AS database/, [{ database: 'default' }]],
+          [/SELECT engine FROM system.tables/, [{ engine: 'ReplicatedReplacingMergeTree' }]],
         ]),
       )
       // How many replicas list the journal table on each successive poll.
       const scripted = db.query.bind(db)
       db.query = async <T>(sql: string): Promise<T[]> => {
-        if (sql.includes('system.tables')) {
+        if (sql.includes('system.tables') && sql.includes('AS replicas')) {
           const seen = journalOnReplicas[Math.min(journalPolls, journalOnReplicas.length - 1)]
           journalPolls += 1
           return [{ replicas: seen }] as T[]
@@ -447,10 +448,11 @@ describe('createJournalStore', () => {
 
       await store.readMigrationState('m.sql')
 
-      const tablePolls = queries.filter((sql) => sql.includes('system.tables'))
-      expect(tablePolls).toHaveLength(2)
+      const tablePollIndices = queries.flatMap((sql, index) =>
+        sql.includes('system.tables') && sql.includes('AS replicas') ? [index] : [])
+      expect(tablePollIndices).toHaveLength(2)
       const firstRead = queries.findIndex((sql) => sql.includes("name = 'm.sql'"))
-      expect(firstRead).toBeGreaterThan(queries.lastIndexOf(tablePolls[1] as string))
+      expect(firstRead).toBeGreaterThan(Math.max(...tablePollIndices))
     })
 
     test('a single replica keeps the FINAL read', async () => {

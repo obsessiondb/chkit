@@ -8,6 +8,7 @@ import {
   normalizeProjectionIndex,
   normalizeSQLFragment,
   renderDefault,
+  renderColumnType,
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
@@ -218,8 +219,8 @@ function normalizeColumnShape(column: ColumnDefinition): string {
       ? ''
       : sqlExpressionFingerprint(rendered)
   const parts = [
-    `type=${String(column.type).trim()}`,
-    `nullable=${column.nullable ? '1' : '0'}`,
+    // Introspection unwraps Nullable(T) into type=T plus nullable=true.
+    `type=${renderColumnType(column)}`,
     `default=${normalizedDefault}`,
     `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,

@@ -127,6 +127,18 @@ To regenerate the migration instead, delete the file, restore `chkit/meta/snapsh
 
 A statement made only of comments, such as a block comment after the last `;`, is not executable either. chkit skips it instead of sending it to ClickHouse, which would reject it as `Empty query`.
 
+### Backfill assertions
+
+Mark a SQL guard with `assert_backfill` to verify that a data backfill completed before later statements run:
+
+```sql
+-- operation: assert_backfill key=table:analytics.events:backfill risk=caution
+SELECT throwIf(countIf(format_version < 3) > 0, 'Complete the event backfill first')
+FROM analytics.events;
+```
+
+The assertion succeeds when the query completes and is recorded in the journal. It does not wait for a table named `events:backfill` to appear. If the query throws, the migration stops before the next statement; after completing the backfill, run `chkit migrate --apply` again to resume at the failed assertion.
+
 ### Journal
 
 Each migration has one row in the `_chkit_migrations` journal table in ClickHouse:

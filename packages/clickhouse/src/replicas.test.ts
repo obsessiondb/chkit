@@ -49,6 +49,20 @@ describe('resolveReplicaFanout', () => {
 })
 
 describe('waitForDDLPropagation across replicas', () => {
+  test('skips backfill assertions and still waits for subsequent DDL on every replica', async () => {
+    const { db, queries } = twoReplicaExecutor([1, 2])
+
+    await waitForDDLPropagation(db, 'assert_backfill', 'table:brain.knowledge:backfill')
+    expect(queries).toEqual([])
+
+    await waitForDDLPropagation(db, 'create_table', 'table:brain.knowledge')
+
+    const polls = queries.filter((sql) => sql.includes('system.tables'))
+    expect(polls).toHaveLength(2)
+    expect(polls.every((sql) => sql.includes("name = 'knowledge'"))).toBe(true)
+    expect(polls.every((sql) => sql.includes("clusterAllReplicas('default', system.tables)"))).toBe(true)
+  })
+
   test('keeps waiting while only one of two replicas shows an added column', async () => {
     const { db, queries } = twoReplicaExecutor([1, 1, 2])
 

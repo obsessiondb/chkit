@@ -719,7 +719,12 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 					sql,
 				})
-				const rows = await result.json<T>()
+				// The client's JSONEachRow decoder drops the final row when the
+				// response ends without a newline. Decode every nonempty line.
+				const rows = (await result.text())
+					.split('\n')
+					.filter((line) => line.trim().length > 0)
+					.map((line): T => JSON.parse(line))
 				logProfiling(
 					profiler,
 					sql,

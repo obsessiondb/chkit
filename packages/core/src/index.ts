@@ -41,7 +41,7 @@ export {
   normalizeSQLFragment,
   sqlExpressionFingerprint,
 } from './sql-normalizer.js'
-export { renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
+export { renderColumnType, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   canonicalizeCodec,

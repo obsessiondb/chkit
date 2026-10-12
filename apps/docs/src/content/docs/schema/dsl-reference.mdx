@@ -243,6 +243,8 @@ See the ClickHouse [data types reference](https://clickhouse.com/docs/sql-refere
 
 When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL.
 
+An inline nullable type (`type: 'Nullable(String)'`) and `type: 'String', nullable: true` are equivalent in migration generation and drift checks. Use either form; setting `nullable: true` on an already nullable type adds another wrapper.
+
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts

@@ -158,6 +158,47 @@ describe('@chkit/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  test('equates inline Nullable types with the introspected nullable property', () => {
+    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)', 'LowCardinality(String)']) {
+      const inline = { name: 'value', type: `Nullable(${type})` }
+      const property = { name: 'value', type, nullable: true }
+      expect(compareColumn(inline, property)).toBeNull()
+      expect(compareColumn(property, inline)).toBeNull()
+      expect(compareColumn(property, property)).toBeNull()
+    }
+  })
+
+  test('preserves real type, nullability and wrapper differences', () => {
+    const differences: Array<[ColumnDefinition, ColumnDefinition]> = [
+      [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'String' }],
+      [{ name: 'value', type: 'String' }, { name: 'value', type: 'String', nullable: true }],
+      [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'UInt64', nullable: true }],
+      [{ name: 'value', type: 'Nullable(String)', nullable: true }, { name: 'value', type: 'String', nullable: true }],
+      [{ name: 'value', type: 'LowCardinality(Nullable(String))' }, { name: 'value', type: 'LowCardinality(String)', nullable: true }],
+      [{ name: 'value', type: 'Array(Nullable(String))' }, { name: 'value', type: 'Array(String)' }],
+    ]
+    for (const [expected, actual] of differences) {
+      expect(compareColumn(expected, actual)).toMatchObject({
+        changedColumns: ['value'],
+        reasonCodes: ['changed_column'],
+      })
+      expect(compareColumn(actual, expected)?.changedColumns).toEqual(['value'])
+    }
+  })
+
+  test('keeps defaults, comments and default kinds in nullable column comparisons', () => {
+    const expected = { name: 'value', type: 'Nullable(String)', default: 'a', comment: 'original' }
+    const actual = { name: 'value', type: 'String', nullable: true, default: "'a'", comment: 'original' }
+    expect(compareColumn(expected, actual)).toBeNull()
+    for (const column of [
+      { ...actual, default: "'b'" },
+      { ...actual, comment: 'changed' },
+      { ...actual, defaultKind: 'MATERIALIZED' },
+    ] satisfies ColumnDefinition[]) {
+      expect(compareColumn(expected, column)?.changedColumns).toEqual(['value'])
+    }
+  })
+
   // #194: ClickHouse derives PRIMARY KEY from ORDER BY when it is omitted, then
   // omits it from SHOW CREATE. A pulled schema carries the derived primary key,
   // so the live table (no PRIMARY KEY) must not read as drift against it.
@@ -835,6 +876,22 @@ describe('@chkit/cli drift comparer', () => {
     expect(live('(toYYYYMM(ts), `user--id` % 8)')?.reasonCodes).toEqual(['partition_by_mismatch'])
   })
 })
+
+function compareColumn(expected: ColumnDefinition, actual: ColumnDefinition) {
+  return compareTableShape(table({
+    database: 'app',
+    name: 'events',
+    engine: 'MergeTree()',
+    columns: [expected],
+    orderBy: [],
+  }), {
+    engine: 'MergeTree()',
+    columns: [actual],
+    settings: {},
+    indexes: [],
+    projections: [],
+  })
+}
 
 describe('@chkit/cli drift comparer with quoted identifiers', () => {
   const expected = table({
