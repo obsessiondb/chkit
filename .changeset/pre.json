@@ -34,6 +34,7 @@
     "drift-ch-canonical-expressions",
     "drift-index-arguments",
     "e2e-testkit-local-stack",
+    "friendly-agents-onboard",
     "generate-empty-migration",
     "google-calendar-raw-events",
     "google-meet-core-raw-resources",
