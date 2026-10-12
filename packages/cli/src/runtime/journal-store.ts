@@ -185,6 +185,7 @@ SETTINGS index_granularity = 1`
 
   let bootstrapped = false
   let _databaseMissing = false
+  let replicaSyncSupported: boolean | undefined
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
 
@@ -238,6 +239,19 @@ SETTINGS index_granularity = 1`
   }
 
   async function trySyncReplica(): Promise<void> {
+    if (replicaSyncSupported === undefined) {
+      try {
+        const rows = await db.query<{ engine: string }>(
+          `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
+        )
+        // Only skip synchronization when the actual engine is known. If system
+        // metadata is unavailable, retain the existing best-effort sync behavior.
+        replicaSyncSupported = rows[0] ? rows[0].engine.startsWith('Replicated') : true
+      } catch {
+        replicaSyncSupported = true
+      }
+    }
+    if (!replicaSyncSupported) return
     try {
       await db.command(`SYSTEM SYNC REPLICA ${journalTable}`)
     } catch {

@@ -28,7 +28,7 @@ Use the `chkit` CLI to define ClickHouse schemas in TypeScript or Python, genera
 
 ## Connection requirements
 
-Generate migrations from local files without a connection or credentials. Configure a ClickHouse connection to apply migrations or inspect a live database.
+Generate migrations from local files without a database connection. The starter schema still requires an explicitly chosen `CLICKHOUSE_DB` namespace. Preserve supplied target metadata during generation so cluster and engine settings remain consistent. Configure a ClickHouse connection to apply migrations or inspect a live database.
 
 <Image src={commandConnections} alt="Two groups of commands. No connection: generate (diff schema vs snapshot), codegen (types from schema), and editing schema files. Connects to ClickHouse: migrate (apply SQL), pull (introspect), status (read journal), check and drift (compare live DB to code)." />
 
@@ -40,7 +40,9 @@ Generate migrations from local files without a connection or credentials. Config
 
 ```sh
 chkit init                   # scaffold config + example schema
+# Set CLICKHOUSE_DB to the intended namespace before generation.
 chkit generate --name init   # produce migration SQL + snapshot
+# Supply the remaining connection values before connected commands.
 chkit migrate --json         # inspect the pending plan without applying
 chkit migrate --apply        # apply reviewed migrations to ClickHouse
 chkit status                 # verify migration state
@@ -56,7 +58,8 @@ These flags are available on every command that loads a config file:
 | `--config <path>` | string | `clickhouse.config.ts` / `clickhouse.config.py` | Path to the chkit config file |
 | `--json` | boolean | `false` | Emit machine-readable JSON output |
 | `--table <selector>` | string | n/a | Narrow some commands to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`). Effect varies per command: see note below |
-| `--help` | boolean | n/a | Show help text |
+| `--help` | boolean | n/a | Show built-in help without evaluating project config |
+| `--help-plugins` | boolean | n/a | Include configured plugin flags; evaluates config/plugin registration but skips lifecycle hooks |
 | `--version` | boolean | n/a | Print CLI version |
 
 The effect of `--table` depends on the command:

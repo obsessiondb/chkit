@@ -14,22 +14,33 @@ Paste this into your coding agent to start setup:
 ```text
 Set up chkit (ClickHouse schema management) in this repo. First fetch
 https://chkit.obsessiondb.com/ai-agents.md and follow the instructions there:
-ask me the setup questions, install the agent skill, scaffold the config,
+use choices I already supplied, ask only missing setup questions, install the agent skill, scaffold the config,
 recommend any plugins this project needs, and walk me through the first
-migration. Don't apply anything to the database without confirming with me first.
+migration. Review SQL before applying; ask for apply authorization if I haven't provided it.
+```
+
+
+For an explicitly authorized disposable development target, add:
+
+```text
+I authorize the reviewed migrations needed for this task on the supplied
+local development database. Proceed through apply and verification without
+asking for repeat confirmation. If credentials are missing, prepare everything
+possible offline and ask for the exact missing connection values. Do not invent
+connection defaults or provision an account.
 ```
 
 Append `.md` to a documentation URL to read Markdown, such as [`/ai-agents.md`](https://chkit.obsessiondb.com/ai-agents.md). Find page URLs in [`/llms.txt`](https://chkit.obsessiondb.com/llms.txt).
 
 ## What chkit is
 
-Use chkit to define ClickHouse schemas in TypeScript or Python, generate migration SQL, deploy reviewed changes, and check the live database for drift.
+Use chkit to define ClickHouse schemas, generate migration SQL, deploy reviewed changes, and check the live database for drift. Default to TypeScript unless the user explicitly requests the alpha Python implementation.
 
 Run chkit through shell commands. Install the schema agent skill for command and authoring guidance.
 
-## Step 1: Ask the user before scaffolding
+## Step 1: Resolve the setup choices
 
-Ask these three questions before scaffolding. Use the answers to select the commands.
+Treat choices already supplied in the task as answered. Ask only for genuinely missing information, and continue independent offline work while waiting. Use these choices to select the commands.
 
 1. **New project or existing project?**
    - *New / empty directory* → initialize a schema project with `chkit init` in the chosen language (Step 3a).
@@ -45,6 +56,14 @@ Ask these three questions before scaffolding. Use the answers to select the comm
    - *Already have an ObsessionDB account*: log in and pick a service.
    - *Already have a ClickHouse instance*: connect with environment variables.
    - *Configure later*: scaffold only; the user wires up the connection themselves.
+
+### Missing credentials: prepare offline, then ask
+
+For an existing ClickHouse target, request its HTTP(S) URL including port, username, password (or explicitly blank password), and database. Do not treat localhost, `default`, or an absent password as verified values. Configure direct connected commands to fail clearly when a required value is missing; `generate` can run without a connection/executor.
+
+Prepare schema definitions offline. Generate the initial SQL once the user has chosen the database namespace; if that name is unknown, request it and leave generation pending instead of inventing a default. If a previous attempt generated placeholder SQL, retarget definitions and regenerate only never-applied initial artifacts; never rewrite an applied migration or its history. Keep credentials out of Git and handoffs. Bun loads a root `.env`; npm/Node requires explicit loading such as `node --env-file=.env ./node_modules/chkit/dist/bin/chkit.js check --strict --json`.
+
+The CLI scaffold requires an explicit database namespace before generation and explicit credentials before a direct connection. Preserve supplied target metadata during offline generation; removing the connection configuration can change cluster or engine-setting behavior. A generated config is not proof a database connection works.
 
 ## Step 2: Install the agent skill
 
@@ -81,7 +100,7 @@ chkit init
 
 Follow the [first-schema tutorial](/tutorials/first-schema/) for the complete workflow. If the user wants a curated TypeScript project with two tables and an existing migration, use the optional [schema example](/getting-started/with-an-example/).
 
-Both paths run the connect flow in Step 4. Drive `init` non-interactively with `--connect <choice>` (and `--email` for the claim path), or `--yes` to scaffold only.
+Both paths offer the connect flow in Step 4. Choose configure-later while credentials are missing; do not claim an account on the user's behalf unless requested. Drive `init` non-interactively with `--connect <choice>` (and `--email` for the claim path), or `--yes` to scaffold only.
 
 ### 3b. Existing project: `chkit init`
 
@@ -132,7 +151,7 @@ chkit pull
 
 In Python, `chkit pull` is built in and needs no plugin registration. Replace or remove the scaffolded starter schema so the configured schema files contain the intended database objects.
 
-Pull writes schema definitions from the live tables; it does not create a migration baseline or record existing tables as migrated. With no snapshot, `generate` still produces initial `CREATE` statements. Review how existing objects will be adopted before applying any initial migration to that database. See [schema introspection](/plugins/pull/) for options.
+Pull writes definitions, not a migration baseline or applied history. Follow [the complete existing-database adoption guide](/getting-started/add-to-existing-project/) to review an idempotent baseline, handle scoped database permissions, apply through the normal journal, verify data/views/live drift, and make a separate ALTER migration. `IF NOT EXISTS` does not prove the existing object matches the definition. Never manufacture history by editing the journal or rebuilding a snapshot. See [schema introspection](/plugins/pull/) for options.
 
 ## Step 6: First migration
 
@@ -141,7 +160,7 @@ Once the schema reflects what the user wants:
 ```sh
 chkit generate --name init   # diff schema against the last snapshot → migration SQL
 chkit migrate --json         # plan pending migrations without applying
-chkit migrate --apply        # apply — only after the user confirms the SQL
+chkit migrate --apply        # apply reviewed SQL with user authorization
 chkit status                 # report applied vs pending migrations
 chkit check                  # CI gate: pending, checksums, drift, plugins
 ```
@@ -154,7 +173,7 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 |----------------------------|-----------|-------|
 | Adopt chkit on an **existing** ClickHouse database | [`@chkit/plugin-pull`](/plugins/pull/) | Introspects the live database into local schema files so the user starts from real tables, not a blank example. |
 | Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
-| **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Time-windowed loads with checkpoints, for large or resumable backfills. |
+| **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Partition/sort-key replay with checkpoints; inspect plan predicates and retry/engine semantics. |
 | Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and service selection; strips the `storage_policy` table setting when targeting non-ObsessionDB ClickHouse. |
 
 Install plugins for the project's stated requirements.
@@ -164,7 +183,7 @@ Install plugins for the project's stated requirements.
 chkit applies DDL to real databases. Treat the following as hard rules unless the user explicitly overrides them:
 
 :::caution
-- **Preview with `chkit migrate --json`.** This reports the plan without applying changes. Show the pending SQL, then run `chkit migrate --apply` after the user confirms. A plain `chkit migrate` in an interactive terminal can prompt to apply the plan.
+- **Preview with `chkit migrate --json`.** This reports pending work without executing migration statements; connected setup can initialize the journal. Review the pending SQL, then apply with the authorization already supplied, or ask if the requested writes are not authorized. For populated structural changes, use [the data-preserving recipe](/guides/data-preserving-migrations/) instead of approving a generated DROP/CREATE. A plain `chkit migrate` in an interactive terminal can prompt to apply the plan.
 - **Recover a failed migration with the CLI, not by editing the journal.** Preview with `chkit migrate --retry <file> --json` or `chkit migrate --abandon <file> --json`, show the user the result, and add `--apply` once they confirm. Never delete rows from the `_chkit_migrations` table. See [failed migrations](/cli/migrate/#failed-migrations).
 - **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it.
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.

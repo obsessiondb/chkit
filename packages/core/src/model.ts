@@ -10,6 +10,7 @@ import type {
   MaterializedViewDefinition,
   SchemaDefinition,
   TableDefinition,
+  TableInput,
   ValidationIssue,
   ViewDefinition,
 } from './model-types.js'
@@ -93,9 +94,9 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
 }
 
 export function table(input: KafkaTableInput): TableDefinition
-export function table(input: Omit<TableDefinition, 'kind'>): TableDefinition
-export function table(input: KafkaTableInput | Omit<TableDefinition, 'kind'>): TableDefinition {
-  return { ...input, primaryKey: input.primaryKey ?? [], orderBy: input.orderBy ?? [], kind: 'table' }
+export function table(input: TableInput): TableDefinition
+export function table(input: KafkaTableInput | TableInput): TableDefinition {
+  return { ...input, primaryKey: input.primaryKey ?? input.orderBy ?? [], orderBy: input.orderBy ?? [], kind: 'table' }
 }
 
 export function view(input: Omit<ViewDefinition, 'kind'>): ViewDefinition {

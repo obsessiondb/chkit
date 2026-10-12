@@ -131,6 +131,7 @@ export interface SystemTableRow {
 	name: string
 	engine: string
 	create_table_query?: string
+	primary_key?: string
 }
 
 export interface SystemColumnRow {
@@ -353,7 +354,7 @@ export function buildIntrospectedTables(
 				database: row.database,
 				name: row.name,
 					engine: parseEngineFromCreateTableQuery(row.create_table_query) ?? row.engine,
-				primaryKey: parsePrimaryKeyFromCreateTableQuery(row.create_table_query),
+				primaryKey: parsePrimaryKeyFromCreateTableQuery(row.create_table_query) ?? (row.primary_key || undefined),
 				orderBy: parseOrderByFromCreateTableQuery(row.create_table_query),
 				uniqueKey: parseUniqueKeyFromCreateTableQuery(row.create_table_query),
 				partitionBy: parsePartitionByFromCreateTableQuery(
@@ -930,7 +931,7 @@ WHERE is_temporary = 0
 				.map((dbName) => `'${dbName.replace(/'/g, "''")}'`)
 				.join(', ')
 			const tables = await this.query<SystemTableRow>(
-				`SELECT database, name, engine, create_table_query
+				`SELECT database, name, engine, create_table_query, primary_key
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})`,

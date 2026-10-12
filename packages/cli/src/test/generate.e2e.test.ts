@@ -704,7 +704,7 @@ describe('@chkit/cli generate expression defaults (#234)', () => {
     expect(INIT_SCHEMA_TEMPLATE).toContain("default: { expression: 'now64(3)' }")
     const fixture = await createFixture(INIT_SCHEMA_TEMPLATE.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)))
     try {
-      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'], { CLICKHOUSE_DB: 'app' })
       expect(result.exitCode).toBe(0)
       const payload = JSON.parse(result.stdout) as { operations: Array<{ type: string; sql: string }> }
       const createTable = payload.operations.find((operation) => operation.type === 'create_table')
