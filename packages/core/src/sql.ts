@@ -20,12 +20,17 @@ import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 
 function renderColumn(col: ColumnDefinition): string {
-  let out = `${quoteIdentifier(col.name)} ${col.nullable ? `Nullable(${col.type})` : col.type}`
+  let out = `${quoteIdentifier(col.name)} ${renderColumnType(col)}`
   if (col.default !== undefined) out += ` ${col.defaultKind ?? 'DEFAULT'} ${renderDefault(col.default)}`
   else if (col.defaultKind === 'EPHEMERAL') out += ' EPHEMERAL'
   if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
   if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
+}
+
+export function renderColumnType(column: Pick<ColumnDefinition, 'type' | 'nullable'>): string {
+  const type = String(column.type).trim()
+  return column.nullable ? `Nullable(${type})` : type
 }
 
 export function renderKeyClauseColumns(

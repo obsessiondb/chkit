@@ -14,6 +14,7 @@ import {
   runCli,
   runCliWithRetry,
   waitForColumn,
+  waitForRows,
   waitForTable,
 } from './e2e-testkit.js'
 
@@ -60,6 +61,68 @@ async function createFixture(input: {
 
 describe('@chkit/cli drift depth env e2e', () => {
   const liveEnv = getLiveEnv()
+
+  test('inline Nullable types pass strict checks and real nullability or type changes drift', async () => {
+    const executor = createLiveExecutor(liveEnv)
+    const database = liveEnv.clickhouseDatabase
+    const usersTable = `${createPrefix('drift_nullable')}users`
+    const journalTable = createJournalTableName('drift_nullable')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const fixture = await createFixture({ database, usersTableName: usersTable })
+    const object = `${quoteIdent(database)}.${quoteIdent(usersTable)}`
+    const args = ['--config', fixture.configPath, '--table', `${database}.${usersTable}`, '--json']
+
+    try {
+      await writeFile(fixture.schemaPath, `import { schema, table } from '${CORE_ENTRY}'
+export default schema(table({
+  database: '${database}', name: '${usersTable}', engine: 'MergeTree()', orderBy: ['id'],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'note', type: 'Nullable(String)', default: 'new', comment: 'optional note' },
+    { name: 'seen_at', type: "Nullable(DateTime64(3, 'UTC'))" },
+    { name: 'amount', type: 'Nullable(Decimal(12, 3))' },
+  ],
+}))
+`, 'utf8')
+      const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('nullable generate failed', generated))
+      expect(generated.exitCode).toBe(0)
+      const migrated = await runCliWithRetry(
+        fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'], { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('nullable migrate failed', migrated))
+      await waitForTable(executor, database, usersTable)
+
+      const drift = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(drift.exitCode).toBe(0)
+      expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+      const check = runCli(fixture.dir, ['check', '--strict', ...args], cliEnv)
+      expect(check.exitCode).toBe(0)
+      expect(JSON.parse(check.stdout)).toMatchObject({ ok: true, drifted: false, failedChecks: [] })
+
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN note String`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN amount Nullable(Decimal(12, 4))`)
+      await waitForRows<{ name: string; type: string }>(executor,
+        `SELECT name, type FROM system.columns WHERE database = '${database}' AND table = '${usersTable}' AND name IN ('note', 'amount') ORDER BY name`,
+        (rows) => rows[0]?.type === 'Nullable(Decimal(12, 4))' && rows[1]?.type === 'String',
+        'nullable column changes'
+      )
+      const changed = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(changed.exitCode).toBe(0)
+      expect(JSON.parse(changed.stdout)).toMatchObject({
+        drifted: true,
+        tableDrift: [{ table: `${database}.${usersTable}`, changedColumns: ['amount', 'note'], reasonCodes: ['changed_column'] }],
+      })
+      const strict = runCli(fixture.dir, ['check', '--strict', ...args], cliEnv)
+      expect(strict.exitCode).toBe(1)
+      expect(JSON.parse(strict.stdout)).toMatchObject({ ok: false, drifted: true, failedChecks: ['schema_drift'] })
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${object}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 240_000)
 
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',

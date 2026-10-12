@@ -61,6 +61,9 @@ function createMockClient(
         async json() {
           return []
         },
+        async text() {
+          return ''
+        },
       }
     },
     async insert(params: { table: string; values: Array<Record<string, unknown>>; columns?: string[] }) {
@@ -347,8 +350,8 @@ SETTINGS index_granularity = 8192;`
     // block to the body. If we decoded the body first, JSON parsing would
     // throw before the header check ran and the streamed exception would be
     // silently bypassed.
-    let jsonCalled = false
-    const failingJsonClient = {
+    let textCalled = false
+    const failingBodyClient = {
       async query() {
         return {
           query_id: 'q-1',
@@ -356,8 +359,8 @@ SETTINGS index_granularity = 8192;`
             'x-clickhouse-exception-code': '241',
             'x-clickhouse-exception-tag': 'memlim',
           },
-          async json() {
-            jsonCalled = true
+          async text() {
+            textCalled = true
             throw new Error('invalid JSON: trailing exception block')
           },
         }
@@ -379,13 +382,13 @@ SETTINGS index_granularity = 8192;`
         database: 'default',
         secure: false,
       },
-      failingJsonClient,
+      failingBodyClient,
     )
 
     await expect(executor.query('SELECT 1')).rejects.toBeInstanceOf(
       ClickHouseStreamedException,
     )
-    expect(jsonCalled).toBe(false)
+    expect(textCalled).toBe(false)
     await executor.close()
   })
 

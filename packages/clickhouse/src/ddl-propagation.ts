@@ -187,6 +187,10 @@ export async function waitForDDLPropagation(
   operationKey: string,
   options?: PropagationOptions,
 ): Promise<void> {
+  // Backfill assertions execute SELECT guards. Their keys identify the guard,
+  // not an object changed by DDL, so there is no schema propagation to await.
+  if (operationType === 'assert_backfill') return
+
   const parsed = parseOperationKey(operationType, operationKey)
   if (!parsed) return // database-level ops or unrecognized keys — no wait needed
 

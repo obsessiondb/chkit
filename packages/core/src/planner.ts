@@ -28,6 +28,7 @@ import {
   renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
+  renderColumnType,
   toCreateSQL,
 } from './sql.js'
 import { textIndexFingerprint } from './text-index.js'
@@ -198,14 +199,16 @@ interface TableDiffResult {
   renameSuggestions: ColumnRenameSuggestion[]
 }
 
-function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom'> {
-  const { name: _name, renamedFrom: _renamedFrom, ...rest } = column
-  return rest
+function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable'> {
+  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, ...rest } = column
+  // Compare what the DSL renders: inline Nullable(T) and nullable: true are
+  // equivalent, while an additional or differently placed wrapper is not.
+  return { type: renderColumnType(column), ...rest }
 }
 
 function normalizeColumnWithoutCodec(
   column: ColumnDefinition
-): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'codec'> {
+): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
   const { codec: _codec, ...rest } = normalizeColumn(column)
   return rest
 }

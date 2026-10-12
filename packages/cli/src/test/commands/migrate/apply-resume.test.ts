@@ -211,6 +211,113 @@ describe('applyMigration sync resume (#6)', () => {
   })
 })
 
+describe('applyMigration backfill assertions (#274)', () => {
+  const GUARD = "SELECT throwIf((SELECT count() FROM brain.knowledge FINAL WHERE format_version < 3) > 0, 'Republish repository knowledge');"
+  const GUARD_MARKER = '-- operation: assert_backfill key=table:brain.knowledge:backfill risk=safe\n'
+  const DROP = 'ALTER TABLE brain.knowledge DROP COLUMN owners;'
+  const DROP_MARKER = '-- operation: alter_table_drop_column key=table:brain.knowledge:column:owners risk=danger\n'
+
+  test('journals a successful guard and resumes subsequent DDL without replaying the guard', async () => {
+    const sql = `${GUARD_MARKER}${GUARD}\n${DROP_MARKER}${DROP}\n`
+    const dir = writeMigration(sql)
+    const { store, state, appended } = createFakeStore()
+    const commands: string[] = []
+    const queries: string[] = []
+    let failDrop = true
+    const db = {
+      async command(statement: string) {
+        commands.push(statement)
+        if (statement === DROP && failDrop) throw new Error('drop temporarily failed')
+      },
+      async query(statement: string) {
+        queries.push(statement)
+        // The column has disappeared after DROP. Other rows would falsely
+        // satisfy the old wait for the nonexistent knowledge:backfill table.
+        return statement.includes('system.columns') || statement.includes('system.one') ? [] : [{ x: 1 }]
+      },
+    } as unknown as ClickHouseExecutor
+    const args = {
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('drop temporarily failed')
+    expect(state()?.operations).toMatchObject([
+      { operationType: 'assert_backfill', operationKey: 'table:brain.knowledge:backfill', status: 'completed' },
+      { operationType: 'alter_table_drop_column', status: 'failed' },
+    ])
+    expect(queries).toEqual([])
+    expect(appended).toEqual([])
+
+    failDrop = false
+    await applyMigration(args)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commands).toEqual([GUARD, DROP, DROP])
+    expect(queries).toHaveLength(2)
+    expect(queries[1]).toContain("table = 'knowledge' AND name = 'owners'")
+    expect(queries.some((query) => query.includes('knowledge:backfill'))).toBe(false)
+    expect(state()?.migrationCompleted).toBe(true)
+    expect(state()?.operations.every((operation) => operation.status === 'completed')).toBe(true)
+    expect(appended).toMatchObject([{ name: 'm.sql', checksum: checksumSQL(sql) }])
+  })
+
+  test('a rejected guard blocks destructive DDL and runs again after the backfill is complete', async () => {
+    const sql = `${GUARD_MARKER}${GUARD}\n${DROP_MARKER}${DROP}\n`
+    const dir = writeMigration(sql)
+    const { store, state, appended } = createFakeStore()
+    const commands: string[] = []
+    const queries: string[] = []
+    let backfillComplete = false
+    const db = {
+      async command(statement: string) {
+        commands.push(statement)
+        if (statement === GUARD && !backfillComplete) throw new Error('Republish repository knowledge')
+      },
+      async query(statement: string) {
+        queries.push(statement)
+        return statement.includes('system.columns') || statement.includes('system.one') ? [] : [{ x: 1 }]
+      },
+    } as unknown as ClickHouseExecutor
+    const args = {
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('Republish repository knowledge')
+    expect(commands).toEqual([GUARD])
+    expect(queries).toEqual([])
+    expect(state()?.operations).toMatchObject([
+      { operationType: 'assert_backfill', status: 'failed', lastError: 'Republish repository knowledge' },
+    ])
+    expect(appended).toEqual([])
+
+    backfillComplete = true
+    await applyMigration(args)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commands).toEqual([GUARD, GUARD, DROP])
+    expect(queries).toHaveLength(2)
+    expect(queries[1]).toContain("table = 'knowledge' AND name = 'owners'")
+    expect(queries.some((query) => query.includes('knowledge:backfill'))).toBe(false)
+    expect(state()?.migrationCompleted).toBe(true)
+    expect(state()?.operations.every((operation) => operation.status === 'completed')).toBe(true)
+    expect(appended).toMatchObject([{ name: 'm.sql', checksum: checksumSQL(sql) }])
+  })
+})
+
 describe('applyMigration with an edited in-progress migration (#233)', () => {
   test('refuses an edited file when a statement already completed and --retry was not given', async () => {
     const dir = writeMigration(EDITED_SQL)
