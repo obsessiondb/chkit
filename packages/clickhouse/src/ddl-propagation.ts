@@ -63,18 +63,38 @@ export async function waitForView(
   }, options)
 }
 
+/**
+ * Waits until the dictionary's catalog row is on every replica.
+ *
+ * `system.dictionaries` is the wrong signal. It lists each replica's
+ * in-memory loader (`ExternalLoader` load results), not the replicated
+ * catalog. `CREATE OR REPLACE DICTIONARY` drops that loader entry while the
+ * replica reloads, so a replica can omit the dictionary for the whole retry
+ * budget after the DDL is already in `system.tables`. A following statement
+ * only needs the catalog object.
+ *
+ * On several replicas the wait holds until every replica stores the same
+ * non-nil `uuid`. A replace does not remove the row, and ClickHouse redacts
+ * a SOURCE password to `[HIDDEN]` in `create_table_query`, so a password-only
+ * replace compares equal to the previous definition. `CREATE OR REPLACE`
+ * still assigns one new UUID in the replicated DDL (an `ON CLUSTER` statement
+ * and a Replicated database), and every replica that has applied it reports
+ * that UUID. `metadata_modification_time` is each replica's metadata-file
+ * mtime at second precision: it can stay unchanged across a replace in the
+ * same second, and two replicas that have both applied the DDL can disagree.
+ */
 export async function waitForDictionary(
   executor: ClickHouseExecutor,
   database: string,
   dictionaryName: string,
   options?: PropagationOptions,
 ): Promise<void> {
-  await waitForSystemRows(executor, {
-    source: 'system.dictionaries',
-    where: `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)}`,
-    want: 'present',
-    label: `waitForDictionary: ${database}.${dictionaryName} not yet visible`,
-  }, options)
+  const where = `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)} AND engine = 'Dictionary'`
+  const label = `waitForDictionary: ${database}.${dictionaryName} not yet visible`
+  const fanout = await resolveReplicaFanout(executor, options?.cluster)
+  await pRetry(async () => {
+    if (!(await dictionaryCatalogVisible(executor, where, fanout))) throw new Error(label)
+  }, RETRY_OPTIONS)
 }
 
 export async function waitForColumn(
@@ -259,6 +279,26 @@ async function waitForSystemRows(
   await pRetry(async () => {
     if (!(await systemRowsMatch(executor, wait, fanout))) throw new Error(wait.label)
   }, RETRY_OPTIONS)
+}
+
+async function dictionaryCatalogVisible(
+  executor: ClickHouseExecutor,
+  where: string,
+  fanout: ReplicaFanout | undefined,
+): Promise<boolean> {
+  if (!fanout) {
+    const rows = await executor.query<{ x: number }>(`SELECT 1 AS x FROM system.tables WHERE ${where}`)
+    return rows.length > 0
+  }
+  const rows = await executor.query<{ replicas: number | string; agreed: number | string | boolean }>(
+    `SELECT count(DISTINCT hostName()) AS replicas, (min(uuid) = max(uuid) AND min(uuid) != toUUID('00000000-0000-0000-0000-000000000000') AND count(uuid) = count()) AS agreed FROM ${allReplicas(fanout, 'system.tables')} WHERE ${where}`,
+  )
+  const replicas = Number(rows[0]?.replicas ?? 0)
+  return replicas >= fanout.replicas && isAgreed(rows[0]?.agreed)
+}
+
+function isAgreed(value: number | string | boolean | undefined): boolean {
+  return value === true || value === 1 || value === '1'
 }
 
 async function systemRowsMatch(

@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { waitForDDLPropagation } from './ddl-propagation.js'
 import { createLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from './e2e-testkit.js'
 import type { ClickHouseExecutor, ClickHouseSettings } from './index.js'
-import { allReplicas, resolveReplicaFanout } from './replicas.js'
+import { allReplicas, resolveReplicaFanout, stringLiteral } from './replicas.js'
 
 /**
  * `migrate` calls waitForDDLPropagation after every statement. On managed
@@ -142,6 +142,42 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
       await executor.command(`DROP VIEW IF EXISTS ${object(materializedView)}`)
       await executor.command(`DROP TABLE IF EXISTS ${object(table)}`)
       await executor.command(`DROP TABLE IF EXISTS ${object(target)}`)
+      await executor.close()
+    }
+  }, 120_000)
+
+  test('a password-only dictionary replace changes the catalog uuid and not the redacted definition', async () => {
+    const liveEnv = getLiveEnv()
+    const executor = createLiveExecutor(liveEnv)
+    const db = liveEnv.clickhouseDatabase
+    const dict = `${createPrefix('ddlwait_pwd')}dict`
+    const object = `${quoteIdent(db)}.${quoteIdent(dict)}`
+    const definition = (password: string) =>
+      `CREATE OR REPLACE DICTIONARY ${object} (id UInt64, name String) PRIMARY KEY id ` +
+      `SOURCE(HTTP(URL 'http://127.0.0.1:1/rows' FORMAT 'JSONEachRow' CREDENTIALS(USER 'default' PASSWORD '${password}'))) ` +
+      `LAYOUT(FLAT()) LIFETIME(MIN 0 MAX 300)`
+    const catalog = async () => {
+      const rows = await executor.query<{ uuid: string; create_table_query: string }>(
+        `SELECT toString(uuid) AS uuid, create_table_query FROM system.tables WHERE database = ${stringLiteral(db)} AND name = ${stringLiteral(dict)} AND engine = 'Dictionary'`,
+      )
+      expect(rows).toHaveLength(1)
+      return rows[0]
+    }
+
+    try {
+      await executor.command(definition('secret-one'))
+      await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`)
+      const before = await catalog()
+      await executor.command(definition('secret-two'))
+      await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`)
+      const after = await catalog()
+
+      expect(before?.uuid).not.toBe('00000000-0000-0000-0000-000000000000')
+      expect(after?.uuid).not.toBe(before?.uuid)
+      expect(after?.create_table_query).toBe(before?.create_table_query)
+      expect(after?.create_table_query).toContain("PASSWORD '[HIDDEN]'")
+    } finally {
+      await executor.command(`DROP DICTIONARY IF EXISTS ${object}`)
       await executor.close()
     }
   }, 120_000)

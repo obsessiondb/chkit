@@ -115,15 +115,34 @@ def wait_for_view(
 def wait_for_dictionary(
     client: Any, database: str, dictionary_name: str, *, cluster: str | None = None
 ) -> None:
-    """Poll ``system.dictionaries`` until ``database.dictionary_name`` appears."""
-    _wait_for_system_rows(
-        client,
-        source="system.dictionaries",
-        where=f"database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}'",
-        want="present",
-        label=f"wait_for_dictionary: {database}.{dictionary_name} not yet visible",
-        cluster=cluster,
+    """Wait until every replica's catalog lists this dictionary.
+
+    ``system.dictionaries`` is each replica's in-memory loader, not the
+    replicated catalog. ``CREATE OR REPLACE DICTIONARY`` drops that loader
+    entry while the replica reloads, so the dictionary can be missing there
+    after the DDL is already in ``system.tables``. On several replicas the
+    wait holds until every replica stores the same non-nil ``uuid``. A
+    replace does not remove the row, and ClickHouse redacts a SOURCE password
+    to ``[HIDDEN]`` in ``create_table_query``, so a password-only replace
+    compares equal to the previous definition. ``CREATE OR REPLACE`` still
+    assigns one new UUID in the replicated DDL, and every replica that has
+    applied it reports that UUID. ``metadata_modification_time`` is each
+    replica's metadata-file mtime at second precision, so it can stay
+    unchanged across a replace and differ between replicas that applied it.
+    """
+    where = (
+        f"database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}' "
+        "AND engine = 'Dictionary'"
     )
+    label = f"wait_for_dictionary: {database}.{dictionary_name} not yet visible"
+    fanout = resolve_replica_fanout(client, cluster)
+
+    def _check() -> bool:
+        if not _dictionary_catalog_visible(client, where, fanout):
+            raise RuntimeError(label)
+        return True
+
+    _poll(_check)
 
 def wait_for_column(
     client: Any,
@@ -298,6 +317,31 @@ def _wait_for_system_rows(
         return True
 
     _poll(_check)
+
+
+def _dictionary_catalog_visible(
+    client: Any,
+    where: str,
+    fanout: ReplicaFanout | None,
+) -> bool:
+    if fanout is None:
+        rows = client.query(f"SELECT 1 AS x FROM system.tables WHERE {where}").rows
+        return len(rows) > 0
+    rows = client.query(
+        "SELECT count(DISTINCT hostName()) AS replicas, "
+        "(min(uuid) = max(uuid) "
+        "AND min(uuid) != toUUID('00000000-0000-0000-0000-000000000000') "
+        "AND count(uuid) = count()) AS agreed "
+        f"FROM {all_replicas(fanout, 'system.tables')} WHERE {where}"
+    ).rows
+    if not rows:
+        return False
+    replicas = int(rows[0]["replicas"])
+    return replicas >= fanout.replicas and _is_agreed(rows[0].get("agreed"))
+
+
+def _is_agreed(value: object) -> bool:
+    return value is True or value in {1, "1"}
 
 
 def _system_rows_match(
