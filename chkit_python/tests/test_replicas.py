@@ -83,7 +83,9 @@ def test_keeps_waiting_while_only_one_of_two_replicas_shows_an_added_column() ->
     assert "clusterAllReplicas('default', system.columns)" in polls[0]
 
 
-def test_waits_until_every_replica_stores_the_same_dictionary_definition() -> None:
+def test_waits_until_every_replica_stores_the_same_dictionary_uuid_after_a_password_only_replace() -> None:
+    """A replace leaves the row in place. The redacted definition can already match
+    while one replica still has the previous uuid."""
     queries: list[str] = []
     visible = [{"replicas": 2, "agreed": 0}, {"replicas": 2, "agreed": 1}]
 
@@ -100,7 +102,9 @@ def test_waits_until_every_replica_stores_the_same_dictionary_definition() -> No
     assert len(polls) == 2
     assert "clusterAllReplicas('default', system.tables)" in polls[0]
     assert "engine = 'Dictionary'" in polls[0]
-    assert "create_table_query" in polls[0]
+    assert "min(uuid) = max(uuid)" in polls[0]
+    assert "toUUID('00000000-0000-0000-0000-000000000000')" in polls[0]
+    assert "create_table_query" not in polls[0]
     assert "system.dictionaries" not in polls[0]
 
 

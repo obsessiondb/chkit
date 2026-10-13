@@ -81,11 +81,12 @@ describe('waitForDDLPropagation across replicas', () => {
     expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(2)
   })
 
-  test('waits until every replica stores the same dictionary definition in the catalog', async () => {
+  test('waits until every replica stores the same dictionary uuid after a password-only replace', async () => {
     const queries: string[] = []
     let poll = 0
-    // A replace leaves the row in place. One replica still on the previous
-    // definition reports agreed = 0; the loader table is not consulted.
+    // A replace leaves the row in place. ClickHouse redacts the SOURCE
+    // password, so both replicas can already show the same create_table_query
+    // while one still has the previous uuid. The loader table is not consulted.
     const visible = [
       { replicas: 2, agreed: 0 },
       { replicas: 2, agreed: 1 },
@@ -106,7 +107,9 @@ describe('waitForDDLPropagation across replicas', () => {
     expect(polls).toHaveLength(2)
     expect(polls[0]).toContain("clusterAllReplicas('default', system.tables)")
     expect(polls[0]).toContain("engine = 'Dictionary'")
-    expect(polls[0]).toContain('create_table_query')
+    expect(polls[0]).toContain('min(uuid) = max(uuid)')
+    expect(polls[0]).toContain("toUUID('00000000-0000-0000-0000-000000000000')")
+    expect(polls[0]).not.toContain('create_table_query')
     expect(polls[0]).not.toContain('system.dictionaries')
   })
 })

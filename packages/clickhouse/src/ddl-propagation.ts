@@ -71,10 +71,17 @@ export async function waitForView(
  * catalog. `CREATE OR REPLACE DICTIONARY` drops that loader entry while the
  * replica reloads, so a replica can omit the dictionary for the whole retry
  * budget after the DDL is already in `system.tables`. A following statement
- * only needs the catalog object. On several replicas the wait also holds
- * until every replica stores the same `create_table_query`: a replace does
- * not remove the row, and a replica still serving the previous definition
- * must not run the next statement.
+ * only needs the catalog object.
+ *
+ * On several replicas the wait holds until every replica stores the same
+ * non-nil `uuid`. A replace does not remove the row, and ClickHouse redacts
+ * a SOURCE password to `[HIDDEN]` in `create_table_query`, so a password-only
+ * replace compares equal to the previous definition. `CREATE OR REPLACE`
+ * still assigns one new UUID in the replicated DDL (an `ON CLUSTER` statement
+ * and a Replicated database), and every replica that has applied it reports
+ * that UUID. `metadata_modification_time` is each replica's metadata-file
+ * mtime at second precision: it can stay unchanged across a replace in the
+ * same second, and two replicas that have both applied the DDL can disagree.
  */
 export async function waitForDictionary(
   executor: ClickHouseExecutor,
@@ -284,7 +291,7 @@ async function dictionaryCatalogVisible(
     return rows.length > 0
   }
   const rows = await executor.query<{ replicas: number | string; agreed: number | string | boolean }>(
-    `SELECT count(DISTINCT hostName()) AS replicas, (min(create_table_query) = max(create_table_query) AND min(create_table_query) != '' AND count(create_table_query) = count()) AS agreed FROM ${allReplicas(fanout, 'system.tables')} WHERE ${where}`,
+    `SELECT count(DISTINCT hostName()) AS replicas, (min(uuid) = max(uuid) AND min(uuid) != toUUID('00000000-0000-0000-0000-000000000000') AND count(uuid) = count()) AS agreed FROM ${allReplicas(fanout, 'system.tables')} WHERE ${where}`,
   )
   const replicas = Number(rows[0]?.replicas ?? 0)
   return replicas >= fanout.replicas && isAgreed(rows[0]?.agreed)
