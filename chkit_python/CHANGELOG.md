@@ -53,6 +53,13 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- Dictionary DDL waits read `system.tables`, not each replica's in-memory
+  `system.dictionaries` loader. `CREATE OR REPLACE DICTIONARY` drops the loader
+  entry while a replica reloads, so `migrate` could time out after the catalog
+  already had the dictionary. On several replicas the wait holds until every
+  replica stores the same non-nil `uuid`. A SOURCE password is redacted to
+  `[HIDDEN]` in `create_table_query`, so a password-only replace still needs
+  that UUID to tell the new definition from the previous one.
 - `migrate` on multi-replica targets (#265): after each DDL statement it waits until
   every replica of `clickhouse.cluster` (or `default`) shows the change, and journal
   reads keep the newest row per migration across all replicas. Single-replica and

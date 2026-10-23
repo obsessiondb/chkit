@@ -158,7 +158,7 @@ The table is a `ReplacingMergeTree` keyed by `name`: every change inserts a newe
 
 On a service whose endpoint spreads requests over several replicas, such as a multi-replica ObsessionDB service, a read can land on a replica that has not applied the latest DDL or journal write yet. chkit counts the replicas of the cluster set in `clickhouse.cluster`, or of the `default` cluster when none is set, once per run. With more than one replica:
 
-- After each DDL statement, `migrate` waits until every replica shows the change (the new table, view, or column, or the dropped one) before it runs the next statement. An `ALTER` that ran on a replica that had not applied the previous one could otherwise write back the old schema.
+- After each DDL statement, `migrate` waits until every replica shows the change (the new table, view, dictionary, or column, or the dropped one) before it runs the next statement. A replaced dictionary waits until every replica's catalog entry stores the same uuid, including when the only change is a SOURCE password that ClickHouse redacts from the stored definition. An `ALTER` that ran on a replica that had not applied the previous one could otherwise write back the old schema.
 - The journal is read from every replica with `clusterAllReplicas`, keeping the newest version of each migration's row, so a lagging replica cannot make `migrate` replay a statement that already completed.
 
 When the cluster does not exist, has a single replica, or the user cannot query it, chkit reads the local replica as before.
