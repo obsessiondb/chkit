@@ -83,7 +83,7 @@ export default defineConfig({
 								{ slug: 'plugins/backfill' },
 							],
 						},
-						{ label: 'Python (alpha)', autogenerate: { directory: 'python' } },
+						{ label: 'Python (beta)', autogenerate: { directory: 'python' } },
 						{ label: 'ObsessionDB', autogenerate: { directory: 'obsessiondb' } },
 						{
 							label: 'CLI Reference',

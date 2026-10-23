@@ -1,6 +1,6 @@
 # chkit
 
-**ClickHouse schema management in TypeScript, with Python support in alpha.**
+**ClickHouse schema management in TypeScript, with Python support in beta.**
 
 chkit is an open-source CLI for defining ClickHouse schemas in code, generating SQL migrations, and checking schema drift. Keep definitions and migration files in your repository, review the SQL before applying it, and verify the live database from the terminal or CI.
 
@@ -8,7 +8,7 @@ chkit is an open-source CLI for defining ClickHouse schemas in code, generating 
 
 ## TL;DR
 
-**Define → generate → preview → migrate → check.** TypeScript schemas use `@chkit/core`. Python support is in alpha and uses [`chkit-py`](https://pypi.org/project/chkit-py/), with the same migration SQL, snapshots, and ClickHouse journal.
+**Define → generate → preview → migrate → check.** TypeScript schemas use `@chkit/core`. Python support is in beta and uses [`chkit-py`](https://pypi.org/project/chkit-py/), with the same migration SQL, snapshots, and ClickHouse journal.
 
 ## Features
 
@@ -59,9 +59,9 @@ Without `--apply`, JSON mode only prints the pending migration plan. Commit the 
 
 All commands support `--json` for machine-readable output and `--config <path>` for a custom config file. The [first-schema tutorial](https://chkit.obsessiondb.com/tutorials/first-schema/) includes a complete definition, database setup, queries, and a schema change.
 
-## Python (alpha)
+## Python (beta)
 
-Python support is in alpha. Install the Python implementation and initialize a project:
+Python support is in beta. Install the Python implementation and initialize a project:
 
 ```sh
 pip install chkit-py

@@ -6,7 +6,7 @@ import { registryMarkdown, registryReferenceMarkdown, type RegistryReferenceSect
 import { getDocsProduct } from '../data/docs-products';
 
 const BASE_URL = 'https://chkit.obsessiondb.com';
-const SITE_TAGLINE = 'ClickHouse schema management in TypeScript, with Python support in alpha. Define schemas in code, review migration SQL, and detect drift.';
+const SITE_TAGLINE = 'ClickHouse schema management in TypeScript, with Python support in beta. Define schemas in code, review migration SQL, and detect drift.';
 
 interface DocEntry {
 	slug: string;

@@ -1,14 +1,14 @@
 ---
-title: Python Core API (alpha)
-description: The alpha Python implementation's chkit.core pipeline for loading, validation, diffing, planning, snapshots, and SQL rendering.
+title: Python Core API (beta)
+description: The beta Python implementation's chkit.core pipeline for loading, validation, diffing, planning, snapshots, and SQL rendering.
 sidebar:
   order: 3
   badge:
-    text: Alpha
+    text: Beta
     variant: caution
 ---
 
-`chkit.core` exposes the pipeline underneath the alpha Python CLI as plain functions over Pydantic models — load definitions, validate them, diff against a snapshot, and render SQL, all without the CLI.
+`chkit.core` exposes the pipeline underneath the beta Python CLI as plain functions over Pydantic models — load definitions, validate them, diff against a snapshot, and render SQL, all without the CLI.
 
 ```python
 from chkit import (

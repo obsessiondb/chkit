@@ -1,12 +1,12 @@
 ---
 title: "chkit: ClickHouse schema management"
-description: Define ClickHouse schemas in TypeScript, review migration SQL, and detect drift with chkit; Python support is in alpha.
+description: Define ClickHouse schemas in TypeScript, review migration SQL, and detect drift with chkit; Python support is in beta.
 template: splash
 prev: false
 next: false
 hero:
   title: ClickHouse schemas.<br />Managed in code.
-  tagline: Define tables and views in TypeScript, with Python support in alpha. Generate migration SQL, review changes, and apply them to ClickHouse. Keep the schema and its history in your repository.
+  tagline: Define tables and views in TypeScript, with Python support in beta. Generate migration SQL, review changes, and apply them to ClickHouse. Keep the schema and its history in your repository.
   actions:
     - text: Get started
       link: /getting-started/
@@ -45,7 +45,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## From a definition to a reviewed migration
 
-A schema change starts in code and produces SQL to review. This walkthrough uses TypeScript; the [Python port (alpha)](/python/overview/) provides the schema and migration workflow in Python.
+A schema change starts in code and produces SQL to review. This walkthrough uses TypeScript; the [Python port (beta)](/python/overview/) provides the schema and migration workflow in Python.
 
 <p className="home-demo-setup">Install <code>chkit</code> and <code>@chkit/core</code>, then run <code>chkit init</code> to create the project configuration. The <a href="/tutorials/first-schema/">first schema tutorial</a> covers installation, the ClickHouse connection, and each step below.</p>
 
@@ -200,7 +200,7 @@ Use [`chkit check`](/cli/check/) as the CI gate. Its exit code reports whether t
 
 <div className="home-next not-content">
   <h2>Manage your ClickHouse schema.</h2>
-  <p><a href="/tutorials/first-schema/">Create your first migration →</a><a href="/python/overview/">Use Python (alpha) →</a></p>
+  <p><a href="/tutorials/first-schema/">Create your first migration →</a><a href="/python/overview/">Use Python (beta) →</a></p>
 </div>
 
 <div className="home-ingestion-beta not-content">

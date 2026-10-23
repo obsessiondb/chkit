@@ -70,7 +70,7 @@ Commit schema definitions, migration files, and `chkit/meta/` together. Change a
 - [First-schema tutorial](https://chkit.obsessiondb.com/tutorials/first-schema/) — a complete migration workflow.
 - [Schema DSL reference](https://chkit.obsessiondb.com/schema/dsl-reference/) — tables, views, materialized views, dictionaries, and schema options.
 - [Configuration](https://chkit.obsessiondb.com/configuration/overview/) — config files, connections, and plugins.
-- [Python overview (alpha)](https://chkit.obsessiondb.com/python/overview/) — the equivalent schema workflow with `chkit-py`.
+- [Python overview (beta)](https://chkit.obsessiondb.com/python/overview/) — the equivalent schema workflow with `chkit-py`.
 
 ## License
 

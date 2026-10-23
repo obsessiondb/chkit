@@ -144,7 +144,7 @@ For existing tables, start with the [adoption guide](https://chkit.obsessiondb.c
 | [`@chkit/plugin-backfill`](packages/plugin-backfill) | Checkpointed partition/sort-key backfills (beta) |
 | [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB connection and remote execution |
 
-Python support is in alpha through [`chkit-py`](https://pypi.org/project/chkit-py/). See the [Python documentation](https://chkit.obsessiondb.com/python/overview/) for its setup and limitations.
+Python support is in beta through [`chkit-py`](https://pypi.org/project/chkit-py/). See the [Python documentation](https://chkit.obsessiondb.com/python/overview/) for its setup and limitations.
 
 ## ObsessionDB and chkit Sync
 
