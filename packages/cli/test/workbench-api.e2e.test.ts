@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
+import { executeBackfill, type BackfillChunkState } from '../../plugin-backfill/src/async-backfill.js'
 import { loadCredentials } from '../../plugin-obsessiondb/src/auth/credentials.js'
 import { createRemoteExecutor } from '../../plugin-obsessiondb/src/query/remote-executor.js'
 import { applyAsyncStatement, makeDeterministicQueryId } from '../src/commands/migrate/async-apply.js'
@@ -145,6 +146,52 @@ describe('async migrate through the real ObsessionDB workbench API', () => {
       await attempt
       await remote.command(`DROP TABLE IF EXISTS ${table}`)
     }
+  }, TIMEOUT_MS)
+
+  // #289: backfill's resume reads every replica through the remote executor
+  // too (the SDK takes any executor), so a chunk that a lost run left running
+  // is polled, not submitted again.
+  test('a backfill resume finds the chunk a lost run left running', async () => {
+    const remote = await connect()
+    const planId = createPrefix('workbench_bf').slice(0, -1)
+    const chunkId = 'c0'
+    const queryId = `backfill-${planId}-${chunkId}`
+    const chunkSql = `SELECT sum(sleepEachRow(1)) FROM numbers(${SLOW_ROWS}) SETTINGS max_block_size = 1`
+    const attempt = remote.submit(chunkSql, queryId).then(
+      () => 'finished',
+      (error: unknown) => String(error),
+    )
+    await pollUntil(
+      () => remote.queryStatus(queryId, { everyReplica: true }),
+      (status) => status.status === 'running',
+      { intervalMs: 250, timeoutMs: 10_000 },
+    )
+
+    const submits: string[] = []
+    const snapshots: BackfillChunkState[] = []
+    const result = await executeBackfill({
+      executor: {
+        ...remote,
+        submit: async (sql, id) => {
+          submits.push(id ?? sql)
+          return remote.submit(sql, id)
+        },
+      },
+      planId,
+      chunks: [{ id: chunkId }],
+      buildQuery: () => chunkSql,
+      pollIntervalMs: 500,
+      resumeFrom: { [chunkId]: { status: 'pending' } },
+      onProgress: (progress) => {
+        const state = progress[chunkId]
+        if (state) snapshots.push(state)
+      },
+    })
+
+    expect(snapshots[0]).toMatchObject({ status: 'running', queryId })
+    expect(submits).toEqual([])
+    expect(result.progress[chunkId]?.status).toBe('done')
+    expect(await attempt).toBe('finished')
   }, TIMEOUT_MS)
 })
 

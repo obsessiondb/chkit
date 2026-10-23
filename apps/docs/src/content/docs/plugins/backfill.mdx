@@ -103,6 +103,8 @@ chkit plugin backfill doctor --plan-id <samePlanId> --json
 
 Resume uses saved progress and skips completed chunks. A completed run returns a successful no-op; it does not create a new plan. `run` refuses an existing run and directs you to resume. `--replay-failed` resets failed chunks for retry; the default resume does not request failed-chunk replay.
 
+Before submitting anything, resume reads `system.processes` and `system.query_log` to find chunks that are still running or already finished, so it polls them instead of submitting them again. A chunk runs on the replica that received it, so on a multi-replica target these reads cover every replica of `clickhouse.cluster`, or of `default` (a multi-replica ObsessionDB service) when no cluster is set. If a replica cannot be read, resume stops with an error and submits nothing; re-run it.
+
 Each chunk has a stable token within its saved plan. ClickHouse's actual deduplication depends on the table engine, settings and deduplication window; a token is **not** a universal exactly-once guarantee. A crash after an INSERT but before checkpoint persistence needs engine-specific recovery testing. Verify totals before and after resuming.
 
 Calling `plan` again generates a **new random plan ID**, even for the same target/options. It is a new replay, not an idempotent lookup of the previous job, and can duplicate aggregates. Preserve and reuse the original plan/checkpoint.

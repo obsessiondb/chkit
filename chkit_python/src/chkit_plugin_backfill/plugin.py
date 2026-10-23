@@ -298,6 +298,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
             plan_id=plan.plan_id,
             chunk_ids=[chunk.id for chunk in plan.chunk_plan.chunks],
             build_query=build_query,
+            cluster=clickhouse.cluster,
             concurrency=concurrency,
             poll_interval_ms=poll_interval_ms,
             resume_from=resume_from,

@@ -24,6 +24,7 @@ from threading import Lock
 from typing import Protocol, TypeAlias
 
 from chkit.clickhouse.client import QueryStatus
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit_plugin_backfill.types import (
     BackfillChunkState,
     BackfillProgress,
@@ -138,6 +139,8 @@ def sync_progress(
     plan_id: str,
     chunk_ids: list[str],
     progress: BackfillProgress,
+    *,
+    cluster: str | None = None,
 ) -> BackfillProgress:
     """Reconcile local progress with server-side state.
 
@@ -145,11 +148,12 @@ def sync_progress(
     IDs to discover queries that were submitted but whose status was never
     persisted locally (e.g. client crash between submit and state write).
 
-    Divergence from TS (mirrors the Python client's ``query_status``): plain
-    ``system.processes`` / ``system.query_log`` instead of
-    ``clusterAllReplicas('cluster', ...)`` — the TS spelling assumes
-    ObsessionDB-style cluster naming that isn't portable across bare
-    ClickHouse installs. Recorded in DRIFT.md.
+    A chunk query runs on the replica that received it, and a chunk this read
+    does not find is submitted again (#289). So on a multi-replica target both
+    tables are read on every replica of ``cluster`` (the configured
+    ``clickhouse.cluster``, or ``default``) through ``clusterAllReplicas``, as
+    the client's ``query_status`` does, and a replica that cannot be read fails
+    the sync instead of being skipped.
     """
     prefix = f"backfill-{plan_id}-"
 
@@ -167,26 +171,14 @@ def sync_progress(
     # Escape single-quotes in the prefix for safe SQL embedding
     safe_prefix = _escape_like_prefix(prefix)
 
-    running_result = executor.query(
-        "SELECT query_id FROM system.processes "
-        f"WHERE user = currentUser() AND query_id LIKE '{safe_prefix}%'"
+    running_result, log_result = _read_chunk_queries(
+        executor, plan_id, safe_prefix, cluster
     )
     running_set = {
         str(row.get("query_id"))
         for row in _rows_of(running_result)
         if row.get("query_id") is not None
     }
-
-    log_result = executor.query(
-        "SELECT query_id, type, written_rows, written_bytes, query_duration_ms,"
-        " exception\n"
-        "FROM system.query_log\n"
-        "WHERE user = currentUser()\n"
-        f"  AND query_id LIKE '{safe_prefix}%'\n"
-        "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')\n"
-        "  AND is_initial_query = 1\n"
-        "ORDER BY event_time DESC"
-    )
 
     # Deduplicate: take the latest log entry per query_id (results are ordered
     # by event_time DESC)
@@ -236,6 +228,44 @@ def sync_progress(
     return updated
 
 
+def _read_chunk_queries(
+    executor: BackfillExecutor,
+    plan_id: str,
+    safe_prefix: str,
+    cluster: str | None,
+) -> tuple[object, object]:
+    fanout = resolve_replica_fanout(executor, cluster)
+
+    def source(table: str) -> str:
+        return all_replicas(fanout, table) if fanout else table
+
+    try:
+        running_result = executor.query(
+            f"SELECT query_id FROM {source('system.processes')} "
+            f"WHERE user = currentUser() AND query_id LIKE '{safe_prefix}%' "
+            "SETTINGS skip_unavailable_shards = 0"
+        )
+        log_result = executor.query(
+            "SELECT query_id, type, written_rows, written_bytes, query_duration_ms,"
+            " exception\n"
+            f"FROM {source('system.query_log')}\n"
+            "WHERE user = currentUser()\n"
+            f"  AND query_id LIKE '{safe_prefix}%'\n"
+            "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')\n"
+            "  AND is_initial_query = 1\n"
+            "ORDER BY event_time DESC\n"
+            "SETTINGS skip_unavailable_shards = 0"
+        )
+    except Exception as error:
+        msg = (
+            f"Backfill plan {plan_id}: could not check which chunks are still "
+            f"running on the server ({error}). Nothing was submitted — re-run "
+            "the resume."
+        )
+        raise RuntimeError(msg) from error
+    return running_result, log_result
+
+
 def _rows_of(result: object) -> list[dict[str, object]]:
     """Accept either a raw row list or the client's ``QueryResult`` envelope."""
     rows = getattr(result, "rows", result)
@@ -267,6 +297,7 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
     plan_id: str,
     chunk_ids: list[str],
     build_query: _BuildQuery,
+    cluster: str | None = None,
     concurrency: int = _DEFAULT_CONCURRENCY,
     poll_interval_ms: int = _DEFAULT_POLL_INTERVAL_MS,
     max_poll_errors: int = _DEFAULT_MAX_POLL_ERRORS,
@@ -287,7 +318,9 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
     # This catches queries that were submitted but whose status was never
     # persisted (e.g. client crash between submit() and state file write).
     if resume_from is not None:
-        progress = sync_progress(executor, plan_id, chunk_ids, progress)
+        progress = sync_progress(
+            executor, plan_id, chunk_ids, progress, cluster=cluster
+        )
 
     # Reset confirmed-failed chunks to pending AFTER sync so we operate on
     # ground truth. The deterministic query_id is reused; the after_time filter

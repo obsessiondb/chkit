@@ -13,6 +13,8 @@ from __future__ import annotations
 import threading
 import uuid
 
+import pytest
+
 from chkit.clickhouse.client import QueryStatus
 from chkit_plugin_backfill.async_backfill import execute_backfill, sync_progress
 from chkit_plugin_backfill.types import BackfillChunkState, BackfillProgress
@@ -426,3 +428,127 @@ def test_sync_updates_failed_server_state_for_locally_submitted_chunk() -> None:
     synced = sync_progress(FailedServerStateExecutor(), PLAN_ID, ["c1"], progress)
     assert synced["c1"].status == "failed"
     assert synced["c1"].error == "Memory limit exceeded"
+
+
+# #289: a chunk query runs on the replica that received it. Resume submits
+# every chunk ``sync_progress`` does not find, so it reads each replica.
+
+
+class _Result:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+
+
+class ReplicatedServerExecutor(SubmitRecordingExecutor):
+    """A multi-replica server: the replica probe of ``cluster`` finds ``replicas``."""
+
+    def __init__(
+        self,
+        *,
+        cluster: str = "default",
+        replicas: int = 2,
+        running: list[str] | None = None,
+        fail_on: str | None = None,
+        statuses: dict[str, list[QueryStatus]] | None = None,
+    ) -> None:
+        super().__init__(statuses or {})
+        self._cluster = cluster
+        self._replicas = replicas
+        self._running = running or []
+        self._fail_on = fail_on
+        self.queries: list[str] = []
+
+    def query(self, statement: str) -> _Result:  # type: ignore[override]
+        self.queries.append(statement)
+        if f"clusterAllReplicas('{self._cluster}', system.one)" in statement:
+            return _Result([{"replicas": self._replicas}])
+        if self._fail_on is not None and self._fail_on in statement:
+            msg = "Code: 279. ALL_CONNECTION_TRIES_FAILED"
+            raise RuntimeError(msg)
+        if f"clusterAllReplicas('{self._cluster}', system.processes)" in statement:
+            return _Result([{"query_id": query_id} for query_id in self._running])
+        return _Result([])
+
+    def status_reads(self) -> list[str]:
+        return [
+            sql
+            for sql in self.queries
+            if "system.processes" in sql or "system.query_log" in sql
+        ]
+
+
+def test_sync_reads_every_replica_without_clickhouse_cluster() -> None:
+    executor = ReplicatedServerExecutor(running=[f"backfill-{PLAN_ID}-c1"])
+
+    synced = sync_progress(
+        executor, PLAN_ID, ["c1"], {"c1": BackfillChunkState(status="pending")}
+    )
+
+    assert synced["c1"].status == "running"
+    assert "FROM clusterAllReplicas('default', system.one)" in executor.queries[0]
+    processes, query_log = executor.status_reads()
+    assert "FROM clusterAllReplicas('default', system.processes)" in processes
+    assert "FROM clusterAllReplicas('default', system.query_log)" in query_log
+    # A replica that cannot be read fails the read instead of being skipped.
+    assert "SETTINGS skip_unavailable_shards = 0" in processes
+    assert "SETTINGS skip_unavailable_shards = 0" in query_log
+
+
+def test_sync_fails_instead_of_reporting_a_chunk_not_running() -> None:
+    executor = ReplicatedServerExecutor(fail_on="system.processes")
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            rf"Backfill plan {PLAN_ID}: could not check which chunks are still "
+            r"running on the server \(Code: 279\. ALL_CONNECTION_TRIES_FAILED\)\. "
+            "Nothing was submitted"
+        ),
+    ):
+        sync_progress(executor, PLAN_ID, ["c1"], {"c1": BackfillChunkState(status="pending")})
+
+
+def test_resume_reads_configured_cluster_and_attaches_to_running_chunk() -> None:
+    query_id = f"backfill-{PLAN_ID}-c1"
+    executor = ReplicatedServerExecutor(
+        cluster="analytics",
+        replicas=4,
+        running=[query_id],
+        statuses={query_id: [QueryStatus(status="finished", written_rows=7)]},
+    )
+
+    result = execute_backfill(
+        executor=executor,
+        cluster="analytics",
+        plan_id=PLAN_ID,
+        chunk_ids=["c1"],
+        build_query=lambda _chunk_id: "SELECT 1",
+        poll_interval_ms=10,
+        # A run that crashed between submit and its state write.
+        resume_from={"c1": BackfillChunkState(status="pending")},
+    )
+
+    assert executor.submit_order == []
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == query_id
+    assert result.progress["c1"].written_rows == 7
+    assert not any("clusterAllReplicas('default'" in sql for sql in executor.queries)
+
+
+def test_resume_submits_nothing_when_a_replica_cannot_be_read() -> None:
+    executor = ReplicatedServerExecutor(fail_on="system.query_log")
+
+    with pytest.raises(RuntimeError, match="could not check which chunks are still running"):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=10,
+            resume_from={
+                "c1": BackfillChunkState(status="failed", error="Lost contact"),
+                "c2": BackfillChunkState(status="pending"),
+            },
+            replay_failed=True,
+        )
+    assert executor.submit_order == []

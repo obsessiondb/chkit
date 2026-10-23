@@ -367,8 +367,9 @@ describe('syncProgress', () => {
       { c1: { status: 'pending' } },
     )
 
-    expect(queries[0]).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
-    expect(queries[1]).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
+    const [processes, queryLog] = statusReads(queries)
+    expect(processes).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
+    expect(queryLog).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
     expect(queries.join('\n')).not.toContain("clusterAllReplicas('cluster'")
   })
 
@@ -387,10 +388,11 @@ describe('syncProgress', () => {
       { c1: { status: 'pending' } },
     )
 
-    expect(queries[0]).toContain('FROM system.processes')
-    expect(queries[0]).not.toContain('clusterAllReplicas')
-    expect(queries[1]).toContain('FROM system.query_log')
-    expect(queries[1]).not.toContain('clusterAllReplicas')
+    const [processes, queryLog] = statusReads(queries)
+    expect(processes).toContain('FROM system.processes')
+    expect(processes).not.toContain('clusterAllReplicas')
+    expect(queryLog).toContain('FROM system.query_log')
+    expect(queryLog).not.toContain('clusterAllReplicas')
   })
 
   test('observable fallback still works when systemTableSource is undefined', async () => {
@@ -414,6 +416,111 @@ describe('syncProgress', () => {
     )
 
     expect(synced.c1.status).toBe('running')
-    expect(queries[0]).toMatch(/FROM system\.processes/)
+    expect(statusReads(queries)[0]).toMatch(/FROM system\.processes/)
+  })
+
+  // #289: a chunk query runs on the replica that received it. Resume submits
+  // every chunk this read does not find, so it reads each replica.
+  test('reads every replica of a multi-replica target without clickhouse.cluster', async () => {
+    const queries: string[] = []
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      queries.push(sql)
+      if (sql.includes('system.one')) return [{ replicas: '2' }] as T[]
+      if (sql.includes('system.processes')) return [{ query_id: `backfill-${PLAN_ID}-c1` }] as T[]
+      return [] as T[]
+    }
+
+    const synced = await syncProgress(executor, PLAN_ID, [{ id: 'c1' }], { c1: { status: 'pending' } })
+
+    expect(synced.c1.status).toBe('running')
+    expect(queries[0]).toContain("FROM clusterAllReplicas('default', system.one)")
+    const [processes, queryLog] = statusReads(queries)
+    expect(processes).toContain("FROM clusterAllReplicas('default', system.processes)")
+    expect(queryLog).toContain("FROM clusterAllReplicas('default', system.query_log)")
+    // A replica that cannot be read fails the read instead of being skipped.
+    expect(processes).toContain('SETTINGS skip_unavailable_shards = 0')
+    expect(queryLog).toContain('SETTINGS skip_unavailable_shards = 0')
+  })
+
+  test('fails instead of reporting a chunk not running when a replica cannot be read', async () => {
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      if (sql.includes('system.one')) return [{ replicas: '2' }] as T[]
+      if (sql.includes('system.processes')) throw new Error('Code: 279. ALL_CONNECTION_TRIES_FAILED')
+      return [] as T[]
+    }
+
+    await expect(
+      syncProgress(executor, PLAN_ID, [{ id: 'c1' }], { c1: { status: 'pending' } }),
+    ).rejects.toThrow(
+      `Backfill plan ${PLAN_ID}: could not check which chunks are still running on the server (Code: 279. ALL_CONNECTION_TRIES_FAILED). Nothing was submitted`,
+    )
   })
 })
+
+describe('executeBackfill resume across replicas (#289)', () => {
+  test('reads the replicas of the configured cluster and attaches to a chunk running on one', async () => {
+    const queryId = `backfill-${PLAN_ID}-c1`
+    const queries: string[] = []
+    const submits: string[] = []
+    const executor = createMockExecutor(new Map([[queryId, [{ status: 'finished', writtenRows: 7 }]]]))
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      queries.push(sql)
+      if (sql.includes("clusterAllReplicas('analytics', system.one)")) return [{ replicas: '4' }] as T[]
+      if (sql.includes("clusterAllReplicas('analytics', system.processes)")) return [{ query_id: queryId }] as T[]
+      return [] as T[]
+    }
+    executor.submit = async (_sql, id) => {
+      submits.push(id ?? '')
+      return id ?? ''
+    }
+
+    const result = await executeBackfill({
+      executor,
+      cluster: 'analytics',
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'SELECT 1',
+      pollIntervalMs: 10,
+      // A run that crashed between submit and its state write.
+      resumeFrom: { c1: { status: 'pending' } },
+    })
+
+    expect(submits).toEqual([])
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId, writtenRows: 7 })
+    expect(queries.join('\n')).not.toContain("clusterAllReplicas('default'")
+  })
+
+  test('submits nothing when the resume cannot read a replica', async () => {
+    const submits: string[] = []
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      if (sql.includes('system.one')) return [{ replicas: '2' }] as T[]
+      if (sql.includes('system.query_log')) throw new Error('Code: 210. NETWORK_ERROR')
+      return [] as T[]
+    }
+    executor.submit = async (_sql, id) => {
+      submits.push(id ?? '')
+      return id ?? ''
+    }
+
+    await expect(
+      executeBackfill({
+        executor,
+        planId: PLAN_ID,
+        chunks: [{ id: 'c1' }, { id: 'c2' }],
+        buildQuery: () => 'SELECT 1',
+        pollIntervalMs: 10,
+        resumeFrom: { c1: { status: 'failed', error: 'Lost contact' }, c2: { status: 'pending' } },
+        replayFailed: true,
+      }),
+    ).rejects.toThrow('could not check which chunks are still running on the server (Code: 210. NETWORK_ERROR)')
+    expect(submits).toEqual([])
+  })
+})
+
+// The processes and query_log reads, without the replica probe before them.
+function statusReads(queries: string[]): string[] {
+  return queries.filter((sql) => sql.includes('system.processes') || sql.includes('system.query_log'))
+}
