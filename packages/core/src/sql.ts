@@ -52,7 +52,7 @@ export function renderKeyClauseColumns(
     .join(', ')
 }
 
-export function renderIndexType(idx: SkipIndexDefinition): string {
+function renderIndexType(idx: SkipIndexDefinition): string {
   switch (idx.type) {
     case 'text':
       return renderTextIndexType(idx)

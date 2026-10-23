@@ -135,7 +135,7 @@ export async function waitForColumnAbsent(
  * yet would let a following `DROP CONSTRAINT IF EXISTS` (a changed constraint)
  * or `ADD CONSTRAINT IF NOT EXISTS` silently do nothing.
  */
-export async function waitForConstraint(
+async function waitForConstraint(
   executor: ClickHouseExecutor,
   database: string,
   tableName: string,
@@ -150,7 +150,7 @@ export async function waitForConstraint(
   }, options)
 }
 
-export async function waitForConstraintAbsent(
+async function waitForConstraintAbsent(
   executor: ClickHouseExecutor,
   database: string,
   tableName: string,
