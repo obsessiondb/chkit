@@ -1541,10 +1541,7 @@ end-state of `main` (includes `f85f568` MV-source chunk sizing,
   sub-ms digits) and `toISOString`; `_js_round` handles the
   `0.49999999999999994` double-rounding case. Plan JSON collapses
   integral floats to ints on write so files byte-match TS.
-- **`sync_progress`** queries plain `system.processes` /
-  `system.query_log` instead of TS's `clusterAllReplicas('cluster', …)`
-  — the TS spelling assumes ObsessionDB cluster naming; not portable to
-  bare CH. (`query_status` reads every replica since #246; see below.)
+- **`sync_progress`** reads every replica since #289; see below.
 - **`ClickHouseClient.submit`** passed `query_id=` to
   clickhouse-connect's `command()`, which has no such parameter —
   every live run/resume would have crashed (pre-existing latent bug,
@@ -1791,6 +1788,23 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   the other with `cluster="test_cluster_2s"`) is
   `tests_cluster/test_migrate_async_cluster_e2e.py`, the port of the async case
   in `packages/cli/test/cluster-2shard.e2e.test.ts`.
+
+### Backfill resume across replicas (#289)
+- Same design as TS: `sync_progress` (and `execute_backfill`'s resume) reads
+  `system.processes` and `system.query_log` through `clusterAllReplicas` when
+  `resolve_replica_fanout` finds more than one replica of `cluster` (the
+  configured `clickhouse.cluster`, passed by the plugin's run/resume, or
+  `default`). Both reads send `skip_unavailable_shards = 0` and a failed read
+  raises before any chunk is submitted or replayed. Polls keep using
+  `query_status` without `every_replica`.
+- Before this, Python read the local tables even with `clickhouse.cluster` set
+  (TS read `clusterAllReplicas(<cluster>, …)` through `systemTableSource`). With
+  one replica (or a failed probe) Python still reads the local tables where TS
+  keeps `clusterAllReplicas(<cluster>, …)`; both read the same rows.
+- The SQL embeds `SETTINGS skip_unavailable_shards = 0` because the backfill
+  executor protocol's `query()` takes no settings.
+- Live checks: `tests/test_backfill_replicas_e2e.py` (local stack and
+  ObsessionDB) and `tests_cluster/test_backfill_replicas_cluster_e2e.py`.
 
 ### vector_similarity indexes, raw indexes and constraints (#278)
 - Same model as TS: `SkipIndexVectorSimilarity`, `SkipIndexRaw` and

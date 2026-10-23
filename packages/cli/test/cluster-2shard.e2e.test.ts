@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import { type ClickHouseExecutor, createClickHouseExecutor } from '@chkit/clickhouse'
 
+import { executeBackfill, type BackfillChunkState } from '../../plugin-backfill/src/async-backfill.js'
 import { applyAsyncStatement, makeDeterministicQueryId } from '../src/commands/migrate/async-apply.js'
 import type { JournalStore, MigrationRowState } from '../src/runtime/journal-store.js'
 import {
@@ -426,6 +427,75 @@ describe('chkit cluster mode (ON CLUSTER) — async statement on another node', 
     } finally {
       await submitter.command(`DROP TABLE IF EXISTS ${table} ON CLUSTER '${CLUSTER}' SYNC`)
       await otherReplica.close()
+    }
+  }, 90_000)
+})
+
+// #289: a backfill chunk runs on the node that received it. A resume whose
+// requests reach another node must see the chunk running and poll it, instead
+// of submitting it again.
+describe('chkit cluster mode (ON CLUSTER) — backfill chunk on another node', () => {
+  test('a resume through another replica reports the running chunk and does not resubmit it', async () => {
+    const planId = createPrefix('twoshard_bf').slice(0, -1)
+    const chunkId = 'c0'
+    const queryId = `backfill-${planId}-${chunkId}`
+    // About 6 s.
+    const chunkSql = 'SELECT sleepEachRow(0.3) FROM numbers(20) SETTINGS max_block_size = 1'
+    const submitter = executorFor(SHARD1_ENDPOINT)
+    // The other replica of shard 1, configured like the run that resumes.
+    const otherReplica = createClickHouseExecutor({
+      url: SHARD1_OTHER_REPLICA,
+      username: USER,
+      password: PASSWORD,
+      database: DATABASE,
+      cluster: CLUSTER,
+    })
+    try {
+      const attempt = submitter.submit(chunkSql, queryId)
+      await pollUntil(
+        () => submitter.query<{ n: string }>(`SELECT toString(count()) AS n FROM system.processes WHERE query_id = '${queryId}'`),
+        (rows) => rows[0]?.n === '1',
+        { intervalMs: 100 },
+      )
+      // The other replica's own system.processes does not show the chunk.
+      const [local] = await otherReplica.query<{ n: string }>(
+        `SELECT toString(count()) AS n FROM system.processes WHERE query_id = '${queryId}'`,
+      )
+      expect(local?.n).toBe('0')
+
+      const submits: string[] = []
+      const snapshots: BackfillChunkState[] = []
+      const db: ClickHouseExecutor = {
+        ...otherReplica,
+        queryStatus: (id, options) => otherReplica.queryStatus(id, options),
+        query: (sql, settings) => otherReplica.query(sql, settings),
+        submit: async (sql, id) => {
+          submits.push(id ?? sql)
+          return otherReplica.submit(sql, id)
+        },
+      }
+
+      const result = await executeBackfill({
+        executor: db,
+        cluster: CLUSTER,
+        planId,
+        chunks: [{ id: chunkId }],
+        buildQuery: () => chunkSql,
+        pollIntervalMs: 250,
+        // A run that stopped between submitting the chunk and recording it.
+        resumeFrom: { [chunkId]: { status: 'pending' } },
+        onProgress: (progress) => {
+          const state = progress[chunkId]
+          if (state) snapshots.push(state)
+        },
+      })
+
+      expect(snapshots[0]).toMatchObject({ status: 'running', queryId })
+      expect(submits).toEqual([])
+      expect(result.progress[chunkId]?.status).toBe('done')
+      await attempt
+    } finally {
+      await Promise.all([submitter.close(), otherReplica.close()])
     }
   }, 90_000)
 })

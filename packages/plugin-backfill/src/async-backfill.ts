@@ -1,11 +1,21 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { observableSystemTable, type ClickHouseExecutor, type QueryStatus } from '@chkit/clickhouse'
+import {
+  allReplicas,
+  observableSystemTable,
+  resolveReplicaFanout,
+  type ClickHouseExecutor,
+  type ObservableSystemTable,
+  type QueryStatus,
+} from '@chkit/clickhouse'
 import pMap from 'p-map'
 
 export interface BackfillOptions {
   /** The executor to submit queries to (target ClickHouse) */
   executor: ClickHouseExecutor
+  /** The configured `clickhouse.cluster`. Resume reads chunk status on every replica of
+   *  this cluster, or of `default` (a multi-replica ObsessionDB service) when unset. */
+  cluster?: string
   /** Plan ID used as a namespace in deterministic query IDs */
   planId: string
   /** The chunks to process (from buildChunks) */
@@ -124,12 +134,19 @@ function updateChunk(
  * Queries system.processes and system.query_log for all chunk query IDs
  * to discover queries that were submitted but whose status was never
  * persisted locally (e.g. client crash between submit and state write).
+ *
+ * A chunk query runs on the replica that received it, and a chunk this read
+ * does not find is submitted again (#289). So on a multi-replica target (see
+ * `resolveReplicaFanout`) both tables are read on every replica, also without
+ * `clickhouse.cluster`, and a replica that cannot be read fails the sync
+ * instead of being skipped.
  */
 export async function syncProgress(
   executor: ClickHouseExecutor,
   planId: string,
   chunks: Array<{ id: string }>,
   progress: BackfillProgress,
+  options?: { cluster?: string },
 ): Promise<BackfillProgress> {
   const prefix = `backfill-${planId}-`
 
@@ -146,31 +163,8 @@ export async function syncProgress(
   // Escape single-quotes in the prefix for safe SQL embedding
   const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
 
-  const processesFrom = observableSystemTable(executor, 'processes')
-  const queryLogFrom = observableSystemTable(executor, 'query_log')
-
-  const runningRows = await executor.query<{ query_id: string }>(
-    `SELECT query_id FROM ${processesFrom} WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 1`
-  )
+  const { runningRows, logRows } = await readChunkQueries(executor, planId, safePrefix, options?.cluster)
   const runningSet = new Set(runningRows.map((r) => r.query_id))
-
-  const logRows = await executor.query<{
-    query_id: string
-    type: string
-    written_rows: string
-    written_bytes: string
-    query_duration_ms: string
-    exception: string
-  }>(
-    `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
-FROM ${queryLogFrom}
-WHERE user = currentUser()
-  AND query_id LIKE '${safePrefix}%'
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
-  AND is_initial_query = 1
-ORDER BY event_time DESC
-SETTINGS skip_unavailable_shards = 1`
-  )
 
   // Deduplicate: take the latest log entry per query_id (results are ordered by event_time DESC)
   const latestLogByQueryId = new Map<string, (typeof logRows)[0]>()
@@ -219,6 +213,47 @@ SETTINGS skip_unavailable_shards = 1`
   return updated
 }
 
+interface ChunkLogRow {
+  query_id: string
+  type: string
+  written_rows: string
+  written_bytes: string
+  query_duration_ms: string
+  exception: string
+}
+
+async function readChunkQueries(
+  executor: ClickHouseExecutor,
+  planId: string,
+  safePrefix: string,
+  cluster: string | undefined,
+): Promise<{ runningRows: Array<{ query_id: string }>; logRows: ChunkLogRow[] }> {
+  const fanout = await resolveReplicaFanout(executor, cluster)
+  const from = (table: ObservableSystemTable) =>
+    fanout ? allReplicas(fanout, `system.${table}`) : observableSystemTable(executor, table)
+  try {
+    const runningRows = await executor.query<{ query_id: string }>(
+      `SELECT query_id FROM ${from('processes')} WHERE user = currentUser() AND query_id LIKE '${safePrefix}%' SETTINGS skip_unavailable_shards = 0`
+    )
+    const logRows = await executor.query<ChunkLogRow>(
+      `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
+FROM ${from('query_log')}
+WHERE user = currentUser()
+  AND query_id LIKE '${safePrefix}%'
+  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND is_initial_query = 1
+ORDER BY event_time DESC
+SETTINGS skip_unavailable_shards = 0`
+    )
+    return { runningRows, logRows }
+  } catch (error) {
+    throw new Error(
+      `Backfill plan ${planId}: could not check which chunks are still running on the server (${error instanceof Error ? error.message : String(error)}). Nothing was submitted — re-run the resume.`,
+      { cause: error },
+    )
+  }
+}
+
 async function pollChunk(
   executor: ClickHouseExecutor,
   initial: BackfillChunkState,
@@ -263,6 +298,7 @@ async function pollChunk(
 export async function executeBackfill(options: BackfillOptions): Promise<BackfillResult> {
   const {
     executor,
+    cluster,
     planId,
     chunks,
     buildQuery,
@@ -285,7 +321,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // This catches queries that were submitted but whose status was never
   // persisted (e.g. client crash between submit() and state file write).
   if (resumeFrom) {
-    progress = await syncProgress(executor, planId, chunks, progress)
+    progress = await syncProgress(executor, planId, chunks, progress, { cluster })
   }
 
   // Reset confirmed-failed chunks to pending AFTER sync so we operate on

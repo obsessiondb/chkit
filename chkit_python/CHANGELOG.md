@@ -71,6 +71,13 @@
   a view outputs a column the target cannot take or views feeding one target output
   different columns; `run`/`resume` refuse a plan whose target lost a planned
   column. ObsessionDB managed submit renders the same SQL (#291).
+- backfill: resume reads chunk status on every replica of a multi-replica target
+  (#289). `sync_progress` read only the local `system.processes` /
+  `system.query_log`, even with `clickhouse.cluster` set, so a chunk running or
+  finished on another replica stayed pending and was submitted again. It now reads
+  both through `clusterAllReplicas` when `resolve_replica_fanout` finds more than
+  one replica of `clickhouse.cluster` (or `default`), and raises without submitting
+  anything when a replica cannot be read. `execute_backfill` takes `cluster`.
 - backfill: chunk INSERTs set `asterisk_include_materialized_columns=0` and
   `asterisk_include_alias_columns=0`, ahead of any `insert_settings`. A settings
   profile that enabled them made `SELECT *` return MATERIALIZED and ALIAS columns:

@@ -31,6 +31,8 @@ from chkit.cli.commands.migrate_async_apply import (
 )
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.clickhouse.client import QueryResult, QueryStatus
+from chkit_plugin_backfill.async_backfill import execute_backfill
+from chkit_plugin_backfill.types import BackfillChunkState, BackfillProgress
 from chkit_plugin_obsessiondb.credentials import load_credentials
 from chkit_plugin_obsessiondb.remote_executor import RemoteClickHouseClient
 
@@ -194,6 +196,59 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
         if worker.is_alive():
             worker.join(timeout=60)
         remote.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def test_backfill_resume_finds_chunk_a_lost_run_left_running() -> None:
+    # #289: backfill's resume reads every replica through the remote client too
+    # (the SDK takes any executor), so a chunk that a lost run left running is
+    # polled, not submitted again.
+    remote = _connect()
+    plan_id = f"py_workbench_bf_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    chunk_id = "c0"
+    query_id = f"backfill-{plan_id}-{chunk_id}"
+    chunk_sql = (
+        f"SELECT sum(sleepEachRow(1)) FROM numbers({_SLOW_ROWS}) SETTINGS max_block_size = 1"
+    )
+    outcome: list[str] = []
+    worker = threading.Thread(
+        target=_run_into(outcome, lambda: _connect().submit(chunk_sql, query_id=query_id))
+    )
+    worker.start()
+    try:
+        _poll_until(
+            lambda: remote.query_status(query_id, every_replica=True),
+            lambda status: status.status == "running",
+            timeout=10.0,
+            interval=0.25,
+        )
+        recording = _RecordingRemote(remote)
+        snapshots: list[BackfillChunkState] = []
+
+        def on_progress(progress: BackfillProgress) -> None:
+            state = progress.get(chunk_id)
+            if state is not None:
+                snapshots.append(state)
+
+        result = execute_backfill(
+            executor=recording,
+            plan_id=plan_id,
+            chunk_ids=[chunk_id],
+            build_query=lambda _chunk_id: chunk_sql,
+            concurrency=1,
+            poll_interval_ms=500,
+            resume_from={chunk_id: BackfillChunkState(status="pending")},
+            on_progress=on_progress,
+        )
+
+        assert snapshots[0].status == "running"
+        assert snapshots[0].query_id == query_id
+        assert recording.submitted == []
+        assert result.progress[chunk_id].status == "done"
+        worker.join(timeout=60)
+        assert outcome == ["finished"]
+    finally:
+        if worker.is_alive():
+            worker.join(timeout=60)
 
 
 class _RecordingRemote:

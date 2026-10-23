@@ -138,6 +138,7 @@ async function runBackfill(input: {
 
     const result = await executeBackfill({
       executor: db,
+      cluster: input.clickhouse.cluster,
       planId: plan.planId,
       chunks: plan.chunkPlan.chunks.map((chunk) => ({ id: chunk.id })),
       buildQuery: (chunk) => {
