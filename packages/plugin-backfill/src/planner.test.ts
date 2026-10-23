@@ -8,7 +8,7 @@ import { resolveConfig } from '@chkit/core'
 import { buildChunkExecutionSql, rewriteSelectColumns } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { PlanSchema } from './options.js'
-import { assertBackfillTargetSafe, buildBackfillPlan } from './planner.js'
+import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan } from './planner.js'
 import { backfillPaths, computeBackfillStateDir, readPlan } from './state.js'
 
 function createMockQuery(opts: {
@@ -23,6 +23,7 @@ function createMockQuery(opts: {
   sortingKey?: string
   columnRows?: Array<{ name: string; type: string }>
   liveColumns?: Array<{ name: string; default_kind: string }>
+  viewOutputs?: string[]
 } = {}): <T>(sql: string) => Promise<T[]> {
   const partitions = opts.partitions ?? [
     {
@@ -37,8 +38,10 @@ function createMockQuery(opts: {
   const sortingKey = opts.sortingKey ?? 'event_time'
   const columnRows = opts.columnRows ?? [{ name: 'event_time', type: 'DateTime' }]
   const liveColumns = opts.liveColumns ?? [{ name: 'id', default_kind: '' }]
+  const viewOutputs = opts.viewOutputs ?? liveColumns.map((column) => column.name)
 
   return async <T>(sql: string) => {
+    if (sql.startsWith('DESCRIBE TABLE (')) return viewOutputs.map((name) => ({ name })) as T[]
     if (sql.includes('SELECT name, default_kind')) return liveColumns as T[]
     if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }] as T[]
     if (sql.includes('FROM system.parts')) return partitions as T[]
@@ -82,7 +85,8 @@ function createSourceScopedMockQuery(opts: {
   const table = opts.sourceTable
 
   return async <T>(sql: string) => {
-    if (sql.includes('SELECT name, default_kind')) return [{ name: 'id', default_kind: '' }] as T[]
+    if (sql.startsWith('DESCRIBE TABLE (')) return [{ name: 'id' }, { name: 'count' }] as T[]
+    if (sql.includes('SELECT name, default_kind')) return [{ name: 'id', default_kind: '' }, { name: 'count', default_kind: '' }] as T[]
     if (sql.includes('SELECT 1 FROM')) return [{ ok: 1 }] as T[]
     if (sql.includes('FROM system.parts')) {
       return (sql.includes(`table = '${table}'`) ? partitions : []) as T[]
@@ -96,6 +100,8 @@ function createSourceScopedMockQuery(opts: {
     return [] as T[]
   }
 }
+
+const EVENTS_AGG_COLUMNS = [{ name: 'event_time', default_kind: '' }, { name: 'count', default_kind: '' }]
 
 const MV_REPLAY_SCHEMA = `export const events_target = {
   kind: 'table',
@@ -289,7 +295,7 @@ export const events_mv = {
         metaDir: './chkit/meta',
       })
       const opts = PlanSchema.parse({ target: 'app.events_agg' })
-      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: createMockQuery() })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: createMockQuery({ liveColumns: EVENTS_AGG_COLUMNS }) })
 
       expect(output.plan.execution.mode).toBe('mv_replay')
 
@@ -362,7 +368,7 @@ export const api_mv = {
         metaDir: './chkit/meta',
       })
       const opts = PlanSchema.parse({ target: 'app.events_agg' })
-      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: createMockQuery() })
+      const output = await buildBackfillPlan({ opts, configPath, config, clickhouseQuery: createMockQuery({ liveColumns: EVENTS_AGG_COLUMNS }) })
 
       expect(output.plan.execution.mode).toBe('mv_replay')
       expect(output.plan.execution.mvReplayQueries).toHaveLength(2)
@@ -568,7 +574,10 @@ test('MV replay omits computed columns and rejects unrecoverable ephemeral input
     `)
     const output = await buildBackfillPlan({ opts: PlanSchema.parse({ target: 'app.events_agg' }),
       configPath: join(dir, 'clickhouse.config.ts'), config: resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' }),
-      clickhouseQuery: createMockQuery(),
+      clickhouseQuery: createMockQuery({
+        liveColumns: [...EVENTS_AGG_COLUMNS, { name: 'day', default_kind: 'MATERIALIZED' }, { name: 'label', default_kind: 'ALIAS' }],
+        viewOutputs: ['event_time', 'count'],
+      }),
     })
     expect(output.plan.execution.targetColumns).toEqual(['event_time', 'count'])
     await expect(buildBackfillPlan({ opts: PlanSchema.parse({ target: 'app.events_agg' }),
@@ -634,4 +643,99 @@ test('a listed target without readable columns cannot be verified', async () => 
   const query = async <T>(sql: string) => (sql.includes('FROM system.tables') ? [{ name: 'events' }] : []) as T[]
   await expect(assertBackfillTargetSafe({ database: 'app', table: 'events', mode: 'copy', query }))
     .rejects.toThrow('Cannot verify live target column kinds')
+})
+
+describe('mv_replay column list', () => {
+  const VIEW_ONLY_SCHEMA = `
+    export const mv = { kind: 'materialized_view', database: 'app', name: 'events_mv',
+      to: { database: 'app', name: 'events_copy' }, as: 'SELECT * FROM app.events' }
+  `
+  const TWO_VIEW_SCHEMA = `${VIEW_ONLY_SCHEMA}
+    export const other = { kind: 'materialized_view', database: 'app', name: 'other_mv',
+      to: { database: 'app', name: 'events_copy' }, as: 'SELECT id FROM app.events' }
+  `
+
+  async function planViewTarget(input: {
+    schema?: string
+    query: <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => Promise<T[]>
+  }) {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-columns-'))
+    try {
+      await writeFile(join(dir, 'schema.ts'), input.schema ?? VIEW_ONLY_SCHEMA)
+      return await buildBackfillPlan({
+        opts: PlanSchema.parse({ target: 'app.events_copy' }),
+        configPath: join(dir, 'clickhouse.config.ts'),
+        config: resolveConfig({ schema: './schema.ts', metaDir: './chkit/meta' }),
+        clickhouseQuery: input.query,
+        querySettings: { enable_parallel_replicas: 0 },
+      })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('a target outside the schema gets the view outputs it can take, in target order', async () => {
+    const calls: Array<{ sql: string; settings?: Record<string, unknown> }> = []
+    const mock = createMockQuery({
+      liveColumns: [
+        { name: 'b', default_kind: '' },
+        { name: 'x', default_kind: 'DEFAULT' },
+        { name: 'm', default_kind: 'MATERIALIZED' },
+        { name: 'al', default_kind: 'ALIAS' },
+        { name: 'a', default_kind: '' },
+        { name: 'id', default_kind: '' },
+      ],
+      viewOutputs: ['id', 'a', 'b'],
+    })
+    const output = await planViewTarget({
+      query: async <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => {
+        calls.push({ sql, settings })
+        return mock<T>(sql)
+      },
+    })
+
+    expect(output.plan.execution.mode).toBe('mv_replay')
+    expect(output.plan.execution.targetColumns).toEqual(['b', 'a', 'id'])
+    // `*` is described under the same pins the chunk INSERT carries.
+    expect(calls.find((call) => call.sql.startsWith('DESCRIBE'))).toEqual({
+      sql: 'DESCRIBE TABLE (\nSELECT * FROM app.events\n) SETTINGS asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0',
+      settings: { enable_parallel_replicas: 0 },
+    })
+  })
+
+  for (const [kind, liveColumns] of [
+    ['missing from', [{ name: 'id', default_kind: '' }, { name: 'a', default_kind: '' }]],
+    ['MATERIALIZED on', [{ name: 'id', default_kind: '' }, { name: 'a', default_kind: '' }, { name: 'b', default_kind: 'MATERIALIZED' }]],
+    ['ALIAS on', [{ name: 'id', default_kind: '' }, { name: 'a', default_kind: '' }, { name: 'b', default_kind: 'ALIAS' }]],
+  ] as const) {
+    test(`a view output ${kind} the target fails the plan`, async () => {
+      const query = createMockQuery({ liveColumns: [...liveColumns], viewOutputs: ['id', 'a', 'b'] })
+      await expect(planViewTarget({ query }))
+        .rejects.toThrow('Materialized view app.events_mv outputs column(s) b, which app.events_copy cannot take (missing, MATERIALIZED or ALIAS)')
+    })
+  }
+
+  test('a view whose output columns cannot be read fails the plan', async () => {
+    const query = createMockQuery({ liveColumns: [{ name: 'id', default_kind: '' }], viewOutputs: [] })
+    await expect(planViewTarget({ query }))
+      .rejects.toThrow('Cannot read the output columns of materialized view app.events_mv')
+  })
+
+  test('views feeding one target with different outputs fail the plan', async () => {
+    const mock = createMockQuery({ liveColumns: [{ name: 'id', default_kind: '' }, { name: 'a', default_kind: '' }] })
+    const query = async <T>(sql: string) => sql.startsWith('DESCRIBE TABLE (\nSELECT id FROM app.events\n)')
+      ? [{ name: 'id' }] as T[]
+      : mock<T>(sql)
+    await expect(planViewTarget({ schema: TWO_VIEW_SCHEMA, query }))
+      .rejects.toThrow('Materialized views feeding app.events_copy output different columns: app.events_mv (id, a) vs app.other_mv (id)')
+  })
+
+  test('run refuses a plan whose columns the target no longer takes', () => {
+    const check = (insertableColumns: string[]) => assertReplayColumnsStillInsertable({
+      planId: 'p1', target: 'app.t', targetColumns: ['id', 'a'], insertableColumns,
+    })
+    expect(() => check(['a', 'x', 'id'])).not.toThrow()
+    expect(() => check(['id'])).toThrow('Target app.t changed since plan p1 was created: column(s) a are gone or no longer insertable')
+    expect(() => assertReplayColumnsStillInsertable({ planId: 'p1', target: 'app.t', insertableColumns: [] })).not.toThrow()
+  })
 })

@@ -1,8 +1,10 @@
-"""Port of the #243 case in ``packages/cli/test/cluster-2shard.e2e.test.ts``.
+"""Port of the #243 and #291 cases in ``packages/cli/test/cluster-2shard.e2e.test.ts``.
 
 A copy backfill of a ReplicatedMergeTree table created ``ON CLUSTER`` on the
-2-shard x 2-replica cluster (``test/cluster/2shard``), run through chkit-py
-under a profile that widens ``SELECT *`` with MATERIALIZED and ALIAS columns.
+2-shard x 2-replica cluster (``test/cluster/2shard``), and an mv_replay of a
+``SELECT *`` view into a reordered target with extra columns, run through
+chkit-py under a profile that widens ``SELECT *`` with MATERIALIZED and ALIAS
+columns.
 
 Like the TS cluster suites this lives outside the default test path: run it
 explicitly after ``bun run cluster:2shard:up`` with
@@ -146,6 +148,102 @@ def test_copy_backfill_of_replicated_table_under_widened_asterisk_profile(
             assert rows == expected, NODES[index]
     finally:
         shard1.execute(f"DROP TABLE IF EXISTS {fqn} ON CLUSTER '{CLUSTER}' SYNC")
+        for node in nodes:
+            node.close()
+
+
+def test_mv_replay_of_select_star_view_writes_replicated_target_columns_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """chkit#291: the view's output reaches each target column by name, on both
+    shard-1 replicas, whatever the target's column order and extra
+    DEFAULT/MATERIALIZED/ALIAS columns."""
+    nodes = [_connect_or_fail(url) for url in NODES]
+    shard1 = nodes[0]
+    prefix = create_prefix("twoshard_bf_mv")
+    source = f"{DATABASE}.{prefix}source"
+    target = f"{DATABASE}.{prefix}target"
+    try:
+        shard1.execute(
+            f"CREATE TABLE {source} ON CLUSTER '{CLUSTER}' ("
+            "id UInt64, event_time DateTime, a String, "
+            "m String MATERIALIZED concat(a, '_m'), b String"
+            ") ENGINE = ReplicatedMergeTree "
+            "PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)"
+        )
+        # Reordered, one DEFAULT column computed from a replayed value, and
+        # MATERIALIZED/ALIAS columns the replay must leave to the target.
+        shard1.execute(
+            f"CREATE TABLE {target} ON CLUSTER '{CLUSTER}' ("
+            "b String, x String DEFAULT concat(a, '_xd'), a String, event_time DateTime, "
+            "id UInt64, tm String MATERIALIZED concat(a, '_tm'), tal String ALIAS concat(b, '_al')"
+            ") ENGINE = ReplicatedMergeTree "
+            "PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)"
+        )
+        for node in nodes:
+            wait_for_table(node, DATABASE, f"{prefix}source")
+            wait_for_table(node, DATABASE, f"{prefix}target")
+        shard1.execute(
+            f"INSERT INTO {source} (id, event_time, a, b) "
+            "VALUES (1, '2026-01-01 12:00:00', 'x', 'bx')"
+        )
+
+        original_get_client: Callable[..., Any] = clickhouse_connect.get_client
+
+        def profiled_get_client(*args: Any, **kwargs: Any) -> Any:
+            settings = {**(kwargs.pop("settings", None) or {}), **PROFILE_SETTINGS}
+            return original_get_client(*args, **kwargs, settings=settings)
+
+        monkeypatch.setattr(clickhouse_connect, "get_client", profiled_get_client)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "schema.py").write_text(
+            f"""
+from chkit import materialized_view, schema
+
+definitions = schema(
+    materialized_view(
+        database={DATABASE!r},
+        name={prefix + "mv"!r},
+        to={{"database": {DATABASE!r}, "name": {prefix + "target"!r}}},
+        as_={"SELECT * FROM " + source!r},
+    )
+)
+""",
+            encoding="utf-8",
+        )
+        (tmp_path / "clickhouse.config.py").write_text(
+            CONFIG_TEMPLATE.format(
+                url=NODES[0], user=USER, password=PASSWORD, database=DATABASE, cluster=CLUSTER
+            ),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        planned = _invoke_json(runner, ["plugin", "backfill", "plan", "--target", target, "--json"])
+        assert planned["strategy"] == "mv_replay"
+        ran = _invoke_json(
+            runner,
+            ["plugin", "backfill", "run", "--plan-id", planned["planId"],
+             "--poll-interval", "500", "--json"],
+        )
+        assert ran["status"] == "completed"
+
+        # Both shard-1 replicas hold the replayed row; shard 2 never had any.
+        replayed = [{"id": "1", "a": "x", "b": "bx", "x": "x_xd", "tm": "x_tm", "tal": "bx_al"}]
+        for index, node in enumerate(nodes):
+            expected = replayed if index < SHARD1_REPLICAS else []
+
+            def read(node: ClickHouseClient = node) -> list[dict[str, str]]:
+                rows = node.query(
+                    f"SELECT toString(id) AS id, a, b, x, tm, tal FROM {target} ORDER BY id"
+                ).rows
+                return [{key: str(value) for key, value in row.items()} for row in rows]
+
+            rows = poll_until(read, lambda value, expected=expected: value == expected)
+            assert rows == expected, NODES[index]
+    finally:
+        shard1.execute(f"DROP TABLE IF EXISTS {source} ON CLUSTER '{CLUSTER}' SYNC")
+        shard1.execute(f"DROP TABLE IF EXISTS {target} ON CLUSTER '{CLUSTER}' SYNC")
         for node in nodes:
             node.close()
 

@@ -53,7 +53,11 @@ from chkit_plugin_backfill.payload import (
     plan_payload,
     status_payload,
 )
-from chkit_plugin_backfill.planner import assert_backfill_target_safe, build_backfill_plan
+from chkit_plugin_backfill.planner import (
+    assert_backfill_target_safe,
+    assert_replay_columns_still_insertable,
+    build_backfill_plan,
+)
 from chkit_plugin_backfill.queries import (
     cancel_backfill_run,
     get_backfill_doctor_report,
@@ -239,8 +243,14 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
 
     try:
         database, table = plan.target.split(".")
-        assert_backfill_target_safe(
+        insertable_columns = assert_backfill_target_safe(
             database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+        )
+        assert_replay_columns_still_insertable(
+            plan_id=plan.plan_id,
+            target=plan.target,
+            target_columns=plan.execution.target_columns,
+            insertable_columns=insertable_columns,
         )
         run_state = BackfillRunState(
             plan_id=plan.plan_id,

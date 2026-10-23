@@ -93,17 +93,21 @@ def build_chunk_execution_sql(
     if mv_replay_queries:
         # Each MV feeding the target becomes a filtered SELECT; UNION ALL replays
         # them in one INSERT so a single query_id and dedup token cover the chunk.
+        # With the plan's column list, both sides name the columns and each
+        # view's output is read by name, as ClickHouse does for a view's TO table.
+        columns = (
+            ", ".join(_quote_identifier(name) for name in target_columns)
+            if target_columns
+            else None
+        )
         selects: list[str] = []
         for query in mv_replay_queries:
             filtered = _inject_partition_filter(query, chunk.partition_id)
             for condition in chunk_conditions:
                 filtered = _inject_where_condition(filtered, condition)
-            if target_columns:
-                filtered = rewrite_select_columns(filtered, target_columns)
-            selects.append(filtered)
-        return "\n".join(
-            [header, f"INSERT INTO {target}", "\nUNION ALL\n".join(selects), settings]
-        )
+            selects.append(f"SELECT {columns}\nFROM (\n{filtered}\n)" if columns else filtered)
+        insert = f"INSERT INTO {target} ({columns})" if columns else f"INSERT INTO {target}"
+        return "\n".join([header, insert, "\nUNION ALL\n".join(selects), settings])
 
     lines = [
         header,
@@ -517,6 +521,11 @@ def split_top_level(sql: str, delimiter: str) -> list[str]:
 
 
 # ── Value formatting & condition helpers ─────────────────────────────────────
+
+
+def _quote_identifier(name: str) -> str:
+    escaped = name.replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{escaped}`"
 
 
 def _quote_sql_string(value: str) -> str:

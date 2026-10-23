@@ -9,12 +9,14 @@ filter injection (``inject_sort_key_filter``).
 from __future__ import annotations
 
 from chkit_plugin_backfill.chunking.sql import (
+    build_chunk_execution_sql,
     extract_source_table_ref,
     find_top_level_keywords,
     inject_sort_key_filter,
     rewrite_select_columns,
     split_top_level,
 )
+from chkit_plugin_backfill.chunking.types import Chunk, TableProfile
 
 # ── find_top_level_keywords ──────────────────────────────────────────────────
 
@@ -240,3 +242,63 @@ def test_ignores_a_trailing_clause_keyword_that_lives_inside_a_string_literal() 
     assert "AND ts >= '1'" in sql
     # No fresh WHERE was inserted; the existing one was extended.
     assert sql.count("WHERE") == 1
+
+
+# ── build_chunk_execution_sql mv_replay column list ──────────────────────────
+
+_REPLAY_CHUNK = Chunk.model_validate(
+    {
+        "id": "c1",
+        "partitionId": "20260101",
+        "ranges": [],
+        "estimate": {
+            "rows": 1,
+            "bytesCompressed": 1,
+            "bytesUncompressed": 1,
+            "confidence": "exact",
+            "reason": "exact-count",
+        },
+        "analysis": {"lineage": []},
+    }
+)
+_REPLAY_TABLE = TableProfile.model_validate({"database": "db", "table": "a", "sortKeys": []})
+
+
+def test_names_the_columns_on_both_sides_and_reads_each_view_output_by_name() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p",
+        chunk=_REPLAY_CHUNK,
+        target="db.t",
+        table=_REPLAY_TABLE,
+        mv_replay_queries=["SELECT * FROM db.a", "SELECT id, b AS a, c FROM db.b GROUP BY id"],
+        target_columns=["id", "a", "we`ird"],
+        idempotency_token="tok",
+    )
+    assert "\n".join(sql.split("\n")[1:-1]) == "\n".join(
+        [
+            "INSERT INTO db.t (`id`, `a`, `we\\`ird`)",
+            "SELECT `id`, `a`, `we\\`ird`",
+            "FROM (",
+            "SELECT * FROM db.a",
+            "WHERE _partition_id = '20260101'",
+            ")",
+            "UNION ALL",
+            "SELECT `id`, `a`, `we\\`ird`",
+            "FROM (",
+            "SELECT id, b AS a, c FROM db.b",
+            "WHERE _partition_id = '20260101'",
+            "GROUP BY id",
+            ")",
+        ]
+    )
+
+
+def test_keeps_the_view_query_unwrapped_for_a_plan_without_a_column_list() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p",
+        chunk=_REPLAY_CHUNK,
+        target="db.t",
+        table=_REPLAY_TABLE,
+        mv_replay_queries=["SELECT * FROM db.a"],
+    )
+    assert "INSERT INTO db.t\nSELECT * FROM db.a\nWHERE" in sql
