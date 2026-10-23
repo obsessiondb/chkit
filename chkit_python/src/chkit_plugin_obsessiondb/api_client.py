@@ -24,9 +24,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict
 
 from chkit_plugin_obsessiondb import _version
+from chkit_plugin_obsessiondb.api_model import ConsoleApiModel
 
 CLIENT_ID = "chkit-cli"
 # Versioned User-Agent matches the TS oRPC client + direct-ClickHouse executor
@@ -68,30 +68,22 @@ class DeviceCodeResponse:
     interval: int
 
 
-class SessionUser(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class SessionUser(ConsoleApiModel):
     id: str
     name: str
     email: str
 
 
-class SessionInfo(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
-
+class SessionInfo(ConsoleApiModel):
     active_organization_id: str | None = None
 
 
-class SessionResponse(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class SessionResponse(ConsoleApiModel):
     user: SessionUser
     session: SessionInfo | None = None
 
 
-class VerifiedUser(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class VerifiedUser(ConsoleApiModel):
     id: str
     email: str
     name: str | None = None

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
+from chkit_plugin_obsessiondb.api_model import ConsoleApiModel
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.service_api import _rpc_post
 
@@ -27,63 +28,53 @@ JobStatus = Literal[
 ]
 
 
-class JobSummary(BaseModel):
+class JobSummary(ConsoleApiModel):
     """``jobSummarySchema`` from the jobs contract."""
 
-    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
-
     id: str
-    service_id: str = Field(..., alias="serviceId")
+    service_id: str
     title: str | None = None
     type: str
     target: str
     status: JobStatus
     concurrency: int
-    task_limit: int | None = Field(default=None, alias="taskLimit")
-    poll_interval_base_sec: int | None = Field(
-        default=None, alias="pollIntervalBaseSec"
-    )
-    poll_interval_max_sec: int | None = Field(
-        default=None, alias="pollIntervalMaxSec"
-    )
-    total_tasks: int = Field(..., alias="totalTasks")
-    completed_tasks: int = Field(..., alias="completedTasks")
-    failed_tasks: int = Field(..., alias="failedTasks")
-    created_at: str = Field(..., alias="createdAt")
-    updated_at: str = Field(..., alias="updatedAt")
+    task_limit: int | None = None
+    poll_interval_base_sec: int | None = None
+    poll_interval_max_sec: int | None = None
+    total_tasks: int
+    completed_tasks: int
+    failed_tasks: int
+    created_at: str
+    updated_at: str
 
 
 class JobDetail(JobSummary):
     """``jobDetailSchema`` — summary plus retry/workflow/task breakdown."""
 
-    max_retries: int = Field(..., alias="maxRetries")
-    workflow_id: str | None = Field(default=None, alias="workflowId")
+    max_retries: int
+    workflow_id: str | None = None
     metadata: dict[str, Any] | None = None
     # Full task rows (with runs) — kept structurally loose like the TS client,
     # which passes them through without touching individual fields.
     tasks: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class JobsListResponse(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
-
+class JobsListResponse(ConsoleApiModel):
     jobs: list[JobSummary]
     total: int = 0
 
 
-class JobSubmitTask(BaseModel):
+class JobSubmitTask(ConsoleApiModel):
     """One task in a ``jobs/submit`` request (subset of the jobs contract)."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     sql: str
     group: str | None = None
-    estimated_bytes: float | None = Field(default=None, alias="estimatedBytes")
-    estimated_bytes_uncompressed: float | None = Field(
-        default=None, alias="estimatedBytesUncompressed"
-    )
-    max_retries: int | None = Field(default=None, alias="maxRetries")
+    estimated_bytes: float | None = None
+    estimated_bytes_uncompressed: float | None = None
+    max_retries: int | None = None
 
 
 def jobs_submit(
