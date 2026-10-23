@@ -20,7 +20,7 @@ from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.text_index_sql import normalize_text_index_sql
-from tests.e2e_testkit import create_prefix, get_required_env, poll_until, run_once_visible
+from tests.e2e_testkit import create_prefix, poll_until, resolve_live_env, run_once_visible
 from tests.test_text_index import docs
 
 CASES = json.loads(
@@ -46,7 +46,7 @@ def _load_pulled(definition: TableDefinition) -> TableDefinition:
 
 @pytest.fixture
 def text_client() -> Iterator[TextClient]:
-    env = get_required_env()
+    env = resolve_live_env()
     with ClickHouseClient.connect(
         ChxResolvedClickHouseConfig(
             url=env.clickhouse_url,

@@ -107,19 +107,24 @@ port choice, known limitation, and won't-port item.
 
 ## Development
 
+The repository's `bun run verify` runs the Python lint, type check, tests and
+wheel build through [uv](https://docs.astral.sh/uv/) (dependencies pinned in
+`uv.lock`, Python version in `.python-version`). To run them directly:
+
 ```sh
 git clone https://github.com/obsessiondb/chkit
+cd chkit
+bun run infra:up    # local ClickHouse test stack (Docker)
 cd chkit_python
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv\Scripts\python.exe -m pytest
-.venv\Scripts\python.exe -m mypy src
-.venv\Scripts\python.exe -m ruff check src tests
+uv run --locked --extra dev pytest
+uv run --locked --extra dev mypy src
+uv run --locked --extra dev ruff check src tests tests_cluster tests_workbench_api
+bash scripts/build.sh   # sdist + wheel, twine check, wheel smoke test
 ```
 
 Tests under `tests/test_*_parity.py` and `tests/test_sql_validation_e2e.py`
 are direct ports of the TS suites in
-`packages/core/src/*.test.ts`. The E2E suite requires a reachable ClickHouse
-(defaults to `http://localhost:8123` with no password — matches a fresh
-`docker run` of clickhouse-server). Override via `CLICKHOUSE_URL` /
+`packages/core/src/*.test.ts`. The E2E tests target the local test stack
+(`http://localhost:8123`, started by `bun run infra:up`) unless
+`CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; a remote target also needs
 `CLICKHOUSE_PASSWORD`.

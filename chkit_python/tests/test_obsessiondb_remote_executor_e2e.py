@@ -36,7 +36,7 @@ from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.remote_executor import RemoteClickHouseClient
-from tests.e2e_testkit import LiveEnv, create_prefix, get_required_env, quote_ident
+from tests.e2e_testkit import LiveEnv, create_prefix, quote_ident, resolve_live_env
 
 T = TypeVar("T")
 
@@ -114,7 +114,7 @@ def _start_workbench(env: LiveEnv) -> ThreadingHTTPServer:
 
 @pytest.fixture
 def live_env() -> LiveEnv:
-    return get_required_env()
+    return resolve_live_env()
 
 
 @pytest.fixture

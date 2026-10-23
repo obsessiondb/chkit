@@ -14,23 +14,24 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
+from tests.e2e_testkit import resolve_live_env
 
 CONFIG_TEMPLATE = """
 from chkit import define_config
 
 config = define_config(
-    {
+    {{
         "schema": "./schema_*.py",
         "outDir": "./chkit",
         "migrationsDir": "./chkit/migrations",
         "metaDir": "./chkit/meta",
-        "clickhouse": {
-            "url": "http://localhost:8123",
-            "username": "default",
-            "password": "",
-            "database": "default",
-        },
-    }
+        "clickhouse": {{
+            "url": {url!r},
+            "username": {user!r},
+            "password": {password!r},
+            "database": {database!r},
+        }},
+    }}
 )
 """
 
@@ -80,7 +81,14 @@ def runner() -> CliRunner:
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "clickhouse.config.py").write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    env = resolve_live_env()
+    config = CONFIG_TEMPLATE.format(
+        url=env.clickhouse_url,
+        user=env.clickhouse_user,
+        password=env.clickhouse_password,
+        database=env.clickhouse_database,
+    )
+    (tmp_path / "clickhouse.config.py").write_text(config, encoding="utf-8")
     (tmp_path / "schema_v1.py").write_text(SCHEMA_TWO_TABLES, encoding="utf-8")
     return tmp_path
 
@@ -175,14 +183,12 @@ def test_drift_table_scope_filters(runner: CliRunner, project: Path) -> None:
 def test_check_table_scope_filters_drift(
     runner: CliRunner, project: Path
 ) -> None:
-    """check exercises drift filtering; if there's no live ClickHouse we skip."""
+    """check exercises drift filtering against the live ClickHouse."""
     runner.invoke(app, ["generate", "--name", "init"])
     (project / "schema_v1.py").write_text(
         SCHEMA_TWO_TABLES_EVENTS_CHANGED, encoding="utf-8"
     )
 
     result = runner.invoke(app, ["check", "--json", "--table", "users"])
-    if result.exit_code != 0 and (result.exception is not None or "Connection" in str(result.output)):
-        pytest.skip("No live ClickHouse for check command")
     payload = json.loads(result.output)
     assert "drift" not in payload.get("failedChecks", [])

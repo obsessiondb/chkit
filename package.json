@@ -16,7 +16,8 @@
     "apps/*",
     "registry",
     "examples/clickbench",
-    "test/kafka"
+    "test/kafka",
+    "chkit_python"
   ],
   "scripts": {
     "build": "turbo run build",

@@ -537,11 +537,11 @@ of ``getRequiredEnv``, ``quoteIdent``, ``createRunTag``, ``createPrefix``,
 ``e2e-testkit.ts`` pattern was already noted in the project CLAUDE.md as
 having a "thinner version in tests/conftest.py".
 
-Key intentional difference: **Python defaults to localhost Docker** when
-``CLICKHOUSE_URL`` is missing, while TS hard-fails. The user works
-primarily with a local Docker dev setup; hard-failing on missing env
-would push test-driven development into the env-var-juggling weeds for
-zero gain. CI sets the env vars explicitly anyway.
+~~Key intentional difference: **Python defaults to localhost Docker** when
+``CLICKHOUSE_URL`` is missing, while TS hard-fails.~~ Resolved (#292): TS now
+defaults to the local test stack too (``getLiveEnv``), and ``resolve_live_env``
+matches it, including the stack's ``chkit-ci`` password and the hard failure
+on a remote target without ``CLICKHOUSE_PASSWORD``.
 
 If a future plugin needs to import shared testkit utilities (rather than
 re-creating them per-package), promote the conftest helpers to
@@ -1471,9 +1471,10 @@ Full lifecycle port mirroring `materialized_view`:
 - `.venv` was found hollow and rebuilt from `python 3.11` +
   `pip install -e .[dev]`; latest ruff surfaced new lint rules
   (PLR0917) on pre-existing code — annotated rather than refactored.
-- `tests/test_e2e_testkit.py::test_create_run_tag_is_unique_across_calls`
+- ~~`tests/test_e2e_testkit.py::test_create_run_tag_is_unique_across_calls`
   is flaky (millisecond-timestamp + random-suffix collision over 100
-  iterations); observed one collision, passes on re-run. Pre-existing.
+  iterations); observed one collision, passes on re-run. Pre-existing.~~
+  Fixed in #292: the random suffix is now 32 bits (see that entry).
 
 
 ## Main sync 2026-08-10 — Phase-2 backfill engine port (final parity gap closed)
@@ -1796,3 +1797,13 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   ignores URL parameters, so Python needs it in the user's settings profile. The
   ReplicatedMergeTree case (`tests_cluster/test_vector_index_constraints_cluster_e2e.py`,
   ClickHouse 25.3) patches `clickhouse_connect.get_client` to add it.
+
+### Python suite in `verify` (#292)
+- `chkit_python/package.json` (private workspace `@chkit/python`) gives Turbo
+  `lint` (ruff), `typecheck` (mypy), `test` (pytest) and `build` (sdist + wheel,
+  `twine check`, wheel smoke test) tasks, all through `uv` with the committed
+  `uv.lock`. `tests_cluster/` and `tests_workbench_api/` stay opt-in.
+- The e2e testkit's random name suffix is 8 hex digits (`secrets.token_hex(4)`);
+  TS keeps `Math.floor(Math.random() * 100000)`. Five decimal digits collided
+  when many names were built in the same millisecond. Only the test helpers
+  differ; no product code is affected.

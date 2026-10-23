@@ -62,6 +62,8 @@ bun run lint         # lint all packages
 
 `bun run test` runs every package's tests, unit and e2e together, through Turbo. Each package's `test` task depends on the root `infra:up` task, which starts the test stack in `test/infra/docker-compose.yml` (ClickHouse 26.3 and a Redpanda Kafka broker) and waits until it is healthy. The stack stays up between runs; `bun run infra:down` removes it. Docker is required.
 
+The Python port (`chkit_python/`, published to PyPI as `chkit-py`) is the private workspace `@chkit/python`. Its Turbo tasks run through [uv](https://docs.astral.sh/uv/), which must be installed: `lint` (ruff), `typecheck` (mypy), `test` (pytest over `tests/`, against the same target as the TS e2e tests) and `build` (`scripts/build.sh`: sdist + wheel, `twine check`, a smoke test of the wheel). Dependencies are pinned in `chkit_python/uv.lock`; after changing `pyproject.toml` run `uv lock` there. `tests_cluster/` and `tests_workbench_api/` stay opt-in (run them with `uv run --extra dev pytest tests_cluster`). CI installs the uv version pinned in `.github/actions/setup`.
+
 ### Test target
 
 Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; then `infra:up` starts nothing and the tests run against that server:
@@ -74,7 +76,7 @@ Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; t
 
 `bun run test:workbench-api` (opt-in, not in `verify`) runs async migrate through the real ObsessionDB console API with the `chkit obsessiondb login` session and `CHKIT_E2E_OBSESSIONDB_SERVICE=<service slug>`; the Python port is `pytest tests_workbench_api`.
 
-Shared ClickHouse test utilities (target env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones. The Kafka suite is the private workspace `test/kafka` (`@chkit/kafka-e2e`). plugin-backfill's `test` script seeds its chunking fixtures before running.
+Shared ClickHouse test utilities (target env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. Their Python port is `chkit_python/tests/e2e_testkit.py`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones. The Kafka suite is the private workspace `test/kafka` (`@chkit/kafka-e2e`). plugin-backfill's `test` script seeds its chunking fixtures before running.
 
 Key conventions:
 
@@ -125,3 +127,14 @@ Publishing authenticates via **OIDC Trusted Publishing**, so the job runs on a G
 **Previews:** `.github/workflows/preview.yml` publishes every push to `main` to pkg.pr.new, not npm: `bun add -d https://pkg.pr.new/chkit@<sha>` (or `@main`).
 
 Without CI: `bun run release:prepare [--stable]` opens the release PR from a clean, up-to-date local `main`, and `bun run release:publish [--dry-run]` publishes the merged release from local `main` (prompts for an npm OTP).
+
+### chkit-py (PyPI)
+
+chkit-py has its own version, outside the changesets `fixed` group, and its own changelog (`chkit_python/CHANGELOG.md`, `## Unreleased` until a release). To release it:
+
+1. In a PR, set `version` in `chkit_python/pyproject.toml` and move the `## Unreleased` entries under that version in `chkit_python/CHANGELOG.md`. Merge it.
+2. Push the tag `chkit-py-v<version>` on that commit of `main`. `.github/workflows/publish-chkit-py.yml` checks that the tag matches the pyproject version, builds and checks the dists with `chkit_python/scripts/build.sh` (the same script `verify` runs), and publishes to PyPI through OIDC Trusted Publishing in the `pypi` environment. No PyPI token is stored anywhere.
+
+To rehearse, run the workflow manually: `dry-run` (the default) builds, checks and smoke-tests without uploading; `testpypi` also uploads to TestPyPI. A version can be uploaded to PyPI (or TestPyPI) only once.
+
+**One-time setup** (out of band, by a `chkit-py` owner on pypi.org): project `chkit-py` → Publishing → add a GitHub trusted publisher with owner `obsessiondb`, repository `chkit`, workflow `publish-chkit-py.yml`, environment `pypi`. Create the `pypi` GitHub environment and limit its deployment tags to `chkit-py-v*`. For TestPyPI rehearsals, add the same publisher on test.pypi.org with environment `testpypi`, and create a `testpypi` GitHub environment.
