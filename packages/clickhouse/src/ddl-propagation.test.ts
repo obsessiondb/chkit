@@ -188,6 +188,25 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
   }, 30_000)
 })
 
+describe('waitForDDLPropagation: deadline', () => {
+  test('a polling query that never returns ends the wait at the deadline', async () => {
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        return new Promise<T[]>(() => {})
+      },
+    } as unknown as ClickHouseExecutor
+    const started = Date.now()
+
+    await expect(
+      waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
+      }),
+    ).rejects.toThrow('app.events.raw definition not applied on every replica after 1 checks: a check did not return within the 30s deadline')
+    expect(Date.now() - started).toBeLessThan(35_000)
+  }, 40_000)
+})
+
 describe('waitForDDLPropagation: other column and index operations', () => {
   test('ADD COLUMN waits for every replica to agree without checking what the statement sets', async () => {
     const { db, polled, queries } = fakeTarget([
