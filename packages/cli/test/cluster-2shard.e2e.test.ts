@@ -12,6 +12,12 @@ import {
   runCli,
   waitForTable,
 } from '../src/test/e2e-testkit.js'
+import {
+  FINAL_COLUMNS,
+  columnsOnEveryReplica,
+  writeScenarioMigrations,
+  type ScenarioTarget,
+} from '../src/test/consecutive-alters-scenario.js'
 
 // MULTI-SHARD cluster-mode e2e against test/cluster/2shard (2 shards x 2 replicas,
 // replicas named per-shard so the journal's replica id must be unique cluster-wide).
@@ -95,4 +101,31 @@ describe('chkit cluster mode (ON CLUSTER) — multi-shard journal', () => {
     await cleanup.command(`DROP TABLE IF EXISTS ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' SYNC`)
     await cleanup.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
   }, 90_000)
+
+  test('dependent ALTERs on one column leave every node of both shards on the final schema (#240)', async () => {
+    const target: ScenarioTarget = {
+      database: DATABASE,
+      table: `${createPrefix('twoshard_alters')}t`,
+      engine: 'ReplicatedMergeTree',
+      cluster: CLUSTER,
+    }
+    const journalTable = createJournalTableName('twoshard_alters')
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-cluster-2s-alters-e2e-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    await writeScenarioMigrations(join(dir, 'chkit', 'migrations'), target)
+    await writeFile(configPath, configFor(join(dir, 'schema.ts'), dir, SHARD1_ENDPOINT), 'utf8')
+    const executor = executorFor(SHARD1_ENDPOINT)
+
+    const migrate = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], { CHKIT_JOURNAL_TABLE: journalTable })
+    expect(migrate.exitCode, formatTestDiagnostic('migrate --apply', migrate)).toBe(0)
+
+    const { replicas, hosts } = await columnsOnEveryReplica(executor, target)
+    expect(replicas).toBe(NODES.length)
+    expect(hosts).toHaveLength(replicas)
+    for (const host of hosts) expect(host.columns).toEqual(FINAL_COLUMNS)
+
+    await executor.command(`DROP TABLE IF EXISTS ${DATABASE}.${target.table} ON CLUSTER '${CLUSTER}' SYNC`)
+    await executor.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
+    await executor.close()
+  }, 120_000)
 })
