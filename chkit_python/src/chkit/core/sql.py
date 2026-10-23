@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 
 from chkit.core.codec import render_codec
 from chkit.core.column_default import render_default
+from chkit.core.constraint import constraint_expression, constraint_kind, render_constraint
 from chkit.core.engine import is_merge_tree_engine, supports_sort_order
 from chkit.core.kafka import is_kafka_engine, render_kafka_setting
 from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
@@ -23,15 +24,20 @@ from chkit.core.model import (
     SkipIndexBloomFilter,
     SkipIndexDefinition,
     SkipIndexMinmax,
+    SkipIndexRaw,
     SkipIndexSet,
     SkipIndexTokenBF,
+    SkipIndexVectorSimilarity,
+    TableConstraintDefinition,
     TableDefinition,
     TableRef,
     ViewDefinition,
 )
 from chkit.core.projection import render_projection_body
+from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.text_index import TEXT_INDEX_GRANULARITY, render_text_index_type
 from chkit.core.validate import assert_valid_definitions
+from chkit.core.vector_index import render_vector_index_type
 
 _COLUMN_ADAPTER: TypeAdapter[ColumnDefinition] = TypeAdapter(ColumnDefinition)
 _INDEX_ADAPTER: TypeAdapter[SkipIndexDefinition] = TypeAdapter(SkipIndexDefinition)
@@ -86,9 +92,13 @@ def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str
     )
 
 
-def _render_index_type(idx: SkipIndexDefinition) -> str:
+def _render_index_type(idx: SkipIndexDefinition) -> str:  # noqa: PLR0911
     if idx.type == "text":
         return render_text_index_type(idx)
+    if isinstance(idx, SkipIndexVectorSimilarity):
+        return render_vector_index_type(idx)
+    if isinstance(idx, SkipIndexRaw):
+        return normalize_sql_fragment(idx.raw_type)
     if isinstance(idx, SkipIndexMinmax):
         return "minmax"
     if isinstance(idx, SkipIndexSet):
@@ -131,8 +141,9 @@ def _render_index_line(idx: SkipIndexDefinition) -> str:
 def _render_table_sql(definition: TableDefinition) -> str:
     columns = [_render_column(c) for c in definition.columns]
     indexes_block = [_render_index_line(idx) for idx in (definition.indexes or [])]
+    constraints_block = [render_constraint(c) for c in (definition.constraints or [])]
     projections_block = [_render_projection(p) for p in (definition.projections or [])]
-    body = ",\n  ".join(columns + indexes_block + projections_block)
+    body = ",\n  ".join(columns + indexes_block + constraints_block + projections_block)
 
     column_names = {column.name for column in definition.columns}
     clauses: list[str] = []
@@ -383,6 +394,23 @@ def render_alter_drop_index(definition: TableDefinition, index_name: str) -> str
     return (
         f"ALTER TABLE {definition.database}.{definition.name} "
         f"DROP INDEX IF EXISTS `{index_name}`;"
+    )
+
+
+def render_alter_add_constraint(
+    definition: TableDefinition, constraint: TableConstraintDefinition
+) -> str:
+    return (
+        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"ADD CONSTRAINT IF NOT EXISTS `{constraint.name}` "
+        f"{constraint_kind(constraint)} {constraint_expression(constraint)};"
+    )
+
+
+def render_alter_drop_constraint(definition: TableDefinition, constraint_name: str) -> str:
+    return (
+        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"DROP CONSTRAINT IF EXISTS `{constraint_name}`;"
     )
 
 

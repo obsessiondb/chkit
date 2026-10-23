@@ -17,6 +17,8 @@ const KEY_SUFFIXES: ReadonlyMap<string, string> = new Map<MigrationOperationType
   ['alter_table_drop_index', ':index:'],
   ['alter_table_add_projection', ':projection:'],
   ['alter_table_drop_projection', ':projection:'],
+  ['alter_table_add_constraint', ':constraint:'],
+  ['alter_table_drop_constraint', ':constraint:'],
   ['alter_table_modify_setting', ':setting:'],
   ['alter_table_reset_setting', ':setting:'],
   ['alter_table_modify_ttl', ':ttl'],
@@ -128,6 +130,42 @@ export async function waitForColumnAbsent(
 }
 
 /**
+ * Waits until every replica's `create_table_query` lists the constraint. There
+ * is no system table of constraints. A replica that has not applied the ADD
+ * yet would let a following `DROP CONSTRAINT IF EXISTS` (a changed constraint)
+ * or `ADD CONSTRAINT IF NOT EXISTS` silently do nothing.
+ */
+export async function waitForConstraint(
+  executor: ClickHouseExecutor,
+  database: string,
+  tableName: string,
+  constraintName: string,
+  options?: PropagationOptions,
+): Promise<void> {
+  await waitForSystemRows(executor, {
+    source: 'system.tables',
+    where: constraintWhere(database, tableName, constraintName),
+    want: 'present',
+    label: `waitForConstraint: ${database}.${tableName}.${constraintName} not yet visible`,
+  }, options)
+}
+
+export async function waitForConstraintAbsent(
+  executor: ClickHouseExecutor,
+  database: string,
+  tableName: string,
+  constraintName: string,
+  options?: PropagationOptions,
+): Promise<void> {
+  await waitForSystemRows(executor, {
+    source: 'system.tables',
+    where: constraintWhere(database, tableName, constraintName),
+    want: 'absent',
+    label: `waitForConstraintAbsent: ${database}.${tableName}.${constraintName} still present`,
+  }, options)
+}
+
+/**
  * Polls a query until its rows satisfy `predicate`, then returns them. Use for
  * reads that race DDL/DML propagation on managed ClickHouse (e.g. journal rows
  * written by a just-finished migration that aren't yet visible via FINAL).
@@ -181,6 +219,7 @@ function parseOperationKey(
       database: string
       table: string
       column: string | undefined
+      constraint?: string
     }
   | undefined {
   const keyMatch = key.match(/^(?:table|dictionary|view|materialized_view):([^.]+)\.(.+)$/)
@@ -193,8 +232,13 @@ function parseOperationKey(
   const suffix = KEY_SUFFIXES.get(operationType)
   const at = suffix === undefined ? -1 : rest.lastIndexOf(suffix)
   if (suffix === undefined || at < 1) return { database, table: rest, column: undefined }
-  const column = suffix === ':column:' ? rest.slice(at + suffix.length) : undefined
-  return { database, table: rest.slice(0, at), column }
+  const member = rest.slice(at + suffix.length)
+  return {
+    database,
+    table: rest.slice(0, at),
+    column: suffix === ':column:' ? member : undefined,
+    constraint: suffix === ':constraint:' ? member : undefined,
+  }
 }
 
 /**
@@ -241,6 +285,18 @@ export async function waitForDDLPropagation(
     case 'alter_table_drop_column':
       if (parsed.column) {
         return waitForColumnAbsent(executor, parsed.database, parsed.table, parsed.column, options)
+      }
+      return waitForTable(executor, parsed.database, parsed.table, options)
+
+    case 'alter_table_add_constraint':
+      if (parsed.constraint) {
+        return waitForConstraint(executor, parsed.database, parsed.table, parsed.constraint, options)
+      }
+      return waitForTable(executor, parsed.database, parsed.table, options)
+
+    case 'alter_table_drop_constraint':
+      if (parsed.constraint) {
+        return waitForConstraintAbsent(executor, parsed.database, parsed.table, parsed.constraint, options)
       }
       return waitForTable(executor, parsed.database, parsed.table, options)
 
@@ -319,4 +375,13 @@ async function systemRowsMatch(
 
 function columnWhere(database: string, tableName: string, columnName: string): string {
   return `database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name = ${stringLiteral(columnName)}`
+}
+
+// ClickHouse writes a constraint name bare when it is a plain identifier and
+// backquoted otherwise (`backQuoteIfNeed`), so match either spelling.
+function constraintWhere(database: string, tableName: string, constraintName: string): string {
+  const quoted = `\`${constraintName.replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\``
+  const spellings = [`CONSTRAINT ${constraintName} `, `CONSTRAINT ${quoted} `]
+  const listed = spellings.map((spelling) => `position(create_table_query, ${stringLiteral(spelling)}) > 0`).join(' OR ')
+  return `database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)} AND (${listed})`
 }

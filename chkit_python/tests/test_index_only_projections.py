@@ -207,12 +207,12 @@ def test_plans_add_and_drop_for_index_only_projections() -> None:
 
     plan = plan_diff(old_defs, new_defs)  # type: ignore[arg-type]
     assert [op.type for op in plan.operations] == [
-        "alter_table_add_projection",
         "alter_table_drop_projection",
+        "alter_table_add_projection",
     ]
     assert (
         "ADD PROJECTION IF NOT EXISTS `p_add` INDEX (source, id) TYPE basic"
-        in plan.operations[0].sql
+        in plan.operations[1].sql
     )
 
 

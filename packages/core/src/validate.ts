@@ -1,4 +1,6 @@
+import { constraintProblem } from './constraint.js'
 import { renderTextIndexType } from './text-index.js'
+import { renderVectorIndexType } from './vector-index.js'
 import { definitionKey } from './canonical.js'
 import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
 import {
@@ -261,7 +263,7 @@ function suggestedExpression(value: string): { expression: string; rendered: str
 function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]): void {
   const kafka = isKafkaEngine(def.engine)
   if (kafka) {
-    for (const field of ['primaryKey', 'orderBy', 'uniqueKey', 'partitionBy', 'ttl', 'indexes', 'projections'] as const) {
+    for (const field of ['primaryKey', 'orderBy', 'uniqueKey', 'partitionBy', 'ttl', 'indexes', 'projections', 'constraints'] as const) {
       const value = def[field]
       if (Array.isArray(value) ? value.length > 0 : Boolean(value)) {
         pushValidationIssue(issues, def, 'kafka_unsupported_clause', `Kafka table ${def.database}.${def.name} does not support ${field}. Put storage clauses on the destination table.`)
@@ -338,6 +340,37 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
         pushValidationIssue(issues, def, 'text_index_invalid_parameters',
           `Text index "${index.name}": ${error instanceof Error ? error.message : String(error)}`)
       }
+    }
+    if (index.type === 'vector_similarity') {
+      try {
+        renderVectorIndexType(index)
+      } catch (error) {
+        pushValidationIssue(issues, def, 'vector_index_invalid_parameters',
+          `Vector similarity index "${index.name}": ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (index.type === 'raw' && (typeof index.rawType !== 'string' || normalizeSQLFragment(index.rawType) === '')) {
+      pushValidationIssue(issues, def, 'raw_index_invalid_type',
+        `Table ${def.database}.${def.name} raw index "${index.name}" needs a non-empty rawType, e.g. "sparse_grams(3, 100, 512, 1, 3, 0)"`)
+    }
+  }
+
+  const constraintSeen = new Set<string>()
+  for (const constraint of def.constraints ?? []) {
+    if (constraintSeen.has(constraint.name)) {
+      pushValidationIssue(
+        issues,
+        def,
+        'duplicate_constraint_name',
+        `Table ${def.database}.${def.name} has duplicate constraint name "${constraint.name}"`
+      )
+      continue
+    }
+    constraintSeen.add(constraint.name)
+    const problem = constraintProblem(constraint)
+    if (problem) {
+      pushValidationIssue(issues, def, 'constraint_invalid',
+        `Table ${def.database}.${def.name} constraint "${constraint.name}" ${problem}`)
     }
   }
 
@@ -697,6 +730,9 @@ function collectIdentifiers(def: SchemaDefinition): Array<{ label: string; name:
   if (def.kind === 'table') {
     for (const column of def.columns) identifiers.push({ label: 'column name', name: column.name })
     for (const index of def.indexes ?? []) identifiers.push({ label: 'index name', name: index.name })
+    for (const constraint of def.constraints ?? []) {
+      identifiers.push({ label: 'constraint name', name: constraint.name })
+    }
     for (const projection of def.projections ?? []) {
       identifiers.push({ label: 'projection name', name: projection.name })
     }

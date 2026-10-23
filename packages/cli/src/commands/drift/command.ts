@@ -112,6 +112,9 @@ export const driftCommand: ChxPluginCommand = {
         if (item.projectionDiffs.length > 0) {
           console.log(`  projectionDiffs=${item.projectionDiffs.join(',')}`)
         }
+        if (item.constraintDiffs.length > 0) {
+          console.log(`  constraintDiffs=${item.constraintDiffs.join(',')}`)
+        }
         console.log(`  reasonCodes=${item.reasonCodes.join(',')}`)
       }
     }

@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { type ColumnDefinition, table } from '@chkit/core'
+import {
+  type ColumnDefinition,
+  type SkipIndexDefinition,
+  type TableConstraintDefinition,
+  type TableInput,
+  table,
+} from '@chkit/core'
 
 import {
   collectTableSqlFragments,
@@ -1123,5 +1129,101 @@ describe('@chkit/cli drift SQL canonicalization (#195)', () => {
     expect(
       compareTableShape(expected, actual('(id, `user--b`)'), commentAwareFormat)?.reasonCodes
     ).toEqual(['order_by_mismatch'])
+  })
+})
+
+describe('@chkit/cli drift: vector indexes, raw indexes and constraints (#278)', () => {
+  // Stand-in for ClickHouse's formatter on the shapes used below: it adds the
+  // parentheses ClickHouse stores around `IN` and arithmetic.
+  const formatted: Record<string, string> = {
+    "s IN ('a','b') AND (id+1)*2 > 0": "(s IN ('a', 'b')) AND (((id + 1) * 2) > 0)",
+    'sparse_grams(3,100, 512,1,3,0)': 'sparse_grams(3, 100, 512, 1, 3, 0)',
+  }
+  const canonicalizer: SqlCanonicalizer = {
+    expression: (fragment) => formatted[fragment] ?? fragment,
+    query: (fragment) => fragment,
+  }
+  const vector = {
+    name: 'e', expression: 'embedding', type: 'vector_similarity' as const,
+    method: 'hnsw' as const, distanceFunction: 'cosineDistance' as const, dimensions: 4,
+  }
+  const rawSparse = { name: 'sg', expression: 's', type: 'raw' as const, rawType: 'sparse_grams(3,100, 512,1,3,0)', granularity: 1 }
+  const expected = (overrides: Partial<TableInput> = {}) => table({
+    database: 'app',
+    name: 'vectors',
+    engine: 'MergeTree()',
+    columns: [
+      { name: 'id', type: 'UInt64' },
+      { name: 's', type: 'String' },
+      { name: 'embedding', type: 'Array(Float32)' },
+    ],
+    orderBy: ['id'],
+    indexes: [vector, rawSparse],
+    constraints: [
+      { name: 'dimension', check: 'length(embedding) = 4' },
+      { name: 'c3', check: "s IN ('a','b') AND (id+1)*2 > 0" },
+    ],
+    ...overrides,
+  })
+  const liveVector = { ...vector, granularity: 100_000_000 }
+  const liveSparse = { ...rawSparse, rawType: 'sparse_grams(3, 100, 512, 1, 3, 0)' }
+  const liveDimension = { name: 'dimension', check: 'length(embedding) = 4' }
+  const liveC3 = { name: 'c3', check: "(s IN ('a', 'b')) AND (((id + 1) * 2) > 0)" }
+  const actual = (overrides: { indexes?: SkipIndexDefinition[]; constraints?: TableConstraintDefinition[] } = {}) => ({
+    engine: 'MergeTree',
+    primaryKey: undefined,
+    orderBy: 'id',
+    columns: [
+      { name: 'id', type: 'UInt64' },
+      { name: 's', type: 'String' },
+      { name: 'embedding', type: 'Array(Float32)' },
+    ],
+    settings: {},
+    indexes: overrides.indexes ?? [liveVector, liveSparse],
+    projections: [],
+    constraints: overrides.constraints ?? [liveDimension, liveC3],
+  })
+
+  test('what ClickHouse echoes back reads clean', () => {
+    expect(compareTableShape(expected(), actual(), canonicalizer)).toBeNull()
+  })
+
+  test('every fragment the comparison canonicalizes is collected', () => {
+    const { expressions } = collectTableSqlFragments(expected(), actual())
+    expect(expressions).toContain("s IN ('a','b') AND (id+1)*2 > 0")
+    expect(expressions).toContain('sparse_grams(3,100, 512,1,3,0)')
+  })
+
+  test('a missing, extra or changed constraint drifts', () => {
+    const missing = compareTableShape(expected(), actual({ constraints: [liveDimension] }), canonicalizer)
+    expect(missing?.reasonCodes).toEqual(['constraint_mismatch'])
+    expect(missing?.constraintDiffs).toEqual(['c3'])
+
+    const extra = compareTableShape(expected({ constraints: [] }), actual(), canonicalizer)
+    expect(extra?.constraintDiffs).toEqual(['c3', 'dimension'])
+
+    const kind = compareTableShape(
+      expected(),
+      actual({ constraints: [{ name: 'dimension', assume: 'length(embedding) = 4' }, liveC3] }),
+      canonicalizer
+    )
+    expect(kind?.constraintDiffs).toEqual(['dimension'])
+  })
+
+  test('a changed vector index or granularity drifts', () => {
+    const changed = compareTableShape(
+      expected(),
+      actual({ indexes: [{ ...liveVector, distanceFunction: 'L2Distance' }, liveSparse] }),
+      canonicalizer
+    )
+    expect(changed?.indexDiffs).toEqual(['e'])
+
+    const granularity = compareTableShape(expected(), actual({ indexes: [{ ...liveVector, granularity: 1 }, liveSparse] }), canonicalizer)
+    expect(granularity?.indexDiffs).toEqual(['e'])
+  })
+
+  test('a structured index matches the same type written raw', () => {
+    const raw = { name: 'e', expression: 'embedding', type: 'raw' as const, rawType: "vector_similarity('hnsw', 'cosineDistance', 4)", granularity: 100_000_000 }
+    expect(compareTableShape(expected({ indexes: [raw, rawSparse] }), actual(), canonicalizer)).toBeNull()
   })
 })

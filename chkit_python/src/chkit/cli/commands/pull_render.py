@@ -48,6 +48,9 @@ from chkit.core.model import (
     RawColumnCodec,
     SchemaDefinition,
     SkipIndexDefinition,
+    SkipIndexRaw,
+    SkipIndexVectorSimilarity,
+    TableConstraintDefinition,
     TableDefinition,
     ViewDefinition,
 )
@@ -111,11 +114,16 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
                     "tokenbf_v1": "SkipIndexTokenBF",
                     "ngrambf_v1": "SkipIndexNgramBF",
                     "text": "SkipIndexText",
+                    "vector_similarity": "SkipIndexVectorSimilarity",
+                    "raw": "SkipIndexRaw",
                 }[idx.type]
             )
 
     has_projection = any(
         isinstance(d, TableDefinition) and d.projections for d in canonical
+    )
+    has_constraint = any(
+        isinstance(d, TableDefinition) and d.constraints for d in canonical
     )
     has_dictionary = any(isinstance(d, DictionaryDefinition) for d in canonical)
     has_dictionary_attribute = has_dictionary
@@ -146,6 +154,8 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
         imports.append("SQLExpression")
     if has_projection:
         imports.append("ProjectionDefinition")
+    if has_constraint:
+        imports.append("TableConstraintDefinition")
     if has_raw_codec:
         imports.append("codec_raw")
     imports.extend(index_classes)
@@ -221,8 +231,21 @@ def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
             f"        {_render_projection(p)}," for p in definition.projections
         )
         lines.append("    ],")
+    if definition.constraints:
+        lines.append("    constraints=[")
+        lines.extend(f"        {_render_constraint(c)}," for c in definition.constraints)
+        lines.append("    ],")
     lines.append(")")
     return lines
+
+
+def _render_constraint(constraint: TableConstraintDefinition) -> str:
+    body = (
+        f"check={_render_string(constraint.check)}"
+        if constraint.check is not None
+        else f"assume={_render_string(constraint.assume or '')}"
+    )
+    return f"TableConstraintDefinition(name={_render_string(constraint.name)}, {body})"
 
 
 def _render_column(column: ColumnDefinition) -> str:
@@ -251,7 +274,7 @@ def _render_column_default(value: ColumnDefaultValue) -> str:
     return _render_literal(parsed.value)
 
 
-def _render_index(index: SkipIndexDefinition) -> str:
+def _render_index(index: SkipIndexDefinition) -> str:  # noqa: PLR0912
     parts: list[str] = [
         f"name={_render_string(index.name)}",
         f"expression={_render_string(index.expression)}",
@@ -271,6 +294,16 @@ def _render_index(index: SkipIndexDefinition) -> str:
         parts.append(f"size_bytes={index.size_bytes}")
         parts.append(f"hash_functions={index.hash_functions}")
         parts.append(f"random_seed={index.random_seed}")
+    elif isinstance(index, SkipIndexVectorSimilarity):
+        for field in ("method", "distance_function", "dimensions", "quantization",
+                      "hnsw_max_connections_per_layer",
+                      "hnsw_candidate_list_size_for_construction"):
+            value = getattr(index, field)
+            if value is not None:
+                rendered = _render_string(value) if isinstance(value, str) else str(value)
+                parts.append(f"{field}={rendered}")
+    elif isinstance(index, SkipIndexRaw):
+        parts.append(f"raw_type={_render_string(index.raw_type)}")
     elif index.type == "text":
         for field in ("tokenizer", "preprocessor", "postprocessor", "support_phrase_search",
                       "dictionary_block_size", "dictionary_block_frontcoding_compression",
@@ -288,6 +321,8 @@ def _render_index(index: SkipIndexDefinition) -> str:
         "tokenbf_v1": "SkipIndexTokenBF",
         "ngrambf_v1": "SkipIndexNgramBF",
         "text": "SkipIndexText",
+        "vector_similarity": "SkipIndexVectorSimilarity",
+        "raw": "SkipIndexRaw",
     }[index.type]
     return f"{type_class}({', '.join(parts)})"
 

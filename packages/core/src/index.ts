@@ -26,6 +26,20 @@ export {
   renderTextIndexType,
   textIndexFingerprint,
 } from './text-index.js'
+export {
+  VECTOR_INDEX_GRANULARITY,
+  canonicalizeVectorIndex,
+  parseVectorIndexArgs,
+  renderVectorIndexType,
+  vectorIndexGranularity,
+} from './vector-index.js'
+export {
+  canonicalizeConstraint,
+  constraintExpression,
+  constraintKind,
+  renderConstraint,
+  type ConstraintKind,
+} from './constraint.js'
 export { splitTopLevelComma } from './key-clause.js'
 export { insertColumnList } from './insert-columns.js'
 export {

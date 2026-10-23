@@ -20,6 +20,7 @@ from chkit.core.column_default import (
     stores_unparsable_literal_as_null,
     trim_expression,
 )
+from chkit.core.constraint import constraint_problem
 from chkit.core.engine import engine_name, supports_sort_order
 from chkit.core.kafka import is_kafka_engine
 from chkit.core.key_clause import (
@@ -34,6 +35,8 @@ from chkit.core.model import (
     DictionaryDefinition,
     MaterializedViewDefinition,
     SchemaDefinition,
+    SkipIndexRaw,
+    SkipIndexVectorSimilarity,
     SQLExpression,
     TableDefinition,
     ValidationIssue,
@@ -45,6 +48,7 @@ from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.text_index import render_text_index_type
 from chkit.core.text_index_sql import text_sql_tokens
+from chkit.core.vector_index import vector_index_problem
 
 
 def _push(
@@ -130,6 +134,43 @@ def _validate_indexes(definition: TableDefinition, issues: list[ValidationIssue]
             except ValueError as exc:
                 _push(issues, definition, "text_index_invalid_parameters",
                       f'Text index "{index.name}": {exc}')
+        if isinstance(index, SkipIndexVectorSimilarity):
+            problem = vector_index_problem(index)
+            if problem is not None:
+                _push(issues, definition, "vector_index_invalid_parameters",
+                      f'Vector similarity index "{index.name}": {problem}')
+        if isinstance(index, SkipIndexRaw) and normalize_sql_fragment(index.raw_type) == "":
+            _push(
+                issues,
+                definition,
+                "raw_index_invalid_type",
+                f'Table {definition.database}.{definition.name} raw index "{index.name}" '
+                f'needs a non-empty rawType, e.g. "sparse_grams(3, 100, 512, 1, 3, 0)"',
+            )
+
+
+def _validate_constraints(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
+    seen: set[str] = set()
+    for constraint in definition.constraints or []:
+        if constraint.name in seen:
+            _push(
+                issues,
+                definition,
+                "duplicate_constraint_name",
+                f'Table {definition.database}.{definition.name} '
+                f'has duplicate constraint name "{constraint.name}"',
+            )
+            continue
+        seen.add(constraint.name)
+        problem = constraint_problem(constraint)
+        if problem is not None:
+            _push(
+                issues,
+                definition,
+                "constraint_invalid",
+                f"Table {definition.database}.{definition.name} "
+                f'constraint "{constraint.name}" {problem}',
+            )
 
 
 def _validate_sort_order_support(
@@ -178,6 +219,7 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
         "ttl": definition.ttl,
         "indexes": definition.indexes,
         "projections": definition.projections,
+        "constraints": definition.constraints,
     }
     for field, value in clauses.items():
         if value:
@@ -548,6 +590,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
             _validate_column_default(definition, column, issues)
 
     _validate_indexes(definition, issues)
+    _validate_constraints(definition, issues)
 
     projection_seen: set[str] = set()
     for projection in definition.projections or []:

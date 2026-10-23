@@ -49,9 +49,12 @@ from chkit.core.model import (
     SkipIndexBloomFilter,
     SkipIndexMinmax,
     SkipIndexNgramBF,
+    SkipIndexRaw,
     SkipIndexSet,
     SkipIndexText,
     SkipIndexTokenBF,
+    SkipIndexVectorSimilarity,
+    TableConstraintDefinition,
 )
 
 __version__ = "0.2.0"
@@ -81,9 +84,12 @@ __all__ = [
     "SkipIndexBloomFilter",
     "SkipIndexMinmax",
     "SkipIndexNgramBF",
+    "SkipIndexRaw",
     "SkipIndexSet",
     "SkipIndexText",
     "SkipIndexTokenBF",
+    "SkipIndexVectorSimilarity",
+    "TableConstraintDefinition",
     "TableDefinition",
     "TableRef",
     "ValidationIssue",

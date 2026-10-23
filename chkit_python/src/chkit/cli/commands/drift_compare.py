@@ -23,6 +23,7 @@ from chkit.cli.commands.drift_diff import (
 )
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectKind
 from chkit.core.column_default import render_default
+from chkit.core.constraint import constraint_expression, constraint_kind
 from chkit.core.identifier import unquote_identifiers
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
 from chkit.core.key_clause import split_top_level_comma
@@ -30,6 +31,9 @@ from chkit.core.model import (
     ColumnDefinition,
     ProjectionDefinition,
     SkipIndexDefinition,
+    SkipIndexRaw,
+    SkipIndexVectorSimilarity,
+    TableConstraintDefinition,
     TableDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
@@ -42,6 +46,7 @@ from chkit.core.sql_normalizer import (
     sql_expression_fingerprint,
 )
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
+from chkit.core.vector_index import render_vector_index_type
 
 ObjectDriftReasonCode: TypeAlias = Literal[
     "missing_object", "extra_object", "kind_mismatch"
@@ -60,6 +65,7 @@ TableDriftReasonCode: TypeAlias = Literal[
     "partition_by_mismatch",
     "unique_key_mismatch",
     "projection_mismatch",
+    "constraint_mismatch",
 ]
 
 DriftReasonCode: TypeAlias = ObjectDriftReasonCode | TableDriftReasonCode
@@ -154,6 +160,7 @@ class TableDriftDetail:
     unique_key_mismatch: bool
     partition_by_mismatch: bool
     projection_diffs: list[str]
+    constraint_diffs: list[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,9 +295,13 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
     return "|".join(parts)
 
 
-def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:
+def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:  # noqa: PLR0911
     if index.type == "text":
         return render_text_index_type(index)
+    if isinstance(index, SkipIndexVectorSimilarity):
+        return render_vector_index_type(index)
+    if isinstance(index, SkipIndexRaw):
+        return normalize_sql_fragment(index.raw_type)
     if index.type == "minmax":
         return "minmax"
     if index.type == "set":
@@ -344,10 +355,26 @@ def _normalize_index_shape(
     return "|".join(
         [
             f"expr={expression}",
-            f"type={_render_index_type_fingerprint(index)}",
+            # A raw type is compared as ClickHouse formats it, so a structured
+            # index on one side and the same type written raw on the other match.
+            "type="
+            + _canonicalize_expression(_render_index_type_fingerprint(index), canonicalizer),
             f"granularity={index.granularity}",
         ]
     )
+
+
+def _normalize_constraint_shape(
+    constraint: TableConstraintDefinition, canonicalizer: SqlCanonicalizer | None = None
+) -> str:
+    # ClickHouse re-formats a constraint expression when it stores it, e.g.
+    # `s IN ('a','b') AND (id+1)*2 > 0` comes back as
+    # `(s IN ('a', 'b')) AND (((id + 1) * 2) > 0)`, so both sides go through the
+    # canonicalizer.
+    expression = _canonicalize_expression(
+        normalize_sql_fragment(constraint_expression(constraint)), canonicalizer
+    )
+    return f"{constraint_kind(constraint)} {expression}"
 
 
 def _normalize_projection_shape(
@@ -448,6 +475,15 @@ def collect_table_sql_fragments(
         for index in [*(expected.indexes or []), *actual.indexes]
         if index.type != "text"
     ]
+    expressions.extend(
+        _render_index_type_fingerprint(index)
+        for index in [*(expected.indexes or []), *actual.indexes]
+        if index.type != "text"
+    )
+    expressions.extend(
+        normalize_sql_fragment(constraint_expression(constraint))
+        for constraint in [*(expected.constraints or []), *(actual.constraints or [])]
+    )
     expressions.extend(normalize_sql_fragment(ttl) for ttl in (expected.ttl, actual.ttl) if ttl)
     for pair in _table_clauses(expected, actual).values():
         for clause in pair:
@@ -542,6 +578,17 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     }
     projection_diffs = diff_named_shape_maps(expected_projections, actual_projections)
 
+    constraint_diffs = diff_named_shape_maps(
+        {
+            c.name: _normalize_constraint_shape(c, canonicalizer)
+            for c in (expected.constraints or [])
+        },
+        {
+            c.name: _normalize_constraint_shape(c, canonicalizer)
+            for c in (actual.constraints or [])
+        },
+    )
+
     reason_codes: list[TableDriftReasonCode] = []
     if missing_columns:
         reason_codes.append("missing_column")
@@ -567,6 +614,8 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         reason_codes.append("partition_by_mismatch")
     if projection_diffs:
         reason_codes.append("projection_mismatch")
+    if constraint_diffs:
+        reason_codes.append("constraint_mismatch")
 
     if not reason_codes:
         return None
@@ -586,4 +635,5 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         unique_key_mismatch=unique_key_mismatch,
         partition_by_mismatch=partition_by_mismatch,
         projection_diffs=projection_diffs,
+        constraint_diffs=constraint_diffs,
     )

@@ -75,6 +75,7 @@ Column defaults are compared token by token with `default_expression` in `system
 | `partition_by_mismatch` | PARTITION BY expression differs |
 | `unique_key_mismatch` | Unique key expression differs |
 | `projection_mismatch` | Projection definition differs |
+| `constraint_mismatch` | A `CHECK` or `ASSUME` constraint is missing, extra, or differs in kind or expression |
 
 ## Examples
 
@@ -136,7 +137,8 @@ Use [`chkit check`](/cli/check/) with `failOnDrift` to enforce drift-free state 
       "orderByMismatch": false,
       "uniqueKeyMismatch": false,
       "partitionByMismatch": false,
-      "projectionDiffs": []
+      "projectionDiffs": [],
+      "constraintDiffs": []
     }
   ]
 }

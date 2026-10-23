@@ -5,6 +5,7 @@ import {
   normalizeProjectionIndex,
   normalizeSQLFragment,
   splitTopLevelComma,
+  type TableConstraintDefinition,
   unquoteIdentifiers,
 } from '@chkit/core'
 
@@ -196,4 +197,26 @@ export function parseProjectionsFromCreateTableQuery(
     projections.push({ name, query })
   }
   return projections
+}
+
+/** `CONSTRAINT name CHECK|ASSUME expr` entries of the column list. */
+export function parseConstraintsFromCreateTableQuery(
+  createTableQuery: string | undefined
+): TableConstraintDefinition[] {
+  const body = extractCreateTableBody(createTableQuery)
+  if (!body) return []
+  const constraints: TableConstraintDefinition[] = []
+  for (const part of splitTopLevelComma(body)) {
+    const match = part.match(
+      /^\s*CONSTRAINT\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s+(CHECK|ASSUME)\s+([\s\S]+?)\s*$/i
+    )
+    if (!match) continue
+    const name = unquoteIdentifiers(match[1] ?? '').trim()
+    const expression = normalizeSQLFragment(match[3] ?? '')
+    if (!name || !expression) continue
+    constraints.push(
+      (match[2] ?? '').toUpperCase() === 'CHECK' ? { name, check: expression } : { name, assume: expression }
+    )
+  }
+  return constraints
 }

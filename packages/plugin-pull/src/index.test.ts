@@ -341,6 +341,46 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).not.toContain('typeArgs')
   })
 
+  test('renders vector, raw indexes and constraints in pulled schema', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'vectors',
+        engine: 'MergeTree()',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 's', type: 'String' },
+          { name: 'embedding', type: 'Array(Float32)' },
+        ],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [
+          {
+            name: 'e', expression: 'embedding', type: 'vector_similarity', method: 'hnsw',
+            distanceFunction: 'L2Distance', dimensions: 4, quantization: 'bf16',
+            hnswMaxConnectionsPerLayer: 32, hnswCandidateListSizeForConstruction: 128, granularity: 100000000,
+          },
+          { name: 'sg', expression: 's', type: 'raw', rawType: 'sparse_grams(3, 100, 512, 1, 3, 0)', granularity: 1 },
+        ],
+        constraints: [
+          { name: 'dimension', check: 'length(embedding) = 4' },
+          { name: 'a-b', assume: 'id > 0' },
+        ],
+      },
+    ])
+
+    expect(content).toContain(
+      '{ name: "e", expression: "embedding", type: "vector_similarity", method: "hnsw", distanceFunction: "L2Distance", dimensions: 4, quantization: "bf16", hnswMaxConnectionsPerLayer: 32, hnswCandidateListSizeForConstruction: 128, granularity: 100000000 },'
+    )
+    expect(content).toContain(
+      '{ name: "sg", expression: "s", type: "raw", rawType: "sparse_grams(3, 100, 512, 1, 3, 0)", granularity: 1 },'
+    )
+    expect(content).toContain(
+      '  constraints: [\n    { name: "a-b", assume: "id > 0" },\n    { name: "dimension", check: "length(embedding) = 4" },\n  ],'
+    )
+  })
+
   test('renders view and materialized view definitions', () => {
     const content = renderSchemaFile([
       {

@@ -14,6 +14,7 @@ import {
   type ProjectionDefinition,
   type SchemaDefinition,
   type SkipIndexDefinition,
+  type TableConstraintDefinition,
   type TableDefinition,
   type ViewDefinition,
   supportsSortOrder,
@@ -104,6 +105,9 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
   }
   if (definition.projections && definition.projections.length > 0) {
     lines.push(...renderProjectionLines(definition.projections))
+  }
+  if (definition.constraints && definition.constraints.length > 0) {
+    lines.push(...renderConstraintLines(definition.constraints))
   }
   lines.push('})')
   return lines
@@ -233,6 +237,16 @@ function renderIndex(index: SkipIndexDefinition): string {
         if (value !== undefined) parts.push(`${field}: ${typeof value === 'string' ? renderString(value) : value}`)
       }
       break
+    case 'vector_similarity':
+      for (const field of ['method', 'distanceFunction', 'dimensions', 'quantization',
+        'hnswMaxConnectionsPerLayer', 'hnswCandidateListSizeForConstruction'] as const) {
+        const value = index[field]
+        if (value !== undefined) parts.push(`${field}: ${typeof value === 'string' ? renderString(value) : value}`)
+      }
+      break
+    case 'raw':
+      parts.push(`rawType: ${renderString(index.rawType)}`)
+      break
     case 'minmax':
       break
     case 'set':
@@ -259,8 +273,20 @@ function renderIndex(index: SkipIndexDefinition): string {
       )
       break
   }
-  if (index.type !== 'text') parts.push(`granularity: ${index.granularity}`)
+  if (index.type !== 'text' && index.granularity !== undefined) parts.push(`granularity: ${index.granularity}`)
   return `{ ${parts.join(', ')} }`
+}
+
+function renderConstraintLines(constraints: TableConstraintDefinition[]): string[] {
+  const lines: string[] = ['  constraints: [']
+  for (const constraint of constraints) {
+    const body = constraint.check !== undefined
+      ? `check: ${renderString(constraint.check)}`
+      : `assume: ${renderString(constraint.assume ?? '')}`
+    lines.push(`    { name: ${renderString(constraint.name)}, ${body} },`)
+  }
+  lines.push('  ],')
+  return lines
 }
 
 function renderProjectionLines(projections: ProjectionDefinition[]): string[] {

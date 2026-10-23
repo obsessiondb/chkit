@@ -9,6 +9,7 @@ from typing import Final, TypeVar
 
 from chkit.core.codec import canonicalize_codec
 from chkit.core.column_default import canonicalize_column_default
+from chkit.core.constraint import canonicalize_constraint
 from chkit.core.key_clause import normalize_key_columns
 from chkit.core.model import (
     ColumnDefinition,
@@ -20,6 +21,7 @@ from chkit.core.model import (
     SchemaDefinition,
     SchemaKind,
     SkipIndexDefinition,
+    SkipIndexRaw,
     TableDefinition,
     TableRef,
     TableRenamedFrom,
@@ -73,6 +75,13 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
 def _canonicalize_index(index: SkipIndexDefinition) -> SkipIndexDefinition:
     if index.type == "text":
         return canonicalize_text_index(index)
+    if isinstance(index, SkipIndexRaw):
+        return index.model_copy(
+            update={
+                "expression": normalize_sql_fragment(index.expression),
+                "raw_type": normalize_sql_fragment(index.raw_type),
+            }
+        )
     return index.model_copy(update={"expression": normalize_sql_fragment(index.expression)})
 
 
@@ -102,6 +111,11 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
     projections = (
         [canonicalize_projection(p) for p in _sort_by_name(definition.projections)]
         if definition.projections is not None
+        else None
+    )
+    constraints = (
+        [canonicalize_constraint(c) for c in _sort_by_name(definition.constraints)]
+        if definition.constraints is not None
         else None
     )
     renamed_from: TableRenamedFrom | None = None
@@ -137,6 +151,7 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
             "settings": settings,
             "indexes": indexes,
             "projections": projections,
+            "constraints": constraints,
             "comment": definition.comment.strip() if definition.comment is not None else None,
         }
     )

@@ -41,6 +41,8 @@ _KEY_SUFFIXES: dict[str, str] = {
     "alter_table_drop_index": ":index:",
     "alter_table_add_projection": ":projection:",
     "alter_table_drop_projection": ":projection:",
+    "alter_table_add_constraint": ":constraint:",
+    "alter_table_drop_constraint": ":constraint:",
     "alter_table_modify_setting": ":setting:",
     "alter_table_reset_setting": ":setting:",
     "alter_table_modify_ttl": ":ttl",
@@ -292,6 +294,63 @@ def wait_for_projection_absent(
         cluster=cluster,
     )
 
+def wait_for_constraint(
+    client: Any,
+    database: str,
+    table_name: str,
+    constraint_name: str,
+    *,
+    cluster: str | None = None,
+) -> None:
+    """Poll every replica's ``create_table_query`` until it lists the constraint.
+
+    There is no system table of constraints. A replica that has not applied the
+    ADD yet would let a following ``DROP CONSTRAINT IF EXISTS`` or ``ADD
+    CONSTRAINT IF NOT EXISTS`` silently do nothing.
+    """
+    _wait_for_system_rows(
+        client,
+        source="system.tables",
+        where=_constraint_where(database, table_name, constraint_name),
+        want="present",
+        label=f"wait_for_constraint: {database}.{table_name}.{constraint_name} not yet visible",
+        cluster=cluster,
+    )
+
+
+def wait_for_constraint_absent(
+    client: Any,
+    database: str,
+    table_name: str,
+    constraint_name: str,
+    *,
+    cluster: str | None = None,
+) -> None:
+    """Poll every replica's ``create_table_query`` until the constraint is gone."""
+    _wait_for_system_rows(
+        client,
+        source="system.tables",
+        where=_constraint_where(database, table_name, constraint_name),
+        want="absent",
+        label=(
+            f"wait_for_constraint_absent: {database}.{table_name}.{constraint_name} "
+            "still present"
+        ),
+        cluster=cluster,
+    )
+
+
+def _constraint_where(database: str, table_name: str, constraint_name: str) -> str:
+    # ClickHouse writes a constraint name bare when it is a plain identifier
+    # and backquoted otherwise (`backQuoteIfNeed`), so match either spelling.
+    escaped = constraint_name.replace("\\", "\\\\").replace("`", "\\`")
+    spellings = [f"CONSTRAINT {constraint_name} ", f"CONSTRAINT `{escaped}` "]
+    listed = " OR ".join(
+        f"position(create_table_query, '{_quote(spelling)}') > 0" for spelling in spellings
+    )
+    return f"database = '{_quote(database)}' AND name = '{_quote(table_name)}' AND ({listed})"
+
+
 def _wait_for_system_rows(
     client: Any,
     *,
@@ -420,6 +479,8 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     - alter_table_drop_index                          → wait_for_index_absent
     - alter_table_add_projection                      → wait_for_projection
     - alter_table_drop_projection                     → wait_for_projection_absent
+    - alter_table_add_constraint                      → wait_for_constraint
+    - alter_table_drop_constraint                     → wait_for_constraint_absent
     - everything else (modify_setting, modify_ttl …) → wait_for_table (best-effort)
     """
     parsed = _parse_operation_key(operation_type, operation_key)
@@ -458,6 +519,15 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
         return
     if operation_type == "alter_table_drop_index" and index is not None:
         wait_for_index_absent(client, database, table, index, cluster=cluster)
+        return
+    if operation_type in {"alter_table_add_constraint", "alter_table_drop_constraint"}:
+        constraint = operation_key[operation_key.rfind(":constraint:") + len(":constraint:") :]
+        wait = (
+            wait_for_constraint
+            if operation_type == "alter_table_add_constraint"
+            else wait_for_constraint_absent
+        )
+        wait(client, database, table, constraint, cluster=cluster)
         return
     if operation_type == "alter_table_add_projection" and projection is not None:
         wait_for_projection(client, database, table, projection, cluster=cluster)

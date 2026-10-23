@@ -1759,3 +1759,23 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   the other with `cluster="test_cluster_2s"`) is
   `tests_cluster/test_migrate_async_cluster_e2e.py`, the port of the async case
   in `packages/cli/test/cluster-2shard.e2e.test.ts`.
+
+### vector_similarity indexes, raw indexes and constraints (#278)
+- Same model as TS: `SkipIndexVectorSimilarity`, `SkipIndexRaw` and
+  `TableConstraintDefinition` (`check` or `assume`). `method`, `distance_function` and
+  `quantization` are plain `str` fields checked by `validate.py`
+  (`vector_index_invalid_parameters`), where TS narrows them to literal unions; both
+  report the same issue for a bad value. Constraints with both or neither expression
+  construct and are reported as `constraint_invalid` (TS rejects them in its type).
+- The vector index model defaults `granularity` to `100000000`; TS leaves it optional
+  and canonicalization fills the same default, so snapshots agree.
+- Constraint waits read `create_table_query` on every replica (there is no system table
+  of constraints). TS waits the same way; TS skip index ALTERs still wait only for the
+  table, Python for the index.
+- Python drift JSON keeps snake_case keys (`constraint_diffs`), like the other
+  `tableDrift` fields; TS writes `constraintDiffs`.
+- On ClickHouse < 25.8 the vector index is experimental. TS can pass the setting as a
+  `clickhouse_setting_...` query parameter on `clickhouse.url`; `clickhouse-connect`
+  ignores URL parameters, so Python needs it in the user's settings profile. The
+  ReplicatedMergeTree case (`tests_cluster/test_vector_index_constraints_cluster_e2e.py`,
+  ClickHouse 25.3) patches `clickhouse_connect.get_client` to add it.

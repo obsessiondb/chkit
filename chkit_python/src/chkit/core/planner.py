@@ -6,6 +6,7 @@ import json
 import re
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
+from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
@@ -22,6 +23,7 @@ from chkit.core.model import (
     RiskLevel,
     SchemaDefinition,
     SkipIndexDefinition,
+    TableConstraintDefinition,
     TableDefinition,
     ValidationIssue,
     ViewDefinition,
@@ -35,9 +37,11 @@ from chkit.core.object_dependencies import (
 )
 from chkit.core.sql import (
     render_alter_add_column,
+    render_alter_add_constraint,
     render_alter_add_index,
     render_alter_add_projection,
     render_alter_drop_column,
+    render_alter_drop_constraint,
     render_alter_drop_index,
     render_alter_drop_projection,
     render_alter_modify_column,
@@ -580,6 +584,8 @@ def _diff_tables(
             )
         )
 
+    ops.extend(_constraint_operations(old, new))
+
     projection_diff = diff_by_name(
         list(old.projections or []),
         list(new.projections or []),
@@ -672,6 +678,67 @@ def _diff_tables(
 
     rename_suggestions = _infer_column_rename_suggestions(new, added_columns, dropped_columns)
     return ops, rename_suggestions
+
+
+def _constraint_operations(old: TableDefinition, new: TableDefinition) -> list[MigrationOperation]:
+    def key(name: str) -> str:
+        return f"table:{new.database}.{new.name}:constraint:{name}"
+
+    def add(constraint: TableConstraintDefinition) -> MigrationOperation:
+        return MigrationOperation(
+            type="alter_table_add_constraint",
+            key=key(constraint.name),
+            risk="caution",
+            sql=render_alter_add_constraint(new, constraint),
+            warning=_constraint_warning(new, constraint),
+        )
+
+    def drop(name: str) -> MigrationOperation:
+        return MigrationOperation(
+            type="alter_table_drop_constraint",
+            key=key(name),
+            risk="caution",
+            sql=render_alter_drop_constraint(new, name),
+        )
+
+    diff = diff_by_name(
+        list(old.constraints or []),
+        list(new.constraints or []),
+        lambda c: c.name,
+        lambda left, right: left == right,
+    )
+    ops = [add(constraint) for constraint in diff.added]
+    for change in diff.changed:
+        ops += [drop(change.name), add(change.new_item)]
+    ops += [drop(constraint.name) for constraint in diff.removed]
+    return ops
+
+
+def _constraint_warning(definition: TableDefinition, constraint: TableConstraintDefinition) -> str:
+    subject = f"Constraint {constraint.name} on {definition.database}.{definition.name}"
+    if constraint_kind(constraint) == "CHECK":
+        return (
+            f"{subject} applies to new INSERTs only: ClickHouse does not validate existing "
+            "rows, and INSERTs with a row that fails the CHECK are rejected. Make sure every "
+            "writer produces valid rows before applying."
+        )
+    return (
+        f"{subject} is an ASSUME constraint: ClickHouse never validates it, and queries "
+        "optimized with optimize_using_constraints trust it, so an assumption that does "
+        "not hold returns wrong results."
+    )
+
+
+# Skip indexes, constraints and projections that read a column block its DROP
+# COLUMN (and a changed column's MODIFY), so their drops run before every other
+# ALTER. Their adds keep key order, which puts them after the column ALTERs.
+_DEPENDENT_DROPS = frozenset(
+    {"alter_table_drop_index", "alter_table_drop_constraint", "alter_table_drop_projection"}
+)
+
+
+def _alter_rank(op: MigrationOperation) -> int:
+    return 0 if op.type in _DEPENDENT_DROPS else 1
 
 
 def _rank(op: MigrationOperation) -> int:
@@ -813,7 +880,7 @@ def plan_diff(
 
     # The sort is stable, so operations that share a key keep the order
     # _diff_tables pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
-    operations.sort(key=lambda op: (_rank(op), op.key))
+    operations.sort(key=lambda op: (_rank(op), _alter_rank(op), op.key))
     operations = _order_operations(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),

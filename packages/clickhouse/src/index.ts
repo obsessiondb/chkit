@@ -7,13 +7,16 @@ import {
 	type ProjectionDefinition,
 	parseCodec,
 	type SkipIndexDefinition,
+	type TableConstraintDefinition,
 	parseTextIndexParams,
+	parseVectorIndexArgs,
 	normalizeTextIndexSQL,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
+	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
 	parseOrderByFromCreateTableQuery,
 	parsePartitionByFromCreateTableQuery,
@@ -175,6 +178,7 @@ export interface IntrospectedTable {
 	settings: Record<string, string>
 	indexes: SkipIndexDefinition[]
 	projections: ProjectionDefinition[]
+	constraints?: TableConstraintDefinition[]
 	ttl?: string
 }
 
@@ -188,6 +192,7 @@ type ClickHouseClientOptions = {
 }
 
 export {
+	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
 	parseOrderByFromCreateTableQuery,
 	parsePartitionByFromCreateTableQuery,
@@ -253,64 +258,69 @@ export function normalizeColumnFromSystemRow(
 	}
 }
 
-type ParsedIndexShape =
-	| ({ type: 'text' } & ReturnType<typeof parseTextIndexParams>)
-	| { type: 'minmax' }
-	| { type: 'set'; maxRows: number }
-	| { type: 'bloom_filter'; falsePositiveRate?: number }
-	| {
-			type: 'tokenbf_v1'
-			sizeBytes: number
-			hashFunctions: number
-			randomSeed: number
-	  }
-	| {
-			type: 'ngrambf_v1'
-			ngramSize: number
-			sizeBytes: number
-			hashFunctions: number
-			randomSeed: number
-	  }
+type ParsedIndexShape = SkipIndexDefinition extends infer Index
+	? Index extends SkipIndexDefinition
+		? Omit<Index, 'name' | 'expression' | 'granularity'>
+		: never
+	: never
 
-function splitArgs(args: string | undefined): number[] {
-	if (args === undefined) return []
-	return args
-		.split(',')
-		.map((part) => Number(part.trim()))
-		.filter((value) => !Number.isNaN(value))
-}
-
+/**
+ * Maps `system.data_skipping_indices.type_full` onto the structured DSL shape.
+ * A type chkit has no structured form for, or arguments that do not fit one
+ * (`set` without a row limit, an unknown text parameter, a newer vector
+ * similarity option), become a raw index carrying `type_full` verbatim, so pull
+ * and drift never rewrite an index into a different one.
+ */
 function parseIndexType(value: string): ParsedIndexShape {
 	const match = value.match(/^(\w+)\((.*)\)$/s)
-	const baseName = match?.[1] ?? value
-	if (baseName === 'text') return { type: 'text', ...parseTextIndexParams(match?.[2] ?? '') }
-	const args = splitArgs(match?.[2])
+	const baseName = match?.[1] ?? value.trim()
+	const args = match?.[2]
+	const raw = { type: 'raw', rawType: normalizeSQLFragment(value) } as const
+	const numbers = args === undefined ? [] : splitArgs(args)
+	const numeric = (count: number) => args !== undefined && numbers.length === count
 
 	switch (baseName) {
+		case 'text':
+			try {
+				return { type: 'text', ...parseTextIndexParams(args ?? '') }
+			} catch {
+				return raw
+			}
+		case 'vector_similarity': {
+			const parsed = args === undefined ? undefined : parseVectorIndexArgs(args)
+			return parsed ?? raw
+		}
 		case 'minmax':
-			return { type: 'minmax' }
+			return args === undefined ? { type: 'minmax' } : raw
+		case 'set':
+			return numeric(1) ? { type: 'set', maxRows: numbers[0] ?? 0 } : raw
 		case 'bloom_filter':
-			return args[0] !== undefined
-				? { type: 'bloom_filter', falsePositiveRate: args[0] }
-				: { type: 'bloom_filter' }
+			if (args === undefined) return { type: 'bloom_filter' }
+			return numeric(1) ? { type: 'bloom_filter', falsePositiveRate: numbers[0] } : raw
 		case 'tokenbf_v1':
-			return {
-				type: 'tokenbf_v1',
-				sizeBytes: args[0] ?? 0,
-				hashFunctions: args[1] ?? 0,
-				randomSeed: args[2] ?? 0,
-			}
+			return numeric(3)
+				? { type: 'tokenbf_v1', sizeBytes: numbers[0] ?? 0, hashFunctions: numbers[1] ?? 0, randomSeed: numbers[2] ?? 0 }
+				: raw
 		case 'ngrambf_v1':
-			return {
-				type: 'ngrambf_v1',
-				ngramSize: args[0] ?? 0,
-				sizeBytes: args[1] ?? 0,
-				hashFunctions: args[2] ?? 0,
-				randomSeed: args[3] ?? 0,
-			}
+			return numeric(4)
+				? {
+						type: 'ngrambf_v1',
+						ngramSize: numbers[0] ?? 0,
+						sizeBytes: numbers[1] ?? 0,
+						hashFunctions: numbers[2] ?? 0,
+						randomSeed: numbers[3] ?? 0,
+					}
+				: raw
 		default:
-			return { type: 'set', maxRows: args[0] ?? 0 }
+			return raw
 	}
+}
+
+/** Numeric arguments, or none when any argument is not a plain number. */
+function splitArgs(args: string): number[] {
+	const parts = args.split(',').map((part) => part.trim())
+	if (parts.some((part) => !/^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(part))) return []
+	return parts.map(Number)
 }
 
 export function normalizeIndexFromSystemRow(
@@ -320,7 +330,8 @@ export function normalizeIndexFromSystemRow(
 	return {
 		name: row.name,
 		expression: parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr),
-		granularity: row.granularity,
+		// UInt64 arrives as a JSON string when the server quotes 64-bit integers.
+		granularity: Number(row.granularity),
 		...parsed,
 	}
 }
@@ -374,6 +385,7 @@ export function buildIntrospectedTables(
 				projections: parseProjectionsFromCreateTableQuery(
 					row.create_table_query,
 				),
+				constraints: parseConstraintsFromCreateTableQuery(row.create_table_query),
 				ttl: parseTTLFromCreateTableQuery(row.create_table_query),
 			}
 		})
