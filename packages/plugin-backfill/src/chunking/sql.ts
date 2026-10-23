@@ -24,6 +24,16 @@ const TRAILING_CLAUSE_KEYWORDS = [
   'SETTINGS',
 ] as const
 
+/**
+ * `INSERT INTO t SELECT *` fills only `t`'s insertable columns (no MATERIALIZED,
+ * ALIAS or EPHEMERAL), so `*` must expand to the same set. A user profile with
+ * `asterisk_include_*_columns = 1` adds MATERIALIZED/ALIAS columns to `*`: copy
+ * mode then fails on a column-count mismatch, and an mv_replay `SELECT *` can
+ * shift values into the wrong target columns. Query-level SETTINGS override the
+ * profile and cover every `*` in the query, including each UNION ALL branch.
+ */
+const ASTERISK_SETTINGS = 'asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+
 // ── Chunk execution SQL ──────────────────────────────────────────────────────
 
 export function buildChunkExecutionSql(input: {
@@ -461,9 +471,9 @@ function buildRangeBoundConditions(range: ChunkRange, sortKey: SortKey): string[
 
 function buildSettingsClause(token: string): string {
   if (token) {
-    return `SETTINGS async_insert=0, insert_deduplication_token='${token}'`
+    return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplication_token='${token}'`
   }
-  return 'SETTINGS async_insert=0'
+  return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}`
 }
 
 function buildChunkConditions(chunk: Pick<Chunk, 'ranges'>, sortKeys: SortKey[]): string[] {

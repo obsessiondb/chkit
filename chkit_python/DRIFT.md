@@ -1720,3 +1720,13 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   all-replica check; TS gained the column-absent wait for `DROP COLUMN` in this change.
 - Unit tests whose fake clients script every query use the `single_replica` fixture,
   which pins the probe to a single replica.
+
+### Backfill asterisk settings (#243)
+- Same fix as TS: the chunk `SETTINGS` clause pins
+  `asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0`
+  after `async_insert=0` and before the dedup token. Python renders
+  `insert_settings` after them, so a user setting with the same name still wins.
+- The e2e simulates the profile differently: TS adds `ch_<setting>` URL
+  parameters to the config URL, which `@clickhouse/client` sends with every
+  request. `clickhouse-connect` ignores URL parameters, so the Python test patches
+  `clickhouse_connect.get_client` to add client-level `settings`.

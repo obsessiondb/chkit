@@ -37,6 +37,13 @@ _TRAILING_CLAUSE_KEYWORDS = (
     "SETTINGS",
 )
 
+# Pinned in every chunk INSERT so ``SELECT *`` expands to the insertable columns
+# regardless of the user's profile (see ``_build_settings_clause``).
+_ASTERISK_SETTINGS = (
+    "asterisk_include_materialized_columns=0",
+    "asterisk_include_alias_columns=0",
+)
+
 _JS_WS_CLASS = (
     "\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a"
     "\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff"
@@ -544,7 +551,13 @@ def _build_settings_clause(
     token: str,
     insert_settings: Mapping[str, str | int | float | bool] | None = None,
 ) -> str:
-    parts = ["async_insert=0"]
+    # ``INSERT INTO t SELECT *`` fills only ``t``'s insertable columns, so ``*``
+    # must expand to the same set. A profile with ``asterisk_include_*_columns = 1``
+    # adds MATERIALIZED/ALIAS columns to ``*``: copy mode then fails on a
+    # column-count mismatch and an mv_replay ``SELECT *`` can shift values into
+    # the wrong target columns. Query-level SETTINGS override the profile and
+    # cover every ``*`` in the query, including each UNION ALL branch.
+    parts = ["async_insert=0", *_ASTERISK_SETTINGS]
     if token:
         parts.append(f"insert_deduplication_token='{token}'")
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,

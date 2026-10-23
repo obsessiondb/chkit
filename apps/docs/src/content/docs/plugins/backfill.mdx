@@ -168,6 +168,6 @@ The plan stores an environment fingerprint derived from URL origin and database.
 
 ## Target safety and CI
 
-Automatic replay omits `MATERIALIZED` and `ALIAS` target columns and cannot supply `EPHEMERAL` inputs. Planning/execution refuses unsafe column combinations, unreadable metadata and missing targets. For a blocked target, use an explicitly mapped, reviewed SQL migration instead.
+Automatic replay omits `MATERIALIZED` and `ALIAS` target columns and cannot supply `EPHEMERAL` inputs. Every chunk `INSERT` sets `asterisk_include_materialized_columns=0` and `asterisk_include_alias_columns=0`, so a settings profile that enables them does not change which columns `SELECT *` reads. Planning/execution refuses unsafe column combinations, unreadable metadata and missing targets. For a blocked target, use an explicitly mapped, reviewed SQL migration instead.
 
 `chkit check --strict --json` includes `plugins.backfill`. For each saved plan, a missing, unfinished or failed local run can fail the gate; a relaxed policy is surfaced. If the plans directory is missing or empty, the check passes with `requiredCount: 0`: it cannot discover omitted historical work. The check does not poll managed jobs, and a completed remote submission does not create a completed local run checkpoint; validate managed job completion separately. Keep the state directory available to the machine running that check—local checkpoints are not migration-journal rows. A passing plugin check does not replace source preservation and aggregate validation.

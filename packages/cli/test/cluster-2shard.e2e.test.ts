@@ -9,6 +9,7 @@ import {
   createLiveExecutor,
   createPrefix,
   formatTestDiagnostic,
+  pollUntil,
   runCli,
   waitForTable,
 } from '../src/test/e2e-testkit.js'
@@ -18,6 +19,7 @@ import {
   writeScenarioMigrations,
   type ScenarioTarget,
 } from '../src/test/consecutive-alters-scenario.js'
+import { BACKFILL_PLUGIN_ENTRY } from '../src/test/testkit.test'
 
 // MULTI-SHARD cluster-mode e2e against test/cluster/2shard (2 shards x 2 replicas,
 // replicas named per-shard so the journal's replica id must be unique cluster-wide).
@@ -127,5 +129,63 @@ describe('chkit cluster mode (ON CLUSTER) — multi-shard journal', () => {
     await executor.command(`DROP TABLE IF EXISTS ${DATABASE}.${target.table} ON CLUSTER '${CLUSTER}' SYNC`)
     await executor.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
     await executor.close()
+  }, 120_000)
+})
+
+describe('chkit cluster mode (ON CLUSTER) — backfill copy under a widened-asterisk profile (#243)', () => {
+  test('copies ReplicatedMergeTree rows on a shard without reading MATERIALIZED/ALIAS columns', async () => {
+    const table = `${createPrefix('twoshard_bf_asterisk')}events`
+    const fqn = `${DATABASE}.${table}`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-cluster-2s-bf-e2e-'))
+    const schemaPath = join(dir, 'schema.ts')
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const pluginPath = join(dir, 'backfill-plugin.ts')
+    const executors = NODES.map(executorFor)
+    const shard1 = executors[0] as ReturnType<typeof executorFor>
+    try {
+      await shard1.command(`CREATE TABLE ${fqn} ON CLUSTER '${CLUSTER}' (
+        id UInt64,
+        event_time DateTime,
+        a String,
+        m String MATERIALIZED concat(a, '_m'),
+        al String ALIAS concat(a, '_al'),
+        d String DEFAULT 'dflt',
+        b String
+      ) ENGINE = ReplicatedMergeTree PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+      for (const node of executors) await waitForTable(node, DATABASE, table)
+      await shard1.command(`INSERT INTO ${fqn} (id, event_time, a, d, b) VALUES
+        (1, '2026-01-01 12:00:00', 'x', 'custom', 'bx'),
+        (2, '2026-01-02 12:00:00', 'y', 'dflt', 'by')`)
+
+      // The profile is simulated with @clickhouse/client URL parameters, which
+      // every chkit client sends with each request.
+      const profiledUrl = `${SHARD1_ENDPOINT}/?ch_asterisk_include_materialized_columns=1&ch_asterisk_include_alias_columns=1`
+      await writeFile(schemaPath, `import { schema } from '${CORE_ENTRY}'\n\nexport default schema()\n`, 'utf8')
+      await writeFile(pluginPath, `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`, 'utf8')
+      await writeFile(configPath, `import { plugin } from '${pluginPath}'\n\n${configFor(schemaPath, dir, profiledUrl).replace('\n}\n', '\n  plugins: [{ plugin }],\n}\n')}`, 'utf8')
+
+      const plan = runCli(dir, ['plugin', 'backfill', 'plan', '--target', fqn, '--from', '2026-01-01T00:00:00.000Z', '--to', '2026-01-03T00:00:00.000Z', '--config', configPath, '--json'])
+      expect(plan.exitCode, formatTestDiagnostic('backfill plan', plan)).toBe(0)
+      const planned = JSON.parse(plan.stdout) as { planId: string; strategy: string }
+      expect(planned.strategy).toBe('copy')
+      const run = runCli(dir, ['plugin', 'backfill', 'run', '--plan-id', planned.planId, '--poll-interval', '500', '--config', configPath, '--json'])
+      expect(run.exitCode, formatTestDiagnostic('backfill run', run)).toBe(0)
+
+      // Both shard-1 replicas hold the doubled rows; shard 2 never had any.
+      const expected = [
+        { id: '1', a: 'x', m: 'x_m', al: 'x_al', d: 'custom', b: 'bx', copies: '2' },
+        { id: '2', a: 'y', m: 'y_m', al: 'y_al', d: 'dflt', b: 'by', copies: '2' },
+      ]
+      for (const [index, node] of executors.entries()) {
+        const rows = await pollUntil(() => node.query<Record<string, string>>(
+          `SELECT toString(id) AS id, a, m, al, d, b, toString(count()) AS copies
+           FROM ${fqn} GROUP BY id, a, m, al, d, b ORDER BY id`,
+        ), (value) => JSON.stringify(value) === JSON.stringify(index < 2 ? expected : []))
+        expect(rows, NODES[index]).toEqual(index < 2 ? expected : [])
+      }
+    } finally {
+      await shard1.command(`DROP TABLE IF EXISTS ${fqn} ON CLUSTER '${CLUSTER}' SYNC`)
+      await Promise.all(executors.map((node) => node.close()))
+    }
   }, 120_000)
 })
