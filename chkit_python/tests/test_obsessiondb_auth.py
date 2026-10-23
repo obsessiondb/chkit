@@ -299,7 +299,7 @@ def test_signup_skips_create_org_when_active_org_exists(
         url=f"{BASE}/api/auth/get-session",
         json={
             "user": {"id": "u", "email": "a@b.com", "name": "A"},
-            "session": {"active_organization_id": "org-existing"},
+            "session": {"activeOrganizationId": "org-existing"},
         },
     )
     msgs: list[object] = []

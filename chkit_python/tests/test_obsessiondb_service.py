@@ -42,6 +42,7 @@ from chkit_plugin_obsessiondb.service_api import (
     InstanceClaimStatusEligible,
     InstanceClaimStatusIneligible,
     SessionExpiredError,
+    get_service,
 )
 from chkit_plugin_obsessiondb.storage import SelectedService
 
@@ -74,12 +75,12 @@ def _service(
         "status": status,
         "tier": 1,
         "nodes": 1,
-        "connection_url": None,
-        "connection_username": None,
-        "desired_status": "running",
-        "desired_tier": 1,
-        "desired_nodes": 1,
-        "created_at": "2026-01-01T00:00:00Z",
+        "connectionUrl": None,
+        "connectionUsername": None,
+        "desiredStatus": "running",
+        "desiredTier": 1,
+        "desiredNodes": 1,
+        "createdAt": "2026-01-01T00:00:00Z",
         "managed": True,
     }
 
@@ -110,6 +111,27 @@ def test_list_service_organizations_parses_listAll(httpx_mock: HTTPXMock) -> Non
     assert orgs[0].services[0].slug == "prod-eu"
 
 
+def test_get_service_reads_the_camel_case_wire_fields(httpx_mock: HTTPXMock) -> None:
+    wire = {
+        **_service(name="prod", slug="prod-eu"),
+        "connectionUrl": "https://prod-eu.example.com:8443",
+        "connectionUsername": "default",
+        "controlInstanceId": None,
+    }
+    httpx_mock.add_response(url=f"{BASE}/rpc/services/get", json={"json": wire})
+
+    service = get_service(_creds(), service_slug="prod-eu")
+
+    assert service.connection_url == "https://prod-eu.example.com:8443"
+    assert service.connection_username == "default"
+    assert service.desired_status == "running"
+    assert service.created_at == "2026-01-01T00:00:00Z"
+    # Fields outside the TS contract copy (controlInstanceId) are ignored.
+    assert service.model_dump(by_alias=True) == {
+        key: value for key, value in wire.items() if key != "controlInstanceId"
+    }
+
+
 def test_instance_claim_status_eligible_path(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/instanceClaimStatus",
@@ -122,7 +144,7 @@ def test_instance_claim_status_eligible_path(httpx_mock: HTTPXMock) -> None:
 def test_instance_claim_status_ineligible_path(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/instanceClaimStatus",
-        json={"eligible": False, "claimed_organization_name": "Acme"},
+        json={"eligible": False, "claimedOrganizationName": "Acme"},
     )
     status = instance_claim_status(_creds())
     assert isinstance(status, InstanceClaimStatusIneligible)
@@ -151,7 +173,7 @@ def test_claim_instance_returns_none_available_branch(httpx_mock: HTTPXMock) -> 
 def test_claim_instance_returns_already_claimed_branch(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/claimInstance",
-        json={"outcome": "already_claimed", "claimed_organization_name": "Acme"},
+        json={"outcome": "already_claimed", "claimedOrganizationName": "Acme"},
     )
     result = claim_instance(_creds())
     assert isinstance(result, ClaimInstanceAlreadyClaimed)

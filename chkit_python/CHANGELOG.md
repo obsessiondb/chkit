@@ -78,6 +78,11 @@
   The remote executor sends a submission's query id as the workbench API's
   top-level `queryId`, which the API honours; it ignored the `query_id`
   setting, so async statements ran under a random id.
+- ObsessionDB plugin: console API models read the camelCase fields the API sends
+  (`createdAt`, `desiredStatus`, `claimedOrganizationName`, `activeOrganizationId`, ...)
+  (#288). `service list`, `service select`, `service alias set` and `service claim`
+  failed with a validation error on every service, and `signup` did not see an
+  existing active organization, so it created another one.
 - Distributed tables (#279): `PARTITION BY`, `PRIMARY KEY` and `ORDER BY` render only
   for engines that accept them (MergeTree family, EmbeddedRocksDB, KeeperMap, S3, ...),
   so Distributed, Memory, Null, Log, Buffer and Merge tables create cleanly; `table()`

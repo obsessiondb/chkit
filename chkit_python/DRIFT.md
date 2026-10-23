@@ -208,6 +208,23 @@ speaks the oRPC RPC envelope that TS's ``RPCLink`` sends: ``{"json": input}``
 in, ``{"json": output}`` out (unwrapped before validation). ``api_client.py``
 (auth endpoints) was not touched or verified live.
 
+**Resolved (#288)**: the services and session models declared snake_case
+fields with no aliases, but the API sends camelCase (``createdAt``,
+``activeOrganizationId``, ...), so ``services.listAll`` / ``services.get``
+failed validation and ``get_session`` never saw the active organization. Every
+console API model (services, jobs, auth session) now derives from
+``api_model.ConsoleApiModel`` (``alias_generator=to_camel``,
+``populate_by_name=True``). ``workbench_api`` keeps plain names: its result is
+ClickHouse's snake_case JSON (``query_id``, ``bytes_read``). The opt-in
+``tests_workbench_api/test_console_api_e2e.py`` checks each read-only call
+(``listAll``, ``get``, ``instanceClaimStatus``, ``jobs.list``, ``get-session``)
+and ``service list --json`` / ``whoami --json`` against the live API. Not run
+live, because they create or change state or send email: ``claimInstance``,
+``jobs.submit|get|cancel``, device-code login, the OTP signup calls and
+``organization/create|set-active``. ``services.list`` and
+``services.revealCredentials`` are in the TS contract copy but unused by
+either CLI, so they are not ported.
+
 Phase 4 (this turn): **remote executor + backfill routing + full wizard shipped**
 - ``workbench_api.py`` — ``workbench_query_execute`` (POST
   ``/rpc/workbench/query/execute``) returns a ``WorkbenchExecuteResult``

@@ -20,13 +20,13 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict
 
 from chkit_plugin_obsessiondb.api_client import (
     USER_AGENT,
     SessionExpiredError,
     SessionResponse,
 )
+from chkit_plugin_obsessiondb.api_model import ConsoleApiModel
 from chkit_plugin_obsessiondb.credentials import Credentials
 
 ServiceStatus = Literal[
@@ -44,10 +44,8 @@ ClaimOutcome = Literal["claimed", "none_available", "already_claimed"]
 DesiredStatus = Literal["running", "stopped", "terminated"]
 
 
-class Service(BaseModel):
+class Service(ConsoleApiModel):
     """One service row as returned by ``services.get`` / ``services.listAll``."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
     id: str
     slug: str
@@ -64,10 +62,8 @@ class Service(BaseModel):
     managed: bool
 
 
-class ServiceOrganization(BaseModel):
+class ServiceOrganization(ConsoleApiModel):
     """An organization with the services it owns."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore")
 
     id: str
     name: str
@@ -75,21 +71,15 @@ class ServiceOrganization(BaseModel):
     services: list[Service]
 
 
-class ListAllResponse(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class ListAllResponse(ConsoleApiModel):
     organizations: list[ServiceOrganization]
 
 
-class InstanceClaimStatusEligible(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class InstanceClaimStatusEligible(ConsoleApiModel):
     eligible: Literal[True] = True
 
 
-class InstanceClaimStatusIneligible(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
-
+class InstanceClaimStatusIneligible(ConsoleApiModel):
     eligible: Literal[False] = False
     claimed_organization_name: str
 
@@ -97,23 +87,17 @@ class InstanceClaimStatusIneligible(BaseModel):
 InstanceClaimStatus = InstanceClaimStatusEligible | InstanceClaimStatusIneligible
 
 
-class ClaimInstanceClaimed(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class ClaimInstanceClaimed(ConsoleApiModel):
     outcome: Literal["claimed"] = "claimed"
     id: str
     slug: str
 
 
-class ClaimInstanceNoneAvailable(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
+class ClaimInstanceNoneAvailable(ConsoleApiModel):
     outcome: Literal["none_available"] = "none_available"
 
 
-class ClaimInstanceAlreadyClaimed(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
-
+class ClaimInstanceAlreadyClaimed(ConsoleApiModel):
     outcome: Literal["already_claimed"] = "already_claimed"
     claimed_organization_name: str
 

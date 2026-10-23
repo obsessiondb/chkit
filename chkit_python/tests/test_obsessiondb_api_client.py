@@ -130,7 +130,7 @@ def test_get_session_parses_response(httpx_mock: HTTPXMock) -> None:
         url=f"{BASE}/api/auth/get-session",
         json={
             "user": {"id": "u1", "email": "alice@example.com", "name": "Alice"},
-            "session": {"active_organization_id": "org-1"},
+            "session": {"activeOrganizationId": "org-1"},
         },
     )
     session = get_session(BASE, "tok-abc")
