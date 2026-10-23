@@ -3,6 +3,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { type ClickHouseExecutor, createClickHouseExecutor } from '@chkit/clickhouse'
+
+import { applyAsyncStatement, makeDeterministicQueryId } from '../src/commands/migrate/async-apply.js'
+import type { JournalStore, MigrationRowState } from '../src/runtime/journal-store.js'
 import {
   CORE_ENTRY,
   createJournalTableName,
@@ -39,8 +43,10 @@ const USER = process.env.CLICKHOUSE_USER ?? 'default'
 const PASSWORD = process.env.CLICKHOUSE_PASSWORD ?? 'clusterpass'
 const DATABASE = process.env.CLICKHOUSE_DB ?? 'default'
 
-// NODES[0] is a shard-1 node (primary endpoint); NODES[2] is a shard-2 node.
+// NODES[0] is a shard-1 node (primary endpoint); NODES[1] is the other shard-1
+// replica; NODES[2] is a shard-2 node.
 const SHARD1_ENDPOINT = NODES[0] as string
+const SHARD1_OTHER_REPLICA = NODES[1] as string
 const SHARD2_ENDPOINT = NODES[2] as string
 
 function executorFor(url: string) {
@@ -189,3 +195,135 @@ describe('chkit cluster mode (ON CLUSTER) — backfill copy under a widened-aste
     }
   }, 120_000)
 })
+
+// #246: an async statement runs on the node that received it. A re-run whose
+// requests reach another node must still see the attempt and attach to it,
+// instead of running the statement's before-retry SQL and resubmitting.
+describe('chkit cluster mode (ON CLUSTER) — async statement on another node', () => {
+  test('a re-run through another replica attaches to the running attempt', async () => {
+    const tableName = `${createPrefix('twoshard_async')}dst`
+    const table = `${DATABASE}.\`${tableName}\``
+    const migrationName = `20990101000000_${tableName}.sql`
+    const queryId = makeDeterministicQueryId(migrationName, 0)
+    const submitter = executorFor(SHARD1_ENDPOINT)
+    // The other replica of shard 1, configured like the run that re-applies.
+    const otherReplica = createClickHouseExecutor({
+      url: SHARD1_OTHER_REPLICA,
+      username: USER,
+      password: PASSWORD,
+      database: DATABASE,
+      cluster: CLUSTER,
+    })
+    try {
+      await submitter.command(
+        `CREATE TABLE ${table} ON CLUSTER '${CLUSTER}' (n UInt64) ENGINE = ReplicatedMergeTree ORDER BY n`,
+      )
+      for (const node of NODES.map(executorFor)) await waitForTable(node, DATABASE, tableName)
+
+      // The attempt a run that lost its connection left behind: about 6 s.
+      const attempt = submitter.submit(
+        `INSERT INTO ${table} SELECT number + sleepEachRow(0.3) FROM numbers(20) SETTINGS max_block_size = 1`,
+        queryId,
+      )
+      await pollUntil(
+        () => submitter.query<{ n: string }>(`SELECT toString(count()) AS n FROM system.processes WHERE query_id = '${queryId}'`),
+        (rows) => rows[0]?.n === '1',
+        { intervalMs: 100 },
+      )
+      // The other replica's own system.processes does not show the attempt.
+      const [local] = await otherReplica.query<{ n: string }>(
+        `SELECT toString(count()) AS n FROM system.processes WHERE query_id = '${queryId}'`,
+      )
+      expect(local?.n).toBe('0')
+
+      const commands: string[] = []
+      const submits: string[] = []
+      const db: ClickHouseExecutor = {
+        ...otherReplica,
+        queryStatus: (id, options) => otherReplica.queryStatus(id, options),
+        query: (sql, settings) => otherReplica.query(sql, settings),
+        command: async (sql) => {
+          commands.push(sql)
+          await otherReplica.command(sql)
+        },
+        submit: async (sql, id) => {
+          submits.push(sql)
+          return otherReplica.submit(sql, id)
+        },
+      }
+      const journal = createMemoryJournal(startedState(migrationName, queryId, `table:${DATABASE}.${tableName}`))
+      const lines: string[] = []
+
+      const result = await applyAsyncStatement({
+        db,
+        journalStore: journal.store,
+        sql: 'SELECT 1',
+        migrationName,
+        migrationChecksum: MIGRATION_CHECKSUM,
+        statementIndex: 0,
+        operationType: 'load_table_data',
+        operationKey: `table:${DATABASE}.${tableName}`,
+        beforeRetry: `TRUNCATE TABLE ${table} ON CLUSTER '${CLUSTER}'`,
+        log: (line) => lines.push(line),
+        pollIntervalMs: 250,
+      })
+
+      expect(result.kind).toBe('completed')
+      expect(lines.some((line) => line.includes('attaching to in-flight query'))).toBe(true)
+      expect(commands).toEqual([])
+      expect(submits).toEqual([])
+      expect(journal.statuses()).toEqual(['completed'])
+      await attempt
+      const [rows] = await submitter.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)
+      expect(rows?.n).toBe('20')
+    } finally {
+      await submitter.command(`DROP TABLE IF EXISTS ${table} ON CLUSTER '${CLUSTER}' SYNC`)
+      await otherReplica.close()
+    }
+  }, 90_000)
+})
+
+const MIGRATION_CHECKSUM = 'c1'
+
+function createMemoryJournal(initial: MigrationRowState | null) {
+  let state = initial
+  const writes: MigrationRowState[] = []
+  const store: JournalStore = {
+    databaseMissing: false,
+    async readJournal() {
+      return { version: 1, applied: [] }
+    },
+    async readMigrationState() {
+      return state
+    },
+    async writeMigrationState(next) {
+      writes.push(next)
+      state = next
+    },
+    async appendEntry() {},
+  }
+  return { store, statuses: () => writes.map((write) => write.operations[0]?.status) }
+}
+
+// What a run that lost its connection while the statement ran leaves behind.
+function startedState(migrationName: string, queryId: string, operationKey: string): MigrationRowState {
+  return {
+    name: migrationName,
+    appliedAt: '1970-01-01 00:00:00.000',
+    checksum: MIGRATION_CHECKSUM,
+    chkitVersion: '',
+    migrationCompleted: false,
+    operations: [
+      {
+        operationIndex: 0,
+        operationKey,
+        operationType: 'load_table_data',
+        queryId,
+        status: 'started',
+        startedAt: '2026-10-02 00:00:00.000',
+        finishedAt: null,
+        lastError: '',
+      },
+    ],
+  }
+}

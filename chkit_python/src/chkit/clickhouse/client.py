@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import clickhouse_connect  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict
 
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.model import ChxResolvedClickHouseConfig
 
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
@@ -208,21 +209,35 @@ class ClickHouseClient:
 
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
     ) -> QueryStatus:
         """Check whether a previously-submitted query is running / finished / failed.
 
         Polls ``system.processes`` first (running?), then falls back to
-        ``system.query_log`` for the terminal state. Uses plain (non-cluster)
-        system tables; the TS version uses ``clusterAllReplicas('cluster', ...)``
-        which assumes ObsessionDB-style cluster naming and isn't portable across
-        bare-CH installs.
+        ``system.query_log`` for the terminal state. The query runs on the
+        replica that received it, so on a multi-replica target (#246) both are
+        read on every replica of ``clickhouse.cluster`` (or ``default``)
+        through ``clusterAllReplicas``. A replica that cannot be read is
+        skipped, so a poll keeps going while one is down; ``every_replica``
+        fails the read instead, so a status other than ``running`` means that
+        no replica runs the query.
         """
+        fanout = resolve_replica_fanout(self, self._config.cluster)
+
+        def source(table: str) -> str:
+            return all_replicas(fanout, table) if fanout else table
+
+        read_settings = {"skip_unavailable_shards": 0 if every_replica else 1}
         running_sql = (
             "SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed "
-            f"FROM system.processes WHERE user = currentUser() AND query_id = '{query_id}'"
+            f"FROM {source('system.processes')} "
+            f"WHERE user = currentUser() AND query_id = '{query_id}'"
         )
-        running = self.query(running_sql)
+        running = self.query(running_sql, settings=read_settings)
         if running.rows:
             row = running.rows[0]
             return QueryStatus(
@@ -237,14 +252,14 @@ class ClickHouseClient:
         after = after_time or "1970-01-01 00:00:00"
         log_sql = (
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
-            "FROM system.query_log "
+            f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
             "AND type IN ('QueryFinish', 'ExceptionWhileProcessing') "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
             "ORDER BY event_time DESC LIMIT 1"
         )
-        log = self.query(log_sql)
+        log = self.query(log_sql, settings=read_settings)
         if not log.rows:
             return QueryStatus(status="unknown")
 

@@ -198,7 +198,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # and the attempt's elapsed time never falls after the start that
     # query_log records for the attempt.
     server_now_ms = _read_server_now_ms(client)
-    in_flight = client.query_status(query_id)
+    in_flight = _check_in_flight(client, query_id, input_.operation_type)
     if in_flight.status == "running":
         input_.log(
             f"  {input_.operation_type}: query_id={query_id} already running on "
@@ -426,6 +426,29 @@ def _accept_changed_checksum(
             is_async=True,
         )
     return state.model_copy(update={"checksum": migration_checksum})
+
+
+def _check_in_flight(
+    client: ClickHouseClient, query_id: str, operation_type: str
+) -> QueryStatus:
+    """Whether a previous attempt still runs, read on every replica (#246).
+
+    The retry path that follows a 'not running' answer runs before-retry SQL
+    (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica:
+    the attempt runs on the replica that received it. A replica that cannot be
+    read fails the check instead of being skipped, and a failed check stops
+    here, before anything is compensated or resubmitted.
+    """
+    try:
+        return client.query_status(query_id, every_replica=True)
+    except Exception as error:
+        msg = (
+            f"Async migration step {operation_type} (query_id {query_id}): could "
+            f"not check whether a previous attempt is still running "
+            f"({_describe_error(error)}). Nothing was resubmitted and no "
+            f"before-retry SQL ran — re-run `chkit migrate --apply`."
+        )
+        raise RuntimeError(msg) from error
 
 
 def _attach_lower_bound(server_now_ms: int, elapsed_ms: int | None) -> str:

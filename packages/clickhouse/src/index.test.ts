@@ -820,26 +820,8 @@ describe('systemTableSource / observableSystemTable', () => {
   })
 
   test('queryStatus SQL uses configured cluster (and local tables when unset)', async () => {
-    const queries: string[] = []
-    const capturingClient = {
-      async command() {
-        return { query_id: 'cmd', response_headers: {} }
-      },
-      async query(params: { query: string }) {
-        queries.push(params.query)
-        return {
-          query_id: 'q',
-          response_headers: {},
-          async json() {
-            return []
-          },
-        }
-      },
-      async insert() {
-        return { query_id: 'i', response_headers: {} }
-      },
-      async close() {},
-    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+    // The replica probe finds no rows here, as on a single replica.
+    const { client: capturingClient, queries, statusQueries } = createStatusCapturingClient(0)
 
     const clustered = createExecutorWithClient(
       {
@@ -850,8 +832,9 @@ describe('systemTableSource / observableSystemTable', () => {
       capturingClient,
     )
     await clustered.queryStatus('qid-1')
-    expect(queries[0]).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
-    expect(queries[1]).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
+    expect(queries[0]).toContain("clusterAllReplicas('moebel_cluster', system.one)")
+    expect(statusQueries()[0]).toContain("clusterAllReplicas('moebel_cluster', system.processes)")
+    expect(statusQueries()[1]).toContain("clusterAllReplicas('moebel_cluster', system.query_log)")
     expect(queries.join('\n')).not.toContain("clusterAllReplicas('cluster'")
 
     queries.length = 0
@@ -863,12 +846,91 @@ describe('systemTableSource / observableSystemTable', () => {
       capturingClient,
     )
     await local.queryStatus('qid-2')
-    expect(queries[0]).toContain('FROM system.processes')
-    expect(queries[0]).not.toContain('clusterAllReplicas')
-    expect(queries[1]).toContain('FROM system.query_log')
-    expect(queries[1]).not.toContain('clusterAllReplicas')
+    expect(statusQueries()[0]).toContain('FROM system.processes')
+    expect(statusQueries()[0]).not.toContain('clusterAllReplicas')
+    expect(statusQueries()[1]).toContain('FROM system.query_log')
+    expect(statusQueries()[1]).not.toContain('clusterAllReplicas')
+  })
+
+  // #246: the query runs on the replica that received it. Without
+  // clickhouse.cluster, a multi-replica ObsessionDB service exposes its
+  // replicas as the cluster `default`.
+  test('queryStatus reads every replica of a multi-replica target without clickhouse.cluster', async () => {
+    const { client, queries, statusQueries } = createStatusCapturingClient(2)
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', database: 'default' },
+      client,
+    )
+
+    expect(await executor.queryStatus('qid-1')).toEqual({ status: 'unknown' })
+    const [processes, queryLog] = statusQueries()
+    expect(processes).toContain("FROM clusterAllReplicas('default', system.processes)")
+    expect(queryLog).toContain("FROM clusterAllReplicas('default', system.query_log)")
+    // A poll skips a replica it cannot reach and keeps polling.
+    expect(processes).toContain('skip_unavailable_shards = 1')
+    expect(queryLog).toContain('skip_unavailable_shards = 1')
+
+    queries.length = 0
+    await executor.queryStatus('qid-1', { everyReplica: true })
+    // The probe ran once per executor.
+    expect(queries.some((query) => query.includes('system.one'))).toBe(false)
+    const [strictProcesses, strictQueryLog] = statusQueries()
+    expect(strictProcesses).toContain("FROM clusterAllReplicas('default', system.processes)")
+    expect(strictProcesses).toContain('skip_unavailable_shards = 0')
+    expect(strictQueryLog).toContain('skip_unavailable_shards = 0')
+  })
+
+  test('queryStatus with everyReplica fails when a replica cannot be read', async () => {
+    const { client } = createStatusCapturingClient(2, {
+      failProcesses: new Error('Code: 279. ALL_CONNECTION_TRIES_FAILED'),
+    })
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', database: 'default' },
+      client,
+    )
+
+    await expect(executor.queryStatus('qid-1', { everyReplica: true })).rejects.toThrow(
+      /ALL_CONNECTION_TRIES_FAILED/,
+    )
   })
 })
+
+// A client that answers the replica probe with `replicas` and every status
+// read with no rows, recording each query.
+function createStatusCapturingClient(
+  replicas: number,
+  options: { failProcesses?: Error } = {},
+) {
+  const queries: string[] = []
+  const client = {
+    async command() {
+      return { query_id: 'cmd', response_headers: {} }
+    },
+    async query(params: { query: string }) {
+      queries.push(params.query)
+      if (options.failProcesses && params.query.includes('system.processes')) {
+        throw options.failProcesses
+      }
+      const rows = params.query.includes('system.one') && replicas > 0 ? [{ replicas: String(replicas) }] : []
+      return {
+        query_id: 'q',
+        response_headers: {},
+        async json() {
+          return rows
+        },
+        async text() {
+          return rows.map((row) => JSON.stringify(row)).join('\n')
+        },
+      }
+    },
+    async insert() {
+      return { query_id: 'i', response_headers: {} }
+    },
+    async close() {},
+  } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+  const statusQueries = () => queries.filter((query) => !query.includes('system.one'))
+  return { client, queries, statusQueries }
+}
 
 describe('create table parser with quoted identifiers', () => {
   // Verbatim system.tables.create_table_query from ClickHouse 26.3.

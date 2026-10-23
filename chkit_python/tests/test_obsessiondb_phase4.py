@@ -4,6 +4,7 @@ full onboarding wizard, and the ``ensure_obsessiondb_plugin_in_source`` text rew
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,7 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
 
 
 def test_remote_client_query_status_returns_running(httpx_mock: HTTPXMock) -> None:
+    _answer_replica_probe(httpx_mock, replicas=1)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [["my-qid"]], "meta": [{"name": "query_id", "type": "String"}], "rows": 1},
@@ -228,6 +230,7 @@ def test_remote_client_query_status_returns_running(httpx_mock: HTTPXMock) -> No
 
 
 def test_remote_client_query_status_finished_path(httpx_mock: HTTPXMock) -> None:
+    _answer_replica_probe(httpx_mock, replicas=1)
     # First call: empty system.processes
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
@@ -256,6 +259,7 @@ def test_remote_client_query_status_finished_path(httpx_mock: HTTPXMock) -> None
 
 
 def test_remote_client_query_status_unknown_when_log_empty(httpx_mock: HTTPXMock) -> None:
+    _answer_replica_probe(httpx_mock, replicas=1)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [{"name": "query_id", "type": "String"}], "rows": 0},
@@ -269,10 +273,84 @@ def test_remote_client_query_status_unknown_when_log_empty(httpx_mock: HTTPXMock
     assert status.status == "unknown"
 
 
+def test_remote_client_query_status_reads_every_replica(httpx_mock: HTTPXMock) -> None:
+    # #246: the attempt runs on the replica that received it, so a
+    # multi-replica service reads processes and query_log on every replica.
+    _answer_replica_probe(httpx_mock, replicas=2)
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [{"name": "elapsed", "type": "String"}], "rows": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    client = create_remote_executor(_creds(), service_slug=SVC)
+    assert client.query_status("my-qid").status == "unknown"
+    # The probe ran once: the check below sends only its two reads.
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [{"name": "elapsed", "type": "String"}], "rows": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    assert client.query_status("my-qid", every_replica=True).status == "unknown"
+
+    queries = [
+        json.loads(request.content)["input"]["query"] for request in httpx_mock.get_requests()
+    ]
+    assert "clusterAllReplicas('default', system.one)" in queries[0]
+    polls, check = queries[1:3], queries[3:5]
+    for query in polls:
+        assert "skip_unavailable_shards = 1" in query
+    for query in check:
+        assert "skip_unavailable_shards = 0" in query
+    for query in (*polls, *check):
+        assert "clusterAllReplicas('default', system." in query
+    assert "system.processes" in polls[0]
+    assert "system.query_log" in polls[1]
+
+
+def test_remote_client_query_status_keeps_local_tables_on_one_replica(
+    httpx_mock: HTTPXMock,
+) -> None:
+    _answer_replica_probe(httpx_mock, replicas=1)
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [{"name": "elapsed", "type": "String"}], "rows": 0},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    client = create_remote_executor(_creds(), service_slug=SVC)
+    assert client.query_status("my-qid").status == "unknown"
+    queries = [
+        json.loads(request.content)["input"]["query"] for request in httpx_mock.get_requests()
+    ]
+    assert "FROM system.processes" in queries[1]
+    assert "FROM system.query_log" in queries[2]
+    assert all("clusterAllReplicas" not in query for query in queries[1:])
+
+
 def test_remote_client_is_a_context_manager() -> None:
     with create_remote_executor(_creds(), service_slug=SVC) as client:
         assert isinstance(client, RemoteClickHouseClient)
         assert client.database == "default"
+
+
+def _answer_replica_probe(httpx_mock: HTTPXMock, *, replicas: int) -> None:
+    """The replica count query_status probes once per client (#246)."""
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={
+            "data": [[str(replicas)]],
+            "meta": [{"name": "replicas", "type": "UInt64"}],
+            "rows": 1,
+        },
+    )
 
 
 # ---------- jobs_api ----------

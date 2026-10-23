@@ -100,7 +100,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // before the check, so the start derived from it and the attempt's elapsed
   // time never falls after the start that query_log records for the attempt.
   const serverNowMs = await readServerNowMs(db)
-  const inFlight = await db.queryStatus(queryId)
+  const inFlight = await checkInFlight(db, queryId, operationType)
   if (inFlight.status === 'running') {
     log(
       `  ${operationType}: query_id=${queryId} already running on server — attaching to in-flight query`,
@@ -127,8 +127,8 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     })
   }
 
-  // 3. Prior in-progress row exists but query is not in system.processes →
-  // RETRY. Run before-retry compensation, then resubmit forward.
+  // 3. Prior in-progress row exists but no replica runs the query → RETRY.
+  // Run before-retry compensation, then resubmit forward.
   // 4. No prior row → FIRST attempt. Skip compensation, submit forward.
   // (priorOpState.status === 'completed' was already returned above.)
   if (priorOpState !== undefined) {
@@ -370,6 +370,26 @@ function acceptChangedChecksum(
     })
   }
   return { ...state, checksum: migrationChecksum }
+}
+
+// The retry path that follows a 'not running' answer runs before-retry SQL
+// (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica: the
+// attempt runs on the replica that received it (#246). A replica that cannot be
+// read fails the check instead of being skipped, and a failed check stops here,
+// before anything is compensated or resubmitted.
+async function checkInFlight(
+  db: ClickHouseExecutor,
+  queryId: string,
+  operationType: string,
+): Promise<QueryStatus> {
+  try {
+    return await db.queryStatus(queryId, { everyReplica: true })
+  } catch (error) {
+    throw new Error(
+      `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
+      { cause: error },
+    )
+  }
 }
 
 // Read just before a submission, as an ISO UTC string for queryStatus.

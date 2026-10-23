@@ -1528,10 +1528,10 @@ end-state of `main` (includes `f85f568` MV-source chunk sizing,
   sub-ms digits) and `toISOString`; `_js_round` handles the
   `0.49999999999999994` double-rounding case. Plan JSON collapses
   integral floats to ints on write so files byte-match TS.
-- **`sync_progress` / `query_status`** query plain `system.processes` /
+- **`sync_progress`** queries plain `system.processes` /
   `system.query_log` instead of TS's `clusterAllReplicas('cluster', …)`
-  — consistent with the client's documented divergence (the TS spelling
-  assumes ObsessionDB cluster naming; not portable to bare CH).
+  — the TS spelling assumes ObsessionDB cluster naming; not portable to
+  bare CH. (`query_status` reads every replica since #246; see below.)
 - **`ClickHouseClient.submit`** passed `query_id=` to
   clickhouse-connect's `command()`, which has no such parameter —
   every live run/resume would have crashed (pre-existing latent bug,
@@ -1735,3 +1735,24 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `testpaths`, the same way TS keeps its cluster suites in `packages/cli/test/`
   out of the default run. Run it explicitly with `pytest tests_cluster` against
   `test/cluster/2shard`; it hard-fails when a node is unreachable.
+
+### Async migrate status across replicas (#246)
+- Same design as TS: `ClickHouseClient.query_status` and
+  `RemoteClickHouseClient.query_status` read `system.processes` and
+  `system.query_log` through `clusterAllReplicas` when
+  `resolve_replica_fanout` finds more than one replica (`clickhouse.cluster`
+  for the native client, `default` for the remote one), with
+  `skip_unavailable_shards = 1` for polls. `every_replica=True` (TS
+  `everyReplica`) sends `skip_unavailable_shards = 0`, so an unreadable
+  replica fails the read.
+- `apply_async_statement`'s in-flight check passes `every_replica=True` and
+  turns a failed check into an error before any `before_retry` SQL or
+  resubmission, as TS does.
+- Python's native client previously never read `clusterAllReplicas`, even with
+  `clickhouse.cluster` set; TS did. When the probe finds one replica (or fails),
+  Python reads the local tables, where TS keeps `clusterAllReplicas(<cluster>, …)`
+  for a configured cluster. Both read the same rows on one replica.
+- The replicated case (attempt submitted on one shard-1 replica, re-run through
+  the other with `cluster="test_cluster_2s"`) is
+  `tests_cluster/test_migrate_async_cluster_e2e.py`, the port of the async case
+  in `packages/cli/test/cluster-2shard.e2e.test.ts`.

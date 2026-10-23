@@ -41,6 +41,7 @@ from chkit.clickhouse.introspect import (
     list_schema_objects,
     list_table_details,
 )
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.workbench_api import (
     WorkbenchExecuteResult,
@@ -223,7 +224,11 @@ class RemoteClickHouseClient:
         return list_table_details(self, databases)
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
     ) -> QueryStatus:
         """Mirror of :meth:`ClickHouseClient.query_status`, proxied via workbench."""
         # after_time bounds the query's start, as in the native client. A
@@ -236,11 +241,23 @@ class RemoteClickHouseClient:
             if after_time
             else ""
         )
+        # The query runs on the replica that received it, so a multi-replica
+        # service reads every replica (#246). A poll skips a replica it cannot
+        # reach; with every_replica the read fails instead.
+        fanout = resolve_replica_fanout(self)
+
+        def source(table: str) -> str:
+            return all_replicas(fanout, table) if fanout else table
+
+        read_settings = (
+            f" SETTINGS skip_unavailable_shards = {0 if every_replica else 1}"
+        )
         # migrate bounds an attach by how long the running attempt has run.
         # The workbench API returns every cell as a string.
         running = self.query(
-            "SELECT elapsed FROM system.processes "
+            f"SELECT elapsed FROM {source('system.processes')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' LIMIT 1"
+            f"{read_settings}"
         )
         if running.rows:
             return QueryStatus(
@@ -249,11 +266,12 @@ class RemoteClickHouseClient:
             )
         log = self.query(
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
-            "FROM system.query_log "
+            f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}'"
             "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')"
             f"{after_filter}"
             " ORDER BY event_time DESC LIMIT 1"
+            f"{read_settings}"
         )
         if not log.rows:
             return QueryStatus(status="unknown")

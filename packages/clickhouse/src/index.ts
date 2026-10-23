@@ -12,6 +12,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
+import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseEngineFromCreateTableQuery,
 	parseOrderByFromCreateTableQuery,
@@ -37,6 +38,11 @@ export interface QueryStatus {
 	elapsedMs?: number
 	durationMs?: number
 	error?: string
+}
+
+export interface QueryStatusOptions {
+	afterTime?: string
+	everyReplica?: boolean
 }
 
 export type { ClickHouseSettings }
@@ -93,13 +99,15 @@ export interface ClickHouseExecutor {
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
+	 *  On a multi-replica target (see `resolveReplicaFanout`) both are read on every replica,
+	 *  because the query runs on whichever replica received it.
 	 *  @param queryId - The query_id returned by submit()
 	 *  @param options.afterTime - Only consider query_log entries for queries started at or after this ISO timestamp.
-	 *    Useful when resubmitting with the same query_id to ignore stale entries from previous attempts. */
-	queryStatus(
-		queryId: string,
-		options?: { afterTime?: string },
-	): Promise<QueryStatus>
+	 *    Useful when resubmitting with the same query_id to ignore stale entries from previous attempts.
+	 *  @param options.everyReplica - Fail when a replica cannot be read instead of skipping it, so a
+	 *    status other than 'running' means that no replica runs the query. Polls leave it unset and
+	 *    keep going while a replica is unavailable. */
+	queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus>
 
 	/** Optional capability: FROM-clause source for cluster-aware system table polling.
 	 *  Native executors return `clusterAllReplicas(...)` when `clickhouse.cluster` is set.
@@ -824,14 +832,17 @@ export function createExecutorWithClient(
 			}
 			return `system.${table}`
 		},
-		async queryStatus(
-			queryId: string,
-			options?: { afterTime?: string },
-		): Promise<QueryStatus> {
+		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
+			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
+			// runs the query on one replica only (#246).
+			const fanout = await resolveReplicaFanout(this, config.cluster)
+			const from = (table: ObservableSystemTable) =>
+				fanout ? allReplicas(fanout, `system.${table}`) : observableSystemTable(this, table)
+			const skipUnavailable = options?.everyReplica ? 0 : 1
 			try {
-				const processesFrom = observableSystemTable(this, 'processes')
+				const processesFrom = from('processes')
 				const running = await client.query({
-					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = 1`,
+					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId },
 					format: 'JSONEachRow',
 				})
@@ -855,7 +866,7 @@ export function createExecutorWithClient(
 				}
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
-				const queryLogFrom = observableSystemTable(this, 'query_log')
+				const queryLogFrom = from('query_log')
 				const log = await client.query({
 					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${queryLogFrom}
@@ -866,7 +877,7 @@ WHERE user = currentUser()
   AND query_start_time >= parseDateTimeBestEffort({after:String})
 ORDER BY event_time DESC
 LIMIT 1
-SETTINGS skip_unavailable_shards = 1`,
+SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
 					format: 'JSONEachRow',
 				})

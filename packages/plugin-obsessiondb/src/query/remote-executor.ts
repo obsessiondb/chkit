@@ -7,8 +7,10 @@ import type {
 	SchemaObjectRef,
 } from '@chkit/clickhouse'
 import {
+	allReplicas,
 	buildIntrospectedTables,
 	inferSchemaKindFromEngine,
+	resolveReplicaFanout,
 	type SystemColumnRow,
 	type SystemSkippingIndexRow,
 	type SystemTableRow,
@@ -176,10 +178,17 @@ export function createRemoteExecutor(deps: {
 				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
 				: ''
 
+			// The query runs on the replica that received it, so a multi-replica
+			// service reads every replica (#246). A poll skips a replica it cannot
+			// reach; with everyReplica the read fails instead.
+			const fanout = await resolveReplicaFanout(executor)
+			const from = (table: string) => (fanout ? allReplicas(fanout, table) : table)
+			const readSettings = `SETTINGS skip_unavailable_shards = ${options?.everyReplica ? 0 : 1}`
+
 			// migrate bounds an attach by how long the running attempt has run.
 			// The API returns every cell as a string.
 			const running = await executor.query<{ elapsed: string }>(
-				`SELECT elapsed FROM system.processes WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1`,
+				`SELECT elapsed FROM ${from('system.processes')} WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1 ${readSettings}`,
 			)
 			const [proc] = running
 			if (proc) {
@@ -197,13 +206,14 @@ export function createRemoteExecutor(deps: {
 				exception: string
 			}>(
 				`SELECT type, written_rows, written_bytes, query_duration_ms, exception
-FROM system.query_log
+FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
   ${afterFilter}
 ORDER BY event_time DESC
-LIMIT 1`,
+LIMIT 1
+${readSettings}`,
 			)
 
 			const [row] = log
