@@ -165,6 +165,7 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
     }
 
     try {
+      await logDictionaryCatalog(executor, db, dict, 'before-create')
       await executor.command(definition('secret-one'))
       await logDictionaryCatalog(executor, db, dict, 'after-create')
       const created = await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`).then(
@@ -211,6 +212,7 @@ async function logDictionaryCatalog(
   const catalogColumns =
     'hostName() AS host, toString(uuid) AS uuid, engine, toString(metadata_modification_time) AS metadata_modification_time, toString(cityHash64(create_table_query)) AS create_table_query_hash'
   const queries: Array<[string, string]> = [
+    ['version', 'SELECT version() AS version'],
     [
       'database',
       `SELECT name, engine, substring(engine_full, 1, 200) AS engine_full FROM system.databases WHERE name = ${stringLiteral(database)}`,
