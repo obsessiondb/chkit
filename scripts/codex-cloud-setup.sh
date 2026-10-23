@@ -28,6 +28,15 @@ else
 fi
 test "$(bun --version)" = 1.3.13
 
+# chkit_python's Turbo tasks run through uv. Match the setup action.
+if command -v mise >/dev/null 2>&1; then
+  mise use --global uv@0.13.0
+  export PATH="$(dirname "$(mise which uv)"):$PATH"
+else
+  curl -LsSf https://astral.sh/uv/0.13.0/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
+fi
+test "$(uv --version | cut -d' ' -f2)" = 0.13.0
+
 # Save the setup-only secret in gh's credential store for subsequent agent commands.
 # In a headless container this can be a plaintext file accessible to the agent.
 if [ -n "$chkit_github_token" ]; then
@@ -118,6 +127,8 @@ fi
 clickhouse-client --host 127.0.0.1 --password chkit-ci --query 'SYSTEM RELOAD CONFIG'
 
 bun install --frozen-lockfile
+# Install chkit_python's Python and dev tools while the network is available.
+(cd chkit_python && uv sync --locked --extra dev)
 bunx turbo run build --filter=@chkit/clickhouse...
 bun run packages/plugin-backfill/src/chunking/e2e/seed-datasets.script.ts
 printf '\nCloud environment ready: Bun %s; ClickHouse %s\n' \

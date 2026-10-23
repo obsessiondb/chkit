@@ -3,6 +3,7 @@
   "remoteCache": {
     "teamId": "team_VzYIrbcT25TaqBtYUgI4t5Du"
   },
+  "globalPassThroughEnv": ["UV_*"],
   "tasks": {
     "@chkit/registry#build": {
       "dependsOn": ["^build"],

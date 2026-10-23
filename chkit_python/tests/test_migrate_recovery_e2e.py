@@ -33,8 +33,8 @@ from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
     format_test_diagnostic,
-    get_required_env,
     quote_ident,
+    resolve_live_env,
     wait_for_table_on_every_replica,
 )
 
@@ -85,7 +85,7 @@ config = define_config(
 def make_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Callable[[str], Project]]:
-    env = get_required_env()
+    env = resolve_live_env()
     created: list[tuple[Project, list[str], list[str]]] = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CI", "1")

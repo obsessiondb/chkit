@@ -1,0 +1,12 @@
+{
+  "name": "@chkit/python",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Turbo tasks for chkit-py (published to PyPI from publish-chkit-py.yml, not npm)",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "lint": "uv run --locked --extra dev ruff check src tests tests_cluster tests_workbench_api",
+    "typecheck": "uv run --locked --extra dev mypy src",
+    "test": "uv run --locked --extra dev pytest"
+  }
+}

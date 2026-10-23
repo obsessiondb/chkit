@@ -27,8 +27,8 @@ from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
     format_test_diagnostic,
-    get_required_env,
     quote_ident,
+    resolve_live_env,
 )
 
 _POLL_TIMEOUT_SECONDS = 90.0
@@ -37,7 +37,7 @@ _POLL_TIMEOUT_SECONDS = 90.0
 def test_rebuilt_snapshot_matches_the_views_two_merged_branches_left_in_clickhouse(  # noqa: PLR0915
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    env = get_required_env()
+    env = resolve_live_env()
     database = env.clickhouse_database
     journal_table = create_journal_table_name("snaprb")
     prefix = create_prefix("snaprb")

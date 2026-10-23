@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import pytest
 
 from tests.e2e_testkit import (
+    LOCAL_STACK_ENV,
     LiveEnv,
     create_journal_table_name,
     create_prefix,
@@ -68,30 +69,53 @@ def test_get_required_env_returns_all_overrides(
     )
 
 
-# ---------- resolve_live_env (soft-default variant) ----------
+# ---------- resolve_live_env (TS getLiveEnv) ----------
 
 
-def test_resolve_live_env_defaults_to_local_docker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _clear_clickhouse_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("CLICKHOUSE_URL", "CLICKHOUSE_HOST", "CLICKHOUSE_USER",
                  "CLICKHOUSE_PASSWORD", "CLICKHOUSE_DB"):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_resolve_live_env_defaults_to_local_test_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_clickhouse_env(monkeypatch)
     env = resolve_live_env()
+    assert env == LOCAL_STACK_ENV
     assert env.clickhouse_url == "http://localhost:8123"
     assert env.clickhouse_user == "default"
-    assert env.clickhouse_password == ""
+    assert env.clickhouse_password == "chkit-ci"
     assert env.clickhouse_database == "default"
+
+
+def test_resolve_live_env_ignores_password_without_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_clickhouse_env(monkeypatch)
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "other")
+    assert resolve_live_env() == LOCAL_STACK_ENV
 
 
 def test_resolve_live_env_env_overrides_win(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _clear_clickhouse_env(monkeypatch)
     monkeypatch.setenv("CLICKHOUSE_URL", "https://custom:9000")
     monkeypatch.setenv("CLICKHOUSE_PASSWORD", "pw")
     env = resolve_live_env()
     assert env.clickhouse_url == "https://custom:9000"
     assert env.clickhouse_password == "pw"
+
+
+def test_resolve_live_env_remote_target_requires_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_clickhouse_env(monkeypatch)
+    monkeypatch.setenv("CLICKHOUSE_HOST", "example.invalid")
+    with pytest.raises(RuntimeError, match="CLICKHOUSE_PASSWORD"):
+        resolve_live_env()
 
 
 # ---------- live_env_to_client_kwargs ----------
