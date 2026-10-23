@@ -34,6 +34,8 @@ from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_repli
 
 MAX_ATTEMPTS = 20
 RETRY_DELAY_SECONDS = 0.5
+# Upper bound on a column definition or rename wait.
+DEFINITION_WAIT_DEADLINE_SECONDS = 30.0
 
 
 # What each ALTER or rename appends to the `<kind>:<database>.<name>` key of
@@ -436,8 +438,13 @@ def wait_for_column_rename(
 def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     """Poll ``check`` until it reports no mismatch.
 
-    On timeout the error names what was still different on the last check.
+    Uses the retry budget of the other waits (21 checks, 0.5 s apart) and stops
+    retrying at a 30 s deadline (TS also abandons a check that does not
+    return by then; a synchronous query here is bounded by the client's
+    receive timeout). On timeout the error names what was still different on
+    the last check.
     """
+    deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
     checks = 0
     for attempt in range(MAX_ATTEMPTS + 1):
@@ -449,8 +456,9 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
         if mismatch is None:
             return
         detail = mismatch
-        if attempt < MAX_ATTEMPTS:
-            time.sleep(RETRY_DELAY_SECONDS)
+        if attempt == MAX_ATTEMPTS or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+            break
+        time.sleep(RETRY_DELAY_SECONDS)
     msg = (
         f"wait_for_ddl_propagation: {subject} not applied on every replica "
         f"after {checks} checks: {detail}"

@@ -5,6 +5,8 @@ import type { ClickHouseExecutor } from './index.js'
 import { allReplicas, resolveReplicaFanout, stringLiteral, type ReplicaFanout } from './replicas.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
+// Upper bound on a column definition or rename wait, including slow queries.
+const DEFINITION_WAIT_DEADLINE_MS = 30_000
 
 // The `system.columns` fields a column definition wait compares.
 const COLUMN_FIELDS = ['type', 'default_kind', 'default_expression', 'comment', 'compression_codec'] as const
@@ -509,20 +511,48 @@ function constraintWhere(database: string, tableName: string, constraintName: st
 }
 
 /**
- * Polls `check` until it reports no mismatch. On timeout the error names what
- * was still different on the last check.
+ * Polls `check` until it reports no mismatch, with the retry budget of the
+ * other waits (21 checks, 500 ms apart) and a hard deadline: chkit's queries
+ * have no request timeout, so a check that does not return ends the wait at
+ * the deadline instead of holding the migration. On timeout the error names
+ * what was still different on the last check.
  */
 async function waitUntilApplied(subject: string, check: () => Promise<string | undefined>): Promise<void> {
+  const deadline = Date.now() + DEFINITION_WAIT_DEADLINE_MS
   let checks = 0
+  let detail = ''
+  for (;;) {
+    checks += 1
+    const outcome = await checkBefore(check, deadline)
+    if (outcome.mismatch === undefined && outcome.failure === undefined) return
+    detail = outcome.failure ?? outcome.mismatch ?? ''
+    if (checks > RETRY_OPTIONS.retries || Date.now() + RETRY_OPTIONS.minTimeout >= deadline) break
+    await new Promise((resolve) => setTimeout(resolve, RETRY_OPTIONS.minTimeout))
+  }
+  throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
+}
+
+async function checkBefore(
+  check: () => Promise<string | undefined>,
+  deadline: number,
+): Promise<{ mismatch?: string; failure?: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<{ failure: string }>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ failure: `a check did not return within the ${DEFINITION_WAIT_DEADLINE_MS / 1000}s deadline` }),
+      Math.max(deadline - Date.now(), 0),
+    )
+  })
   try {
-    await pRetry(async () => {
-      checks += 1
-      const mismatch = await check()
-      if (mismatch !== undefined) throw new Error(mismatch)
-    }, RETRY_OPTIONS)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
+    return await Promise.race([
+      check().then(
+        (mismatch) => ({ mismatch }),
+        (error: unknown) => ({ failure: error instanceof Error ? error.message : String(error) }),
+      ),
+      expired,
+    ])
+  } finally {
+    clearTimeout(timer)
   }
 }
 
