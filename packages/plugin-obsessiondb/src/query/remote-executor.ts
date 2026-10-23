@@ -163,10 +163,12 @@ export function createRemoteExecutor(deps: {
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
-				settings: queryId ? { query_id: queryId } : undefined,
+				// The API takes the id as a top-level field and ignores a
+				// `query_id` setting, which would leave the query under a random id.
+				...(queryId ? { queryId } : {}),
 			})
 			throwIfError(res)
-			return queryId ?? 'submitted'
+			return queryId ?? res.query_id ?? 'submitted'
 		},
 
 		async queryStatus(queryId, options?) {

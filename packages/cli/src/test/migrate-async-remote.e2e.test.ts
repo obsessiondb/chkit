@@ -33,6 +33,7 @@ type LiveEnv = ReturnType<typeof getLiveEnv>
 interface WorkbenchInput {
   query: string
   settings?: Record<string, string | number>
+  queryId?: string
 }
 
 interface WorkbenchResult {
@@ -202,9 +203,12 @@ function startWorkbench(env: LiveEnv): { url: string; stop: () => void } {
       const { json: input } = (await request.json()) as { json: WorkbenchInput }
       const url = new URL(env.clickhouseUrl)
       url.searchParams.set('default_format', 'JSONCompactStrings')
+      // Like the real API: the query runs under the top-level queryId, and a
+      // query_id setting is ignored.
       for (const [key, value] of Object.entries(input.settings ?? {})) {
-        url.searchParams.set(key, String(value))
+        if (key !== 'query_id') url.searchParams.set(key, String(value))
       }
+      if (input.queryId) url.searchParams.set('query_id', input.queryId)
       const response = await fetch(url, {
         method: 'POST',
         body: input.query,

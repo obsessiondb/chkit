@@ -45,10 +45,17 @@ def workbench_query_execute(
     service_slug: str,
     query: str,
     settings: dict[str, Any] | None = None,
+    query_id: str | None = None,
 ) -> WorkbenchExecuteResult:
-    """``workbench.query.execute`` — proxy a SQL string through ObsessionDB."""
+    """``workbench.query.execute`` — proxy a SQL string through ObsessionDB.
+
+    ``query_id`` is the id ClickHouse runs the query under. The API takes it as
+    the top-level ``queryId`` field and ignores a ``query_id`` setting.
+    """
     payload: dict[str, Any] = {"serviceSlug": service_slug, "query": query}
     if settings is not None:
         payload["settings"] = settings
+    if query_id is not None:
+        payload["queryId"] = query_id
     body = _rpc_post(creds, "workbench/query/execute", payload)
     return WorkbenchExecuteResult.model_validate(body)

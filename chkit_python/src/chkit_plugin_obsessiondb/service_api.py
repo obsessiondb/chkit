@@ -127,14 +127,17 @@ HTTP_401_UNAUTHORIZED = 401
 
 
 def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
-    """POST to ``{base_url}/rpc/{procedure}`` with bearer auth + ``{input: ...}`` body.
+    """POST to ``{base_url}/rpc/{procedure}`` with bearer auth, oRPC RPC envelope.
 
-    Translates HTTP 401 into ``SessionExpiredError`` so callers handle session
-    expiry uniformly. Non-2xx for any other code raises ``RuntimeError`` with
-    the response body for debugging.
+    The oRPC RPC protocol (what TS's ``RPCLink`` speaks) wraps the input as
+    ``{"json": ...}`` and the output the same way; the API rejects any other
+    body with ``400 Input validation failed``. Translates HTTP 401 into
+    ``SessionExpiredError`` so callers handle session expiry uniformly. Non-2xx
+    for any other code raises ``RuntimeError`` with the response body for
+    debugging.
     """
     url = f"{creds.base_url}/rpc/{procedure}"
-    body = {"input": payload}
+    body = {"json": payload}
     headers = {
         "Authorization": f"Bearer {creds.access_token}",
         "Content-Type": "application/json",
@@ -148,10 +151,11 @@ def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
         msg = f"RPC {procedure} failed: {res.status_code} {res.text}"
         raise RuntimeError(msg)
     try:
-        return res.json()
+        envelope = res.json()
     except ValueError:
         msg = f"RPC {procedure} returned non-JSON body: {res.text[:200]}"
         raise RuntimeError(msg)  # noqa: B904
+    return envelope["json"] if isinstance(envelope, dict) and "json" in envelope else envelope
 
 
 def list_service_organizations(creds: Credentials) -> list[ServiceOrganization]:

@@ -68,10 +68,15 @@ def _start_workbench(env: LiveEnv) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length))["input"]
+            payload = json.loads(self.rfile.read(length))["json"]
             params: dict[str, str] = {"default_format": "JSONCompactStrings"}
+            # Like the real API: the query runs under the top-level queryId,
+            # and a query_id setting is ignored.
             for key, value in (payload.get("settings") or {}).items():
-                params[key] = str(value)
+                if key != "query_id":
+                    params[key] = str(value)
+            if payload.get("queryId"):
+                params["query_id"] = payload["queryId"]
             response = httpx.post(
                 env.clickhouse_url,
                 params=params,
@@ -92,7 +97,7 @@ def _start_workbench(env: LiveEnv) -> ThreadingHTTPServer:
             else:
                 parsed = json.loads(body)
                 result = {"data": parsed["data"], "meta": parsed["meta"], "rows": parsed["rows"]}
-            encoded = json.dumps(result).encode()
+            encoded = json.dumps({"json": result}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))

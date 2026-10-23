@@ -108,8 +108,51 @@ def test_workbench_query_execute_passes_settings(httpx_mock: HTTPXMock) -> None:
         _creds(),
         service_slug=SVC,
         query="SELECT 1",
-        settings={"query_id": "qid-x"},
+        settings={"max_threads": 2},
     )
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content)["json"] == {
+        "serviceSlug": SVC,
+        "query": "SELECT 1",
+        "settings": {"max_threads": 2},
+    }
+
+
+def test_workbench_query_execute_speaks_the_orpc_envelope(httpx_mock: HTTPXMock) -> None:
+    # The oRPC RPC protocol wraps input and output as {"json": ...}; the API
+    # answers any other body with 400 "Input validation failed".
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={
+            "json": {
+                "data": [["1"]],
+                "meta": [{"name": "x", "type": "UInt8"}],
+                "rows": 1,
+                "query_id": "q-1",
+            }
+        },
+    )
+    out = workbench_query_execute(_creds(), service_slug=SVC, query="SELECT 1 AS x")
+    assert out.rows == 1
+    assert out.query_id == "q-1"
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content) == {"json": {"serviceSlug": SVC, "query": "SELECT 1 AS x"}}
+
+
+def test_workbench_query_execute_sends_query_id_top_level(httpx_mock: HTTPXMock) -> None:
+    # The API runs the query under the top-level queryId and ignores a
+    # query_id setting (#246).
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0, "query_id": "qid-x"},
+    )
+    workbench_query_execute(_creds(), service_slug=SVC, query="SELECT 1", query_id="qid-x")
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content)["json"] == {
+        "serviceSlug": SVC,
+        "query": "SELECT 1",
+        "queryId": "qid-x",
+    }
 
 
 def test_workbench_query_execute_propagates_error(httpx_mock: HTTPXMock) -> None:
@@ -216,6 +259,26 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
     client = create_remote_executor(_creds(), service_slug=SVC)
     qid = client.submit("ALTER TABLE x ADD COLUMN y UInt64", query_id="my-qid")
     assert qid == "my-qid"
+    # The id travels as the top-level queryId, never as a query_id setting.
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content)["json"] == {
+        "serviceSlug": SVC,
+        "query": "ALTER TABLE x ADD COLUMN y UInt64",
+        "queryId": "my-qid",
+    }
+
+
+def test_remote_client_submit_without_query_id_returns_server_id(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0, "query_id": "server-id"},
+    )
+    client = create_remote_executor(_creds(), service_slug=SVC)
+    assert client.submit("SELECT 1") == "server-id"
+    [request] = httpx_mock.get_requests()
+    assert "queryId" not in json.loads(request.content)["json"]
 
 
 def test_remote_client_query_status_returns_running(httpx_mock: HTTPXMock) -> None:
@@ -299,7 +362,7 @@ def test_remote_client_query_status_reads_every_replica(httpx_mock: HTTPXMock) -
     assert client.query_status("my-qid", every_replica=True).status == "unknown"
 
     queries = [
-        json.loads(request.content)["input"]["query"] for request in httpx_mock.get_requests()
+        json.loads(request.content)["json"]["query"] for request in httpx_mock.get_requests()
     ]
     assert "clusterAllReplicas('default', system.one)" in queries[0]
     polls, check = queries[1:3], queries[3:5]
@@ -328,7 +391,7 @@ def test_remote_client_query_status_keeps_local_tables_on_one_replica(
     client = create_remote_executor(_creds(), service_slug=SVC)
     assert client.query_status("my-qid").status == "unknown"
     queries = [
-        json.loads(request.content)["input"]["query"] for request in httpx_mock.get_requests()
+        json.loads(request.content)["json"]["query"] for request in httpx_mock.get_requests()
     ]
     assert "FROM system.processes" in queries[1]
     assert "FROM system.query_log" in queries[2]
