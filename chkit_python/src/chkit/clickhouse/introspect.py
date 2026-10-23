@@ -12,8 +12,8 @@ live DB) and ``chkit pull`` (live DB → schema files):
 - ``normalize_column_from_system_row`` — ``system.columns`` row →
   ``ColumnDefinition`` (handles ``Nullable``, codecs, defaults, comments).
 - ``normalize_index_from_system_row`` — ``system.data_skipping_indices``
-  row → ``SkipIndexDefinition`` (parses minmax, bloom_filter, tokenbf_v1,
-  ngrambf_v1, set with all arg shapes).
+  row → ``SkipIndexDefinition`` (minmax, set, bloom_filter, tokenbf_v1,
+  ngrambf_v1, text, vector_similarity; anything else stays a raw index).
 - ``build_introspected_tables`` — joins the three system rows into one
   ``IntrospectedTable`` per (database, name). Sorts deterministically.
 - ``list_schema_objects`` / ``list_table_details`` — issue the SQL
@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 from chkit.clickhouse.create_table_parser import (
+    parse_constraints_from_create_table_query,
     parse_engine_from_create_table_query,
     parse_order_by_from_create_table_query,
     parse_partition_by_from_create_table_query,
@@ -44,13 +45,17 @@ from chkit.core.model import (
     SkipIndexDefinition,
     SkipIndexMinmax,
     SkipIndexNgramBF,
+    SkipIndexRaw,
     SkipIndexSet,
     SkipIndexText,
     SkipIndexTokenBF,
+    SkipIndexVectorSimilarity,
+    TableConstraintDefinition,
 )
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
 from chkit.core.text_index import parse_text_index_params
 from chkit.core.text_index_sql import normalize_text_index_sql
+from chkit.core.vector_index import parse_vector_index_args
 
 SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view", "dictionary"]
 
@@ -116,6 +121,7 @@ class IntrospectedTable:
     settings: dict[str, str]
     indexes: list[SkipIndexDefinition]
     projections: list[ProjectionDefinition]
+    constraints: list[TableConstraintDefinition] | None = None
     engine: str | None = None
     primary_key: str | None = None
     order_by: str | None = None
@@ -177,86 +183,87 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
     })
 
 
-def _split_int_args(args: str | None) -> list[int]:
+_NUMBER_ARG_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$", re.IGNORECASE)
+
+
+def _numeric_args(args: str | None) -> list[float] | None:
+    """Every argument as a number, or None when any is not a plain number."""
     if args is None:
-        return []
-    out: list[int] = []
-    for part in args.split(","):
-        token = part.strip()
-        if not token:
-            continue
-        try:
-            out.append(int(float(token)))
-        except ValueError:
-            continue
-    return out
+        return None
+    parts = [part.strip() for part in args.split(",")]
+    if not all(_NUMBER_ARG_RE.match(part) for part in parts):
+        return None
+    return [float(part) for part in parts]
 
 
-def _split_float_args(args: str | None) -> list[float]:
-    if args is None:
-        return []
-    out: list[float] = []
-    for part in args.split(","):
-        token = part.strip()
-        if not token:
-            continue
-        try:
-            out.append(float(token))
-        except ValueError:
-            continue
-    return out
-
-
-def _padded(ints: list[int], width: int) -> list[int]:
-    """Right-pad ``ints`` with zeros to ``width`` so positional indexing is safe."""
-    return (ints + [0] * width)[:width]
-
-
-def normalize_index_from_system_row(row: SystemSkippingIndexRow) -> SkipIndexDefinition:
+def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
+    row: SystemSkippingIndexRow,
+) -> SkipIndexDefinition:
     """Decode one ``system.data_skipping_indices`` row into a SkipIndexDefinition.
 
-    Returns a discriminated-union member (Pydantic-validated) based on the
-    ``type`` column value. Unknown variants fall back to ``set`` to mirror TS.
+    ``row.type`` is ``type_full``. A type chkit has no structured form for, or
+    arguments that do not fit one (``set`` without a row limit, an unknown text
+    parameter, a newer vector similarity option), becomes ``SkipIndexRaw``
+    carrying ``type_full`` verbatim, so pull and drift never rewrite an index
+    into a different one (TS parity).
     """
     base_payload: dict[str, Any] = {
         "name": row.name,
         "expression": normalize_sql_fragment(row.expr),
-        "granularity": row.granularity,
+        "granularity": int(row.granularity),
     }
+    raw = SkipIndexRaw(**base_payload, raw_type=normalize_sql_fragment(row.type))
 
     match = _INDEX_TYPE_RE.match(row.type)
-    base_name = match.group(1) if match is not None else row.type
+    base_name = match.group(1) if match is not None else row.type.strip()
     args_str = match.group(2) if match is not None else None
+    numbers = _numeric_args(args_str)
+
+    def ints(count: int) -> list[int] | None:
+        if numbers is None or len(numbers) != count:
+            return None
+        return [int(n) for n in numbers]
 
     if base_name == "text":
-        base_payload["expression"] = normalize_text_index_sql(row.expr)
+        try:
+            params = parse_text_index_params(args_str or "")
+        except ValueError:
+            return raw
         return SkipIndexText.model_validate(
-            {**base_payload, **parse_text_index_params(args_str or "")}
+            {**base_payload, "expression": normalize_text_index_sql(row.expr), **params}
         )
-
+    if base_name == "vector_similarity":
+        vector = parse_vector_index_args(args_str) if args_str is not None else None
+        if vector is None:
+            return raw
+        return SkipIndexVectorSimilarity.model_validate({**base_payload, **vector})
     if base_name == "minmax":
-        return SkipIndexMinmax(**base_payload)
-
+        return SkipIndexMinmax(**base_payload) if args_str is None else raw
     if base_name == "bloom_filter":
-        floats = _split_float_args(args_str)
-        rate = floats[0] if floats else None
-        return SkipIndexBloomFilter(**base_payload, false_positive_rate=rate)
-
+        if args_str is None:
+            return SkipIndexBloomFilter(**base_payload)
+        if numbers is None or len(numbers) != 1:
+            return raw
+        return SkipIndexBloomFilter(**base_payload, false_positive_rate=numbers[0])
+    if base_name == "set":
+        set_args = ints(1)
+        return raw if set_args is None else SkipIndexSet(**base_payload, max_rows=set_args[0])
     if base_name == "tokenbf_v1":
-        size_bytes, hash_functions, random_seed = _padded(
-            _split_int_args(args_str), 3
-        )
+        token_args = ints(3)
+        if token_args is None:
+            return raw
+        size_bytes, hash_functions, random_seed = token_args
         return SkipIndexTokenBF(
             **base_payload,
             size_bytes=size_bytes,
             hash_functions=hash_functions,
             random_seed=random_seed,
         )
-
     if base_name == "ngrambf_v1":
-        ngram_size, size_bytes, hash_functions, random_seed = _padded(
-            _split_int_args(args_str), 4
-        )
+        ngram_args = ints(4)
+        if ngram_args is None:
+            return raw
+        ngram_size, size_bytes, hash_functions, random_seed = ngram_args
         return SkipIndexNgramBF(
             **base_payload,
             ngram_size=ngram_size,
@@ -264,9 +271,7 @@ def normalize_index_from_system_row(row: SystemSkippingIndexRow) -> SkipIndexDef
             hash_functions=hash_functions,
             random_seed=random_seed,
         )
-
-    ints = _split_int_args(args_str)
-    return SkipIndexSet(**base_payload, max_rows=ints[0] if ints else 0)
+    return raw
 
 
 def build_introspected_tables(
@@ -334,6 +339,9 @@ def build_introspected_tables(
                         table_row.create_table_query
                     )
                 ],
+                constraints=parse_constraints_from_create_table_query(
+                    table_row.create_table_query
+                ),
                 ttl=parse_ttl_from_create_table_query(table_row.create_table_query),
             )
         )

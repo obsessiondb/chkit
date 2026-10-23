@@ -28,6 +28,7 @@ from chkit.core.model import (
     SkipIndexBloomFilter,
     SkipIndexMinmax,
     SkipIndexNgramBF,
+    SkipIndexRaw,
     SkipIndexSet,
     SkipIndexTokenBF,
 )
@@ -230,24 +231,24 @@ def test_normalize_index_set_with_max_rows() -> None:
     assert idx.max_rows == 100
 
 
-def test_normalize_index_set_without_args() -> None:
+def test_normalize_index_set_without_args_stays_raw() -> None:
+    # Rewriting a bare `set` as `set(0)` would change the index (#278).
     row = SystemSkippingIndexRow(
         database="db", table="t", name="idx", expr="x", type="set", granularity=1
     )
     idx = normalize_index_from_system_row(row)
-    assert isinstance(idx, SkipIndexSet)
-    assert idx.max_rows == 0
+    assert isinstance(idx, SkipIndexRaw)
+    assert idx.raw_type == "set"
 
 
-def test_normalize_index_tokenbf_with_partial_args_zero_pads() -> None:
+def test_normalize_index_tokenbf_with_partial_args_stays_raw() -> None:
+    # Zero-padding missing arguments would invent a different index (#278).
     row = SystemSkippingIndexRow(
         database="db", table="t", name="idx", expr="x", type="tokenbf_v1(256)", granularity=1
     )
     idx = normalize_index_from_system_row(row)
-    assert isinstance(idx, SkipIndexTokenBF)
-    assert idx.size_bytes == 256
-    assert idx.hash_functions == 0
-    assert idx.random_seed == 0
+    assert isinstance(idx, SkipIndexRaw)
+    assert idx.raw_type == "tokenbf_v1(256)"
 
 
 # ---------- build_introspected_tables ----------

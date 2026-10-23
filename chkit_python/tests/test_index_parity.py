@@ -261,10 +261,10 @@ def test_plans_non_additive_table_changes_with_risk_classification() -> None:
     ]
     plan = plan_diff(old, new)
     assert [op.type for op in plan.operations] == [
+        "alter_table_drop_index",
+        "alter_table_drop_index",
         "alter_table_drop_column",
         "alter_table_modify_column",
-        "alter_table_drop_index",
-        "alter_table_drop_index",
         "alter_table_add_index",
         "alter_table_modify_setting",
         "alter_table_reset_setting",
@@ -445,9 +445,9 @@ def test_plans_projection_add_replace_remove_operations() -> None:
     plan = plan_diff(old, new)
     assert [op.type for op in plan.operations] == [
         "alter_table_drop_projection",
-        "alter_table_add_projection",
-        "alter_table_add_projection",
         "alter_table_drop_projection",
+        "alter_table_add_projection",
+        "alter_table_add_projection",
     ]
     assert plan.risk_summary.model_dump() == {"safe": 0, "caution": 4, "danger": 0}
 

@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- `SkipIndexVectorSimilarity` (`type="vector_similarity"`: `method`, `distanceFunction`,
+  optional `dimensions` and the three HNSW tuning fields, validated as
+  `vector_index_invalid_parameters`), `SkipIndexRaw` (`type="raw"`, `rawType` rendered
+  verbatim) and table `constraints=[TableConstraintDefinition(name=..., check=...|assume=...)]`
+  (#278). Constraints render in `CREATE TABLE`, plan `ADD`/`DROP CONSTRAINT` (risk
+  `caution`, with a warning; a changed one is dropped and re-added), get `ON CLUSTER`, and
+  migrate waits until every replica shows them. `pull` and `drift --live` read both;
+  drift reports `constraint_mismatch` with `constraint_diffs`.
 - `chkit snapshot rebuild [--dryrun] [--json]` rewrites `snapshot.json` from the schema
   definitions after a merge or rebase conflict, reports added, removed and changed
   entries, and prints git review and restore commands.
@@ -80,6 +88,12 @@
   ObsessionDB plugin rejects Distributed tables in `generate`, `snapshot rebuild` and
   `check` when targeting ObsessionDB, which has no shards. The README now says beta,
   matching the package classifier.
+- Introspection keeps an index type or argument list it cannot express structurally
+  (`sparse_grams(...)`, a bare `set`, `tokenbf_v1` with missing arguments, an unknown
+  text parameter) as `SkipIndexRaw` instead of guessing: an unknown type was read as
+  `set`, missing arguments as zeros (#278).
+- Plans run drops of skip indexes, constraints and projections before the other ALTERs,
+  so dropping a column together with an index or constraint that reads it works (#278).
 - Dictionary DDL waits read `system.tables`, not each replica's in-memory
   `system.dictionaries` loader. `CREATE OR REPLACE DICTIONARY` drops the loader
   entry while a replica reloads, so `migrate` could time out after the catalog

@@ -251,15 +251,70 @@ class SkipIndexText(_SkipIndexBase):
                              validate_assignment=True, populate_by_name=True)
 
 
+class SkipIndexVectorSimilarity(_SkipIndexBase):
+    """Vector similarity (HNSW) index; mirrors TS ``VectorSimilaritySkipIndex``.
+
+    Renders ``vector_similarity(method, distance[, dimensions][, quantization,
+    M, ef])``. ``dimensions`` is required from ClickHouse 25.4 and rejected
+    before it; the three tuning fields are positional, so set all or none.
+    Values are checked by ``validate.py`` (``vector_index_invalid_parameters``).
+    """
+
+    type: Literal["vector_similarity"] = "vector_similarity"
+    granularity: int = 100_000_000
+    method: str
+    distance_function: str = Field(..., alias="distanceFunction")
+    dimensions: int | None = None
+    quantization: str | None = None
+    hnsw_max_connections_per_layer: int | None = Field(
+        default=None, alias="hnswMaxConnectionsPerLayer"
+    )
+    hnsw_candidate_list_size_for_construction: int | None = Field(
+        default=None, alias="hnswCandidateListSizeForConstruction"
+    )
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True,
+                             validate_assignment=True, populate_by_name=True)
+
+
+class SkipIndexRaw(_SkipIndexBase):
+    """Escape hatch for an index type without a structured form (TS ``RawSkipIndex``).
+
+    ``raw_type`` renders verbatim after ``TYPE``, e.g. ``sparse_grams(3, 20, 256,
+    2, 0)``. Introspection emits it for any type or argument list it cannot
+    express structurally, so pull and drift never rewrite an index.
+    """
+
+    type: Literal["raw"] = "raw"
+    raw_type: str = Field(..., alias="rawType")
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True,
+                             validate_assignment=True, populate_by_name=True)
+
+
 SkipIndexDefinition: TypeAlias = Annotated[
     SkipIndexMinmax
     | SkipIndexSet
     | SkipIndexBloomFilter
     | SkipIndexTokenBF
     | SkipIndexNgramBF
-    | SkipIndexText,
+    | SkipIndexText
+    | SkipIndexVectorSimilarity
+    | SkipIndexRaw,
     Field(discriminator="type"),
 ]
+
+
+class TableConstraintDefinition(_StrictModel):
+    """``CONSTRAINT name CHECK expr`` or ``CONSTRAINT name ASSUME expr``.
+
+    Set exactly one of ``check``/``assume``; ``validate.py`` reports anything
+    else as ``constraint_invalid`` (TS enforces the shape in its type).
+    """
+
+    name: str
+    check: str | None = None
+    assume: str | None = None
 
 
 class ProjectionDefinition(_StrictModel):
@@ -329,6 +384,7 @@ class TableDefinition(_StrictModel):
     settings: dict[str, SettingValue] | None = None
     indexes: list[SkipIndexDefinition] | None = None
     projections: list[ProjectionDefinition] | None = None
+    constraints: list[TableConstraintDefinition] | None = None
     comment: str | None = None
     # Per-table plugin configuration (TS `TablePlugins`, e.g.
     # `{"backfill": {"timeColumn": "ts"}}`). Ignored by the diff engine —
@@ -635,6 +691,8 @@ MigrationOperationType: TypeAlias = Literal[
     "alter_table_drop_projection",
     "alter_table_reset_setting",
     "alter_table_modify_ttl",
+    "alter_table_add_constraint",
+    "alter_table_drop_constraint",
     "create_dictionary",
     "drop_dictionary",
     "rename_dictionary",
@@ -704,6 +762,10 @@ ValidationIssueCode: TypeAlias = Literal[
     "duplicate_column_name",
     "duplicate_index_name",
     "text_index_invalid_parameters",
+    "vector_index_invalid_parameters",
+    "raw_index_invalid_type",
+    "duplicate_constraint_name",
+    "constraint_invalid",
     "duplicate_projection_name",
     "projection_ambiguous_kind",
     "projection_empty_index",
@@ -765,6 +827,7 @@ class ChxValidationError(Exception):
 ColumnInput: TypeAlias = ColumnDefinition | dict[str, object]
 SkipIndexInput: TypeAlias = SkipIndexDefinition | dict[str, object]
 ProjectionInput: TypeAlias = ProjectionDefinition | dict[str, object]
+ConstraintInput: TypeAlias = TableConstraintDefinition | dict[str, object]
 TableRefInput: TypeAlias = TableRef | dict[str, object]
 MaterializedViewRefreshInput: TypeAlias = MaterializedViewRefresh | dict[str, object]
 DictionaryAttributeInput: TypeAlias = DictionaryAttribute | dict[str, object]
@@ -795,6 +858,7 @@ def table(
     settings: dict[str, SettingValue] | None = None,
     indexes: list[SkipIndexInput] | None = None,
     projections: list[ProjectionInput] | None = None,
+    constraints: list[ConstraintInput] | None = None,
     comment: str | None = None,
     plugins: dict[str, Any] | None = None,
 ) -> TableDefinition:
@@ -826,6 +890,7 @@ def table(
             "settings": settings,
             "indexes": indexes,
             "projections": projections,
+            "constraints": constraints,
             "comment": comment,
             "plugins": plugins,
         }

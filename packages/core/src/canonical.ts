@@ -12,10 +12,12 @@ import type {
 import { normalizeKeyColumns } from './key-clause.js'
 import { isSchemaDefinition } from './model.js'
 import { canonicalizeCodec } from './codec.js'
+import { canonicalizeConstraint } from './constraint.js'
 import { canonicalizeColumnDefault } from './column-default.js'
 import { canonicalizeProjection } from './projection.js'
 import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
+import { canonicalizeVectorIndex } from './vector-index.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => a.name.localeCompare(b.name))
@@ -48,6 +50,10 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
 
 function canonicalizeIndex(index: SkipIndexDefinition): SkipIndexDefinition {
   if (index.type === 'text') return canonicalizeTextIndex(index)
+  if (index.type === 'vector_similarity') return canonicalizeVectorIndex(index)
+  if (index.type === 'raw') {
+    return { ...index, expression: normalizeSQLFragment(index.expression), rawType: normalizeSQLFragment(index.rawType) }
+  }
   return {
     ...index,
     expression: normalizeSQLFragment(index.expression),
@@ -71,6 +77,9 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
   const indexes = def.indexes ? sortByName(def.indexes).map(canonicalizeIndex) : undefined
   const projections = def.projections
     ? sortByName(def.projections).map(canonicalizeProjection)
+    : undefined
+  const constraints = def.constraints
+    ? sortByName(def.constraints).map(canonicalizeConstraint)
     : undefined
 
   const columnNames = new Set(def.columns.map((column) => column.name.trim()))
@@ -100,6 +109,7 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     settings,
     indexes,
     projections,
+    constraints,
     comment: def.comment?.trim(),
   }
 }

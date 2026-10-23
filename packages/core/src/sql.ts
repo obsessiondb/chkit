@@ -7,18 +7,22 @@ import type {
   ProjectionDefinition,
   SchemaDefinition,
   SkipIndexDefinition,
+  TableConstraintDefinition,
   TableDefinition,
   ViewDefinition,
 } from './model.js'
 import { renderCodec } from './codec.js'
 import { renderDefault } from './column-default.js'
+import { constraintExpression, constraintKind, renderConstraint } from './constraint.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import { isMergeTreeEngine, supportsSortOrder } from './engine.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
+import { normalizeSQLFragment } from './sql-normalizer.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
+import { renderVectorIndexType, vectorIndexGranularity } from './vector-index.js'
 
 function renderColumn(col: ColumnDefinition): string {
   let out = `${quoteIdentifier(col.name)} ${renderColumnType(col)}`
@@ -48,10 +52,14 @@ export function renderKeyClauseColumns(
     .join(', ')
 }
 
-function renderIndexType(idx: SkipIndexDefinition): string {
+export function renderIndexType(idx: SkipIndexDefinition): string {
   switch (idx.type) {
     case 'text':
       return renderTextIndexType(idx)
+    case 'vector_similarity':
+      return renderVectorIndexType(idx)
+    case 'raw':
+      return normalizeSQLFragment(idx.rawType)
     case 'minmax':
       return 'minmax'
     case 'set':
@@ -67,16 +75,23 @@ function renderIndexType(idx: SkipIndexDefinition): string {
   }
 }
 
+function renderIndexGranularity(idx: SkipIndexDefinition): number {
+  if (idx.type === 'text') return TEXT_INDEX_GRANULARITY
+  if (idx.type === 'vector_similarity') return vectorIndexGranularity(idx)
+  return idx.granularity
+}
+
 function renderTableSQL(def: TableDefinition): string {
   const columns = def.columns.map(renderColumn)
   const indexes = (def.indexes ?? []).map(
     (idx) =>
-      `INDEX ${quoteIdentifier(idx.name)} (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${idx.type === 'text' ? TEXT_INDEX_GRANULARITY : idx.granularity}`
+      `INDEX ${quoteIdentifier(idx.name)} (${idx.expression}) TYPE ${renderIndexType(idx)} GRANULARITY ${renderIndexGranularity(idx)}`
   )
+  const constraints = (def.constraints ?? []).map(renderConstraint)
   const projections = (def.projections ?? []).map(
     (projection) => `PROJECTION ${quoteIdentifier(projection.name)} ${renderProjectionBody(projection)}`
   )
-  const body = [...columns, ...indexes, ...projections].join(',\n  ')
+  const body = [...columns, ...indexes, ...constraints, ...projections].join(',\n  ')
 
   const columnNames = new Set(def.columns.map((column) => column.name))
   const clauses: string[] = []
@@ -251,11 +266,19 @@ export function renderAlterRemoveCodec(def: TableDefinition, columnName: string)
 }
 
 export function renderAlterAddIndex(def: TableDefinition, index: SkipIndexDefinition): string {
-  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD INDEX IF NOT EXISTS ${quoteIdentifier(index.name)} (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${index.type === 'text' ? TEXT_INDEX_GRANULARITY : index.granularity};`
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD INDEX IF NOT EXISTS ${quoteIdentifier(index.name)} (${index.expression}) TYPE ${renderIndexType(index)} GRANULARITY ${renderIndexGranularity(index)};`
 }
 
 export function renderAlterDropIndex(def: TableDefinition, indexName: string): string {
   return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} DROP INDEX IF EXISTS ${quoteIdentifier(indexName)};`
+}
+
+export function renderAlterAddConstraint(def: TableDefinition, constraint: TableConstraintDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} ADD CONSTRAINT IF NOT EXISTS ${quoteIdentifier(constraint.name)} ${constraintKind(constraint)} ${constraintExpression(constraint)};`
+}
+
+export function renderAlterDropConstraint(def: TableDefinition, constraintName: string): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} DROP CONSTRAINT IF EXISTS ${quoteIdentifier(constraintName)};`
 }
 
 export function renderAlterAddProjection(

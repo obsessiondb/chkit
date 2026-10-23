@@ -18,12 +18,14 @@ import re
 from dataclasses import dataclass
 
 from chkit.core.key_clause import split_top_level_comma
+from chkit.core.model import TableConstraintDefinition
 from chkit.core.projection import normalize_projection_index
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import find_quote_end, find_top_level_sql_pattern, is_quote_char
 
 __all__ = [
     "ProjectionDefinitionShape",
+    "parse_constraints_from_create_table_query",
     "parse_engine_from_create_table_query",
     "parse_order_by_from_create_table_query",
     "parse_partition_by_from_create_table_query",
@@ -87,6 +89,11 @@ _UNIQUE_KEY_STOP = re.compile(
 
 _PROJECTION_RE = re.compile(
     r"^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\((.*)\)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_CONSTRAINT_RE = re.compile(
+    r"^\s*CONSTRAINT\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+(CHECK|ASSUME)\s+(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -265,3 +272,26 @@ def parse_projections_from_create_table_query(
             continue
         projections.append(ProjectionDefinitionShape(name=name, query=query_text))
     return projections
+
+
+def parse_constraints_from_create_table_query(
+    query: str | None,
+) -> list[TableConstraintDefinition]:
+    """``CONSTRAINT name CHECK|ASSUME expr`` entries of the column list."""
+    body = _extract_create_table_body(query)
+    if body is None:
+        return []
+    constraints: list[TableConstraintDefinition] = []
+    for part in split_top_level_comma(body):
+        match = _CONSTRAINT_RE.match(part)
+        if match is None:
+            continue
+        name = (match.group(1) or match.group(2) or "").strip()
+        expression = normalize_sql_fragment(match.group(4) or "")
+        if not name or not expression:
+            continue
+        if (match.group(3) or "").upper() == "CHECK":
+            constraints.append(TableConstraintDefinition(name=name, check=expression))
+        else:
+            constraints.append(TableConstraintDefinition(name=name, assume=expression))
+    return constraints

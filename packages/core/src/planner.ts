@@ -10,14 +10,17 @@ import type {
   MigrationPlan,
   RiskLevel,
   SchemaDefinition,
+  TableConstraintDefinition,
   TableDefinition,
   ValidationIssue,
 } from './model.js'
 import {
   renderAlterAddColumn,
+  renderAlterAddConstraint,
   renderAlterAddIndex,
   renderAlterAddProjection,
   renderAlterDropColumn,
+  renderAlterDropConstraint,
   renderAlterDropIndex,
   renderAlterDropProjection,
   renderAlterModifyColumn,
@@ -31,6 +34,7 @@ import {
   renderColumnType,
   toCreateSQL,
 } from './sql.js'
+import { constraintKind } from './constraint.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
@@ -512,6 +516,29 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     })
   }
 
+  const constraintDiff = diffByName(
+    oldDef.constraints ?? [],
+    newDef.constraints ?? [],
+    (constraint) => constraint.name,
+    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+  )
+  const addConstraint = (constraint: TableConstraintDefinition): MigrationOperation => ({
+    type: 'alter_table_add_constraint',
+    key: `table:${newDef.database}.${newDef.name}:constraint:${constraint.name}`,
+    risk: 'caution',
+    sql: renderAlterAddConstraint(newDef, constraint),
+    warning: constraintWarning(newDef, constraint),
+  })
+  const dropConstraint = (name: string): MigrationOperation => ({
+    type: 'alter_table_drop_constraint',
+    key: `table:${newDef.database}.${newDef.name}:constraint:${name}`,
+    risk: 'caution',
+    sql: renderAlterDropConstraint(newDef, name),
+  })
+  for (const constraint of constraintDiff.added) ops.push(addConstraint(constraint))
+  for (const { name, newItem } of constraintDiff.changed) ops.push(dropConstraint(name), addConstraint(newItem))
+  for (const constraint of constraintDiff.removed) ops.push(dropConstraint(constraint.name))
+
   const projectionDiff = diffByName(
     oldDef.projections ?? [],
     newDef.projections ?? [],
@@ -581,6 +608,13 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     operations: ops,
     renameSuggestions: inferColumnRenameSuggestions(newDef, addedColumns, droppedColumns),
   }
+}
+
+function constraintWarning(def: TableDefinition, constraint: TableConstraintDefinition): string {
+  const subject = `Constraint ${constraint.name} on ${def.database}.${def.name}`
+  return constraintKind(constraint) === 'CHECK'
+    ? `${subject} applies to new INSERTs only: ClickHouse does not validate existing rows, and INSERTs with a row that fails the CHECK are rejected. Make sure every writer produces valid rows before applying.`
+    : `${subject} is an ASSUME constraint: ClickHouse never validates it, and queries optimized with optimize_using_constraints trust it, so an assumption that does not hold returns wrong results.`
 }
 
 export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
@@ -674,6 +708,15 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
   }
 }
 
+// Skip indexes, constraints and projections that read a column block its DROP
+// COLUMN (and a changed column's MODIFY), so their drops run before every other
+// ALTER. Their adds keep key order, which puts them after the column ALTERs.
+const DEPENDENT_DROPS: ReadonlySet<MigrationOperation['type']> = new Set([
+  'alter_table_drop_index',
+  'alter_table_drop_constraint',
+  'alter_table_drop_projection',
+])
+
 // drop_* 0, alter_* 1, create_database 2, create_table 3, create_view 4, other creates 5.
 function operationRank(op: MigrationOperation): number {
   if (op.type.startsWith('drop_')) return 0
@@ -687,7 +730,11 @@ function operationRank(op: MigrationOperation): number {
 // The sort is stable, so operations that share a key keep the order diffTables
 // pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
 function compareOperations(a: MigrationOperation, b: MigrationOperation): number {
-  return operationRank(a) - operationRank(b) || a.key.localeCompare(b.key)
+  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || a.key.localeCompare(b.key)
+}
+
+function alterRank(op: MigrationOperation): number {
+  return DEPENDENT_DROPS.has(op.type) ? 0 : 1
 }
 
 /**

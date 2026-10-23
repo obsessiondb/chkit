@@ -248,10 +248,10 @@ describe('@chkit/core smoke', () => {
 
     const plan = planDiff(oldDefs, newDefs)
     expect(plan.operations.map((op) => op.type)).toEqual([
-      'alter_table_add_projection',
       'alter_table_drop_projection',
+      'alter_table_add_projection',
     ])
-    expect(plan.operations[0]?.sql).toContain(
+    expect(plan.operations[1]?.sql).toContain(
       'ADD PROJECTION IF NOT EXISTS `p_add` INDEX (source, id) TYPE basic'
     )
   })
@@ -564,10 +564,10 @@ describe('@chkit/core planner v1', () => {
 
     const plan = planDiff(oldDefs, newDefs)
     expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_drop_index',
+      'alter_table_drop_index',
       'alter_table_drop_column',
       'alter_table_modify_column',
-      'alter_table_drop_index',
-      'alter_table_drop_index',
       'alter_table_add_index',
       'alter_table_modify_setting',
       'alter_table_reset_setting',
@@ -831,9 +831,9 @@ describe('@chkit/core planner v1', () => {
     const plan = planDiff(oldDefs, newDefs)
     expect(plan.operations.map((op) => op.type)).toEqual([
       'alter_table_drop_projection',
-      'alter_table_add_projection',
-      'alter_table_add_projection',
       'alter_table_drop_projection',
+      'alter_table_add_projection',
+      'alter_table_add_projection',
     ])
     expect(plan.riskSummary).toEqual({
       safe: 0,

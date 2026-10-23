@@ -123,6 +123,38 @@ export interface TextSkipIndex extends Omit<SkipIndexBase, 'granularity'> {
 }
 
 /**
+ * Vector similarity (approximate nearest neighbour) index, rendered as
+ * `vector_similarity(method, distanceFunction[, dimensions][, quantization,
+ * hnswMaxConnectionsPerLayer, hnswCandidateListSizeForConstruction])`.
+ * `dimensions` is required from ClickHouse 25.4 and rejected before it; the
+ * three tuning fields are positional, so set all of them or none. Granularity
+ * defaults to 100000000 (one index per part), as ClickHouse recommends.
+ */
+export interface VectorSimilaritySkipIndex extends Omit<SkipIndexBase, 'granularity'> {
+  type: 'vector_similarity'
+  method: 'hnsw'
+  /** `dotProduct` requires ClickHouse 26.4+. */
+  distanceFunction: 'L2Distance' | 'cosineDistance' | 'dotProduct'
+  dimensions?: number
+  /** `b1` (binary) requires ClickHouse 25.8+, `cosineDistance` and dimensions divisible by 8. */
+  quantization?: 'f64' | 'f32' | 'f16' | 'bf16' | 'i8' | 'b1'
+  hnswMaxConnectionsPerLayer?: number
+  hnswCandidateListSizeForConstruction?: number
+  granularity?: number
+}
+
+/**
+ * Escape hatch for a skip index type chkit has no structured form for, such as
+ * `sparse_grams(3, 100, 512, 1, 3, 0)`: `rawType` is rendered verbatim after
+ * `TYPE`. `chkit pull` emits it for any type (or argument list) it cannot
+ * express structurally, so nothing is lost on a round trip.
+ */
+export interface RawSkipIndex extends SkipIndexBase {
+  type: 'raw'
+  rawType: string
+}
+
+/**
  * Skip index with structured, discriminated args per type. Arg signatures
  * come from ClickHouse MergeTree docs:
  * - `minmax` — no args
@@ -131,11 +163,13 @@ export interface TextSkipIndex extends Omit<SkipIndexBase, 'granularity'> {
  * - `tokenbf_v1(size_bytes, n_hash, seed)` — 3 required ints
  * - `ngrambf_v1(n, size_bytes, n_hash, seed)` — 4 required ints
  * - `text(tokenizer = ..., ...)` — named parameters, automatic granularity
+ * - `vector_similarity(...)` — see {@link VectorSimilaritySkipIndex}
+ * - anything else — `type: 'raw'`, see {@link RawSkipIndex}
  *
  * ClickHouse 26+ requires `set(0)` not bare `set`; `maxRows` is required
  * so this is encoded naturally.
  */
-export type SkipIndexDefinition = TextSkipIndex | SkipIndexBase &
+export type SkipIndexDefinition = TextSkipIndex | VectorSimilaritySkipIndex | RawSkipIndex | SkipIndexBase &
   (
     | { type: 'minmax' }
     | { type: 'set'; maxRows: number }
@@ -175,6 +209,16 @@ export interface IndexProjectionDefinition {
 
 export type ProjectionDefinition = SelectProjectionDefinition | IndexProjectionDefinition
 
+/**
+ * A table constraint. `check` renders `CONSTRAINT name CHECK expr`: ClickHouse
+ * rejects INSERTs whose rows fail it, but does not validate existing rows when
+ * the constraint is added. `assume` renders `CONSTRAINT name ASSUME expr`: never
+ * validated, used by the optimizer (`optimize_using_constraints`) as a fact.
+ */
+export type TableConstraintDefinition =
+  | { name: string; check: string; assume?: never }
+  | { name: string; assume: string; check?: never }
+
 // biome-ignore lint/suspicious/noEmptyInterface: must be an interface for declaration merging by plugins
 export interface TablePlugins {}
 
@@ -193,6 +237,7 @@ export interface TableDefinition {
   settings?: Record<string, string | number | boolean>
   indexes?: SkipIndexDefinition[]
   projections?: ProjectionDefinition[]
+  constraints?: TableConstraintDefinition[]
   comment?: string
   plugins?: TablePlugins
 }
@@ -204,7 +249,7 @@ export type TableInput = Omit<TableDefinition, 'kind' | 'primaryKey'> & {
 
 /** Kafka queues do not have MergeTree sorting/storage clauses. */
 export type KafkaTableInput = Omit<TableDefinition,
-  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections'
+  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections' | 'constraints'
 > & {
   engine: 'Kafka' | `Kafka(${string})`
   primaryKey?: never
@@ -214,6 +259,7 @@ export type KafkaTableInput = Omit<TableDefinition,
   ttl?: never
   indexes?: never
   projections?: never
+  constraints?: never
 }
 
 /**
@@ -443,6 +489,8 @@ export type MigrationOperationType =
   | 'alter_table_drop_projection'
   | 'alter_table_reset_setting'
   | 'alter_table_modify_ttl'
+  | 'alter_table_add_constraint'
+  | 'alter_table_drop_constraint'
   | 'create_dictionary'
   | 'drop_dictionary'
   | 'rename_dictionary'
@@ -486,6 +534,10 @@ export type ValidationIssueCode =
   | 'duplicate_column_name'
   | 'duplicate_index_name'
   | 'text_index_invalid_parameters'
+  | 'vector_index_invalid_parameters'
+  | 'raw_index_invalid_type'
+  | 'duplicate_constraint_name'
+  | 'constraint_invalid'
   | 'duplicate_projection_name'
   | 'projection_ambiguous_kind'
   | 'projection_empty_index'

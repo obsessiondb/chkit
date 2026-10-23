@@ -1,4 +1,6 @@
 import {
+  constraintExpression,
+  constraintKind,
   normalizeEngine as coreNormalizeEngine,
   isKafkaEngine,
   parseKafkaSettings,
@@ -17,7 +19,10 @@ import {
   type ProjectionDefinition,
   type SkipIndexDefinition,
   textIndexFingerprint,
+  renderVectorIndexType,
+  type TableConstraintDefinition,
   type TableDefinition,
+  vectorIndexGranularity,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
@@ -52,6 +57,7 @@ type TableDriftReasonCode =
   | 'partition_by_mismatch'
   | 'unique_key_mismatch'
   | 'projection_mismatch'
+  | 'constraint_mismatch'
 
 type ObjectDriftReasonCode = 'missing_object' | 'extra_object' | 'kind_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
@@ -80,6 +86,7 @@ interface ActualTableShape {
   uniqueKey?: string
   partitionBy?: string
   projections: ProjectionDefinition[]
+  constraints?: TableConstraintDefinition[]
 }
 
 export interface TableDriftDetail {
@@ -97,6 +104,7 @@ export interface TableDriftDetail {
   uniqueKeyMismatch: boolean
   partitionByMismatch: boolean
   projectionDiffs: string[]
+  constraintDiffs: string[]
 }
 
 interface DriftReasonSummary {
@@ -232,6 +240,10 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   switch (index.type) {
     case 'text':
       return textIndexFingerprint(index)
+    case 'vector_similarity':
+      return renderVectorIndexType(index)
+    case 'raw':
+      return normalizeSQLFragment(index.rawType)
     case 'minmax':
       return 'minmax'
     case 'set':
@@ -269,9 +281,20 @@ function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCano
   if (index.type === 'text') return textIndexFingerprint(index)
   return [
     `expr=${canonicalizeExpression(indexExpressionBase(index), canonicalizer)}`,
-    `type=${renderIndexTypeFingerprint(index)}`,
-    `granularity=${index.granularity}`,
+    // A raw type is compared as ClickHouse formats it, so a structured index on
+    // one side and the same type written raw on the other compare equal.
+    `type=${canonicalizeExpression(renderIndexTypeFingerprint(index), canonicalizer)}`,
+    `granularity=${index.type === 'vector_similarity' ? vectorIndexGranularity(index) : index.granularity}`,
   ].join('|')
+}
+
+// ClickHouse re-formats a constraint expression when it stores it, e.g.
+// `s IN ('a','b') AND (id+1)*2 > 0` comes back as
+// `(s IN ('a', 'b')) AND (((id + 1) * 2) > 0)`, so both sides go through the
+// canonicalizer.
+function normalizeConstraintShape(constraint: TableConstraintDefinition, canonicalizer?: SqlCanonicalizer): string {
+  const expression = canonicalizeExpression(normalizeSQLFragment(constraintExpression(constraint)), canonicalizer)
+  return `${constraintKind(constraint)} ${expression}`
 }
 
 function normalizeProjectionShape(
@@ -360,6 +383,12 @@ export function collectTableSqlFragments(
 
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
     if (index.type !== 'text') expressions.push(indexExpressionBase(index))
+  }
+  for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
+    if (index.type !== 'text') expressions.push(renderIndexTypeFingerprint(index))
+  }
+  for (const constraint of [...(expected.constraints ?? []), ...(actual.constraints ?? [])]) {
+    expressions.push(normalizeSQLFragment(constraintExpression(constraint)))
   }
   for (const ttl of [expected.ttl, actual.ttl]) {
     if (ttl) expressions.push(normalizeSQLFragment(ttl))
@@ -451,6 +480,11 @@ export function compareTableShape(
   )
   const projectionDiffs = diffNamedShapeMaps(expectedProjections, actualProjections)
 
+  const constraintDiffs = diffNamedShapeMaps(
+    new Map((expected.constraints ?? []).map((item) => [item.name, normalizeConstraintShape(item, canonicalizer)])),
+    new Map((actual.constraints ?? []).map((item) => [item.name, normalizeConstraintShape(item, canonicalizer)]))
+  )
+
   const reasonCodes: TableDriftReasonCode[] = []
   if (missingColumns.length > 0) reasonCodes.push('missing_column')
   if (extraColumns.length > 0) reasonCodes.push('extra_column')
@@ -464,6 +498,7 @@ export function compareTableShape(
   if (uniqueKeyMismatch) reasonCodes.push('unique_key_mismatch')
   if (partitionByMismatch) reasonCodes.push('partition_by_mismatch')
   if (projectionDiffs.length > 0) reasonCodes.push('projection_mismatch')
+  if (constraintDiffs.length > 0) reasonCodes.push('constraint_mismatch')
 
   if (reasonCodes.length === 0) return null
 
@@ -482,5 +517,6 @@ export function compareTableShape(
     uniqueKeyMismatch,
     partitionByMismatch,
     projectionDiffs,
+    constraintDiffs,
   }
 }

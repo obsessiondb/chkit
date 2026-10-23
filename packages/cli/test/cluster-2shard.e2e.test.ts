@@ -136,6 +136,89 @@ describe('chkit cluster mode (ON CLUSTER) — multi-shard journal', () => {
     await executor.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
     await executor.close()
   }, 120_000)
+
+  // #278 on ClickHouse 25.3: the vector index takes no dimensions argument and is
+  // still experimental, so the connection enables it through a URL setting (the
+  // documented opt-in); chkit itself sets no experimental setting.
+  test('vector index and constraints migrate ON CLUSTER and read back on every node', async () => {
+    const table = `${createPrefix('twoshard_vec')}vectors`
+    const journalTable = createJournalTableName('twoshard_vec')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const vectorUrl = (url: string) => `${url}/?clickhouse_setting_allow_experimental_vector_similarity_index=1`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-cluster-2s-vec-'))
+    const schemaPath = join(dir, 'schema.ts')
+    const configS1 = join(dir, 'clickhouse.config.ts')
+    const configS2 = join(dir, 'clickhouse.shard2.ts')
+    const writeSchema = (index: string, constraints: string) =>
+      writeFile(
+        schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\nexport default schema(table({\n  database: '${DATABASE}', name: '${table}', engine: \"ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')\",\n  columns: [{ name: 'id', type: 'UInt64' }, { name: 's', type: 'String' }, { name: 'embedding', type: 'Array(Float32)' }],\n  primaryKey: ['id'], orderBy: ['id'],\n  indexes: [${index}],\n  constraints: [${constraints}],\n}))\n`,
+        'utf8',
+      )
+    const run = (label: string, args: string[]) => {
+      const result = runCli(dir, args, cliEnv)
+      expect(result.exitCode, formatTestDiagnostic(label, result)).toBe(0)
+      return JSON.parse(result.stdout)
+    }
+    const executors = NODES.map(executorFor)
+    const createQueries = async () =>
+      Promise.all(executors.map(async (node) => (await node.query<{ q: string }>(
+        `SELECT create_table_query AS q FROM system.tables WHERE database = '${DATABASE}' AND name = '${table}'`,
+      ))[0]?.q ?? ''))
+
+    await writeSchema(
+      "{ name: 'e', expression: 'embedding', type: 'vector_similarity', method: 'hnsw', distanceFunction: 'L2Distance' }",
+      "{ name: 'allowed', check: \"s IN ('a','b') AND (id+1)*2 > 0\" }, { name: 'positive-id', assume: 'id > 0' }",
+    )
+    await writeFile(configS1, configFor(schemaPath, dir, vectorUrl(SHARD1_ENDPOINT)), 'utf8')
+    await writeFile(configS2, configFor(schemaPath, dir, vectorUrl(SHARD2_ENDPOINT)), 'utf8')
+
+    try {
+      run('generate init', ['generate', '--config', configS1, '--name', 'init', '--json'])
+      run('migrate init', ['migrate', '--config', configS1, '--execute', '--json'])
+      for (const node of executors) await waitForTable(node, DATABASE, table)
+      for (const query of await createQueries()) {
+        expect(query).toContain("TYPE vector_similarity('hnsw', 'L2Distance')")
+        expect(query).toContain("CONSTRAINT allowed CHECK (s IN ('a', 'b')) AND (((id + 1) * 2) > 0)")
+        expect(query).toContain('CONSTRAINT `positive-id` ASSUME id > 0')
+      }
+      const drift = run('drift shard2', ['drift', '--table', `${DATABASE}.${table}`, '--config', configS2, '--json'])
+      expect(drift.drifted, JSON.stringify(drift.tableDrift)).toBe(false)
+
+      // Change the index tuning and the CHECK, drop the ASSUME.
+      await writeSchema(
+        "{ name: 'e', expression: 'embedding', type: 'vector_similarity', method: 'hnsw', distanceFunction: 'cosineDistance', quantization: 'f32', hnswMaxConnectionsPerLayer: 16, hnswCandidateListSizeForConstruction: 64 }",
+        "{ name: 'allowed', check: \"s IN ('a','b','c')\" }",
+      )
+      const plan = run('generate plan', ['generate', '--config', configS1, '--dryrun', '--json'])
+      expect(plan.operations.map((op: { sql: string }) => op.sql)).toEqual([
+        `ALTER TABLE ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' DROP CONSTRAINT IF EXISTS \`allowed\`;`,
+        `ALTER TABLE ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' DROP CONSTRAINT IF EXISTS \`positive-id\`;`,
+        `ALTER TABLE ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' DROP INDEX IF EXISTS \`e\`;`,
+        `ALTER TABLE ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' ADD CONSTRAINT IF NOT EXISTS \`allowed\` CHECK s IN ('a','b','c');`,
+        `ALTER TABLE ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' ADD INDEX IF NOT EXISTS \`e\` (embedding) TYPE vector_similarity('hnsw', 'cosineDistance', 'f32', 16, 64) GRANULARITY 100000000;`,
+      ])
+      run('generate change', ['generate', '--config', configS1, '--name', 'change', '--json'])
+      run('migrate change', ['migrate', '--config', configS1, '--execute', '--json'])
+      for (const query of await createQueries()) {
+        expect(query).toContain("TYPE vector_similarity('hnsw', 'cosineDistance', 'f32', 16, 64)")
+        expect(query).toContain("CONSTRAINT allowed CHECK s IN ('a', 'b', 'c')")
+        expect(query).not.toContain('positive-id')
+      }
+      const driftAfter = run('drift shard2 after change', ['drift', '--table', `${DATABASE}.${table}`, '--config', configS2, '--json'])
+      expect(driftAfter.drifted, JSON.stringify(driftAfter.tableDrift)).toBe(false)
+      // The CHECK is enforced on a shard-2 replica.
+      await expect(
+        (executors[3] as ReturnType<typeof executorFor>).command(
+          `INSERT INTO ${DATABASE}.${table} VALUES (1, 'z', [0.1, 0.2])`,
+        ),
+      ).rejects.toThrow(/allowed/)
+    } finally {
+      const cleanup = executors[0] as ReturnType<typeof executorFor>
+      await cleanup.command(`DROP TABLE IF EXISTS ${DATABASE}.${table} ON CLUSTER '${CLUSTER}' SYNC`)
+      await cleanup.command(`DROP TABLE IF EXISTS ${DATABASE}.\`${journalTable}\` ON CLUSTER '${CLUSTER}' SYNC`)
+    }
+  }, 120_000)
 })
 
 describe('chkit cluster mode (ON CLUSTER) — backfill copy under a widened-asterisk profile (#243)', () => {

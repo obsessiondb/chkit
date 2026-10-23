@@ -403,6 +403,7 @@ function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefini
     ...(Object.keys(table.settings).length > 0 ? { settings: isKafkaEngine(table.engine ?? '') ? parseKafkaSettings(table.settings) : table.settings } : {}),
     ...(table.indexes.length > 0 ? { indexes: table.indexes } : {}),
     ...(table.projections.length > 0 ? { projections: table.projections } : {}),
+    ...(table.constraints && table.constraints.length > 0 ? { constraints: table.constraints } : {}),
   }
 }
 

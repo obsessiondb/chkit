@@ -11,7 +11,7 @@ This document covers practical usage of `pull`. In TypeScript it is an optional 
 
 ## What it does
 
-- Connects to a live ClickHouse instance and introspects table metadata (columns, engines, indexes, projections, partitioning, TTL, settings).
+- Connects to a live ClickHouse instance and introspects table metadata (columns, engines, indexes, projections, constraints, partitioning, TTL, settings).
 - Introspects views and materialized views (including `TO` clause parsing).
 - Introspects dictionaries (attributes — including `HIERARCHICAL`/`BIDIRECTIONAL`/`INJECTIVE`/`IS_OBJECT_ID` modifiers — primary key, `SOURCE`/`LAYOUT`/`LIFETIME`/`RANGE`/`SETTINGS`), preserving ClickHouse's `[HIDDEN]` password redaction — see [Credential handling](#credential-handling-hidden-passwords).
 - Generates a deterministic schema file using the chkit builders — TypeScript (`@chkit/core`) or Python (`chkit`).
@@ -158,7 +158,7 @@ export default schema(app_events, app_events_view, app_events_mv)
   </TabItem>
 </Tabs>
 
-Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, and `projections` when present in the source metadata.
+Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, `projections`, and `constraints` when present in the source metadata. An index type with no structured DSL form (or arguments the structured form cannot express exactly) is written as a [raw index](/schema/dsl-reference/#raw-indexes) that carries ClickHouse's type verbatim, so the pulled schema recreates the same index. Constraint expressions are written as ClickHouse stores them, e.g. `(s IN ('a', 'b')) AND (id > 0)`.
 
 ## Credential handling (`[HIDDEN]` passwords)
 

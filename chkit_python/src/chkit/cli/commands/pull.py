@@ -66,9 +66,11 @@ from chkit.core.model import (
     SkipIndexBloomFilter,
     SkipIndexMinmax,
     SkipIndexNgramBF,
+    SkipIndexRaw,
     SkipIndexSet,
     SkipIndexText,
     SkipIndexTokenBF,
+    SkipIndexVectorSimilarity,
     SQLExpression,
     TableDefinition,
     TableRef,
@@ -103,6 +105,8 @@ def _introspected_table_to_definition(
         | SkipIndexTokenBF
         | SkipIndexNgramBF
         | SkipIndexText
+        | SkipIndexVectorSimilarity
+        | SkipIndexRaw
         | dict[str, object]
     ] = list(item.indexes)
 
@@ -126,6 +130,7 @@ def _introspected_table_to_definition(
         settings=settings or None,
         indexes=indexes or None,
         projections=list(item.projections) or None,
+        constraints=list(item.constraints or []) or None,
     )
 
 

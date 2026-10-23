@@ -172,7 +172,7 @@ them for [Distributed tables](#distributed-tables) and other engines without key
 ### Optional fields
 
 For [Kafka tables](/schema/kafka/), omit `primaryKey` and `orderBy`. Kafka also
-rejects storage clauses (`partitionBy`, `uniqueKey`, `ttl`, indexes, projections)
+rejects storage clauses (`partitionBy`, `uniqueKey`, `ttl`, indexes, projections, constraints)
 and column defaults. Its setting strings are escaped SQL literals.
 
 | Field | Type | Description |
@@ -183,6 +183,7 @@ and column defaults. Its setting strings are escaped SQL literals.
 | `settings` | `Record<string, string \| number \| boolean>` | Table-level settings |
 | `indexes` | `SkipIndexDefinition[]` | Skip indexes (see [Skip indexes](#skip-indexes)) |
 | `projections` | `ProjectionDefinition[]` | Projections (see [Projections](#projections)) |
+| `constraints` | `TableConstraintDefinition[]` | `CHECK` and `ASSUME` constraints (see [Constraints](#constraints)) |
 | `comment` | `string` | Table comment |
 | `renamedFrom` | `{ database?: string; name: string }` | Previous identity for rename tracking (see [Rename support](#rename-support)) |
 | `plugins` | `TablePlugins` | Per-table plugin configuration (see [Plugin configuration](#plugin-configuration)) |
@@ -547,8 +548,8 @@ Each entry in the `indexes` array is a `SkipIndexDefinition`. The shared base fi
 |-------|------|-------------|
 | `name` | `string` | Index name |
 | `expression` | `string` | Indexed expression |
-| `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1' \| 'text'` | Index type |
-| `granularity` | `number` | Required for other indexes; optional and ignored for `text`, which always uses `100000000` |
+| `type` | `'minmax' \| 'set' \| 'bloom_filter' \| 'tokenbf_v1' \| 'ngrambf_v1' \| 'text' \| 'vector_similarity' \| 'raw'` | Index type |
+| `granularity` | `number` | Required for most indexes; optional for `vector_similarity` (defaults to `100000000`); optional and ignored for `text`, which always uses `100000000` |
 
 Type-specific fields:
 
@@ -559,6 +560,8 @@ Type-specific fields:
 | `bloom_filter` | — | `falsePositiveRate: number` | Defaults to `0.025` when omitted |
 | `tokenbf_v1` | `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `tokenbf_v1(size_bytes, n_hash, seed)` |
 | `ngrambf_v1` | `ngramSize`, `sizeBytes`, `hashFunctions`, `randomSeed` (all `number`) | — | Maps to `ngrambf_v1(n, size_bytes, n_hash, seed)` |
+| `vector_similarity` | `method`, `distanceFunction` | `dimensions`, `quantization`, `hnswMaxConnectionsPerLayer`, `hnswCandidateListSizeForConstruction` | See [Vector similarity indexes](#vector-similarity-indexes) |
+| `raw` | `rawType: string` | — | Any other index type, rendered verbatim after `TYPE` (see [Raw indexes](#raw-indexes)) |
 
 ### Full-text indexes
 
@@ -597,8 +600,8 @@ Basic text indexes and tuning options are tested against ClickHouse 26.3 and 26.
 The newer `postprocessor` and `supportPhraseSearch` options are exercised on 26.8;
 26.2 availability of the index does not imply availability of every later option.
 ClickHouse remains responsible for validating tokenizer/function availability and
-server-specific parameter limits. Pull fails with an explicit error for unknown
-text-index parameters instead of silently discarding them.
+server-specific parameter limits. Pull keeps a text index with parameters it
+does not know as a [raw index](#raw-indexes) instead of silently discarding them.
 
 Avoid column names that are also SQL literals (`true`, `false`, `inf`, `infinity`,
 or `nan`) in text-index expressions on older servers. ClickHouse 26.3 can remove
@@ -646,9 +649,136 @@ queryable before materialization.
         },
     ]
     ```
-    Model classes are importable when dicts feel too loose: `SkipIndexMinmax`, `SkipIndexSet`, `SkipIndexBloomFilter`, `SkipIndexTokenBF`, `SkipIndexNgramBF`, `SkipIndexText`.
+    Model classes are importable when dicts feel too loose: `SkipIndexMinmax`, `SkipIndexSet`, `SkipIndexBloomFilter`, `SkipIndexTokenBF`, `SkipIndexNgramBF`, `SkipIndexText`, `SkipIndexVectorSimilarity`, `SkipIndexRaw`.
   </TabItem>
 </Tabs>
+
+### Vector similarity indexes
+
+`type: 'vector_similarity'` declares an approximate nearest-neighbour (HNSW)
+index on an `Array(Float32)`, `Array(Float64)` or `Array(BFloat16)` column. It
+renders `vector_similarity(method, distanceFunction[, dimensions][, quantization,
+hnswMaxConnectionsPerLayer, hnswCandidateListSizeForConstruction])`.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `method` | `'hnsw'` | Required. The only method ClickHouse supports |
+| `distanceFunction` | `'L2Distance' \| 'cosineDistance' \| 'dotProduct'` | Required. `dotProduct` needs ClickHouse 26.4+ |
+| `dimensions` | `number` | Vector length. Required on ClickHouse 25.4+; omit it on older servers, which take no dimensions argument |
+| `quantization` | `'f64' \| 'f32' \| 'f16' \| 'bf16' \| 'i8' \| 'b1'` | Stored vector precision. `b1` (binary, ClickHouse 25.8+) requires `cosineDistance` and dimensions divisible by 8 |
+| `hnswMaxConnectionsPerLayer` | `number` | `0` (library default) or at least `2` |
+| `hnswCandidateListSizeForConstruction` | `number` | Non-negative integer; `0` is the library default |
+| `granularity` | `number` | Defaults to `100000000`, one index per part, as ClickHouse recommends |
+
+The three tuning fields are positional arguments in ClickHouse, so set all three
+or none; omitted, ClickHouse uses `bf16`, `32` and `128`.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    indexes: [{
+      name: 'embedding_hnsw',
+      expression: 'embedding',
+      type: 'vector_similarity',
+      method: 'hnsw',
+      distanceFunction: 'cosineDistance',
+      dimensions: 512,
+      // optional, all three or none:
+      quantization: 'bf16',
+      hnswMaxConnectionsPerLayer: 32,
+      hnswCandidateListSizeForConstruction: 128,
+    }]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    indexes=[{
+        "name": "embedding_hnsw",
+        "expression": "embedding",
+        "type": "vector_similarity",
+        "method": "hnsw",
+        "distanceFunction": "cosineDistance",
+        "dimensions": 512,
+    }]
+    ```
+    Or `SkipIndexVectorSimilarity(name=..., expression=..., method="hnsw", distance_function="cosineDistance", dimensions=512)`.
+  </TabItem>
+</Tabs>
+
+Vector search is generally available from ClickHouse 25.8. On older servers
+ClickHouse rejects the index unless the setting
+`allow_experimental_vector_similarity_index = 1` (25.7: `enable_vector_similarity_index`)
+is active for the connection. chkit never sets experimental settings itself:
+enable it in the settings profile of the user chkit connects as. The TypeScript
+CLI also passes `clickhouse_setting_<name>=<value>` query parameters on
+`clickhouse.url` through to the server, e.g.
+`http://host:8123/?clickhouse_setting_allow_experimental_vector_similarity_index=1`.
+`chkit-py` ignores URL parameters, so use the profile there.
+
+A changed vector index is dropped and re-added. As with other skip indexes, the
+new index covers new parts only until you run `MATERIALIZE INDEX`.
+
+### Raw indexes
+
+`type: 'raw'` declares an index type chkit has no structured form for, such as
+`sparse_grams` or an option a newer ClickHouse adds. `rawType` is rendered
+verbatim after `TYPE`, and `granularity` is required.
+
+```ts
+indexes: [{ name: 'idx_grams', expression: 'body', type: 'raw', rawType: 'sparse_grams(3, 20, 256, 2, 0)', granularity: 1 }]
+```
+
+`chkit pull` and `chkit drift` read every index type. A type, or an argument
+list, that the structured forms cannot express exactly (for example `set`
+without a row limit, or a text index parameter chkit does not know) comes back
+as a raw index carrying ClickHouse's `type_full`, so pull never rewrites an index
+into a different one. Drift compares the type the way ClickHouse formats it, so a
+structured index and the same type written raw do not drift.
+
+## Constraints
+
+Each entry in the `constraints` array is a `TableConstraintDefinition` with a
+`name` and exactly one of `check` or `assume`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Constraint name |
+| `check` | `string` | Boolean SQL expression. ClickHouse rejects every INSERT with a row for which it is false |
+| `assume` | `string` | Boolean SQL expression ClickHouse never checks; with `optimize_using_constraints` the optimizer trusts it |
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    constraints: [
+      { name: 'dimension', check: 'length(embedding) = 512' },
+      { name: 'positive_id', assume: 'id > 0' },
+    ]
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    constraints=[
+        {"name": "dimension", "check": "length(embedding) = 512"},
+        {"name": "positive_id", "assume": "id > 0"},
+    ]
+    ```
+    Or `TableConstraintDefinition(name="dimension", check="length(embedding) = 512")`.
+  </TabItem>
+</Tabs>
+
+Constraints render inside `CREATE TABLE` after the indexes. A new constraint is
+`ALTER TABLE ... ADD CONSTRAINT`, a removed one `DROP CONSTRAINT`, and a changed
+expression or kind drops and re-adds it. Every constraint operation has
+`risk=caution` and carries a warning: ClickHouse does not validate existing rows
+against a new `CHECK`, but rejects later INSERTs that violate it, and a wrong
+`ASSUME` returns wrong query results. In a migration that also drops a column,
+chkit drops the constraints and skip indexes first, because ClickHouse refuses to
+drop a column they read.
+
+ClickHouse stores the expression in its own formatting
+(`s IN ('a','b') AND (id+1)*2 > 0` is stored as
+`(s IN ('a', 'b')) AND (((id + 1) * 2) > 0)`). `chkit drift` formats both sides
+through ClickHouse, so a different spelling of the same expression is not drift.
 
 ## Projections
 
@@ -1109,6 +1239,10 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Duplicate column names** -- repeated column name within a table
 - **Duplicate index names** -- repeated index name within a table
 - **Duplicate projection names** -- repeated projection name within a table
+- **Duplicate constraint names** (`duplicate_constraint_name`) -- repeated constraint name within a table
+- **Invalid constraint** (`constraint_invalid`) -- a constraint sets both `check` and `assume`, neither, or an empty expression
+- **Invalid vector similarity index** (`vector_index_invalid_parameters`) -- an unknown `method`, `distanceFunction` or `quantization`, a non-positive `dimensions` or `granularity`, only some of the three tuning fields, `hnswMaxConnectionsPerLayer: 1`, or `b1` quantization without `cosineDistance` or with dimensions not divisible by 8
+- **Raw index without a type** (`raw_index_invalid_type`) -- a `raw` index with an empty `rawType`
 - **Ambiguous projection kind** (`projection_ambiguous_kind`) -- a projection sets both `query` and `index`; use one or the other (see [Projections](#projections))
 - **Empty projection index** (`projection_empty_index`) -- an index-only projection whose `index` expression is empty
 - **Primary key references missing column** -- `primaryKey` includes a bare column name not in `columns` (function expressions like `toDate(ts)` are passed through to ClickHouse unchecked)
@@ -1143,7 +1277,7 @@ When a property changes, chkit determines whether the table can be altered in pl
 
 **Structural** (drop + recreate): `engine`, `primaryKey`, `orderBy`, `partitionBy`, `uniqueKey`
 
-**Alterable** (ALTER in place): columns, indexes, projections, settings, TTL, comment
+**Alterable** (ALTER in place): columns, indexes, projections, constraints, settings, TTL, comment
 
 Views and materialized views always use drop + recreate.
 
