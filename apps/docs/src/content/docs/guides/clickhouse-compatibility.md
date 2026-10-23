@@ -16,8 +16,19 @@ The continuous test suite runs against ObsessionDB, so the `SharedMergeTree`/`Sh
 [Kafka engine tables](/schema/kafka/) support creation, pull, and schema drift,
 validated on self-hosted ClickHouse 25.3 and 26.3. Existing queue changes require
 explicit replacement; generic Kafka column/settings ALTERs are not generated.
-The server must provide the Kafka engine and broker connectivity. Distributed and
-other integration engines remain outside this support scope.
+The server must provide the Kafka engine and broker connectivity.
+
+[Distributed tables](/schema/dsl-reference/#distributed-tables) support creation,
+column ALTERs, pull, and schema drift, validated on open-source ClickHouse 26.3 and
+on a 2-shard ReplicatedMergeTree cluster on 25.3. ObsessionDB has no shards, so the
+[ObsessionDB plugin](/obsessiondb/engine-rewriting/#distributed-tables) rejects
+Distributed tables when targeting it.
+
+chkit renders `PARTITION BY`, `PRIMARY KEY`, and `ORDER BY` only for engines that
+accept them: the `MergeTree` family (including `Replicated*` and `Shared*`) and a few
+others such as `EmbeddedRocksDB`, `KeeperMap`, and `S3`. Tables on `Memory`, `Null`,
+`Log`, `Buffer`, `Merge`, `Distributed`, and similar engines get none, and setting a
+key on them fails validation.
 
 A few schema features depend on the ClickHouse version of your target:
 

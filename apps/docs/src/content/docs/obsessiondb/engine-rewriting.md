@@ -57,6 +57,19 @@ The migration files and `snapshot.json` keep what the flag decided, so pass the 
 
 Only tables are affected. Views and materialized views pass through unchanged.
 
+## Distributed tables
+
+ObsessionDB runs one shared-storage service with no shards: every replica reads the same data, so a [Distributed table](/schema/dsl-reference/#distributed-tables) has nothing to route to, and ObsessionDB users have no grant for the `Distributed` engine. When the target is ObsessionDB (the same detection as above, including `--force-shared-engines`), the plugin rejects every Distributed table in the schema:
+
+- `chkit generate` and `chkit snapshot rebuild` fail before writing a migration.
+- `chkit check` fails with the `obsessiondb_distributed_unsupported` finding.
+
+```
+Table analytics.events uses the Distributed engine, which ObsessionDB does not support: ObsessionDB has no shards, so every replica already reads the same shared storage. Remove the Distributed table from the schema and query or insert into its local table directly.
+```
+
+Against regular ClickHouse the plugin leaves Distributed tables alone.
+
 ## Related
 
 - [Services](/obsessiondb/services/) — the runtime counterpart: route a single command at a specific service with `--service`.

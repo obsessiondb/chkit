@@ -1,6 +1,6 @@
 # chkit-py
 
-The alpha Python implementation of [chkit](https://chkit.obsessiondb.com) — a
+The beta Python implementation of [chkit](https://chkit.obsessiondb.com) — a
 ClickHouse schema management and migration toolkit, written in strict,
 imperative Python. Its API and CLI behavior may change between releases.
 

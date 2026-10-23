@@ -152,4 +152,5 @@ settings are returned in plaintext or redacted; `[HIDDEN]` credentials must be
 resolved before generating SQL. Values evaluated from environment variables in
 schema code are still written into snapshots and migration files.
 
-Distributed and other integration engines are outside this release's scope.
+Other integration engines are outside this release's scope. For sharded clusters, see
+[Distributed tables](/schema/dsl-reference/#distributed-tables).

@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 
 from chkit.core.codec import render_codec
 from chkit.core.column_default import render_default
+from chkit.core.engine import is_merge_tree_engine, supports_sort_order
 from chkit.core.kafka import is_kafka_engine, render_kafka_setting
 from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
@@ -135,15 +136,22 @@ def _render_table_sql(definition: TableDefinition) -> str:
 
     column_names = {column.name for column in definition.columns}
     clauses: list[str] = []
-    if definition.partition_by is not None:
-        clauses.append(f"PARTITION BY {definition.partition_by}")
-    if not is_kafka_engine(definition.engine):
-        clauses.append(
-            f"PRIMARY KEY ({render_key_clause_columns(definition.primary_key, column_names)})"
-        )
-        clauses.append(
-            f"ORDER BY ({render_key_clause_columns(definition.order_by, column_names)})"
-        )
+    # Only engines that support sort order take key clauses; ClickHouse rejects
+    # them on Distributed, Memory, Null, Kafka and the like. MergeTree always
+    # gets PRIMARY KEY/ORDER BY (an empty key is `()`), other engines only the
+    # keys they set.
+    if supports_sort_order(definition.engine):
+        merge_tree = is_merge_tree_engine(definition.engine)
+        if definition.partition_by is not None:
+            clauses.append(f"PARTITION BY {definition.partition_by}")
+        if merge_tree or definition.primary_key:
+            clauses.append(
+                f"PRIMARY KEY ({render_key_clause_columns(definition.primary_key, column_names)})"
+            )
+        if merge_tree or definition.order_by:
+            clauses.append(
+                f"ORDER BY ({render_key_clause_columns(definition.order_by, column_names)})"
+            )
     if definition.unique_key is not None and len(definition.unique_key) > 0:
         clauses.append(
             f"UNIQUE KEY ({render_key_clause_columns(definition.unique_key, column_names)})"

@@ -247,7 +247,8 @@ describe('column expressions', () => {
 			{ partitionBy: 'toYYYYMM(day)' },
 			{ engine: "ReplicatedMergeTree('/t/day', 'day')" },
 			{ ttl: 'day + INTERVAL 1 DAY' },
-			{ engine: 'Distributed(day, default, source, rand())' },
+			// Distributed takes no keys; its arguments name a cluster, not columns.
+			{ engine: 'Distributed(day, default, source, rand())', primaryKey: [], orderBy: [] },
 		]) {
 			expect(messages(kinded('ALIAS', overrides))).toEqual([])
 		}

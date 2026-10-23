@@ -58,6 +58,7 @@ from chkit_plugin_obsessiondb.credentials import (
     save_credentials,
 )
 from chkit_plugin_obsessiondb.engine import (
+    find_distributed_tables,
     is_obsessiondb_host,
     resolve_strip_behavior,
     rewrite_shared_engines,
@@ -176,6 +177,7 @@ __all__ = [
     "derive_org_name",
     "ensure_obsessiondb_plugin_in_source",
     "error_envelope",
+    "find_distributed_tables",
     "get_credentials_path",
     "get_service",
     "get_session",

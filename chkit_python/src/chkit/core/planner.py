@@ -7,6 +7,7 @@ import re
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
+from chkit.core.engine import is_distributed_engine
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
 from chkit.core.model import (
     ChxValidationError,
@@ -378,6 +379,20 @@ def _diff_materialized_view(
     return []
 
 
+def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
+    """Distributed stores no rows, and DROP sends the inserts it still queues
+    to the shards (flush_on_detach, on by default), so recreating one to change
+    its engine arguments loses no data. Every other table loses its rows."""
+    if not is_distributed_engine(old.engine):
+        return "danger"
+    flush_on_detach = (old.settings or {}).get("flush_on_detach")
+    disabled = flush_on_detach is not None and str(flush_on_detach).strip().lower() in (
+        "0",
+        "false",
+    )
+    return "danger" if disabled else "caution"
+
+
 def _diff_tables(
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
@@ -420,7 +435,7 @@ def _diff_tables(
                 MigrationOperation(
                     type="drop_table",
                     key=definition_key(new),
-                    risk="danger",
+                    risk=_recreate_drop_risk(old),
                     sql=f"DROP TABLE IF EXISTS {new.database}.{new.name};",
                 ),
                 MigrationOperation(

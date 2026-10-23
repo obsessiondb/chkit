@@ -1,6 +1,5 @@
 import {
   canonicalizeDefinitions,
-  isKafkaEngine,
   isIndexProjection,
   isRawCodec,
   parseColumnDefault,
@@ -17,6 +16,7 @@ import {
   type SkipIndexDefinition,
   type TableDefinition,
   type ViewDefinition,
+  supportsSortOrder,
 } from '@chkit/core'
 
 export function renderSchemaFile(definitions: SchemaDefinition[]): string {
@@ -82,7 +82,8 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
     lines.push(`    ${renderColumn(column)},`)
   }
   lines.push('  ],')
-  if (!isKafkaEngine(definition.engine)) {
+  // Distributed, Memory, Kafka and other engines without sort order take no keys.
+  if (supportsSortOrder(definition.engine)) {
     lines.push(`  primaryKey: ${renderStringArray(definition.primaryKey)},`)
     lines.push(`  orderBy: ${renderStringArray(definition.orderBy)},`)
   }

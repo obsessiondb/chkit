@@ -172,6 +172,32 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).toContain("export default schema(app_events)")
   })
 
+  test('renders a Distributed table without primaryKey or orderBy (#279)', () => {
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'events',
+        engine: "Distributed('cluster', 'app', 'events_local', rand())",
+        columns: [{ name: 'id', type: 'UInt64' }],
+        primaryKey: [],
+        orderBy: [],
+        settings: { flush_on_detach: '0' },
+      },
+    ])
+
+    expect(content).toContain(`const app_events = table({
+  database: "app",
+  name: "events",
+  engine: "Distributed('cluster', 'app', 'events_local', rand())",
+  columns: [
+    { name: "id", type: "UInt64" },
+  ],
+  settings: {`)
+    expect(content).not.toContain('primaryKey')
+    expect(content).not.toContain('orderBy')
+  })
+
   // #234: canonical definitions carry fn: strings; pulled files show the
   // documented { expression } form.
   test('renders expression defaults as { expression } in either spelling, and literals as literals', () => {

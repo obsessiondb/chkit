@@ -34,7 +34,7 @@ from collections.abc import Sequence
 
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.column_default import parse_column_default
-from chkit.core.kafka import is_kafka_engine
+from chkit.core.engine import supports_sort_order
 from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
@@ -195,7 +195,8 @@ def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
     ]
     lines.extend(f"        {_render_column(column)}," for column in definition.columns)
     lines.append("    ],")
-    if not is_kafka_engine(definition.engine):
+    # Distributed, Memory, Kafka and other engines without sort order take no keys.
+    if supports_sort_order(definition.engine):
         lines.append(f"    primary_key={_render_string_list(definition.primary_key)},")
         lines.append(f"    order_by={_render_string_list(definition.order_by)},")
     if definition.unique_key:

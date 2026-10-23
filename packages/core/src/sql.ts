@@ -13,6 +13,7 @@ import type {
 import { renderCodec } from './codec.js'
 import { renderDefault } from './column-default.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
+import { isMergeTreeEngine, supportsSortOrder } from './engine.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
@@ -79,10 +80,19 @@ function renderTableSQL(def: TableDefinition): string {
 
   const columnNames = new Set(def.columns.map((column) => column.name))
   const clauses: string[] = []
-  if (def.partitionBy) clauses.push(`PARTITION BY ${def.partitionBy}`)
-  if (!isKafkaEngine(def.engine)) {
-    clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey, columnNames)})`)
-    clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy, columnNames)})`)
+  // Only engines that support sort order take key clauses; ClickHouse rejects
+  // them on Distributed, Memory, Null, Kafka and the like. MergeTree always
+  // gets PRIMARY KEY/ORDER BY (an empty key is `()`), other engines only the
+  // keys they set.
+  if (supportsSortOrder(def.engine)) {
+    const mergeTree = isMergeTreeEngine(def.engine)
+    if (def.partitionBy) clauses.push(`PARTITION BY ${def.partitionBy}`)
+    if (mergeTree || def.primaryKey.length > 0) {
+      clauses.push(`PRIMARY KEY (${renderKeyClauseColumns(def.primaryKey, columnNames)})`)
+    }
+    if (mergeTree || def.orderBy.length > 0) {
+      clauses.push(`ORDER BY (${renderKeyClauseColumns(def.orderBy, columnNames)})`)
+    }
   }
   if (def.uniqueKey && def.uniqueKey.length > 0) {
     clauses.push(`UNIQUE KEY (${renderKeyClauseColumns(def.uniqueKey, columnNames)})`)

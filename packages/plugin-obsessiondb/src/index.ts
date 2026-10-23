@@ -1,8 +1,12 @@
-import type {
-	ChxInlinePluginRegistration,
-	ResolvedChxConfig,
-	SchemaDefinition,
+import { resolve } from 'node:path'
+
+import {
+	type ChxInlinePluginRegistration,
+	isDistributedEngine,
+	type ResolvedChxConfig,
+	type SchemaDefinition,
 } from '@chkit/core'
+import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { AUTH_COMMANDS, loadCredentials, resolveBaseUrl } from './auth/index.js'
 import {
@@ -97,10 +101,30 @@ interface ObsessionDBPlugin {
 			jsonMode?: boolean
 			definitions: SchemaDefinition[]
 		}): SchemaDefinition[] | undefined
+		onCheck(context: {
+			config: ResolvedChxConfig
+			configPath: string
+			flags: Record<string, string | string[] | boolean | undefined>
+		}): Promise<ObsessionDBCheckResult | undefined>
+		onCheckReport(context: {
+			result: ObsessionDBCheckResult
+			print: (line: string) => void
+		}): void
 		onBeforePluginCommand(
 			context: BeforePluginCommandContext,
 		): Promise<BeforePluginCommandResult>
 	}
+}
+
+interface ObsessionDBCheckResult {
+	plugin: 'obsessiondb'
+	evaluated: boolean
+	ok: boolean
+	findings: Array<{
+		code: 'obsessiondb_distributed_unsupported'
+		message: string
+		severity: 'error'
+	}>
 }
 
 type ObsessionDBRegistration = ChxInlinePluginRegistration<
@@ -134,6 +158,21 @@ export function resolveStripBehavior(
 	const url = config.clickhouse?.url
 	if (url && isObsessionDBHost(url)) return false
 	return true
+}
+
+/**
+ * ObsessionDB runs one shared-storage service with no shards, and its users
+ * have no grant for the Distributed engine. Returns one message per Distributed
+ * table so `generate` and `check` fail before ClickHouse rejects the CREATE.
+ */
+export function findDistributedTables(definitions: SchemaDefinition[]): string[] {
+	return definitions.flatMap((def) =>
+		def.kind === 'table' && isDistributedEngine(def.engine)
+			? [
+					`Table ${def.database}.${def.name} uses the Distributed engine, which ObsessionDB does not support: ObsessionDB has no shards, so every replica already reads the same shared storage. Remove the Distributed table from the schema and query or insert into its local table directly.`,
+				]
+			: [],
+	)
 }
 
 export function stripSharedPrefix(engine: string): string {
@@ -343,7 +382,11 @@ function createObsessionDBPlugin(
 			},
 			onSchemaLoaded(context) {
 				const shouldStrip = resolveStripBehavior(context.config, context.flags)
-				if (!shouldStrip) return
+				if (!shouldStrip) {
+					const distributed = findDistributedTables(context.definitions)
+					if (distributed.length > 0) throw new Error(distributed.join('\n'))
+					return
+				}
 
 				const rewritten = rewriteSharedEngines(context.definitions)
 				if (!context.jsonMode && rewritten.count > 0) {
@@ -358,6 +401,24 @@ function createObsessionDBPlugin(
 					)
 				}
 				return rewritten.definitions
+			},
+			async onCheck({ config, configPath, flags }) {
+				// Same target decision as onSchemaLoaded: ObsessionDB host or
+				// --force-shared-engines.
+				if (resolveStripBehavior(config, flags)) return undefined
+				const definitions = await loadSchemaDefinitions(config.schema, {
+					cwd: resolve(configPath, '..'),
+				})
+				const findings = findDistributedTables(definitions).map((message) => ({
+					code: 'obsessiondb_distributed_unsupported' as const,
+					message,
+					severity: 'error' as const,
+				}))
+				return { plugin: 'obsessiondb', evaluated: true, ok: findings.length === 0, findings }
+			},
+			onCheckReport({ result, print }) {
+				if (result.ok) return
+				for (const finding of result.findings) print(`obsessiondb: ${finding.message}`)
 			},
 			async onBeforePluginCommand(context) {
 				return handleBackfillCommand(context)

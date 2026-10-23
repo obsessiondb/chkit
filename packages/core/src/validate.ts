@@ -16,6 +16,7 @@ import { describeInvalidIdentifier } from './identifier.js'
 import { isPlainColumnReference, normalizeKeyColumns, splitTopLevelComma } from './key-clause.js'
 import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 import { stripWrappingParens } from './sql-scan.js'
+import { engineName, supportsSortOrder } from './engine.js'
 import { isKafkaEngine } from './kafka.js'
 import { type SQLToken, tokenizeSQL } from './sql-lexer.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
@@ -290,6 +291,7 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
       }
     }
   }
+  validateSortOrderSupport(def, issues)
   const columnSeen = new Set<string>()
   const columnSet = new Set<string>()
   for (const column of def.columns) {
@@ -397,6 +399,29 @@ function validateTableDefinition(def: TableDefinition, issues: ValidationIssue[]
   }
 
   validateUnstoredColumnReferences(def, columnSet, issues)
+}
+
+/**
+ * ClickHouse accepts PARTITION BY, PRIMARY KEY and ORDER BY only on engines
+ * that support sort order (MergeTree family, EmbeddedRocksDB, S3, ...). The
+ * renderer omits them for other engines, so a key set there would be dropped
+ * silently; reject it instead. Kafka reports its own clauses.
+ */
+function validateSortOrderSupport(def: TableDefinition, issues: ValidationIssue[]): void {
+  if (supportsSortOrder(def.engine) || isKafkaEngine(def.engine)) return
+  const fields = (['partitionBy', 'primaryKey', 'orderBy'] as const).filter((field) => {
+    const value = def[field]
+    return Array.isArray(value) ? value.length > 0 : Boolean(value)
+  })
+  if (fields.length === 0) return
+  const engine = engineName(def.engine) || def.engine
+  const hint = engine === 'Distributed'
+    ? ' Define the keys on the local table the Distributed table reads from.'
+    : ''
+  pushValidationIssue(
+    issues, def, 'engine_unsupported_clause',
+    `Table ${def.database}.${def.name} sets ${fields.join(', ')}, but engine ${engine} does not support PARTITION BY, PRIMARY KEY or ORDER BY (only MergeTree-family engines and a few others such as EmbeddedRocksDB, KeeperMap and S3 do). Remove ${fields.length === 1 ? 'it' : 'them'}.${hint}`
+  )
 }
 
 function validateUnstoredColumnCodec(def: TableDefinition, column: ColumnDefinition, issues: ValidationIssue[]): void {

@@ -66,6 +66,6 @@ the layout that exercises the journal's cluster-wide-unique replica id
 
 ```bash
 bun run cluster:2shard:up      # 4 ClickHouse nodes + Keeper
-bun run test:cluster:2shard    # multi-shard journal e2e
+bun run test:cluster:2shard    # multi-shard journal + Distributed e2e
 bun run cluster:2shard:down
 ```
