@@ -61,6 +61,16 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- backfill: mv_replay writes each target column by name, the way ClickHouse does
+  when a materialized view inserts into its `TO` table. `plan` reads the live
+  target's insertable columns and each view's output columns (`DESCRIBE`), saves
+  the matching list as `execution.targetColumns`, and every chunk renders it on
+  both sides of `INSERT … SELECT`. A `SELECT *` view into a target with reordered
+  columns or extra DEFAULT/MATERIALIZED/ALIAS columns now replays instead of failing
+  with a column-count mismatch or an unknown identifier. Planning fails clearly when
+  a view outputs a column the target cannot take or views feeding one target output
+  different columns; `run`/`resume` refuse a plan whose target lost a planned
+  column. ObsessionDB managed submit renders the same SQL (#291).
 - backfill: chunk INSERTs set `asterisk_include_materialized_columns=0` and
   `asterisk_include_alias_columns=0`, ahead of any `insert_settings`. A settings
   profile that enabled them made `SELECT *` return MATERIALIZED and ALIAS columns:

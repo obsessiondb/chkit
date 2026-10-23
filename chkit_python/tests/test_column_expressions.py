@@ -244,7 +244,8 @@ mv = materialized_view(database="default", name="mv", to={"database": "default",
     strategy = _detect_backfill_strategy(
         schema=["schema.py"], config_dir=tmp_path, database="default", table="events"
     )
-    assert strategy.target_columns == ["id"]
+    # The replay's column list now comes from the live target at plan time.
+    assert strategy.mv_replay_queries == ["SELECT id FROM default.source"]
     path = tmp_path / "ephemeral.py"
     path.write_text(
         (tmp_path / "schema.py")

@@ -25,7 +25,11 @@ from chkit_plugin_backfill.chunking.types import PlannerQuery, QuerySettings
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PlanOptions
-from chkit_plugin_backfill.planner import assert_backfill_target_safe, build_backfill_plan
+from chkit_plugin_backfill.planner import (
+    assert_backfill_target_safe,
+    assert_replay_columns_still_insertable,
+    build_backfill_plan,
+)
 from chkit_plugin_backfill.state import (
     backfill_paths,
     compute_backfill_state_dir,
@@ -57,6 +61,7 @@ def _create_mock_query(
     sorting_key: str = "event_time",
     column_rows: list[dict[str, str]] | None = None,
     live_columns: list[dict[str, str]] | None = None,
+    view_outputs: list[str] | None = None,
 ) -> PlannerQuery:
     resolved_partitions = (
         partitions
@@ -78,9 +83,18 @@ def _create_mock_query(
         else [{"name": "event_time", "type": "DateTime"}]
     )
     resolved_live_columns = live_columns or [{"name": "id", "default_kind": ""}]
+    resolved_view_outputs = (
+        view_outputs
+        if view_outputs is not None
+        else [row["name"] for row in resolved_live_columns]
+    )
 
-    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+    def query(  # noqa: PLR0911 — one branch per introspection query
+        sql: str, settings: QuerySettings | None
+    ) -> list[dict[str, object]]:
         _ = settings
+        if sql.startswith("DESCRIBE TABLE ("):
+            return [{"name": name} for name in resolved_view_outputs]
         if "SELECT name, default_kind" in sql:
             return [dict(row) for row in resolved_live_columns]
         if "SELECT 1 FROM" in sql:
@@ -126,10 +140,14 @@ def _create_source_scoped_mock_query(
         column_rows if column_rows is not None else [{"name": "id", "type": "UInt64"}]
     )
 
-    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+    def query(  # noqa: PLR0911 — one branch per introspection query
+        sql: str, settings: QuerySettings | None
+    ) -> list[dict[str, object]]:
         _ = settings
+        if sql.startswith("DESCRIBE TABLE ("):
+            return [{"name": "id"}, {"name": "count"}]
         if "SELECT name, default_kind" in sql:
-            return [{"name": "id", "default_kind": ""}]
+            return [{"name": "id", "default_kind": ""}, {"name": "count", "default_kind": ""}]
         if "SELECT 1 FROM" in sql:
             return [{"ok": 1}]
         if "FROM system.parts" in sql and f"table = '{source_table}'" in sql:
@@ -142,6 +160,11 @@ def _create_source_scoped_mock_query(
 
     return query
 
+
+EVENTS_AGG_COLUMNS = [
+    {"name": "event_time", "default_kind": ""},
+    {"name": "count", "default_kind": ""},
+]
 
 MV_REPLAY_SCHEMA = """
 from chkit import ColumnDefinition, materialized_view, table
@@ -328,7 +351,7 @@ events_mv = materialized_view(
         opts=opts,
         config_path=config_path,
         config=config,
-        clickhouse_query=_create_mock_query(),
+        clickhouse_query=_create_mock_query(live_columns=EVENTS_AGG_COLUMNS),
     )
 
     assert output.plan.execution.mode == "mv_replay"
@@ -405,7 +428,7 @@ api_mv = materialized_view(
         opts=opts,
         config_path=config_path,
         config=config,
-        clickhouse_query=_create_mock_query(),
+        clickhouse_query=_create_mock_query(live_columns=EVENTS_AGG_COLUMNS),
     )
 
     assert output.plan.execution.mode == "mv_replay"
@@ -633,3 +656,152 @@ def test_a_listed_target_without_readable_columns_cannot_be_verified() -> None:
 
     with pytest.raises(BackfillConfigError, match="Cannot verify live target column kinds"):
         assert_backfill_target_safe(database="app", table="events", mode="copy", query=query)
+
+
+# ---------- mv_replay column list (chkit#291) ----------
+
+VIEW_ONLY_SCHEMA = """
+from chkit import materialized_view
+
+mv = materialized_view(
+    database="app",
+    name="events_mv",
+    to={"database": "app", "name": "events_copy"},
+    as_="SELECT * FROM app.events",
+)
+"""
+
+TWO_VIEW_SCHEMA = VIEW_ONLY_SCHEMA + """
+other = materialized_view(
+    database="app",
+    name="other_mv",
+    to={"database": "app", "name": "events_copy"},
+    as_="SELECT id FROM app.events",
+)
+"""
+
+
+def _plan_view_target(tmp_path: Path, query: PlannerQuery, schema: str = VIEW_ONLY_SCHEMA):
+    (tmp_path / "schema.py").write_text(schema, encoding="utf-8")
+    return build_backfill_plan(
+        opts=PlanOptions.model_validate({"target": "app.events_copy"}),
+        config_path=tmp_path / "clickhouse.config.py",
+        config=_resolve_config(),
+        clickhouse_query=query,
+        query_settings={"enable_parallel_replicas": 0},
+    )
+
+
+def test_a_target_outside_the_schema_gets_the_view_outputs_it_can_take_in_target_order(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, QuerySettings | None]] = []
+    mock = _create_mock_query(
+        live_columns=[
+            {"name": "b", "default_kind": ""},
+            {"name": "x", "default_kind": "DEFAULT"},
+            {"name": "m", "default_kind": "MATERIALIZED"},
+            {"name": "al", "default_kind": "ALIAS"},
+            {"name": "a", "default_kind": ""},
+            {"name": "id", "default_kind": ""},
+        ],
+        view_outputs=["id", "a", "b"],
+    )
+
+    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+        calls.append((sql, settings))
+        return mock(sql, settings)
+
+    output = _plan_view_target(tmp_path, query)
+
+    assert output.plan.execution.mode == "mv_replay"
+    assert output.plan.execution.target_columns == ["b", "a", "id"]
+    # `*` is described under the same pins the chunk INSERT carries.
+    assert next(call for call in calls if call[0].startswith("DESCRIBE")) == (
+        "DESCRIBE TABLE (\nSELECT * FROM app.events\n) SETTINGS "
+        "asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0",
+        {"enable_parallel_replicas": 0},
+    )
+
+
+@pytest.mark.parametrize(
+    "live_columns",
+    [
+        [{"name": "id", "default_kind": ""}, {"name": "a", "default_kind": ""}],
+        [
+            {"name": "id", "default_kind": ""},
+            {"name": "a", "default_kind": ""},
+            {"name": "b", "default_kind": "MATERIALIZED"},
+        ],
+        [
+            {"name": "id", "default_kind": ""},
+            {"name": "a", "default_kind": ""},
+            {"name": "b", "default_kind": "ALIAS"},
+        ],
+    ],
+    ids=["missing", "materialized", "alias"],
+)
+def test_a_view_output_the_target_cannot_take_fails_the_plan(
+    tmp_path: Path, live_columns: list[dict[str, str]]
+) -> None:
+    query = _create_mock_query(live_columns=live_columns, view_outputs=["id", "a", "b"])
+    with pytest.raises(
+        BackfillConfigError,
+        match=re.escape(
+            "Materialized view app.events_mv outputs column(s) b, which app.events_copy "
+            "cannot take (missing, MATERIALIZED or ALIAS)"
+        ),
+    ):
+        _plan_view_target(tmp_path, query)
+
+
+def test_a_view_whose_output_columns_cannot_be_read_fails_the_plan(tmp_path: Path) -> None:
+    query = _create_mock_query(live_columns=[{"name": "id", "default_kind": ""}], view_outputs=[])
+    with pytest.raises(
+        BackfillConfigError,
+        match=re.escape("Cannot read the output columns of materialized view app.events_mv"),
+    ):
+        _plan_view_target(tmp_path, query)
+
+
+def test_views_feeding_one_target_with_different_outputs_fail_the_plan(tmp_path: Path) -> None:
+    mock = _create_mock_query(
+        live_columns=[{"name": "id", "default_kind": ""}, {"name": "a", "default_kind": ""}]
+    )
+
+    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+        if sql.startswith("DESCRIBE TABLE (\nSELECT id FROM app.events\n)"):
+            return [{"name": "id"}]
+        return mock(sql, settings)
+
+    with pytest.raises(
+        BackfillConfigError,
+        match=re.escape(
+            "Materialized views feeding app.events_copy output different columns: "
+            "app.events_mv (id, a) vs app.other_mv (id)"
+        ),
+    ):
+        _plan_view_target(tmp_path, query, TWO_VIEW_SCHEMA)
+
+
+def test_run_refuses_a_plan_whose_columns_the_target_no_longer_takes() -> None:
+    def check(insertable_columns: list[str]) -> None:
+        assert_replay_columns_still_insertable(
+            plan_id="p1",
+            target="app.t",
+            target_columns=["id", "a"],
+            insertable_columns=insertable_columns,
+        )
+
+    check(["a", "x", "id"])
+    with pytest.raises(
+        BackfillConfigError,
+        match=re.escape(
+            "Target app.t changed since plan p1 was created: column(s) a are gone "
+            "or no longer insertable"
+        ),
+    ):
+        check(["id"])
+    assert_replay_columns_still_insertable(
+        plan_id="p1", target="app.t", target_columns=None, insertable_columns=[]
+    )

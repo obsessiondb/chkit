@@ -1749,6 +1749,20 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   out of the default run. Run it explicitly with `pytest tests_cluster` against
   `test/cluster/2shard`; it hard-fails when a node is unreachable.
 
+### Backfill mv_replay column list (#291)
+- Same design as TS: `_resolve_replay_columns` describes each view's query with
+  `DESCRIBE TABLE (...) SETTINGS asterisk_include_*=0`, keeps the live target's
+  insertable columns the views output (target order) as `target_columns`, and
+  `build_chunk_execution_sql` renders `INSERT INTO t (cols) SELECT cols FROM (<view
+  query>)` per view. `_run_backfill` calls `assert_replay_columns_still_insertable`.
+- Python-only `insert_settings` still render after the pins. A user setting that
+  re-enables `asterisk_include_*` only widens the inner `*`; the outer `SELECT`
+  picks the planned columns by name, so it cannot shift values.
+- The schema-declared target's columns no longer feed `target_columns`, so
+  `_BackfillStrategy` dropped that field (TS: `BackfillStrategy.targetColumns`).
+- The ReplicatedMergeTree case is a second test in
+  `tests_cluster/test_backfill_asterisk_columns_cluster_e2e.py`.
+
 ### Async migrate status across replicas (#246)
 - Same design as TS: `ClickHouseClient.query_status` and
   `RemoteClickHouseClient.query_status` read `system.processes` and

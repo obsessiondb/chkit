@@ -1,4 +1,4 @@
-"""Port of ``packages/cli/src/test/backfill-asterisk-columns.e2e.test.ts`` (chkit#243).
+"""Port of ``packages/cli/src/test/backfill-asterisk-columns.e2e.test.ts`` (chkit#243, #291).
 
 Backfill chunks run ``INSERT INTO t SELECT * FROM t``. A user profile with
 ``asterisk_include_materialized_columns`` / ``asterisk_include_alias_columns``
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from typer.testing import CliRunner
 
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_table
+from chkit.clickhouse.ddl_propagation import wait_for_column_absent, wait_for_table
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     LiveEnv,
@@ -178,9 +179,151 @@ def test_copy_of_a_table_with_ephemeral_inputs_keeps_the_stored_defaults_derived
     ]
 
 
-def test_mv_replay_of_a_select_star_view_never_shifts_source_columns(ctx: _Ctx) -> None:
+# chkit#291: an mv_replay of a `SELECT *` view writes each target column by
+# name, as ClickHouse does when the view inserts into its TO table, whatever the
+# target's column order or extra DEFAULT/MATERIALIZED/ALIAS columns. The source
+# has a MATERIALIZED column the widened profile would add to `*`.
+
+
+def test_mv_replay_fills_an_extra_default_column_of_a_target_outside_the_schema(
+    ctx: _Ctx,
+) -> None:
+    rows = _run_mv_replay(
+        ctx,
+        label="bf_mv_default",
+        target_columns="id UInt64, event_time DateTime, a String, b String, x String DEFAULT 'xd'",
+        read_columns=["id", "a", "b", "x"],
+    )
+    assert rows == [{"id": "1", "a": "x", "b": "bx", "x": "xd"}]
+
+
+def test_mv_replay_matches_reordered_target_columns_by_name(ctx: _Ctx) -> None:
+    rows = _run_mv_replay(
+        ctx,
+        label="bf_mv_reorder",
+        target_columns=(
+            "b String, x String DEFAULT concat(a, '_xd'), a String, event_time DateTime, id UInt64"
+        ),
+        read_columns=["id", "a", "b", "x"],
+    )
+    assert rows == [{"id": "1", "a": "x", "b": "bx", "x": "x_xd"}]
+
+
+def test_mv_replay_recomputes_materialized_and_alias_target_columns(ctx: _Ctx) -> None:
+    rows = _run_mv_replay(
+        ctx,
+        label="bf_mv_computed",
+        target_columns=(
+            "id UInt64, event_time DateTime, a String, b String, "
+            "m String MATERIALIZED concat(a, '_tm'), al String ALIAS concat(b, '_al')"
+        ),
+        read_columns=["id", "a", "b", "m", "al"],
+    )
+    assert rows == [{"id": "1", "a": "x", "b": "bx", "m": "x_tm", "al": "bx_al"}]
+
+
+def test_mv_replay_fills_an_extra_default_column_of_a_target_declared_in_the_schema(
+    ctx: _Ctx,
+) -> None:
+    rows = _run_mv_replay(
+        ctx,
+        label="bf_mv_declared",
+        target_columns="event_time DateTime, x String DEFAULT 'xd', b String, a String, id UInt64",
+        declare_target=(
+            '[{"name": "event_time", "type": "DateTime"}, '
+            '{"name": "x", "type": "String", "default": "xd"}, '
+            '{"name": "b", "type": "String"}, {"name": "a", "type": "String"}, '
+            '{"name": "id", "type": "UInt64"}]'
+        ),
+        read_columns=["id", "a", "b", "x"],
+    )
+    assert rows == [{"id": "1", "a": "x", "b": "bx", "x": "xd"}]
+
+
+def test_mv_replay_refuses_to_plan_when_the_target_lacks_a_column_the_view_outputs(
+    ctx: _Ctx,
+) -> None:
+    with _mv_replay_fixture(
+        ctx, label="bf_mv_missing", target_columns="id UInt64, event_time DateTime, a String"
+    ) as (_prefix, target):
+        result = ctx.runner.invoke(app, ["plugin", "backfill", "plan", "--target", target, "--json"])
+        assert result.exit_code == 2, result.output
+        assert (
+            f"outputs column(s) b, which {target} cannot take (missing, MATERIALIZED or ALIAS)"
+            in result.output
+        )
+
+
+def test_mv_replay_refuses_to_run_a_plan_whose_target_lost_a_replayed_column(
+    ctx: _Ctx,
+) -> None:
     database = ctx.env.clickhouse_database
-    prefix = create_prefix("bf_asterisk_mv")
+    with _mv_replay_fixture(
+        ctx,
+        label="bf_mv_altered",
+        target_columns="id UInt64, event_time DateTime, a String, b String, x String DEFAULT 'xd'",
+    ) as (prefix, target):
+        planned = _invoke_json(ctx, ["plugin", "backfill", "plan", "--target", target, "--json"])
+        assert planned["strategy"] == "mv_replay"
+        ctx.db.execute(f"ALTER TABLE {target} DROP COLUMN b")
+        wait_for_column_absent(ctx.db, database, f"{prefix}target", "b")
+
+        result = ctx.runner.invoke(
+            app,
+            ["plugin", "backfill", "run", "--plan-id", planned["planId"],
+             "--poll-interval", "500", "--json"],
+        )
+        assert result.exit_code == 2, result.output
+        assert (
+            f"Target {target} changed since plan {planned['planId']} was created: "
+            "column(s) b are gone or no longer insertable"
+        ) in result.output
+        assert _count_rows(ctx.db, target) == 0
+
+
+def _run_mv_replay(
+    ctx: _Ctx,
+    *,
+    label: str,
+    target_columns: str,
+    read_columns: list[str],
+    declare_target: str | None = None,
+) -> list[dict[str, str]]:
+    """Plan and run an mv_replay backfill of a ``SELECT *`` view from the shared
+    source shape into a target with ``target_columns``, under the widened
+    profile, and return the target's rows as strings."""
+    with _mv_replay_fixture(
+        ctx, label=label, target_columns=target_columns, declare_target=declare_target
+    ) as (_prefix, target):
+        planned = _invoke_json(ctx, ["plugin", "backfill", "plan", "--target", target, "--json"])
+        assert planned["strategy"] == "mv_replay"
+        ran = _invoke_json(
+            ctx,
+            ["plugin", "backfill", "run", "--plan-id", planned["planId"],
+             "--poll-interval", "500", "--json"],
+        )
+        assert ran["status"] == "completed"
+
+        _wait_for_row_count(ctx.db, target, 1)
+        projection = ", ".join(f"toString({column}) AS {column}" for column in read_columns)
+        rows = ctx.db.query(
+            f"SELECT {projection} FROM {target} ORDER BY id "
+            f"SETTINGS select_sequential_consistency = 1"
+        ).rows
+        return [{key: str(value) for key, value in row.items()} for row in rows]
+
+
+@contextmanager
+def _mv_replay_fixture(
+    ctx: _Ctx, *, label: str, target_columns: str, declare_target: str | None = None
+) -> Iterator[tuple[str, str]]:
+    """Create the source (with a MATERIALIZED column the profile adds to ``*``)
+    and the target, insert one source row, and declare the ``SELECT *`` view
+    (and optionally the target) in the schema. The view itself is never
+    created: the replay reads its query from the schema. Yields the name prefix
+    and the target's qualified name."""
+    database = ctx.env.clickhouse_database
+    prefix = create_prefix(label)
     source = f"{database}.{prefix}source"
     target = f"{database}.{prefix}target"
     try:
@@ -189,11 +332,8 @@ def test_mv_replay_of_a_select_star_view_never_shifts_source_columns(ctx: _Ctx) 
             f"m String MATERIALIZED concat(a, '_m'), b String) ENGINE = MergeTree() "
             f"PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)"
         )
-        # One column more than the source's insertable set: a widened `*` lines
-        # up with it by count, so `m` would land in `b` and `b` in `x`.
         ctx.db.execute(
-            f"CREATE TABLE {target} (id UInt64, event_time DateTime, a String, b String, "
-            f"x String DEFAULT 'xd') ENGINE = MergeTree() "
+            f"CREATE TABLE {target} ({target_columns}) ENGINE = MergeTree() "
             f"PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)"
         )
         wait_for_table(ctx.db, database, f"{prefix}source")
@@ -206,12 +346,25 @@ def test_mv_replay_of_a_select_star_view_never_shifts_source_columns(ctx: _Ctx) 
         )
         _wait_for_row_count(ctx.db, source, 1)
 
-        # Only the view is declared, so the replay keeps its `SELECT *` projection.
+        declared_target = (
+            f"""
+    table(
+        database={database!r},
+        name={prefix + "target"!r},
+        engine="MergeTree()",
+        partition_by="toYYYYMMDD(event_time)",
+        primary_key=["event_time", "id"],
+        order_by=["event_time", "id"],
+        columns={declare_target},
+    ),"""
+            if declare_target is not None
+            else ""
+        )
         (ctx.project / "schema.py").write_text(
             f"""
-from chkit import materialized_view, schema
+from chkit import materialized_view, schema, table
 
-definitions = schema(
+definitions = schema({declared_target}
     materialized_view(
         database={database!r},
         name={prefix + "mv"!r},
@@ -222,21 +375,7 @@ definitions = schema(
 """,
             encoding="utf-8",
         )
-
-        planned = _invoke_json(ctx, ["plugin", "backfill", "plan", "--target", target, "--json"])
-        assert planned["strategy"] == "mv_replay"
-
-        result = ctx.runner.invoke(
-            app,
-            ["plugin", "backfill", "run", "--plan-id", planned["planId"],
-             "--poll-interval", "500", "--json"],
-        )
-        # Same result as without the profile: `*` reads 4 columns into a
-        # 5-column target and ClickHouse refuses it. Before the fix this run
-        # completed and wrote the shifted row.
-        assert result.exit_code == 1, result.output
-        assert "NUMBER_OF_COLUMNS_DOESNT_MATCH" in result.output
-        assert _count_rows(ctx.db, target) == 0
+        yield prefix, target
     finally:
         ctx.db.execute(f"DROP TABLE IF EXISTS {source}")
         ctx.db.execute(f"DROP TABLE IF EXISTS {target}")

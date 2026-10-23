@@ -49,11 +49,19 @@ class _PlanConfig(Protocol):
     def schema_(self) -> list[str]: ...
 
 
+# The same pins every chunk INSERT carries (see ``chunking/sql.py``), so ``*``
+# in a view's query expands to the same columns at plan time as at run time,
+# whatever the user's settings profile says. Inline, like the INSERT's, so no
+# client or URL-level setting can override them.
+_ASTERISK_SETTINGS = (
+    "asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0"
+)
+
+
 @dataclass(frozen=True)
 class _BackfillStrategy:
     mvs: list[MaterializedViewDefinition]
     mv_replay_queries: list[str] | None = None
-    target_columns: list[str] | None = None
 
 
 def _detect_backfill_strategy(
@@ -91,18 +99,7 @@ def _detect_backfill_strategy(
                 "Automatic backfill cannot reconstruct EPHEMERAL inputs; "
                 "use an explicit INSERT with an input column mapping."
             )
-        return _BackfillStrategy(
-            mvs=mvs,
-            mv_replay_queries=[mv.as_ for mv in mvs],
-            target_columns=(
-                [
-                    column.name for column in table_def.columns
-                    if column.default_kind in {None, "DEFAULT"}
-                ]
-                if table_def is not None
-                else None
-            ),
-        )
+        return _BackfillStrategy(mvs=mvs, mv_replay_queries=[mv.as_ for mv in mvs])
     except BackfillConfigError:
         raise
     except Exception:
@@ -113,12 +110,15 @@ def _detect_backfill_strategy(
 def assert_backfill_target_safe(
     *, database: str, table: str, mode: Literal["copy", "mv_replay"], query: PlannerQuery,
     query_settings: QuerySettings | None = None,
-) -> None:
+) -> list[str]:
     """Fail closed when live metadata cannot establish safe input semantics.
 
     Copy mode re-inserts ``SELECT *``, which keeps stored DEFAULT values but
     recomputes MATERIALIZED ones. Expressions are not parsed, so a copy is
     refused whenever a MATERIALIZED column could read an EPHEMERAL input.
+
+    Returns the live target's insertable columns (no MATERIALIZED, ALIAS or
+    EPHEMERAL) in table order.
     """
     def quote(value: str) -> str:
         return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
@@ -162,6 +162,7 @@ def assert_backfill_target_safe(
             f"EPHEMERAL column(s) {', '.join(ephemeral)}. "
             "Use an explicit INSERT with an input column mapping."
         )
+    return [str(c["name"]) for c in rows if c["default_kind"] in {"", "DEFAULT"}]
 
 
 @dataclass(frozen=True)
@@ -197,9 +198,20 @@ def build_backfill_plan(
         database=database,
         table=table,
     )
-    assert_backfill_target_safe(
+    insertable_columns = assert_backfill_target_safe(
         database=database, table=table, query=clickhouse_query, query_settings=query_settings,
         mode="mv_replay" if strategy.mv_replay_queries is not None else "copy",
+    )
+    target_columns = (
+        _resolve_replay_columns(
+            target=opts.target,
+            mvs=strategy.mvs,
+            insertable_columns=insertable_columns,
+            query=clickhouse_query,
+            query_settings=query_settings,
+        )
+        if strategy.mv_replay_queries is not None
+        else None
     )
     replay_source = (
         resolve_mv_replay_source(strategy.mvs)
@@ -257,7 +269,6 @@ def build_backfill_plan(
     paths = backfill_paths(state_dir, chunk_plan.plan_id)
 
     mv_replay_queries = strategy.mv_replay_queries
-    target_columns = strategy.target_columns
 
     plan = BackfillPlanState(
         plan_id=chunk_plan.plan_id,
@@ -307,6 +318,84 @@ def build_backfill_plan(
     )
 
     return BuildBackfillPlanOutput(plan=plan, plan_path=paths.plan_path)
+
+
+def _resolve_replay_columns(
+    *,
+    target: str,
+    mvs: list[MaterializedViewDefinition],
+    insertable_columns: list[str],
+    query: PlannerQuery,
+    query_settings: QuerySettings | None,
+) -> list[str]:
+    """Name the columns an mv_replay INSERT writes, the way ClickHouse does when
+    a materialized view inserts into its ``TO`` table: each view's output column
+    goes to the target column of the same name, whatever the order, and target
+    columns the view does not output get their DEFAULT. Chunk SQL renders this
+    list on both sides of ``INSERT … SELECT``, so a ``SELECT *`` view never
+    lines up by position. The list is persisted in the plan, so ``run`` does not
+    depend on what the target looks like later.
+
+    Fails when a view outputs a column the target cannot take (missing,
+    MATERIALIZED or ALIAS), which ClickHouse also refuses when the view is
+    created, and when views feeding one target output different column sets:
+    one INSERT cannot leave a column to its DEFAULT for some rows only.
+    """
+    outputs: list[tuple[MaterializedViewDefinition, list[str]]] = []
+    for mv in mvs:
+        rows = query(
+            f"DESCRIBE TABLE (\n{mv.as_}\n) SETTINGS {_ASTERISK_SETTINGS}", query_settings
+        )
+        names = [str(row["name"]) for row in rows]
+        if not names:
+            raise BackfillConfigError(
+                f"Cannot read the output columns of materialized view {mv.database}.{mv.name}; "
+                "automatic backfill is blocked."
+            )
+        rejected = [name for name in names if name not in insertable_columns]
+        if rejected:
+            raise BackfillConfigError(
+                f"Materialized view {mv.database}.{mv.name} outputs column(s) "
+                f"{', '.join(rejected)}, which {target} cannot take (missing, MATERIALIZED "
+                "or ALIAS). ClickHouse matches view output to target columns by name and "
+                "refuses such a view by default; align the view's SELECT with the target "
+                "(use AS to rename) before backfilling."
+            )
+        outputs.append((mv, names))
+
+    def describe(output: tuple[MaterializedViewDefinition, list[str]]) -> str:
+        mv, names = output
+        return f"{mv.database}.{mv.name} ({', '.join(names)})"
+
+    first = outputs[0]
+    mismatch = next((out for out in outputs if set(out[1]) != set(first[1])), None)
+    if mismatch is not None:
+        raise BackfillConfigError(
+            f"Materialized views feeding {target} output different columns: "
+            f"{describe(first)} vs {describe(mismatch)}. Backfill replays them in one "
+            "INSERT, which cannot leave a column to its DEFAULT for only some views' rows."
+        )
+    return [name for name in insertable_columns if name in first[1]]
+
+
+def assert_replay_columns_still_insertable(
+    *,
+    plan_id: str,
+    target: str,
+    target_columns: list[str] | None,
+    insertable_columns: list[str],
+) -> None:
+    """A plan names its replay columns at plan time. Before running it, make
+    sure the live target still takes every one of them, so a target altered
+    after planning fails with a clear message instead of on every chunk.
+    """
+    missing = [name for name in target_columns or [] if name not in insertable_columns]
+    if missing:
+        raise BackfillConfigError(
+            f"Target {target} changed since plan {plan_id} was created: column(s) "
+            f"{', '.join(missing)} are gone or no longer insertable. "
+            "Create a new plan with backfill plan."
+        )
 
 
 __all__ = ["BuildBackfillPlanOutput", "build_backfill_plan"]

@@ -279,6 +279,70 @@ describe('chkit cluster mode (ON CLUSTER) — backfill copy under a widened-aste
   }, 120_000)
 })
 
+describe('chkit cluster mode (ON CLUSTER) — backfill mv_replay of a SELECT * view (#291)', () => {
+  test('writes each ReplicatedMergeTree target column by name on a shard', async () => {
+    const prefix = createPrefix('twoshard_bf_mv')
+    const source = `${DATABASE}.${prefix}source`
+    const target = `${DATABASE}.${prefix}target`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-cluster-2s-bf-mv-e2e-'))
+    const schemaPath = join(dir, 'schema.ts')
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const pluginPath = join(dir, 'backfill-plugin.ts')
+    const executors = NODES.map(executorFor)
+    const shard1 = executors[0] as ReturnType<typeof executorFor>
+    try {
+      await shard1.command(`CREATE TABLE ${source} ON CLUSTER '${CLUSTER}' (
+        id UInt64, event_time DateTime, a String, m String MATERIALIZED concat(a, '_m'), b String
+      ) ENGINE = ReplicatedMergeTree PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+      // Reordered, one DEFAULT column computed from a replayed value, and
+      // MATERIALIZED/ALIAS columns the replay must leave to the target.
+      await shard1.command(`CREATE TABLE ${target} ON CLUSTER '${CLUSTER}' (
+        b String, x String DEFAULT concat(a, '_xd'), a String, event_time DateTime, id UInt64,
+        tm String MATERIALIZED concat(a, '_tm'), tal String ALIAS concat(b, '_al')
+      ) ENGINE = ReplicatedMergeTree PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+      for (const node of executors) {
+        await waitForTable(node, DATABASE, `${prefix}source`)
+        await waitForTable(node, DATABASE, `${prefix}target`)
+      }
+      await shard1.command(`INSERT INTO ${source} (id, event_time, a, b) VALUES (1, '2026-01-01 12:00:00', 'x', 'bx')`)
+
+      const profiledUrl = `${SHARD1_ENDPOINT}/?ch_asterisk_include_materialized_columns=1&ch_asterisk_include_alias_columns=1`
+      await writeFile(schemaPath, `import { materializedView, schema } from '${CORE_ENTRY}'
+
+export default schema(materializedView({
+  database: '${DATABASE}',
+  name: '${prefix}mv',
+  to: { database: '${DATABASE}', name: '${prefix}target' },
+  as: 'SELECT * FROM ${source}',
+}))
+`, 'utf8')
+      await writeFile(pluginPath, `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`, 'utf8')
+      await writeFile(configPath, `import { plugin } from '${pluginPath}'\n\n${configFor(schemaPath, dir, profiledUrl).replace('\n}\n', '\n  plugins: [{ plugin }],\n}\n')}`, 'utf8')
+
+      const plan = runCli(dir, ['plugin', 'backfill', 'plan', '--target', target, '--config', configPath, '--json'])
+      expect(plan.exitCode, formatTestDiagnostic('backfill plan', plan)).toBe(0)
+      const planned = JSON.parse(plan.stdout) as { planId: string; strategy: string }
+      expect(planned.strategy).toBe('mv_replay')
+      const run = runCli(dir, ['plugin', 'backfill', 'run', '--plan-id', planned.planId, '--poll-interval', '500', '--config', configPath, '--json'])
+      expect(run.exitCode, formatTestDiagnostic('backfill run', run)).toBe(0)
+      expect((JSON.parse(run.stdout) as { status: string }).status).toBe('completed')
+
+      // Both shard-1 replicas hold the replayed row; shard 2 never had any.
+      const expected = [{ id: '1', a: 'x', b: 'bx', x: 'x_xd', tm: 'x_tm', tal: 'bx_al' }]
+      for (const [index, node] of executors.entries()) {
+        const rows = await pollUntil(() => node.query<Record<string, string>>(
+          `SELECT toString(id) AS id, a, b, x, tm, tal FROM ${target} ORDER BY id`,
+        ), (value) => JSON.stringify(value) === JSON.stringify(index < 2 ? expected : []))
+        expect(rows, NODES[index]).toEqual(index < 2 ? expected : [])
+      }
+    } finally {
+      await shard1.command(`DROP TABLE IF EXISTS ${source} ON CLUSTER '${CLUSTER}' SYNC`)
+      await shard1.command(`DROP TABLE IF EXISTS ${target} ON CLUSTER '${CLUSTER}' SYNC`)
+      await Promise.all(executors.map((node) => node.close()))
+    }
+  }, 120_000)
+})
+
 // #246: an async statement runs on the node that received it. A re-run whose
 // requests reach another node must still see the attempt and attach to it,
 // instead of running the statement's before-retry SQL and resubmitting.

@@ -265,3 +265,51 @@ describe('buildChunkExecutionSql asterisk settings', () => {
     expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}, insert_deduplication_token='tok'`)
   })
 })
+
+describe('buildChunkExecutionSql mv_replay column list', () => {
+  const chunk: Chunk = {
+    id: 'c1',
+    partitionId: '20260101',
+    ranges: [],
+    estimate: { rows: 1, bytesCompressed: 1, bytesUncompressed: 1, confidence: 'exact', reason: 'exact-count' },
+    analysis: { lineage: [] },
+  }
+
+  test('names the columns on both sides and reads each view output by name', () => {
+    const sql = buildChunkExecutionSql({
+      planId: 'p',
+      chunk,
+      target: 'db.t',
+      table: { sortKeys: [] },
+      mvReplayQueries: ['SELECT * FROM db.a', 'SELECT id, b AS a, c FROM db.b GROUP BY id'],
+      targetColumns: ['id', 'a', 'we`ird'],
+      idempotencyToken: 'tok',
+    })
+    expect(sql.split('\n').slice(1, -1).join('\n')).toBe([
+      'INSERT INTO db.t (`id`, `a`, `we\\`ird`)',
+      'SELECT `id`, `a`, `we\\`ird`',
+      'FROM (',
+      'SELECT * FROM db.a',
+      "WHERE _partition_id = '20260101'",
+      ')',
+      'UNION ALL',
+      'SELECT `id`, `a`, `we\\`ird`',
+      'FROM (',
+      'SELECT id, b AS a, c FROM db.b',
+      "WHERE _partition_id = '20260101'",
+      'GROUP BY id',
+      ')',
+    ].join('\n'))
+  })
+
+  test('keeps the view query unwrapped for a plan without a column list', () => {
+    const sql = buildChunkExecutionSql({
+      planId: 'p',
+      chunk,
+      target: 'db.t',
+      table: { sortKeys: [] },
+      mvReplayQueries: ['SELECT * FROM db.a'],
+    })
+    expect(sql).toContain('INSERT INTO db.t\nSELECT * FROM db.a\nWHERE')
+  })
+})

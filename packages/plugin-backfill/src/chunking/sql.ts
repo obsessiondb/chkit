@@ -54,17 +54,18 @@ export function buildChunkExecutionSql(input: {
   if (input.mvReplayQueries?.length) {
     // Each MV feeding the target becomes a filtered SELECT; UNION ALL replays
     // them in one INSERT so a single query_id and dedup token cover the chunk.
+    // With the plan's column list, both sides name the columns and each view's
+    // output is read by name, as ClickHouse does for a view's TO table.
+    const columns = input.targetColumns?.length ? input.targetColumns.map(quoteIdentifier).join(', ') : undefined
     const selects = input.mvReplayQueries.map((query) => {
       let filtered = injectPartitionFilter(query, input.chunk.partitionId)
       for (const condition of chunkConditions) {
         filtered = injectWhereCondition(filtered, condition)
       }
-      if (input.targetColumns?.length) {
-        filtered = rewriteSelectColumns(filtered, input.targetColumns)
-      }
-      return filtered
+      return columns ? `SELECT ${columns}\nFROM (\n${filtered}\n)` : filtered
     })
-    return [header, `INSERT INTO ${input.target}`, selects.join('\nUNION ALL\n'), settings].join('\n')
+    const insert = columns ? `INSERT INTO ${input.target} (${columns})` : `INSERT INTO ${input.target}`
+    return [header, insert, selects.join('\nUNION ALL\n'), settings].join('\n')
   }
 
   const lines = [
@@ -438,6 +439,10 @@ export function splitTopLevel(sql: string, delimiter: string): string[] {
 }
 
 // ── Value formatting & condition helpers ─────────────────────────────────────
+
+function quoteIdentifier(name: string): string {
+  return `\`${name.replaceAll('\\', '\\\\').replaceAll('`', '\\`')}\``
+}
 
 function quoteSqlString(value: string): string {
   return `'${value.replaceAll('\\', '\\\\').replaceAll('\'', '\\\'')}'`

@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { waitForColumnAbsent } from '@chkit/clickhouse'
+
 import {
   createLiveExecutor,
   createPrefix,
@@ -77,62 +79,181 @@ describe('backfill under a profile that widens SELECT *', () => {
       { id: '2', a: 'Y', al: 'Y_al', b: 'by', copies: '2' },
     ])
   }, 120_000)
+})
 
-  test('mv_replay of a SELECT * view never shifts source columns into other target columns', async () => {
-    const prefix = createPrefix('bf_asterisk_mv')
-    const source = `${DATABASE}.${prefix}source`
-    const target = `${DATABASE}.${prefix}target`
-    const db = createLiveExecutor(env)
-    const fixture = await createFixture()
-    try {
-      await db.command(`CREATE TABLE ${source} (
-        id UInt64, event_time DateTime, a String, m String MATERIALIZED concat(a, '_m'), b String
-      ) ENGINE = MergeTree() PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
-      // One column more than the source's insertable set: a widened `*` lines
-      // up with it by count, so `m` would land in `b` and `b` in `x`.
-      await db.command(`CREATE TABLE ${target} (
-        id UInt64, event_time DateTime, a String, b String, x String DEFAULT 'xd'
-      ) ENGINE = MergeTree() PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
-      await waitForTable(db, DATABASE, `${prefix}source`)
-      await waitForTable(db, DATABASE, `${prefix}target`)
-      await db.command(`INSERT INTO ${source} (id, event_time, a, b) VALUES (1, '2026-01-01 12:00:00', 'x', 'bx')`)
-      await waitForRowCount(db, source, 1)
+// chkit#291: an mv_replay of a `SELECT *` view writes each target column by
+// name, as ClickHouse does when the view inserts into its TO table, whatever
+// the target's column order or extra DEFAULT/MATERIALIZED/ALIAS columns. The
+// source has a MATERIALIZED column the widened profile would add to `*`.
+describe('mv_replay of a SELECT * view under a profile that widens SELECT *', () => {
+  test('fills an extra DEFAULT column of a target outside the schema', async () => {
+    const rows = await runMvReplay({
+      label: 'bf_mv_default',
+      targetColumns: 'id UInt64, event_time DateTime, a String, b String, x String DEFAULT \'xd\'',
+      readColumns: 'id, a, b, x',
+    })
+    expect(rows).toEqual([{ id: '1', a: 'x', b: 'bx', x: 'xd' }])
+  }, 120_000)
 
-      // Only the view is declared, so the replay keeps its `SELECT *` projection.
-      await writeFile(fixture.schemaPath, `import { materializedView, schema } from '${CORE_ENTRY}'
+  test('matches reordered target columns by name and computes DEFAULTs from replayed values', async () => {
+    const rows = await runMvReplay({
+      label: 'bf_mv_reorder',
+      targetColumns: 'b String, x String DEFAULT concat(a, \'_xd\'), a String, event_time DateTime, id UInt64',
+      readColumns: 'id, a, b, x',
+    })
+    expect(rows).toEqual([{ id: '1', a: 'x', b: 'bx', x: 'x_xd' }])
+  }, 120_000)
 
-export default schema(materializedView({
+  test('recomputes MATERIALIZED and ALIAS target columns', async () => {
+    const rows = await runMvReplay({
+      label: 'bf_mv_computed',
+      targetColumns: 'id UInt64, event_time DateTime, a String, b String, m String MATERIALIZED concat(a, \'_tm\'), al String ALIAS concat(b, \'_al\')',
+      readColumns: 'id, a, b, m, al',
+    })
+    expect(rows).toEqual([{ id: '1', a: 'x', b: 'bx', m: 'x_tm', al: 'bx_al' }])
+  }, 120_000)
+
+  test('fills an extra DEFAULT column of a reordered target declared in the schema', async () => {
+    const rows = await runMvReplay({
+      label: 'bf_mv_declared',
+      targetColumns: 'event_time DateTime, x String DEFAULT \'xd\', b String, a String, id UInt64',
+      declareTarget: `[
+        { name: 'event_time', type: 'DateTime' },
+        { name: 'x', type: 'String', default: 'xd' },
+        { name: 'b', type: 'String' },
+        { name: 'a', type: 'String' },
+        { name: 'id', type: 'UInt64' },
+      ]`,
+      readColumns: 'id, a, b, x',
+    })
+    expect(rows).toEqual([{ id: '1', a: 'x', b: 'bx', x: 'xd' }])
+  }, 120_000)
+
+  test('refuses to plan when the target lacks a column the view outputs', async () => {
+    await withMvReplayFixture({
+      label: 'bf_mv_missing',
+      targetColumns: 'id UInt64, event_time DateTime, a String',
+    }, async ({ fixture, target }) => {
+      const plan = runCli(['plugin', 'backfill', 'plan', '--target', target, '--config', fixture.configPath, '--json'])
+      expect(plan.exitCode, formatTestDiagnostic('backfill plan', plan)).toBe(2)
+      expect(plan.stdout).toContain(`outputs column(s) b, which ${target} cannot take (missing, MATERIALIZED or ALIAS)`)
+    })
+  }, 120_000)
+
+  test('refuses to run a plan whose target lost a replayed column', async () => {
+    await withMvReplayFixture({
+      label: 'bf_mv_altered',
+      targetColumns: 'id UInt64, event_time DateTime, a String, b String, x String DEFAULT \'xd\'',
+    }, async ({ db, fixture, prefix, target }) => {
+      const planId = planMvReplay(fixture, target)
+      await db.command(`ALTER TABLE ${target} DROP COLUMN b`)
+      await waitForColumnAbsent(db, DATABASE, `${prefix}target`, 'b')
+
+      const run = runCli(['plugin', 'backfill', 'run', '--plan-id', planId, '--poll-interval', '500', '--config', fixture.configPath, '--json'])
+      expect(run.exitCode, formatTestDiagnostic('backfill run', run)).toBe(2)
+      expect(run.stdout).toContain(`Target ${target} changed since plan ${planId} was created: column(s) b are gone or no longer insertable`)
+      await waitForRowCount(db, target, 0)
+    })
+  }, 120_000)
+})
+
+interface MvReplayFixture {
+  db: ReturnType<typeof createLiveExecutor>
+  fixture: Awaited<ReturnType<typeof createFixture>>
+  prefix: string
+  target: string
+}
+
+/**
+ * Plan and run an mv_replay backfill of a `SELECT *` view from the shared
+ * source shape into a target with `targetColumns`, and return the target's
+ * rows as strings.
+ */
+async function runMvReplay(input: {
+  label: string
+  targetColumns: string
+  declareTarget?: string
+  readColumns: string
+}): Promise<Record<string, string>[]> {
+  return withMvReplayFixture(input, async ({ db, fixture, target }) => {
+    const planId = planMvReplay(fixture, target)
+    const run = runCli(['plugin', 'backfill', 'run', '--plan-id', planId, '--poll-interval', '500', '--config', fixture.configPath, '--json'])
+    expect(run.exitCode, formatTestDiagnostic('backfill run', run)).toBe(0)
+    expect((JSON.parse(run.stdout) as { status: string }).status).toBe('completed')
+
+    await waitForRowCount(db, target, 1)
+    return db.query<Record<string, string>>(
+      `SELECT ${input.readColumns.split(', ').map((column) => `toString(${column}) AS ${column}`).join(', ')}
+       FROM ${target} ORDER BY id
+       SETTINGS select_sequential_consistency = 1`,
+    )
+  })
+}
+
+function planMvReplay(fixture: Awaited<ReturnType<typeof createFixture>>, target: string): string {
+  const plan = runCli(['plugin', 'backfill', 'plan', '--target', target, '--config', fixture.configPath, '--json'])
+  expect(plan.exitCode, formatTestDiagnostic('backfill plan', plan)).toBe(0)
+  const planned = JSON.parse(plan.stdout) as { planId: string; strategy: string }
+  expect(planned.strategy).toBe('mv_replay')
+  return planned.planId
+}
+
+/**
+ * Create the source (with a MATERIALIZED column the profile adds to `*`) and
+ * the target, insert one source row, and declare the `SELECT *` view (and
+ * optionally the target) in the schema. The view itself is never created: the
+ * replay reads its query from the schema.
+ */
+async function withMvReplayFixture<T>(
+  input: { label: string; targetColumns: string; declareTarget?: string },
+  body: (context: MvReplayFixture) => Promise<T>,
+): Promise<T> {
+  const prefix = createPrefix(input.label)
+  const source = `${DATABASE}.${prefix}source`
+  const target = `${DATABASE}.${prefix}target`
+  const db = createLiveExecutor(env)
+  const fixture = await createFixture()
+  try {
+    await db.command(`CREATE TABLE ${source} (
+      id UInt64, event_time DateTime, a String, m String MATERIALIZED concat(a, '_m'), b String
+    ) ENGINE = MergeTree() PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+    await db.command(`CREATE TABLE ${target} (${input.targetColumns}
+    ) ENGINE = MergeTree() PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+    await waitForTable(db, DATABASE, `${prefix}source`)
+    await waitForTable(db, DATABASE, `${prefix}target`)
+    await db.command(`INSERT INTO ${source} (id, event_time, a, b) VALUES (1, '2026-01-01 12:00:00', 'x', 'bx')`)
+    await waitForRowCount(db, source, 1)
+
+    const declaredTarget = input.declareTarget
+      ? `table({
+  database: '${DATABASE}',
+  name: '${prefix}target',
+  engine: 'MergeTree()',
+  partitionBy: 'toYYYYMMDD(event_time)',
+  primaryKey: ['event_time', 'id'],
+  orderBy: ['event_time', 'id'],
+  columns: ${input.declareTarget},
+}), `
+      : ''
+    await writeFile(fixture.schemaPath, `import { materializedView, schema, table } from '${CORE_ENTRY}'
+
+export default schema(${declaredTarget}materializedView({
   database: '${DATABASE}',
   name: '${prefix}mv',
   to: { database: '${DATABASE}', name: '${prefix}target' },
   as: 'SELECT * FROM ${source}',
 }))
 `, 'utf8')
-      await writeBackfillConfig(fixture)
+    await writeBackfillConfig(fixture)
 
-      const plan = runCli(['plugin', 'backfill', 'plan', '--target', target, '--config', fixture.configPath, '--json'])
-      expect(plan.exitCode, formatTestDiagnostic('backfill plan', plan)).toBe(0)
-      const planned = JSON.parse(plan.stdout) as { planId: string; strategy: string }
-      expect(planned.strategy).toBe('mv_replay')
-
-      const run = runCli(['plugin', 'backfill', 'run', '--plan-id', planned.planId, '--poll-interval', '500', '--config', fixture.configPath, '--json'])
-      // Same result as without the profile: `*` reads 4 columns into a 5-column
-      // target and ClickHouse refuses it. Before the fix this run completed
-      // and wrote the shifted row.
-      expect(run.exitCode, formatTestDiagnostic('backfill run', run)).toBe(1)
-      expect(run.stdout).toContain("Number of columns doesn't match (source: 4 and result: 5)")
-      const [row] = await db.query<{ cnt: string }>(
-        `SELECT toString(count()) AS cnt FROM ${target} SETTINGS select_sequential_consistency = 1`,
-      )
-      expect(row?.cnt).toBe('0')
-    } finally {
-      await rm(fixture.dir, { recursive: true, force: true })
-      await db.command(`DROP TABLE IF EXISTS ${source}`)
-      await db.command(`DROP TABLE IF EXISTS ${target}`)
-      await db.close()
-    }
-  }, 120_000)
-})
+    return await body({ db, fixture, prefix, target })
+  } finally {
+    await rm(fixture.dir, { recursive: true, force: true })
+    await db.command(`DROP TABLE IF EXISTS ${source}`)
+    await db.command(`DROP TABLE IF EXISTS ${target}`)
+    await db.close()
+  }
+}
 
 /**
  * Create a two-partition table, plan and run a copy backfill of it through the
