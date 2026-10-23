@@ -64,7 +64,26 @@ describe('waitForDDLPropagation across replicas', () => {
   })
 
   test('keeps waiting while only one of two replicas shows an added column', async () => {
-    const { db, queries } = twoReplicaExecutor([1, 1, 2])
+    const queries: string[] = []
+    const column = (replica: string) => ({
+      replica,
+      type: 'String',
+      default_kind: '',
+      default_expression: '',
+      comment: '',
+      compression_codec: '',
+    })
+    const visible = [[column('r1')], [column('r1')], [column('r1'), column('r2')]]
+    let poll = 0
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        queries.push(sql)
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        const rows = visible[Math.min(poll, visible.length - 1)]
+        poll += 1
+        return rows as T[]
+      },
+    } as unknown as ClickHouseExecutor
 
     await waitForDDLPropagation(db, 'alter_table_add_column', 'table:app.events:column:c1')
 

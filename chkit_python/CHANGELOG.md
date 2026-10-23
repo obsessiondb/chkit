@@ -78,6 +78,16 @@
   both through `clusterAllReplicas` when `resolve_replica_fanout` finds more than
   one replica of `clickhouse.cluster` (or `default`), and raises without submitting
   anything when a replica cannot be read. `execute_backfill` takes `cluster`.
+- migrate: the DDL propagation wait checks a changed column's definition, not only
+  that the column is listed (#290). After `ADD COLUMN` and `MODIFY COLUMN` it waits
+  until every replica reports the same `type`, `default_kind`, `default_expression`,
+  `comment` and `compression_codec`; after `MODIFY COLUMN` also until they show what
+  the statement sets (default kind, the default expression formatted by the server
+  with `formatQuerySingleLine`, comment, a removed default or codec).
+  `RENAME COLUMN` waits until no replica lists the old name and every replica lists
+  the new one. `wait_for_ddl_propagation` takes the executed `statement=`. A timeout
+  names the replica and field that differ, and says when every replica kept the old
+  value (ObsessionDB ignores `MODIFY COLUMN ... EPHEMERAL <default>`, #285).
 - backfill: chunk INSERTs set `asterisk_include_materialized_columns=0` and
   `asterisk_include_alias_columns=0`, ahead of any `insert_settings`. A settings
   profile that enabled them made `SELECT *` return MATERIALIZED and ALIAS columns:

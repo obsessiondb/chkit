@@ -1703,7 +1703,7 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `column_default_invalid` issue.
 - The SQL lexer works on code points, TS on UTF-16 offsets; token text is the
   same, offsets differ only outside the BMP.
-- The DDL propagation wait still also waits for skip indexes/projections and
+- The DDL propagation wait still also waits for projections (TS: indexes only) and
   only warns on timeout (TS raises).
 - `migrate --json` success output stays bare JSON (no `command` /
   `schemaVersion` / `scope`), and `applied` entries keep `applied_at`. The JSON
@@ -1816,8 +1816,8 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - The vector index model defaults `granularity` to `100000000`; TS leaves it optional
   and canonicalization fills the same default, so snapshots agree.
 - Constraint waits read `create_table_query` on every replica (there is no system table
-  of constraints). TS waits the same way; TS skip index ALTERs still wait only for the
-  table, Python for the index.
+  of constraints). TS waits the same way. Skip index ALTERs now wait for the index in
+  both (#290).
 - Python drift JSON keeps snake_case keys (`constraint_diffs`), like the other
   `tableDrift` fields; TS writes `constraintDiffs`.
 - On ClickHouse < 25.8 the vector index is experimental. TS can pass the setting as a
@@ -1835,3 +1835,18 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   TS keeps `Math.floor(Math.random() * 100000)`. Five decimal digits collided
   when many names were built in the same millisecond. Only the test helpers
   differ; no product code is affected.
+
+### Column definition wait (#290)
+- Same design as TS: `chkit.clickhouse.alter_column_statement` (port of
+  `alter-column-statement.ts`) reads what a `MODIFY COLUMN` sets and a `RENAME COLUMN`'s
+  names with the SQL lexer; `wait_for_column_definition` and `wait_for_column_rename`
+  poll every replica's `system.columns` rows. The default expression is compared after
+  the server formats it with `formatQuerySingleLine`; types and codecs the statement sets
+  are only compared between replicas.
+- `migrate_apply` still only warns when the wait times out (TS stops the migration), as
+  before. So on ObsessionDB a changed `EPHEMERAL` default (#285) is a warning in Python
+  and an error in TS.
+- TS projection ALTERs still wait only for the table; Python waits for the projection.
+- The replica-lag case (one replica's replication queue stopped) is
+  `tests_cluster/test_definition_wait_cluster_e2e.py`, the port of
+  `packages/cli/test/cluster-2shard-definition-wait.e2e.test.ts`.

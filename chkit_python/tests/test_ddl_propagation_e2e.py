@@ -69,8 +69,12 @@ def _listed_as_view(db: str, name: str) -> str:
 
 
 def _column_listed(db: str, table: str, column: str) -> str:
-    return _polled(
-        "system.columns", f"database = '{db}' AND table = '{table}' AND name = '{column}'"
+    # A column wait reads every replica's definition, not a count.
+    source = all_replicas(_fanout, "system.columns") if _fanout else "system.columns"
+    return (
+        "SELECT hostName() AS replica, type, default_kind, default_expression, comment, "
+        f"compression_codec FROM {source} "
+        f"WHERE database = '{db}' AND table = '{table}' AND name = '{column}'"
     )
 
 
@@ -186,8 +190,8 @@ def test_waits_for_the_whole_name_of_objects_and_columns_containing_colons(ch_cl
         assert polling("alter_table_add_column", f"table:{db}.{table}:column:{column}") == [
             _column_listed(db, table, column)
         ]
-        # Python also waits for the index itself (TS checks only the table), so
-        # the index is created first; its name is cut at the key's `:index:`.
+        # The wait checks the index itself, so it is created first; its name is
+        # cut at the key's `:index:`.
         run(
             f"ALTER TABLE {obj(table)} ADD INDEX {quote_ident(index)} id TYPE minmax GRANULARITY 1"
         )
