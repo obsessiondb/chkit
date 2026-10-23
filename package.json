@@ -38,7 +38,7 @@
     "test:cluster": "bun test packages/cli/test/cluster.e2e.test.ts",
     "cluster:2shard:up": "docker compose -f test/cluster/2shard/docker-compose.yml up -d --wait",
     "cluster:2shard:down": "docker compose -f test/cluster/2shard/docker-compose.yml down -v",
-    "test:cluster:2shard": "bun test packages/cli/test/cluster-2shard.e2e.test.ts",
+    "test:cluster:2shard": "bun test packages/cli/test/cluster-2shard",
     "test:workbench-api": "bun test packages/cli/test/workbench-api.e2e.test.ts",
     "fallow": "bunx fallow",
     "fallow:dead-code": "bunx fallow --only dead-code",

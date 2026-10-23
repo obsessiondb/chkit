@@ -694,6 +694,7 @@ class MigrationPlan(_StrictModel):
 
 ValidationIssueCode: TypeAlias = Literal[
     "kafka_unsupported_clause",
+    "engine_unsupported_clause",
     "kafka_column_default",
     "kafka_missing_setting",
     "kafka_invalid_setting",
@@ -799,9 +800,10 @@ def table(
 ) -> TableDefinition:
     pk = primary_key if primary_key is not None else primaryKey
     ob = order_by if order_by is not None else orderBy
-    from chkit.core.kafka import is_kafka_engine
+    from chkit.core.engine import supports_sort_order
 
-    if is_kafka_engine(engine):
+    # Kafka, Distributed, Memory and other engines without sort order take no keys.
+    if not supports_sort_order(engine):
         pk = pk or []
         ob = ob or []
     if pk is None or ob is None:

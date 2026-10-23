@@ -1,3 +1,4 @@
+import { isDistributedEngine, normalizeDistributedEngine } from './engine.js'
 import { isKafkaEngine, normalizeKafkaEngine } from './kafka.js'
 import { type SQLToken, tokenizeSQL } from './sql-lexer.js'
 import { textExpressionFingerprint, textSQLFingerprint } from './text-index-sql.js'
@@ -108,6 +109,7 @@ export function stripSQLComments(value: string): string {
 
 export function normalizeEngine(engine: string): string {
   if (isKafkaEngine(engine)) return normalizeKafkaEngine(engine)
+  if (isDistributedEngine(engine)) return normalizeDistributedEngine(engine)
   let normalized = engine.trim().replace(/^Shared/, '')
   if (!normalized.includes('(')) {
     normalized += '()'

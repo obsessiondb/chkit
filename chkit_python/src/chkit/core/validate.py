@@ -20,6 +20,7 @@ from chkit.core.column_default import (
     stores_unparsable_literal_as_null,
     trim_expression,
 )
+from chkit.core.engine import engine_name, supports_sort_order
 from chkit.core.kafka import is_kafka_engine
 from chkit.core.key_clause import (
     is_plain_column_reference,
@@ -129,6 +130,40 @@ def _validate_indexes(definition: TableDefinition, issues: list[ValidationIssue]
             except ValueError as exc:
                 _push(issues, definition, "text_index_invalid_parameters",
                       f'Text index "{index.name}": {exc}')
+
+
+def _validate_sort_order_support(
+    definition: TableDefinition, issues: list[ValidationIssue]
+) -> None:
+    """ClickHouse accepts PARTITION BY, PRIMARY KEY and ORDER BY only on engines
+    that support sort order (MergeTree family, EmbeddedRocksDB, S3, ...). The
+    renderer omits them for other engines, so a key set there would be dropped
+    silently; reject it instead. Kafka reports its own clauses."""
+    if supports_sort_order(definition.engine) or is_kafka_engine(definition.engine):
+        return
+    clauses = {
+        "partitionBy": definition.partition_by,
+        "primaryKey": definition.primary_key,
+        "orderBy": definition.order_by,
+    }
+    fields = [field for field, value in clauses.items() if value]
+    if not fields:
+        return
+    engine = engine_name(definition.engine) or definition.engine
+    hint = (
+        " Define the keys on the local table the Distributed table reads from."
+        if engine == "Distributed"
+        else ""
+    )
+    _push(
+        issues,
+        definition,
+        "engine_unsupported_clause",
+        f"Table {definition.database}.{definition.name} sets {', '.join(fields)}, "
+        f"but engine {engine} does not support PARTITION BY, PRIMARY KEY or ORDER BY "
+        "(only MergeTree-family engines and a few others such as EmbeddedRocksDB, "
+        f"KeeperMap and S3 do). Remove {'it' if len(fields) == 1 else 'them'}.{hint}",
+    )
 
 
 def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
@@ -488,6 +523,7 @@ def _unquote(name: str) -> str:
 def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
     kafka = is_kafka_engine(definition.engine)
     _validate_kafka_table(definition, issues)
+    _validate_sort_order_support(definition, issues)
     column_seen: set[str] = set()
     column_set: set[str] = set()
     for column in definition.columns:

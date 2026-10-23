@@ -6,6 +6,7 @@ import json
 import re
 from typing import Final
 
+from chkit.core.engine import is_distributed_engine, normalize_distributed_engine
 from chkit.core.kafka import is_kafka_engine, normalize_kafka_engine
 from chkit.core.sql_lexer import (
     JS_WHITESPACE_RUN,
@@ -131,6 +132,8 @@ def strip_sql_comments(value: str) -> str:
 def normalize_engine(engine: str) -> str:
     if is_kafka_engine(engine):
         return normalize_kafka_engine(engine)
+    if is_distributed_engine(engine):
+        return normalize_distributed_engine(engine)
     normalized = engine.strip()
     if normalized.startswith("Shared"):
         normalized = normalized[len("Shared") :]

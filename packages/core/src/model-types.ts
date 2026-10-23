@@ -216,6 +216,33 @@ export type KafkaTableInput = Omit<TableDefinition,
   projections?: never
 }
 
+/**
+ * Common engines without sort order. ClickHouse rejects PARTITION BY, PRIMARY
+ * KEY and ORDER BY on them, so their tables need no keys. Other engines without
+ * sort order still validate through `TableInput` with `orderBy: []`.
+ */
+export type KeylessTableEngine =
+  | `Distributed(${string})`
+  | `Merge(${string})`
+  | `Buffer(${string})`
+  | 'Memory' | `Memory(${string})`
+  | 'Null' | `Null(${string})`
+  | 'Log' | `Log(${string})`
+  | 'TinyLog' | `TinyLog(${string})`
+  | 'StripeLog' | `StripeLog(${string})`
+  | 'Set' | `Set(${string})`
+  | `Join(${string})`
+
+/** A table on a `KeylessTableEngine`, e.g. a Distributed table over a local table. */
+export type KeylessTableInput = Omit<TableDefinition,
+  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy'
+> & {
+  engine: KeylessTableEngine
+  primaryKey?: []
+  orderBy?: []
+  partitionBy?: never
+}
+
 export interface ViewDefinition {
   kind: 'view'
   database: string
@@ -449,6 +476,7 @@ export interface MigrationPlan {
 
 export type ValidationIssueCode =
   | 'kafka_unsupported_clause'
+  | 'engine_unsupported_clause'
   | 'kafka_column_default'
   | 'kafka_missing_setting'
   | 'kafka_invalid_setting'

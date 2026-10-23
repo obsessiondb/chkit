@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from chkit.core.engine import is_distributed_engine
 from chkit.core.model import (
     ChxResolvedConfig,
     SchemaDefinition,
@@ -86,6 +87,22 @@ def resolve_strip_behavior(
         return True
     url = config.clickhouse.url if config.clickhouse is not None else None
     return not (url and is_obsessiondb_host(url))
+
+
+def find_distributed_tables(definitions: Sequence[SchemaDefinition]) -> list[str]:
+    """One message per Distributed table, so generate and check fail early.
+
+    ObsessionDB runs one shared-storage service with no shards, and its users
+    have no grant for the Distributed engine. Port of ``findDistributedTables``.
+    """
+    return [
+        f"Table {definition.database}.{definition.name} uses the Distributed engine, "
+        "which ObsessionDB does not support: ObsessionDB has no shards, so every "
+        "replica already reads the same shared storage. Remove the Distributed table "
+        "from the schema and query or insert into its local table directly."
+        for definition in definitions
+        if isinstance(definition, TableDefinition) and is_distributed_engine(definition.engine)
+    ]
 
 
 def strip_shared_prefix(engine: str) -> str:

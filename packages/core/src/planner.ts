@@ -35,6 +35,7 @@ import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
 import { ChxValidationError } from './model.js'
+import { isDistributedEngine } from './engine.js'
 import { isKafkaEngine, kafkaSettingFingerprint } from './kafka.js'
 import {
   buildDependencyGraph,
@@ -192,6 +193,18 @@ function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition)
       newValue: normalizeClauseList(newDef.uniqueKey),
     },
   ])
+}
+
+/**
+ * A Distributed table stores no rows, and DROP sends the inserts it still
+ * queues to the shards (flush_on_detach, on by default), so recreating one to
+ * change its engine arguments loses no data. Every other table loses its rows.
+ */
+function recreateDropRisk(oldDef: TableDefinition): RiskLevel {
+  if (!isDistributedEngine(oldDef.engine)) return 'danger'
+  const flushOnDetach = oldDef.settings?.flush_on_detach
+  const disabled = flushOnDetach !== undefined && ['0', 'false'].includes(String(flushOnDetach).trim().toLowerCase())
+  return disabled ? 'danger' : 'caution'
 }
 
 interface TableDiffResult {
@@ -389,7 +402,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
         {
           type: 'drop_table',
           key: definitionKey(newDef),
-          risk: 'danger',
+          risk: recreateDropRisk(oldDef),
           sql: `DROP TABLE IF EXISTS ${renderQualifiedName(newDef.database, newDef.name)};`,
         },
         {

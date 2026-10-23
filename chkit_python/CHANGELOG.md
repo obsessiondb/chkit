@@ -70,6 +70,16 @@
   The remote executor sends a submission's query id as the workbench API's
   top-level `queryId`, which the API honours; it ignored the `query_id`
   setting, so async statements ran under a random id.
+- Distributed tables (#279): `PARTITION BY`, `PRIMARY KEY` and `ORDER BY` render only
+  for engines that accept them (MergeTree family, EmbeddedRocksDB, KeeperMap, S3, ...),
+  so Distributed, Memory, Null, Log, Buffer and Merge tables create cleanly; `table()`
+  no longer requires keys for them, and setting one fails validation with
+  `engine_unsupported_clause`. `pull` writes them without keys, Distributed engine
+  arguments compare equal to the quoted literals ClickHouse stores, and recreating a
+  Distributed table is `risk=caution` (`danger` with `flush_on_detach = 0`). The
+  ObsessionDB plugin rejects Distributed tables in `generate`, `snapshot rebuild` and
+  `check` when targeting ObsessionDB, which has no shards. The README now says beta,
+  matching the package classifier.
 - Dictionary DDL waits read `system.tables`, not each replica's in-memory
   `system.dictionaries` loader. `CREATE OR REPLACE DICTIONARY` drops the loader
   entry while a replica reloads, so `migrate` could time out after the catalog

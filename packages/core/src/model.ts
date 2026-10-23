@@ -7,6 +7,7 @@ import type {
   ChxUserConfig,
   DictionaryDefinition,
   KafkaTableInput,
+  KeylessTableInput,
   MaterializedViewDefinition,
   SchemaDefinition,
   TableDefinition,
@@ -94,8 +95,9 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
 }
 
 export function table(input: KafkaTableInput): TableDefinition
+export function table(input: KeylessTableInput): TableDefinition
 export function table(input: TableInput): TableDefinition
-export function table(input: KafkaTableInput | TableInput): TableDefinition {
+export function table(input: KafkaTableInput | KeylessTableInput | TableInput): TableDefinition {
   return { ...input, primaryKey: input.primaryKey ?? input.orderBy ?? [], orderBy: input.orderBy ?? [], kind: 'table' }
 }
 

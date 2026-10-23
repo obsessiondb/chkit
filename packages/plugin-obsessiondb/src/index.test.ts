@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -428,6 +428,53 @@ describe('obsessiondb plugin', () => {
 
 		expect(result).toBeDefined()
 		expect(result).toHaveLength(1)
+	})
+})
+
+describe('Distributed tables on ObsessionDB (#279)', () => {
+	const OBSESSIONDB_URL = 'https://my-cluster.obsessiondb.com:8443'
+	const distributed = makeTable('events', "Distributed('cluster', 'default', 'events_local', rand())")
+	const message =
+		'Table default.events uses the Distributed engine, which ObsessionDB does not support: ObsessionDB has no shards, so every replica already reads the same shared storage. Remove the Distributed table from the schema and query or insert into its local table directly.'
+
+	test('onSchemaLoaded rejects a Distributed table when targeting ObsessionDB', () => {
+		const { hooks } = obsessiondb().plugin
+		const load = (url: string, flags: Record<string, boolean> = {}) => () =>
+			hooks.onSchemaLoaded({ config: makeConfig(url), flags, definitions: [distributed] })
+		expect(load(OBSESSIONDB_URL)).toThrow(message)
+		expect(load('http://localhost:8123', { '--force-shared-engines': true })).toThrow(message)
+	})
+
+	test('onSchemaLoaded keeps a Distributed table for regular ClickHouse', () => {
+		const result = obsessiondb().plugin.hooks.onSchemaLoaded({
+			config: makeConfig('http://localhost:8123'),
+			flags: {},
+			definitions: [distributed],
+		})
+		expect(result).toEqual([distributed])
+	})
+
+	test('onCheck reports Distributed tables in the schema only for ObsessionDB', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'chkit-obsessiondb-distributed-'))
+		try {
+			await writeFile(join(dir, 'schema.ts'), `export const events = ${JSON.stringify(distributed)}\n`)
+			const configPath = join(dir, 'clickhouse.config.ts')
+			const check = (url: string) =>
+				obsessiondb().plugin.hooks.onCheck({
+					config: { ...makeConfig(url), schema: ['schema.ts'] },
+					configPath,
+					flags: {},
+				})
+			expect(await check(OBSESSIONDB_URL)).toEqual({
+				plugin: 'obsessiondb',
+				evaluated: true,
+				ok: false,
+				findings: [{ code: 'obsessiondb_distributed_unsupported', message, severity: 'error' }],
+			})
+			expect(await check('http://localhost:8123')).toBeUndefined()
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
 	})
 })
 

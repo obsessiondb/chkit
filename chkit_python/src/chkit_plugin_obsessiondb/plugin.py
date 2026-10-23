@@ -21,9 +21,14 @@ from chkit.cli.shared_engine_flags import (
     FORCE_SHARED_ENGINES_HELP,
     NO_SHARED_ENGINES_HELP,
 )
+from chkit.core import load_schema_definitions
 from chkit.plugins import (
+    ChxCheckFinding,
     ChxOnBeforePluginCommandContext,
     ChxOnBeforePluginCommandResult,
+    ChxOnCheckContext,
+    ChxOnCheckReportContext,
+    ChxOnCheckResult,
     ChxOnSchemaLoadedContext,
     ChxPlugin,
     ChxPluginCommand,
@@ -42,6 +47,7 @@ from chkit_plugin_obsessiondb.auth_signup import (
 from chkit_plugin_obsessiondb.backfill_handler import handle_backfill_command
 from chkit_plugin_obsessiondb.credentials import resolve_base_url
 from chkit_plugin_obsessiondb.engine import (
+    find_distributed_tables,
     resolve_strip_behavior,
     rewrite_shared_engines,
 )
@@ -69,6 +75,9 @@ class _ObsessionDBHooks:
     ) -> list[Any] | None:
         flags = dict(ctx.flags) if ctx.flags else {}
         if not resolve_strip_behavior(ctx.config, flags):
+            distributed = find_distributed_tables(list(ctx.definitions))
+            if distributed:
+                raise ValueError("\n".join(distributed))
             return None
 
         result = rewrite_shared_engines(list(ctx.definitions))
@@ -85,6 +94,31 @@ class _ObsessionDBHooks:
                     f"{', '.join(unique)}"
                 )
         return result.definitions
+
+    def on_check(self, ctx: ChxOnCheckContext) -> ChxOnCheckResult | None:
+        # Same target decision as on_schema_loaded: ObsessionDB host or
+        # --force-shared-engines.
+        flags = dict(ctx.flags) if ctx.flags else {}
+        if resolve_strip_behavior(ctx.config, flags):
+            return None
+        definitions = load_schema_definitions(
+            list(ctx.config.schema_), cwd=Path(ctx.config_path).resolve().parent
+        )
+        findings = [
+            ChxCheckFinding(
+                code="obsessiondb_distributed_unsupported", message=message, severity="error"
+            )
+            for message in find_distributed_tables(definitions)
+        ]
+        return ChxOnCheckResult(
+            plugin="obsessiondb", evaluated=True, ok=not findings, findings=findings
+        )
+
+    def on_check_report(self, ctx: ChxOnCheckReportContext) -> None:
+        if ctx.result.ok:
+            return
+        for finding in ctx.result.findings:
+            ctx.print(f"obsessiondb: {finding.message}")
 
 
 def _resolve_base_url_from_flags(flags: dict[str, Any]) -> str:

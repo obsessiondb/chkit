@@ -166,6 +166,9 @@ Creates a table definition.
 | `primaryKey` | `string[]` | Primary key columns or expressions, e.g. `['toDate(ts)', 'id']` |
 | `orderBy` | `string[]` | ORDER BY columns or expressions, e.g. `['toStartOfHour(ts)', 'id']` |
 
+`primaryKey` and `orderBy` are required only on engines that support sort order. Omit
+them for [Distributed tables](#distributed-tables) and other engines without keys.
+
 ### Optional fields
 
 For [Kafka tables](/schema/kafka/), omit `primaryKey` and `orderBy`. Kafka also
@@ -203,6 +206,77 @@ Write expressions in ClickHouse's **canonical form**, because ClickHouse rewrite
 
 Plain function chains like `toStartOfHour(ts)`, `toDate(ts)`, and arithmetic (`a + 1`, `h % 8`) round-trip unchanged.
 :::
+
+### Distributed tables
+
+A Distributed table stores no rows. It routes queries and inserts to a local table on
+every shard of a cluster. Define the local table and the Distributed table as two
+separate tables in the schema:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import { schema, table } from '@chkit/core'
+
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+    ]
+
+    const eventsLocal = table({
+      database: 'analytics',
+      name: 'events_local',
+      engine: "ReplicatedMergeTree('/clickhouse/tables/{shard}/analytics/events_local', '{replica}')",
+      columns,
+      orderBy: ['id'],
+      partitionBy: 'toYYYYMM(ts)',
+    })
+
+    const events = table({
+      database: 'analytics',
+      name: 'events',
+      engine: 'Distributed(my_cluster, analytics, events_local, rand())',
+      columns,
+    })
+
+    export default schema(eventsLocal, events)
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    from chkit import schema, table
+
+    columns = [{"name": "id", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}]
+
+    events_local = table(
+        database="analytics",
+        name="events_local",
+        engine="ReplicatedMergeTree('/clickhouse/tables/{shard}/analytics/events_local', '{replica}')",
+        columns=columns,
+        primary_key=["id"],
+        order_by=["id"],
+        partition_by="toYYYYMM(ts)",
+    )
+
+    events = table(
+        database="analytics",
+        name="events",
+        engine="Distributed(my_cluster, analytics, events_local, rand())",
+        columns=columns,
+    )
+
+    definitions = schema(events_local, events)
+    ```
+  </TabItem>
+</Tabs>
+
+Set [`clickhouse.cluster`](/configuration/overview/#cluster-mode-on-cluster) so every statement runs `ON CLUSTER`.
+
+- **No keys.** ClickHouse rejects `PARTITION BY`, `PRIMARY KEY`, and `ORDER BY` on a Distributed table, so chkit renders none, and validation fails with `engine_unsupported_clause` when one is set. Put the keys on the local table. The same applies to `Memory`, `Null`, `Log`, `Buffer`, `Merge`, and other engines without sort order.
+- **Two tables, two ALTERs.** chkit does not link the Distributed table to its local table. To add a column, add it to both definitions; `chkit generate` plans one `ALTER TABLE ... ADD COLUMN` per table, and both run in the same migration.
+- **Engine arguments.** ClickHouse stores the cluster, database, and table arguments as string literals, so `Distributed(my_cluster, analytics, events_local)` and `Distributed('my_cluster', 'analytics', 'events_local')` are the same engine to `drift` and `generate`. Write the database name literally: an expression such as `currentDatabase()` reads back as its value and shows as drift.
+- **Recreate risk.** Changing the engine arguments (cluster, local table, sharding key) recreates the Distributed table. The drop is `risk=caution`, not `danger`: the table holds no rows, and `DROP` sends inserts still queued for the shards first (`flush_on_detach`, on by default). With `settings: { flush_on_detach: 0 }` queued inserts are lost, so the drop stays `risk=danger`.
+- **ObsessionDB.** ObsessionDB has no shards. The [ObsessionDB plugin](/obsessiondb/engine-rewriting/#distributed-tables) rejects Distributed tables when targeting it; use the local table directly.
 
 ## Columns
 
@@ -1047,6 +1121,7 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Default looks like an expression** (`column_default_looks_like_expression`) -- the plain string default of a `DEFAULT` or `EPHEMERAL` column starts with a function call, such as `'now64(3)'`, and the column type cannot hold a string; use `{ expression: 'now64(3)' }` (see [`default`](#default-string--number--boolean--sqlexpression-optional))
 - **Plain string expression** (`column_expression_requires_fn`) -- a `MATERIALIZED` or `ALIAS` column has a plain string `default`, which renders as a quoted literal instead of SQL; use `{ expression: 'toDate(ts)' }`, or `{ expression: "'text'" }` for a constant string (see [`defaultKind`](#defaultkind-optional))
 - **Invalid default** (`column_default_invalid`) -- `default` is an object other than `{ expression: string }`, an expression that keeps the legacy prefix, such as `{ expression: 'fn:now()' }`, or an expression with an unterminated string, quoted identifier, or block comment, such as `{ expression: 'now() /* set on insert' }`, or with a `#` that starts no comment, such as `{ expression: 'now() #' }`
+- **Key on an engine without sort order** (`engine_unsupported_clause`) -- `partitionBy`, `primaryKey`, or `orderBy` is set on an engine that rejects them, such as `Distributed`, `Memory`, or `Null` (see [Distributed tables](#distributed-tables))
 - **Unstored column in a key** (`column_kind_not_stored`) -- an `ALIAS` or `EPHEMERAL` column is named directly in `orderBy`, `primaryKey`, `partitionBy` or an engine argument, or an `EPHEMERAL` column is a skip index expression
 - **EPHEMERAL column in a projection** (`column_ephemeral_in_projection`) -- a projection reads an `EPHEMERAL` column
 - **Codec on an unstored column** (`column_kind_codec_unsupported`) -- an `ALIAS` column, or an `EPHEMERAL` column without a default or comment, has a `codec`
@@ -1061,6 +1136,8 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 
 The table rules below apply to MergeTree-family tables. Kafka changes require an
 [explicit replacement](/schema/kafka/#changing-a-queue); chkit refuses generic ALTERs.
+A [Distributed table](#distributed-tables) follows the same rules, but its recreate
+drop is `risk=caution` because it holds no rows.
 
 When a property changes, chkit determines whether the table can be altered in place or must be dropped and recreated.
 

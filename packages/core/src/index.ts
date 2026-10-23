@@ -1,6 +1,7 @@
 export * from './flags.js'
 export * from './model.js'
 export { isKafkaEngine, parseKafkaSettings, kafkaSettingFingerprint } from './kafka.js'
+export { engineName, isDistributedEngine, isMergeTreeEngine, supportsSortOrder } from './engine.js'
 export {
   findQuoteEnd,
   findTopLevelSQLPattern,
