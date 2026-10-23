@@ -34,7 +34,7 @@ Append `.md` to a documentation URL to read Markdown, such as [`/ai-agents.md`](
 
 ## What chkit is
 
-Use chkit to define ClickHouse schemas, generate migration SQL, deploy reviewed changes, and check the live database for drift. Default to TypeScript unless the user explicitly requests the alpha Python implementation.
+Use chkit to define ClickHouse schemas, generate migration SQL, deploy reviewed changes, and check the live database for drift. Default to TypeScript unless the user explicitly requests the beta Python implementation.
 
 Run chkit through shell commands. Install the schema agent skill for command and authoring guidance.
 

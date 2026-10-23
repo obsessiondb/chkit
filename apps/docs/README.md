@@ -6,7 +6,7 @@ Public docs content lives in `src/content/docs/`.
 
 ## Product documentation
 
-Schema Management is the main product, starting at `/getting-started/`. Its guides, configuration, plugins, and CLI reference cover schemas and migrations without depending on Sync documentation. Python support is in alpha; the backfill plugin is in beta.
+Schema Management is the main product, starting at `/getting-started/`. Its guides, configuration, plugins, and CLI reference cover schemas and migrations without depending on Sync documentation. Python support is in beta; the backfill plugin is in beta.
 
 chkit Sync (beta) syncs business application data into ClickHouse. It starts at `/sync/` and has its own getting-started, integrations, source authoring, operations, and reference hierarchy. It may link to Schema Management for destination definitions and migrations.
 

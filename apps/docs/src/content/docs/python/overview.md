@@ -1,14 +1,14 @@
 ---
-title: Python Overview (alpha)
-description: Define ClickHouse schemas and run migrations with the alpha Python implementation, chkit-py.
+title: Python Overview (beta)
+description: Define ClickHouse schemas and run migrations with the beta Python implementation, chkit-py.
 sidebar:
   order: 1
   badge:
-    text: Alpha
+    text: Beta
     variant: caution
 ---
 
-Use `chkit-py` to define ClickHouse schemas and run the chkit migration workflow in Python. Python support is in alpha; its API and CLI behavior may change between releases.
+Use `chkit-py` to define ClickHouse schemas and run the chkit migration workflow in Python. Python support is in beta; its API and CLI behavior may change between releases.
 
 ## Install
 
