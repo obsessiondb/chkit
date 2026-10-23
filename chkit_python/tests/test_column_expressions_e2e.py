@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import time
 from typing import Any
 from uuid import uuid4
 
@@ -26,15 +24,7 @@ from chkit_plugin_backfill.planner import assert_backfill_target_safe
 from chkit_plugin_codegen import generate_type_artifacts
 from tests.e2e_testkit import poll_until, run_once_visible
 
-# Consecutive ALTERs race replica lag on ObsessionDB (#240); the verify job runs
-# this against open-source ClickHouse.
-_ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 
-
-@pytest.mark.skipif(
-    _ON_OBSESSIONDB,
-    reason="consecutive ALTERs race replica lag on ObsessionDB (#240)",
-)
 def test_expression_column_lifecycle(ch_client: Any) -> None:  # noqa: PLR0915 â€” mirrors the TS lifecycle test
     client = ch_client._client
     name = f"column_expr_py_{uuid4().hex}"
@@ -84,7 +74,10 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:  # noqa: PLR0915 â
         exec(generate_type_artifacts(definitions=[definition]).content, models)
         read = next(value for key, value in models.items() if key.endswith("Row"))
         explicit = models[read.__name__ + "Explicit"]
-        read.model_validate(next(client.query(f"SELECT * FROM {target}").named_results()))
+        read.model_validate(poll_until(
+            lambda: list(client.query(f"SELECT * FROM {target}").named_results()),
+            lambda rows: len(rows) == 1,
+        )[0])
         # UInt64 models use the same string encoding as ClickHouse JSON output.
         explicit.model_validate({"id": 1, "size": "3", "label": "3"})
         with pytest.raises(Exception, match="MATERIALIZED"):
@@ -103,6 +96,7 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:  # noqa: PLR0915 â
         for operation in plan_diff([definition], [changed]).operations:
             assert "MATERIALIZE COLUMN" not in operation.sql
             client.command(operation.sql)
+            _replicas_agree(client, definition)
         assert compare_table_shape(changed, _settled_shape(client, changed)) is None
         assert _settled_rows(client, f"SELECT size FROM {target}", 1) == [(3,)]
         client.command(f"INSERT INTO {target} (id, raw) VALUES (2, 'abcd')")
@@ -119,6 +113,7 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:  # noqa: PLR0915 â
         )
         for operation in plan_diff([changed], [plain]).operations:
             client.command(operation.sql)
+            _replicas_agree(client, plain)
         assert compare_table_shape(plain, _settled_shape(client, plain)) is None
         # In one ALTER, ClickHouse casts the retained 'abc' to UInt64 before the REMOVE.
         coded = plain.model_copy(update={"name": f"{name}_code", "columns": [
@@ -135,6 +130,7 @@ def test_expression_column_lifecycle(ch_client: Any) -> None:  # noqa: PLR0915 â
         )
         for operation in plan_diff([coded], [retyped]).operations:
             client.command(operation.sql)
+            _replicas_agree(client, coded)
         assert compare_table_shape(retyped, _settled_shape(client, retyped)) is None
         assert _settled_rows(client, f"SELECT code FROM {target}_code", 1) == [(42,)]
         keyed = plain.model_copy(update={"order_by": ["id", "k"], "columns": [
@@ -202,33 +198,77 @@ def _settled_rows(client: Any, sql: str, count: int) -> list[Any]:
 
 
 def _settled_shape(client: Any, definition: TableDefinition) -> IntrospectedTable:
-    """Re-read ``system.columns`` until it matches ``definition``.
+    """Re-read ``system.columns`` on every replica until all of them match ``definition``.
 
-    DDL is eventually consistent on managed ClickHouse (e.g. ObsessionDB). Running
-    out of time returns the last observation so the caller's assert shows it.
+    On a multi-replica service (ObsessionDB) each request may reach a replica
+    that has not applied the previous DDL yet (#240). Returns a replica's shape
+    that differs from ``definition``, or any replica's when all match, so the
+    caller's assert shows the drift.
     """
-    for _ in range(60):
-        shape = _read_shape(client, definition)
-        if compare_table_shape(definition, shape) is None:
-            break
-        time.sleep(0.5)
-    return shape
-
-
-def _read_shape(client: Any, definition: TableDefinition) -> IntrospectedTable:
-    rows = client.query(
-        "SELECT database, table, name, type, position, default_kind, default_expression "
-        f"FROM system.columns WHERE database='{definition.database}' "
-        f"AND table='{definition.name}' ORDER BY position"
-    ).named_results()
-    return IntrospectedTable(
-        database=definition.database,
-        name=definition.name,
-        columns=[normalize_column_from_system_row(SystemColumnRow(**row)) for row in rows],
-        settings={},
-        indexes=[],
-        projections=[],
-        engine="MergeTree()",
-        primary_key="id",
-        order_by="id",
+    replicas = _replica_count(client)
+    shapes = poll_until(
+        lambda: _replica_shapes(client, definition, replicas),
+        lambda shapes: len(shapes) == replicas
+        and all(compare_table_shape(definition, shape) is None for shape in shapes),
     )
+    assert len(shapes) == replicas, f"{len(shapes)} of {replicas} replicas list {definition.name}"
+    drifted = [shape for shape in shapes if compare_table_shape(definition, shape) is not None]
+    return (drifted or shapes)[0]
+
+
+def _replicas_agree(client: Any, definition: TableDefinition) -> None:
+    """Wait until every replica lists the same columns after one statement.
+
+    A step can run several statements (e.g. REMOVE DEFAULT, then MODIFY COLUMN)
+    whose final state is not the target definition yet. The replica that ran a
+    statement has applied it, so once every replica agrees, all of them have.
+    """
+    replicas = _replica_count(client)
+    shapes = poll_until(
+        lambda: [shape.columns for shape in _replica_shapes(client, definition, replicas)],
+        lambda shapes: len(shapes) == replicas and all(cols == shapes[0] for cols in shapes),
+    )
+    assert len(shapes) == replicas
+    assert all(cols == shapes[0] for cols in shapes), shapes
+
+
+def _replica_count(client: Any) -> int:
+    """Replicas of the ``default`` cluster ObsessionDB exposes; 1 without it."""
+    try:
+        rows = client.query(
+            "SELECT count(DISTINCT hostName()) FROM clusterAllReplicas('default', system.one)"
+        ).result_rows
+    except Exception:
+        return 1
+    return max(int(rows[0][0]), 1)
+
+
+def _replica_shapes(
+    client: Any, definition: TableDefinition, replicas: int
+) -> list[IntrospectedTable]:
+    source = "clusterAllReplicas('default', system.columns)" if replicas > 1 else "system.columns"
+    rows = client.query(
+        "SELECT hostName() AS host, database, table, name, type, position, default_kind, "
+        f"default_expression FROM {source} WHERE database='{definition.database}' "
+        f"AND table='{definition.name}' ORDER BY host, position"
+    ).named_results()
+    by_host: dict[str, list[Any]] = {}
+    for row in rows:
+        host = str(row.pop("host"))
+        by_host.setdefault(host, []).append(
+            normalize_column_from_system_row(SystemColumnRow(**row))
+        )
+    return [
+        IntrospectedTable(
+            database=definition.database,
+            name=definition.name,
+            columns=columns,
+            settings={},
+            indexes=[],
+            projections=[],
+            engine="MergeTree()",
+            primary_key="id",
+            order_by="id",
+        )
+        for columns in by_host.values()
+    ]

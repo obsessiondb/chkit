@@ -11,7 +11,9 @@ import {
 	type TableDefinition,
 } from '@chkit/core'
 import {
+	allReplicas,
 	normalizeColumnFromSystemRow,
+	resolveReplicaFanout,
 	type SystemColumnRow,
 } from '@chkit/clickhouse'
 import { compareTableShape } from '../commands/drift/compare.js'
@@ -30,11 +32,9 @@ import {
 	quoteIdent,
 } from './e2e-testkit.js'
 
-// Consecutive ALTERs race replica lag on ObsessionDB (#240); the verify job runs
-// this against open-source ClickHouse.
 const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 
-test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inserts and ALTER on live ClickHouse', async () => {
+test('column expressions survive create, pull, drift, inserts and ALTER on live ClickHouse', async () => {
 	const env = getLiveEnv()
 	const client = createClient({
 		url: env.clickhouseUrl,
@@ -42,6 +42,7 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 		password: env.clickhousePassword,
 		database: env.clickhouseDatabase,
 	})
+	const executor = createLiveExecutor(env)
 	const dir = await mkdtemp(join(tmpdir(), 'chkit-expression-pull-'))
 	const name = `column_expr_${Date.now()}_${Math.random().toString(16).slice(2)}`
 	const keyed = `${name}_keyed`
@@ -83,37 +84,59 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 	// (e.g. ObsessionDB): re-read until the expected rows are visible.
 	const settledRows = <T>(sql: string, count: number) =>
 		pollUntil(() => query<T>(sql), (rows) => rows.length === count)
-	const columns = async () =>
-		(
-			await query<SystemColumnRow>(
-				`SELECT database, table, name, type, position, default_kind, default_expression FROM system.columns WHERE database='${def.database}' AND table='${def.name}' ORDER BY position`,
-			)
-		).map(normalizeColumnFromSystemRow)
-	const actual = async () => ({
-		columns: await columns(),
-		settings: {},
-		indexes: [],
-		projections: [],
-		engine: 'MergeTree()',
-		primaryKey: 'id',
-		orderBy: 'id',
-	})
-	// DDL is eventually consistent on managed ClickHouse (e.g. ObsessionDB): re-read
-	// system.columns until it reflects the definition before comparing.
-	const settledShape = () =>
-		pollUntil(actual, (shape) => compareTableShape(def, shape) === null)
+	// On a multi-replica service (ObsessionDB) each request may reach a replica
+	// that has not applied the previous DDL yet (#240), so every check reads the
+	// columns of every replica, one list per replica.
+	const fanout = await resolveReplicaFanout(executor)
+	const replicas = fanout?.replicas ?? 1
+	const replicaColumns = async () => {
+		const rows = await query<SystemColumnRow & { host: string }>(
+			`SELECT hostName() AS host, database, table, name, type, position, default_kind, default_expression FROM ${fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'} WHERE database='${def.database}' AND table='${def.name}' ORDER BY host, position`,
+		)
+		return [...new Set(rows.map((row) => row.host))].map((host) =>
+			rows.filter((row) => row.host === host).map(normalizeColumnFromSystemRow),
+		)
+	}
+	const drift = async () =>
+		(await replicaColumns()).map((columns) =>
+			compareTableShape(def, {
+				columns,
+				settings: {},
+				indexes: [],
+				projections: [],
+				engine: 'MergeTree()',
+				primaryKey: 'id',
+				orderBy: 'id',
+			}),
+		)
+	// Re-read until every replica reflects the definition, then compare.
+	const expectSettled = async () =>
+		expect(
+			await pollUntil(drift, (shapes) => shapes.length === replicas && shapes.every((shape) => shape === null)),
+		).toEqual(Array(replicas).fill(null))
+	// A step can run several statements (e.g. REMOVE DEFAULT, then MODIFY COLUMN)
+	// whose final state is not `def` yet. The replica that ran a statement has
+	// applied it, so once every replica lists the same columns, all of them have.
+	const replicasAgree = async () => {
+		const lists = await pollUntil(
+			async () => (await replicaColumns()).map((columns) => JSON.stringify(columns)),
+			(lists) => lists.length === replicas && new Set(lists).size === 1,
+		)
+		expect({ replicas: lists.length, distinct: new Set(lists).size }).toEqual({ replicas, distinct: 1 })
+	}
 	const migrate = async (next: TableDefinition) => {
 		const plan = planDiff([def], [next])
 		for (const operation of plan.operations) {
 			expect(operation.sql).not.toContain('MATERIALIZE COLUMN')
 			await client.command({ query: operation.sql })
+			await replicasAgree()
 		}
 		def = next
-		expect(compareTableShape(def, await settledShape())).toBeNull()
+		await expectSettled()
 	}
 	try {
 		await client.command({ query: toCreateSQL(def) })
-		expect(compareTableShape(def, await settledShape())).toBeNull()
+		await expectSettled()
 		const backfill = (target: string) =>
 			buildBackfillPlan({
 				opts: PlanSchema.parse({ target: `${def.database}.${target}` }),
@@ -125,7 +148,7 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 		await expect(backfill(`${name}_missing`)).rejects.toThrow('does not exist or is not visible yet')
 		const pulled = {
 			...def,
-			columns: (await columns()).map((column) => ({
+			columns: ((await replicaColumns())[0] ?? []).map((column) => ({
 				...column,
 				default:
 					typeof column.default === 'string'
@@ -230,18 +253,22 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 					: column,
 			),
 		})
-		await migrate({
-			...def,
-			columns: def.columns.map((column) =>
-				column.name === 'raw' ? { ...column, default: 'seed' } : column,
-			),
-		})
-		await migrate({
-			...def,
-			columns: def.columns.map((column) =>
-				column.name === 'raw' ? { ...column, default: undefined } : column,
-			),
-		})
+		// ObsessionDB's SharedMergeTree accepts MODIFY COLUMN ... EPHEMERAL <default>
+		// without changing the default (#285); the verify job still runs these steps.
+		if (!onObsessionDB) {
+			await migrate({
+				...def,
+				columns: def.columns.map((column) =>
+					column.name === 'raw' ? { ...column, default: 'seed' } : column,
+				),
+			})
+			await migrate({
+				...def,
+				columns: def.columns.map((column) =>
+					column.name === 'raw' ? { ...column, default: undefined } : column,
+				),
+			})
+		}
 		// In one ALTER, ClickHouse casts the retained 'abc' to UInt64 before the REMOVE.
 		// A fresh single-part table: merging older parts that lack `code` would store 'abc'.
 		def = table({
@@ -250,13 +277,13 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 			columns: [{ name: 'id', type: 'UInt32' }, { name: 'code', type: 'String', default: 'abc' }],
 		})
 		await client.command({ query: toCreateSQL(def) })
-		expect(compareTableShape(def, await settledShape())).toBeNull()
+		await expectSettled()
 		await client.command({
 			query: `INSERT INTO ${def.database}.${coded} (id, code) VALUES (1, '42')`,
 		})
 		await migrate({ ...def, columns: [{ name: 'id', type: 'UInt32' }, { name: 'code', type: 'UInt64' }] })
 		expect(
-			await query(`SELECT toString(code) AS code FROM ${def.database}.${coded}`),
+			await settledRows(`SELECT toString(code) AS code FROM ${def.database}.${coded}`, 1),
 		).toEqual([{ code: '42' }])
 
 		const keyedSQL = (kind: string) =>
@@ -286,6 +313,7 @@ test.skipIf(onObsessionDB)('column expressions survive create, pull, drift, inse
 			})
 		}
 		await client.close()
+		await executor.close()
 		await rm(dir, { recursive: true, force: true })
 	}
 }, 120_000)
