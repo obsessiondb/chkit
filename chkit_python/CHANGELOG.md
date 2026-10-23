@@ -53,6 +53,11 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- backfill: chunk INSERTs set `asterisk_include_materialized_columns=0` and
+  `asterisk_include_alias_columns=0`, ahead of any `insert_settings`. A settings
+  profile that enabled them made `SELECT *` return MATERIALIZED and ALIAS columns:
+  copy backfills failed with a column-count mismatch, and an mv_replay of a
+  `SELECT *` view could write values into the wrong target columns (#243).
 - Dictionary DDL waits read `system.tables`, not each replica's in-memory
   `system.dictionaries` loader. `CREATE OR REPLACE DICTIONARY` drops the loader
   entry while a replica reloads, so `migrate` could time out after the catalog

@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  buildChunkExecutionSql,
   extractSourceTableRef,
   findTopLevelKeywords,
   injectSortKeyFilter,
   rewriteSelectColumns,
   splitTopLevel,
 } from './sql.js'
+import type { Chunk } from './types.js'
 
 describe('findTopLevelKeywords', () => {
   test('finds keywords at the top level in ascending position order', () => {
@@ -230,5 +232,36 @@ describe('injectSortKeyFilter', () => {
     expect(sql).toContain("AND ts >= '1'")
     // No fresh WHERE was inserted; the existing one was extended.
     expect(sql.match(/WHERE/g)).toHaveLength(1)
+  })
+})
+
+describe('buildChunkExecutionSql asterisk settings', () => {
+  const chunk: Chunk = {
+    id: 'c1',
+    partitionId: 'all',
+    ranges: [],
+    estimate: { rows: 1, bytesCompressed: 1, bytesUncompressed: 1, confidence: 'exact', reason: 'exact-count' },
+    analysis: { lineage: [] },
+  }
+  const pinned = 'asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+
+  test('copy mode pins SELECT * to insertable columns', () => {
+    const sql = buildChunkExecutionSql({ planId: 'p', chunk, target: 'db.t', table: { sortKeys: [] } })
+    expect(sql).toContain('SELECT *')
+    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}`)
+  })
+
+  test('mv_replay pins the settings once for every UNION ALL branch, with the dedup token', () => {
+    const sql = buildChunkExecutionSql({
+      planId: 'p',
+      chunk,
+      target: 'db.t',
+      table: { sortKeys: [] },
+      mvReplayQueries: ['SELECT * FROM db.a', 'SELECT * FROM db.b'],
+      idempotencyToken: 'tok',
+    })
+    expect(sql).toContain('UNION ALL')
+    expect(sql.match(/SETTINGS/g)).toHaveLength(1)
+    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}, insert_deduplication_token='tok'`)
   })
 })

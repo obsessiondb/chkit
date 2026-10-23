@@ -62,6 +62,9 @@ def _chunk(partition_id: str = "all") -> Chunk:
     )
 
 
+PINNED = "asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0"
+
+
 def _settings_line(sql: str) -> str:
     return sql.splitlines()[-1]
 
@@ -78,9 +81,9 @@ def test_without_insert_settings_the_clause_is_unchanged() -> None:
     )
 
     assert _settings_line(with_token) == (
-        "SETTINGS async_insert=0, insert_deduplication_token='tok'"
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok'"
     )
-    assert _settings_line(without_token) == "SETTINGS async_insert=0"
+    assert _settings_line(without_token) == f"SETTINGS async_insert=0, {PINNED}"
 
 
 def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -> None:
@@ -103,7 +106,7 @@ def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -
 
     assert sql.count("SETTINGS") == 1
     assert _settings_line(sql) == (
-        "SETTINGS async_insert=0, insert_deduplication_token='tok', "
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok', "
         "max_insert_threads=4, min_insert_block_size_rows=1000000, "
         "log_comment='it\\'s chkit', insert_deduplicate=true, "
         "max_partitions_per_insert_block=0, ratio=0.5, whole_float=2"
@@ -120,7 +123,7 @@ def test_insert_settings_without_a_token() -> None:
     )
 
     assert _settings_line(sql) == (
-        "SETTINGS async_insert=0, max_insert_threads=2, insert_deduplicate=false"
+        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, insert_deduplicate=false"
     )
 
 
@@ -136,7 +139,7 @@ def test_insert_settings_apply_to_the_mv_replay_union_insert() -> None:
 
     assert sql.count("SETTINGS") == 1
     assert "UNION ALL" in sql
-    assert sql.endswith("SETTINGS async_insert=0, max_insert_threads=8")
+    assert sql.endswith(f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=8")
 
 
 # ---------- plugin options ----------
