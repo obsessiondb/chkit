@@ -595,17 +595,23 @@ def test_emits_a_json_error_envelope_for_usage_errors(project_dir: Path) -> None
     assert "Missing snapshot subcommand" in envelope["error"]["message"]
 
 
+ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def test_help_shows_the_rebuild_usage(project_dir: Path) -> None:
     project = create_project(project_dir, INITIAL_SCHEMA)
 
     command_help = chkit(project, ["snapshot", "--help"])
     global_help = CliRunner().invoke(app, ["--help"])
 
+    # Typer forces a styled terminal when GITHUB_ACTIONS is set; compare text.
+    command_text = ANSI_STYLE.sub("", command_help.stdout)
+    global_text = ANSI_STYLE.sub("", global_help.stdout)
     assert command_help.exit_code == 0
-    assert "chkit snapshot rebuild [--dryrun]" in command_help.stdout
-    assert "--dryrun" in command_help.stdout
+    assert "chkit snapshot rebuild [--dryrun]" in command_text
+    assert "--dryrun" in command_text
     assert global_help.exit_code == 0
-    assert re.search(r"snapshot\s+.*Rebuild snapshot\.json", global_help.stdout)
+    assert re.search(r"snapshot\s+.*Rebuild snapshot\.json", global_text)
 
 
 # ---------- commands reading a conflicted snapshot ----------
