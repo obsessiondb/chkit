@@ -64,6 +64,12 @@
   running on another replica instead of resubmitting it. When a replica cannot
   be read, the check fails before any `-- before-retry:` SQL runs or the
   statement is resubmitted.
+- ObsessionDB plugin: API calls now use the oRPC envelope (`{"json": ...}` in
+  and out). The `{"input": ...}` body the port sent was rejected with
+  `400 Input validation failed`, so no Python call reached the console API.
+  The remote executor sends a submission's query id as the workbench API's
+  top-level `queryId`, which the API honours; it ignored the `query_id`
+  setting, so async statements ran under a random id.
 - Dictionary DDL waits read `system.tables`, not each replica's in-memory
   `system.dictionaries` loader. `CREATE OR REPLACE DICTIONARY` drops the loader
   entry while a replica reloads, so `migrate` could time out after the catalog

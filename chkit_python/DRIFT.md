@@ -202,13 +202,11 @@ Phase 3 (this turn): **service management shipped**
   dispatches on ``args[0]`` to ``list`` / ``select`` / ``claim`` /
   ``alias set|list|remove``.
 
-**Open caveat (DRIFT)**: the oRPC wire protocol used here is a best guess
-(``POST /rpc/<procedure>`` with ``{"input": ...}`` body). The TS plugin uses
-``@orpc/client/fetch``'s RPCLink and we couldn't inspect the package on disk
-to confirm. All tests use ``httpx_mock`` so they pass regardless of the real
-wire format. When connecting to a live ObsessionDB instance, the URL or
-body shape may need a tweak — likely a one-line fix in ``service_api._rpc_post``
-(and ``api_client.py`` if auth endpoints use the same envelope).
+**Resolved (#246)**: the ``{"input": ...}`` body guessed here was wrong; the
+live API rejected it with ``400 Input validation failed``. ``_rpc_post`` now
+speaks the oRPC RPC envelope that TS's ``RPCLink`` sends: ``{"json": input}``
+in, ``{"json": output}`` out (unwrapped before validation). ``api_client.py``
+(auth endpoints) was not touched or verified live.
 
 Phase 4 (this turn): **remote executor + backfill routing + full wizard shipped**
 - ``workbench_api.py`` — ``workbench_query_execute`` (POST
@@ -235,11 +233,8 @@ Phase 4 (this turn): **remote executor + backfill routing + full wizard shipped*
   thread through ``run_onboarding`` — moved out of PLUMBED_PENDING_DEPENDENCY
   in the checklist.
 
-**Caveat (DRIFT, reiterated)**: workbench + jobs RPC paths use the same
-best-guess wire format documented in Phase 3 (``POST /rpc/<procedure>``,
-``{"input": ...}`` body). If oRPC turns out to disagree the fix is centralised
-in ``api_client._auth_rpc_post`` / ``service_api._rpc_post`` /
-``jobs_api._rpc_post`` / ``workbench_api._rpc_post``.
+**Resolved (#246)**: workbench + jobs RPC paths share ``service_api._rpc_post``,
+which now sends the oRPC ``{"json": ...}`` envelope (see Phase 3).
 
 **Caveat (DRIFT)**: ``ensure_obsessiondb_plugin_in_source`` is a regex-based
 rewriter. The TS version uses an AST mutation. We accept the regex for two
@@ -1752,6 +1747,14 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `clickhouse.cluster` set; TS did. When the probe finds one replica (or fails),
   Python reads the local tables, where TS keeps `clusterAllReplicas(<cluster>, …)`
   for a configured cluster. Both read the same rows on one replica.
+- ``RemoteClickHouseClient.submit`` sends the query id as the workbench API's
+  top-level ``queryId`` (``workbench_query_execute(query_id=...)``), as TS does;
+  the API ignores a ``query_id`` setting. The live check is
+  ``tests_workbench_api/test_remote_executor_api_e2e.py`` (opt-in, port of
+  ``packages/cli/test/workbench-api.e2e.test.ts``).
+- Not fixed here: ``list_services`` / ``get_service`` still fail validation
+  against the live API (``Service`` expects snake_case fields such as
+  ``created_at``; the API returns camelCase).
 - The replicated case (attempt submitted on one shard-1 replica, re-run through
   the other with `cluster="test_cluster_2s"`) is
   `tests_cluster/test_migrate_async_cluster_e2e.py`, the port of the async case

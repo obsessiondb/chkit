@@ -10,8 +10,8 @@ they're hitting a local Docker or a managed ObsessionDB instance:
 - ``query(sql)`` — returns rows as ``list[dict]``.
 - ``query_json(sql)`` — returns the full
   :class:`ClickHouseJsonQueryResult` envelope.
-- ``submit(sql, query_id?)`` — async query (proxies query_id via the
-  ``settings`` field of the execute call).
+- ``submit(sql, query_id?)`` — async query (sends query_id as the
+  top-level ``queryId`` field of the execute call).
 - ``query_status(query_id)`` — polls ``system.processes`` then
   ``system.query_log`` via this same proxy.
 - ``database`` — the org's default database (introspected from the first
@@ -172,14 +172,13 @@ class RemoteClickHouseClient:
         return normalize_query_json_result(result)
 
     def submit(self, statement: str, query_id: str | None = None) -> str:
-        settings: dict[str, str] | None = None
-        if query_id is not None:
-            settings = {"query_id": query_id}
+        # The API takes the id as a top-level field and ignores a query_id
+        # setting, which would leave the query under a random id.
         result = workbench_query_execute(
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=settings,
+            query_id=query_id,
         )
         _raise_if_error(result)
         return query_id or result.query_id or "submitted"

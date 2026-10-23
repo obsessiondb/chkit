@@ -97,6 +97,39 @@ describe('renderValuesInsert', () => {
 	})
 })
 
+// The workbench API runs a query under its top-level queryId and ignores a
+// query_id setting, so a submission that sent the id as a setting could never
+// be found again by queryStatus or attached to (#246).
+describe('createRemoteExecutor submit', () => {
+	test('sends the query id as the top-level queryId, not as a setting', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			expect(await remote.submit('INSERT INTO t SELECT 1', 'qid-1')).toBe('qid-1')
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1' },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends no queryId when the caller has none', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.submit('INSERT INTO t SELECT 1')
+
+			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1' }])
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
 // #246: the query runs on the replica that received it, so on a multi-replica
 // service queryStatus reads processes and query_log on every replica.
 describe('createRemoteExecutor queryStatus', () => {
@@ -170,10 +203,14 @@ function connect(baseUrl: string): ClickHouseExecutor {
 // every status read with no rows (or `processesError`), and records each query.
 function startScriptedWorkbench(script: { replicas: number; processesError?: string }) {
 	const queries: string[] = []
+	const inputs: Array<Record<string, unknown>> = []
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
-			const { json: input } = (await request.json()) as { json: { query: string } }
+			const { json: input } = (await request.json()) as {
+				json: { query: string } & Record<string, unknown>
+			}
+			inputs.push(input)
 			queries.push(input.query)
 			if (input.query.includes('system.one')) {
 				return Response.json({
@@ -186,5 +223,5 @@ function startScriptedWorkbench(script: { replicas: number; processesError?: str
 			return Response.json({ json: { data: [], meta: [], rows: 0 } })
 		},
 	})
-	return { url: `http://127.0.0.1:${server.port}`, queries, stop: () => server.stop(true) }
+	return { url: `http://127.0.0.1:${server.port}`, queries, inputs, stop: () => server.stop(true) }
 }

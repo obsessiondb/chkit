@@ -37,6 +37,8 @@ export const workbenchContract = {
 						.record(z.string(), z.union([z.string(), z.number()]))
 						.optional(),
 					database: z.string().optional(),
+					/** The query id ClickHouse runs the query under (`settings.query_id` is ignored). */
+					queryId: z.string().optional(),
 				}),
 			)
 			.output(queryResultSchema),

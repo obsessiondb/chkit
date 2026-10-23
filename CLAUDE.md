@@ -72,6 +72,8 @@ Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; t
 
 `bun run test:obsessiondb` runs the suite against ObsessionDB (set the variables above, e.g. through Doppler). It sets `CHKIT_E2E_TARGET=obsessiondb` and leaves out the Kafka suite, whose broker only exists in the local stack.
 
+`bun run test:workbench-api` (opt-in, not in `verify`) runs async migrate through the real ObsessionDB console API with the `chkit obsessiondb login` session and `CHKIT_E2E_OBSESSIONDB_SERVICE=<service slug>`; the Python port is `pytest tests_workbench_api`.
+
 Shared ClickHouse test utilities (target env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones. The Kafka suite is the private workspace `test/kafka` (`@chkit/kafka-e2e`). plugin-backfill's `test` script seeds its chunking fixtures before running.
 
 Key conventions:
