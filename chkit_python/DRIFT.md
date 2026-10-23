@@ -1730,3 +1730,8 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   parameters to the config URL, which `@clickhouse/client` sends with every
   request. `clickhouse-connect` ignores URL parameters, so the Python test patches
   `clickhouse_connect.get_client` to add client-level `settings`.
+- The ReplicatedMergeTree `ON CLUSTER` case lives in
+  `tests_cluster/test_backfill_asterisk_columns_cluster_e2e.py`, outside
+  `testpaths`, the same way TS keeps its cluster suites in `packages/cli/test/`
+  out of the default run. Run it explicitly with `pytest tests_cluster` against
+  `test/cluster/2shard`; it hard-fails when a node is unreachable.
