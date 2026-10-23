@@ -173,7 +173,7 @@ class _ScriptedClient:
 
     def __init__(
         self,
-        statuses: list[QueryStatus],
+        statuses: list[QueryStatus | BaseException],
         *,
         submit_raises: BaseException | None = None,
     ) -> None:
@@ -181,6 +181,7 @@ class _ScriptedClient:
         self.submitted: list[tuple[str, str | None]] = []
         self.executed: list[str] = []
         self.after_times: list[str | None] = []
+        self.every_replica: list[bool] = []
         # Server-time reads, status checks and submissions, in call order.
         self.events: list[str] = []
         self._submit_raises = submit_raises
@@ -196,12 +197,22 @@ class _ScriptedClient:
             raise self._submit_raises
         return query_id or "auto-id"
 
-    def query_status(self, _query_id: str, *, after_time: str | None = None) -> QueryStatus:
+    def query_status(
+        self,
+        _query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+    ) -> QueryStatus:
         self.events.append("status")
         self.after_times.append(after_time)
+        self.every_replica.append(every_replica)
         if not self._statuses:
             return QueryStatus(status="unknown")
-        return self._statuses.pop(0)
+        status = self._statuses.pop(0)
+        if isinstance(status, BaseException):
+            raise status
+        return status
 
     def execute(self, statement: str) -> None:
         self.executed.append(statement)
@@ -362,6 +373,41 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
     )
     assert client.executed == ["TRUNCATE TABLE db.t"]
     assert client.after_times == [None, SUBMISSION_BOUND]
+    # #246: only the in-flight check, which decides on the retry, must read
+    # every replica; a poll skips a replica it cannot reach.
+    assert client.every_replica == [True, False]
+
+
+@pytest.mark.parametrize("prior_status", ["started", "failed"])
+def test_apply_async_inconclusive_in_flight_check_never_compensates(
+    prior_status: str,
+) -> None:
+    # #246: the attempt may still run on a replica the check could not read.
+    # Running the before-retry SQL (a TRUNCATE) or resubmitting then would race
+    # it, so a failed check stops before either and leaves the journal as is.
+    state = _state(_op(prior_status), checksum="abc")
+    client = _ScriptedClient(
+        statuses=[RuntimeError("ALL_CONNECTION_TRIES_FAILED: clickhouse-1")]
+    )
+    journal = _FakeJournalStore(state=state)
+    with pytest.raises(RuntimeError) as raised:
+        apply_async_statement(
+            _input(
+                client=client,
+                journal=journal,
+                migration_name="m.sql",
+                before_retry="TRUNCATE TABLE db.t",
+            )
+        )
+    message = str(raised.value)
+    assert "could not check whether a previous attempt is still running" in message
+    assert "ALL_CONNECTION_TRIES_FAILED: clickhouse-1" in message
+    assert "no before-retry SQL ran" in message
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+    assert journal.state == state
+    assert client.every_replica == [True]
 
 
 def _op(status: str, *, last_error: str = "", index: int = 0) -> OperationState:
@@ -467,8 +513,15 @@ class _QueryLogClient(_ScriptedClient):
         self._attached_start = attached_start
         self._earlier_start = earlier_start
 
-    def query_status(self, _query_id: str, *, after_time: str | None = None) -> QueryStatus:
+    def query_status(
+        self,
+        _query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+    ) -> QueryStatus:
         self.after_times.append(after_time)
+        self.every_replica.append(every_replica)
         phase = self._phases.pop(0) if self._phases else "flushed"
         if phase == "running":
             return QueryStatus(status="running", written_rows=1, elapsed_ms=RUNNING_ELAPSED_MS)

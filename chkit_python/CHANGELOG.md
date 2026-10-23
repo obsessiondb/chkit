@@ -58,6 +58,12 @@
   profile that enabled them made `SELECT *` return MATERIALIZED and ALIAS columns:
   copy backfills failed with a column-count mismatch, and an mv_replay of a
   `SELECT *` view could write values into the wrong target columns (#243).
+- Async `migrate` statements on multi-replica targets (#246): the check for a
+  still-running attempt and the status polls read `system.processes` and
+  `system.query_log` on every replica, so a re-run attaches to an attempt
+  running on another replica instead of resubmitting it. When a replica cannot
+  be read, the check fails before any `-- before-retry:` SQL runs or the
+  statement is resubmitted.
 - Dictionary DDL waits read `system.tables`, not each replica's in-memory
   `system.dictionaries` loader. `CREATE OR REPLACE DICTIONARY` drops the loader
   entry while a replica reloads, so `migrate` could time out after the catalog

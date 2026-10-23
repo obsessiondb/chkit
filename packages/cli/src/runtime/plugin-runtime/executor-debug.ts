@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, QueryStatusOptions } from '@chkit/clickhouse'
 
 import { debug, isDebugEnabled } from '../debug.js'
 
@@ -75,7 +75,7 @@ export function wrapExecutorWithDebug(
       )
       return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId))
     },
-    queryStatus(queryId: string, options?: { afterTime?: string }) {
+    queryStatus(queryId: string, options?: QueryStatusOptions) {
       debug('clickhouse', `queryStatus for ${queryId}`)
       return trace(
         'queryStatus',

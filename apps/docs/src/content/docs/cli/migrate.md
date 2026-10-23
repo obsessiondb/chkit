@@ -160,6 +160,7 @@ On a service whose endpoint spreads requests over several replicas, such as a mu
 
 - After each DDL statement, `migrate` waits until every replica shows the change (the new table, view, dictionary, or column, or the dropped one) before it runs the next statement. A replaced dictionary waits until every replica's catalog entry stores the same uuid, including when the only change is a SOURCE password that ClickHouse redacts from the stored definition. An `ALTER` that ran on a replica that had not applied the previous one could otherwise write back the old schema.
 - The journal is read from every replica with `clusterAllReplicas`, keeping the newest version of each migration's row, so a lagging replica cannot make `migrate` replay a statement that already completed.
+- An [async](#async-operations-modeasync) statement's status is read from `system.processes` and `system.query_log` of every replica, because the query runs only on the replica that received it.
 
 When the cluster does not exist, has a single replica, or the user cannot query it, chkit reads the local replica as before.
 
@@ -185,7 +186,7 @@ INSERT INTO default.hits SELECT * FROM s3(...);
 When `chkit migrate --apply` encounters an async operation it:
 
 1. Computes a deterministic `query_id` from `sha256(migration_filename + ':' + statement_index)`.
-2. Checks `system.processes` for an attempt with that id that is still running, and attaches to it instead of submitting again.
+2. Checks `system.processes` for an attempt with that id that is still running, and attaches to it instead of submitting again. On a [multi-replica target](#multi-replica-targets) the check reads every replica. When a replica cannot be read, `migrate` stops with an error before it runs `-- before-retry:` SQL or submits again; re-run it once the replica is back. The polls that follow skip a replica they cannot reach.
 3. Otherwise submits the query without blocking on the HTTP response.
 4. Polls every 5 seconds and prints a one-line progress update (`written=N.NM rows (N.N GiB), elapsed Ns`). Only `system.query_log` entries of queries that started no earlier than this submission, or than the attempt chkit attached to, count. Both are measured on the server clock with a 2-second margin, so an earlier attempt with the same id is never mistaken for this one.
 5. Records the journal entry on success, or throws the server's exception on failure.

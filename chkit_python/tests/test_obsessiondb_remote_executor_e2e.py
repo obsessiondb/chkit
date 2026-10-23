@@ -14,7 +14,6 @@ the SQL the remote executor builds meets a real server.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import uuid
@@ -41,10 +40,6 @@ from tests.e2e_testkit import LiveEnv, create_prefix, get_required_env, quote_id
 
 T = TypeVar("T")
 
-# migrate's in-flight check reads system.processes on whichever replica
-# answers, so on ObsessionDB it can miss the attempt the attach test attaches
-# to (#246); the verify job runs it against open-source ClickHouse.
-_ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 _MIGRATION_CHECKSUM = "c1"
 
 
@@ -311,15 +306,15 @@ class _RecordingRemote:
     def submit(self, statement: str, query_id: str | None = None) -> str:
         return self._inner.submit(statement, query_id=query_id)
 
-    def query_status(self, query_id: str, *, after_time: str | None = None) -> QueryStatus:
+    def query_status(
+        self, query_id: str, *, after_time: str | None = None, every_replica: bool = False
+    ) -> QueryStatus:
         self.after_times.append(after_time)
-        return self._inner.query_status(query_id, after_time=after_time)
+        return self._inner.query_status(
+            query_id, after_time=after_time, every_replica=every_replica
+        )
 
 
-@pytest.mark.skipif(
-    _ON_OBSESSIONDB,
-    reason="system.processes is per replica on ObsessionDB (#246); runs in verify",
-)
 def test_attach_counts_only_query_log_entries_of_attached_attempt(
     live_env: LiveEnv, remote: RemoteClickHouseClient, live: ClickHouseClient
 ) -> None:

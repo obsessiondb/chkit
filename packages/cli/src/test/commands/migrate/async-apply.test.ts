@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
 
 import {
   applyAsyncStatement,
@@ -12,7 +12,7 @@ import type {
   OperationState,
 } from '../../../runtime/journal-store.js'
 
-type StatusCall = { queryId: string; afterTime?: string }
+type StatusCall = { queryId: string; afterTime?: string; everyReplica?: boolean }
 type SubmitCall = { sql: string; queryId?: string }
 type CommandCall = { sql: string }
 
@@ -36,7 +36,8 @@ const RUNNING_ELAPSED_MS = 30_000
 const ATTACH_BOUND = '2023-11-14T22:14:28.000Z'
 
 function createFakeExecutor(
-  statuses: QueryStatus[],
+  // An Error is thrown by the queryStatus call it answers.
+  statuses: Array<QueryStatus | Error>,
   options: { failSubmit?: () => Error } = {},
 ): FakeExecutor {
   const statusCalls: StatusCall[] = []
@@ -55,13 +56,14 @@ function createFakeExecutor(
       if (options.failSubmit) throw options.failSubmit()
       return queryId ?? 'fallback-id'
     },
-    async queryStatus(queryId: string, opts?: { afterTime?: string }) {
+    async queryStatus(queryId: string, opts?: QueryStatusOptions) {
       events.push('status')
-      statusCalls.push({ queryId, afterTime: opts?.afterTime })
+      statusCalls.push({ queryId, afterTime: opts?.afterTime, everyReplica: opts?.everyReplica })
       const next = queue.shift()
       if (!next) {
         throw new Error('queryStatus called more times than fake has answers for')
       }
+      if (next instanceof Error) throw next
       return next
     },
     async command(sql: string) {
@@ -412,6 +414,9 @@ describe('applyAsyncStatement', () => {
     expect(statusCalls[1]?.afterTime).toBe(SUBMISSION_BOUND)
     expect(statusCalls[2]?.afterTime).toBe(SUBMISSION_BOUND)
     expect(events).toEqual([SERVER_TIME_QUERY, 'status', SERVER_TIME_QUERY, 'submit', 'status', 'status'])
+    // #246: the check that decides on the retry reads every replica; a poll
+    // skips a replica it cannot reach.
+    expect(statusCalls.map((call) => call.everyReplica)).toEqual([true, undefined, undefined])
     expect(lines.some((line) => line.includes('running before-retry SQL'))).toBe(true)
     expect(lines.some((line) => line.includes('Memory limit exceeded'))).toBe(true)
     // started (overwrite prior failed) + completed
@@ -452,6 +457,47 @@ describe('applyAsyncStatement', () => {
     expect(commandCalls).toEqual([]) // no before-retry SQL → no command
     expect(submitCalls).toHaveLength(1)
   })
+
+  // #246: the attempt may still run on a replica the check could not read.
+  // Running before-retry SQL (a TRUNCATE) or resubmitting then would race it.
+  for (const prior of ['started', 'failed'] as const) {
+    test(`an in-flight check that cannot read every replica neither compensates nor resubmits (prior op: ${prior})`, async () => {
+      const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+      const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
+        new Error('ALL_CONNECTION_TRIES_FAILED: clickhouse-1'),
+      ])
+      const priorState = freshStateWith({
+        operationIndex: 0,
+        operationKey: BASE_INPUT.operationKey,
+        operationType: BASE_INPUT.operationType,
+        queryId,
+        status: prior,
+        startedAt: '2026-05-26 10:00:00.000',
+        finishedAt: prior === 'started' ? null : '2026-05-26 10:05:00.000',
+        lastError: '',
+      })
+      const { store, writes } = createFakeJournalStore(priorState)
+
+      const run = applyAsyncStatement({
+        ...BASE_INPUT,
+        beforeRetry: 'TRUNCATE TABLE t',
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      })
+
+      await expect(run).rejects.toThrow(
+        /could not check whether a previous attempt is still running \(ALL_CONNECTION_TRIES_FAILED: clickhouse-1\)\. Nothing was resubmitted and no before-retry SQL ran/,
+      )
+      expect(statusCalls).toEqual([{ queryId, afterTime: undefined, everyReplica: true }])
+      expect(commandCalls).toEqual([])
+      expect(submitCalls).toEqual([])
+      expect(writes).toEqual([])
+      expect(await store.readMigrationState(BASE_INPUT.migrationName)).toEqual(priorState)
+    })
+  }
 
   test('polling-failure: query transitions to failed → write failed state and throw', async () => {
     const { db } = createFakeExecutor([
