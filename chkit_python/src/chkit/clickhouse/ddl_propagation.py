@@ -19,10 +19,17 @@ database.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
+from chkit.clickhouse.alter_column_statement import (
+    ColumnIntent,
+    parse_modify_column_intent,
+    parse_rename_column,
+)
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 
 MAX_ATTEMPTS = 20
@@ -50,6 +57,18 @@ _KEY_SUFFIXES: dict[str, str] = {
     "rename_dictionary": ":rename_dictionary",
 }
 _OBJECT_KEY_PREFIXES = ("table:", "dictionary:", "view:", "materialized_view:")
+
+# The ``system.columns`` fields a column definition wait compares.
+_COLUMN_FIELDS = ("type", "default_kind", "default_expression", "comment", "compression_codec")
+
+
+@dataclass(frozen=True)
+class _ExpectedColumnValue:
+    """A field value the statement sets; ``prefix`` matches the start only."""
+
+    field: str
+    value: str
+    prefix: bool = False
 
 
 def _quote(value: str) -> str:
@@ -340,6 +359,220 @@ def wait_for_constraint_absent(
     )
 
 
+def wait_for_column_definition(
+    client: Any,
+    database: str,
+    table_name: str,
+    column_name: str,
+    intent: ColumnIntent,
+    *,
+    cluster: str | None = None,
+) -> None:
+    """Wait until every replica reports the column with one definition.
+
+    Agreement: the replica that ran an ALTER has applied it when the statement
+    returns, so once every replica reports the same ``type``,
+    ``default_kind``, ``default_expression``, ``comment`` and
+    ``compression_codec``, all of them have. Each replica formats these values
+    itself, so the comparison never trips over how chkit wrote an expression.
+
+    Intent: agreement alone passes when every replica kept the old definition,
+    e.g. ObsessionDB ignoring ``MODIFY COLUMN ... EPHEMERAL <default>`` (#285).
+    So the fields the statement sets are compared too: the default kind and
+    comment verbatim, a removed codec as empty, and the default expression
+    after the server formats it with ``formatQuerySingleLine``, the formatter
+    that writes ``system.columns.default_expression``. Types and codecs the
+    statement sets are only compared between replicas: ClickHouse rewrites
+    them (``Decimal(10,2)`` becomes ``Decimal(10, 2)``, ``ZSTD`` becomes
+    ``ZSTD(1)``).
+    """
+    fanout = resolve_replica_fanout(client, cluster)
+    expected = _expected_column_values(client, intent)
+    source = all_replicas(fanout, "system.columns") if fanout else "system.columns"
+    sql = (
+        f"SELECT hostName() AS replica, {', '.join(_COLUMN_FIELDS)} FROM {source} "
+        f"WHERE database = '{_quote(database)}' AND table = '{_quote(table_name)}' "
+        f"AND name = '{_quote(column_name)}'"
+    )
+    replicas = fanout.replicas if fanout else 1
+    _wait_until_applied(
+        f"{database}.{table_name}.{column_name} definition",
+        lambda: _column_definition_mismatch(client.query(sql).rows, replicas, expected),
+    )
+
+
+def wait_for_column_rename(
+    client: Any,
+    database: str,
+    table_name: str,
+    from_: str,
+    to: str,
+    *,
+    cluster: str | None = None,
+) -> None:
+    """Wait until no replica lists the old name and every replica lists the new one."""
+    fanout = resolve_replica_fanout(client, cluster)
+    replicas = fanout.replicas if fanout else 1
+    source = all_replicas(fanout, "system.columns") if fanout else "system.columns"
+    sql = (
+        f"SELECT hostName() AS replica, name FROM {source} "
+        f"WHERE database = '{_quote(database)}' AND table = '{_quote(table_name)}' "
+        f"AND name IN ('{_quote(from_)}', '{_quote(to)}')"
+    )
+
+    def _check() -> str | None:
+        rows = client.query(sql).rows
+        stale = [str(row.get("replica")) for row in rows if row.get("name") == from_]
+        if stale:
+            return f"replica {', '.join(stale)} still lists column {from_}"
+        renamed = {row.get("replica") for row in rows if row.get("name") == to}
+        if len(renamed) < replicas:
+            return f"column {to} is listed on {len(renamed)} of {replicas} replicas"
+        return None
+
+    _wait_until_applied(f"{database}.{table_name} rename of column {from_} to {to}", _check)
+
+
+def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
+    """Poll ``check`` until it reports no mismatch.
+
+    On timeout the error names what was still different on the last check.
+    """
+    detail = ""
+    checks = 0
+    for attempt in range(MAX_ATTEMPTS + 1):
+        checks += 1
+        try:
+            mismatch = check()
+        except Exception as error:  # reported on timeout
+            mismatch = str(error)
+        if mismatch is None:
+            return
+        detail = mismatch
+        if attempt < MAX_ATTEMPTS:
+            time.sleep(RETRY_DELAY_SECONDS)
+    msg = (
+        f"wait_for_ddl_propagation: {subject} not applied on every replica "
+        f"after {checks} checks: {detail}"
+    )
+    raise RuntimeError(msg)
+
+
+def _expected_column_values(client: Any, intent: ColumnIntent) -> list[_ExpectedColumnValue]:
+    """The ``system.columns`` values ``intent`` pins down.
+
+    The default expression is formatted by the server; when it cannot be
+    formatted (a server without ``formatQuerySingleLine``), the expression is
+    left to the agreement check.
+    """
+    expected: list[_ExpectedColumnValue] = []
+    if intent.default_kind is not None:
+        expected.append(_ExpectedColumnValue("default_kind", intent.default_kind))
+    if intent.default_kind == "":
+        expected.append(_ExpectedColumnValue("default_expression", ""))
+    if intent.type_default:
+        expected.append(
+            _ExpectedColumnValue("default_expression", "defaultValueOfTypeName(", prefix=True)
+        )
+    if intent.comment is not None:
+        expected.append(_ExpectedColumnValue("comment", intent.comment))
+    if intent.codec_removed:
+        expected.append(_ExpectedColumnValue("compression_codec", ""))
+    if intent.default_expression is not None:
+        formatted = _format_expression(client, intent.default_expression)
+        if formatted is not None:
+            expected.append(_ExpectedColumnValue("default_expression", formatted))
+    return expected
+
+
+def _format_expression(client: Any, expression: str) -> str | None:
+    select = "SELECT "
+    try:
+        rows = client.query(
+            f"SELECT formatQuerySingleLine('{_quote(select + expression)}') AS formatted"
+        ).rows
+    except Exception:  # left to the agreement check
+        return None
+    formatted = rows[0].get("formatted") if rows else None
+    if not isinstance(formatted, str) or not formatted.startswith(select):
+        return None
+    return formatted[len(select) :]
+
+
+def _column_definition_mismatch(
+    rows: list[dict[str, Any]],
+    replicas: int,
+    expected: list[_ExpectedColumnValue],
+) -> str | None:
+    """Why the replicas' rows do not show the intended definition yet, or None."""
+
+    def value(row: dict[str, Any], field: str) -> str:
+        return str(row.get(field) or "")
+
+    listed = list(dict.fromkeys(str(row.get("replica")) for row in rows))
+    if len(listed) < replicas:
+        where = f" ({', '.join(listed)})" if listed else ""
+        return f"the column is listed on {len(listed)} of {replicas} replicas{where}"
+    for row in rows:
+        off = next(
+            (
+                want
+                for want in expected
+                if not (
+                    value(row, want.field).startswith(want.value)
+                    if want.prefix
+                    else value(row, want.field) == want.value
+                )
+            ),
+            None,
+        )
+        if off is None:
+            continue
+        sets = f"{_json(off.value)}..." if off.prefix else _json(off.value)
+        actual = value(row, off.field)
+        unanimous = len(rows) > 1 and all(value(other, off.field) == actual for other in rows)
+        lag = (
+            "; every replica reports the same, so this is not replication lag: "
+            "the server accepted the statement without applying it"
+            if unanimous
+            else ""
+        )
+        return (
+            f"replica {row.get('replica')} reports {off.field} {_json(actual)}, "
+            f"the statement sets {sets}{lag}"
+        )
+    if not rows:
+        return None
+    first = rows[0]
+    for row in rows[1:]:
+        field = next((f for f in _COLUMN_FIELDS if value(row, f) != value(first, f)), None)
+        if field is not None:
+            return (
+                f"replica {row.get('replica')} reports {field} {_json(value(row, field))}, "
+                f"replica {first.get('replica')} reports {_json(value(first, field))}"
+            )
+    return None
+
+
+def _json(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _renamed_column(member: str, statement: str | None) -> tuple[str, str] | None:
+    """The old and new names of a column rename.
+
+    The statement names them; without it the key's ``<from>:<to>`` is split
+    only when it holds exactly one ':'.
+    """
+    parsed = parse_rename_column(statement) if statement is not None else None
+    if parsed is not None and f"{parsed[0]}:{parsed[1]}" == member:
+        return parsed
+    parts = member.split(":")
+    if len(parts) == 2 and parts[0] and parts[1]:  # noqa: PLR2004
+        return parts[0], parts[1]
+    return None
+
+
 def _constraint_where(database: str, table_name: str, constraint_name: str) -> str:
     # ClickHouse writes a constraint name bare when it is a plain identifier
     # and backquoted otherwise (`backQuoteIfNeed`), so match either spelling.
@@ -462,7 +695,12 @@ def _parse_operation_key(
 
 
 def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
-    client: Any, operation_type: str, operation_key: str, *, cluster: str | None = None
+    client: Any,
+    operation_type: str,
+    operation_key: str,
+    *,
+    cluster: str | None = None,
+    statement: str | None = None,
 ) -> None:
     """Dispatch the right ``wait_for_*`` based on the operation type + key.
 
@@ -472,7 +710,9 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     - create_view / create_materialized_view         → wait_for_view
     - create_dictionary                               → wait_for_dictionary
     - drop_dictionary                                 → wait_for_table_absent
-    - alter_table_add_column / alter_table_modify_column → wait_for_column
+    - alter_table_add_column / alter_table_modify_column → wait_for_column_definition
+      (MODIFY also checks what ``statement`` sets)
+    - alter_table_rename_column                       → wait_for_column_rename
     - alter_table_drop_column                         → wait_for_column_absent
     - drop_table / drop_view / drop_materialized_view → wait_for_table_absent
     - alter_table_add_index                           → wait_for_index
@@ -498,9 +738,25 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     if operation_type == "create_dictionary":
         wait_for_dictionary(client, database, table, cluster=cluster)
         return
+    # ADD COLUMN IF NOT EXISTS leaves an existing column as it is, so only
+    # agreement between replicas is checked; MODIFY also checks what it sets.
     if operation_type in {"alter_table_add_column", "alter_table_modify_column"}:
         if column is not None:
-            wait_for_column(client, database, table, column, cluster=cluster)
+            intent = (
+                parse_modify_column_intent(statement, column)
+                if operation_type == "alter_table_modify_column" and statement is not None
+                else ColumnIntent()
+            )
+            wait_for_column_definition(client, database, table, column, intent, cluster=cluster)
+        return
+    if operation_type == "alter_table_rename_column":
+        suffix = ":column_rename:"
+        member = operation_key[operation_key.rfind(suffix) + len(suffix) :]
+        rename = _renamed_column(member, statement) if suffix in operation_key else None
+        if rename is not None:
+            wait_for_column_rename(client, database, table, *rename, cluster=cluster)
+        else:
+            wait_for_table(client, database, table, cluster=cluster)
         return
     if operation_type == "alter_table_drop_column":
         if column is not None:

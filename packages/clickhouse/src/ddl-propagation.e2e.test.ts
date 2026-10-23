@@ -100,7 +100,7 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
     // Ends like a MODIFY REFRESH key, so only the key's last `:refresh` is cut.
     const materializedView = `${p}mv:refresh`
     const object = (name: string) => `${quoteIdent(db)}.${quoteIdent(name)}`
-    const { pollingQueries, listed, listedAsView, columnListed } = await recordPollingQueries(executor)
+    const { pollingQueries, listed, listedAsView, columnListed, indexListed } = await recordPollingQueries(executor)
 
     try {
       await executor.command(`CREATE TABLE ${object(table)} (id UInt64) ENGINE = MergeTree ORDER BY id`)
@@ -109,8 +109,12 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
       expect(await pollingQueries('alter_table_add_column', `table:${db}.${table}:column:${column}`)).toEqual([
         columnListed(db, table, column),
       ])
-      // Other ALTER keys carry a suffix too; the wait checks the table still exists.
+      await executor.command(`ALTER TABLE ${object(table)} ADD INDEX ${quoteIdent('i:1')} id TYPE minmax GRANULARITY 1`)
       expect(await pollingQueries('alter_table_add_index', `table:${db}.${table}:index:i:1`)).toEqual([
+        indexListed(db, table, 'i:1'),
+      ])
+      // Other ALTER keys carry a suffix too; the wait checks the table still exists.
+      expect(await pollingQueries('alter_table_add_projection', `table:${db}.${table}:projection:p:1`)).toEqual([
         listed(db, table),
       ])
 
@@ -214,7 +218,10 @@ async function recordPollingQueries(executor: ClickHouseExecutor) {
     listed,
     listedAsView: (db: string, name: string) =>
       polled('system.tables', `database = '${db}' AND name = '${name}' AND engine LIKE '%View%'`),
+    // A column wait reads every replica's definition, not a count.
     columnListed: (db: string, table: string, column: string) =>
-      polled('system.columns', `database = '${db}' AND table = '${table}' AND name = '${column}'`),
+      `SELECT hostName() AS replica, type, default_kind, default_expression, comment, compression_codec FROM ${fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'} WHERE database = '${db}' AND table = '${table}' AND name = '${column}'`,
+    indexListed: (db: string, table: string, index: string) =>
+      polled('system.data_skipping_indices', `database = '${db}' AND table = '${table}' AND name = '${index}'`),
   }
 }

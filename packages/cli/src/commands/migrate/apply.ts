@@ -207,7 +207,7 @@ export async function applyMigration(input: {
       upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
     )
     if (operation) {
-      await waitForDDLPropagation(db, operation.type, operation.key, { cluster: config.clickhouse?.cluster })
+      await waitForDDLPropagation(db, operation.type, operation.key, { cluster: config.clickhouse?.cluster, statement })
     }
   }
 

@@ -73,8 +73,21 @@ def test_uses_the_configured_cluster_name() -> None:
     assert "clusterAllReplicas('prod', system.one)" in client.queries[0]
 
 
+@dataclass
+class _ColumnReplicaClient(_ReplicaClient):
+    """A column wait reads every replica's definition: one row per replica."""
+
+    def query(self, sql: str) -> _Result:
+        result = super().query(sql)
+        if "system.columns" not in sql:
+            return result
+        column = {"type": "String", "default_kind": "", "default_expression": ""}
+        count = int(result.rows[0]["replicas"])
+        return _Result([{"replica": f"r{i}", **column} for i in range(1, count + 1)])
+
+
 def test_keeps_waiting_while_only_one_of_two_replicas_shows_an_added_column() -> None:
-    client = _ReplicaClient([1, 1, 2])
+    client = _ColumnReplicaClient([1, 1, 2])
 
     wait_for_ddl_propagation(client, "alter_table_add_column", "table:app.events:column:c1")
 

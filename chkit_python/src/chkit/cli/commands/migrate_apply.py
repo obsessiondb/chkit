@@ -190,6 +190,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
                     operation.type,
                     operation.key,
                     cluster=input_.config.clickhouse.cluster if input_.config.clickhouse else None,
+                    statement=statement,
                 )
             except Exception as wait_error:
                 input_.warn(

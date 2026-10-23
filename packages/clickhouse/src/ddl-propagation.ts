@@ -1,9 +1,22 @@
 import type { MigrationOperationType } from '@chkit/core'
 import pRetry from 'p-retry'
+import { parseModifyColumnIntent, parseRenameColumn, type ColumnIntent } from './alter-column-statement.js'
 import type { ClickHouseExecutor } from './index.js'
 import { allReplicas, resolveReplicaFanout, stringLiteral, type ReplicaFanout } from './replicas.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
+
+// The `system.columns` fields a column definition wait compares.
+const COLUMN_FIELDS = ['type', 'default_kind', 'default_expression', 'comment', 'compression_codec'] as const
+type ColumnField = (typeof COLUMN_FIELDS)[number]
+type ColumnDefinitionRow = { replica: string } & Record<ColumnField, string>
+
+/** A field value the statement sets; `prefix` matches the start only. */
+interface ExpectedColumnValue {
+  field: ColumnField
+  value: string
+  prefix?: boolean
+}
 
 // What each ALTER or rename appends to the `<kind>:<database>.<name>` key of the
 // object it changes. Creates and drops use the bare key.
@@ -35,6 +48,11 @@ const KEY_SUFFIXES: ReadonlyMap<string, string> = new Map<MigrationOperationType
  */
 export interface PropagationOptions {
   cluster?: string
+  /**
+   * The statement that ran. A MODIFY COLUMN wait reads what the statement sets
+   * from it, and a RENAME COLUMN wait reads the old and new names.
+   */
+  statement?: string
 }
 
 export async function waitForTable(
@@ -130,6 +148,80 @@ export async function waitForColumnAbsent(
 }
 
 /**
+ * Waits until every replica reports the column with one definition, and with
+ * what `intent` says the statement set.
+ *
+ * Agreement: the replica that ran an ALTER has applied it when the statement
+ * returns, so once every replica reports the same `type`, `default_kind`,
+ * `default_expression`, `comment` and `compression_codec`, all of them have.
+ * Each replica formats these values itself, so the comparison is between
+ * server-formatted text and never trips over how chkit wrote an expression.
+ *
+ * Intent: agreement alone passes when every replica kept the old definition,
+ * e.g. ObsessionDB ignoring `MODIFY COLUMN ... EPHEMERAL <default>` (#285). So
+ * the fields the statement sets are compared too: the default kind and comment
+ * verbatim, a removed codec as empty, and the default expression after the
+ * server formats it with `formatQuerySingleLine`, the formatter that writes
+ * `system.columns.default_expression`. Types and codecs the statement sets are
+ * only compared between replicas: ClickHouse rewrites them (`Decimal(10,2)`
+ * becomes `Decimal(10, 2)`, `ZSTD` becomes `ZSTD(1)`).
+ */
+async function waitForColumnDefinition(
+  executor: ClickHouseExecutor,
+  database: string,
+  tableName: string,
+  columnName: string,
+  intent: ColumnIntent,
+  options?: PropagationOptions,
+): Promise<void> {
+  const fanout = await resolveReplicaFanout(executor, options?.cluster)
+  const expected = await expectedColumnValues(executor, intent)
+  const source = fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'
+  const sql = `SELECT hostName() AS replica, ${COLUMN_FIELDS.join(', ')} FROM ${source} WHERE ${columnWhere(database, tableName, columnName)}`
+  await waitUntilApplied(`${database}.${tableName}.${columnName} definition`, async () =>
+    columnDefinitionMismatch(await executor.query<ColumnDefinitionRow>(sql), fanout?.replicas ?? 1, expected),
+  )
+}
+
+/** Waits until no replica lists the old name and every replica lists the new one. */
+async function waitForColumnRename(
+  executor: ClickHouseExecutor,
+  database: string,
+  tableName: string,
+  rename: { from: string; to: string },
+  options?: PropagationOptions,
+): Promise<void> {
+  const fanout = await resolveReplicaFanout(executor, options?.cluster)
+  const replicas = fanout?.replicas ?? 1
+  const source = fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'
+  const sql = `SELECT hostName() AS replica, name FROM ${source} WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name IN (${stringLiteral(rename.from)}, ${stringLiteral(rename.to)})`
+  await waitUntilApplied(`${database}.${tableName} rename of column ${rename.from} to ${rename.to}`, async () => {
+    const rows = await executor.query<{ replica: string; name: string }>(sql)
+    const stale = rows.filter((row) => row.name === rename.from).map((row) => row.replica)
+    if (stale.length > 0) return `replica ${stale.join(', ')} still lists column ${rename.from}`
+    const renamed = new Set(rows.filter((row) => row.name === rename.to).map((row) => row.replica))
+    if (renamed.size < replicas) return `column ${rename.to} is listed on ${renamed.size} of ${replicas} replicas`
+    return undefined
+  })
+}
+
+async function waitForIndex(
+  executor: ClickHouseExecutor,
+  database: string,
+  tableName: string,
+  indexName: string,
+  want: 'present' | 'absent',
+  options?: PropagationOptions,
+): Promise<void> {
+  await waitForSystemRows(executor, {
+    source: 'system.data_skipping_indices',
+    where: `database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name = ${stringLiteral(indexName)}`,
+    want,
+    label: `waitForIndex: ${database}.${tableName}.${indexName} ${want === 'present' ? 'not yet visible' : 'still present'}`,
+  }, options)
+}
+
+/**
  * Waits until every replica's `create_table_query` lists the constraint. There
  * is no system table of constraints. A replica that has not applied the ADD
  * yet would let a following `DROP CONSTRAINT IF EXISTS` (a changed constraint)
@@ -220,6 +312,9 @@ function parseOperationKey(
       table: string
       column: string | undefined
       constraint?: string
+      index?: string
+      /** `<from>:<to>` of a column rename. */
+      rename?: string
     }
   | undefined {
   const keyMatch = key.match(/^(?:table|dictionary|view|materialized_view):([^.]+)\.(.+)$/)
@@ -238,7 +333,20 @@ function parseOperationKey(
     table: rest.slice(0, at),
     column: suffix === ':column:' ? member : undefined,
     constraint: suffix === ':constraint:' ? member : undefined,
+    index: suffix === ':index:' ? member : undefined,
+    rename: suffix === ':column_rename:' ? member : undefined,
   }
+}
+
+/**
+ * The old and new names of a column rename. The statement names them; without
+ * it the key's `<from>:<to>` is split only when it holds exactly one ':'.
+ */
+function renamedColumn(member: string, statement: string | undefined): { from: string; to: string } | undefined {
+  const parsed = statement === undefined ? undefined : parseRenameColumn(statement)
+  if (parsed && `${parsed.from}:${parsed.to}` === member) return parsed
+  const parts = member.split(':')
+  return parts.length === 2 && parts[0] && parts[1] ? { from: parts[0], to: parts[1] } : undefined
 }
 
 /**
@@ -269,18 +377,32 @@ export async function waitForDDLPropagation(
     case 'create_dictionary':
       return waitForDictionary(executor, parsed.database, parsed.table, options)
 
+    // ADD COLUMN IF NOT EXISTS leaves an existing column as it is, so only
+    // agreement between replicas is checked; MODIFY also checks what it sets.
     case 'alter_table_add_column':
     case 'alter_table_modify_column':
       if (parsed.column) {
-        return waitForColumn(
-          executor,
-          parsed.database,
-          parsed.table,
-          parsed.column,
-          options,
-        )
+        const intent =
+          operationType === 'alter_table_modify_column' && options?.statement !== undefined
+            ? parseModifyColumnIntent(options.statement, parsed.column)
+            : {}
+        return waitForColumnDefinition(executor, parsed.database, parsed.table, parsed.column, intent, options)
       }
       return
+
+    case 'alter_table_rename_column': {
+      const rename = parsed.rename === undefined ? undefined : renamedColumn(parsed.rename, options?.statement)
+      if (rename) return waitForColumnRename(executor, parsed.database, parsed.table, rename, options)
+      return waitForTable(executor, parsed.database, parsed.table, options)
+    }
+
+    case 'alter_table_add_index':
+    case 'alter_table_drop_index':
+      if (parsed.index) {
+        const want = operationType === 'alter_table_add_index' ? 'present' : 'absent'
+        return waitForIndex(executor, parsed.database, parsed.table, parsed.index, want, options)
+      }
+      return waitForTable(executor, parsed.database, parsed.table, options)
 
     case 'alter_table_drop_column':
       if (parsed.column) {
@@ -312,7 +434,7 @@ export async function waitForDDLPropagation(
       )
 
     default:
-      // alter_table_add_index, alter_table_modify_setting,
+      // alter_table_add_projection, alter_table_modify_setting,
       // alter_materialized_view_modify_refresh, etc.
       // Wait for the table to exist as a basic sanity check.
       return waitForTable(executor, parsed.database, parsed.table, options)
@@ -384,4 +506,96 @@ function constraintWhere(database: string, tableName: string, constraintName: st
   const spellings = [`CONSTRAINT ${constraintName} `, `CONSTRAINT ${quoted} `]
   const listed = spellings.map((spelling) => `position(create_table_query, ${stringLiteral(spelling)}) > 0`).join(' OR ')
   return `database = ${stringLiteral(database)} AND name = ${stringLiteral(tableName)} AND (${listed})`
+}
+
+/**
+ * Polls `check` until it reports no mismatch. On timeout the error names what
+ * was still different on the last check.
+ */
+async function waitUntilApplied(subject: string, check: () => Promise<string | undefined>): Promise<void> {
+  let checks = 0
+  try {
+    await pRetry(async () => {
+      checks += 1
+      const mismatch = await check()
+      if (mismatch !== undefined) throw new Error(mismatch)
+    }, RETRY_OPTIONS)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
+  }
+}
+
+/**
+ * The `system.columns` values `intent` pins down. The default expression is
+ * formatted by the server; when it cannot be formatted (a server without
+ * `formatQuerySingleLine`), the expression is left to the agreement check.
+ */
+async function expectedColumnValues(
+  executor: ClickHouseExecutor,
+  intent: ColumnIntent,
+): Promise<ExpectedColumnValue[]> {
+  const expected: ExpectedColumnValue[] = []
+  if (intent.defaultKind !== undefined) expected.push({ field: 'default_kind', value: intent.defaultKind })
+  if (intent.defaultKind === '') expected.push({ field: 'default_expression', value: '' })
+  if (intent.typeDefault) expected.push({ field: 'default_expression', value: 'defaultValueOfTypeName(', prefix: true })
+  if (intent.comment !== undefined) expected.push({ field: 'comment', value: intent.comment })
+  if (intent.codecRemoved) expected.push({ field: 'compression_codec', value: '' })
+  if (intent.defaultExpression !== undefined) {
+    const formatted = await formatExpression(executor, intent.defaultExpression)
+    if (formatted !== undefined) expected.push({ field: 'default_expression', value: formatted })
+  }
+  return expected
+}
+
+async function formatExpression(executor: ClickHouseExecutor, expression: string): Promise<string | undefined> {
+  const select = 'SELECT '
+  try {
+    const rows = await executor.query<{ formatted: string }>(
+      `SELECT formatQuerySingleLine(${stringLiteral(`${select}${expression}`)}) AS formatted`,
+    )
+    const formatted = rows[0]?.formatted
+    return formatted?.startsWith(select) ? formatted.slice(select.length) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Why the replicas' rows do not show the intended definition yet, or
+ * undefined when every replica reports it.
+ */
+function columnDefinitionMismatch(
+  rows: ColumnDefinitionRow[],
+  replicas: number,
+  expected: ExpectedColumnValue[],
+): string | undefined {
+  const listed = new Set(rows.map((row) => row.replica))
+  if (listed.size < replicas) {
+    const where = listed.size > 0 ? ` (${[...listed].join(', ')})` : ''
+    return `the column is listed on ${listed.size} of ${replicas} replicas${where}`
+  }
+  for (const row of rows) {
+    const off = expected.find((want) => !matchesExpected(row[want.field], want))
+    if (!off) continue
+    const sets = off.prefix ? `${JSON.stringify(off.value)}...` : JSON.stringify(off.value)
+    const unanimous = rows.length > 1 && rows.every((other) => other[off.field] === row[off.field])
+    return (
+      `replica ${row.replica} reports ${off.field} ${JSON.stringify(row[off.field])}, the statement sets ${sets}` +
+      (unanimous ? '; every replica reports the same, so this is not replication lag: the server accepted the statement without applying it' : '')
+    )
+  }
+  const [first, ...others] = rows
+  if (!first) return undefined
+  for (const row of others) {
+    const field = COLUMN_FIELDS.find((name) => row[name] !== first[name])
+    if (field) {
+      return `replica ${row.replica} reports ${field} ${JSON.stringify(row[field])}, replica ${first.replica} reports ${JSON.stringify(first[field])}`
+    }
+  }
+  return undefined
+}
+
+function matchesExpected(actual: string, want: ExpectedColumnValue): boolean {
+  return want.prefix ? actual.startsWith(want.value) : actual === want.value
 }

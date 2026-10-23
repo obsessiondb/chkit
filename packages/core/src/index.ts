@@ -8,6 +8,7 @@ export {
   isQuoteChar,
   stripWrappingParens,
 } from './sql-scan.js'
+export { identifierName, isTrivia, stringLiteralValue, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 export { SYNTHESIZED_CONFIG_PATH, isSynthesizedConfigPath } from './config-path.js'
 export { hasConflictMarkers } from './conflict-markers.js'
 export {
