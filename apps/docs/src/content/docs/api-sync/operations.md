@@ -77,7 +77,7 @@ An exhausted request retry budget fails the stream; reader recovery does not mul
 | Stream `budget.maxChunkRows` | `100_000` | Fails a stream that yields a larger chunk |
 | `ingest({ journalTable })` | `_chkit_ingestion_journal` | Journal table in the configured database |
 
-A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
+A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. A configuration error exits `2` before any stream runs, for example a `--tag` that matches no stream, a missing ClickHouse connection, `--from`/`--to` without `--backfill`, or an invalid backfill id or `--max-duration` value. See [`chkit ingest` exit codes](/cli/ingest/#exit-codes). Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
 
 Treat the journal as durable operational state. Changing the journal name or configured target identity starts a different checkpoint history. Do not change them as routine retry handling.
 
