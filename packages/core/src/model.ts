@@ -4,6 +4,7 @@ import type {
   ChxConfigFn,
   ChxConfigInput,
   ChxResolvedConfig,
+  ChxUserClickHouseConfig,
   ChxUserConfig,
   DictionaryDefinition,
   KafkaTableInput,
@@ -85,14 +86,28 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
           username: config.clickhouse.username ?? 'default',
           password: config.clickhouse.password ?? '',
           database: config.clickhouse.database ?? 'default',
-          // The client takes the protocol from the URL; keep `secure` consistent with it.
-          secure: config.clickhouse.secure ?? /^https:/i.test(config.clickhouse.url),
+          secure: resolveSecure(config.clickhouse),
           cluster: config.clickhouse.cluster
             ? assertValidClusterName(config.clickhouse.cluster)
             : undefined,
         }
       : undefined,
   }
+}
+
+// The client takes the protocol, and without a port the scheme's default port,
+// from the URL, so `secure` can only confirm the scheme. A contradicting value is
+// an error instead of a silent downgrade to plain HTTP or an ignored setting.
+function resolveSecure(clickhouse: ChxUserClickHouseConfig): boolean {
+  const scheme = /^(https?):/i.exec(clickhouse.url)?.[1]?.toLowerCase()
+  if (scheme === undefined) return clickhouse.secure ?? false
+  const fromUrl = scheme === 'https'
+  if (clickhouse.secure !== undefined && clickhouse.secure !== fromUrl) {
+    throw new Error(
+      `clickhouse.secure is ${clickhouse.secure} but clickhouse.url uses ${scheme}://. The URL scheme sets the protocol: remove secure or change the URL to ${clickhouse.secure ? 'https' : 'http'}://.`,
+    )
+  }
+  return fromUrl
 }
 
 export function table(input: KafkaTableInput): TableDefinition
