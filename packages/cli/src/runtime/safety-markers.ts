@@ -14,7 +14,7 @@ export interface DestructiveOperationMarker {
   summary: string
 }
 
-export type MigrationOperationMode = 'sync' | 'async'
+export type MigrationOperationMode = 'sync' | 'async' | 'barrier'
 
 export interface MigrationOperationSummary {
   type: string
@@ -26,7 +26,9 @@ export interface MigrationOperationSummary {
    * `-- before-retry: <sql>` header line that follows the `-- operation:`
    * line. Empty / null on first attempt; runs on every retry. Compensates
    * for partial side effects left behind by a failed prior attempt
-   * (e.g. TRUNCATE a partially-loaded table before re-INSERTing).
+   * (e.g. TRUNCATE a partially-loaded table before re-INSERTing), or guards
+   * a statement that must not run twice (a SELECT throwIf before an
+   * EXCHANGE TABLES that may already have run).
    */
   beforeRetry: string | null
   summary: string
@@ -55,7 +57,7 @@ function parseOperationLine(
   )
   if (!match) return null
   const rawMode = match[4]
-  const mode: MigrationOperationMode = rawMode === 'async' ? 'async' : 'sync'
+  const mode: MigrationOperationMode = rawMode === 'async' || rawMode === 'barrier' ? rawMode : 'sync'
   return {
     type: match[1] ?? 'unknown',
     key: match[2] ?? 'unknown',

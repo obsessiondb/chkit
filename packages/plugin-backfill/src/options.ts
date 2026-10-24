@@ -27,6 +27,14 @@ function normalizeTarget(raw: string): string {
   return value
 }
 
+function normalizeCutoverTarget(raw: string): string {
+  const value = raw.trim()
+  if (!/^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/.test(value)) {
+    throw new BackfillConfigError('Invalid value for --cutover. Expected <database.table>.')
+  }
+  return value
+}
+
 const BYTE_SUFFIXES: Record<string, number> = {
   T: 1024 ** 4,
   G: 1024 ** 3,
@@ -86,7 +94,9 @@ export type PluginConfig = z.input<typeof PluginConfigSchema>
 // ───── Per-command schemas ─────
 
 export const PlanSchema = z.object({
-  target: z.string(),
+  // Empty when --cutover names the table: the plan then targets the cutover's shadow table.
+  target: z.string().default(''),
+  cutover: z.string().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
   maxChunkBytes: z.number().positive().default(10 * GiB),
@@ -143,6 +153,7 @@ export const CheckSchema = z.object({
 
 export const PLAN_FLAGS = defineFlags([
   { name: '--target', type: 'string', description: 'Target table (database.table)', placeholder: '<database.table>' },
+  { name: '--cutover', type: 'string', description: 'Copy the rows of a pending generate --cutover of this table (instead of --target)', placeholder: '<database.table>' },
   { name: '--from', type: 'string', description: 'Filter partitions starting from timestamp', placeholder: '<timestamp>' },
   { name: '--to', type: 'string', description: 'Filter partitions up to timestamp', placeholder: '<timestamp>' },
   { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
@@ -150,6 +161,7 @@ export const PLAN_FLAGS = defineFlags([
 
 export const SUBMIT_FLAGS = defineFlags([
   { name: '--target', type: 'string', description: 'Target table (database.table)', placeholder: '<database.table>' },
+  { name: '--cutover', type: 'string', description: 'Copy the rows of a pending generate --cutover of this table (instead of --target)', placeholder: '<database.table>' },
   { name: '--from', type: 'string', description: 'Filter partitions starting from timestamp', placeholder: '<timestamp>' },
   { name: '--to', type: 'string', description: 'Filter partitions up to timestamp', placeholder: '<timestamp>' },
   { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
@@ -180,6 +192,7 @@ export const PLAN_ID_FLAGS = defineFlags([
 
 export const PLAN_FLAG_MAP: FlagMapping = {
   '--target': { key: 'target', coerce: normalizeTarget },
+  '--cutover': { key: 'cutover', coerce: normalizeCutoverTarget },
   '--from': { key: 'from', coerce: (v) => normalizeTimestamp(v, '--from') },
   '--to': { key: 'to', coerce: (v) => normalizeTimestamp(v, '--to') },
   '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: parseByteSize },
@@ -187,6 +200,7 @@ export const PLAN_FLAG_MAP: FlagMapping = {
 
 export const SUBMIT_FLAG_MAP: FlagMapping = {
   '--target': { key: 'target', coerce: normalizeTarget },
+  '--cutover': { key: 'cutover', coerce: normalizeCutoverTarget },
   '--from': { key: 'from', coerce: (v) => normalizeTimestamp(v, '--from') },
   '--to': { key: 'to', coerce: (v) => normalizeTimestamp(v, '--to') },
   '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: parseByteSize },

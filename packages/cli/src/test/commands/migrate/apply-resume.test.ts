@@ -624,3 +624,103 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
   })
 })
 
+describe('applyMigration -- before-retry on sync statements', () => {
+  const SQL =
+    '-- operation: cutover_validate key=table:default.t:cutover:start risk=caution\n' +
+    'SELECT 1;\n' +
+    '-- operation: exchange_tables key=table:default.t risk=caution\n' +
+    "-- before-retry: SELECT throwIf(swapped, 'already swapped')\n" +
+    'EXCHANGE TABLES default.t AND default.s;\n'
+  const START = { type: 'cutover_validate', key: 'table:default.t:cutover:start' }
+  const EXCHANGE = { type: 'exchange_tables', key: 'table:default.t' }
+
+  function args(db: ClickHouseExecutor, store: JournalStore, dir: string) {
+    return {
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    }
+  }
+
+  test('does not run before-retry SQL on the first attempt', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore()
+    await applyMigration(args(db, store, dir))
+    expect(commandCalls).toEqual(['SELECT 1;', 'EXCHANGE TABLES default.t AND default.s;'])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  // A lost acknowledgement leaves the EXCHANGE recorded as started although it
+  // ran. Its guard runs first and stops the retry instead of swapping back.
+  test('runs the guard before retrying an interrupted statement, and stops when it throws', async () => {
+    const dir = writeMigration(SQL)
+    const { store } = createFakeStore(
+      inProgressState(checksumSQL(SQL), [operation(0, 'completed', START), operation(1, 'started', EXCHANGE)]),
+    )
+    const { db, commandCalls } = recordingDb({ fail: (sql) => sql.startsWith('SELECT throwIf(swapped') })
+    await expect(applyMigration(args(db, store, dir))).rejects.toThrow('boom: SELECT throwIf(swapped')
+    expect(commandCalls).toEqual(["SELECT throwIf(swapped, 'already swapped')"])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('retries a failed statement once its guard passes', async () => {
+    const dir = writeMigration(SQL)
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SQL), [operation(0, 'completed', START), operation(1, 'failed', EXCHANGE)]),
+    )
+    const { db, commandCalls } = recordingDb()
+    await applyMigration(args(db, store, dir))
+    expect(commandCalls).toEqual([
+      "SELECT throwIf(swapped, 'already swapped')",
+      'EXCHANGE TABLES default.t AND default.s;',
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('applyMigration mode=barrier', () => {
+  test('waits for the INSERTs running at the first read instead of executing the statement', async () => {
+    const sql =
+      '-- operation: cutover_wait_for_inserts key=table:default.t:cutover:mirror_barrier risk=safe mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');\n"
+    const dir = writeMigration(sql)
+    const polls = [['q1'], ['q1'], []]
+    const reads: string[] = []
+    const commandCalls: string[] = []
+    const db = {
+      async command(statement: string) {
+        commandCalls.push(statement)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        if (statement.includes('system.one')) throw new Error('no cluster')
+        reads.push(statement)
+        return (polls[Math.min(reads.length - 1, polls.length - 1)] ?? []).map((query_id) => ({ query_id })) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, appended } = createFakeStore()
+    await applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+    expect(commandCalls).toEqual([])
+    expect(reads).toHaveLength(3)
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  }, 15_000)
+})
+

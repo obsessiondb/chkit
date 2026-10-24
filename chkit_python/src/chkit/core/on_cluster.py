@@ -181,7 +181,14 @@ def apply_on_cluster_to_plan(
     return plan.model_copy(
         update={
             "operations": [
-                op.model_copy(update={"sql": _inject_on_cluster_clause(op.sql, clause)})
+                op.model_copy(
+                    update={
+                        "sql": _inject_on_cluster_clause(op.sql, clause),
+                        "before_retry": _inject_on_cluster_clause(op.before_retry, clause)
+                        if op.before_retry is not None
+                        else None,
+                    }
+                )
                 for op in plan.operations
             ],
             "rename_suggestions": [

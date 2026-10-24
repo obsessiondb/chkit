@@ -48,7 +48,8 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import extract_migration_operation_summaries
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
+from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation, wait_for_exchange
+from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.core.model import ChxResolvedConfig
 from chkit.core.sql_splitter import extract_executable_statements
 from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
@@ -146,6 +147,27 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
         if _operation_is_completed(state_before, index):
             continue
         identity = statement_identity(operation_summaries, index)
+        cluster = input_.config.clickhouse.cluster if input_.config.clickhouse else None
+        prior_attempt = (
+            next((op for op in state_before.operations if op.operation_index == index), None)
+            if state_before is not None
+            else None
+        )
+        if prior_attempt is not None and operation is not None and operation.before_retry:
+            try:
+                _run_before_retry(
+                    input_.client,
+                    operation.type,
+                    statement,
+                    operation.before_retry,
+                    cluster=cluster,
+                    log=input_.log,
+                    status=prior_attempt.status,
+                )
+            except Exception as error:
+                raise statement_error(
+                    file=file, index=index, total=total, statement=statement, error=error
+                ) from error
         base_state = state_before or fresh_migration_state(file, migration_checksum)
         journal_store.write_migration_state(
             upsert_operation(
@@ -155,7 +177,10 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
             )
         )
         try:
-            input_.client.execute(statement)
+            if operation is not None and operation.mode == "barrier":
+                wait_for_insert_barrier(input_.client, statement, cluster=cluster, log=input_.log)
+            else:
+                input_.client.execute(statement)
         except Exception as error:
             state_on_error = journal_store.read_migration_state(file) or base_state
             journal_store.write_migration_state(
@@ -181,7 +206,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
                 iso_without_zone(datetime.now(tz=UTC)),
             )
         )
-        if operation is not None:
+        if operation is not None and operation.mode != "barrier":
             # Poll system.tables / system.columns until the DDL is visible.
             # Critical for Replicated / ObsessionDB Shared engines.
             try:
@@ -189,7 +214,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
                     input_.client,
                     operation.type,
                     operation.key,
-                    cluster=input_.config.clickhouse.cluster if input_.config.clickhouse else None,
+                    cluster=cluster,
                     statement=statement,
                 )
             except Exception as wait_error:
@@ -230,6 +255,30 @@ def statement_error(
         f"  {preview_statement(statement)}\n"
         f"{error}"
     )
+
+
+def _run_before_retry(
+    client: ClickHouseClient,
+    operation_type: str,
+    statement: str,
+    before_retry: str,
+    *,
+    cluster: str | None,
+    log: Callable[[str], None],
+    status: OperationStatus,
+) -> None:
+    """Run a statement's ``-- before-retry:`` SQL before chkit attempts it again
+    after an earlier attempt failed or was interrupted (TS ``runBeforeRetry``).
+
+    Before an EXCHANGE TABLES the replicas first have to agree on both tables:
+    a swap that ran but whose acknowledgement was lost may not have reached the
+    replica the guard reads yet, and exchanging again would swap the tables back.
+    """
+    if operation_type == "exchange_tables":
+        wait_for_exchange(client, statement, cluster=cluster)
+    attempt = "failed" if status == "failed" else "was interrupted"
+    log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
+    client.execute(before_retry)
 
 
 def _accept_edited_migration(

@@ -1,5 +1,6 @@
 """Inspect local drift without turning unsupported changes into SQL."""
 
+from chkit.cli.commands.generate_cutover import carry_retained_definitions
 from chkit.cli.table_scope import TableScope, filter_plan_by_table_scope
 from chkit.core.model import (
     ChxValidationError,
@@ -23,6 +24,11 @@ def plan_snapshot_drift(
     Migration generation still fails on these issues. Read-only checks can
     report them and continue inspecting other tables, including scoped checks.
     """
+    # A table a keep-mode cutover retained is in the snapshot only; `generate`
+    # keeps planning it as declared, so it is not drift either.
+    current = carry_retained_definitions(
+        previous_definitions=previous, definitions=current, drop_retained=[]
+    )
     issues: list[ValidationIssue] = []
     while True:
         try:

@@ -240,16 +240,23 @@ export interface TableDefinition {
   constraints?: TableConstraintDefinition[]
   comment?: string
   plugins?: TablePlugins
+  /**
+   * Set by `chkit generate --cutover` with `--cutover-old keep` on the table
+   * that keeps the pre-cutover rows (`<table>_previous`). Only the snapshot
+   * carries it: `generate` keeps planning the table as declared until
+   * `--drop-retained` removes it, so it never reads as a pending drop.
+   */
+  retainedBy?: { cutover: string }
 }
 
 /** Omitted primary keys inherit ORDER BY, matching ClickHouse MergeTree semantics. */
-export type TableInput = Omit<TableDefinition, 'kind' | 'primaryKey'> & {
+export type TableInput = Omit<TableDefinition, 'kind' | 'primaryKey' | 'retainedBy'> & {
   primaryKey?: string[]
 }
 
 /** Kafka queues do not have MergeTree sorting/storage clauses. */
 export type KafkaTableInput = Omit<TableDefinition,
-  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections' | 'constraints'
+  'kind' | 'retainedBy' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections' | 'constraints'
 > & {
   engine: 'Kafka' | `Kafka(${string})`
   primaryKey?: never
@@ -281,7 +288,7 @@ export type KeylessTableEngine =
 
 /** A table on a `KeylessTableEngine`, e.g. a Distributed table over a local table. */
 export type KeylessTableInput = Omit<TableDefinition,
-  'kind' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy'
+  'kind' | 'retainedBy' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy'
 > & {
   engine: KeylessTableEngine
   primaryKey?: []
@@ -494,6 +501,23 @@ export type MigrationOperationType =
   | 'create_dictionary'
   | 'drop_dictionary'
   | 'rename_dictionary'
+  // Zero-downtime cutover of a structural table change (`generate --cutover`).
+  | 'exchange_tables'
+  | 'cutover_validate'
+  | 'cutover_wait_for_inserts'
+  | 'cutover_snapshot'
+  | 'cutover_sync_replicas'
+  | 'cutover_copy'
+  | 'cutover_verify'
+  | 'cutover_reconcile'
+  | 'cutover_attach'
+
+/**
+ * How `migrate` runs a statement: `async` submits it and polls its query id
+ * (long data loads); `barrier` reads the running INSERT query ids once and
+ * waits until none of them is still running. Unset means synchronous.
+ */
+export type MigrationOperationMode = 'async' | 'barrier'
 
 export interface MigrationOperation {
   type: MigrationOperationType
@@ -501,6 +525,13 @@ export interface MigrationOperation {
   risk: RiskLevel
   sql: string
   warning?: string
+  mode?: MigrationOperationMode
+  /**
+   * One line of SQL that `migrate` runs before it attempts the statement again
+   * after an earlier attempt failed or was interrupted. A guard that throws
+   * stops the retry, e.g. before an `EXCHANGE TABLES` that may already have run.
+   */
+  beforeRetry?: string
 }
 
 export interface ColumnRenameSuggestion {
@@ -568,6 +599,7 @@ export type ValidationIssueCode =
   | 'dictionary_range_missing_attribute'
   | 'dictionary_bidirectional_requires_hierarchical'
   | 'invalid_identifier'
+  | 'cutover_unsupported'
 
 export interface ValidationIssue {
   code: ValidationIssueCode

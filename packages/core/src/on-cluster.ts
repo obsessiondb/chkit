@@ -128,6 +128,9 @@ export function applyOnClusterToPlan(
     operations: plan.operations.map((operation) => ({
       ...operation,
       sql: injectOnClusterClause(operation.sql, clause),
+      ...(operation.beforeRetry === undefined
+        ? {}
+        : { beforeRetry: injectOnClusterClause(operation.beforeRetry, clause) }),
     })),
     renameSuggestions: plan.renameSuggestions.map((suggestion) => ({
       ...suggestion,

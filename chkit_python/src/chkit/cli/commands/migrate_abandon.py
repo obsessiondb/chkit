@@ -68,9 +68,10 @@ def abandon_migration_state(
 ) -> None:
     """Supersede an in-progress state with one where every statement failed.
 
-    The next apply runs the file from statement 1: sync statements run
-    again, and async statements keep their query ids, so they take the retry
-    path (``-- before-retry:`` compensation, then a resubmit). Like every
+    The next apply runs the file from statement 1: every statement runs its
+    ``-- before-retry:`` SQL first, sync statements run again, and async
+    statements keep their query ids, so they take the retry path
+    (compensation, then a resubmit). Like every
     journal write this is an INSERT of a newer row version, so it needs no
     DELETE privilege and leaves no mutation behind.
     """

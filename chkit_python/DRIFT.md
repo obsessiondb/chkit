@@ -1850,3 +1850,24 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - The replica-lag case (one replica's replication queue stopped) is
   `tests_cluster/test_definition_wait_cluster_e2e.py`, the port of
   `packages/cli/test/cluster-2shard-definition-wait.e2e.test.ts`.
+
+### Zero-downtime cutover (#202)
+- Same design and SQL as TS (`chkit.core.cutover`, `chkit.cli.commands.generate_cutover`,
+  `chkit.clickhouse.insert_barrier`, `wait_for_exchange`): the planner output of TS and
+  Python was compared statement by statement for the in-migration/keep, backfill/drop and
+  cluster/drop cases and is identical. The backfill `cutover_copy` strategy is ported
+  too (`plan --cutover`, managed `submit --cutover`, chunk SQL without a dedup token).
+- chkit-py's default `drift` and `check` compare the snapshot with the schema files (TS
+  compares with the live database). They carry the retained `<table>_previous` like
+  `generate` does, so a keep-mode cutover is clean in both.
+- `migrate_apply` still only warns when a propagation wait times out (see #290 above);
+  for `exchange_tables` that means a slow swap propagation is a warning, and the
+  `after_exchange` guard that follows fails the migration on a replica that has not
+  applied the swap.
+- The Python e2e scenario uses a MergeTree table as the chained insert source instead
+  of a Null table: chkit-py's live drift reports a Null table as `engine_mismatch`
+  (pre-existing, unrelated to the cutover).
+- `tests_cluster/test_cutover_cluster_e2e.py` is the port of
+  `packages/cli/test/cluster-2shard-cutover.e2e.test.ts`.
+- Correction to the backfill notes above: local `plan` / `run` / `resume` are ported
+  (Phase 2 landed); the cutover e2e drives them.
