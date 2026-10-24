@@ -104,10 +104,10 @@ export function createPrefix(label: string): string {
 }
 
 export function createJournalTableName(label: string): string {
-  const runTag =
-    process.env.GITHUB_RUN_ID?.trim() ||
-    `${Date.now()}_${Math.floor(Math.random() * 100000)}`
-  return `_chkit_migrations_${label}_${runTag}`
+  // The CI run id alone is not unique: the TS and Python suites run at the same
+  // time against one server and share labels, so a random suffix always follows.
+  const runTag = process.env.GITHUB_RUN_ID?.trim() || `${Date.now()}`
+  return `_chkit_migrations_${label}_${runTag}_${Math.floor(Math.random() * 100000)}`
 }
 
 // ---------------------------------------------------------------------------
