@@ -189,7 +189,11 @@ def test_create_journal_table_name_prefers_github_run_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GITHUB_RUN_ID", "run-42")
-    assert create_journal_table_name("dry") == "_chkit_migrations_dry_run-42"
+    name = create_journal_table_name("dry")
+    assert name.startswith("_chkit_migrations_dry_run-42_")
+    # The TS and Python suites share labels within one CI run: the run id
+    # alone must not make two names equal.
+    assert create_journal_table_name("dry") != name
 
 
 def test_create_journal_table_name_falls_back_to_ts_and_rand(

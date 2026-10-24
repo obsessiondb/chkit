@@ -171,17 +171,17 @@ def create_prefix(label: str = "test") -> str:
 
 
 def create_journal_table_name(label: str) -> str:
-    """Return ``_chkit_migrations_<label>_<runTag>``.
+    """Return ``_chkit_migrations_<label>_<runTag>_<rand>``.
 
     Mirrors TS ``createJournalTableName``: prefers ``GITHUB_RUN_ID`` (so CI
-    reruns can be correlated) and falls back to ``<ms>_<rand>``. Used to point
+    reruns can be correlated) and falls back to ``<ms>``. The random suffix is
+    always added: the TS and Python suites run at the same time against one
+    server and share labels, so the run id alone collides. Used to point
     ``CHKIT_JOURNAL_TABLE`` at a per-test journal so parallel tests don't
     contend on the shared ``_chkit_migrations`` table.
     """
-    run_tag = (os.environ.get("GITHUB_RUN_ID") or "").strip()
-    if not run_tag:
-        run_tag = f"{int(time.time() * 1000)}_{_random_suffix()}"
-    return f"_chkit_migrations_{label}_{run_tag}"
+    run_tag = (os.environ.get("GITHUB_RUN_ID") or "").strip() or str(int(time.time() * 1000))
+    return f"_chkit_migrations_{label}_{run_tag}_{_random_suffix()}"
 
 
 def poll_until(
