@@ -47,7 +47,7 @@ __all__ = [
 ]
 
 
-MigrationOperationMode = Literal["sync", "async"]
+MigrationOperationMode = Literal["sync", "async", "barrier"]
 
 _PREVIEW_MAX_LEN = 120
 _PREVIEW_TRUNCATE_LEN = 117
@@ -147,7 +147,9 @@ def _parse_operation_line(
     if match is None:
         return None
     raw_mode = match.group(4)
-    mode: MigrationOperationMode = "async" if raw_mode == "async" else "sync"
+    mode: MigrationOperationMode = (
+        "async" if raw_mode == "async" else "barrier" if raw_mode == "barrier" else "sync"
+    )
     return MigrationOperationSummary(
         type=match.group(1),
         key=match.group(2),

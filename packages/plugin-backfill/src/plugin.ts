@@ -1,4 +1,4 @@
-import { createClickHouseExecutor } from '@chkit/clickhouse'
+import { createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
 import { executeBackfill, type BackfillProgress } from './async-backfill.js'
@@ -152,6 +152,7 @@ async function runBackfill(input: {
           table: plan.chunkPlan.table,
           mvReplayQueries: plan.execution.mvReplayQueries,
           targetColumns: plan.execution.targetColumns,
+          cutoverKey: plan.execution.cutoverKey,
           idempotencyToken: plan.execution.requireIdempotencyToken
             ? generateIdempotencyToken(plan.planId, planChunk.id)
             : '',
@@ -240,7 +241,10 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               )
             }
 
-            const db = createClickHouseExecutor(context.config.clickhouse)
+            // Planning only reads, and chunk refinement reads several slices
+            // at once, which a session-bound executor rejects ("Session is
+            // locked by a concurrent client").
+            const db = createStatelessClickHouseExecutor(context.config.clickhouse)
 
             try {
               const output = await buildBackfillPlan({

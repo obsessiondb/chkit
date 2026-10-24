@@ -20,6 +20,7 @@ database.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -466,6 +467,81 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     raise RuntimeError(msg)
 
 
+def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None) -> None:
+    """Wait until every replica lists both tables of ``EXCHANGE TABLES a AND b``
+    with one uuid each, and the two uuids differ.
+
+    The replica that ran the statement has swapped them, so once all replicas
+    agree, all have. A statement that runs on a replica that has not applied
+    the swap yet would see the old names: a following DROP of the pre-cutover
+    table would drop the new one.
+
+    With ``clickhouse.cluster`` the statement ran ``ON CLUSTER``, which returns
+    once every host executed it, and each host may hold its own uuids, so
+    there is nothing to wait for. A single replica has nothing to wait for
+    either. (TS ``waitForExchange``.)
+    """
+    if cluster:
+        return
+    tables = parse_exchange_tables(statement)
+    if tables is None:
+        return
+    fanout = resolve_replica_fanout(client)
+    if fanout is None:
+        return
+    (db1, t1), (db2, t2) = tables
+    where = (
+        f"(database = {_quote(db1)} AND name = {_quote(t1)}) OR "
+        f"(database = {_quote(db2)} AND name = {_quote(t2)})"
+    )
+    sql = (
+        "SELECT database, name, count(DISTINCT hostName()) AS replicas, "
+        "uniqExact(uuid) AS uuids, any(toString(uuid)) AS sample_uuid "
+        f"FROM {all_replicas(fanout, 'system.tables')} WHERE {where} GROUP BY database, name"
+    )
+
+    def _check() -> str | None:
+        rows = client.query(sql).rows
+        if len(rows) < 2:  # noqa: PLR2004 - the two exchanged tables
+            return f"only {len(rows)} of the 2 tables are listed"
+        for row in rows:
+            if int(row.get("replicas", 0)) < fanout.replicas:
+                return (
+                    f"{row.get('database')}.{row.get('name')} is listed on "
+                    f"{row.get('replicas')} of {fanout.replicas} replicas"
+                )
+            if int(row.get("uuids", 0)) != 1:
+                return f"replicas disagree on the uuid of {row.get('database')}.{row.get('name')}"
+        if rows[0].get("sample_uuid") == rows[1].get("sample_uuid"):
+            return "both names report the same uuid"
+        return None
+
+    _wait_until_applied(f"EXCHANGE TABLES {db1}.{t1} AND {db2}.{t2}", _check)
+
+
+_QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"
+_EXCHANGE_PATTERN = re.compile(
+    rf"^\s*EXCHANGE\s+TABLES\s+({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
+    rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})",
+    re.IGNORECASE,
+)
+
+
+def parse_exchange_tables(statement: str) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    """The two ``(database, table)`` of ``EXCHANGE TABLES db.a AND db.b``, or None."""
+    match = _EXCHANGE_PATTERN.match(statement)
+    if match is None:
+        return None
+    db1, t1, db2, t2 = (_unquote_identifier(part) for part in match.groups())
+    return (db1, t1), (db2, t2)
+
+
+def _unquote_identifier(identifier: str) -> str:
+    if not identifier.startswith("`"):
+        return identifier
+    return re.sub(r"\\(.)", r"\1", identifier[1:-1])
+
+
 def _expected_column_values(client: Any, intent: ColumnIntent) -> list[_ExpectedColumnValue]:
     """The ``system.columns`` values ``intent`` pins down.
 
@@ -731,6 +807,19 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     - alter_table_drop_constraint                     → wait_for_constraint_absent
     - everything else (modify_setting, modify_ttl …) → wait_for_table (best-effort)
     """
+    # Backfill assertions execute SELECT guards. Their keys identify the guard,
+    # not an object changed by DDL, so there is no schema propagation to await.
+    if operation_type == "assert_backfill":
+        return
+    # Cutover guards, barriers, copies and the snapshot ALTER change no object
+    # in the catalog; the objects a cutover creates and drops use the regular
+    # create/drop operation types.
+    if operation_type.startswith("cutover_"):
+        return
+    if operation_type == "exchange_tables":
+        if statement is not None:
+            wait_for_exchange(client, statement, cluster=cluster)
+        return
     parsed = _parse_operation_key(operation_type, operation_key)
     if parsed is None:
         # database-level ops or unrecognised keys — nothing to poll for.

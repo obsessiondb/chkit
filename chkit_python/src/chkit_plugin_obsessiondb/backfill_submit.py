@@ -52,6 +52,7 @@ def build_submit_tasks(
                 table=plan.chunk_plan.table,
                 mv_replay_queries=plan.execution.mv_replay_queries,
                 target_columns=plan.execution.target_columns,
+                cutover_key=plan.execution.cutover_key,
                 idempotency_token=(
                     generate_idempotency_token(plan.plan_id, chunk.id)
                     if plan.execution.require_idempotency_token
@@ -115,8 +116,10 @@ def _coerce_timestamp(raw: str | None, flag: str) -> str | None:
 
 def parse_submit_input(flags: dict[str, Any]) -> ParsedSubmitInput:
     target = _flag_string(flags, "--target")
-    if target is None or _TARGET_RE.match(target) is None:
-        msg = "backfill submit requires --target <database.table>"
+    cutover = _flag_string(flags, "--cutover")
+    named = target if target is not None else cutover
+    if named is None or (target and cutover) or _TARGET_RE.match(named) is None:
+        msg = "backfill submit requires --target <database.table> or --cutover <database.table>"
         raise ValueError(msg)
 
     raw_bytes = _flag_string(flags, "--max-chunk-bytes")
@@ -140,7 +143,9 @@ def parse_submit_input(flags: dict[str, Any]) -> ParsedSubmitInput:
             raise ValueError(msg)
         concurrency = int(parsed)
 
-    plan_fields: dict[str, Any] = {"target": target}
+    plan_fields: dict[str, Any] = {"target": target or ""}
+    if cutover:
+        plan_fields["cutover"] = cutover
     from_value = _coerce_timestamp(_flag_string(flags, "--from"), "--from")
     to_value = _coerce_timestamp(_flag_string(flags, "--to"), "--to")
     if from_value is not None:

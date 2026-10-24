@@ -45,11 +45,17 @@ export function buildChunkExecutionSql(input: {
   mvReplayQueries?: string[]
   targetColumns?: string[]
   idempotencyToken?: string
+  /** cutover_copy: skip rows whose key the target already holds. */
+  cutoverKey?: string[]
 }): string {
   const sourceTarget = input.sourceTarget ?? input.target
   const header = `/* chkit backfill plan=${input.planId} chunk=${input.chunk.id} token=${input.idempotencyToken ?? ''} */`
   const settings = buildSettingsClause(input.idempotencyToken ?? '')
   const chunkConditions = buildChunkConditions(input.chunk, input.table.sortKeys)
+
+  if (input.cutoverKey?.length && input.targetColumns?.length) {
+    return buildCutoverChunkSql({ ...input, cutoverKey: input.cutoverKey, targetColumns: input.targetColumns, sourceTarget, header, chunkConditions })
+  }
 
   if (input.mvReplayQueries?.length) {
     // Each MV feeding the target becomes a filtered SELECT; UNION ALL replays
@@ -81,6 +87,46 @@ export function buildChunkExecutionSql(input: {
   }
 
   lines.push(settings)
+  return lines.join('\n')
+}
+
+/**
+ * A cutover chunk copies the snapshot rows of the chunk whose key the shadow
+ * table does not hold yet: rows the mirror already wrote, and rows an earlier
+ * attempt of this chunk wrote, are skipped, so a retry never duplicates rows.
+ * The key set is narrowed to the chunk's range when the range is on columns
+ * the copy writes unchanged, so a chunk does not load every key of the shadow.
+ * `select_sequential_consistency` makes a SharedMergeTree replica read the
+ * parts other replicas committed, including mirrored rows.
+ */
+function buildCutoverChunkSql(input: {
+  chunk: Chunk
+  target: string
+  table: Pick<TableProfile, 'sortKeys'>
+  sourceTarget: string
+  targetColumns: string[]
+  cutoverKey: string[]
+  header: string
+  chunkConditions: string[]
+}): string {
+  const columns = input.targetColumns.map(quoteIdentifier).join(', ')
+  const key = input.cutoverKey.map(quoteIdentifier).join(', ')
+  const copied = new Set(input.targetColumns)
+  const shadowConditions = input.chunk.ranges.flatMap((range) => {
+    const sortKey = input.table.sortKeys[range.dimensionIndex]
+    if (!sortKey || !copied.has(sortKey.name.replace(/^`|`$/g, ''))) return []
+    return buildRangeBoundConditions(range, sortKey)
+  })
+  const lines = [
+    input.header,
+    `INSERT INTO ${input.target} (${columns})`,
+    `SELECT ${columns}`,
+    `FROM ${input.sourceTarget}`,
+    `WHERE _partition_id = ${quoteSqlString(input.chunk.partitionId)}`,
+    ...input.chunkConditions.map((condition) => `  AND ${condition}`),
+    `  AND (${key}) NOT IN (SELECT ${key} FROM ${input.target}${shadowConditions.length > 0 ? ` WHERE ${shadowConditions.join(' AND ')}` : ''})`,
+    `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplicate=0, select_sequential_consistency=1`,
+  ]
   return lines.join('\n')
 }
 

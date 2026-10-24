@@ -137,7 +137,8 @@ function buildMigrationContent(input: {
 
   const body = input.plan.operations
     .map((op) => [
-      `-- operation: ${op.type} key=${op.key} risk=${op.risk}`,
+      `-- operation: ${op.type} key=${op.key} risk=${op.risk}${op.mode ? ` mode=${op.mode}` : ''}`,
+      ...(op.beforeRetry ? [`-- before-retry: ${op.beforeRetry.replace(/\s*[\r\n]+\s*/g, ' ')}`] : []),
       ...(op.warning ? [`-- Warning: ${op.warning.replace(/[\r\n]/g, ' ')}`] : []),
       op.sql,
     ].join('\n'))

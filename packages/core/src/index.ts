@@ -60,6 +60,22 @@ export {
 export { renderColumnType, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
+  CUTOVER_COPY_MODES,
+  CUTOVER_OLD_TABLE_MODES,
+  cutoverNames,
+  formatCutoverMetadata,
+  parseCutoverMetadata,
+  parseCutoverRequest,
+  planCutover,
+  type CutoverCopyMode,
+  type CutoverMetadata,
+  type CutoverNames,
+  type CutoverOldTableMode,
+  type CutoverOptions,
+  type CutoverRequest,
+  type PlannedCutover,
+} from './cutover.js'
+export {
   canonicalizeCodec,
   codec,
   codecsEqual,

@@ -144,12 +144,12 @@ def render_abandon_text(
         "them from the file. A column's MODIFY COLUMN ... REMOVE DEFAULT or REMOVE "
         "MATERIALIZED is not safe: it fails once the column has no such expression."
     )
-    # chkit runs -- before-retry: only on the async path, and only for a record
-    # whose operation type and key still match (rebase_in_progress_state).
+    # chkit runs -- before-retry: only for a record whose operation type and key
+    # still match (rebase_in_progress_state).
     typer.echo(
-        "A data load adds its rows again unless it is marked mode=async with a "
-        "-- before-retry: line that undoes it. That line runs only for an async "
-        "statement that keeps its position, operation type and key."
+        "A data load adds its rows again unless it has a -- before-retry: line "
+        "that undoes it. That line runs only for a statement that keeps its "
+        "position, operation type and key."
     )
     typer.echo(
         f"Or regenerate it: delete {migration}, restore {snapshot_file} from git to "

@@ -54,6 +54,14 @@ def _normalize_target(raw: str) -> str:
     return value
 
 
+def _normalize_cutover_target(raw: str) -> str:
+    value = raw.strip()
+    if not _TARGET_RE.match(value):
+        msg = "Invalid value for --cutover. Expected <database.table>."
+        raise BackfillConfigError(msg)
+    return value
+
+
 _BYTE_SUFFIXES: dict[str, int] = {
     "T": 1024**4,
     "G": 1024**3,
@@ -141,7 +149,9 @@ class PluginConfig(BaseModel):
 
 
 class PlanOptions(BaseModel):
-    target: str
+    # Empty when --cutover names the table: the plan then targets the cutover's shadow table.
+    target: str = ""
+    cutover: str | None = None
     from_: str | None = Field(default=None, alias="from")
     to: str | None = None
     max_chunk_bytes: int = Field(default=10 * _GiB, alias="maxChunkBytes", gt=0)
@@ -214,6 +224,14 @@ PLAN_FLAGS: list[dict[str, Any]] = [
         "placeholder": "<database.table>",
     },
     {
+        "name": "--cutover",
+        "type": "string",
+        "description": (
+            "Copy the rows of a pending generate --cutover of this table (instead of --target)"
+        ),
+        "placeholder": "<database.table>",
+    },
+    {
         "name": "--from",
         "type": "string",
         "description": "Filter partitions starting from timestamp",
@@ -282,6 +300,7 @@ PLAN_ID_FLAGS: list[dict[str, Any]] = [
 
 PLAN_FLAG_MAP: dict[str, dict[str, Any]] = {
     "--target": {"key": "target", "coerce": _normalize_target},
+    "--cutover": {"key": "cutover", "coerce": _normalize_cutover_target},
     "--from": {"key": "from", "coerce": lambda v: _normalize_timestamp(v, "--from")},
     "--to": {"key": "to", "coerce": lambda v: _normalize_timestamp(v, "--to")},
     "--max-chunk-bytes": {"key": "max_chunk_bytes", "coerce": parse_byte_size},

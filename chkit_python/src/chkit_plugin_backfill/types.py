@@ -30,8 +30,12 @@ class BackfillEnvironment(BaseModel):
 
 
 class BackfillExecutionPlan(BaseModel):
-    mode: Literal["copy", "mv_replay"]
+    # ``cutover_copy`` copies a ``generate --cutover`` snapshot into its shadow
+    # table, skipping rows whose key the shadow already holds.
+    mode: Literal["copy", "mv_replay", "cutover_copy"]
     source_target: str = Field(..., alias="sourceTarget")
+    # cutover_copy: the unique key that tells copied rows from mirrored rows.
+    cutover_key: list[str] | None = Field(default=None, alias="cutoverKey")
     # One `SELECT` per materialized view feeding the target table. mv_replay
     # inserts all of them (via `UNION ALL`) so every MV's rows are rebuilt.
     mv_replay_queries: list[str] | None = Field(

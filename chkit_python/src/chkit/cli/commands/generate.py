@@ -9,12 +9,17 @@ Flag set matches the TypeScript ``generateCommand``:
 - ``--dryrun``         Print the plan without writing artifacts.
 - ``--json``           Emit a JSON-formatted summary instead of human text.
 - ``--empty``          Scaffold a blank manual migration (no diff, snapshot untouched).
+- ``--cutover``        Zero-downtime cutover of a structural change (``db.table=key``); repeatable.
+- ``--cutover-copy``   Where a cutover copies existing rows: ``migration`` or ``backfill``.
+- ``--cutover-old``    What happens to the pre-cutover table: ``keep`` or ``drop``.
+- ``--drop-retained``  Drop a table a keep-mode cutover retained; repeatable.
 - ``--config``         Path to the config file (default ``clickhouse.config.py``).
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -23,6 +28,13 @@ import typer
 from chkit import __version__
 from chkit.cli.commands.dictionary_password_warnings import (
     detect_dictionary_password_warnings,
+)
+from chkit.cli.commands.generate_cutover import (
+    apply_cutovers,
+    carry_retained_definitions,
+    cutover_text_lines,
+    resolve_cutover_flags,
+    summarize_cutover,
 )
 from chkit.cli.commands.generate_plan_pipeline import (
     apply_explicit_dictionary_renames,
@@ -75,7 +87,14 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, ChxValidationError, SchemaDefinition
+from chkit.core.cutover import PlannedCutover
+from chkit.core.model import (
+    ChxConfigEnv,
+    ChxResolvedConfig,
+    ChxValidationError,
+    MigrationOperation,
+    SchemaDefinition,
+)
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
@@ -169,6 +188,27 @@ def _exit_validation_failed(error: ChxValidationError, *, output_json: bool) -> 
         details = "\n".join(f"- [{issue.code}] {issue.message}" for issue in error.issues)
         typer.echo(f"{error}\n{details}", err=True)
     raise typer.Exit(code=1) from error
+
+
+def _operation_payload(op: MigrationOperation) -> dict[str, object]:
+    """An operation in ``--json`` output. ``mode``/``beforeRetry`` appear only
+    when set, like TS ``JSON.stringify`` omitting undefined fields."""
+    payload = op.model_dump(by_alias=True)
+    for field in ("mode", "beforeRetry"):
+        if payload.get(field) is None:
+            payload.pop(field, None)
+    return payload
+
+
+def _migration_stamp(moment: datetime) -> str:
+    """The migration file's timestamp prefix, ``YYYYMMDDHHMMSS``; names a cutover's
+    temporary objects (TS ``migrationStamp``)."""
+    return "".join(ch for ch in moment.isoformat() if ch not in "-:TZ.+")[:14]
+
+
+def _usage_error(message: str) -> NoReturn:
+    typer.echo(message, err=True)
+    raise typer.Exit(code=1)
 
 
 def _scope_to_payload(scope: TableScope) -> dict[str, object]:
@@ -315,9 +355,50 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             help="Scaffold a blank manual migration (no schema diff, snapshot untouched).",
         ),
     ] = False,
+    cutover: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--cutover",
+            help=(
+                "Cut a structural table change over without downtime, keyed by a unique "
+                "key: database.table=key[,key]. Repeatable."
+            ),
+        ),
+    ] = None,
+    cutover_copy: Annotated[
+        str | None,
+        typer.Option(
+            "--cutover-copy",
+            help="Where the cutover copies existing rows: migration (default) or backfill.",
+        ),
+    ] = None,
+    cutover_old: Annotated[
+        str | None,
+        typer.Option(
+            "--cutover-old",
+            help=(
+                "What happens to the pre-cutover table: keep (default, as <table>_previous) "
+                "or drop."
+            ),
+        ),
+    ] = None,
+    drop_retained: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--drop-retained",
+            help="Drop a table a cutover retained (database.table). Repeatable.",
+        ),
+    ] = None,
     force_shared_engines: ForceSharedEnginesOption = False,
     no_shared_engines: NoSharedEnginesOption = False,
 ) -> None:
+    try:
+        cutover_flags = resolve_cutover_flags(
+            cutover=cutover or [], copy=cutover_copy, old_table=cutover_old
+        )
+    except ValueError as error:
+        _usage_error(str(error))
+    now = datetime.now(tz=UTC)
     config = load_config(config_path, ChxConfigEnv(command="generate"))
     # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
     # pipeline, and the snapshot is left untouched. Short-circuit before any of
@@ -347,9 +428,9 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         json_mode=output_json,
         plugin_runtime=plugin_runtime,
     )
-    canonical = canonicalize_definitions(threaded_defs)
+    schema_canonical = canonicalize_definitions(threaded_defs)
 
-    issues = validate_definitions(canonical)
+    issues = validate_definitions(schema_canonical)
     if issues:
         _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
 
@@ -358,6 +439,14 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
 
     previous = read_snapshot(meta_dir)
     old_defs = list(previous.definitions) if previous is not None else []
+    try:
+        canonical = carry_retained_definitions(
+            previous_definitions=old_defs,
+            definitions=schema_canonical,
+            drop_retained=drop_retained or [],
+        )
+    except ValueError as error:
+        _usage_error(str(error))
 
     (
         remapped_old_defs,
@@ -438,6 +527,30 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
     )
 
+    # A cutover replaces the DROP + CREATE of a structural change with a
+    # zero-downtime copy and swap. It runs after scope filtering, so a table
+    # outside --table has no DROP + CREATE to replace.
+    cluster = config.clickhouse.cluster if config.clickhouse else None
+    cutovers: list[PlannedCutover] = []
+    if cutover_flags.requests:
+        try:
+            plan, cutovers = apply_cutovers(
+                plan=plan,
+                previous_definitions=remapped_old_defs,
+                definitions=canonical,
+                cutovers=cutover_flags,
+                cluster=cluster,
+                stamp=_migration_stamp(now),
+            )
+        except ChxValidationError as error:
+            _exit_validation_failed(error, output_json=output_json)
+        except ValueError as error:
+            _usage_error(str(error))
+    cutover_summaries = [summarize_cutover(c) for c in cutovers]
+    cutover_payload: dict[str, object] = (
+        {"cutovers": cutover_summaries} if cutover_summaries else {}
+    )
+
     # Cluster mode: stamp ``ON CLUSTER <name>`` onto every DDL statement as a
     # final post-pass, after all plan transforms (renames, plugins, scope
     # filtering) — so plugin-injected SQL is also covered. ``migrate`` never
@@ -459,14 +572,13 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                         "mode": "plan",
                         "operationCount": len(plan.operations),
                         "riskSummary": plan.risk_summary.model_dump(),
-                        "operations": [
-                            op.model_dump(by_alias=True) for op in plan.operations
-                        ],
+                        "operations": [_operation_payload(op) for op in plan.operations],
                         "renameSuggestions": [
                             s.model_dump(by_alias=True) for s in plan.rename_suggestions
                         ],
                         "scope": _scope_to_payload(table_scope),
                         "warnings": dictionary_password_warnings,
+                        **cutover_payload,
                     },
                     indent=2,
                 )
@@ -481,9 +593,11 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         for warning in dictionary_password_warnings:
             typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+        for line in cutover_text_lines(cutover_summaries):
+            typer.echo(line)
         return
 
-    artifact_definitions = (
+    scoped_definitions = (
         build_scoped_snapshot_definitions(
             previous_definitions=old_defs,
             next_definitions=canonical,
@@ -493,6 +607,12 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         if table_scope.enabled
         else canonical
     )
+    # A keep-mode cutover leaves the old table as <table>_previous: record it so
+    # drift, check and the next generate treat it as managed.
+    artifact_definitions = [
+        *scoped_definitions,
+        *(c.retained for c in cutovers if c.retained is not None),
+    ]
 
     artifact = write_migration(
         migrations_dir,
@@ -502,6 +622,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         migration_name=migration_name,
         migration_id=migration_id,
         cli_version=__version__,
+        now=now,
     )
     snapshot = create_snapshot(artifact_definitions)
     snapshot_path = write_snapshot(meta_dir, snapshot)
@@ -528,6 +649,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                     "operationCount": len(plan.operations),
                     "riskSummary": plan.risk_summary.model_dump(),
                     "warnings": dictionary_password_warnings,
+                    **cutover_payload,
                 },
                 indent=2,
             )
@@ -548,3 +670,5 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     )
     for warning in dictionary_password_warnings:
         typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+    for line in cutover_text_lines(cutover_summaries):
+        typer.echo(line)

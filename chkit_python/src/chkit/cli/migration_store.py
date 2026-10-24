@@ -80,6 +80,10 @@ class ChecksumMismatch(BaseModel):
     actual: str
 
 
+# A `-- before-retry:` line holds one line of SQL (TS `/\s*[\r\n]+\s*/g`).
+_BEFORE_RETRY_NEWLINES = re.compile(r"\s*[\r\n]+\s*")
+
+
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
 
@@ -207,7 +211,14 @@ def _build_migration_content(
         for s in plan.rename_suggestions
     ]
     body_blocks = [
-        f"-- operation: {op.type} key={op.key} risk={op.risk}\n"
+        f"-- operation: {op.type} key={op.key} risk={op.risk}"
+        + (f" mode={op.mode}" if op.mode else "")
+        + "\n"
+        + (
+            "-- before-retry: " + _BEFORE_RETRY_NEWLINES.sub(" ", op.before_retry) + "\n"
+            if op.before_retry
+            else ""
+        )
         + ("-- Warning: " + " ".join(op.warning.splitlines()) + "\n" if op.warning else "")
         + op.sql
         for op in plan.operations

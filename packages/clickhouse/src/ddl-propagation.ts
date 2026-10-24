@@ -260,6 +260,71 @@ async function waitForConstraintAbsent(
 }
 
 /**
+ * Waits until every replica lists both tables of `EXCHANGE TABLES a AND b`
+ * with one uuid each, and the two uuids differ. The replica that ran the
+ * statement has swapped them, so once all replicas agree, all have. A
+ * statement that runs on a replica that has not applied the swap yet would
+ * see the old names: a following DROP of the pre-cutover table would drop the
+ * new one.
+ *
+ * With `clickhouse.cluster` the statement ran `ON CLUSTER`, which returns once
+ * every host executed it, and each host may hold its own uuids, so there is
+ * nothing to wait for. A single replica has nothing to wait for either.
+ */
+export async function waitForExchange(
+  executor: ClickHouseExecutor,
+  statement: string,
+  options?: PropagationOptions,
+): Promise<void> {
+  if (options?.cluster) return
+  const tables = parseExchangeTables(statement)
+  if (!tables) return
+  const fanout = await resolveReplicaFanout(executor)
+  if (!fanout) return
+  const [first, second] = tables
+  const where = `(database = ${stringLiteral(first.database)} AND name = ${stringLiteral(first.name)}) OR (database = ${stringLiteral(second.database)} AND name = ${stringLiteral(second.name)})`
+  const sql = `SELECT database, name, count(DISTINCT hostName()) AS replicas, uniqExact(uuid) AS uuids, any(toString(uuid)) AS sample_uuid FROM ${allReplicas(fanout, 'system.tables')} WHERE ${where} GROUP BY database, name`
+  await waitUntilApplied(`EXCHANGE TABLES ${first.database}.${first.name} AND ${second.database}.${second.name}`, async () => {
+    const rows = await executor.query<{ database: string; name: string; replicas: number | string; uuids: number | string; sample_uuid: string }>(sql)
+    if (rows.length < 2) return `only ${rows.length} of the 2 tables are listed`
+    for (const row of rows) {
+      if (Number(row.replicas) < fanout.replicas) return `${row.database}.${row.name} is listed on ${row.replicas} of ${fanout.replicas} replicas`
+      if (Number(row.uuids) !== 1) return `replicas disagree on the uuid of ${row.database}.${row.name}`
+    }
+    if (rows[0]?.sample_uuid === rows[1]?.sample_uuid) return 'both names report the same uuid'
+    return undefined
+  })
+}
+
+interface QualifiedName {
+  database: string
+  name: string
+}
+
+const QUOTED_OR_BARE = String.raw`(?:\`(?:[^\`\\]|\\.)*\`|[^\s.\`;]+)`
+const EXCHANGE_PATTERN = new RegExp(
+  String.raw`^\s*EXCHANGE\s+TABLES\s+(${QUOTED_OR_BARE})\.(${QUOTED_OR_BARE})\s+AND\s+(${QUOTED_OR_BARE})\.(${QUOTED_OR_BARE})`,
+  'i',
+)
+
+/** The two tables of `EXCHANGE TABLES db.a AND db.b`, or undefined. */
+export function parseExchangeTables(statement: string): [QualifiedName, QualifiedName] | undefined {
+  const match = EXCHANGE_PATTERN.exec(statement)
+  if (!match) return undefined
+  const [, db1, t1, db2, t2] = match
+  if (!db1 || !t1 || !db2 || !t2) return undefined
+  return [
+    { database: unquote(db1), name: unquote(t1) },
+    { database: unquote(db2), name: unquote(t2) },
+  ]
+}
+
+function unquote(identifier: string): string {
+  if (!identifier.startsWith('`')) return identifier
+  return identifier.slice(1, -1).replace(/\\(.)/g, '$1')
+}
+
+/**
  * Polls a query until its rows satisfy `predicate`, then returns them. Use for
  * reads that race DDL/DML propagation on managed ClickHouse (e.g. journal rows
  * written by a just-finished migration that aren't yet visible via FINAL).
@@ -364,6 +429,14 @@ export async function waitForDDLPropagation(
   // Backfill assertions execute SELECT guards. Their keys identify the guard,
   // not an object changed by DDL, so there is no schema propagation to await.
   if (operationType === 'assert_backfill') return
+  // Cutover guards, barriers, copies and the snapshot ALTER change no object
+  // in the catalog; the objects a cutover creates and drops use the regular
+  // create/drop operation types.
+  if (operationType.startsWith('cutover_')) return
+  if (operationType === 'exchange_tables') {
+    if (options?.statement === undefined) return
+    return waitForExchange(executor, options.statement, options)
+  }
 
   const parsed = parseOperationKey(operationType, operationKey)
   if (!parsed) return // database-level ops or unrecognized keys — no wait needed

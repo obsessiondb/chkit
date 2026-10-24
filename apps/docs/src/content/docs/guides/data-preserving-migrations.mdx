@@ -1,307 +1,140 @@
 ---
-title: Data-preserving structural migrations
-description: Change a populated table's sorting and partition keys, transform historical rows, validate the full copy, and cut over atomically with a retained recovery table.
+title: Zero-downtime structural migrations
+description: Change a populated table's sorting key, primary key, partition key or engine while writers keep inserting, with chkit generate --cutover.
 ---
 
-A sorting-key or partition-key change can produce a generated `DROP TABLE` / `CREATE TABLE` plan. Applying that plan discards the old rows. This recipe replaces that proposal with reviewed SQL migrations: **copy → validate → atomic swap**, keeping the original table for recovery.
+`chkit generate --cutover` changes a populated table's `ORDER BY`, `PRIMARY KEY`, `PARTITION BY` or engine without losing a row and without pausing the writers that insert into it.
 
-The example continues the [existing-database adoption walkthrough](/getting-started/add-to-existing-project/) through its first `ingest_source` change. It uses the same local `analytics` database, `events` table with 1,000 unique IDs, ordinary `event_counts` view, Bun project, and exported credentials. Finish that guide first; `status`, `drift`, `check`, and `generate --dryrun` should all be clean. The shell snippets use `rg` (ripgrep) to locate each newly generated migration; alternatively set the variable to the exact file path printed by `generate`.
+## Why a structural change needs a cutover
 
-## Choose the right backfill mechanism
+ClickHouse cannot `ALTER` a table's sorting key, partition key or engine. For such a change `generate` plans a `DROP TABLE` followed by a `CREATE TABLE`, which deletes every row; that is why it needs `--allow-destructive`. A cutover builds the new table next to the old one instead, fills it while the old one keeps serving reads and writes, and swaps the two with `EXCHANGE TABLES`, which renames both atomically.
 
-| Goal | Mechanism |
-| --- | --- |
-| Populate a materialized view's destination from historical source rows | The [backfill plugin's MV replay](/plugins/backfill/), with its plan/checkpoint workflow |
-| Replay data within one supported table/engine | The backfill plugin's table replay, after reviewing its engine and duplicate-protection requirements |
-| Transform source rows into a replacement table and change its layout | A tracked SQL migration, as below |
+## How a cutover works
 
-The plugin's same-table replay is not a general source-to-shadow-table transformer. Completing and resuming an already finished backfill proves a no-op; it does not prove interrupted chunks cannot duplicate data. For large workloads, test retry and engine semantics separately.
+The generated migration runs these steps for a table `analytics.events` with unique key `id`:
 
-## Preconditions and intended result
+1. **Shadow and mirror.** It creates the shadow table `events__cutover_<stamp>` with the new definition, and a materialized view `events__cutover_<stamp>_mirror` `FROM events TO` the shadow. Every `INSERT` that starts from now on writes its rows to both tables.
+2. **Insert barrier.** An `INSERT` builds its pipeline, including the materialized views it writes to, when it starts, so the `INSERT`s already running do not reach the mirror. chkit reads the running `INSERT` queries on every replica and waits until each of them has finished.
+3. **Snapshot.** It attaches every partition of `events` to a frozen copy, `events__cutover_<stamp>_snapshot` (`ATTACH PARTITION ALL FROM`, hard links, no data copied), and waits for the `INSERT`s that were running at that moment. Every row of the snapshot was either inserted before the mirror existed, or has reached the shadow through the mirror.
+4. **Copy.** It inserts the snapshot rows whose `id` the shadow does not hold yet. Rows inserted before the mirror are copied; mirrored rows are skipped. A retried copy skips the rows an earlier attempt wrote.
+5. **Verify.** For every `id` of the snapshot it compares the number of rows and a hash of their values with the shadow. Any difference stops the migration before the swap.
+6. **Swap.** `EXCHANGE TABLES events AND events__cutover_<stamp>`: `events` now has the new definition and every row. Inserts that started before the swap finish into the old table and still reach the new one through the mirror, which is dropped next.
+7. **Reconcile.** An `INSERT` resolves the names in its pipeline one after another when it starts: the table, the materialized views that read it, their `TO` tables. One that starts at the instant of the swap can resolve the table before the swap and the rest after it, and then writes its rows only to the old table: once without running any materialized view, or twice (directly and through the mirror) after running them. After another insert barrier, the rows of the old table whose `id` the new table lacks are added to `events`: rows the old table holds once with an `INSERT`, which runs the materialized views that read `events`; rows it holds twice through a staging table and `ATTACH PARTITION ALL FROM`, which does not run them a second time. Such rows are missing from `events` for the few seconds between the swap and this step.
+8. **Old table.** It renames the old table to `events_previous` (`--cutover-old keep`, the default) or drops it (`--cutover-old drop`), and drops the snapshot.
 
-This recipe is for a **single-node Atomic database with writers paused**. Pause ingestion jobs, application writes, and mutations before the copy, and keep them paused through verification or rollback. Allow enough disk for both copies. Unique immutable `id` values make the copy retryable. The example has an ordinary view; materialized-view dependencies, replicated/distributed tables, concurrent ingestion, and zero-downtime cutovers need a separate design.
+Writers insert into `events` the whole time. Readers read `events`: the old table until the swap, the complete new table after it. Materialized views that read from `events` or write into it keep working, because ClickHouse binds them to the table name, which the swap keeps.
 
-The final `events` table will:
+## Preconditions
 
-- partition by `toYYYYMM(occurred_at)`;
-- sort and use a primary key of `(user_id, occurred_at, id)`;
-- store `lowerUTF8(event_type)` for historical rows;
-- preserve every other field and retain the original rows/layout as `events_previous`.
+- **A unique key.** `--cutover analytics.events=id` names the columns that identify a row. The copy tells copied rows from mirrored rows by it, so no `INSERT` may reuse an existing key while the cutover runs, and the key columns cannot be `Nullable`. The verification fails, before the swap, when a key was inserted again before the snapshot; an exact repeat of an existing row inserted after the snapshot cannot be detected.
+- **No mutations.** A materialized view only sees `INSERT`s. Do not run `ALTER TABLE ... UPDATE/DELETE`, lightweight `DELETE`, `TRUNCATE` or partition operations on the table until the migration completes. The migration refuses to start while a mutation is unfinished, and the verification fails when an update changed rows between the mirror and the snapshot. A change made after the snapshot does not reach the new table, and chkit cannot detect it.
+- **Writers chkit can see.** The barrier waits for queries in `system.processes`, which includes `INSERT`s, their materialized views, inserts through `Distributed` tables and asynchronous insert flushes. A Kafka (or RabbitMQ, NATS, S3Queue, FileLog) consumer view or a refreshable materialized view writes from a background thread; `generate` refuses a cutover while the schema has one writing into the table. Detach it for the cutover.
+- **Supported tables.** `MergeTree`, `ReplicatedMergeTree` and `SharedMergeTree`, in an `Atomic` or `Replicated` database (`EXCHANGE TABLES` needs one). Engines that merge rows away (`ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`, `CollapsingMergeTree`) are refused: their copy cannot be verified row by row. A replication path must contain `{uuid}` or `{table}`, so the shadow registers at its own path.
+- **Columns.** Columns can be added or removed in the same change; the copy and the mirror write the columns both tables store. A column whose type changes is refused: change it in a separate migration.
+- **Disk.** The shadow holds a second copy of the table until the old one is dropped.
 
-Update your writers/readers to accept lowercase event types before resuming them. This example hardcodes `analytics` in both schema and SQL; for another target, change **every** database-qualified reference deliberately. A connection database alone does not rewrite SQL.
+## Run a cutover
 
-Check the starting state:
-
-```sh
-bunx chkit query "SELECT name, engine FROM system.databases WHERE name = 'analytics'" --json
-bunx chkit query "SELECT name, sorting_key, partition_key FROM system.tables WHERE database = 'analytics' AND name IN ('events', 'events_previous') ORDER BY name" --json
-bunx chkit query "SELECT count() AS rows, uniqExact(id) AS ids FROM analytics.events" --json
-```
-
-Expect `Atomic`, only `events` with sorting key `id` and no partition key, and both counts `1000`. The migration asserts these conditions again. Confirm your deployed application is compatible with the intended transformation before proceeding.
-
-## 1. Copy and validate in a tracked migration
-
-Keep the current schema definitions unchanged. Scaffold a manual migration; `--empty` does not advance the snapshot:
-
-```sh
-bunx chkit generate --empty --name copy_events
-COPY_MIGRATION=$(rg --files chkit/migrations | rg '_copy_events.sql$')
-```
-
-Replace that unapplied file's contents with:
-
-```sh
-cat > "$COPY_MIGRATION" <<'SQL'
--- chkit-migration-format: v1
--- log: Writers must remain paused until cutover verification completes.
-
--- operation: validate_source key=table:analytics.events risk=caution
-SELECT throwIf(
-  (SELECT count() FROM system.databases WHERE name = 'analytics' AND engine = 'Atomic') != 1
-  OR (SELECT count() FROM system.tables WHERE database = 'analytics' AND name = 'events'
-      AND sorting_key = 'id' AND partition_key = '') != 1
-  OR (SELECT count() FROM analytics.events) != 1000
-  OR (SELECT uniqExact(id) FROM analytics.events) != 1000,
-  'Expected the original Atomic database, table layout, and 1000 unique IDs'
-);
-
--- operation: create_table key=table:analytics.events_previous risk=safe
-CREATE TABLE IF NOT EXISTS analytics.events_previous (
-  id UInt64,
-  user_id UInt64,
-  event_type String,
-  occurred_at DateTime64(3),
-  properties String DEFAULT '{}',
-  ingest_source String DEFAULT 'legacy'
-) ENGINE = MergeTree
-PARTITION BY toYYYYMM(occurred_at)
-PRIMARY KEY (user_id, occurred_at, id)
-ORDER BY (user_id, occurred_at, id);
-
--- operation: load_table_data key=table:analytics.events_previous risk=caution
-INSERT INTO analytics.events_previous
-  (id, user_id, event_type, occurred_at, properties, ingest_source)
-SELECT id, user_id, lowerUTF8(event_type), occurred_at, properties, ingest_source
-FROM analytics.events
-WHERE id NOT IN (SELECT id FROM analytics.events_previous);
-
--- operation: validate_data key=table:analytics.events_previous risk=caution
-SELECT throwIf(
-  (SELECT count() FROM analytics.events_previous) != 1000
-  OR (SELECT uniqExact(id) FROM analytics.events_previous) != 1000
-  OR (SELECT count() FROM (
-    SELECT id, user_id, event_type, occurred_at, properties, ingest_source, sum(delta) AS balance
-    FROM (
-      SELECT id, user_id, lowerUTF8(event_type) AS event_type, occurred_at, properties,
-             ingest_source, toInt64(1) AS delta FROM analytics.events
-      UNION ALL
-      SELECT id, user_id, event_type, occurred_at, properties,
-             ingest_source, toInt64(-1) AS delta FROM analytics.events_previous
-    )
-    GROUP BY id, user_id, event_type, occurred_at, properties, ingest_source
-    HAVING balance != 0
-  )) != 0,
-  'Copy differs from the exact expected transformed row multiset'
-);
-SQL
-```
-
-The explicit column list preserves millisecond timestamps and all other original values. With writers paused and unique IDs, the missing-ID filter can continue a partial insert without copying those IDs again. The exact multiset comparison catches duplicates, missing rows, or altered fields; a matching row count or checksum alone would be weaker.
-
-Review and apply:
-
-```sh
-cat "$COPY_MIGRATION"
-bunx chkit migrate --json
-bunx chkit migrate --apply
-bunx chkit status --json
-```
-
-Do not cut over unless the copy migration succeeded. There is temporarily an extra live table not yet in the snapshot, so a live drift check at this intermediate point is expected to report it. The name `events_previous` currently holds the **new** layout; after the swap it holds the original.
-
-## 2. Describe the final state, then replace the destructive proposal
-
-Replace the practice fixture's `src/db/schema/pulled.ts` with the final definitions below. In a real project retain every other managed definition; do not overwrite unrelated tables/views.
-
-```ts
-import { schema, table, view } from '@chkit/core'
-
-const columns = [
-  { name: 'id', type: 'UInt64' },
-  { name: 'user_id', type: 'UInt64' },
-  { name: 'event_type', type: 'String' },
-  { name: 'occurred_at', type: 'DateTime64(3)' },
-  { name: 'properties', type: 'String', default: '{}' },
-  { name: 'ingest_source', type: 'String', default: 'legacy' },
-]
-
-const events = table({
-  database: 'analytics', name: 'events', engine: 'MergeTree()', columns,
-  partitionBy: 'toYYYYMM(occurred_at)',
-  primaryKey: ['user_id', 'occurred_at', 'id'],
-  orderBy: ['user_id', 'occurred_at', 'id'],
-  settings: { index_granularity: '8192' },
-})
-
-// After EXCHANGE this name retains the original layout and original values.
-const previous = table({
-  database: 'analytics', name: 'events_previous', engine: 'MergeTree()', columns,
-  primaryKey: ['id'], orderBy: ['id'],
-  settings: { index_granularity: '8192' },
-})
-
-const counts = view({
-  database: 'analytics', name: 'event_counts',
-  as: 'SELECT event_type, count() AS total FROM analytics.events GROUP BY event_type',
-})
-
-export default schema(events, previous, counts)
-```
-
-Generate the schema transition. This updates `snapshot.json` to the final definitions, but the emitted SQL must be replaced **before applying it**:
-
-```sh
-bunx chkit generate --name cutover_events
-CUTOVER_MIGRATION=$(rg --files chkit/migrations | rg '_cutover_events.sql$')
-cat "$CUTOVER_MIGRATION"
-```
-
-Expect a destructive proposal for the key change. Do not apply it. Replace the **whole unapplied migration**, including obsolete operation markers, with the guarded swap below. Do not edit the already applied copy migration.
-
-```sh
-cat > "$CUTOVER_MIGRATION" <<'SQL'
--- chkit-migration-format: v1
--- log: Reviewed atomic cutover; original data is retained as events_previous.
-
--- operation: validate_cutover key=table:analytics.events risk=caution
-SELECT throwIf(
-  (SELECT count() FROM system.tables WHERE database = 'analytics' AND name = 'events'
-      AND sorting_key = 'id' AND partition_key = '') != 1
-  OR (SELECT count() FROM system.tables WHERE database = 'analytics' AND name = 'events_previous'
-      AND sorting_key = 'user_id, occurred_at, id'
-      AND partition_key = 'toYYYYMM(occurred_at)') != 1
-  OR (SELECT count() FROM analytics.events) != 1000
-  OR (SELECT count() FROM analytics.events_previous) != 1000,
-  'Expected unswapped tables; inspect live state before retrying a cutover'
-);
-
--- operation: exchange_tables key=table:analytics.events risk=caution
-EXCHANGE TABLES analytics.events AND analytics.events_previous;
-SQL
-```
-
-Keep writers paused between the successful exact copy validation and this swap. Review the final file and pending plan, then apply:
-
-```sh
-cat "$CUTOVER_MIGRATION"
-bunx chkit migrate --json
-bunx chkit migrate --apply
-```
-
-`EXCHANGE TABLES` swaps both names atomically in an Atomic database. Retaining the backup in the schema keeps it managed and avoids unexplained drift. `generate` already recorded the intended final definitions; no manual snapshot editing, snapshot rebuild, or journal manipulation is needed.
-
-## 3. Verify before resuming writers
-
-```sh
-bunx chkit status --json
-bunx chkit drift --json
-bunx chkit check --json
-bunx chkit generate --dryrun --json
-bunx chkit query "SELECT name, sorting_key, partition_key FROM system.tables WHERE database = 'analytics' AND name IN ('events', 'events_previous') ORDER BY name" --json
-bunx chkit query "SELECT count() AS rows, uniqExact(id) AS ids, countIf(event_type != lowerUTF8(event_type)) AS non_normalized FROM analytics.events" --json
-bunx chkit query "SELECT * FROM analytics.event_counts ORDER BY event_type" --json
-```
-
-Expect no pending migrations, no drift, a passing check, zero generated operations, the new keys on `events`, and the old keys on `events_previous`. Row/ID counts are `1000`, `non_normalized` is `0`, and the view has `pageview: 500` and `signup: 500`.
-
-Verify the exact transformed row multiset again after the swap:
-
-```sh
-bunx chkit query "
-SELECT throwIf((SELECT count() FROM (
-  SELECT id, user_id, event_type, occurred_at, properties, ingest_source, sum(delta) AS balance
-  FROM (
-    SELECT id, user_id, lowerUTF8(event_type) AS event_type, occurred_at, properties,
-           ingest_source, toInt64(1) AS delta FROM analytics.events_previous
-    UNION ALL
-    SELECT id, user_id, event_type, occurred_at, properties,
-           ingest_source, toInt64(-1) AS delta FROM analytics.events
-  )
-  GROUP BY id, user_id, event_type, occurred_at, properties, ingest_source
-  HAVING balance != 0
-)) != 0, 'Post-cutover rows differ from the transformed original')" --json
-```
-
-The query must succeed. Exercise application reads with writers still paused, then resume only compatible writers.
-
-Commit the final schema, both reviewed migrations, and the updated snapshot together. Another environment must run the same committed migration sequence against the same original schema/data assumptions; do not regenerate on deployment. The hardcoded `1000` assertions deliberately make this practice recipe fail on a different dataset—adapt and review them before using it elsewhere.
-
-## Recovery and retries
-
-Migrations are not a transaction across statements. If any command fails, inspect `status`, both table layouts, row contents, and chkit's operation recovery output before acting. Never assume a failed command means no statement ran.
-
-- **Before cutover:** keep writers paused. The original `events` remains authoritative. Fix the cause and review [failed-migration recovery](/cli/migrate/#failed-migrations); do not change an already applied file. A partial copy must pass the exact validation before proceeding.
-- **An uncertain swap:** do **not** rerun `migrate --apply` until you have inspected both live layouts and operation/journal state. A lost acknowledgement can leave the swap executed but unrecorded, and automatic recovery may skip a previously completed guard. Repeating `EXCHANGE` then swaps the tables back. The guard protects a fresh execution; it is not a guarantee against replaying an uncertain swap. Follow the failed-migration recovery procedure for the observed state before resuming deployment.
-- **Rollback before writers resume:** after a fully acknowledged, journaled cutover, use the new tracked rollback below. An uncertain/failed cutover must first be reconciled using the failed-migration recovery procedure; do not layer a rollback onto ambiguous journal state.
-- **After writers resume:** the backup is stale. A simple swap would lose new writes; design a reconciliation/backfill before rollback.
-
-Keep the backup until your recovery window closes. Removing it later is a separate reviewed schema change/migration that drops only `events_previous`; it is destructive and requires the appropriate explicit approval/CLI flag. The backup doubles storage until then.
-
-## Optional: tracked rollback before writes resume
-
-Use this only after the cutover migration is recorded as applied, with writers still paused. Change the two table declarations in `pulled.ts` to the following; retain the existing `columns`, `counts`, and `export default schema(events, previous, counts)`:
+Change the table's definition in your schema, here the sorting key of `analytics.events` from `id` to `(user_id, occurred_at, id)`:
 
 ```ts
 const events = table({
-  database: 'analytics', name: 'events', engine: 'MergeTree()', columns,
-  primaryKey: ['id'], orderBy: ['id'],
-  settings: { index_granularity: '8192' },
-})
-
-const previous = table({
-  database: 'analytics', name: 'events_previous', engine: 'MergeTree()', columns,
+  database: 'analytics',
+  name: 'events',
+  engine: 'MergeTree()',
+  columns,
   partitionBy: 'toYYYYMM(occurred_at)',
   primaryKey: ['user_id', 'occurred_at', 'id'],
   orderBy: ['user_id', 'occurred_at', 'id'],
-  settings: { index_granularity: '8192' },
 })
 ```
 
-Generate the corresponding snapshot transition, then replace its destructive SQL with the reviewed reverse swap. These are **new** files; the copy and cutover files remain immutable.
+Generate the cutover instead of the drop and recreate, review the migration, and apply it while your writers keep running:
 
 ```sh
-bunx chkit generate --name rollback_events
-ROLLBACK_MIGRATION=$(rg --files chkit/migrations | rg '_rollback_events.sql$')
-cat "$ROLLBACK_MIGRATION"
-cat > "$ROLLBACK_MIGRATION" <<'SQL'
--- chkit-migration-format: v1
--- log: Rollback before writers resume; restores original rows and layout.
-
--- operation: validate_rollback key=table:analytics.events risk=caution
-SELECT throwIf(
-  (SELECT count() FROM system.tables WHERE database = 'analytics' AND name = 'events'
-      AND sorting_key = 'user_id, occurred_at, id'
-      AND partition_key = 'toYYYYMM(occurred_at)') != 1
-  OR (SELECT count() FROM system.tables WHERE database = 'analytics' AND name = 'events_previous'
-      AND sorting_key = 'id' AND partition_key = '') != 1
-  OR (SELECT count() FROM analytics.events) != 1000
-  OR (SELECT count() FROM analytics.events_previous) != 1000,
-  'Expected completed cutover and unchanged backup; inspect before rollback'
-);
-
--- operation: exchange_tables key=table:analytics.events risk=caution
-EXCHANGE TABLES analytics.events AND analytics.events_previous;
-SQL
-cat "$ROLLBACK_MIGRATION"
-bunx chkit migrate --json
-bunx chkit migrate --apply
-bunx chkit status --json
-bunx chkit drift --json
-bunx chkit check --json
-bunx chkit generate --dryrun --json
-bunx chkit query "SELECT name, sorting_key, partition_key FROM system.tables WHERE database = 'analytics' AND name IN ('events', 'events_previous') ORDER BY name" --json
-bunx chkit query "SELECT * FROM analytics.event_counts ORDER BY event_type" --json
+chkit generate --name events_by_user --cutover analytics.events=id
+cat chkit/migrations/*_events_by_user.sql
+chkit migrate --apply
 ```
 
-Expect `events` back on the original unpartitioned `id` layout and the view back to `PageView: 500` and `Signup: 500`, with clean chkit checks. Compare the original-column rows against the adoption guide's saved originals before resuming compatible writers. If rollback's acknowledgement is uncertain, the same no-blind-retry rule applies.
+`generate` records the final definitions in the snapshot, including the retained `analytics.events_previous`. Afterwards everything is clean:
+
+```sh
+chkit status --json
+chkit drift --json
+chkit check --json
+chkit generate --dryrun --json
+```
+
+The copy runs as an [async statement](/cli/migrate/#async-operations-modeasync): an interrupted `migrate` re-attaches to it, and a copy that failed runs again and skips the rows it already wrote.
+
+### Copy with the backfill plugin
+
+For a large table, let the [backfill plugin](/plugins/backfill/#cutover-copy) copy the rows in chunks, locally with checkpoints or as a managed job with `submit`:
+
+```sh
+chkit generate --name events_by_user --cutover analytics.events=id --cutover-copy backfill
+chkit migrate --apply     # creates the shadow and the mirror, takes the snapshot, then stops at the copy check
+chkit plugin backfill plan --cutover analytics.events
+chkit plugin backfill run --plan-id <planId>     # or: chkit plugin backfill submit --cutover analytics.events
+chkit migrate --apply     # verifies the copy and swaps
+```
+
+The first `migrate` exits with code 1 at the verification, like a [backfill assertion](/cli/migrate/#backfill-assertions); writers keep inserting into the table and the mirror keeps the shadow current while the backfill runs. Each chunk skips the rows whose key the shadow holds, so a chunk can run again. `--cutover-copy backfill` is not available with `clickhouse.cluster`.
+
+### Keep or drop the old table
+
+With `--cutover-old keep` (the default) the old table stays as `<table>_previous`, with its old definition and the rows it received until the mirror was dropped. The rows of an `INSERT` that started at the instant of the swap can appear in it twice. The snapshot records it as retained, so `drift` and `check` compare it and the next `generate` does not plan to drop it. Drop it when you no longer need it; this is a normal destructive change:
+
+```sh
+chkit generate --name drop_events_previous --drop-retained analytics.events_previous
+chkit migrate --apply --allow-destructive
+```
+
+A second cutover of the same table needs the name free: drop the retained table first, or use `--cutover-old drop`.
+
+With `--cutover-old drop` the migration drops the old table after the swap. The drop is a `danger` operation and needs `--allow-destructive`.
+
+## Clusters and ObsessionDB
+
+- **ObsessionDB.** No configuration is needed. The copy and the verification read with `select_sequential_consistency = 1`, so each sees the parts every replica committed. After the swap, `migrate` waits until every replica lists the swapped tables before it continues.
+- **`clickhouse.cluster`.** Every DDL statement runs `ON CLUSTER`. The copy runs on every shard (`INSERT INTO FUNCTION cluster(...)` with `parallel_distributed_insert_select = 2`), so each shard copies its own rows, and `SYSTEM SYNC REPLICA ... LIGHTWEIGHT` runs before the copy and the verification. Use `ReplicatedMergeTree`: a plain `MergeTree` on a cluster is refused.
+
+## Failures and retries
+
+Each step is recorded in the migration journal. When a step fails, fix the cause and run `chkit migrate --apply` again: the completed steps are skipped and the failed one runs again.
+
+- **The barrier times out** after 10 minutes when an `INSERT` that started before the step is still running. Let it finish, or kill it and insert its rows again after the cutover, then re-run `migrate`.
+- **The verification fails** when the shadow does not match the snapshot. The table was not swapped. Find the cause (a reused key, a mutation), then drop the cutover's objects (`<table>__cutover_<stamp>`, `_mirror`, `_snapshot`), [abandon](/cli/migrate/#abandoning-a-failed-migration) the migration and run it again.
+- **The reconcile reads both tables in full** after the swap (a `GROUP BY` of every key, which spills to disk on a large table). Its `ATTACH` is guarded like the swap: retried after a lost acknowledgement, it stops with `the ATTACH may already have run` when the staging rows are already in the table; replace the statement with `SELECT 1;`, delete its `-- before-retry:` line, and resume with `--retry`.
+- **The swap was interrupted.** `EXCHANGE TABLES` is not idempotent: running it again swaps the tables back. Before chkit retries it, it waits until the replicas agree on both tables and runs a guard that checks that the table still has its old layout. When the swap had already run, the guard stops the migration with `the EXCHANGE may already have run`. Compare both tables in `system.tables`. If the table has its new layout, the swap is done: replace the `EXCHANGE TABLES` statement in the migration file with `SELECT 1;`, delete its `-- before-retry:` line, and resume with `chkit migrate --apply --retry <migration>`.
+- **Leftovers.** A cutover started again from its first step, after an abandon, refuses to run while its shadow, mirror or snapshot exist. Drop them first.
+
+## Roll back
+
+After a `keep` cutover the old table is still there as `<table>_previous`, but it stopped receiving rows when the mirror was dropped. To go back without losing the rows written since, run another cutover: drop the retained table, change the schema back, and generate `--cutover` again. A plain reverse `EXCHANGE TABLES` is only safe while writers are paused and before any row was written to the new table; write it as a [manual migration](#when-a-cutover-does-not-fit) with the same layout guard.
+
+## When a cutover does not fit
+
+A table without a unique key, a change that transforms rows, or an engine that merges rows needs a reviewed manual migration, with writers paused from the copy until the swap:
+
+1. Keep the schema unchanged and scaffold a migration with `chkit generate --empty --name copy_events`. Create the new table under a temporary name, copy the rows with the transformation you need, and validate the copy with a guard such as `SELECT throwIf(...)`.
+2. Change the schema to the final definitions, declaring the old layout as `events_previous` if you keep it, and run `chkit generate`. It records the final definitions in the snapshot. Replace the generated `DROP`/`CREATE` of that migration with a guard and the swap:
+
+```sql
+-- operation: cutover_validate key=table:analytics.events:cutover:before_exchange risk=caution
+SELECT throwIf((SELECT sorting_key FROM system.tables WHERE database = 'analytics' AND name = 'events') != 'id', 'events is no longer on its old layout; inspect before you retry');
+
+-- operation: exchange_tables key=table:analytics.events risk=caution
+-- before-retry: SELECT throwIf((SELECT sorting_key FROM system.tables WHERE database = 'analytics' AND name = 'events') != 'id', 'the EXCHANGE may already have run')
+EXCHANGE TABLES analytics.events AND analytics.events_previous;
+```
+
+3. Apply both migrations, check `status`, `drift`, `check` and `generate --dryrun`, and resume the writers.
+
+## Related pages
+
+- [`chkit generate`](/cli/generate/#zero-downtime-cutover) — the `--cutover` flags
+- [`chkit migrate`](/cli/migrate/) — retries, `-- before-retry:` and insert barriers
+- [Backfill plugin](/plugins/backfill/#cutover-copy) — copying a cutover's rows in chunks
+- [Migration workflow](/guides/migration-workflow/)

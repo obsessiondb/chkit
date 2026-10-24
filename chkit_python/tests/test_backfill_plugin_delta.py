@@ -220,10 +220,14 @@ def test_schema_defaults_apply_when_no_override_provided() -> None:
     assert opts.force_environment is False
 
 
-def test_validation_raises_on_missing_required_options() -> None:
+# --target is optional at the schema level: --cutover can name the table
+# instead, and planning rejects a plan with neither.
+def test_validation_raises_on_invalid_options() -> None:
     with pytest.raises(ValidationError):
         PlanOptions.model_validate(
-            _with_factory_defaults(set(PlanOptions.model_fields), PluginConfig(), {})
+            _with_factory_defaults(
+                set(PlanOptions.model_fields), PluginConfig(), {"max_chunk_bytes": -1}
+            )
         )
 
 

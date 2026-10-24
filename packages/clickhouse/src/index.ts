@@ -546,13 +546,16 @@ export {
 	type PropagationOptions,
 	waitForColumn,
 	waitForColumnAbsent,
+	parseExchangeTables,
 	waitForDDLPropagation,
 	waitForDictionary,
+	waitForExchange,
 	waitForTable,
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
 export { allReplicas, resolveReplicaFanout, type ReplicaFanout } from './replicas.js'
+export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
 
 function parseSummaryFromHeaders(
 	headers: Record<string, string | string[] | undefined>,

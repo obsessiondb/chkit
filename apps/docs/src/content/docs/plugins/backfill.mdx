@@ -20,7 +20,8 @@ A backfill writes rows. A direct-table replay selects from and inserts into the 
 | --- | --- |
 | Populate an existing MV's empty destination from historical source rows | `mv_replay`, selected automatically from your schema's materialized views |
 | Replay rows into the same table | Table copy, only after reviewing the engine and retry/duplicate semantics |
-| Change sorting/partition keys or transform source rows into a shadow table | Reviewed tracked SQL migration with copy, validation and cutover |
+| Copy the rows of a `chkit generate --cutover` into its shadow table | `--cutover <database.table>` on `plan` or `submit` ([cutover copy](#cutover-copy)) |
+| Change sorting/partition keys or transform source rows into a shadow table | A [zero-downtime cutover](/guides/data-preserving-migrations/), or a reviewed tracked SQL migration with copy, validation and swap |
 
 MV replay runs each materialized view's SELECT over the source chunks and inserts the result into its destination. A destination fed by several views replays their queries together with `UNION ALL`. Source-based chunking requires every view to resolve to the same simple `FROM` table; verify that source in the saved plan. Unresolved or different sources fall back to destination metadata and are unsuitable for this empty-target bootstrap. With a resolved source, chunk sizing uses the **source** table, so the destination may start empty. Define the source, destination and MVs in the configured schema before planning.
 
@@ -92,6 +93,20 @@ chkit query "SELECT day, event_type, sum(total) AS total FROM analytics.daily_ev
 
 The result rows must match exactly; also verify that the source rows are unchanged. Store review evidence without committing sensitive production data.
 
+## Cutover copy
+
+A [zero-downtime cutover](/guides/data-preserving-migrations/) generated with `--cutover-copy backfill` leaves the copy of the existing rows to this plugin. Once `chkit migrate --apply` has stopped at the cutover's copy check, plan the copy by naming the table instead of a target:
+
+```sh
+chkit plugin backfill plan --cutover analytics.events --json
+chkit plugin backfill run --plan-id <planId>
+# or, on ObsessionDB:
+chkit plugin backfill submit --cutover analytics.events
+chkit migrate --apply
+```
+
+`plan` finds the cutover's snapshot table (`events__cutover_<stamp>_snapshot`) and reads the shadow table, the unique key and the copied columns from its comment. The plan's `strategy` is `cutover_copy`: chunks are sized over the snapshot and insert into the shadow, and each chunk skips the rows whose key the shadow already holds, so the mirrored rows are never copied and a chunk that runs again never duplicates rows. The skip reads the shadow's keys within the chunk's sort-key range when that range is on a copied column, otherwise every key of the shadow. Cutover chunks carry no deduplication token (a retry writes fewer rows than the first attempt, so a token would drop them) and read with `select_sequential_consistency = 1`. `--target` and `--cutover` cannot be combined. The plan is refused when no cutover of the table is pending, or when several are.
+
 ## Resume and duplicate protection
 
 ```sh
@@ -117,7 +132,8 @@ All commands support the usual `--json` and `--config` flags. Replace `chkit` wi
 
 | Flag | Required | Meaning |
 | --- | --- | --- |
-| `--target <database.table>` | Yes | Existing destination table |
+| `--target <database.table>` | Unless `--cutover` | Existing destination table |
+| `--cutover <database.table>` | Unless `--target` | Copy the rows of the pending [cutover](#cutover-copy) of this table |
 | `--from <timestamp>` | No | Lower partition-metadata selection bound |
 | `--to <timestamp>` | No | Upper partition-metadata selection bound |
 | `--max-chunk-bytes <size>` | No | Chunk-size override, e.g. `1G`, `500M` |
@@ -136,7 +152,7 @@ All commands support the usual `--json` and `--config` flags. Replace `chkit` wi
 
 ### Managed `submit`
 
-`submit` builds the same partition/sort-key plan and hands it to a managed backend. It accepts `--target`, optional `--from`/`--to`, `--max-chunk-bytes`, `--title`, and `--concurrency` (1–48). First register the [ObsessionDB plugin](/obsessiondb/overview/) alongside `backfill()`; it supplies the account/service commands. Submission requires an authenticated ObsessionDB session and selected service:
+`submit` builds the same partition/sort-key plan and hands it to a managed backend. It accepts `--target` (or `--cutover`), optional `--from`/`--to`, `--max-chunk-bytes`, `--title`, and `--concurrency` (1–48). First register the [ObsessionDB plugin](/obsessiondb/overview/) alongside `backfill()`; it supplies the account/service commands. Submission requires an authenticated ObsessionDB session and selected service:
 
 ```sh
 chkit obsessiondb login

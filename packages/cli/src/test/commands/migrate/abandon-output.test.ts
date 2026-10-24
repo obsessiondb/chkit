@@ -56,8 +56,7 @@ describe('renderAbandonText', () => {
     expect(lines.some((line) => line.includes('restore chkit/meta/snapshot.json from git'))).toBe(true)
   })
 
-  // The sync path never runs -- before-retry:, so the advice names mode=async.
-  test('says that only an async load runs its -- before-retry: line', () => {
+  test('says that a load runs its -- before-retry: line only when its marker still matches', () => {
     const lines = captureLines(() =>
       renderAbandonText(REPORT, { performed: true, fileExists: true, snapshotFile: 'chkit/meta/snapshot.json' }),
     )
@@ -73,7 +72,7 @@ describe('renderAbandonText', () => {
       'The new migration may repeat statements that completed; remove those that cannot run twice, such as a REMOVE DEFAULT or REMOVE MATERIALIZED, before you apply it.',
     )
     expect(lines).toContain(
-      'A data load adds its rows again unless it is marked mode=async with a -- before-retry: line that undoes it. That line runs only for an async statement that keeps its position, operation type and key.',
+      'A data load adds its rows again unless it has a -- before-retry: line that undoes it. That line runs only for a statement that keeps its position, operation type and key.',
     )
   })
 

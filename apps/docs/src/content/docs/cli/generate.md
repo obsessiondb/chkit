@@ -25,6 +25,10 @@ chkit generate [flags]
 | `--table <selector>` | string | — | Scope operations to matching tables |
 | `--dryrun` | boolean | `false` | Print the plan without writing any files |
 | `--empty` | boolean | `false` | Scaffold a blank manual migration without diffing the schema |
+| `--cutover <mapping>` | string | — | Cut a structural change of a table over without downtime instead of dropping and recreating it: `db.table=key_column[,key_column]`. Repeatable |
+| `--cutover-copy <mode>` | string | `migration` | Where a cutover copies the existing rows: `migration` (inside the migration) or `backfill` (with the [backfill plugin](/plugins/backfill/#cutover-copy)) |
+| `--cutover-old <mode>` | string | `keep` | What happens to the pre-cutover table: `keep` (as `<table>_previous`) or `drop` |
+| `--drop-retained <table>` | string | — | Drop a table that a `keep` cutover retained, e.g. `analytics.events_previous`. Repeatable |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -92,6 +96,22 @@ CLI flags take priority when both sources specify a mapping for the same object.
 A dictionary rename emits a single `RENAME DICTIONARY IF EXISTS ... TO ...` statement instead of a `drop_dictionary` + `create_dictionary` pair — see [Dictionary rename](/schema/dsl-reference/#dictionary-rename).
 
 Validation errors are raised for conflicting, chained, or cyclic rename mappings.
+
+### Zero-downtime cutover
+
+A change to a table's `engine`, `orderBy`, `primaryKey` or `partitionBy` cannot be made with `ALTER`, so `generate` plans a `DROP TABLE` and a `CREATE TABLE`, which loses every row and needs `--allow-destructive`. With `--cutover db.table=key`, `generate` plans a zero-downtime cutover for that table instead: writers keep inserting into the table while chkit mirrors new inserts into a shadow table with the new definition, copies the existing rows, verifies the copy, and swaps the two tables with `EXCHANGE TABLES`.
+
+```sh
+chkit generate --name events_by_user --cutover analytics.events=id
+```
+
+- The value after `=` names the columns that identify a row (a unique key). No `INSERT` may reuse an existing key until the migration completes; the copy tells copied rows from mirrored rows by it.
+- The migration keeps the old table as `<table>_previous` (`--cutover-old keep`), recorded in the snapshot as retained: `drift`, `check` and the next `generate` treat it as managed, without it appearing in your schema files. Drop it later with `--drop-retained analytics.events_previous`, a normal destructive change. With `--cutover-old drop` the migration drops it (a `danger` operation).
+- With `--cutover-copy backfill` the migration stops at the copy check; `chkit plugin backfill plan --cutover analytics.events` copies the rows, then `chkit migrate --apply` verifies and swaps.
+- The swap is an `exchange_tables` operation with risk `caution`; it does not need `--allow-destructive`.
+- A cutover is refused, with a `cutover_unsupported` validation issue, for engines other than `MergeTree`, `ReplicatedMergeTree` and `SharedMergeTree`, a Nullable key, a column whose type changes in the same migration, and writers chkit cannot follow (a Kafka-style consumer or a refreshable materialized view writing into the table).
+
+See [Zero-downtime structural migrations](/guides/data-preserving-migrations/) for the steps, the preconditions, and recovery.
 
 ### Dictionary password warnings
 
@@ -161,6 +181,24 @@ chkit generate --rename-table old_db.users=new_db.accounts
 chkit generate --rename-column analytics.events.old_name=new_name
 ```
 
+**Change a populated table's sort key without downtime:**
+
+```sh
+chkit generate --name events_by_user --cutover analytics.events=id
+```
+
+**Copy with the backfill plugin and drop the old table afterwards:**
+
+```sh
+chkit generate --name events_by_user --cutover analytics.events=id --cutover-copy backfill --cutover-old drop
+```
+
+**Drop the table a cutover kept:**
+
+```sh
+chkit generate --name drop_events_previous --drop-retained analytics.events_previous
+```
+
 **Explicit dictionary rename:**
 
 ```sh
@@ -208,6 +246,29 @@ chkit generate --rename-dictionary old_db.old_dict=new_db.new_dict
   "operationCount": 2,
   "riskSummary": { "safe": 2, "caution": 0, "danger": 0 },
   "warnings": []
+}
+```
+
+### Cutover
+
+A plan or apply with `--cutover` adds a `cutovers` array:
+
+```json
+{
+  "cutovers": [
+    {
+      "table": "analytics.events",
+      "key": ["id"],
+      "copy": "migration",
+      "oldTable": "keep",
+      "shadow": "analytics.events__cutover_20260604104251",
+      "mirror": "analytics.events__cutover_20260604104251_mirror",
+      "snapshot": "analytics.events__cutover_20260604104251_snapshot",
+      "columns": ["id", "user_id", "event_type", "occurred_at"],
+      "retainedAs": "analytics.events_previous",
+      "nextSteps": ["chkit migrate --apply"]
+    }
+  ]
 }
 ```
 

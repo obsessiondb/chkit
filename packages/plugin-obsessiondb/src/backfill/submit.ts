@@ -40,6 +40,7 @@ export function buildSubmitTasks(plan: BackfillPlanState): SubmitTask[] {
 			table: plan.chunkPlan.table,
 			mvReplayQueries: plan.execution.mvReplayQueries,
 			targetColumns: plan.execution.targetColumns,
+			cutoverKey: plan.execution.cutoverKey,
 			idempotencyToken: plan.execution.requireIdempotencyToken
 				? generateIdempotencyToken(plan.planId, chunk.id)
 				: '',
@@ -80,8 +81,10 @@ export function parseSubmitInput(
 	flags: Record<string, string | string[] | boolean | undefined>,
 ): ParsedSubmitInput {
 	const target = flagString(flags, '--target')
-	if (!target || !/^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/.test(target)) {
-		throw new Error('backfill submit requires --target <database.table>')
+	const cutover = flagString(flags, '--cutover')
+	const named = target ?? cutover
+	if (!named || (target && cutover) || !/^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/.test(named)) {
+		throw new Error('backfill submit requires --target <database.table> or --cutover <database.table>')
 	}
 
 	const rawBytes = flagString(flags, '--max-chunk-bytes')
@@ -96,7 +99,8 @@ export function parseSubmitInput(
 	}
 
 	const opts = PlanSchema.parse({
-		target,
+		target: target ?? '',
+		...(cutover ? { cutover } : {}),
 		from: coerceTimestamp(flagString(flags, '--from'), '--from'),
 		to: coerceTimestamp(flagString(flags, '--to'), '--to'),
 		maxChunkBytes: rawBytes !== undefined ? parseByteSize(rawBytes) : undefined,
