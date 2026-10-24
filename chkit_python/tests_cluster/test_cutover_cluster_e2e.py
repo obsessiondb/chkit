@@ -58,6 +58,15 @@ def target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[CutoverT
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CI", "1")
     monkeypatch.setenv("CHKIT_JOURNAL_TABLE", "")
+
+    # cluster() reads any replica of a shard, which may not have fetched the
+    # last parts the writers inserted on the other one yet.
+    def settle(tables: list[str]) -> None:
+        for table in tables:
+            admin.execute(
+                f"SYSTEM SYNC REPLICA ON CLUSTER '{CLUSTER}' {DATABASE}.{table} LIGHTWEIGHT"
+            )
+
     yield CutoverTarget(
         database=DATABASE,
         connection={
@@ -73,6 +82,7 @@ def target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[CutoverT
         engine=ENGINE,
         rows_of=lambda table: f"cluster('{CLUSTER}', {DATABASE}, {table})",
         read_settings="",
+        settle=settle,
     )
     admin.close()
 

@@ -55,6 +55,9 @@ class CutoverTarget:
     rows_of: Callable[[str], str]
     # Appended to verification reads, e.g. select_sequential_consistency on ObsessionDB.
     read_settings: str
+    # Makes every replica hold the rows of the tables before they are counted
+    # (Replicated tables fetch parts asynchronously). TS ``settle``.
+    settle: Callable[[list[str]], None] | None = None
 
     @property
     def cluster(self) -> str | None:
@@ -272,6 +275,8 @@ def assert_cutover_rows(target: CutoverTarget, project: CutoverProject, report: 
     """The table holds the historic rows and every row a writer inserted, each
     once; the view reading from it saw each of them once."""
     expected = project.historic + report.rows
+    if target.settle is not None:
+        target.settle([project.table, project.by_user])
     counts = rows(
         target,
         "SELECT count() AS total, uniqExact(id) AS ids, countIf(payload LIKE 'live%') AS live "
@@ -295,7 +300,7 @@ def assert_cutover_rows(target: CutoverTarget, project: CutoverProject, report: 
         "by_user_total": expected,
         "by_user_ids": expected,
     }
-    assert actual == want, f"cutover rows (writer errors: {len(report.errors)})"
+    assert actual == want, f"cutover rows: got {actual}, want {want} (writer errors: {len(report.errors)})"
 
 
 def sorting_keys(target: CutoverTarget, project: CutoverProject) -> dict[str, str]:
@@ -405,6 +410,8 @@ def run_keep_scenario(target: CutoverTarget, label: str, directory: Path) -> Non
             project.table: "user_id, id",
             project.previous: "id",
         }
+        if target.settle is not None:
+            target.settle([project.previous])
         previous = rows(
             target,
             f"SELECT count() AS total, uniqExact(id) AS ids FROM {target.rows_of(project.previous)}",
@@ -477,7 +484,9 @@ def run_retry_scenario(target: CutoverTarget, label: str, directory: Path) -> No
             types.index("cutover_copy"): "replays",
             types.index("exchange_tables"): "refuses",
             types.index("cutover_reconcile"): "replays",
-            types.index("cutover_attach"): "replays",
+            len(types) - 1 - types[::-1].index("cutover_reconcile"): "replays",
+            # Refused when the staging table holds rows (an INSERT straddled the swap).
+            types.index("cutover_attach"): "refuses if staged",
             drop_old: "replays",
         }
 
@@ -514,19 +523,25 @@ def run_retry_scenario(target: CutoverTarget, label: str, directory: Path) -> No
                 )
 
             edit_journal_state(target, file, lose_ack)
+            if lost == "replays":
+                continue
+            path.write_text(_inject_failure(blocks, step + 1), encoding="utf-8")
+            replay = migrate(retry=True)
             if lost == "refuses":
-                path.write_text(_inject_failure(blocks, step + 1), encoding="utf-8")
-                refused = migrate(retry=True)
-                assert refused.exit_code != 0, refused.output
-                assert "the EXCHANGE may already have run" in refused.output, refused.output
+                assert replay.exit_code != 0, replay.output
+                assert "the EXCHANGE may already have run" in replay.output, replay.output
                 keys = sorting_keys(target, project)
                 assert keys[project.table] == "user_id, id", f"swapped back: {keys}"
-                # Documented recovery: the swap ran, so the statement becomes a no-op.
-                blocks[step] = "\n".join(
-                    "SELECT 1;" if line.startswith("EXCHANGE TABLES") else line
-                    for line in blocks[step].split("\n")
-                    if not line.startswith("-- before-retry:")
-                )
+            elif "the ATTACH may already have run" not in replay.output:
+                # Nothing was staged, so the replayed ATTACH ran and the next statement failed.
+                assert f"injected failure at statement {step + 2}" in replay.output, replay.output
+                continue
+            # Documented recovery: the statement ran, so it becomes a no-op.
+            blocks[step] = "\n".join(
+                "SELECT 1;" if line.startswith(("EXCHANGE TABLES", "ALTER TABLE")) else line
+                for line in blocks[step].split("\n")
+                if not line.startswith("-- before-retry:")
+            )
         path.write_text("\n\n".join(blocks), encoding="utf-8")
         expect_ok(migrate(retry=True), "migrate --apply --retry (complete)")
         report = writers.stop()

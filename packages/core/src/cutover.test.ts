@@ -126,6 +126,7 @@ describe('planCutover', () => {
       ['drop_materialized_view', 'materialized_view:app.events__cutover_20261024120000_mirror', 'caution', 'sync'],
       ['cutover_validate', 'table:app.events:cutover:after_exchange', 'caution', 'sync'],
       ['cutover_wait_for_inserts', 'table:app.events:cutover:exchange_barrier', 'safe', 'barrier'],
+      ['cutover_reconcile', 'table:app.events:cutover:reconcile_unmirrored', 'caution', 'async'],
       ['create_table', 'table:app.events__cutover_20261024120000_reconcile', 'safe', 'sync'],
       ['cutover_reconcile', 'table:app.events:cutover:reconcile', 'caution', 'async'],
       ['cutover_attach', 'table:app.events:cutover:attach_reconciled', 'caution', 'sync'],
@@ -188,23 +189,37 @@ describe('planCutover', () => {
   test('reconciles rows the swap left in the old table through a staging table', () => {
     const ops = plan().operations
     const sqlOf = (type: string) => ops.find((op) => op.type === type)
-    expect(sqlOf('cutover_reconcile')?.sql).toBe(
+    const missing = (copies: string) =>
+      `WHERE (\`id\`) IN (SELECT \`id\` FROM (SELECT \`id\`, toUInt8(1) AS old FROM app.events__cutover_20261024120000 UNION ALL SELECT \`id\`, toUInt8(0) AS old FROM app.events) GROUP BY \`id\` HAVING min(old) = 1 AND sum(old) ${copies})`
+    // Rows the old table holds once never ran the views: INSERT them.
+    expect(ops.find((op) => op.key === 'table:app.events:cutover:reconcile_unmirrored')?.sql).toBe(
       [
-        'INSERT INTO app.events__cutover_20261024120000_reconcile (`id`, `user_id`, `payload`)',
+        'INSERT INTO app.events (`id`, `user_id`, `payload`)',
         'SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000',
-        'WHERE (`id`) IN (SELECT `id` FROM (SELECT `id`, toUInt8(1) AS old FROM app.events__cutover_20261024120000 UNION ALL SELECT `id`, toUInt8(0) AS old FROM app.events) GROUP BY `id` HAVING min(old) = 1)',
+        missing('= 1'),
         'LIMIT 1 BY `id`',
         'SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;',
       ].join('\n')
     )
-    expect(sqlOf('cutover_reconcile')?.beforeRetry).toBe('TRUNCATE TABLE IF EXISTS app.events__cutover_20261024120000_reconcile SYNC')
+    // Rows it holds twice did: attach them through the staging table.
+    const staged = ops.find((op) => op.key === 'table:app.events:cutover:reconcile')
+    expect(staged?.sql).toBe(
+      [
+        'INSERT INTO app.events__cutover_20261024120000_reconcile (`id`, `user_id`, `payload`)',
+        'SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000',
+        missing('> 1'),
+        'LIMIT 1 BY `id`',
+        'SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;',
+      ].join('\n')
+    )
+    expect(staged?.beforeRetry).toBe('TRUNCATE TABLE IF EXISTS app.events__cutover_20261024120000_reconcile SYNC')
     expect(sqlOf('cutover_attach')?.sql).toBe('ALTER TABLE app.events ATTACH PARTITION ALL FROM app.events__cutover_20261024120000_reconcile;')
     expect(sqlOf('cutover_attach')?.beforeRetry).toContain('the ATTACH may already have run')
   })
 
   test('keeps the old table as <table>_previous and records it as retained', () => {
     const cutover = plan()
-    expect(cutover.operations[18]?.sql).toBe(
+    expect(cutover.operations[19]?.sql).toBe(
       'RENAME TABLE IF EXISTS app.events__cutover_20261024120000 TO app.events_previous;'
     )
     expect(cutover.retained).toMatchObject({ name: 'events_previous', orderBy: ['id'], retainedBy: { cutover: 'app.events' } })
@@ -264,7 +279,8 @@ describe('planCutover', () => {
       "SYSTEM SYNC REPLICA ON CLUSTER 'c2' app.events__cutover_20261024120000 LIGHTWEIGHT;",
       "SYSTEM SYNC REPLICA ON CLUSTER 'c2' app.events LIGHTWEIGHT;",
     ])
-    expect(sqlOf('cutover_reconcile')[0]).toContain("INSERT INTO FUNCTION cluster('c2', 'app', 'events__cutover_20261024120000_reconcile')")
+    expect(sqlOf('cutover_reconcile')[0]).toContain("INSERT INTO FUNCTION cluster('c2', 'app', 'events') (")
+    expect(sqlOf('cutover_reconcile')[1]).toContain("INSERT INTO FUNCTION cluster('c2', 'app', 'events__cutover_20261024120000_reconcile')")
     expect(sqlOf('cutover_attach')[0]).toBe(
       "ALTER TABLE app.events ON CLUSTER 'c2' ATTACH PARTITION ALL FROM app.events__cutover_20261024120000_reconcile;"
     )

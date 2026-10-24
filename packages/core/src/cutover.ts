@@ -28,12 +28,16 @@ import { renderColumnType, toCreateSQL } from './sql.js'
  *    retried copy skips what an earlier attempt wrote.
  * 5. Verify per key that the shadow holds exactly the snapshot's rows.
  * 6. `EXCHANGE TABLES` the table and the shadow, then drop the mirror.
- * 7. Reconcile: an INSERT that resolved the table name just before the swap
- *    and the mirror's target name just after it wrote its rows to the old
- *    table twice and not to the new one. Once no INSERT runs that could still
- *    do that, the rows of the old table whose key the new one lacks are
- *    copied to a staging table and attached to the new table, which, unlike
- *    an INSERT, does not run its materialized views a second time.
+ * 7. Reconcile: an INSERT builds its pipeline a few names at a time, so one
+ *    that starts at the instant of the swap can resolve the table before it
+ *    and the rest after it. It then writes its rows only to the old table:
+ *    once, without running any view (the old table no longer has the name the
+ *    views read from), or twice, with the views having run (the mirror wrote
+ *    the second copy back to the old table). Once no INSERT runs that could
+ *    still do that, the rows of the old table whose key the new one lacks are
+ *    added to it: rows the old table holds once by an INSERT, which runs the
+ *    table's materialized views; rows it holds twice by ATTACH PARTITION from
+ *    a staging table, which does not run them a second time.
  * 8. The old table is kept as `<table>_previous` or dropped; the snapshot is
  *    dropped.
  *
@@ -334,6 +338,13 @@ function buildOperations(input: {
       sql: statement,
     })),
     {
+      type: 'cutover_reconcile',
+      key: stepKey('reconcile_unmirrored'),
+      risk: 'caution',
+      sql: sql.reconcileUnmirrored,
+      mode: 'async',
+    },
+    {
       type: 'create_table',
       key: `table:${database}.${names.reconcile}`,
       risk: 'safe',
@@ -399,6 +410,7 @@ interface CutoverSql {
   syncAfterExchange: string[]
   copy: string
   reconcile: string
+  reconcileUnmirrored: string
   truncateReconcile: string
   attachReconciled: string
   notAttachedGuard: string
@@ -465,24 +477,29 @@ function createCutoverSql(input: {
         'SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;',
       ].join('\n')
 
-  // Keys of the old table that the new one lacks. GROUP BY spills to disk on
-  // a large table; the IN set only holds the few rows left behind.
-  const missingKeys = `SELECT ${keyList} FROM (SELECT ${keyList}, toUInt8(1) AS old FROM ${q(names.shadow)} UNION ALL SELECT ${keyList}, toUInt8(0) AS old FROM ${q(table)}) GROUP BY ${keyList} HAVING min(old) = 1`
-  const reconcile = cluster
-    ? [
-        `INSERT INTO FUNCTION cluster(${stringLiteral(cluster)}, ${stringLiteral(database)}, ${stringLiteral(names.reconcile)}) (${columnList})`,
-        `SELECT ${columnList} FROM cluster(${stringLiteral(cluster)}, ${stringLiteral(database)}, ${stringLiteral(names.shadow)})`,
-        `WHERE (${keyList}) IN (${missingKeys})`,
-        `LIMIT 1 BY ${keyList}`,
-        'SETTINGS parallel_distributed_insert_select = 2, insert_deduplicate = 0;',
-      ].join('\n')
-    : [
-        `INSERT INTO ${q(names.reconcile)} (${columnList})`,
-        `SELECT ${columnList} FROM ${q(names.shadow)}`,
-        `WHERE (${keyList}) IN (${missingKeys})`,
-        `LIMIT 1 BY ${keyList}`,
-        'SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;',
-      ].join('\n')
+  // Keys of the old table that the new one lacks, held once or more than once
+  // by the old table. GROUP BY spills to disk on a large table; the IN set
+  // only holds the few rows left behind.
+  const missingKeys = (copies: '= 1' | '> 1') =>
+    `SELECT ${keyList} FROM (SELECT ${keyList}, toUInt8(1) AS old FROM ${q(names.shadow)} UNION ALL SELECT ${keyList}, toUInt8(0) AS old FROM ${q(table)}) GROUP BY ${keyList} HAVING min(old) = 1 AND sum(old) ${copies}`
+  const copyMissing = (into: string, copies: '= 1' | '> 1') =>
+    cluster
+      ? [
+          `INSERT INTO FUNCTION cluster(${stringLiteral(cluster)}, ${stringLiteral(database)}, ${stringLiteral(into)}) (${columnList})`,
+          `SELECT ${columnList} FROM cluster(${stringLiteral(cluster)}, ${stringLiteral(database)}, ${stringLiteral(names.shadow)})`,
+          `WHERE (${keyList}) IN (${missingKeys(copies)})`,
+          `LIMIT 1 BY ${keyList}`,
+          'SETTINGS parallel_distributed_insert_select = 2, insert_deduplicate = 0;',
+        ].join('\n')
+      : [
+          `INSERT INTO ${q(into)} (${columnList})`,
+          `SELECT ${columnList} FROM ${q(names.shadow)}`,
+          `WHERE (${keyList}) IN (${missingKeys(copies)})`,
+          `LIMIT 1 BY ${keyList}`,
+          'SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;',
+        ].join('\n')
+  const reconcile = copyMissing(names.reconcile, '> 1')
+  const reconcileUnmirrored = copyMissing(table, '= 1')
   const attachedKeys = `SELECT count() AS attached FROM ${q(table)} WHERE (${keyList}) IN (SELECT ${keyList} FROM ${q(names.reconcile)})`
   const notAttachedGuard = cluster
     ? `SELECT throwIf(sum(attached) > 0, ${stringLiteral(`Rows of ${names.reconcile} are already in ${target}: the ATTACH may already have run. Inspect before you retry.`)}) FROM cluster(${stringLiteral(cluster)}, view(${attachedKeys}))`
@@ -509,6 +526,7 @@ function createCutoverSql(input: {
     attachSnapshot: `ALTER TABLE ${q(names.snapshot)} ATTACH PARTITION ALL FROM ${q(table)};`,
     truncateSnapshot: `TRUNCATE TABLE IF EXISTS ${q(names.snapshot)} SYNC`,
     reconcile,
+    reconcileUnmirrored,
     truncateReconcile: `TRUNCATE TABLE IF EXISTS ${q(names.reconcile)} SYNC`,
     attachReconciled: `ALTER TABLE ${q(table)} ATTACH PARTITION ALL FROM ${q(names.reconcile)};`,
     notAttachedGuard,

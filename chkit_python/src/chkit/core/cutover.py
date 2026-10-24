@@ -14,12 +14,15 @@ table the whole time:
 4. Copy the snapshot rows whose unique key is not in the shadow yet.
 5. Verify per key that the shadow holds exactly the snapshot's rows.
 6. ``EXCHANGE TABLES`` the table and the shadow, then drop the mirror.
-7. Reconcile: an INSERT that resolved the table name just before the swap and
-   the mirror's target name just after it wrote its rows to the old table
-   twice and not to the new one. Once no INSERT runs that could still do that,
-   the rows of the old table whose key the new one lacks are copied to a
-   staging table and attached to the new table, which, unlike an INSERT, does
-   not run its materialized views a second time.
+7. Reconcile: an INSERT builds its pipeline a few names at a time, so one
+   that starts at the instant of the swap can resolve the table before it and
+   the rest after it. It then writes its rows only to the old table: once,
+   without running any view, or twice, with the views having run (the mirror
+   wrote the second copy back to the old table). Once no INSERT runs that
+   could still do that, the rows of the old table whose key the new one lacks
+   are added to it: rows held once by an INSERT, which runs the table's
+   materialized views; rows held twice by ATTACH PARTITION from a staging
+   table, which does not run them a second time.
 8. The old table is kept as ``<table>_previous`` or dropped; the snapshot is
    dropped.
 
@@ -436,6 +439,13 @@ def _build_operations(
                 for index, statement in enumerate(sql.sync_after_exchange)
             ),
             _op(
+                "cutover_reconcile",
+                step_key("reconcile_unmirrored"),
+                "caution",
+                sql.reconcile_unmirrored,
+                mode="async",
+            ),
+            _op(
                 "create_table",
                 f"table:{database}.{names.reconcile}",
                 "safe",
@@ -510,6 +520,7 @@ class _CutoverSql:
     attach_snapshot: str
     truncate_snapshot: str
     reconcile: str
+    reconcile_unmirrored: str
     truncate_reconcile: str
     attach_reconciled: str
     not_attached_guard: str
@@ -638,33 +649,41 @@ def _create_cutover_sql(
 
     # Keys of the old table that the new one lacks. GROUP BY spills to disk on
     # a large table; the IN set only holds the few rows left behind.
-    missing_keys = (
-        f"SELECT {key_list} FROM (SELECT {key_list}, toUInt8(1) AS old FROM {q(names.shadow)} "
-        f"UNION ALL SELECT {key_list}, toUInt8(0) AS old FROM {q(table)}) "
-        f"GROUP BY {key_list} HAVING min(old) = 1"
-    )
-    if cluster:
-        reconcile = "\n".join(
-            [
-                f"INSERT INTO FUNCTION cluster({_string_literal(cluster)}, "
-                f"{_string_literal(database)}, {_string_literal(names.reconcile)}) ({column_list})",
-                f"SELECT {column_list} FROM cluster({_string_literal(cluster)}, "
-                f"{_string_literal(database)}, {_string_literal(names.shadow)})",
-                f"WHERE ({key_list}) IN ({missing_keys})",
-                f"LIMIT 1 BY {key_list}",
-                "SETTINGS parallel_distributed_insert_select = 2, insert_deduplicate = 0;",
-            ]
+    # ``copies`` tells the two straddles apart: one copy in the old table means
+    # the INSERT ran no views (inserted again, so they run once); several mean
+    # it ran them, mirrored into the old table (staged and attached).
+    def missing_keys(copies: str) -> str:
+        return (
+            f"SELECT {key_list} FROM (SELECT {key_list}, toUInt8(1) AS old FROM "
+            f"{q(names.shadow)} UNION ALL SELECT {key_list}, toUInt8(0) AS old FROM {q(table)}) "
+            f"GROUP BY {key_list} HAVING min(old) = 1 AND sum(old) {copies}"
         )
-    else:
-        reconcile = "\n".join(
+
+    def copy_missing(into: str, copies: str) -> str:
+        if cluster:
+            return "\n".join(
+                [
+                    f"INSERT INTO FUNCTION cluster({_string_literal(cluster)}, "
+                    f"{_string_literal(database)}, {_string_literal(into)}) ({column_list})",
+                    f"SELECT {column_list} FROM cluster({_string_literal(cluster)}, "
+                    f"{_string_literal(database)}, {_string_literal(names.shadow)})",
+                    f"WHERE ({key_list}) IN ({missing_keys(copies)})",
+                    f"LIMIT 1 BY {key_list}",
+                    "SETTINGS parallel_distributed_insert_select = 2, insert_deduplicate = 0;",
+                ]
+            )
+        return "\n".join(
             [
-                f"INSERT INTO {q(names.reconcile)} ({column_list})",
+                f"INSERT INTO {q(into)} ({column_list})",
                 f"SELECT {column_list} FROM {q(names.shadow)}",
-                f"WHERE ({key_list}) IN ({missing_keys})",
+                f"WHERE ({key_list}) IN ({missing_keys(copies)})",
                 f"LIMIT 1 BY {key_list}",
                 "SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;",
             ]
         )
+
+    reconcile = copy_missing(names.reconcile, "> 1")
+    reconcile_unmirrored = copy_missing(table, "= 1")
     attached_keys = (
         f"SELECT count() AS attached FROM {q(table)} WHERE ({key_list}) IN "
         f"(SELECT {key_list} FROM {q(names.reconcile)})"
@@ -742,6 +761,7 @@ def _create_cutover_sql(
         attach_snapshot=f"ALTER TABLE {q(names.snapshot)} ATTACH PARTITION ALL FROM {q(table)};",
         truncate_snapshot=f"TRUNCATE TABLE IF EXISTS {q(names.snapshot)} SYNC",
         reconcile=reconcile,
+        reconcile_unmirrored=reconcile_unmirrored,
         truncate_reconcile=f"TRUNCATE TABLE IF EXISTS {q(names.reconcile)} SYNC",
         attach_reconciled=(
             f"ALTER TABLE {q(table)} ATTACH PARTITION ALL FROM {q(names.reconcile)};"

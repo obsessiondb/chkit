@@ -89,7 +89,7 @@ describe('applyCutovers', () => {
     })
     expect(result.plan.operations.some((op) => op.type === 'drop_table' && op.key === 'table:app.events')).toBe(false)
     expect(result.plan.operations.filter((op) => op.type === 'exchange_tables')).toHaveLength(1)
-    expect(result.plan.riskSummary).toEqual({ safe: 6, caution: 14, danger: 0 })
+    expect(result.plan.riskSummary).toEqual({ safe: 6, caution: 15, danger: 0 })
     expect(summarizeCutover(result.cutovers[0] as never)).toMatchObject({
       table: 'app.events',
       key: ['id'],

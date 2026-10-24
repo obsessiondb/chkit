@@ -55,7 +55,7 @@ export interface CutoverProject {
   historic: number
 }
 
-export interface WriterReport {
+interface WriterReport {
   batches: number
   rows: number
   errors: string[]
@@ -132,7 +132,7 @@ export default schema(
  * an INSERT into the chained source, round robin over the writer executors.
  * Only batches that succeeded count.
  */
-export function startWriters(target: CutoverTarget, project: CutoverProject, parallel = 2): { stop: () => Promise<WriterReport> } {
+function startWriters(target: CutoverTarget, project: CutoverProject, parallel = 2): { stop: () => Promise<WriterReport> } {
   let stopped = false
   let next = 0
   const report: WriterReport = { batches: 0, rows: 0, errors: [] }
@@ -170,7 +170,7 @@ export function cli(project: CutoverProject, args: string[]): CliResult {
 }
 
 /** Like `cli`, without blocking the event loop, so writers keep inserting meanwhile. */
-export async function cliAsync(project: CutoverProject, args: string[]): Promise<CliResult> {
+async function cliAsync(project: CutoverProject, args: string[]): Promise<CliResult> {
   const proc = Bun.spawn(['bun', CLI_ENTRY, ...args, '--config', project.configPath], {
     cwd: project.dir,
     env: { ...process.env, ...project.env },
@@ -187,23 +187,23 @@ export async function cliAsync(project: CutoverProject, args: string[]): Promise
   return { exitCode, stdout, stderr }
 }
 
-export function expectOk(result: CliResult, label: string): CliResult {
+function expectOk(result: CliResult, label: string): CliResult {
   if (result.exitCode !== 0) throw new Error(formatTestDiagnostic(label, result))
   return result
 }
 
 /** The cutover migration's file name (generated with --name cutover; init may share its timestamp). */
-export async function cutoverMigration(project: CutoverProject): Promise<string> {
+async function cutoverMigration(project: CutoverProject): Promise<string> {
   const files = (await readdir(join(project.dir, 'chkit/migrations'))).filter((file) => file.endsWith('_cutover.sql'))
   if (files.length !== 1) throw new Error(`expected one cutover migration, found ${files.join(', ')}`)
   return files[0] as string
 }
 
-export async function readMigration(project: CutoverProject, file: string): Promise<string> {
+async function readMigration(project: CutoverProject, file: string): Promise<string> {
   return readFile(join(project.dir, 'chkit/migrations', file), 'utf8')
 }
 
-export async function rows<T>(target: CutoverTarget, sql: string): Promise<T[]> {
+async function rows<T>(target: CutoverTarget, sql: string): Promise<T[]> {
   return target.admin.query<T>(`${sql}${target.readSettings}`)
 }
 
@@ -212,7 +212,7 @@ export async function rows<T>(target: CutoverTarget, sql: string): Promise<T[]> 
  * each exactly once, that the view reading from it saw each of them exactly
  * once, and that its layout is `orderBy`.
  */
-export async function assertCutoverRows(
+async function assertCutoverRows(
   target: CutoverTarget,
   project: CutoverProject,
   writers: WriterReport,
@@ -241,7 +241,7 @@ export async function assertCutoverRows(
   return { total: expected }
 }
 
-export async function sortingKeys(target: CutoverTarget, project: CutoverProject): Promise<Record<string, string>> {
+async function sortingKeys(target: CutoverTarget, project: CutoverProject): Promise<Record<string, string>> {
   const result = await target.admin.query<{ name: string; sorting_key: string }>(
     `SELECT name, sorting_key FROM system.tables WHERE database = '${target.database}' AND (name IN ('${project.table}', '${project.previous}') OR startsWith(name, '${project.table}__cutover_')) ORDER BY name`,
   )
@@ -249,7 +249,7 @@ export async function sortingKeys(target: CutoverTarget, project: CutoverProject
 }
 
 /** status, drift, check and generate --dryrun report nothing to do. */
-export function assertChkitClean(project: CutoverProject): void {
+function assertChkitClean(project: CutoverProject): void {
   const status = JSON.parse(expectOk(cli(project, ['status', '--json']), 'status').stdout) as { pending: number }
   const drift = JSON.parse(expectOk(cli(project, ['drift', '--json']), 'drift').stdout) as {
     drifted: boolean
@@ -272,7 +272,7 @@ export function assertChkitClean(project: CutoverProject): void {
 }
 
 /** Reads and rewrites the cutover migration's journal state, e.g. to simulate a lost acknowledgement. */
-export async function editJournalState(
+async function editJournalState(
   target: CutoverTarget,
   project: CutoverProject,
   file: string,
@@ -420,7 +420,9 @@ export async function runRetryScenario(target: CutoverTarget, label: string): Pr
       [types.indexOf('cutover_copy'), 'replays'],
       [types.indexOf('exchange_tables'), 'refuses'],
       [types.indexOf('cutover_reconcile'), 'replays'],
-      [types.indexOf('cutover_attach'), 'replays'],
+      [types.lastIndexOf('cutover_reconcile'), 'replays'],
+      // Refused when the staging table holds rows (an INSERT straddled the swap).
+      [types.indexOf('cutover_attach'), 'refuses if staged'],
       [dropOld, 'replays'],
     ])
     const migrate = (retry: boolean) =>
@@ -445,21 +447,29 @@ export async function runRetryScenario(target: CutoverTarget, label: string): Pr
           .filter((op) => op.operationIndex !== step)
           .map((op) => (op.operationIndex === step - 1 ? { ...op, status: 'started', finishedAt: null, queryId: '' } : op)),
       }))
+      if (lost === 'replays') continue
+      await write(injectFailure(blocks, step + 1))
+      const replay = await migrate(true)
+      const output = `${replay.stdout}${replay.stderr}`
       if (lost === 'refuses') {
-        await write(injectFailure(blocks, step + 1))
-        const refused = await migrate(true)
-        if (refused.exitCode === 0 || !`${refused.stdout}${refused.stderr}`.includes('the EXCHANGE may already have run')) {
-          throw new Error(formatTestDiagnostic('a replayed EXCHANGE must be refused', refused))
+        if (replay.exitCode === 0 || !output.includes('the EXCHANGE may already have run')) {
+          throw new Error(formatTestDiagnostic('a replayed EXCHANGE must be refused', replay))
         }
         const keys = await sortingKeys(target, project)
         if (keys[project.table] !== 'user_id, id') throw new Error(`the refused replay swapped the tables back: ${JSON.stringify(keys)}`)
-        // Documented recovery: the swap ran, so the statement becomes a no-op.
-        blocks[step] = (blocks[step] as string)
-          .split('\n')
-          .filter((line) => !line.startsWith('-- before-retry:'))
-          .map((line) => (line.startsWith('EXCHANGE TABLES') ? 'SELECT 1;' : line))
-          .join('\n')
+      } else if (!output.includes('the ATTACH may already have run')) {
+        // Nothing was staged, so the replayed ATTACH ran and the next statement failed.
+        if (!output.includes(`injected failure at statement ${step + 2}`)) {
+          throw new Error(formatTestDiagnostic('a replayed empty ATTACH must run', replay))
+        }
+        continue
       }
+      // Documented recovery: the statement ran, so it becomes a no-op.
+      blocks[step] = (blocks[step] as string)
+        .split('\n')
+        .filter((line) => !line.startsWith('-- before-retry:'))
+        .map((line) => (line.startsWith('EXCHANGE TABLES') || line.startsWith('ALTER TABLE') ? 'SELECT 1;' : line))
+        .join('\n')
     }
     await write(blocks.join('\n\n'))
     expectOk(await migrate(true), 'migrate --apply --retry (complete)')

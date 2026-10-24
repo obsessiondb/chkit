@@ -200,6 +200,7 @@ def test_mirrors_snapshots_copies_verifies_and_swaps_in_order() -> None:
         ),
         ("cutover_validate", "table:app.events:cutover:after_exchange", "caution", "sync"),
         ("cutover_wait_for_inserts", "table:app.events:cutover:exchange_barrier", "safe", "barrier"),
+        ("cutover_reconcile", "table:app.events:cutover:reconcile_unmirrored", "caution", "async"),
         ("create_table", "table:app.events__cutover_20261024120000_reconcile", "safe", "sync"),
         ("cutover_reconcile", "table:app.events:cutover:reconcile", "caution", "async"),
         ("cutover_attach", "table:app.events:cutover:attach_reconciled", "caution", "sync"),
@@ -275,19 +276,40 @@ def test_exchange_is_guarded_on_every_attempt() -> None:
 # after it wrote its rows to the old table only: they are attached to the new
 # table, which does not run its materialized views again.
 def test_reconciles_rows_the_swap_left_in_the_old_table() -> None:
+    by_key = {op.key: op for op in plan().operations}
     ops = {op.type: op for op in plan().operations}
-    assert ops["cutover_reconcile"].sql == "\n".join(
-        [
-            "INSERT INTO app.events__cutover_20261024120000_reconcile (`id`, `user_id`, `payload`)",
-            "SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000",
+
+    def missing(copies: str) -> str:
+        return (
             "WHERE (`id`) IN (SELECT `id` FROM (SELECT `id`, toUInt8(1) AS old FROM "
             "app.events__cutover_20261024120000 UNION ALL SELECT `id`, toUInt8(0) AS old FROM "
-            "app.events) GROUP BY `id` HAVING min(old) = 1)",
+            f"app.events) GROUP BY `id` HAVING min(old) = 1 AND sum(old) {copies})"
+        )
+
+    # Rows the old table holds once never ran the views: INSERT them.
+    unmirrored = by_key["table:app.events:cutover:reconcile_unmirrored"]
+    assert unmirrored.sql == "\n".join(
+        [
+            "INSERT INTO app.events (`id`, `user_id`, `payload`)",
+            "SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000",
+            missing("= 1"),
             "LIMIT 1 BY `id`",
             "SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;",
         ]
     )
-    assert ops["cutover_reconcile"].before_retry == (
+    assert unmirrored.before_retry is None
+    # Rows it holds twice did: attach them through the staging table.
+    staged = by_key["table:app.events:cutover:reconcile"]
+    assert staged.sql == "\n".join(
+        [
+            "INSERT INTO app.events__cutover_20261024120000_reconcile (`id`, `user_id`, `payload`)",
+            "SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000",
+            missing("> 1"),
+            "LIMIT 1 BY `id`",
+            "SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;",
+        ]
+    )
+    assert staged.before_retry == (
         "TRUNCATE TABLE IF EXISTS app.events__cutover_20261024120000_reconcile SYNC"
     )
     assert ops["cutover_attach"].sql == (
@@ -299,7 +321,7 @@ def test_reconciles_rows_the_swap_left_in_the_old_table() -> None:
 
 def test_keep_mode_renames_the_old_table_and_retains_it() -> None:
     cutover = plan()
-    assert cutover.operations[18].sql == (
+    assert cutover.operations[19].sql == (
         "RENAME TABLE IF EXISTS app.events__cutover_20261024120000 TO app.events_previous;"
     )
     assert cutover.retained is not None
@@ -388,9 +410,10 @@ def test_cluster_runs_data_steps_on_every_shard() -> None:
         "SYSTEM SYNC REPLICA ON CLUSTER 'c2' app.events__cutover_20261024120000 LIGHTWEIGHT;",
         "SYSTEM SYNC REPLICA ON CLUSTER 'c2' app.events LIGHTWEIGHT;",
     ]
+    assert "INSERT INTO FUNCTION cluster('c2', 'app', 'events') (" in sql_of("cutover_reconcile")[0]
     assert (
         "INSERT INTO FUNCTION cluster('c2', 'app', 'events__cutover_20261024120000_reconcile')"
-        in sql_of("cutover_reconcile")[0]
+        in sql_of("cutover_reconcile")[1]
     )
     assert sql_of("cutover_attach") == [
         "ALTER TABLE app.events ON CLUSTER 'c2' ATTACH PARTITION ALL FROM "
@@ -892,7 +915,7 @@ def test_apply_cutovers_replaces_the_recreate() -> None:
     )
     assert not any(op.type == "drop_table" and op.key == "table:app.events" for op in result.operations)
     assert len([op for op in result.operations if op.type == "exchange_tables"]) == 1
-    assert result.risk_summary.model_dump() == {"safe": 6, "caution": 14, "danger": 0}
+    assert result.risk_summary.model_dump() == {"safe": 6, "caution": 15, "danger": 0}
     summary = summarize_cutover(cutovers[0])
     assert summary["table"] == "app.events"
     assert summary["retainedAs"] == "app.events_previous"
