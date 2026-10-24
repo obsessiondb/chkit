@@ -118,7 +118,7 @@ def live_env_to_client_kwargs(env: LiveEnv) -> dict[str, Any]:
     parsed = urlparse(env.clickhouse_url)
     host_only = parsed.hostname or "localhost"
     secure = parsed.scheme == "https"
-    port = parsed.port if parsed.port is not None else (8443 if secure else 8123)
+    port = parsed.port if parsed.port is not None else (443 if secure else 80)
     return {
         "host": host_only,
         "port": port,

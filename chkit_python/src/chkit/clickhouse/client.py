@@ -86,9 +86,15 @@ class ClickHouseClient:
         if host is None:
             msg = f"Invalid ClickHouse URL (missing host): {config.url}"
             raise ValueError(msg)
+        # Like the TS client (``@clickhouse/client``): the URL scheme sets the
+        # protocol, and a URL without a port uses the scheme's default port.
+        if parsed.scheme not in ("http", "https"):
+            msg = f"ClickHouse URL protocol must be either http or https. Got: {config.url}"
+            raise ValueError(msg)
+        secure = parsed.scheme == "https"
         port = parsed.port
         if port is None:
-            port = 8443 if config.secure else 8123
+            port = 443 if secure else 80
 
         client = clickhouse_connect.get_client(
             host=host,
@@ -96,7 +102,7 @@ class ClickHouseClient:
             username=config.username,
             password=config.password,
             database=config.database,
-            secure=config.secure,
+            secure=secure,
         )
         return cls(client, config)
 
