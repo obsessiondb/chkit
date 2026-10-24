@@ -250,3 +250,20 @@ describe('resolveConfig cluster validation', () => {
     )
   })
 })
+
+describe('resolveConfig secure', () => {
+  test('follows the URL scheme when secure is unset', () => {
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'https://host' } }).clickhouse?.secure).toBe(true)
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'HTTPS://host:443' } }).clickhouse?.secure).toBe(true)
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'http://host' } }).clickhouse?.secure).toBe(false)
+  })
+
+  test('an explicit secure wins over the URL scheme', () => {
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'https://host', secure: false } }).clickhouse?.secure).toBe(
+      false,
+    )
+    expect(resolveConfig({ schema: 's', clickhouse: { url: 'http://host', secure: true } }).clickhouse?.secure).toBe(
+      true,
+    )
+  })
+})

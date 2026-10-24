@@ -1850,3 +1850,15 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - The replica-lag case (one replica's replication queue stopped) is
   `tests_cluster/test_definition_wait_cluster_e2e.py`, the port of
   `packages/cli/test/cluster-2shard-definition-wait.e2e.test.ts`.
+
+### `clickhouse.url` scheme and `secure` (#298)
+- Both ports now resolve an unset `secure` from the URL scheme (`https` → `True`), so
+  the resolved config agrees. Before, both defaulted it to `False`; TS never read the
+  field, but Python used it to pick the protocol and connected to `http://host:8123`
+  for `"url": "https://host"`.
+- The TS client (`@clickhouse/client`) always takes the protocol and port from the URL
+  and ignores `secure`; a URL without a port uses the scheme's default (443/80).
+  Python passes `secure` to `clickhouse-connect` (an explicit value overrides the
+  scheme) and fills a missing port with ClickHouse's defaults, 8443 for HTTPS and 8123
+  for HTTP, as it did before. Put the port in the URL to get the same endpoint from
+  both ports.

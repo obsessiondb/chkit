@@ -85,7 +85,8 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
           username: config.clickhouse.username ?? 'default',
           password: config.clickhouse.password ?? '',
           database: config.clickhouse.database ?? 'default',
-          secure: config.clickhouse.secure ?? false,
+          // The client takes the protocol from the URL; keep `secure` consistent with it.
+          secure: config.clickhouse.secure ?? /^https:/i.test(config.clickhouse.url),
           cluster: config.clickhouse.cluster
             ? assertValidClusterName(config.clickhouse.cluster)
             : undefined,

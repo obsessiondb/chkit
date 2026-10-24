@@ -61,6 +61,11 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- `clickhouse.url` with an `https://` scheme now connects over HTTPS when `secure` is
+  not set (#298). `secure` defaults to the URL scheme (`https` → secure, default port
+  8443; `http` → 8123), the way the TS client takes the protocol from the URL. Before,
+  an unset `secure` meant plain HTTP, so `"url": "https://host"` connected to
+  `http://host:8123`. An explicit `secure` still wins.
 - backfill: mv_replay writes each target column by name, the way ClickHouse does
   when a materialized view inserts into its `TO` table. `plan` reads the live
   target's insertable columns and each view's output columns (`DESCRIBE`), saves

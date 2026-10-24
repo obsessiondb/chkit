@@ -11,6 +11,7 @@ import os
 import re
 from collections.abc import Callable
 from typing import Annotated, Any, Final, Literal, TypeAlias
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
@@ -1103,7 +1104,9 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
             username=ch.username if ch.username is not None else "default",
             password=ch.password if ch.password is not None else "",
             database=ch.database if ch.database is not None else "default",
-            secure=ch.secure if ch.secure is not None else False,
+            # Unset ``secure`` follows the URL scheme, like the TS client,
+            # which takes the protocol from ``clickhouse.url``.
+            secure=ch.secure if ch.secure is not None else urlparse(ch.url).scheme == "https",
             # Falsy check (matches TS ``config.clickhouse.cluster``) — ``None``
             # and ``""`` skip validation and stay ``None``, so cluster mode is
             # opt-in and never engages silently.
