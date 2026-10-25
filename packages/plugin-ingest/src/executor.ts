@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { SpanStatusCode } from '@opentelemetry/api'
 import * as Effect from 'effect/Effect'
 import * as Exit from 'effect/Exit'
+import * as Fiber from 'effect/Fiber'
 import * as Queue from 'effect/Queue'
 import * as Semaphore from 'effect/Semaphore'
 
@@ -115,7 +116,7 @@ interface ReaderInput extends StreamInput {
   retry: ReturnType<typeof mergeRetry>
 }
 
-type AppendInput = { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv }
+type AppendInput = { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv; interruptionSignal?: AbortSignal }
 type FactFields = Partial<Omit<JournalEvent, 'namespaceId' | 'eventSeq' | 'eventKind' | 'runId'>>
 
 export function runIngestion(request: ExecutionRequest, input: ExecutionEnv): Promise<ExecutionResult> {
@@ -325,16 +326,27 @@ function readAndLoad(input: ReaderInput): Effect.Effect<StreamOutcome, unknown> 
         const advanced = canonicalJson(envelope ?? null) !== canonicalJson(progress.envelope ?? null)
         const expected = progress.version
         const version = advanced ? expected + 1 : expected
-        yield* append(input, 'batch_committed', {
-          workId: input.workId, attemptNo: input.attemptNo, batchId,
-          expectedCheckpointVersion: expected, checkpointVersion: version, checkpoint: envelope,
-          sinkEvidence: receipt.evidence, detail: { rows: receipt.rows, writeUnits: receipt.writeUnits },
-        })
-        sinceBoundary = advanced ? 0 : sinceBoundary + 1
-        progress.version = version
-        progress.envelope = envelope
-        progress.rows += receipt.rows
-        progress.batches += 1
+        yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+          yield* sync(() => signal.throwIfAborted())
+          const commit = yield* Effect.forkChild(Effect.gen(function* () {
+            yield* append({ ...input, interruptionSignal: signal }, 'batch_committed', {
+              workId: input.workId, attemptNo: input.attemptNo, batchId,
+              expectedCheckpointVersion: expected, checkpointVersion: version, checkpoint: envelope,
+              sinkEvidence: receipt.evidence, detail: { rows: receipt.rows, writeUnits: receipt.writeUnits },
+            })
+            sinceBoundary = advanced ? 0 : sinceBoundary + 1
+            progress.version = version
+            progress.envelope = envelope
+            progress.rows += receipt.rows
+            progress.batches += 1
+          }), { startImmediately: true })
+          yield* restore(Fiber.join(commit)).pipe(Effect.ensuring(
+            Fiber.await(commit).pipe(
+              Effect.timeoutOption(SHUTDOWN_GRACE_MS),
+              Effect.andThen(Fiber.interrupt(commit))
+            )
+          ))
+        }))
       }
     })
     yield* abortOn(Effect.all([produce, consume].map((task) => task.pipe(
@@ -409,7 +421,7 @@ function appendFacts(input: AppendInput, facts: ReadonlyArray<{ eventKind: Journ
     yield* retryEffect(() => foreign(() => env.journal.append(events)), {
       retries: JOURNAL_APPEND_ATTEMPTS - 1, minTimeout: 250,
     }, terminal ? NEVER_ABORTED : env.signal).pipe(Effect.onExit((exit) => Effect.sync(() => {
-      if (Exit.isFailure(exit)) progress.appendFailure = { error: publicError(exit.cause, env.signal) }
+      if (Exit.isFailure(exit)) progress.appendFailure = { error: publicError(exit.cause, input.interruptionSignal ?? env.signal) }
     })))
     for (const event of events) {
       if (event.eventKind === 'batch_committed' && event.checkpointVersion > event.expectedCheckpointVersion) {

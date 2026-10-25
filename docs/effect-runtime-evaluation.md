@@ -2,9 +2,13 @@
 
 Baseline: `031d99539a515b5d9621603c4eb6039283a0fc37`. Candidate: `refactor/effect-runtime-migration-kit3`. Runtime dependency: **Effect 4.0.6**, imported through submodules.
 
+While this evaluation ran, main advanced independently to `e8f8e06` with the unrelated ClickHouse URL protocol/port fix. This branch and both measured package sets retain the frozen baseline so the comparison isolates the runtime migration; no main-branch changes were made by this work.
+
 ## Recommendation
 
-The implementation covers the internal TypeScript execution runtime, but it is not a code simplification. Production code grows by **2,070 lines** and ordinary extension compatibility requires a substantial private ownership bridge. The final adoption recommendation also depends on the controlled measurements below. This is an evaluation branch, not authorization to merge or deploy.
+**Do not adopt this full rewrite as a simplification or performance improvement.** The complete internal migration passes the compatibility gates below, but production code grows by **2,082 lines**, ordinary extension compatibility requires a substantial private ownership bridge, and the measured runtime is slower and uses more memory. Preserve this branch as the evaluated implementation; do not merge it by default.
+
+Owned concurrency is a real architectural benefit, but backpressure already existed and is unchanged here. Reconsider adoption only for a concrete need that justifies these costs, or after a revised implementation recovers the overhead without weakening ordinary extension semantics. These measurements evaluate this implementation, not every possible use of Effect.
 
 ## Scope and architecture
 
@@ -29,16 +33,16 @@ Counts are physical lines, including comments and blanks, using identical baseli
 | Scaffolder | 389 | 447 | +58 |
 | Backfill | 5,201 | 5,368 | +167 |
 | Codegen plugin | 1,326 | 1,392 | +66 |
-| Ingestion | 2,960 | 3,016 | +56 |
+| Ingestion | 2,960 | 3,028 | +68 |
 | ObsessionDB | 3,276 | 3,874 | +598 |
 | Pull | 1,194 | 1,262 | +68 |
-| **Total** | **33,632** | **35,702** | **+2,070 (+6.2%)** |
+| **Total** | **33,632** | **35,714** | **+2,082 (+6.2%)** |
 
-Production diff: 9,932 lines added and 7,862 removed across 92 files. Tests separately add 3,644 and remove four lines: net +3,640 across 28 files, without weakening existing assertions. Removed lines are three imports and one stale fixture configuration corrected for strict compilation. Ten package/root manifests add 14 lines and remove eight; the lockfile adds 15 and removes 11. Documentation consists of two updated plugin references, a changeset, this evaluation and the inventory; it is excluded from the runtime comparison.
+Production diff: 9,945 lines added and 7,863 removed across 92 files. Tests separately add 3,859 and remove four lines: net +3,855 across 30 files, without weakening existing assertions. Removed lines are three imports and one stale fixture configuration corrected for strict compilation. Ten package/root manifests add 14 lines and remove eight; the lockfile adds 15 and removes 11. Documentation consists of two updated plugin references, a changeset, this evaluation and the inventory; it is excluded from the runtime comparison.
 
 The bespoke 56-line ingestion queue is deleted. Direct `p-limit`, `p-retry` and `p-map` dependencies are removed, including root `p-map`; no production Promise-race/Promise-all scheduler remains. Native promises remain at process/event/foreign adapters and the nine ownership bridges. Effect is added to nine execution packages, not core. `is-network-error` remains a direct dependency where the old retry behavior requires its classifier, rather than reimplementing that classifier. Domain checkpoint/receipt/replay state and exact retry-budget bookkeeping remain explicit code: Effect does not replace those policies.
 
-Ingestion itself grows only 56 lines, but much surrounding CLI, authentication and file orchestration is an `await` to `yield*` conversion with adapters. Dependency consolidation does not translate into a smaller overall implementation.
+Ingestion itself grows only 68 lines, but much surrounding CLI, authentication and file orchestration is an `await` to `yield*` conversion with adapters. Dependency consolidation does not translate into a smaller overall implementation.
 
 ## Compatibility and behavior
 
@@ -52,6 +56,8 @@ The seven packed differential scenarios execute 11 ingestion invocations per pac
 
 Effect's default queue dispatcher delayed consumer handoff relative to the former Promise queue. `Queue.flush` after each offer restores the supported immediate handoff. A draft empty-marker acknowledgement barrier was removed because it imposed a stronger source-pulling policy than baseline. Custom loader and journal acknowledgement still gate checkpoint publication, not all source prefetch; six added frontier cases also pass against the frozen baseline.
 
+The final Node trace also exposed premature interruption of an already-issued journal transaction. An owned commit child now keeps append acknowledgement and managed publication together: normal joining remains interruptible, and its interruption cleanup drains for at most the existing five-second grace before stopping observation. The grace begins on actual interruption, not on a signal whose finalizer might be blocked. This does not block producer prefetch or impose a timeout on a healthy journal. Six additional scenarios run under both Node and Bun, including late acknowledgements and repeated owner interruption after the producer has finished.
+
 Intentional lifecycle/validation changes are explicit:
 
 - Programmatic ingestion capacities reject invalid, non-finite or unsafe integer values before work starts. Duration must be positive and finite.
@@ -61,9 +67,16 @@ Intentional lifecycle/validation changes are explicit:
 
 ## Controlled runtime measurements
 
-Final alternating measurements are pending. The retained initial baseline-only numbers are not used to claim a performance change.
+| Metric | Baseline median | Effect median | Change |
+| --- | ---: | ---: | ---: |
+| Fresh-process CLI `--help` | 171.6 ms | 256.8 ms | +49.7% |
+| In-memory ingestion | 578,149 rows/s | 418,942 rows/s | −27.5% |
+| Ingestion peak RSS | 209,360 KiB | 291,428 KiB | +39.2% |
+| Pulls at capacities 1 / 2 / 4 | 3 / 4 / 6 | 3 / 4 / 6 | Unchanged in all repeats |
 
-The comparison uses the same quiet machine, Node 24.22.1 and identical ordinary packed-consumer fixtures, with one warmup and seven measured fresh processes per version in alternating order. CLI `--help` includes process startup; ingestion excludes imports and processes 1,000,000 rows of 64-byte payload through one stream and a non-retaining in-memory sink/journal. RSS is the child process high-water mark. This measures orchestration overhead, not real provider/ClickHouse throughput; the filesystem cache is warm/uncontrolled.
+Startup ranges were 144.3–226.8 ms before and 212.7–273.0 ms after. Throughput ranges were 494,539–639,630 rows/s before and 349,589–471,437 after; every measured candidate throughput sample was below every baseline sample. Peak RSS medians are approximately 204.5 MiB and 284.6 MiB. Raw samples are retained in the evaluation handoff, rather than comparing these results with the earlier baseline-only run.
+
+The comparison uses the same quiet four-CPU AMD EPYC machine, Node 24.22.1 and identical ordinary packed-consumer fixtures, with one warmup and seven measured fresh processes per version in alternating order. Builds/tests/review probes had stopped and the local ClickHouse/Kafka containers were stopped before sampling. CLI `--help` includes process startup; ingestion excludes imports and processes 1,000,000 rows of 64-byte payload through one stream and a non-retaining in-memory sink/journal. RSS is the child process high-water mark. This measures orchestration overhead, not real provider/ClickHouse throughput; the filesystem cache is warm/uncontrolled.
 
 Blocked-sink tests measure actual pull-ahead at capacities 1, 2 and 4, three times per version. Queue capacity is not an RSS bound: active load, a pending producer batch, the reader page and customer buffers also retain data.
 
@@ -71,6 +84,6 @@ Blocked-sink tests measure actual pull-ahead at capacities 1, 2 and 4, three tim
 
 The baseline and current candidate have passed `bun run verify` (52/52 tasks), including the canonical classifier and final fixture corrections. Strict compilation of all added/changed tests also passes. Local ClickHouse 26.3, Redpanda/Kafka and the Python suite are included; no existing test is skipped or weakened for this migration. The optional live ObsessionDB target, authenticated workbench API and multi-node cluster suites are not verified.
 
-The independent review includes an 81-pair cross-package ownership matrix, real nested pull/SDK abandonment, returned-resource readiness, registry rollback, backfill sibling failure/late publication, async submission draining and held cleanup beyond five seconds. The ten final packed API/isolation checks and bilateral declaration assignments pass, but the final Node differential has **six unresolved differences** in the empty-frontier failure scenario: an acknowledged fact persists, while managed counters remain zero, terminal publication is lost and interruption replaces the source error. Source-failure interruption is cancelling the consumer's already-issued journal transaction; the correction and its bounded-abandonment checks are in progress. **This snapshot is not behavior-compatible or ready to merge.**
+The independent review includes an 81-pair cross-package ownership matrix, real nested pull/SDK abandonment, returned-resource readiness, registry rollback, backfill sibling failure/late publication, async submission draining and held cleanup beyond five seconds. It has no open reproduced finding. The final ten packed API/isolation checks and bilateral declaration assignments pass, with no public export additions/removals or generated-byte changes. All **seven final Node differential scenarios / 11 invocations per version match exactly, with zero differences** after the owned commit correction. The earlier six-difference journal race remains recorded as a superseded failure, not omitted from the evaluation.
 
-The reusable packed harness is retained in the working evidence directory; the completion handoff will include it and the final measurement dataset once these gates finish. Build each revision normally, then run `capture.mjs`, `prepare.mjs`, `validate.mjs`, `compare.mjs`, `type-parity.mjs`, `differential.mjs` and finally `benchmark.mjs` with no builds/tests running. Its README records exact commands and limits. Frozen baseline traces/checksums and superseded-candidate failures remain separate from final results; this is representative compatibility evidence, not a proof for every possible extension program.
+The completion handoff contains the reusable packed harness, inventory, source metrics and final raw measurement dataset. Build each revision normally, then run `capture.mjs`, `prepare.mjs`, `validate.mjs`, `compare.mjs`, `type-parity.mjs`, `differential.mjs` and finally `benchmark.mjs` with no builds/tests running. Its README records exact commands and limits. Frozen baseline traces/checksums and superseded-candidate failures remain separate from final results; this is representative compatibility evidence, not a proof for every possible extension program.
