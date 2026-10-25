@@ -10,4 +10,4 @@
 "@chkit/plugin-pull": patch
 ---
 
-Move internal execution orchestration to Effect while retaining ordinary Promise, AsyncIterable, AbortSignal, and Zod extension APIs and runtime-independent generated application code. Scope nested plugin work and owned connections, bound abandoned executor cleanup, serialize backfill progress publication, and reject invalid programmatic ingestion capacities before work starts.
+Move internal execution orchestration to Effect while retaining ordinary Promise, AsyncIterable, AbortSignal, and Zod extension APIs and runtime-independent generated application code. Scope nested plugin work and owned connections, bound abandoned executor cleanup, serialize backfill progress publication, and reject invalid programmatic ingestion capacities before work starts. Correct pre-existing SQL/LIKE escaping for backfill plan identifiers containing backslashes, quotes or wildcard characters.
