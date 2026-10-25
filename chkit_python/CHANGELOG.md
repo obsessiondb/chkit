@@ -80,6 +80,18 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- `clickhouse.url` with an `https://` scheme now connects over HTTPS when `secure` is
+  not set (#298). Before, an unset `secure` meant plain HTTP, so
+  `"url": "https://host"` connected to `http://host:8123`. The URL scheme now sets the
+  protocol, as in the TS CLI, and `secure` defaults to it.
+- **Behaviour change:** a `clickhouse.url` without a port now uses the scheme's default
+  port, like the TS CLI: 443 for `https://`, 80 for `http://`. Before, chkit-py used
+  ClickHouse's ports (8443 and 8123), so `http://host` now connects to port 80, not
+  8123. Write the port in the URL (`http://localhost:8123`, `https://host:8443`) to
+  connect to those ports (#298).
+- **Behaviour change:** an explicit `secure` that contradicts the URL scheme
+  (`secure=True` with `http://`, or `secure=False` with `https://`) is now a config
+  error. Before, it overrode the scheme (#298).
 - backfill: mv_replay writes each target column by name, the way ClickHouse does
   when a materialized view inserts into its `TO` table. `plan` reads the live
   target's insertable columns and each view's output columns (`DESCRIBE`), saves

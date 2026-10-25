@@ -130,7 +130,7 @@ def test_live_env_to_client_kwargs_parses_https_default_port() -> None:
     )
     kwargs = live_env_to_client_kwargs(env)
     assert kwargs["host"] == "ch.example.com"
-    assert kwargs["port"] == 8443
+    assert kwargs["port"] == 443
     assert kwargs["secure"] is True
     assert kwargs["username"] == "u"
     assert kwargs["password"] == "p"
