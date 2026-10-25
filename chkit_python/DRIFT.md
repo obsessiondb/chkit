@@ -1850,3 +1850,12 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - The replica-lag case (one replica's replication queue stopped) is
   `tests_cluster/test_definition_wait_cluster_e2e.py`, the port of
   `packages/cli/test/cluster-2shard-definition-wait.e2e.test.ts`.
+
+### `clickhouse.url` scheme and `secure` (#298)
+- No divergence left. Both ports take the protocol from the URL scheme and, without a
+  port, its default port (443/80), which is what `@clickhouse/client` does: it keeps
+  `protocol//host` from the URL and calls `http(s).request` with no port. Python's
+  `ClickHouseClient.connect` passes that port and `secure` to `clickhouse-connect`
+  explicitly, because `clickhouse-connect`'s own defaults are 8443/8123.
+- `resolveConfig` / `resolve_config` default `secure` to the scheme and reject an
+  explicit `secure` that contradicts it with the same message.

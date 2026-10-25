@@ -66,6 +66,12 @@ Migration state (the journal of applied migrations) is not stored in `metaDir`. 
   </TabItem>
 </Tabs>
 
+## Connection URL (`clickhouse.url`)
+
+The URL scheme sets the protocol: `https://` connects over TLS, `http://` over plain HTTP. A URL without a port uses the scheme's default port (443 for `https`, 80 for `http`), so include the port for ClickHouse's own ports, as in `http://localhost:8123` or `https://host:8443`.
+
+`clickhouse.secure` is optional and defaults to the URL scheme. If you set it, it must match the scheme: `secure: true` with an `http://` URL, or `secure: false` with an `https://` URL, fails when the config loads.
+
 ## Project entry (`entry`, TypeScript only)
 
 Instead of `schema` globs you can point chkit at one entry module:

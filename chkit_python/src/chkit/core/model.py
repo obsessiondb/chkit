@@ -11,6 +11,7 @@ import os
 import re
 from collections.abc import Callable
 from typing import Annotated, Any, Final, Literal, TypeAlias
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
@@ -1103,7 +1104,7 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
             username=ch.username if ch.username is not None else "default",
             password=ch.password if ch.password is not None else "",
             database=ch.database if ch.database is not None else "default",
-            secure=ch.secure if ch.secure is not None else False,
+            secure=_resolve_secure(ch),
             # Falsy check (matches TS ``config.clickhouse.cluster``) — ``None``
             # and ``""`` skip validation and stay ``None``, so cluster mode is
             # opt-in and never engages silently.
@@ -1121,6 +1122,29 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
         plugins=list(config.plugins) if config.plugins is not None else [],
     )
 
+
+
+def _resolve_secure(ch: ChxUserClickHouseConfig) -> bool:
+    """TS ``resolveSecure``: the URL scheme sets the protocol.
+
+    The client takes the protocol, and without a port the scheme's default
+    port, from ``clickhouse.url``, so ``secure`` can only confirm the scheme.
+    A contradicting value raises instead of silently downgrading to plain HTTP
+    or being ignored.
+    """
+    scheme = urlparse(ch.url).scheme
+    if scheme not in ("http", "https"):
+        return ch.secure if ch.secure is not None else False
+    from_url = scheme == "https"
+    if ch.secure is not None and ch.secure != from_url:
+        wanted = "https" if ch.secure else "http"
+        msg = (
+            f"clickhouse.secure is {str(ch.secure).lower()} but clickhouse.url uses "
+            f"{scheme}://. The URL scheme sets the protocol: remove secure or change "
+            f"the URL to {wanted}://."
+        )
+        raise ValueError(msg)
+    return from_url
 
 # Used by canonical.py to keep dataclass-like helpers in one place.
 @dataclass(frozen=True, config=ConfigDict(extra="forbid", strict=True))
