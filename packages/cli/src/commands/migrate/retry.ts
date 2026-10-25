@@ -1,12 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
 
 import type { JournalStore } from '../../runtime/journal-store.js'
 import { checksumSQL } from '../../runtime/migration-store.js'
-import {
-  extractExecutableStatements,
-  extractMigrationOperationSummaries,
-} from '../../runtime/safety-markers.js'
+import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
 import { retryMismatchError, statementIdentities, verifyRetryEdit } from './recovery.js'
 
 export interface RetryResume {
@@ -43,7 +42,7 @@ export type RetryResolution = RetryResume | RetryNoop
  * so the same command can run against every environment; an edit that moved
  * or changed a statement that already ran throws `retry_mismatch`.
  */
-export async function resolveRetry(
+export function resolveRetry(
   input: {
     migration: string
     migrationsDir: string
@@ -54,32 +53,36 @@ export async function resolveRetry(
   },
   deps: { journalStore: JournalStore },
 ): Promise<RetryResolution> {
-  const { migration } = input
-  if (input.appliedNames.has(migration)) return { action: 'none', migration, reason: 'already_applied' }
-  if (!input.pending.includes(migration)) return { action: 'none', migration, reason: 'not_in_scope' }
-  if (input.emptyMigrations.includes(migration)) return { action: 'none', migration, reason: 'empty_migration' }
-  const state = await deps.journalStore.readMigrationState(migration)
-  if (state === null) return { action: 'none', migration, reason: 'not_in_progress' }
-  if (state.migrationCompleted) return { action: 'none', migration, reason: 'already_applied' }
-  const sql = await readFile(join(input.migrationsDir, migration), 'utf8')
-  const checksum = checksumSQL(sql)
-  if (state.checksum === checksum) return { action: 'none', migration, reason: 'checksum_unchanged' }
-  // The file's statements before onBeforeApply; apply checks again against the
-  // statements the plugins return.
-  const identities = statementIdentities(
-    extractMigrationOperationSummaries(sql),
-    extractExecutableStatements(sql).length,
+  return runEffect(
+    Effect.gen(function* () {
+      const { migration } = input
+      if (input.appliedNames.has(migration)) return { action: 'none', migration, reason: 'already_applied' }
+      if (!input.pending.includes(migration)) return { action: 'none', migration, reason: 'not_in_scope' }
+      if (input.emptyMigrations.includes(migration)) return { action: 'none', migration, reason: 'empty_migration' }
+      const state = yield* fromPromise(() => deps.journalStore.readMigrationState(migration))
+      if (state === null) return { action: 'none', migration, reason: 'not_in_progress' }
+      if (state.migrationCompleted) return { action: 'none', migration, reason: 'already_applied' }
+      const sql = yield* fromPromise(() => readFile(join(input.migrationsDir, migration), 'utf8'))
+      const checksum = checksumSQL(sql)
+      if (state.checksum === checksum) return { action: 'none', migration, reason: 'checksum_unchanged' }
+      // The file's statements before onBeforeApply; apply checks again against the
+      // statements the plugins return.
+      const identities = statementIdentities(
+        extractMigrationOperationSummaries(sql),
+        extractExecutableStatements(sql).length,
+      )
+      const check = verifyRetryEdit(state.operations, identities)
+      if (!check.ok) return yield* Effect.fail(retryMismatchError(migration, check))
+      return {
+        action: 'resume',
+        migration,
+        previousChecksum: state.checksum,
+        checksum,
+        totalStatements: identities.length,
+        completedStatements: check.completed,
+        resumeAtStatement: check.resumeIndex === null ? null : check.resumeIndex + 1,
+        unmarkedCompletedStatements: check.unmarkedCompleted,
+      }
+    }),
   )
-  const check = verifyRetryEdit(state.operations, identities)
-  if (!check.ok) throw retryMismatchError(migration, check)
-  return {
-    action: 'resume',
-    migration,
-    previousChecksum: state.checksum,
-    checksum,
-    totalStatements: identities.length,
-    completedStatements: check.completed,
-    resumeAtStatement: check.resumeIndex === null ? null : check.resumeIndex + 1,
-    unmarkedCompletedStatements: check.unmarkedCompleted,
-  }
 }

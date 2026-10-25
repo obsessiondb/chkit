@@ -1,11 +1,18 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
+import * as fs from 'node:fs/promises'
 import { readFile, readdir, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import * as Effect from 'effect/Effect'
 
 import { applyInstallation, describePlan, planInstallation } from '../../registry/install.js'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
 import { FIXTURE_VERSION, fixtureTracker, installFixtureDependencies, write } from './fixtures.js'
 
 const fixtures = fixtureTracker()
+const restores: Array<() => void> = []
+afterEach(() => {
+  for (const restore of restores.splice(0).reverse()) restore()
+})
 afterEach(() => fixtures.cleanup())
 
 test.serial('planning an empty install is a dry run and applying needs no provider credentials', async () => {
@@ -245,4 +252,119 @@ test.serial('template and CLI incompatibility, ambiguous package managers and ch
   await expect(planInstallation(input)).rejects.toThrow('Multiple package-manager lockfiles')
   await applyInstallation(await planInstallation({ ...input, packageManager: 'bun' }))
   await expect(planInstallation({ ...input, origin: `${fixture.origin}?different` })).rejects.toThrow('already installed')
+})
+
+test.serial('failed staged writes roll back earlier files and remove the staging directory', async () => {
+  const fixture = await fixtures.create()
+  const plan = await planInstallation({ cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, noInstall: true })
+  const target = join(fixture.project, 'collision')
+  plan.files = [
+    { path: target, content: 'first write' },
+    { path: join(target, 'nested.ts'), content: 'cannot write beneath a file' },
+  ]
+  await expect(applyInstallation(plan)).rejects.toThrow('ENOTDIR')
+  await expect(readFile(target)).rejects.toThrow('ENOENT')
+  expect(await readdir(join(fixture.project, '.chkit'))).toEqual([])
+})
+
+test.serial('dependency failures retain their original cause and leave the installation incomplete', async () => {
+  const fixture = await fixtures.create()
+  const plan = await planInstallation({ cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, packageManager: 'bun' })
+  const failure = { reason: 'custom installer rejected' }
+  await expect(applyInstallation(plan, { install: async () => { throw failure } })).rejects.toMatchObject({ cause: failure })
+  const lock = JSON.parse(await readFile(join(fixture.project, '.chkit/registry-lock.json'), 'utf8'))
+  expect(lock.items.fixture.dependenciesInstalled).toBe(false)
+  expect(await readdir(join(fixture.project, '.chkit'))).toEqual(['registry-lock.json'])
+})
+
+test.serial('owned cancellation waits for rename registration before rolling back installed files', async () => {
+  const fixture = await fixtures.create()
+  const destination = join(fixture.project, 'config.ts')
+  await write(destination, 'original')
+  const renamed = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  restores.push(() => release.resolve())
+  const realRename = fs.rename
+  const rename = spyOn(fs, 'rename').mockImplementation(async (source, target) => {
+    await realRename(source, target)
+    if (target === destination) {
+      renamed.resolve()
+      await release.promise
+    }
+  })
+  restores.push(() => rename.mockRestore())
+  let child: Promise<void> | undefined
+  let ownerSettled = false
+  const owner = runEffect(Effect.gen(function* () {
+    yield* fromPromise(() => {
+      child = applyInstallation({
+        cwd: fixture.project,
+        template: { name: 'fixture', version: '1.0.0', origin: 'local' },
+        files: [{ path: destination, original: 'original', content: 'installed' }],
+        dependencies: [], packageManager: 'bun', noInstall: true,
+        withTests: false, alreadyInstalled: false, installRequired: false,
+      })
+      void child.catch(() => {})
+      return renamed.promise
+    })
+  })).then(() => { ownerSettled = true })
+  await renamed.promise
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  const settledBeforeRelease = ownerSettled
+  const stagingBeforeRelease = await readdir(join(fixture.project, '.chkit'))
+  release.resolve()
+  await owner
+
+  expect(child).toBeDefined()
+  await expect(child).rejects.toBeInstanceOf(Error)
+  expect(settledBeforeRelease).toBe(false)
+  expect(stagingBeforeRelease).toHaveLength(1)
+  expect(await readFile(destination, 'utf8')).toBe('original')
+  expect(await readdir(join(fixture.project, '.chkit'))).toEqual([])
+})
+
+test.serial('owned cancellation waits for the staging directory cleanup to be registered', async () => {
+  const fixture = await fixtures.create()
+  const created = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  restores.push(() => release.resolve())
+  const realMkdtemp = fs.mkdtemp
+  const mkdtemp = spyOn(fs, 'mkdtemp').mockImplementation(new Proxy(realMkdtemp, {
+    async apply(target, receiver, args) {
+      const stage: Awaited<ReturnType<typeof realMkdtemp>> = await Reflect.apply(target, receiver, args)
+      if (String(args[0]).startsWith(join(fixture.project, '.chkit', 'registry-stage-'))) {
+        created.resolve()
+        await release.promise
+      }
+      return stage
+    },
+  }))
+  restores.push(() => mkdtemp.mockRestore())
+  const destination = join(fixture.project, 'config.ts')
+  let child: Promise<void> | undefined
+  let ownerSettled = false
+  const owner = runEffect(Effect.gen(function* () {
+    yield* fromPromise(() => {
+      child = applyInstallation({
+        cwd: fixture.project,
+        template: { name: 'fixture', version: '1.0.0', origin: 'local' },
+        files: [{ path: destination, content: 'installed' }],
+        dependencies: [], packageManager: 'bun', noInstall: true,
+        withTests: false, alreadyInstalled: false, installRequired: false,
+      })
+      void child.catch(() => {})
+      return created.promise
+    })
+  })).then(() => { ownerSettled = true })
+  await created.promise
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  const settledBeforeRelease = ownerSettled
+  release.resolve()
+  await owner
+
+  expect(child).toBeDefined()
+  await expect(child).rejects.toBeInstanceOf(Error)
+  expect(settledBeforeRelease).toBe(false)
+  await expect(readFile(destination)).rejects.toThrow('ENOENT')
+  expect(await readdir(join(fixture.project, '.chkit'))).toEqual([])
 })

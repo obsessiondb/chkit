@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -40,77 +42,84 @@ export interface SnapshotRebuildDeps {
  * passed through the plugin hooks, validated and written exactly as
  * `chkit generate` does; no migration is planned or written.
  */
-export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: SnapshotRebuildDeps): Promise<number> {
-  const { metaDir } = resolveDirs(deps.config)
-  const snapshotFile = join(metaDir, 'snapshot.json')
+export function runSnapshotRebuild(input: SnapshotRebuildInput, deps: SnapshotRebuildDeps): Promise<number> {
+  return runEffect(
+    Effect.gen(function* () {
+      const { metaDir } = resolveDirs(deps.config)
+      const snapshotFile = join(metaDir, 'snapshot.json')
 
-  const loaded = await loadSchemaDefinitionsWithHooks(
-    {
-      command: 'snapshot',
-      config: deps.config,
-      configPath: deps.configPath,
-      flags: deps.flags,
-      jsonMode: input.jsonMode,
-    },
-    { pluginRuntime: deps.pluginRuntime },
+      const loaded = yield* fromPromise(() =>
+        loadSchemaDefinitionsWithHooks(
+          {
+            command: 'snapshot',
+            config: deps.config,
+            configPath: deps.configPath,
+            flags: deps.flags,
+            jsonMode: input.jsonMode,
+          },
+          { pluginRuntime: deps.pluginRuntime },
+        ),
+      )
+      // A hook that edits definitions in place (instead of returning them) leaves
+      // them non-canonical. The snapshot always stores canonical definitions, so
+      // canonicalize once and validate, compare, count and write that same list.
+      const definitions = canonicalizeDefinitions(loaded)
+
+      // Same validation and error contract as `chkit generate` (planDiff validates the new definitions).
+      const issues = validateDefinitions(definitions)
+      if (issues.length > 0) {
+        if (input.jsonMode) {
+          emitJson('snapshot', { error: 'validation_failed', issues })
+          return 1
+        }
+        const details = issues.map((issue) => `- [${issue.code}] ${issue.message}`).join('\n')
+        throw new Error(`${new ChxValidationError(issues).message}\n${details}`)
+      }
+
+      const previous = yield* describePreviousSnapshot(snapshotFile, definitions)
+      const upToDate =
+        previous.status === 'parsed' && previous.added.length + previous.removed.length + previous.changed.length === 0
+      // An unchanged snapshot is left alone, so a rebuild never churns `generatedAt`.
+      const written = !input.dryrun && !upToDate
+      if (written) yield* fromPromise(() => writeSnapshot({ metaDir, definitions }))
+
+      emitSnapshotRebuildOutput(
+        {
+          subcommand: 'rebuild',
+          mode: input.dryrun ? 'plan' : 'write',
+          snapshotFile,
+          written,
+          definitionCount: definitions.length,
+          previous,
+        },
+        input.jsonMode,
+      )
+      return 0
+    }),
   )
-  // A hook that edits definitions in place (instead of returning them) leaves
-  // them non-canonical. The snapshot always stores canonical definitions, so
-  // canonicalize once and validate, compare, count and write that same list.
-  const definitions = canonicalizeDefinitions(loaded)
-
-  // Same validation and error contract as `chkit generate` (planDiff validates the new definitions).
-  const issues = validateDefinitions(definitions)
-  if (issues.length > 0) {
-    if (input.jsonMode) {
-      emitJson('snapshot', { error: 'validation_failed', issues })
-      return 1
-    }
-    const details = issues.map((issue) => `- [${issue.code}] ${issue.message}`).join('\n')
-    throw new Error(`${new ChxValidationError(issues).message}\n${details}`)
-  }
-
-  const previous = await describePreviousSnapshot(snapshotFile, definitions)
-  const upToDate =
-    previous.status === 'parsed' &&
-    previous.added.length + previous.removed.length + previous.changed.length === 0
-  // An unchanged snapshot is left alone, so a rebuild never churns `generatedAt`.
-  const written = !input.dryrun && !upToDate
-  if (written) await writeSnapshot({ metaDir, definitions })
-
-  emitSnapshotRebuildOutput(
-    {
-      subcommand: 'rebuild',
-      mode: input.dryrun ? 'plan' : 'write',
-      snapshotFile,
-      written,
-      definitionCount: definitions.length,
-      previous,
-    },
-    input.jsonMode,
-  )
-  return 0
 }
 
-async function describePreviousSnapshot(
+function describePreviousSnapshot(
   snapshotFile: string,
   next: SchemaDefinition[],
-): Promise<PreviousSnapshotReport> {
-  if (!existsSync(snapshotFile)) return { status: 'missing' }
-  const raw = await readFile(snapshotFile, 'utf8')
+): Effect.Effect<PreviousSnapshotReport, unknown> {
+  return Effect.gen(function* () {
+    if (!existsSync(snapshotFile)) return { status: 'missing' }
+    const raw = yield* fromPromise(() => readFile(snapshotFile, 'utf8'))
 
-  let parsed: ParsedSnapshotDocument
-  try {
-    parsed = parseSnapshotDocument(raw)
-  } catch {
-    // Valid JSON whose entries cannot be read as chkit definitions. The rebuild
-    // replaces it anyway; it just cannot be compared.
-    return { status: 'unreadable', reason: 'invalid_shape' }
-  }
+    let parsed: ParsedSnapshotDocument
+    try {
+      parsed = parseSnapshotDocument(raw)
+    } catch {
+      // Valid JSON whose entries cannot be read as chkit definitions. The rebuild
+      // replaces it anyway; it just cannot be compared.
+      return { status: 'unreadable', reason: 'invalid_shape' }
+    }
 
-  if (parsed.status === 'ok') {
-    return { status: 'parsed', ...diffSnapshotDefinitions(parsed.snapshot.definitions, next) }
-  }
-  if (parsed.reason === 'conflict_markers') return { status: 'conflicted' }
-  return { status: 'unreadable', reason: parsed.reason }
+    if (parsed.status === 'ok') {
+      return { status: 'parsed', ...diffSnapshotDefinitions(parsed.snapshot.definitions, next) }
+    }
+    if (parsed.reason === 'conflict_markers') return { status: 'conflicted' }
+    return { status: 'unreadable', reason: parsed.reason }
+  })
 }

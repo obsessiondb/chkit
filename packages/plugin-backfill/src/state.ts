@@ -4,6 +4,8 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from './effect-runtime.js'
 
 import { decodeChunkPlanFromPersistence } from './chunking/boundary-codec.js'
 import { BackfillConfigError } from './errors.js'
@@ -98,8 +100,10 @@ function decodePlan(plan: BackfillPlanState): BackfillPlanState {
 }
 
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  return runEffect(Effect.gen(function* () {
+    yield* fromPromise(() => mkdir(dirname(filePath), { recursive: true }))
+    yield* fromPromise(() => writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8'))
+  }))
 }
 
 export async function readPlan(input: {

@@ -1,5 +1,3 @@
-import type { Options as PRetryOptions, RetryContext as PRetryContext } from 'p-retry'
-
 import type { TableDefinition } from '@chkit/core'
 
 import type { FetchFailure } from './errors.js'
@@ -82,12 +80,20 @@ export interface PlanInput<TState> {
   range: { from: Date | undefined; to: Date | undefined } | undefined
 }
 
-/** p-retry context with the original provider failure and its classification. */
-export type RetryContext = Omit<PRetryContext, 'error'> & { error: FetchFailure }
+export interface RetryContext {
+  error: FetchFailure
+  readonly attemptNumber: number
+  readonly retriesLeft: number
+  readonly retriesConsumed: number
+}
 
-export type RetryOptions = Pick<PRetryOptions,
-  'retries' | 'factor' | 'minTimeout' | 'maxTimeout' | 'randomize' | 'maxRetryTime'
-> & {
+export interface RetryOptions {
+  readonly retries?: number
+  readonly factor?: number
+  readonly minTimeout?: number
+  readonly maxTimeout?: number
+  readonly randomize?: boolean
+  readonly maxRetryTime?: number
   shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>
   shouldConsumeRetry?: (context: RetryContext) => boolean | Promise<boolean>
 }

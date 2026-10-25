@@ -1,12 +1,12 @@
-import { setTimeout as sleep } from 'node:timers/promises'
-
-import { isUnknownDatabaseError, resolveReplicaFanout, waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, isUnknownDatabaseError, resolveReplicaFanout, waitForTable } from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
-import pRetry from 'p-retry'
-
+import * as Effect from 'effect/Effect'
+import * as Schedule from 'effect/Schedule'
+import isNetworkError from 'is-network-error'
+import { debug } from './debug.js'
+import { fromPromise, runEffect } from './effect.js'
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
 import { CLI_VERSION } from './version.js'
-import { debug } from './debug.js'
 
 export type OperationStatus = 'started' | 'completed' | 'failed'
 
@@ -45,7 +45,7 @@ export function resolveJournalTableName(): string {
   if (!candidate) return DEFAULT_JOURNAL_TABLE
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate)) {
     throw new Error(
-      `Invalid CHKIT_JOURNAL_TABLE "${candidate}". Expected unquoted identifier matching [A-Za-z_][A-Za-z0-9_]*`
+      `Invalid CHKIT_JOURNAL_TABLE "${candidate}". Expected unquoted identifier matching [A-Za-z_][A-Za-z0-9_]*`,
     )
   }
   return candidate
@@ -77,7 +77,7 @@ interface OperationTupleRow {
 }
 
 const OPERATIONS_TUPLE_TYPE =
-  'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, \'UTC\'), finished_at Nullable(DateTime64(3, \'UTC\')), last_error String))'
+  "Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String))"
 
 function isRetryableInsertRace(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -157,7 +157,10 @@ function rowVersion(appliedAt: string): number {
 
 export function createJournalStore(db: ClickHouseExecutor, cluster?: string): JournalStore {
   const journalTable = resolveJournalTableName()
-  debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
+  debug(
+    'journal',
+    `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`,
+  )
   // In cluster mode the journal must be consistent across every node, so it uses
   // a replicated engine with a no-`{shard}` Keeper path (one cluster-wide group)
   // created `ON CLUSTER`. `{uuid}` is minted once per CREATE and propagated to
@@ -189,64 +192,84 @@ SETTINGS index_granularity = 1`
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
 
-  async function ensureTable(): Promise<void> {
-    if (bootstrapped) return
-    debug('journal', `probing journal table "${journalTable}"`)
-    try {
-      await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
-      debug('journal', 'journal table exists — checking schema')
-      await ensureSchemaUpgraded()
-      await waitForEveryReplica()
-      bootstrapped = true
-      return
-    } catch (error) {
-      if (isUnknownDatabaseError(error)) {
+  function ensureTable(): Effect.Effect<void, unknown> {
+    return Effect.gen(function* () {
+      if (bootstrapped) return
+      debug('journal', `probing journal table "${journalTable}"`)
+      const existing = yield* Effect.result(
+        Effect.gen(function* () {
+          yield* fromPromise(() => db.query(`SELECT name FROM ${journalTable} LIMIT 0`))
+          debug('journal', 'journal table exists — checking schema')
+          yield* ensureSchemaUpgraded()
+          yield* waitForEveryReplica()
+        }),
+      )
+      if (existing._tag === 'Success') {
+        bootstrapped = true
+        return
+      }
+      if (isUnknownDatabaseError(existing.failure)) {
         debug('journal', 'database does not exist')
         _databaseMissing = true
         bootstrapped = true
         return
       }
-    }
-    debug('journal', 'creating journal table')
-    try {
-      await db.command(createTableSql)
-    } catch (error) {
-      if (isUnknownDatabaseError(error)) {
+      debug('journal', 'creating journal table')
+      const created = yield* Effect.result(fromPromise(() => db.command(createTableSql)))
+      if (created._tag === 'Failure') {
+        if (!isUnknownDatabaseError(created.failure)) return yield* Effect.fail(created.failure)
         debug('journal', 'database missing on CREATE — deferring')
         _databaseMissing = true
         bootstrapped = true
         return
       }
-      throw error
-    }
-    await pRetry(async (attempt) => {
-      await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
-      debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
-    }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
-    await waitForEveryReplica()
-    bootstrapped = true
+      let attempt = 0
+      yield* Effect.gen(function* () {
+        attempt += 1
+        yield* fromPromise(() => db.query(`SELECT name FROM ${journalTable} LIMIT 0`))
+        debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
+      }).pipe(
+        Effect.mapError(normalizeRetryError),
+        Effect.retry({
+          times: 9,
+          schedule: Schedule.spaced(250),
+          while: retryableError,
+        }),
+        Effect.catch(() => Effect.void),
+      )
+      yield* waitForEveryReplica()
+      bootstrapped = true
+    })
   }
 
   // A multi-replica target reads the journal from every replica (#265), which
   // fails while one of them does not have the table yet, e.g. right after the
   // CREATE above or another process's. A single replica needs no wait.
-  async function waitForEveryReplica(): Promise<void> {
-    if (!(await resolveReplicaFanout(db, cluster))) return
-    const [row] = await db.query<{ database: string }>('SELECT currentDatabase() AS database')
-    await waitForTable(db, row?.database ?? 'default', journalTable, { cluster })
+  function waitForEveryReplica(): Effect.Effect<void, unknown> {
+    return Effect.gen(function* () {
+      if (!(yield* fromPromise(() => resolveReplicaFanout(db, cluster)))) return
+      const [row] = yield* fromPromise(() => db.query<{ database: string }>('SELECT currentDatabase() AS database'))
+      yield* fromPromise(() => waitForTable(db, row?.database ?? 'default', journalTable, { cluster }))
+    })
   }
 
-  async function ensureSchemaUpgraded(): Promise<void> {
+  function ensureSchemaUpgraded(): Effect.Effect<void, unknown> {
     // Pre-existing journal tables predate per-operation tracking. Add the
     // columns idempotently so older deployments pick them up on first run
     // of the new chkit. ALTER ADD COLUMN IF NOT EXISTS is a metadata op,
     // no data rewrite.
-    await db.command(
-      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
-    )
-    await db.command(
-      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
-    )
+    return Effect.gen(function* () {
+      yield* fromPromise(() =>
+        db.command(
+          `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
+        ),
+      )
+      yield* fromPromise(() =>
+        db.command(
+          `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
+        ),
+      )
+    })
   }
 
   /**
@@ -257,35 +280,35 @@ SETTINGS index_granularity = 1`
    * write stamps applied_at in milliseconds as the row version, which is what
    * ReplacingMergeTree(applied_at) keeps too.
    */
-  async function journalRows(where: string, limit = ''): Promise<string> {
-    const fanout = await resolveReplicaFanout(db, cluster)
-    const columns = 'name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations'
-    if (!fanout) {
-      return `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit} SETTINGS select_sequential_consistency = 1`
-    }
-    debug('journal', `reading the journal across ${fanout.replicas} replicas of cluster ${fanout.cluster}`)
-    return `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`
+  function journalRows(where: string, limit = ''): Effect.Effect<string, unknown> {
+    return Effect.gen(function* () {
+      const fanout = yield* fromPromise(() => resolveReplicaFanout(db, cluster))
+      const columns =
+        'name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations'
+      if (!fanout) {
+        return `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit} SETTINGS select_sequential_consistency = 1`
+      }
+      debug('journal', `reading the journal across ${fanout.replicas} replicas of cluster ${fanout.cluster}`)
+      return `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`
+    })
   }
 
-  async function trySyncReplica(): Promise<void> {
-    if (replicaSyncSupported === undefined) {
-      try {
-        const rows = await db.query<{ engine: string }>(
-          `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
-        )
+  function trySyncReplica(): Effect.Effect<void, unknown> {
+    return Effect.gen(function* () {
+      if (replicaSyncSupported === undefined) {
+        const rows = yield* fromPromise(() =>
+          db.query<{ engine: string }>(
+            `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
+          ),
+        ).pipe(Effect.catch(() => Effect.succeed([])))
         // Only skip synchronization when the actual engine is known. If system
         // metadata is unavailable, retain the existing best-effort sync behavior.
         replicaSyncSupported = rows[0] ? rows[0].engine.startsWith('Replicated') : true
-      } catch {
-        replicaSyncSupported = true
       }
-    }
-    if (!replicaSyncSupported) return
-    try {
-      await db.command(`SYSTEM SYNC REPLICA ${journalTable}`)
-    } catch {
+      if (!replicaSyncSupported) return
+      yield* fromPromise(() => db.command(`SYSTEM SYNC REPLICA ${journalTable}`)).pipe(Effect.catch(() => Effect.void))
       // Non-replicated or single-node setups don't support SYSTEM SYNC REPLICA.
-    }
+    })
   }
 
   return {
@@ -293,90 +316,130 @@ SETTINGS index_granularity = 1`
       return _databaseMissing
     },
 
-    async readJournal(): Promise<MigrationJournal> {
-      debug('journal', 'reading journal')
-      await ensureTable()
-      if (_databaseMissing) {
-        debug('journal', 'database missing — returning empty journal')
-        return { version: 1, applied: [] }
-      }
-      await trySyncReplica()
-      const rows = await db.query<MigrationRow>(await journalRows('migration_completed = true'))
-      debug('journal', `journal has ${rows.length} applied entries`)
-      return {
-        version: 1,
-        applied: rows.map((row) => ({
-          name: row.name,
-          appliedAt: row.applied_at,
-          checksum: row.checksum,
-        })),
-      }
-    },
-
-    async readMigrationState(migrationName: string): Promise<MigrationRowState | null> {
-      await ensureTable()
-      if (_databaseMissing) return null
-      await trySyncReplica()
-      const rows = await db.query<MigrationRow>(
-        await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1'),
+    readJournal(): Promise<MigrationJournal> {
+      return runEffect(
+        Effect.gen(function* () {
+          debug('journal', 'reading journal')
+          yield* ensureTable()
+          if (_databaseMissing) {
+            debug('journal', 'database missing — returning empty journal')
+            return { version: 1, applied: [] }
+          }
+          yield* trySyncReplica()
+          const query = yield* journalRows('migration_completed = true')
+          const rows = yield* fromPromise(() => db.query<MigrationRow>(query))
+          debug('journal', `journal has ${rows.length} applied entries`)
+          return {
+            version: 1,
+            applied: rows.map((row) => ({
+              name: row.name,
+              appliedAt: row.applied_at,
+              checksum: row.checksum,
+            })),
+          }
+        }),
       )
-      const written = lastWritten.get(migrationName)
-      const row = rows[0]
-      if (!row) return written ?? null
-      const state: MigrationRowState = {
-        name: row.name,
-        appliedAt: row.applied_at,
-        checksum: row.checksum,
-        chkitVersion: row.chkit_version,
-        migrationCompleted: parseBool(row.migration_completed),
-        operations: parseOperations(row.operations),
-      }
-      // Each request can land on a different replica, and SYSTEM SYNC REPLICA
-      // on one request does not make the next one read our write. Never hand a
-      // read-modify-write caller a version older than the one we just wrote, or
-      // its write would drop the progress recorded in between.
-      if (written && rowVersion(state.appliedAt) < rowVersion(written.appliedAt)) {
-        debug('journal', `stale journal read for ${migrationName} — using the last written version`)
-        return written
-      }
-      return state
     },
 
-    async writeMigrationState(state: MigrationRowState): Promise<void> {
-      if (_databaseMissing) {
-        debug('journal', 'resetting databaseMissing flag — migration may have created the database')
-        _databaseMissing = false
-        bootstrapped = false
-      }
-      await ensureTable()
-      const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion || CLI_VERSION)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
-      await pRetry(() => db.command(insertSql), {
-        retries: 4,
-        minTimeout: 0,
-        shouldRetry: async ({ error, attemptNumber }) => {
-          if (!isRetryableInsertRace(error)) return false
-          debug('journal', `insert race detected — retrying (attempt ${attemptNumber}/5)`)
-          await sleep(attemptNumber * 150)
-          return true
-        },
-      })
-      lastWritten.set(state.name, state)
-      await trySyncReplica()
+    readMigrationState(migrationName: string): Promise<MigrationRowState | null> {
+      return runEffect(
+        Effect.gen(function* () {
+          yield* ensureTable()
+          if (_databaseMissing) return null
+          yield* trySyncReplica()
+          const query = yield* journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
+          const rows = yield* fromPromise(() => db.query<MigrationRow>(query))
+          const written = lastWritten.get(migrationName)
+          const row = rows[0]
+          if (!row) return written ?? null
+          const state: MigrationRowState = {
+            name: row.name,
+            appliedAt: row.applied_at,
+            checksum: row.checksum,
+            chkitVersion: row.chkit_version,
+            migrationCompleted: parseBool(row.migration_completed),
+            operations: parseOperations(row.operations),
+          }
+          // Each request can land on a different replica, and SYSTEM SYNC REPLICA
+          // on one request does not make the next one read our write. Never hand a
+          // read-modify-write caller a version older than the one we just wrote, or
+          // its write would drop the progress recorded in between.
+          if (written && rowVersion(state.appliedAt) < rowVersion(written.appliedAt)) {
+            debug('journal', `stale journal read for ${migrationName} — using the last written version`)
+            return written
+          }
+          return state
+        }),
+      )
     },
 
-    async appendEntry(entry: MigrationJournalEntry): Promise<void> {
-      debug('journal', `appending entry: ${entry.name} (checksum: ${entry.checksum})`)
-      // Preserve any per-operation history that async statements wrote
-      // earlier in this migration's apply — we just flip migrationCompleted.
-      const existing = await this.readMigrationState(entry.name)
-      await this.writeMigrationState({
-        name: entry.name,
-        appliedAt: entry.appliedAt,
-        checksum: entry.checksum,
-        chkitVersion: CLI_VERSION,
-        migrationCompleted: true,
-        operations: existing?.operations ?? [],
-      })
+    writeMigrationState(state: MigrationRowState): Promise<void> {
+      return runEffect(
+        Effect.gen(function* () {
+          if (_databaseMissing) {
+            debug('journal', 'resetting databaseMissing flag — migration may have created the database')
+            _databaseMissing = false
+            bootstrapped = false
+          }
+          yield* ensureTable()
+          const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion || CLI_VERSION)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
+          let retries = 0
+          yield* fromPromise(() => db.command(insertSql)).pipe(
+            Effect.mapError(normalizeRetryError),
+            Effect.retry({
+              times: 4,
+              while: (error) =>
+                Effect.gen(function* () {
+                  if (retries >= 4 || !retryableError(error) || !isRetryableInsertRace(error)) return false
+                  retries += 1
+                  debug('journal', `insert race detected — retrying (attempt ${retries}/5)`)
+                  yield* Effect.sleep(retries * 150)
+                  return true
+                }),
+            }),
+            Effect.mapError((error) => (isRetryAbort(error) ? error.originalError : error)),
+          )
+          lastWritten.set(state.name, state)
+          yield* trySyncReplica()
+        }),
+      )
+    },
+
+    appendEntry(entry: MigrationJournalEntry): Promise<void> {
+      const store = this
+      return runEffect(
+        Effect.gen(function* () {
+          debug('journal', `appending entry: ${entry.name} (checksum: ${entry.checksum})`)
+          // Preserve any per-operation history that async statements wrote
+          // earlier in this migration's apply — we just flip migrationCompleted.
+          const existing = yield* fromPromise(() => store.readMigrationState(entry.name))
+          yield* fromPromise(() =>
+            store.writeMigrationState({
+              name: entry.name,
+              appliedAt: entry.appliedAt,
+              checksum: entry.checksum,
+              chkitVersion: CLI_VERSION,
+              migrationCompleted: true,
+              operations: existing?.operations ?? [],
+            }),
+          )
+        }),
+      )
     },
   }
+}
+
+function normalizeRetryError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new TypeError(`Non-error was thrown: "${error}". You should only throw errors.`)
+}
+
+function isRetryAbort(error: Error): error is Error & { originalError: Error } {
+  return error.name === 'AbortError' && 'originalError' in error && error.originalError instanceof Error
+}
+
+function retryableError(error: Error): boolean {
+  if (isRetryAbort(error)) return false
+  return !(error instanceof TypeError) || isNetworkError(error)
 }

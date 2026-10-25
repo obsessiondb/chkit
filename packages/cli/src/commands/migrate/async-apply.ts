@@ -1,14 +1,11 @@
 import { createHash } from 'node:crypto'
-import { setTimeout as defaultSleep } from 'node:timers/promises'
-
 import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
-
+import * as Effect from 'effect/Effect'
+import * as Exit from 'effect/Exit'
+import * as Fiber from 'effect/Fiber'
 import { debug } from '../../runtime/debug.js'
-import type {
-  JournalStore,
-  MigrationRowState,
-  OperationState,
-} from '../../runtime/journal-store.js'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
+import type { JournalStore, MigrationRowState, OperationState } from '../../runtime/journal-store.js'
 import { inProgressChecksumMismatchError } from './errors.js'
 import { hasStatementProgress } from './recovery.js'
 
@@ -56,142 +53,140 @@ export type AsyncApplyResult =
   | { kind: 'completed'; operation: OperationState }
   | { kind: 'skipped'; operation: OperationState }
 
-export async function applyAsyncStatement(input: AsyncApplyInput): Promise<AsyncApplyResult> {
-  const {
-    db,
-    journalStore,
-    sql,
-    migrationName,
-    migrationChecksum,
-    statementIndex,
-    operationType,
-    operationKey,
-    beforeRetry,
-    log,
-    pollIntervalMs = POLL_INTERVAL_MS,
-    sleep = defaultSleep,
-    now = Date.now,
-  } = input
-
-  const queryId = makeDeterministicQueryId(migrationName, statementIndex)
-  debug(
-    'migrate:async',
-    `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
-  )
-
-  const initialMigrationState = acceptChangedChecksum(
-    await journalStore.readMigrationState(migrationName),
-    migrationName,
-    migrationChecksum,
-  )
-  const priorOpState = initialMigrationState?.operations.find(
-    (op) => op.operationIndex === statementIndex,
-  )
-
-  // 1. Already completed → skip entirely
-  if (priorOpState?.status === 'completed') {
-    log(
-      `  ${operationType}: query_id=${queryId} already completed in prior run — skipping`,
-    )
-    return { kind: 'skipped', operation: priorOpState }
-  }
-
-  // 2. Currently in flight on the server → attach. The server clock is read
-  // before the check, so the start derived from it and the attempt's elapsed
-  // time never falls after the start that query_log records for the attempt.
-  const serverNowMs = await readServerNowMs(db)
-  const inFlight = await checkInFlight(db, queryId, operationType)
-  if (inFlight.status === 'running') {
-    log(
-      `  ${operationType}: query_id=${queryId} already running on server — attaching to in-flight query`,
-    )
-    return await pollUntilTerminal({
-      db,
-      journalStore,
-      migrationState: initialMigrationState,
-      migrationName,
-      migrationChecksum,
-      statementIndex,
-      operationType,
-      operationKey,
-      queryId,
-      pollAfterTime: attachLowerBound(serverNowMs, inFlight.elapsedMs),
-      log,
-      pollIntervalMs,
-      sleep,
-      now,
-      // No submit promise — query was started by a prior chkit run that's
-      // now gone. We only observe its eventual completion.
-      submitPromise: null,
-      startedAt: priorOpState?.startedAt ?? isoWithoutZone(new Date(now())),
-    })
-  }
-
-  // 3. Prior in-progress row exists but no replica runs the query → RETRY.
-  // Run before-retry compensation, then resubmit forward.
-  // 4. No prior row → FIRST attempt. Skip compensation, submit forward.
-  // (priorOpState.status === 'completed' was already returned above.)
-  if (priorOpState !== undefined) {
-    const errorTail = priorOpState.lastError
-      ? `: ${firstLine(priorOpState.lastError)}`
-      : ''
-    log(
-      `  ${operationType}: previous attempt of query_id=${queryId} is no longer running (status=${priorOpState.status}${errorTail}) — running before-retry then resubmitting`,
-    )
-    if (beforeRetry !== null) {
-      log(`  ${operationType}: running before-retry SQL`)
-      await db.command(beforeRetry)
-    }
-  } else {
-    log(`  ${operationType}: submitting async (query_id=${queryId})`)
-  }
-
-  const startedAt = isoWithoutZone(new Date(now()))
-
-  // Persist the "started" intent BEFORE submitting, so a crash between here
-  // and the next event still leaves chkit able to detect "this op was tried."
-  await journalStore.writeMigrationState(
-    upsertOperation(
-      initialMigrationState ?? freshMigrationState(migrationName, migrationChecksum),
-      {
-        operationIndex: statementIndex,
-        operationKey,
+export function applyAsyncStatement(input: AsyncApplyInput): Promise<AsyncApplyResult> {
+  return runEffect(
+    Effect.gen(function* () {
+      const {
+        db,
+        journalStore,
+        sql,
+        migrationName,
+        migrationChecksum,
+        statementIndex,
         operationType,
+        operationKey,
+        beforeRetry,
+        log,
+        pollIntervalMs = POLL_INTERVAL_MS,
+        sleep,
+        now = Date.now,
+      } = input
+
+      const queryId = makeDeterministicQueryId(migrationName, statementIndex)
+      debug('migrate:async', `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`)
+
+      const initialMigrationState = acceptChangedChecksum(
+        yield* fromPromise(() => journalStore.readMigrationState(migrationName)),
+        migrationName,
+        migrationChecksum,
+      )
+      const priorOpState = initialMigrationState?.operations.find((op) => op.operationIndex === statementIndex)
+
+      // 1. Already completed → skip entirely
+      if (priorOpState?.status === 'completed') {
+        log(`  ${operationType}: query_id=${queryId} already completed in prior run — skipping`)
+        return { kind: 'skipped', operation: priorOpState }
+      }
+
+      // 2. Currently in flight on the server → attach. The server clock is read
+      // before the check, so the start derived from it and the attempt's elapsed
+      // time never falls after the start that query_log records for the attempt.
+      const serverNowMs = yield* readServerNowMs(db)
+      const inFlight = yield* checkInFlight(db, queryId, operationType)
+      if (inFlight.status === 'running') {
+        log(`  ${operationType}: query_id=${queryId} already running on server — attaching to in-flight query`)
+        return yield* pollUntilTerminal({
+          db,
+          journalStore,
+          migrationState: initialMigrationState,
+          migrationName,
+          migrationChecksum,
+          statementIndex,
+          operationType,
+          operationKey,
+          queryId,
+          pollAfterTime: attachLowerBound(serverNowMs, inFlight.elapsedMs),
+          log,
+          pollIntervalMs,
+          sleep,
+          now,
+          // No submit promise — query was started by a prior chkit run that's
+          // now gone. We only observe its eventual completion.
+          submitPromise: null,
+          startedAt: priorOpState?.startedAt ?? isoWithoutZone(new Date(now())),
+        })
+      }
+
+      // 3. Prior in-progress row exists but no replica runs the query → RETRY.
+      // Run before-retry compensation, then resubmit forward.
+      // 4. No prior row → FIRST attempt. Skip compensation, submit forward.
+      // (priorOpState.status === 'completed' was already returned above.)
+      if (priorOpState !== undefined) {
+        const errorTail = priorOpState.lastError ? `: ${firstLine(priorOpState.lastError)}` : ''
+        log(
+          `  ${operationType}: previous attempt of query_id=${queryId} is no longer running (status=${priorOpState.status}${errorTail}) — running before-retry then resubmitting`,
+        )
+        if (beforeRetry !== null) {
+          log(`  ${operationType}: running before-retry SQL`)
+          yield* fromPromise(() => db.command(beforeRetry))
+        }
+      } else {
+        log(`  ${operationType}: submitting async (query_id=${queryId})`)
+      }
+
+      const startedAt = isoWithoutZone(new Date(now()))
+
+      // Persist the "started" intent BEFORE submitting, so a crash between here
+      // and the next event still leaves chkit able to detect "this op was tried."
+      yield* fromPromise(() =>
+        journalStore.writeMigrationState(
+          upsertOperation(
+            initialMigrationState ?? freshMigrationState(migrationName, migrationChecksum),
+            {
+              operationIndex: statementIndex,
+              operationKey,
+              operationType,
+              queryId,
+              status: 'started',
+              startedAt,
+              finishedAt: null,
+              lastError: '',
+            },
+            now,
+          ),
+        ),
+      )
+
+      // Re-read so we have the row's actual stored applied_at (matters for
+      // subsequent ReplacingMergeTree writes during polling).
+      const stateAfterStart = yield* fromPromise(() => journalStore.readMigrationState(migrationName))
+
+      const pollAfterTime = yield* readSubmissionLowerBound(db)
+      const submitPromise = yield* Effect.try({
+        try: () => db.submit(sql, queryId),
+        catch: (error) => error,
+      })
+
+      return yield* pollUntilTerminal({
+        db,
+        journalStore,
+        migrationState: stateAfterStart,
+        migrationName,
+        migrationChecksum,
+        statementIndex,
+        operationType,
+        operationKey,
         queryId,
-        status: 'started',
+        pollAfterTime,
+        log,
+        pollIntervalMs,
+        sleep,
+        now,
+        submitPromise,
         startedAt,
-        finishedAt: null,
-        lastError: '',
-      },
-      now,
-    ),
+      })
+    }),
   )
-
-  // Re-read so we have the row's actual stored applied_at (matters for
-  // subsequent ReplacingMergeTree writes during polling).
-  const stateAfterStart = await journalStore.readMigrationState(migrationName)
-
-  const pollAfterTime = await readSubmissionLowerBound(db)
-  const submitPromise = db.submit(sql, queryId)
-
-  return await pollUntilTerminal({
-    db,
-    journalStore,
-    migrationState: stateAfterStart,
-    migrationName,
-    migrationChecksum,
-    statementIndex,
-    operationType,
-    operationKey,
-    queryId,
-    pollAfterTime,
-    log,
-    pollIntervalMs,
-    sleep,
-    now,
-    submitPromise,
-    startedAt,
-  })
 }
 
 interface PollUntilTerminalInput {
@@ -208,147 +203,170 @@ interface PollUntilTerminalInput {
   pollAfterTime: string
   log: (line: string) => void
   pollIntervalMs: number
-  sleep: (ms: number) => Promise<void>
+  sleep: ((ms: number) => Promise<void>) | undefined
   now: () => number
   submitPromise: Promise<unknown> | null
   startedAt: string
 }
 
-async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncApplyResult> {
-  const {
-    db,
-    journalStore,
-    migrationState,
-    migrationName,
-    migrationChecksum,
-    statementIndex,
-    operationType,
-    operationKey,
-    queryId,
-    pollAfterTime,
-    log,
-    pollIntervalMs,
-    sleep,
-    now,
-    submitPromise,
-    startedAt,
-  } = input
+function pollUntilTerminal(input: PollUntilTerminalInput): Effect.Effect<AsyncApplyResult, unknown> {
+  return Effect.gen(function* () {
+    const {
+      db,
+      journalStore,
+      migrationState,
+      migrationName,
+      migrationChecksum,
+      statementIndex,
+      operationType,
+      operationKey,
+      queryId,
+      pollAfterTime,
+      log,
+      pollIntervalMs,
+      sleep,
+      now,
+      submitPromise,
+      startedAt,
+    } = input
 
-  let submitError: Error | null = null
-  // Capture the submit promise rejection so it doesn't surface as an
-  // unhandled rejection. Polling is the source of truth for outcome.
-  const submitPromiseGuarded =
-    submitPromise === null
-      ? null
-      : submitPromise.catch((error: unknown) => {
-          submitError = error instanceof Error ? error : new Error(String(error))
-        })
-
-  const pollStartedAt = now()
-  let transientPollErrors = 0
-  try {
-    for (;;) {
-      await sleep(pollIntervalMs)
-      let status: QueryStatus
-      try {
-        status = await db.queryStatus(queryId, { afterTime: pollAfterTime })
-        transientPollErrors = 0
-      } catch (pollError) {
-        // The poll request itself failed (e.g. HTTP 524 gateway timeout). The async
-        // query is very likely still running server-side, so don't abort the migration —
-        // keep polling up to a bounded budget. A re-run re-attaches via the deterministic id.
-        transientPollErrors += 1
-        const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
-        if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
-          throw new Error(
-            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+    let submitError: Error | null = null
+    // Capture the submit promise rejection so it doesn't surface as an
+    // unhandled rejection. Polling is the source of truth for outcome.
+    const submission =
+      submitPromise === null
+        ? null
+        : yield* Effect.forkChild(
+            fromPromise(() => submitPromise).pipe(
+              Effect.catch((error) =>
+                Effect.sync(() => {
+                  submitError = error instanceof Error ? error : new Error(String(error))
+                }),
+              ),
+            ),
+            { startImmediately: true },
           )
-        }
-        log(
-          `  ${operationType}: poll request failed (${describeError(pollError)}) — load may still be running, retrying (elapsed ${failedElapsed}s)`,
-        )
-        continue
-      }
-      const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
-      if (status.status === 'finished') {
-        const finishedSec = Math.round((status.durationMs ?? 0) / 1000)
-        const finishedOp: OperationState = {
-          operationIndex: statementIndex,
-          operationKey,
-          operationType,
-          queryId,
-          status: 'completed',
-          startedAt,
-          finishedAt: isoWithoutZone(new Date(now())),
-          lastError: '',
-        }
-        const baseState =
-          migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(
-          upsertOperation(baseState, finishedOp, now),
-        )
-        log(
-          `  ${operationType}: finished — written=${formatRows(status.writtenRows)} (${formatBytes(status.writtenBytes)}) in ${finishedSec}s`,
-        )
-        return { kind: 'completed', operation: finishedOp }
-      }
+    const pollStartedAt = now()
+    let transientPollErrors = 0
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const outcome = yield* Effect.exit(
+          restore(
+            Effect.gen(function* () {
+              for (;;) {
+                yield* sleep ? fromPromise(() => sleep(pollIntervalMs)) : Effect.sleep(pollIntervalMs)
+                const polled = yield* Effect.result(
+                  fromPromise(() => db.queryStatus(queryId, { afterTime: pollAfterTime })),
+                )
+                if (polled._tag === 'Failure') {
+                  const pollError = polled.failure
+                  // The poll request itself failed (e.g. HTTP 524 gateway timeout). The async
+                  // query is very likely still running server-side, so don't abort the migration —
+                  // keep polling up to a bounded budget. A re-run re-attaches via the deterministic id.
+                  transientPollErrors += 1
+                  const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
+                  if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
+                    return yield* Effect.fail(
+                      new Error(
+                        `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+                      ),
+                    )
+                  }
+                  log(
+                    `  ${operationType}: poll request failed (${describeError(pollError)}) — load may still be running, retrying (elapsed ${failedElapsed}s)`,
+                  )
+                  continue
+                }
+                const status = polled.success
+                transientPollErrors = 0
+                const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
-      if (status.status === 'failed') {
-        const failedOp: OperationState = {
-          operationIndex: statementIndex,
-          operationKey,
-          operationType,
-          queryId,
-          status: 'failed',
-          startedAt,
-          finishedAt: isoWithoutZone(new Date(now())),
-          lastError: status.error ?? '<unknown>',
-        }
-        const baseState =
-          migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(
-          upsertOperation(baseState, failedOp, now),
-        )
-        throw new Error(
-          `Async migration step ${operationType} failed (query_id ${queryId}): ${status.error ?? '<unknown>'}`,
-        )
-      }
+                if (status.status === 'finished') {
+                  const finishedSec = Math.round((status.durationMs ?? 0) / 1000)
+                  const finishedOp: OperationState = {
+                    operationIndex: statementIndex,
+                    operationKey,
+                    operationType,
+                    queryId,
+                    status: 'completed',
+                    startedAt,
+                    finishedAt: isoWithoutZone(new Date(now())),
+                    lastError: '',
+                  }
+                  const baseState = migrationState ?? freshMigrationState(migrationName, migrationChecksum)
+                  yield* fromPromise(() =>
+                    journalStore.writeMigrationState(upsertOperation(baseState, finishedOp, now)),
+                  )
+                  log(
+                    `  ${operationType}: finished — written=${formatRows(status.writtenRows)} (${formatBytes(status.writtenBytes)}) in ${finishedSec}s`,
+                  )
+                  return {
+                    kind: 'completed',
+                    operation: finishedOp,
+                  } satisfies AsyncApplyResult
+                }
 
-      if (status.status === 'running') {
-        log(progressLine(operationType, status, elapsedSec))
-        continue
-      }
+                if (status.status === 'failed') {
+                  const failedOp: OperationState = {
+                    operationIndex: statementIndex,
+                    operationKey,
+                    operationType,
+                    queryId,
+                    status: 'failed',
+                    startedAt,
+                    finishedAt: isoWithoutZone(new Date(now())),
+                    lastError: status.error ?? '<unknown>',
+                  }
+                  const baseState = migrationState ?? freshMigrationState(migrationName, migrationChecksum)
+                  yield* fromPromise(() => journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now)))
+                  return yield* Effect.fail(
+                    new Error(
+                      `Async migration step ${operationType} failed (query_id ${queryId}): ${status.error ?? '<unknown>'}`,
+                    ),
+                  )
+                }
 
-      // status === 'unknown'
-      // If submit has already rejected, the query never made it server-side
-      // (e.g. SQL parse error) — record the attempt as failed and surface that
-      // error. Otherwise it's a transient gap (just-submitted or just-finished); loop.
-      if (submitError) {
-        const failedOp: OperationState = {
-          operationIndex: statementIndex,
-          operationKey,
-          operationType,
-          queryId,
-          status: 'failed',
-          startedAt,
-          finishedAt: isoWithoutZone(new Date(now())),
-          lastError: describeError(submitError),
+                if (status.status === 'running') {
+                  log(progressLine(operationType, status, elapsedSec))
+                  continue
+                }
+
+                // status === 'unknown'
+                // If submit has already rejected, the query never made it server-side
+                // (e.g. SQL parse error) — record the attempt as failed and surface that
+                // error. Otherwise it's a transient gap (just-submitted or just-finished); loop.
+                if (submitError) {
+                  const failedOp: OperationState = {
+                    operationIndex: statementIndex,
+                    operationKey,
+                    operationType,
+                    queryId,
+                    status: 'failed',
+                    startedAt,
+                    finishedAt: isoWithoutZone(new Date(now())),
+                    lastError: describeError(submitError),
+                  }
+                  const baseState = migrationState ?? freshMigrationState(migrationName, migrationChecksum)
+                  yield* fromPromise(() => journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now)))
+                  return yield* Effect.fail(submitError)
+                }
+                log(`  ${operationType}: status unknown — still polling (elapsed ${elapsedSec}s)`)
+              }
+            }),
+          ),
+        )
+        if (submission !== null) {
+          if (Exit.hasInterrupts(outcome)) {
+            yield* Fiber.interrupt(submission)
+          } else {
+            yield* restore(Fiber.await(submission)).pipe(Effect.onInterrupt(() => Fiber.interrupt(submission)))
+          }
         }
-        const baseState =
-          migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
-        throw submitError
-      }
-      log(
-        `  ${operationType}: status unknown — still polling (elapsed ${elapsedSec}s)`,
-      )
-    }
-  } finally {
-    if (submitPromiseGuarded) {
-      await submitPromiseGuarded.catch(() => {})
-    }
-  }
+        return yield* outcome
+      }),
+    )
+  })
 }
 
 // applyMigration re-keys an edited in-progress state before any statement
@@ -377,24 +395,27 @@ function acceptChangedChecksum(
 // attempt runs on the replica that received it (#246). A replica that cannot be
 // read fails the check instead of being skipped, and a failed check stops here,
 // before anything is compensated or resubmitted.
-async function checkInFlight(
+function checkInFlight(
   db: ClickHouseExecutor,
   queryId: string,
   operationType: string,
-): Promise<QueryStatus> {
-  try {
-    return await db.queryStatus(queryId, { everyReplica: true })
-  } catch (error) {
-    throw new Error(
-      `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
-      { cause: error },
-    )
-  }
+): Effect.Effect<QueryStatus, unknown> {
+  return fromPromise(() => db.queryStatus(queryId, { everyReplica: true })).pipe(
+    Effect.mapError(
+      (error) =>
+        new Error(
+          `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
+          { cause: error },
+        ),
+    ),
+  )
 }
 
 // Read just before a submission, as an ISO UTC string for queryStatus.
-async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string> {
-  return queryLogLowerBound(await readServerNowMs(db), 0)
+function readSubmissionLowerBound(db: ClickHouseExecutor): Effect.Effect<string, unknown> {
+  return Effect.gen(function* () {
+    return queryLogLowerBound(yield* readServerNowMs(db), 0)
+  })
 }
 
 // The attached attempt had run for elapsedMs when the in-flight check, which
@@ -408,28 +429,22 @@ function queryLogLowerBound(serverNowMs: number, startedMsAgo: number): string {
   return new Date(serverNowMs - startedMsAgo - QUERY_LOG_SKEW_MARGIN_MS).toISOString()
 }
 
-async function readServerNowMs(db: ClickHouseExecutor): Promise<number> {
-  const [row] = await db.query<{ now_ms: number | string }>(
-    'SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms',
-  )
-  const serverNowMs = Number(row?.now_ms)
-  if (!Number.isFinite(serverNowMs)) {
-    throw new Error('Could not read the ClickHouse server time for an async statement.')
-  }
-  return serverNowMs
+function readServerNowMs(db: ClickHouseExecutor): Effect.Effect<number, unknown> {
+  return Effect.gen(function* () {
+    const [row] = yield* fromPromise(() =>
+      db.query<{ now_ms: number | string }>('SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms'),
+    )
+    const serverNowMs = Number(row?.now_ms)
+    if (!Number.isFinite(serverNowMs)) {
+      return yield* Effect.fail(new Error('Could not read the ClickHouse server time for an async statement.'))
+    }
+    return serverNowMs
+  })
 }
 
-export function upsertOperation(
-  state: MigrationRowState,
-  op: OperationState,
-  now: () => number,
-): MigrationRowState {
-  const others = state.operations.filter(
-    (existing) => existing.operationIndex !== op.operationIndex,
-  )
-  const operations = [...others, op].sort(
-    (a, b) => a.operationIndex - b.operationIndex,
-  )
+export function upsertOperation(state: MigrationRowState, op: OperationState, now: () => number): MigrationRowState {
+  const others = state.operations.filter((existing) => existing.operationIndex !== op.operationIndex)
+  const operations = [...others, op].sort((a, b) => a.operationIndex - b.operationIndex)
   return {
     ...state,
     appliedAt: isoWithoutZone(new Date(now())),
@@ -439,10 +454,7 @@ export function upsertOperation(
   }
 }
 
-export function freshMigrationState(
-  migrationName: string,
-  checksum: string,
-): MigrationRowState {
+export function freshMigrationState(migrationName: string, checksum: string): MigrationRowState {
   return {
     name: migrationName,
     appliedAt: '1970-01-01 00:00:00.000',
@@ -453,27 +465,12 @@ export function freshMigrationState(
   }
 }
 
-export function makeDeterministicQueryId(
-  migrationName: string,
-  statementIndex: number,
-): string {
-  const hex = createHash('sha256')
-    .update(`chkit:${migrationName}:${statementIndex}`)
-    .digest('hex')
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20, 32),
-  ].join('-')
+export function makeDeterministicQueryId(migrationName: string, statementIndex: number): string {
+  const hex = createHash('sha256').update(`chkit:${migrationName}:${statementIndex}`).digest('hex')
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join('-')
 }
 
-function progressLine(
-  operationLabel: string,
-  status: QueryStatus,
-  elapsedSec: number,
-): string {
+function progressLine(operationLabel: string, status: QueryStatus, elapsedSec: number): string {
   const rows = formatRows(status.writtenRows)
   const bytes = formatBytes(status.writtenBytes)
   return `  ${operationLabel}: written=${rows} (${bytes}), elapsed ${elapsedSec}s`

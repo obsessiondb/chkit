@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
 import { defineFlags, typedFlags, type ChxPluginCommand, type ChxPluginCommandContext } from '../../plugins.js'
 import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { runSnapshotRebuild } from './rebuild.js'
@@ -16,27 +18,33 @@ export const snapshotCommand: ChxPluginCommand = {
   run: cmdSnapshot,
 }
 
-async function cmdSnapshot(ctx: ChxPluginCommandContext): Promise<number> {
-  const f = typedFlags(ctx.flags, [...GLOBAL_FLAGS, ...SNAPSHOT_FLAGS] as const)
-  const [subcommand, ...rest] = ctx.args
+function cmdSnapshot(ctx: ChxPluginCommandContext): Promise<number> {
+  return runEffect(
+    Effect.gen(function* () {
+      const f = typedFlags(ctx.flags, [...GLOBAL_FLAGS, ...SNAPSHOT_FLAGS] as const)
+      const [subcommand, ...rest] = ctx.args
 
-  if (subcommand === undefined) {
-    throw new Error(`Missing snapshot subcommand. Available: rebuild.\n${SNAPSHOT_USAGE}`)
-  }
-  if (subcommand !== 'rebuild') {
-    throw new Error(`Unknown snapshot subcommand "${subcommand}". Available: rebuild.\n${SNAPSHOT_USAGE}`)
-  }
-  if (rest.length > 0) {
-    throw new Error(`Unexpected argument "${rest[0]}" for \`chkit snapshot rebuild\`.\n${SNAPSHOT_USAGE}`)
-  }
-  if (f['--table'] !== undefined) {
-    throw new Error(
-      '`chkit snapshot rebuild` always rewrites the whole snapshot and does not support --table. Run it without --table.',
-    )
-  }
+      if (subcommand === undefined) {
+        throw new Error(`Missing snapshot subcommand. Available: rebuild.\n${SNAPSHOT_USAGE}`)
+      }
+      if (subcommand !== 'rebuild') {
+        throw new Error(`Unknown snapshot subcommand "${subcommand}". Available: rebuild.\n${SNAPSHOT_USAGE}`)
+      }
+      if (rest.length > 0) {
+        throw new Error(`Unexpected argument "${rest[0]}" for \`chkit snapshot rebuild\`.\n${SNAPSHOT_USAGE}`)
+      }
+      if (f['--table'] !== undefined) {
+        throw new Error(
+          '`chkit snapshot rebuild` always rewrites the whole snapshot and does not support --table. Run it without --table.',
+        )
+      }
 
-  return runSnapshotRebuild(
-    { dryrun: f['--dryrun'] === true, jsonMode: f['--json'] === true },
-    { config: ctx.config, configPath: ctx.configPath, flags: ctx.flags, pluginRuntime: ctx.pluginRuntime },
+      return yield* fromPromise(() =>
+        runSnapshotRebuild(
+          { dryrun: f['--dryrun'] === true, jsonMode: f['--json'] === true },
+          { config: ctx.config, configPath: ctx.configPath, flags: ctx.flags, pluginRuntime: ctx.pluginRuntime },
+        ),
+      )
+    }),
   )
 }

@@ -107,33 +107,35 @@ export async function renderPlanText(input: {
   emptyMigrations: string[]
   retry: RetryResolution | undefined
 }): Promise<void> {
-  const { migrationsDir, scope, undeterminedScope, pending, emptyMigrations, retry } = input
-  const empty = new Set(emptyMigrations)
-  if (scope.enabled) {
-    console.log(`Table scope: ${scope.selector ?? ''} (${scope.matchCount} matched)`)
-    for (const table of scope.matchedTables) console.log(`- ${table}`)
-  }
-  if (undeterminedScope.length > 0) {
-    console.log(
-      `⚠ ${undeterminedScope.length} pending migration(s) have no table markers; ` +
-        "including them because their target tables can't be determined under --table:",
-    )
-    for (const file of undeterminedScope) console.log(`  - ${file}`)
-  }
-  console.log(`Pending migrations: ${pending.length}`)
-  for (const file of pending) {
-    console.log(empty.has(file) ? `- ${file}  (no executable statements)` : `- ${file}`)
-    const sql = await readFile(join(migrationsDir, file), 'utf8')
-    const meta = extractMigrationMetadata(sql)
-    if (meta.log) console.log(`    ${meta.log}`)
-  }
-  if (emptyMigrations.length > 0) {
-    console.log(
-      `⚠ ${emptyMigrations.length} pending migration(s) contain no executable statements. ` +
-        'chkit migrate --apply refuses to run until each has SQL or is deleted.',
-    )
-  }
-  renderRetryNotice(retry)
+  return runEffect(Effect.gen(function* () {
+    const { migrationsDir, scope, undeterminedScope, pending, emptyMigrations, retry } = input
+    const empty = new Set(emptyMigrations)
+    if (scope.enabled) {
+      console.log(`Table scope: ${scope.selector ?? ''} (${scope.matchCount} matched)`)
+      for (const table of scope.matchedTables) console.log(`- ${table}`)
+    }
+    if (undeterminedScope.length > 0) {
+      console.log(
+        `⚠ ${undeterminedScope.length} pending migration(s) have no table markers; ` +
+          "including them because their target tables can't be determined under --table:",
+      )
+      for (const file of undeterminedScope) console.log(`  - ${file}`)
+    }
+    console.log(`Pending migrations: ${pending.length}`)
+    for (const file of pending) {
+      console.log(empty.has(file) ? `- ${file}  (no executable statements)` : `- ${file}`)
+      const sql = yield* fromPromise(() => readFile(join(migrationsDir, file), 'utf8'))
+      const meta = extractMigrationMetadata(sql)
+      if (meta.log) console.log(`    ${meta.log}`)
+    }
+    if (emptyMigrations.length > 0) {
+      console.log(
+        `⚠ ${emptyMigrations.length} pending migration(s) contain no executable statements. ` +
+          'chkit migrate --apply refuses to run until each has SQL or is deleted.',
+      )
+    }
+    renderRetryNotice(retry)
+  }))
 }
 
 export function renderPlanOnlyNotice(): void {
@@ -307,3 +309,5 @@ function formatRetryNotice(retry: RetryResolution): string[] {
   }
   return lines
 }
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../../runtime/effect.js'

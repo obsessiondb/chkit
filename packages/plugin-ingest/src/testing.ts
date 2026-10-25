@@ -1,5 +1,5 @@
 import { validateJournalHistory } from './journal-history.js'
-import { toJournalRow, type JournalRow } from './journal.js'
+import { toJournalRow, type JournalRow } from './journal-records.js'
 import type { CommittedCheckpoint, DestinationAdapter, Journal, JournalEvent, Row } from './types.js'
 
 export interface MemoryJournal extends Journal {

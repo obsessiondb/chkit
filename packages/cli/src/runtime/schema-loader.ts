@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from './effect.js'
 import process from 'node:process'
 
 import { loadSchemaDefinitions as loadSchemaDefinitionsFromCore } from '@chkit/core/schema-loader'
@@ -26,29 +28,41 @@ export async function loadSchemaDefinitionsWithHooks(
   input: LoadSchemaDefinitionsWithHooksInput,
   deps: { pluginRuntime: PluginRuntime },
 ): Promise<SchemaDefinition[]> {
-  await deps.pluginRuntime.runOnConfigLoaded({
-    command: input.command,
-    config: input.config,
-    configPath: input.configPath,
-    tableScope: resolveTableScope(input.tableSelector, []),
-    flags: input.flags,
-  })
+  return runEffect(
+    Effect.gen(function* () {
+      yield* fromPromise(() =>
+        deps.pluginRuntime.runOnConfigLoaded({
+          command: input.command,
+          config: input.config,
+          configPath: input.configPath,
+          tableScope: resolveTableScope(input.tableSelector, []),
+          flags: input.flags,
+        }),
+      )
 
-  const definitions = await loadSchemaDefinitions(input.config.schema)
-  return deps.pluginRuntime.runOnSchemaLoaded({
-    command: input.command,
-    config: input.config,
-    tableScope: resolveTableScope(input.tableSelector, tableKeysFromDefinitions(definitions)),
-    flags: input.flags,
-    jsonMode: input.jsonMode,
-    definitions,
-  })
+      const definitions = yield* fromPromise(() => loadSchemaDefinitions(input.config.schema))
+      return yield* fromPromise(() =>
+        deps.pluginRuntime.runOnSchemaLoaded({
+          command: input.command,
+          config: input.config,
+          tableScope: resolveTableScope(input.tableSelector, tableKeysFromDefinitions(definitions)),
+          flags: input.flags,
+          jsonMode: input.jsonMode,
+          definitions,
+        }),
+      )
+    }),
+  )
 }
 
 export async function loadSchemaDefinitions(schemaGlobs: string | string[]): Promise<SchemaDefinition[]> {
-  const globs = Array.isArray(schemaGlobs) ? schemaGlobs : [schemaGlobs]
-  debug('schema', `loading definitions from globs: [${globs.join(', ')}] (cwd: ${process.cwd()})`)
-  const definitions = await loadSchemaDefinitionsFromCore(schemaGlobs, { cwd: process.cwd() })
-  debug('schema', `loaded ${definitions.length} schema definitions`)
-  return definitions
+  return runEffect(
+    Effect.gen(function* () {
+      const globs = Array.isArray(schemaGlobs) ? schemaGlobs : [schemaGlobs]
+      debug('schema', `loading definitions from globs: [${globs.join(', ')}] (cwd: ${process.cwd()})`)
+      const definitions = yield* fromPromise(() => loadSchemaDefinitionsFromCore(schemaGlobs, { cwd: process.cwd() }))
+      debug('schema', `loaded ${definitions.length} schema definitions`)
+      return definitions
+    }),
+  )
 }

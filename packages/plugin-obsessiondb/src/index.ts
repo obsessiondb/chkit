@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from './runtime.js'
 import { resolve } from 'node:path'
 
 import {
@@ -165,7 +167,9 @@ export function resolveStripBehavior(
  * have no grant for the Distributed engine. Returns one message per Distributed
  * table so `generate` and `check` fail before ClickHouse rejects the CREATE.
  */
-export function findDistributedTables(definitions: SchemaDefinition[]): string[] {
+export function findDistributedTables(
+	definitions: SchemaDefinition[],
+): string[] {
 	return definitions.flatMap((def) =>
 		def.kind === 'table' && isDistributedEngine(def.engine)
 			? [
@@ -179,27 +183,33 @@ export function stripSharedPrefix(engine: string): string {
 	return engine.replace(/^Shared/, '')
 }
 
-async function resolveServiceOverride(input: {
+function resolveServiceOverride(input: {
 	configPath: string
 	credentials: NonNullable<Awaited<ReturnType<typeof loadCredentials>>>
 	name: string
-}): Promise<SelectedService> {
-	const services = await listServices(input.credentials)
-	const service = services.find((candidate) => candidate.name === input.name)
-	if (service) {
-		return { service_slug: service.slug, service_name: service.name }
-	}
+}): Effect.Effect<SelectedService, unknown> {
+	return Effect.gen(function* () {
+		const services = yield* fromPromise(() => listServices(input.credentials))
+		const service = services.find((candidate) => candidate.name === input.name)
+		if (service) {
+			return { service_slug: service.slug, service_name: service.name }
+		}
 
-	const aliases = await loadServiceAliases(input.configPath)
-	const alias = aliases[input.name]
-	if (alias) return alias
+		const aliases = yield* fromPromise(() =>
+			loadServiceAliases(input.configPath),
+		)
+		const alias = aliases[input.name]
+		if (alias) return alias
 
-	const availableServices =
-		services.map((candidate) => candidate.name).join(', ') || '<none>'
-	const availableAliases = Object.keys(aliases).sort().join(', ') || '<none>'
-	throw new Error(
-		`obsessiondb: service "${input.name}" not found. Available services: ${availableServices}. Available aliases: ${availableAliases}`,
-	)
+		const availableServices =
+			services.map((candidate) => candidate.name).join(', ') || '<none>'
+		const availableAliases = Object.keys(aliases).sort().join(', ') || '<none>'
+		return yield* Effect.fail(
+			new Error(
+				`obsessiondb: service "${input.name}" not found. Available services: ${availableServices}. Available aliases: ${availableAliases}`,
+			),
+		)
+	})
 }
 
 function stripCloudSettings(
@@ -271,7 +281,14 @@ function createObsessionDBPlugin(
 				// so only they act on these flags. migrate, status, drift and check
 				// keep accepting them, so existing scripts that pass them to those
 				// commands don't break.
-				command: ['generate', 'migrate', 'status', 'drift', 'check', 'snapshot'],
+				command: [
+					'generate',
+					'migrate',
+					'status',
+					'drift',
+					'check',
+					'snapshot',
+				],
 				flags: [
 					{
 						name: '--force-shared-engines',
@@ -288,7 +305,15 @@ function createObsessionDBPlugin(
 				],
 			},
 			{
-				command: ['generate', 'migrate', 'status', 'drift', 'check', 'query', 'pull'],
+				command: [
+					'generate',
+					'migrate',
+					'status',
+					'drift',
+					'check',
+					'query',
+					'pull',
+				],
 				flags: [
 					{
 						name: '--service',
@@ -301,84 +326,105 @@ function createObsessionDBPlugin(
 			...BACKFILL_EXTEND_COMMANDS,
 		],
 		hooks: {
-			async getContext({ config, configPath, command, flags }) {
-				const creds = await loadCredentials()
-				if (!creds) return
-				const effectiveCreds = {
-					...creds,
-					base_url: resolveBaseUrl(creds.base_url),
-				}
+			async getContext({
+				config,
+				configPath,
+				command,
+				flags,
+			}): Promise<{ executor: unknown } | undefined> {
+				return runEffect(
+					Effect.gen(function* () {
+						const creds = yield* fromPromise(() => loadCredentials())
+						if (!creds) return
+						const effectiveCreds = {
+							...creds,
+							base_url: resolveBaseUrl(creds.base_url),
+						}
 
-				const serviceOverride = flags['--service']
-				const overrideName =
-					typeof serviceOverride === 'string' ? serviceOverride.trim() : ''
+						const serviceOverride = flags['--service']
+						const overrideName =
+							typeof serviceOverride === 'string' ? serviceOverride.trim() : ''
 
-				let service: SelectedService | null
-				if (overrideName.length > 0) {
-					service = await resolveServiceOverride({
-						configPath,
-						credentials: effectiveCreds,
-						name: overrideName,
-					})
-				} else {
-					service = await loadSelectedService(configPath)
-				}
-				if (!service) {
-					if (command === 'query' && !config.clickhouse) {
-						throw new Error(
-							'authenticated but no ObsessionDB service is selected. Run `chkit obsessiondb service select` or pass `--service <name>`.',
-						)
-					}
-					return
-				}
+						let service: SelectedService | null
+						if (overrideName.length > 0) {
+							service = yield* resolveServiceOverride({
+								configPath,
+								credentials: effectiveCreds,
+								name: overrideName,
+							})
+						} else {
+							service = yield* fromPromise(() =>
+								loadSelectedService(configPath),
+							)
+						}
+						if (!service) {
+							if (command === 'query' && !config.clickhouse) {
+								return yield* Effect.fail(
+									new Error(
+										'authenticated but no ObsessionDB service is selected. Run `chkit obsessiondb service select` or pass `--service <name>`.',
+									),
+								)
+							}
+							return
+						}
 
-				return {
-					executor: createRemoteExecutor({
-						credentials: effectiveCreds,
-						serviceSlug: service.service_slug,
+						return {
+							executor: createRemoteExecutor({
+								credentials: effectiveCreds,
+								serviceSlug: service.service_slug,
+							}),
+						}
 					}),
-				}
+				)
 			},
-			async onInit(context) {
-				if (context.jsonMode) return
-				if (context.command === 'obsessiondb') return
-				const creds = await loadCredentials()
-				if (!creds) return
-				const effectiveCreds = {
-					...creds,
-					base_url: resolveBaseUrl(creds.base_url),
-				}
-				const serviceOverride = context.flags['--service']
-				const overrideName =
-					typeof serviceOverride === 'string' ? serviceOverride.trim() : ''
+			async onInit(context): Promise<void> {
+				return runEffect(
+					Effect.gen(function* () {
+						if (context.jsonMode) return
+						if (context.command === 'obsessiondb') return
+						const creds = yield* fromPromise(() => loadCredentials())
+						if (!creds) return
+						const effectiveCreds = {
+							...creds,
+							base_url: resolveBaseUrl(creds.base_url),
+						}
+						const serviceOverride = context.flags['--service']
+						const overrideName =
+							typeof serviceOverride === 'string' ? serviceOverride.trim() : ''
 
-				let service: SelectedService | null
-				if (overrideName.length > 0) {
-					try {
-						service = await resolveServiceOverride({
-							configPath: context.configPath,
-							credentials: effectiveCreds,
-							name: overrideName,
-						})
-					} catch {
-						return
-					}
-				} else {
-					service = await loadSelectedService(context.configPath)
-				}
-				if (service) {
-					console.log(`obsessiondb: using service "${service.service_name}"\n`)
-				} else if (context.command === 'query' || context.config?.clickhouse) {
-					// Suppress the "no service selected" reminder when the user has a
-					// direct `clickhouse` target configured: ObsessionDB was layered in
-					// from a global `chkit obsessiondb login` profile, not chosen for this
-					// project, so service selection is irrelevant and the notice is noise.
-					return
-				} else {
-					console.log(
-						'obsessiondb: authenticated but no service selected (run `chkit obsessiondb service select` or pass `--service <name>`)',
-					)
-				}
+						let service: SelectedService | null
+						if (overrideName.length > 0) {
+							service = yield* resolveServiceOverride({
+								configPath: context.configPath,
+								credentials: effectiveCreds,
+								name: overrideName,
+							}).pipe(Effect.catchCause(() => Effect.succeed(null)))
+							if (!service) return
+						} else {
+							service = yield* fromPromise(() =>
+								loadSelectedService(context.configPath),
+							)
+						}
+						if (service) {
+							console.log(
+								`obsessiondb: using service "${service.service_name}"\n`,
+							)
+						} else if (
+							context.command === 'query' ||
+							context.config?.clickhouse
+						) {
+							// Suppress the "no service selected" reminder when the user has a
+							// direct `clickhouse` target configured: ObsessionDB was layered in
+							// from a global `chkit obsessiondb login` profile, not chosen for this
+							// project, so service selection is irrelevant and the notice is noise.
+							return
+						} else {
+							console.log(
+								'obsessiondb: authenticated but no service selected (run `chkit obsessiondb service select` or pass `--service <name>`)',
+							)
+						}
+					}),
+				)
 			},
 			onSchemaLoaded(context) {
 				const shouldStrip = resolveStripBehavior(context.config, context.flags)
@@ -402,23 +448,41 @@ function createObsessionDBPlugin(
 				}
 				return rewritten.definitions
 			},
-			async onCheck({ config, configPath, flags }) {
-				// Same target decision as onSchemaLoaded: ObsessionDB host or
-				// --force-shared-engines.
-				if (resolveStripBehavior(config, flags)) return undefined
-				const definitions = await loadSchemaDefinitions(config.schema, {
-					cwd: resolve(configPath, '..'),
-				})
-				const findings = findDistributedTables(definitions).map((message) => ({
-					code: 'obsessiondb_distributed_unsupported' as const,
-					message,
-					severity: 'error' as const,
-				}))
-				return { plugin: 'obsessiondb', evaluated: true, ok: findings.length === 0, findings }
+			async onCheck({
+				config,
+				configPath,
+				flags,
+			}): Promise<ObsessionDBCheckResult | undefined> {
+				return runEffect(
+					Effect.gen(function* () {
+						// Same target decision as onSchemaLoaded: ObsessionDB host or
+						// --force-shared-engines.
+						if (resolveStripBehavior(config, flags)) return undefined
+						const definitions = yield* fromPromise(() =>
+							loadSchemaDefinitions(config.schema, {
+								cwd: resolve(configPath, '..'),
+							}),
+						)
+						const findings = findDistributedTables(definitions).map(
+							(message) => ({
+								code: 'obsessiondb_distributed_unsupported' as const,
+								message,
+								severity: 'error' as const,
+							}),
+						)
+						return {
+							plugin: 'obsessiondb',
+							evaluated: true,
+							ok: findings.length === 0,
+							findings,
+						}
+					}),
+				)
 			},
 			onCheckReport({ result, print }) {
 				if (result.ok) return
-				for (const finding of result.findings) print(`obsessiondb: ${finding.message}`)
+				for (const finding of result.findings)
+					print(`obsessiondb: ${finding.message}`)
 			},
 			async onBeforePluginCommand(context) {
 				return handleBackfillCommand(context)

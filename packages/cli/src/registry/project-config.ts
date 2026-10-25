@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../runtime/effect.js'
 import { readFile } from 'node:fs/promises'
 import { dirname, relative, resolve } from 'node:path'
 
@@ -26,79 +28,96 @@ interface Edit {
 }
 
 /** Plan source edits without importing project code or writing any files. */
-export async function planProjectConfig(input: ProjectConfigInput): Promise<{
+export function planProjectConfig(input: ProjectConfigInput): Promise<{
   files: PlannedFile[]
   configPath: string
 }> {
-  const configPath = resolve(input.cwd, input.configPath ?? 'clickhouse.config.ts')
-  await assertProjectPath(input.cwd, configPath)
-  const providerEntry = resolve(input.providerEntry)
-  const providerPath = relativePath(input.cwd, providerEntry)
-  const names = [...new Set(input.exportNames)]
-  if (names.length === 0 || names.some((name) => !/^[A-Za-z_$][\w$]*$/.test(name) || name === 'default')) {
-    throw new Error('Registry entry exports must be nonempty, named JavaScript identifiers.')
-  }
-  const content = await readOptional(configPath)
-  if (content === undefined) {
-    return { configPath, files: [{ path: configPath, content: newConfig(providerPath) }] }
-  }
-
-  const source = parseSource(configPath, content)
-  const fail: (reason: string) => never = (reason) => {
-    throw configError(configPath, providerPath, reason)
-  }
-  const object = configObject(source, fail)
-  const properties = configProperties(object, fail)
-  const entry = properties.get('entry')
-  const schema = properties.get('schema')
-  if (entry && schema) fail('Both entry and schema are present; choose one schema discovery mode.')
-
-  const edits: Edit[] = []
-  const additions: string[] = []
-  const files: PlannedFile[] = []
-  if (entry) {
-    const entryValue = literalString(entry.initializer)
-    if (entryValue === undefined || entryValue === '') fail('entry must be a nonempty literal path.')
-    // chkit resolves configured schema/entry paths from cwd, even with --config.
-    const entryPath = resolve(input.cwd, entryValue)
-    await assertProjectPath(input.cwd, entryPath)
-    if (entryPath !== providerEntry) {
-      const entryContent = await readOptional(entryPath)
-      if (entryContent === undefined) fail(`The configured entry does not exist: ${entryPath}.`)
-      const updated = addEntryExports(entryPath, entryContent, providerEntry, names)
-      if (updated !== entryContent) files.push({ path: entryPath, content: updated })
-    }
-  } else if (schema) {
-    const value = unwrap(schema.initializer)
-    if (ts.isArrayLiteralExpression(value)) {
-      const paths = value.elements.map((element) => literalString(element))
-      if (paths.some((path) => path === undefined)) fail('schema must contain only literal glob/path strings.')
-      assertSchemaCoverage(input, paths.filter((path): path is string => path !== undefined), fail)
-      if (!paths.some((path) => path !== undefined && resolve(input.cwd, path) === providerEntry)) {
-        appendList(edits, value.elements, value.end - 1, [quote(providerPath)])
+  return runEffect(
+    Effect.gen(function* () {
+      const configPath = resolve(input.cwd, input.configPath ?? 'clickhouse.config.ts')
+      yield* fromPromise(() => assertProjectPath(input.cwd, configPath))
+      const providerEntry = resolve(input.providerEntry)
+      const providerPath = relativePath(input.cwd, providerEntry)
+      const names = [...new Set(input.exportNames)]
+      if (names.length === 0 || names.some((name) => !/^[A-Za-z_$][\w$]*$/.test(name) || name === 'default')) {
+        throw new Error('Registry entry exports must be nonempty, named JavaScript identifiers.')
       }
-    } else {
-      const path = literalString(value)
-      if (path === undefined) fail('schema must be a literal string or array of literal strings.')
-      assertSchemaCoverage(input, [path], fail)
-      if (resolve(input.cwd, path) !== providerEntry) {
-        edits.push({ start: value.getStart(source), end: value.end, text: `[${value.getText(source)}, ${quote(providerPath)}]` })
+      const content = yield* fromPromise(() => readOptional(configPath))
+      if (content === undefined) {
+        return { configPath, files: [{ path: configPath, content: newConfig(providerPath) }] }
       }
-    }
-  } else {
-    additions.push(`entry: ${quote(providerPath)}`)
-  }
 
-  registerIngest(source, properties.get('plugins'), edits, additions, fail)
-  appendList(edits, object.properties, object.end - 1, additions)
-  const updated = applyEdits(content, edits)
-  if (updated !== content) files.unshift({ path: configPath, content: updated })
-  return { configPath, files }
+      const source = parseSource(configPath, content)
+      const fail: (reason: string) => never = (reason) => {
+        throw configError(configPath, providerPath, reason)
+      }
+      const object = configObject(source, fail)
+      const properties = configProperties(object, fail)
+      const entry = properties.get('entry')
+      const schema = properties.get('schema')
+      if (entry && schema) fail('Both entry and schema are present; choose one schema discovery mode.')
+
+      const edits: Edit[] = []
+      const additions: string[] = []
+      const files: PlannedFile[] = []
+      if (entry) {
+        const entryValue = literalString(entry.initializer)
+        if (entryValue === undefined || entryValue === '') fail('entry must be a nonempty literal path.')
+        // chkit resolves configured schema/entry paths from cwd, even with --config.
+        const entryPath = resolve(input.cwd, entryValue)
+        yield* fromPromise(() => assertProjectPath(input.cwd, entryPath))
+        if (entryPath !== providerEntry) {
+          const entryContent = yield* fromPromise(() => readOptional(entryPath))
+          if (entryContent === undefined) fail(`The configured entry does not exist: ${entryPath}.`)
+          const updated = addEntryExports(entryPath, entryContent, providerEntry, names)
+          if (updated !== entryContent) files.push({ path: entryPath, content: updated })
+        }
+      } else if (schema) {
+        const value = unwrap(schema.initializer)
+        if (ts.isArrayLiteralExpression(value)) {
+          const paths = value.elements.map((element) => literalString(element))
+          if (paths.some((path) => path === undefined)) fail('schema must contain only literal glob/path strings.')
+          assertSchemaCoverage(
+            input,
+            paths.filter((path): path is string => path !== undefined),
+            fail,
+          )
+          if (!paths.some((path) => path !== undefined && resolve(input.cwd, path) === providerEntry)) {
+            appendList(edits, value.elements, value.end - 1, [quote(providerPath)])
+          }
+        } else {
+          const path = literalString(value)
+          if (path === undefined) fail('schema must be a literal string or array of literal strings.')
+          assertSchemaCoverage(input, [path], fail)
+          if (resolve(input.cwd, path) !== providerEntry) {
+            edits.push({
+              start: value.getStart(source),
+              end: value.end,
+              text: `[${value.getText(source)}, ${quote(providerPath)}]`,
+            })
+          }
+        }
+      } else {
+        additions.push(`entry: ${quote(providerPath)}`)
+      }
+
+      registerIngest(source, properties.get('plugins'), edits, additions, fail)
+      appendList(edits, object.properties, object.end - 1, additions)
+      const updated = applyEdits(content, edits)
+      if (updated !== content) files.unshift({ path: configPath, content: updated })
+      return { configPath, files }
+    }),
+  )
 }
 
-function assertSchemaCoverage(input: ProjectConfigInput, paths: readonly string[], fail: (reason: string) => never): void {
+function assertSchemaCoverage(
+  input: ProjectConfigInput,
+  paths: readonly string[],
+  fail: (reason: string) => never,
+): void {
   const entry = relative(input.cwd, input.providerEntry).replaceAll('\\', '/')
-  const files = (input.providerFiles ?? []).filter((path) => path !== input.providerEntry)
+  const files = (input.providerFiles ?? [])
+    .filter((path) => path !== input.providerEntry)
     .map((path) => relative(input.cwd, path).replaceAll('\\', '/'))
   const patterns = paths.map((path) => {
     const negative = path.startsWith('!')
@@ -106,13 +125,21 @@ function assertSchemaCoverage(input: ProjectConfigInput, paths: readonly string[
     return `${negative ? '!' : ''}${normalized}`
   })
   // fast-glob applies exclusions to all positive paths, irrespective of order.
-  const ordered = [...patterns.filter((pattern) => !pattern.startsWith('!')), entry, ...patterns.filter((pattern) => pattern.startsWith('!'))]
+  const ordered = [
+    ...patterns.filter((pattern) => !pattern.startsWith('!')),
+    entry,
+    ...patterns.filter((pattern) => pattern.startsWith('!')),
+  ]
   const overlap = micromatch(files, ordered, { dot: false })
   if (overlap.length > 0) {
-    fail(`Existing schema globs also discover provider internals (${overlap.join(', ')}), duplicating entry exports. Narrow the schema globs to existing schema directories, or use an explicit project entry; register only ${entry} for this provider.`)
+    fail(
+      `Existing schema globs also discover provider internals (${overlap.join(', ')}), duplicating entry exports. Narrow the schema globs to existing schema directories, or use an explicit project entry; register only ${entry} for this provider.`,
+    )
   }
   if (micromatch([entry], ordered, { dot: false }).length === 0) {
-    fail(`Existing schema exclusions hide ${entry}. Narrow the exclusion or use an explicit project entry before installing.`)
+    fail(
+      `Existing schema exclusions hide ${entry}. Narrow the exclusion or use an explicit project entry before installing.`,
+    )
   }
 }
 
@@ -125,18 +152,26 @@ function configObject(source: ts.SourceFile, fail: (reason: string) => never): t
   let expression = unwrap(assignment.expression)
   if (ts.isCallExpression(expression)) {
     const defineNames = importedNames(source, '@chkit/core', 'defineConfig')
-    if (!ts.isIdentifier(expression.expression) || !defineNames.includes(expression.expression.text) || expression.arguments.length !== 1) {
+    if (
+      !ts.isIdentifier(expression.expression) ||
+      !defineNames.includes(expression.expression.text) ||
+      expression.arguments.length !== 1
+    ) {
       return fail('The config wrapper must be defineConfig imported from @chkit/core.')
     }
     const argument = expression.arguments[0]
     if (!argument) return fail('defineConfig requires a literal object.')
     expression = unwrap(argument)
   }
-  if (!ts.isObjectLiteralExpression(expression)) return fail('Computed/function configurations cannot be edited automatically.')
+  if (!ts.isObjectLiteralExpression(expression))
+    return fail('Computed/function configurations cannot be edited automatically.')
   return expression
 }
 
-function configProperties(object: ts.ObjectLiteralExpression, fail: (reason: string) => never): Map<string, ts.PropertyAssignment> {
+function configProperties(
+  object: ts.ObjectLiteralExpression,
+  fail: (reason: string) => never,
+): Map<string, ts.PropertyAssignment> {
   const properties = new Map<string, ts.PropertyAssignment>()
   for (const property of object.properties) {
     if (!ts.isPropertyAssignment(property) || ts.isComputedPropertyName(property.name)) {
@@ -161,17 +196,22 @@ function registerIngest(
   let list: ts.ArrayLiteralExpression | undefined
   if (plugins) {
     const value = unwrap(plugins.initializer)
-    if (!ts.isArrayLiteralExpression(value)) fail('plugins must be a literal array; preserve its existing registrations when adding ingest().')
+    if (!ts.isArrayLiteralExpression(value))
+      fail('plugins must be a literal array; preserve its existing registrations when adding ingest().')
     list = value
     let registrations = 0
     for (const element of list.elements) {
       const registration = unwrap(element)
       if (!ts.isCallExpression(registration) || !ts.isIdentifier(registration.expression)) {
-        fail('Plugin registrations must be direct factory calls; inspect computed/inline registrations before adding ingest().')
+        fail(
+          'Plugin registrations must be direct factory calls; inspect computed/inline registrations before adding ingest().',
+        )
       }
       if (aliases.includes(registration.expression.text)) registrations += 1
       else if (!isOtherPluginFactory(source, registration.expression.text)) {
-        fail(`Cannot identify plugin factory ${registration.expression.text}; automatic wiring supports direct named imports from @chkit/plugin-* packages. Add ingest() manually when using custom wrappers.`)
+        fail(
+          `Cannot identify plugin factory ${registration.expression.text}; automatic wiring supports direct named imports from @chkit/plugin-* packages. Add ingest() manually when using custom wrappers.`,
+        )
       }
     }
     if (registrations > 1) fail('The ingestion plugin is registered more than once.')
@@ -195,7 +235,9 @@ function addEntryExports(path: string, content: string, providerEntry: string, n
   const specifier = relativePath(dirname(path), providerEntry).replace(/\.ts$/, '.js')
   const snippet = `export { ${names.join(', ')} } from ${quote(specifier)}`
   const fail: (reason: string) => never = (reason) => {
-    throw new Error(`Cannot wire registry exports into ${path}: ${reason}\nKeep existing schema exports and add or reconcile this exact export:\n${snippet}`)
+    throw new Error(
+      `Cannot wire registry exports into ${path}: ${reason}\nKeep existing schema exports and add or reconcile this exact export:\n${snippet}`,
+    )
   }
   const found = new Set<string>()
   const occupied = new Set<string>()
@@ -205,7 +247,10 @@ function addEntryExports(path: string, content: string, providerEntry: string, n
       if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
         fail('Wildcard/namespace exports cannot be checked safely for name collisions. Use explicit named exports.')
       }
-      const moduleName = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : undefined
+      const moduleName =
+        statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
+          ? statement.moduleSpecifier.text
+          : undefined
       const sameProvider = moduleName !== undefined && sameModule(dirname(path), moduleName, providerEntry)
       for (const exported of statement.exportClause.elements) {
         if (exported.isTypeOnly) continue
@@ -217,10 +262,22 @@ function addEntryExports(path: string, content: string, providerEntry: string, n
         if (names.includes(name) && sameProvider && original === name) found.add(name)
         else occupied.add(name)
       }
-    } else if (ts.canHaveModifiers(statement) && ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+    } else if (
+      ts.canHaveModifiers(statement) &&
+      ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
       if (ts.isVariableStatement(statement)) {
         for (const declaration of statement.declarationList.declarations) bindingNames(declaration.name, occupied)
-      } else if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) && statement.name && ts.isIdentifier(statement.name)) {
+      } else if (
+        (ts.isFunctionDeclaration(statement) ||
+          ts.isClassDeclaration(statement) ||
+          ts.isEnumDeclaration(statement) ||
+          ts.isModuleDeclaration(statement) ||
+          ts.isInterfaceDeclaration(statement) ||
+          ts.isTypeAliasDeclaration(statement)) &&
+        statement.name &&
+        ts.isIdentifier(statement.name)
+      ) {
         occupied.add(statement.name.text)
       }
     }
@@ -234,10 +291,16 @@ function addEntryExports(path: string, content: string, providerEntry: string, n
 
 function importedNames(source: ts.SourceFile, moduleName: string, imported: string): string[] {
   return source.statements.flatMap((statement) => {
-    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== moduleName) return []
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== moduleName
+    )
+      return []
     const clause = statement.importClause
     if (!clause || clause.isTypeOnly || !clause.namedBindings || !ts.isNamedImports(clause.namedBindings)) return []
-    return clause.namedBindings.elements.filter((element) => !element.isTypeOnly && (element.propertyName?.text ?? element.name.text) === imported)
+    return clause.namedBindings.elements
+      .filter((element) => !element.isTypeOnly && (element.propertyName?.text ?? element.name.text) === imported)
       .map((element) => element.name.text)
   })
 }
@@ -247,7 +310,11 @@ function isOtherPluginFactory(source: ts.SourceFile, name: string): boolean {
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) return false
     // Local/third-party wrappers may themselves register ingestion. Do not add
     // another registration unless the existing official factory is identified.
-    if (!/^@chkit\/plugin-[a-z0-9-]+$/.test(statement.moduleSpecifier.text) || statement.moduleSpecifier.text === '@chkit/plugin-ingest') return false
+    if (
+      !/^@chkit\/plugin-[a-z0-9-]+$/.test(statement.moduleSpecifier.text) ||
+      statement.moduleSpecifier.text === '@chkit/plugin-ingest'
+    )
+      return false
     const clause = statement.importClause
     if (!clause || clause.isTypeOnly) return false
     return clause.namedBindings && ts.isNamedImports(clause.namedBindings)
@@ -261,24 +328,38 @@ function appendList(edits: Edit[], items: ts.NodeArray<ts.Node>, close: number, 
   const last = items.at(-1)
   const needsComma = last !== undefined && !items.hasTrailingComma
   if (last && needsComma && last.end !== close) edits.push({ start: last.end, end: last.end, text: ',' })
-  edits.push({ start: close, end: close, text: `${needsComma && last?.end === close ? ',' : ''}\n  ${additions.join(',\n  ')},\n` })
+  edits.push({
+    start: close,
+    end: close,
+    text: `${needsComma && last?.end === close ? ',' : ''}\n  ${additions.join(',\n  ')},\n`,
+  })
 }
 
 function applyEdits(content: string, edits: readonly Edit[]): string {
-  return [...edits].sort((a, b) => b.start - a.start).reduce(
-    (text, edit) => text.slice(0, edit.start) + edit.text + text.slice(edit.end), content,
-  )
+  return [...edits]
+    .sort((a, b) => b.start - a.start)
+    .reduce((text, edit) => text.slice(0, edit.start) + edit.text + text.slice(edit.end), content)
 }
 
 function parseSource(path: string, content: string): ts.SourceFile {
-  const diagnostics = ts.transpileModule(content, { fileName: path, reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } }).diagnostics ?? []
+  const diagnostics =
+    ts.transpileModule(content, {
+      fileName: path,
+      reportDiagnostics: true,
+      compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
+    }).diagnostics ?? []
   const error = diagnostics.find((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
   if (error) throw new Error(`Cannot edit ${path}: ${ts.flattenDiagnosticMessageText(error.messageText, '\n')}`)
   return ts.createSourceFile(path, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 }
 
 function unwrap(expression: ts.Expression): ts.Expression {
-  if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isSatisfiesExpression(expression) || ts.isNonNullExpression(expression)) {
+  if (
+    ts.isParenthesizedExpression(expression) ||
+    ts.isAsExpression(expression) ||
+    ts.isSatisfiesExpression(expression) ||
+    ts.isNonNullExpression(expression)
+  ) {
     return unwrap(expression.expression)
   }
   return expression
@@ -339,7 +420,9 @@ async function readOptional(path: string): Promise<string | undefined> {
 }
 
 function configError(path: string, providerPath: string, reason: string): Error {
-  return new Error(`Cannot safely update ${path}: ${reason}\nNo files were written. Add ingestion while preserving existing plugins:\nimport { ingest as chkitIngest } from '@chkit/plugin-ingest'\n// Add chkitIngest() to your plugins array.\n// In schema mode, add this exact path to the existing schema paths:\n${quote(providerPath)}\n// In entry mode, explicitly re-export the template's schema and pipeline from the existing entry.`)
+  return new Error(
+    `Cannot safely update ${path}: ${reason}\nNo files were written. Add ingestion while preserving existing plugins:\nimport { ingest as chkitIngest } from '@chkit/plugin-ingest'\n// Add chkitIngest() to your plugins array.\n// In schema mode, add this exact path to the existing schema paths:\n${quote(providerPath)}\n// In entry mode, explicitly re-export the template's schema and pipeline from the existing entry.`,
+  )
 }
 
 function newConfig(providerPath: string): string {

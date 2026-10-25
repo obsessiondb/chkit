@@ -14,6 +14,8 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
+import * as Effect from 'effect/Effect'
+import { attempt, run } from './effect-runtime.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -681,18 +683,23 @@ export function createExecutorWithClient(
 
 	return {
 		async command(sql: string): Promise<void> {
-			try {
-				const result = await client.command({
+			return run(Effect.gen(function* () {
+				const result = yield* attempt(() => client.command({
 					query: sql,
 					http_headers: { 'X-DDL': '1' },
+				}))
+				yield* Effect.try({
+					try: () => {
+						assertStreamedQuerySucceeded({
+							response_headers: result.response_headers,
+							query_id: result.query_id,
+							sql,
+						})
+						logProfiling(profiler, sql, result.query_id, result.summary)
+					},
+					catch: (error) => error,
 				})
-				assertStreamedQuerySucceeded({
-					response_headers: result.response_headers,
-					query_id: result.query_id,
-					sql,
-				})
-				logProfiling(profiler, sql, result.query_id, result.summary)
-			} catch (error) {
+			}).pipe(Effect.catch((error) => Effect.gen(function* () {
 				if (isUnknownDatabaseError(error)) {
 					const fallback = createClient({
 						url: config.url,
@@ -703,23 +710,21 @@ export function createExecutorWithClient(
 						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
 						log: SILENT_CLIENT_LOG,
 					})
-					try {
-						const fallbackResult = await fallback.command({
+					yield* Effect.acquireUseRelease(Effect.succeed(fallback), () => Effect.gen(function* () {
+						const fallbackResult = yield* attempt(() => fallback.command({
 							query: sql,
 							http_headers: { 'X-DDL': '1' },
-						})
+						}))
 						assertStreamedQuerySucceeded({
 							response_headers: fallbackResult.response_headers,
 							query_id: fallbackResult.query_id,
 							sql,
 						})
-					} finally {
-						await fallback.close()
-					}
+					}), () => attempt(() => fallback.close()))
 					return
 				}
-				wrapConnectionError(error, config.url, config.username)
-			}
+				return yield* Effect.try({ try: () => wrapConnectionError(error, config.url, config.username), catch: (failure) => failure })
+			}))))
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
@@ -847,92 +852,91 @@ export function createExecutorWithClient(
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).
-			const fanout = await resolveReplicaFanout(this, config.cluster)
-			const from = (table: ObservableSystemTable) =>
-				fanout ? allReplicas(fanout, `system.${table}`) : observableSystemTable(this, table)
-			const skipUnavailable = options?.everyReplica ? 0 : 1
-			try {
-				const processesFrom = from('processes')
-				const running = await client.query({
-					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
-					query_params: { qid: queryId },
-					format: 'JSONEachRow',
-				})
-				const runningRows = await running.json<{
-					read_rows: string
-					read_bytes: string
-					written_rows: string
-					written_bytes: string
-					elapsed: string
-				}>()
-				const [proc] = runningRows
-				if (proc) {
-					return {
-						status: 'running',
-						readRows: Number(proc.read_rows),
-						readBytes: Number(proc.read_bytes),
-						writtenRows: Number(proc.written_rows),
-						writtenBytes: Number(proc.written_bytes),
-						elapsedMs: Math.round(Number(proc.elapsed) * 1000),
+			const executor = this
+			return run(Effect.gen(function* () {
+				const fanout = yield* attempt(() => resolveReplicaFanout(executor, config.cluster))
+				const from = (table: ObservableSystemTable) =>
+					fanout ? allReplicas(fanout, `system.${table}`) : observableSystemTable(executor, table)
+				const skipUnavailable = options?.everyReplica ? 0 : 1
+					const processesFrom = from('processes')
+					const running = yield* attempt(() => client.query({
+						query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
+						query_params: { qid: queryId },
+						format: 'JSONEachRow',
+					}))
+					const runningRows = yield* attempt(() => running.json<{
+						read_rows: string
+						read_bytes: string
+						written_rows: string
+						written_bytes: string
+						elapsed: string
+					}>())
+					const [proc] = runningRows
+					if (proc) {
+						return {
+							status: 'running' as const,
+							readRows: Number(proc.read_rows),
+							readBytes: Number(proc.read_bytes),
+							writtenRows: Number(proc.written_rows),
+							writtenBytes: Number(proc.written_bytes),
+							elapsedMs: Math.round(Number(proc.elapsed) * 1000),
+						}
 					}
-				}
 
-				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
-				const queryLogFrom = from('query_log')
-				const log = await client.query({
-					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
+					const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
+					const queryLogFrom = from('query_log')
+					const log = yield* attempt(() => client.query({
+						query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${queryLogFrom}
 WHERE user = currentUser()
-  AND query_id = {qid:String}
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
-  AND is_initial_query = 1
-  AND query_start_time >= parseDateTimeBestEffort({after:String})
+	  AND query_id = {qid:String}
+	  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+	  AND is_initial_query = 1
+	  AND query_start_time >= parseDateTimeBestEffort({after:String})
 ORDER BY event_time DESC
 LIMIT 1
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
-					query_params: { qid: queryId, after: afterTime },
-					format: 'JSONEachRow',
-				})
-				const logRows = await log.json<{
-					type: string
-					written_rows: string
-					written_bytes: string
-					query_duration_ms: string
-					exception: string
-				}>()
+						query_params: { qid: queryId, after: afterTime },
+						format: 'JSONEachRow',
+					}))
+					const logRows = yield* attempt(() => log.json<{
+						type: string
+						written_rows: string
+						written_bytes: string
+						query_duration_ms: string
+						exception: string
+					}>())
 
-				if (logRows.length === 0) {
-					return { status: 'unknown' }
-				}
-
-				const [row] = logRows
-				if (!row) {
-					return { status: 'unknown' }
-				}
-				if (row.type === 'QueryFinish') {
-					return {
-						status: 'finished',
-						writtenRows: Number(row.written_rows),
-						writtenBytes: Number(row.written_bytes),
-						durationMs: Number(row.query_duration_ms),
+					if (logRows.length === 0) {
+						return { status: 'unknown' as const }
 					}
-				}
 
-				return {
-					status: 'failed',
-					durationMs: Number(row.query_duration_ms),
-					error: row.exception,
-				}
-			} catch (error) {
-				wrapConnectionError(error, config.url, config.username)
-			}
+					const [row] = logRows
+					if (!row) {
+						return { status: 'unknown' as const }
+					}
+					if (row.type === 'QueryFinish') {
+						return {
+							status: 'finished' as const,
+							writtenRows: Number(row.written_rows),
+							writtenBytes: Number(row.written_bytes),
+							durationMs: Number(row.query_duration_ms),
+						}
+					}
+
+					return {
+						status: 'failed' as const,
+						durationMs: Number(row.query_duration_ms),
+						error: row.exception,
+					}
+			}).pipe(Effect.catch((error) => Effect.try({ try: () => wrapConnectionError(error, config.url, config.username), catch: (failure) => failure }))))
 		},
 		async close(): Promise<void> {
-			await Promise.all([
-				client.close(),
-				fireAndForgetClient.close(),
-				compressedClient?.close(),
-			])
+			return run(Effect.forEach(
+				[client, fireAndForgetClient, ...(compressedClient ? [compressedClient] : [])],
+				(connection) => attempt(() => connection.close()),
+				{ concurrency: 'unbounded', discard: true },
+			))
 		},
 		async listSchemaObjects(): Promise<SchemaObjectRef[]> {
 			const rows = await this.query<SystemTableRow>(
@@ -957,28 +961,30 @@ WHERE is_temporary = 0
 		},
 		async listTableDetails(databases: string[]): Promise<IntrospectedTable[]> {
 			if (databases.length === 0) return []
-
-			const quotedDatabases = databases
-				.map((dbName) => `'${dbName.replace(/'/g, "''")}'`)
-				.join(', ')
-			const tables = await this.query<SystemTableRow>(
-				`SELECT database, name, engine, create_table_query, primary_key
+			const executor = this
+			return run(Effect.gen(function* () {
+				const quotedDatabases = databases
+					.map((dbName) => `'${dbName.replace(/'/g, "''")}'`)
+					.join(', ')
+				const tables = yield* attempt(() => executor.query<SystemTableRow>(
+					`SELECT database, name, engine, create_table_query, primary_key
 FROM system.tables
 WHERE is_temporary = 0
-  AND database IN (${quotedDatabases})`,
-			)
-			const columns = await this.query<SystemColumnRow>(
-				`SELECT database, table, name, type, default_kind, default_expression, comment, position, compression_codec
+	  AND database IN (${quotedDatabases})`,
+				))
+				const columns = yield* attempt(() => executor.query<SystemColumnRow>(
+					`SELECT database, table, name, type, default_kind, default_expression, comment, position, compression_codec
 FROM system.columns
 WHERE database IN (${quotedDatabases})`,
-			)
-			const indexes = await this.query<SystemSkippingIndexRow>(
-				`SELECT database, table, name, expr, type_full AS type, granularity
+				))
+				const indexes = yield* attempt(() => executor.query<SystemSkippingIndexRow>(
+					`SELECT database, table, name, expr, type_full AS type, granularity
 FROM system.data_skipping_indices
 WHERE database IN (${quotedDatabases})`,
-			)
+				))
 
-			return buildIntrospectedTables(tables, columns, indexes)
+				return buildIntrospectedTables(tables, columns, indexes)
+			}))
 		},
 	}
 }

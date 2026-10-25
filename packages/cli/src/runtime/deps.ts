@@ -4,6 +4,8 @@ import { writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, resolve } from 'node:path'
 import process from 'node:process'
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from './effect.js'
 
 /**
  * `chkit init` scaffolds a `clickhouse.config.ts` that imports `@chkit/core` (and
@@ -63,31 +65,38 @@ export function installCommand(pm: PackageManager): { cmd: string; args: string[
  * Returns true if an install was run, false if deps were already present or the install failed
  * (a failed install never throws — init keeps going and prints the manual command instead).
  */
-export async function ensureProjectDependencies(
-  cwd: string,
-  print: (msg: string) => void,
-): Promise<boolean> {
-  if (projectHasCoreDependency(cwd)) return false
+export async function ensureProjectDependencies(cwd: string, print: (msg: string) => void): Promise<boolean> {
+  return runEffect(
+    Effect.gen(function* () {
+      if (projectHasCoreDependency(cwd)) return false
 
-  await ensurePackageJson(cwd)
-  const pm = detectPackageManager()
-  const { cmd, args } = installCommand(pm)
+      yield* fromPromise(() => ensurePackageJson(cwd))
+      const pm = detectPackageManager()
+      const { cmd, args } = installCommand(pm)
 
-  print(`No dependencies found — installing chkit with ${cmd}…`)
-  try {
-    await run(cmd, args, cwd)
-    return true
-  } catch {
-    print(`Could not install dependencies automatically. Run this first, then retry: ${cmd} ${args.join(' ')}`)
-    return false
-  }
+      print(`No dependencies found — installing chkit with ${cmd}…`)
+      return yield* fromPromise(() => run(cmd, args, cwd)).pipe(
+        Effect.as(true),
+        Effect.catch(() =>
+          Effect.sync(() => {
+            print(`Could not install dependencies automatically. Run this first, then retry: ${cmd} ${args.join(' ')}`)
+            return false
+          }),
+        ),
+      )
+    }),
+  )
 }
 
 /** Write a minimal `package.json` if the project has none, so the package manager has a manifest. */
 async function ensurePackageJson(cwd: string): Promise<void> {
   const pkgPath = resolve(cwd, 'package.json')
   if (existsSync(pkgPath)) return
-  const name = basename(cwd).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-|-$/g, '') || 'chkit-project'
+  const name =
+    basename(cwd)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-|-$/g, '') || 'chkit-project'
   const manifest = { name, private: true, type: 'module' }
   await writeFile(pkgPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }

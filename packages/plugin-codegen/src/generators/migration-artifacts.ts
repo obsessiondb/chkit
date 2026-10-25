@@ -1,5 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import * as Effect from 'effect/Effect'
+import { attempt, run } from '../effect-runtime.js'
 
 import type {
   GenerateMigrationArtifactsInput,
@@ -24,48 +26,51 @@ function renderMigrationsArray(migrations: ReadonlyArray<{ name: string; sql: st
 export async function generateMigrationArtifacts(
   input: GenerateMigrationArtifactsInput
 ): Promise<GenerateMigrationArtifactsOutput> {
-  const normalized = normalizeCodegenOptions(input.options)
-  const toolVersion = input.toolVersion ?? '0.1.0'
+  return run(Effect.gen(function* () {
+    const normalized = normalizeCodegenOptions(input.options)
+    const toolVersion = input.toolVersion ?? '0.1.0'
 
-  const entries = await readdir(input.migrationsDir).catch(() => [] as string[])
-  const sqlFiles = entries.filter((f) => f.endsWith('.sql')).sort()
+    const entries = yield* attempt(() => readdir(input.migrationsDir)).pipe(Effect.catch(() => Effect.succeed([])))
+    const sqlFiles = entries.filter((f) => f.endsWith('.sql')).sort()
 
-  const migrations = await Promise.all(
-    sqlFiles.map(async (file) => ({
-      name: file.replace(/\.sql$/, ''),
-      sql: await readFile(join(input.migrationsDir, file), 'utf8'),
-    }))
-  )
+    const migrations = yield* Effect.forEach(
+      sqlFiles,
+      (file) => Effect.map(attempt(() => readFile(join(input.migrationsDir, file), 'utf8')), (sql) => ({
+        name: file.replace(/\.sql$/, ''), sql,
+      })),
+      { concurrency: 'unbounded' },
+    )
 
-  const header = renderHeader(toolVersion)
-  const migrationsArray = renderMigrationsArray(migrations)
+    const header = renderHeader(toolVersion)
+    const migrationsArray = renderMigrationsArray(migrations)
 
-  // biome-ignore lint/style/useTemplate: join+concat is clearer here
-  const content = [
-    ...header,
-    '',
-    "import { extractExecutableStatements } from '@chkit/core'",
-    '',
-    'export interface MigrationEntry {',
-    '  name: string',
-    '  sql: string',
-    '}',
-    '',
-    'export interface MigrationExecutor {',
-    '  command(sql: string): Promise<void>',
-    '  query<T>(sql: string): Promise<T[]>',
-    '}',
-    '',
-    migrationsArray,
-    '',
-    RUN_MIGRATIONS_FUNCTION,
-  ].join('\n').trimEnd() + '\n'
+    // biome-ignore lint/style/useTemplate: join+concat is clearer here
+    const content = [
+      ...header,
+      '',
+      "import { extractExecutableStatements } from '@chkit/core'",
+      '',
+      'export interface MigrationEntry {',
+      '  name: string',
+      '  sql: string',
+      '}',
+      '',
+      'export interface MigrationExecutor {',
+      '  command(sql: string): Promise<void>',
+      '  query<T>(sql: string): Promise<T[]>',
+      '}',
+      '',
+      migrationsArray,
+      '',
+      RUN_MIGRATIONS_FUNCTION,
+    ].join('\n').trimEnd() + '\n'
 
-  return {
-    content,
-    outFile: normalized.migrationsOutFile,
-    migrationCount: migrations.length,
-  }
+    return {
+      content,
+      outFile: normalized.migrationsOutFile,
+      migrationCount: migrations.length,
+    }
+  }))
 }
 
 // The runMigrations function is static — it doesn't depend on the SQL splitter source,

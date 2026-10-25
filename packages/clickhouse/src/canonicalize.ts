@@ -1,4 +1,6 @@
 import type { ClickHouseExecutor } from './index.js'
+import * as Effect from 'effect/Effect'
+import { attempt, run } from './effect-runtime.js'
 
 function quoteLiteral(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
@@ -53,27 +55,29 @@ export async function canonicalizeSqlFragments(
   fragments: readonly string[],
   options: { wrap: boolean }
 ): Promise<Map<string, string>> {
-  const result = new Map<string, string>()
-  const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
-  if (unique.length === 0) return result
+  return run(Effect.gen(function* () {
+    const result = new Map<string, string>()
+    const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
+    if (unique.length === 0) return result
 
-  const formatCall = options.wrap
-    ? `formatQuerySingleLineOrNull('SELECT ' || fragment)`
-    : `formatQuerySingleLineOrNull(fragment)`
+    const formatCall = options.wrap
+      ? `formatQuerySingleLineOrNull('SELECT ' || fragment)`
+      : `formatQuerySingleLineOrNull(fragment)`
 
-  for (const batch of batchFragments(unique)) {
-    const arrayLiteral = batch.map(quoteLiteral).join(', ')
-    const rows = await executor.query<{ formatted: Array<string | null> }>(
-      `SELECT arrayMap(fragment -> ${formatCall}, [${arrayLiteral}]) AS formatted`
-    )
-    const formatted = rows[0]?.formatted ?? []
-    for (let i = 0; i < batch.length; i += 1) {
-      const raw = batch[i]
-      const value = formatted[i]
-      if (raw === undefined || value == null) continue
-      const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
-      if (canonical) result.set(raw, canonical)
+    for (const batch of batchFragments(unique)) {
+      const arrayLiteral = batch.map(quoteLiteral).join(', ')
+      const rows = yield* attempt(() => executor.query<{ formatted: Array<string | null> }>(
+        `SELECT arrayMap(fragment -> ${formatCall}, [${arrayLiteral}]) AS formatted`
+      ))
+      const formatted = rows[0]?.formatted ?? []
+      for (let i = 0; i < batch.length; i += 1) {
+        const raw = batch[i]
+        const value = formatted[i]
+        if (raw === undefined || value == null) continue
+        const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
+        if (canonical) result.set(raw, canonical)
+      }
     }
-  }
-  return result
+    return result
+  }))
 }

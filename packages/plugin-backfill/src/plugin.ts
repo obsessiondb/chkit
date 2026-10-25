@@ -1,7 +1,10 @@
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
+import * as Effect from 'effect/Effect'
 
-import { executeBackfill, type BackfillProgress } from './async-backfill.js'
+import type { BackfillProgress } from './async-backfill.js'
+import { executeBackfillEffect } from './async-backfill-runtime.js'
+import { fromPromise, runEffect } from './effect-runtime.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
@@ -75,136 +78,148 @@ async function runBackfill(input: {
   print: (value: unknown) => void
   jsonMode: boolean
 }): Promise<number> {
-  const { plan, stateDir } = await readPlan({
-    planId: input.planId,
-    configPath: input.configPath,
-    config: input.config,
-    stateDir: input.stateDir,
-  })
-
-  ensureEnvironmentMatch({
-    plan,
-    clickhouse: input.clickhouse,
-    forceEnvironment: input.forceEnvironment,
-  })
-
-  const paths = backfillPaths(stateDir, plan.planId)
-
-  // Check for existing run state
-  const existingRun = await readRun(paths.runPath)
-  const resumeFrom = input.resumeFrom
-
-  if (existingRun && !resumeFrom) {
-    // `run` command (no resumeFrom) must not silently continue an existing run.
-    // Users should use `backfill resume` instead.
-    const status = existingRun.status
-    if (status === 'completed') {
-      throw new BackfillConfigError(
-        `Run already completed for plan ${plan.planId}. Nothing to do.`
+  return runEffect(
+    Effect.gen(function* () {
+      const { plan, stateDir } = yield* fromPromise(() =>
+        readPlan({
+          planId: input.planId,
+          configPath: input.configPath,
+          config: input.config,
+          stateDir: input.stateDir,
+        }),
       )
-    }
-    if (status === 'cancelled') {
-      throw new BackfillConfigError(
-        `Run is cancelled for plan ${plan.planId}. Create a new plan or inspect with backfill doctor.`
-      )
-    }
-    throw new BackfillConfigError(
-      `A run already exists for plan ${plan.planId} (status: ${status}). Use backfill resume to continue.`
-    )
-  }
 
-  const db = createClickHouseExecutor(input.clickhouse)
-
-  try {
-    const [database, table] = plan.target.split('.')
-    if (!database || !table) throw new BackfillConfigError('Invalid backfill target.')
-    const insertableColumns = await assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) })
-    assertReplayColumnsStillInsertable({
-      planId: plan.planId,
-      target: plan.target,
-      targetColumns: plan.execution.targetColumns,
-      insertableColumns,
-    })
-    const runState: BackfillRunState = {
-      planId: plan.planId,
-      target: plan.target,
-      status: 'running',
-      startedAt: existingRun?.startedAt ?? nowIso(),
-      updatedAt: nowIso(),
-      progress: resumeFrom ?? {},
-    }
-
-    await writeJson(paths.runPath, runState)
-
-    const result = await executeBackfill({
-      executor: db,
-      cluster: input.clickhouse.cluster,
-      planId: plan.planId,
-      chunks: plan.chunkPlan.chunks.map((chunk) => ({ id: chunk.id })),
-      buildQuery: (chunk) => {
-        const planChunk = plan.chunkPlan.chunks.find((candidate) => candidate.id === chunk.id)
-        if (!planChunk) throw new Error(`Chunk ${chunk.id} not found in plan`)
-        return buildChunkExecutionSql({
-          planId: plan.planId,
-          chunk: planChunk,
-          target: plan.target,
-          sourceTarget: plan.execution.sourceTarget,
-          table: plan.chunkPlan.table,
-          mvReplayQueries: plan.execution.mvReplayQueries,
-          targetColumns: plan.execution.targetColumns,
-          idempotencyToken: plan.execution.requireIdempotencyToken
-            ? generateIdempotencyToken(plan.planId, planChunk.id)
-            : '',
-        })
-      },
-      concurrency: input.concurrency,
-      pollIntervalMs: input.pollIntervalMs,
-      resumeFrom,
-      replayFailed: input.replayFailed,
-      onProgress: async (progress) => {
-        runState.progress = progress
-        runState.updatedAt = nowIso()
-        await writeJson(paths.runPath, runState)
-      },
-    })
-
-    runState.status = result.failed > 0 ? 'failed' : 'completed'
-    runState.completedAt = nowIso()
-    runState.updatedAt = nowIso()
-    runState.progress = result.progress
-    if (result.failed > 0) {
-      const failedEntry = Object.values(result.progress).find((c) => c.status === 'failed')
-      runState.lastError = failedEntry?.error ?? 'One or more chunks failed'
-    }
-    await writeJson(paths.runPath, runState)
-
-    const summary = summarizeRunStatus(runState, paths.runPath, plan)
-
-    if (input.jsonMode) {
-      input.print({
-        ok: result.failed === 0,
-        planId: plan.planId,
-        status: runState.status,
-        chunkCounts: summary.totals,
-        rowsWritten: summary.rowsWritten,
-        runPath: paths.runPath,
-        lastError: runState.lastError,
+      ensureEnvironmentMatch({
+        plan,
+        clickhouse: input.clickhouse,
+        forceEnvironment: input.forceEnvironment,
       })
-    } else {
-      let line = `Backfill ${plan.planId}: ${runState.status} (done=${summary.totals.done}/${summary.totals.total}, ${summary.rowsWritten} rows written)`
-      if (runState.lastError) line += ` \u2014 ${runState.lastError}`
-      input.print(line)
-      if (runState.status === 'completed' && summary.rowsWritten === 0) {
-        input.print(
-          'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+
+      const paths = backfillPaths(stateDir, plan.planId)
+
+      // Check for existing run state
+      const existingRun = yield* fromPromise(() => readRun(paths.runPath))
+      const resumeFrom = input.resumeFrom
+
+      if (existingRun && !resumeFrom) {
+        // `run` command (no resumeFrom) must not silently continue an existing run.
+        // Users should use `backfill resume` instead.
+        const status = existingRun.status
+        if (status === 'completed') {
+          throw new BackfillConfigError(`Run already completed for plan ${plan.planId}. Nothing to do.`)
+        }
+        if (status === 'cancelled') {
+          throw new BackfillConfigError(
+            `Run is cancelled for plan ${plan.planId}. Create a new plan or inspect with backfill doctor.`,
+          )
+        }
+        throw new BackfillConfigError(
+          `A run already exists for plan ${plan.planId} (status: ${status}). Use backfill resume to continue.`,
         )
       }
-    }
 
-    return result.failed > 0 ? 1 : 0
-  } finally {
-    await db.close()
-  }
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => createClickHouseExecutor(input.clickhouse)),
+        (db) =>
+          Effect.gen(function* () {
+            const [database, table] = plan.target.split('.')
+            if (!database || !table) throw new BackfillConfigError('Invalid backfill target.')
+            const insertableColumns = yield* fromPromise(() =>
+              assertBackfillTargetSafe({
+                database,
+                table,
+                mode: plan.execution.mode,
+                query: (sql, settings) => db.query(sql, settings),
+              }),
+            )
+            assertReplayColumnsStillInsertable({
+              planId: plan.planId,
+              target: plan.target,
+              targetColumns: plan.execution.targetColumns,
+              insertableColumns,
+            })
+            const runState: BackfillRunState = {
+              planId: plan.planId,
+              target: plan.target,
+              status: 'running',
+              startedAt: existingRun?.startedAt ?? nowIso(),
+              updatedAt: nowIso(),
+              progress: resumeFrom ?? {},
+            }
+
+            yield* fromPromise(() => writeJson(paths.runPath, runState))
+
+            const result = yield* executeBackfillEffect({
+              executor: db,
+              cluster: input.clickhouse.cluster,
+              planId: plan.planId,
+              chunks: plan.chunkPlan.chunks.map((chunk) => ({ id: chunk.id })),
+              buildQuery: (chunk) => {
+                const planChunk = plan.chunkPlan.chunks.find((candidate) => candidate.id === chunk.id)
+                if (!planChunk) throw new Error(`Chunk ${chunk.id} not found in plan`)
+                return buildChunkExecutionSql({
+                  planId: plan.planId,
+                  chunk: planChunk,
+                  target: plan.target,
+                  sourceTarget: plan.execution.sourceTarget,
+                  table: plan.chunkPlan.table,
+                  mvReplayQueries: plan.execution.mvReplayQueries,
+                  targetColumns: plan.execution.targetColumns,
+                  idempotencyToken: plan.execution.requireIdempotencyToken
+                    ? generateIdempotencyToken(plan.planId, planChunk.id)
+                    : '',
+                })
+              },
+              concurrency: input.concurrency,
+              pollIntervalMs: input.pollIntervalMs,
+              resumeFrom,
+              replayFailed: input.replayFailed,
+              onProgress: async (progress) => {
+                runState.progress = progress
+                runState.updatedAt = nowIso()
+                await writeJson(paths.runPath, runState)
+              },
+            })
+
+            runState.status = result.failed > 0 ? 'failed' : 'completed'
+            runState.completedAt = nowIso()
+            runState.updatedAt = nowIso()
+            runState.progress = result.progress
+            if (result.failed > 0) {
+              const failedEntry = Object.values(result.progress).find((c) => c.status === 'failed')
+              runState.lastError = failedEntry?.error ?? 'One or more chunks failed'
+            }
+            yield* fromPromise(() => writeJson(paths.runPath, runState))
+
+            const summary = summarizeRunStatus(runState, paths.runPath, plan)
+
+            if (input.jsonMode) {
+              input.print({
+                ok: result.failed === 0,
+                planId: plan.planId,
+                status: runState.status,
+                chunkCounts: summary.totals,
+                rowsWritten: summary.rowsWritten,
+                runPath: paths.runPath,
+                lastError: runState.lastError,
+              })
+            } else {
+              let line = `Backfill ${plan.planId}: ${runState.status} (done=${summary.totals.done}/${summary.totals.total}, ${summary.rowsWritten} rows written)`
+              if (runState.lastError) line += ` \u2014 ${runState.lastError}`
+              input.print(line)
+              if (runState.status === 'completed' && summary.rowsWritten === 0) {
+                input.print(
+                  "Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query's WHERE filters.",
+                )
+              }
+            }
+
+            return result.failed > 0 ? 1 : 0
+          }),
+        (db) => fromPromise(() => db.close()),
+      )
+    }),
+  )
 }
 
 export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin {
@@ -236,47 +251,56 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
 
             if (!context.config.clickhouse) {
               throw new BackfillConfigError(
-                'ClickHouse connection is required for backfill planning. Configure clickhouse in your clickhouse.config.ts.'
+                'ClickHouse connection is required for backfill planning. Configure clickhouse in your clickhouse.config.ts.',
               )
             }
 
-            const db = createClickHouseExecutor(context.config.clickhouse)
+            const clickhouse = context.config.clickhouse
+            return runEffect(
+              Effect.acquireUseRelease(
+                Effect.sync(() => createClickHouseExecutor(clickhouse)),
+                (db) =>
+                  Effect.gen(function* () {
+                    const output = yield* fromPromise(() =>
+                      buildBackfillPlan({
+                        opts,
+                        configPath: context.configPath,
+                        config: context.config,
+                        clickhouse: context.config.clickhouse,
+                        clickhouseQuery: async <T>(
+                          sql: string,
+                          settings?: Record<string, string | number | boolean | undefined>,
+                        ) => {
+                          const result = await db.query(sql, settings)
+                          return result as T[]
+                        },
+                        // ObsessionDB enables parallel replicas by default, which inflates
+                        // aggregate results (count, GROUP BY). Disable for planning queries
+                        // until ObsessionDB handles it at the profile level.
+                        querySettings: { enable_parallel_replicas: 0 },
+                      }),
+                    )
 
-            try {
-              const output = await buildBackfillPlan({
-                opts,
-                configPath: context.configPath,
-                config: context.config,
-                clickhouse: context.config.clickhouse,
-                clickhouseQuery: async <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => {
-                  const result = await db.query(sql, settings)
-                  return result as T[]
-                },
-                // ObsessionDB enables parallel replicas by default, which inflates
-                // aggregate results (count, GROUP BY). Disable for planning queries
-                // until ObsessionDB handles it at the profile level.
-                querySettings: { enable_parallel_replicas: 0 },
-              })
+                    const payload = planPayload(output)
+                    if (context.jsonMode) {
+                      context.print(payload)
+                    } else {
+                      const partitionCount = output.plan.chunkPlan.partitions.length
+                      const totalBytes = formatBytes(output.plan.chunkPlan.totalBytesCompressed)
+                      const primarySortKey = output.plan.chunkPlan.table.sortKeys[0]
+                      const sortKeyLabel = primarySortKey
+                        ? `, sort key: ${primarySortKey.name} (${primarySortKey.category})`
+                        : ''
+                      context.print(
+                        `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`,
+                      )
+                    }
 
-              const payload = planPayload(output)
-              if (context.jsonMode) {
-                context.print(payload)
-              } else {
-                const partitionCount = output.plan.chunkPlan.partitions.length
-                const totalBytes = formatBytes(output.plan.chunkPlan.totalBytesCompressed)
-                const primarySortKey = output.plan.chunkPlan.table.sortKeys[0]
-                const sortKeyLabel = primarySortKey
-                  ? `, sort key: ${primarySortKey.name} (${primarySortKey.category})`
-                  : ''
-                context.print(
-                  `Backfill plan ${payload.planId} for ${payload.target} (${payload.chunkCount} chunks across ${partitionCount} partitions, ~${totalBytes}${sortKeyLabel}) -> ${payload.planPath}`
-                )
-              }
-
-              return 0
-            } finally {
-              await db.close()
-            }
+                    return 0
+                  }),
+                (db) => fromPromise(() => db.close()),
+              ),
+            )
           },
         }),
       },
@@ -316,7 +340,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
 
             if (!context.config.clickhouse) {
               throw new BackfillConfigError(
-                'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
+                'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.',
               )
             }
 
@@ -349,7 +373,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
 
             if (!context.config.clickhouse) {
               throw new BackfillConfigError(
-                'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.'
+                'ClickHouse connection is required for backfill execution. Configure clickhouse in your clickhouse.config.ts.',
               )
             }
 
@@ -363,12 +387,18 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
             const existingRun = await readRun(paths.runPath)
             if (!existingRun) {
               throw new BackfillConfigError(
-                `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
+                `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`,
               )
             }
             if (existingRun.status === 'completed') {
               if (context.jsonMode) {
-                context.print({ ok: true, noop: true, planId: opts.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
+                context.print({
+                  ok: true,
+                  noop: true,
+                  planId: opts.planId,
+                  status: 'completed',
+                  message: 'Run already completed. Nothing to resume.',
+                })
               } else {
                 context.print(`Backfill ${opts.planId}: already completed. Nothing to resume.`)
               }
@@ -418,7 +448,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               context.print(line)
               if (payload.status === 'completed' && payload.rowsWritten === 0) {
                 context.print(
-                  'Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query\'s WHERE filters.'
+                  "Warning: 0 rows written across all chunks. Verify that source data exists in the time range and passes the query's WHERE filters.",
                 )
               }
             }
@@ -448,7 +478,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               context.print(payload)
             } else {
               context.print(
-                `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`
+                `Backfill cancel ${payload.planId}: ${payload.status} (done=${payload.chunkCounts.done}/${payload.chunkCounts.total})`,
               )
             }
             return payload.ok ? 0 : 1
@@ -477,7 +507,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               context.print(payload)
             } else {
               context.print(
-                `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`
+                `Backfill doctor ${payload.planId}: ${payload.issueCodes.length === 0 ? 'ok' : payload.issueCodes.join(', ')}`,
               )
               for (const recommendation of payload.recommendations) {
                 context.print(`- ${recommendation}`)
@@ -507,9 +537,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
           print('backfill check: ok')
           return
         }
-        print(
-          `backfill check: failed${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`
-        )
+        print(`backfill check: failed${findingCodes.length > 0 ? ` (${findingCodes.join(', ')})` : ''}`)
       },
     },
   }

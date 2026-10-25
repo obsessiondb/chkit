@@ -1,4 +1,6 @@
 import { createInterface } from 'node:readline/promises'
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../runtime.js'
 
 import type { SelectedService, Service, ServiceOrganization } from './types.js'
 
@@ -75,17 +77,25 @@ export async function selectServiceInteractive(
 		}
 	}
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout })
-	try {
-		const answer = await rl.question(`\nSelect service [1-${choices.length}]: `)
-		const index = parseInt(answer.trim(), 10) - 1
-		const choice = choices[index]
-		if (Number.isNaN(index) || !choice) {
-			print('Invalid selection.')
-			return null
-		}
-		return choice
-	} finally {
-		rl.close()
-	}
+	return runEffect(
+		Effect.acquireUseRelease(
+			Effect.sync(() =>
+				createInterface({ input: process.stdin, output: process.stdout }),
+			),
+			(rl) =>
+				Effect.gen(function* () {
+					const answer = yield* fromPromise((signal) =>
+						rl.question(`\nSelect service [1-${choices.length}]: `, { signal }),
+					)
+					const index = parseInt(answer.trim(), 10) - 1
+					const choice = choices[index]
+					if (Number.isNaN(index) || !choice) {
+						print('Invalid selection.')
+						return null
+					}
+					return choice
+				}),
+			(rl) => Effect.sync(() => rl.close()),
+		),
+	)
 }

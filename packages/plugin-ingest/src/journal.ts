@@ -1,9 +1,11 @@
 import { waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
+import * as Effect from 'effect/Effect'
 
 import { IngestConfigError } from './errors.js'
 import { validateJournalHistory } from './journal-history.js'
 import { digest, toJournalRow, type JournalRow } from './journal-records.js'
-import type { Journal } from './types.js'
+import { foreign, runPublic, sync } from './runtime.js'
+import type { CommittedCheckpoint, Journal } from './types.js'
 
 export { canonicalJson, digest, emptyCheckpoint, toJournalRow, type JournalRow } from './journal-records.js'
 
@@ -28,26 +30,32 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
   const qualified = `\`${options.database}\`.\`${table}\``
 
   return {
-    async ensure() {
-      await options.executor.command(journalTableSql(qualified))
-      await waitForTable(options.executor, options.database, table)
+    ensure(): Promise<void> {
+      return runPublic(Effect.gen(function* () {
+        yield* foreign(() => options.executor.command(journalTableSql(qualified)))
+        yield* foreign(() => waitForTable(options.executor, options.database, table))
+      }))
     },
-    async append(events) {
-      if (events.length === 0) return
-      const at = now()
-      const rows = events.map((event) => toJournalRow(event, options.targetId, at))
-      await options.executor.insert({
-        table: `${options.database}.${table}`, values: rows,
-        settings: { insert_deduplication_token: digest(rows.flatMap((row) => [row.event_id, row.payload_hash])), async_insert: 0 },
-      })
+    append(events): Promise<void> {
+      return runPublic(Effect.gen(function* () {
+        if (events.length === 0) return
+        const at = yield* sync(now)
+        const rows = events.map((event) => toJournalRow(event, options.targetId, at))
+        yield* foreign(() => options.executor.insert({
+          table: `${options.database}.${table}`, values: rows,
+          settings: { insert_deduplication_token: digest(rows.flatMap((row) => [row.event_id, row.payload_hash])), async_insert: 0 },
+        }))
+      }))
     },
-    async readCheckpoint(namespaceId) {
-      const rows = await options.executor.query<JournalRow>(
-        `SELECT * FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
-        { select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1 })
-      // A stale snapshot can cause replay, but its runs cannot overwrite the
-      // identities or checkpoint lineage of another run.
-      return validateJournalHistory(rows, namespaceId).checkpoint
+    readCheckpoint(namespaceId): Promise<CommittedCheckpoint> {
+      return runPublic(Effect.gen(function* () {
+        const rows = yield* foreign(() => options.executor.query<JournalRow>(
+          `SELECT * FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
+          { select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1 }))
+        // A stale snapshot can cause replay, but its runs cannot overwrite the
+        // identities or checkpoint lineage of another run.
+        return validateJournalHistory(rows, namespaceId).checkpoint
+      }))
     },
   }
 }

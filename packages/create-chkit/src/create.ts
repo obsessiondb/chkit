@@ -4,6 +4,8 @@ import process from 'node:process'
 import { confirm, intro, log, outro, select, spinner, text } from '@clack/prompts'
 import { type ConnectChoice, runOnboarding } from '@chkit/plugin-obsessiondb'
 import pc from 'picocolors'
+import * as Effect from 'effect/Effect'
+import { attempt, run } from './effect-runtime.js'
 
 import { downloadExample } from './download.js'
 import { DEFAULT_EXAMPLE, EXAMPLES } from './examples.js'
@@ -30,47 +32,49 @@ export type CreateOptions = {
 }
 
 export async function runCreate(options: CreateOptions): Promise<void> {
-  intro(pc.bgCyan(pc.black(' create-chkit ')) + pc.dim(` v${CREATE_CHKIT_VERSION}`))
+  return run(Effect.gen(function* () {
+    intro(pc.bgCyan(pc.black(' create-chkit ')) + pc.dim(` v${CREATE_CHKIT_VERSION}`))
 
-  const projectName = await resolveProjectName(options.projectDirectory)
-  const targetDir = resolve(process.cwd(), projectName)
-  await assertDirIsEmpty(targetDir)
+    const projectName = yield* attempt(() => resolveProjectName(options.projectDirectory))
+    const targetDir = resolve(process.cwd(), projectName)
+    yield* assertDirIsEmpty(targetDir)
 
-  const example = await resolveExample(options.example)
+    const example = yield* attempt(() => resolveExample(options.example))
 
-  const downloadSpinner = spinner()
-  downloadSpinner.start(`Downloading ${pc.cyan(example)} example`)
-  const { source } = await downloadExample(example, targetDir)
-  downloadSpinner.stop(`Downloaded ${pc.dim(source)}`)
+    const downloadSpinner = spinner()
+    downloadSpinner.start(`Downloading ${pc.cyan(example)} example`)
+    const { source } = yield* attempt(() => downloadExample(example, targetDir))
+    downloadSpinner.stop(`Downloaded ${pc.dim(source)}`)
 
-  const packageManager = await resolvePackageManager(options.packageManager)
-  await transformPackageJsonFile(targetDir, { projectName: basename(projectName), packageManager })
+    const packageManager = yield* attempt(() => resolvePackageManager(options.packageManager))
+    yield* attempt(() => transformPackageJsonFile(targetDir, { projectName: basename(projectName), packageManager }))
 
-  if (!options.skipInstall) {
-    const installSpinner = spinner()
-    installSpinner.start(`Installing dependencies with ${pc.cyan(packageManager)}`)
-    await runInstall(packageManager, targetDir)
-    installSpinner.stop(`Installed dependencies with ${pc.cyan(packageManager)}`)
-  } else {
-    log.info(`Skipped install. Run ${pc.cyan(`${packageManager} install`)} when ready.`)
-  }
+    if (!options.skipInstall) {
+      const installSpinner = spinner()
+      installSpinner.start(`Installing dependencies with ${pc.cyan(packageManager)}`)
+      yield* attempt(() => runInstall(packageManager, targetDir))
+      installSpinner.stop(`Installed dependencies with ${pc.cyan(packageManager)}`)
+    } else {
+      log.info(`Skipped install. Run ${pc.cyan(`${packageManager} install`)} when ready.`)
+    }
 
-  // Onboarding prints its own "Next steps" (package-manager-aware), so only print ours when
-  // onboarding is skipped — otherwise the block would appear twice.
-  if (options.skipOnboarding) {
-    printNextSteps({ projectName, packageManager, didInstall: !options.skipInstall })
-  } else {
-    await runOnboarding({
-      configPath: join(targetDir, 'clickhouse.config.ts'),
-      packageManager,
-      connect: options.connect,
-      email: options.email,
-      code: options.code,
-      orgName: options.orgName,
-    })
-  }
+    // Onboarding prints its own "Next steps" (package-manager-aware), so only print ours when
+    // onboarding is skipped — otherwise the block would appear twice.
+    if (options.skipOnboarding) {
+      printNextSteps({ projectName, packageManager, didInstall: !options.skipInstall })
+    } else {
+      yield* attempt(() => runOnboarding({
+        configPath: join(targetDir, 'clickhouse.config.ts'),
+        packageManager,
+        connect: options.connect,
+        email: options.email,
+        code: options.code,
+        orgName: options.orgName,
+      }))
+    }
 
-  outro(pc.green('Done.'))
+    outro(pc.green('Done.'))
+  }))
 }
 
 async function resolveExample(explicit: string | undefined): Promise<string> {
@@ -102,30 +106,29 @@ async function resolveProjectName(initial: string | undefined): Promise<string> 
   return unwrap(value).trim()
 }
 
-async function assertDirIsEmpty(targetDir: string): Promise<void> {
-  const exists = await pathExists(targetDir)
-  if (!exists) return
-  const stats = await stat(targetDir)
-  if (!stats.isDirectory()) {
-    throw new Error(`${targetDir} exists and is not a directory`)
-  }
-  const entries = await readdir(targetDir)
-  if (entries.length === 0) return
-  const proceed = await confirm({
-    message: `${pc.yellow(targetDir)} is not empty. Overwrite contents?`,
-    initialValue: false,
+function assertDirIsEmpty(targetDir: string): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    const exists = yield* attempt(() => pathExists(targetDir))
+    if (!exists) return
+    const stats = yield* attempt(() => stat(targetDir))
+    if (!stats.isDirectory()) {
+      return yield* Effect.fail(new Error(`${targetDir} exists and is not a directory`))
+    }
+    const entries = yield* attempt(() => readdir(targetDir))
+    if (entries.length === 0) return
+    const proceed = yield* attempt(() => confirm({
+      message: `${pc.yellow(targetDir)} is not empty. Overwrite contents?`,
+      initialValue: false,
+    }))
+    if (!unwrap(proceed)) {
+      log.warn('Aborted by user.')
+      process.exit(0)
+    }
+    yield* Effect.forEach(entries, (entry) => attempt(() => rm(join(targetDir, entry), { recursive: true, force: true })), {
+      concurrency: 'unbounded',
+      discard: true,
+    })
   })
-  if (!unwrap(proceed)) {
-    log.warn('Aborted by user.')
-    process.exit(0)
-  }
-  await clearDirectoryContents(targetDir, entries)
-}
-
-async function clearDirectoryContents(targetDir: string, entries: string[]): Promise<void> {
-  await Promise.all(
-    entries.map((entry) => rm(join(targetDir, entry), { recursive: true, force: true })),
-  )
 }
 
 async function pathExists(path: string): Promise<boolean> {

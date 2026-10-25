@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from './effect.js'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -66,24 +68,28 @@ function checksum(value: string): string {
 
 export async function findChecksumMismatches(
   migrationsDir: string,
-  journal: MigrationJournal
+  journal: MigrationJournal,
 ): Promise<ChecksumMismatch[]> {
-  const mismatches: ChecksumMismatch[] = []
-  for (const entry of journal.applied) {
-    if (!entry.checksum) continue
-    const fullPath = join(migrationsDir, entry.name)
-    if (!existsSync(fullPath)) continue
-    const sql = await readFile(fullPath, 'utf8')
-    const actual = checksum(sql)
-    if (actual !== entry.checksum) {
-      mismatches.push({
-        name: entry.name,
-        expected: entry.checksum,
-        actual,
-      })
-    }
-  }
-  return mismatches
+  return runEffect(
+    Effect.gen(function* () {
+      const mismatches: ChecksumMismatch[] = []
+      for (const entry of journal.applied) {
+        if (!entry.checksum) continue
+        const fullPath = join(migrationsDir, entry.name)
+        if (!existsSync(fullPath)) continue
+        const sql = yield* fromPromise(() => readFile(fullPath, 'utf8'))
+        const actual = checksum(sql)
+        if (actual !== entry.checksum) {
+          mismatches.push({
+            name: entry.name,
+            expected: entry.checksum,
+            actual,
+          })
+        }
+      }
+      return mismatches
+    }),
+  )
 }
 
 export function checksumSQL(value: string): string {

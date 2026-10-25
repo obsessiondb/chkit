@@ -1,20 +1,16 @@
 import { dirname } from 'node:path'
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from './effect-runtime.js'
 
 import type { MaterializedViewDefinition, ResolvedChxConfig } from '@chkit/core'
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
-import { generateChunkPlan } from './chunking/planner.js'
+import { generateChunkPlanEffect } from './chunking/plan-runtime.js'
 import { findMvsForTarget, resolveMvReplaySource } from './detect.js'
 import { BackfillConfigError } from './errors.js'
 import type { PlanOptions } from './options.js'
-import {
-  backfillPaths,
-  computeBackfillStateDir,
-  computeEnvironmentFingerprint,
-  nowIso,
-  writeJson,
-} from './state.js'
+import { backfillPaths, computeBackfillStateDir, computeEnvironmentFingerprint, nowIso, writeJson } from './state.js'
 import type { BuildBackfillPlanOutput } from './types.js'
 
 interface BackfillStrategy {
@@ -22,7 +18,10 @@ interface BackfillStrategy {
   mvReplayQueries?: string[]
 }
 
-type ClickHouseQuery = <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) => Promise<T[]>
+type ClickHouseQuery = <T>(
+  sql: string,
+  settings?: Record<string, string | number | boolean | undefined>,
+) => Promise<T[]>
 
 /**
  * The same pins every chunk INSERT carries (see `chunking/sql.ts`), so `*` in a
@@ -51,12 +50,12 @@ async function detectBackfillStrategy(input: {
 
     const tableDef = definitions.find(
       (definition) =>
-        definition.kind === 'table' &&
-        definition.database === input.database &&
-        definition.name === input.table
+        definition.kind === 'table' && definition.database === input.database && definition.name === input.table,
     )
     if (tableDef?.kind === 'table' && tableDef.columns.some((column) => column.defaultKind === 'EPHEMERAL')) {
-      throw new BackfillConfigError('Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.')
+      throw new BackfillConfigError(
+        'Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.',
+      )
     }
     return { mvs, mvReplayQueries: mvs.map((mv) => mv.as) }
   } catch (error) {
@@ -86,28 +85,41 @@ export async function assertBackfillTargetSafe(input: {
   const target = `${input.database}.${input.table}`
   const rows = await input.query<{ name: string; default_kind: string }>(
     `SELECT name, default_kind FROM system.columns WHERE database = ${quote(input.database)} AND table = ${quote(input.table)} ORDER BY position`,
-    input.querySettings
+    input.querySettings,
   )
   if (!rows.length) {
     const tables = await input.query<{ name: string }>(
       `SELECT name FROM system.tables WHERE database = ${quote(input.database)} AND name = ${quote(input.table)}`,
-      input.querySettings
+      input.querySettings,
     )
     if (!tables.length) {
-      throw new BackfillConfigError(`Backfill target ${target} does not exist or is not visible yet. DDL may still be propagating on managed ClickHouse (e.g. ObsessionDB); check the name and retry.`)
+      throw new BackfillConfigError(
+        `Backfill target ${target} does not exist or is not visible yet. DDL may still be propagating on managed ClickHouse (e.g. ObsessionDB); check the name and retry.`,
+      )
     }
   }
-  if (!rows.length || rows.some((column) => !column.name || !['', 'DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(column.default_kind))) {
-    throw new BackfillConfigError('Cannot verify live target column kinds; automatic backfill is blocked. Check metadata access and use an explicit INSERT if needed.')
+  if (
+    !rows.length ||
+    rows.some(
+      (column) => !column.name || !['', 'DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'].includes(column.default_kind),
+    )
+  ) {
+    throw new BackfillConfigError(
+      'Cannot verify live target column kinds; automatic backfill is blocked. Check metadata access and use an explicit INSERT if needed.',
+    )
   }
   const namesOf = (kind: string) => rows.filter((column) => column.default_kind === kind).map((column) => column.name)
   const ephemeral = namesOf('EPHEMERAL')
   const materialized = namesOf('MATERIALIZED')
   if (ephemeral.length && input.mode === 'mv_replay') {
-    throw new BackfillConfigError('Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.')
+    throw new BackfillConfigError(
+      'Automatic backfill cannot reconstruct EPHEMERAL inputs; use an explicit INSERT with an input column mapping.',
+    )
   }
   if (ephemeral.length && materialized.length) {
-    throw new BackfillConfigError(`Automatic backfill cannot reconstruct EPHEMERAL inputs; copying ${target} recomputes MATERIALIZED column(s) ${materialized.join(', ')}, which may read EPHEMERAL column(s) ${ephemeral.join(', ')}. Use an explicit INSERT with an input column mapping.`)
+    throw new BackfillConfigError(
+      `Automatic backfill cannot reconstruct EPHEMERAL inputs; copying ${target} recomputes MATERIALIZED column(s) ${materialized.join(', ')}, which may read EPHEMERAL column(s) ${ephemeral.join(', ')}. Use an explicit INSERT with an input column mapping.`,
+    )
   }
   return rows.filter((column) => ['', 'DEFAULT'].includes(column.default_kind)).map((column) => column.name)
 }
@@ -120,113 +132,132 @@ export async function buildBackfillPlan(input: {
   clickhouseQuery: ClickHouseQuery
   querySettings?: Record<string, string | number | boolean | undefined>
 }): Promise<BuildBackfillPlanOutput> {
-  const { opts } = input
-  const [database, table] = opts.target.split('.')
-  if (!database || !table) {
-    throw new BackfillConfigError('Invalid target format. Expected <database.table>.')
-  }
+  return runEffect(
+    Effect.gen(function* () {
+      const { opts } = input
+      const [database, table] = opts.target.split('.')
+      if (!database || !table) {
+        throw new BackfillConfigError('Invalid target format. Expected <database.table>.')
+      }
 
-  // Detect the execution strategy before chunk planning: an mv_replay backfill
-  // sizes its chunks against the MV *source* (the table its SELECT reads),
-  // because the injected chunk conditions run against that source — not the
-  // target, which is legitimately empty when bootstrapping an aggregate. Target column safety is checked separately for both paths.
-  const strategy = await detectBackfillStrategy({
-    schema: input.config.schema,
-    configDir: dirname(input.configPath),
-    database,
-    table,
-  })
-  const insertableColumns = await assertBackfillTargetSafe({
-    database, table, mode: strategy.mvReplayQueries ? 'mv_replay' : 'copy',
-    query: input.clickhouseQuery, querySettings: input.querySettings,
-  })
-  const targetColumns = strategy.mvReplayQueries
-    ? await resolveReplayColumns({
-      target: opts.target,
-      mvs: strategy.mvs,
-      insertableColumns,
-      query: input.clickhouseQuery,
-      querySettings: input.querySettings,
-    })
-    : undefined
-  const replaySource = strategy.mvReplayQueries ? resolveMvReplaySource(strategy.mvs) : undefined
-  const chunkSource = replaySource ?? { database, table }
+      // Detect the execution strategy before chunk planning: an mv_replay backfill
+      // sizes its chunks against the MV *source* (the table its SELECT reads),
+      // because the injected chunk conditions run against that source — not the
+      // target, which is legitimately empty when bootstrapping an aggregate. Target column safety is checked separately for both paths.
+      const strategy = yield* fromPromise(() =>
+        detectBackfillStrategy({
+          schema: input.config.schema,
+          configDir: dirname(input.configPath),
+          database,
+          table,
+        }),
+      )
+      const insertableColumns = yield* fromPromise(() =>
+        assertBackfillTargetSafe({
+          database,
+          table,
+          mode: strategy.mvReplayQueries ? 'mv_replay' : 'copy',
+          query: input.clickhouseQuery,
+          querySettings: input.querySettings,
+        }),
+      )
+      const targetColumns = strategy.mvReplayQueries
+        ? yield* fromPromise(() =>
+            resolveReplayColumns({
+              target: opts.target,
+              mvs: strategy.mvs,
+              insertableColumns,
+              query: input.clickhouseQuery,
+              querySettings: input.querySettings,
+            }),
+          )
+        : undefined
+      const replaySource = strategy.mvReplayQueries ? resolveMvReplaySource(strategy.mvs) : undefined
+      const chunkSource = replaySource ?? { database, table }
 
-  const chunkPlan = await generateChunkPlan({
-    database: chunkSource.database,
-    table: chunkSource.table,
-    from: opts.from,
-    to: opts.to,
-    targetChunkBytes: opts.maxChunkBytes,
-    query: input.clickhouseQuery,
-    querySettings: input.querySettings,
-  })
+      const chunkPlan = yield* generateChunkPlanEffect({
+        database: chunkSource.database,
+        table: chunkSource.table,
+        from: opts.from,
+        to: opts.to,
+        targetChunkBytes: opts.maxChunkBytes,
+        query: input.clickhouseQuery,
+        querySettings: input.querySettings,
+      })
 
-  const firstPartition = chunkPlan.partitions[0]
-  if (!firstPartition) {
-    throw new BackfillConfigError(
-      `No partitions found for ${chunkSource.database}.${chunkSource.table}${opts.from || opts.to ? ' within the specified time range' : ''}. The table may be empty.`
-    )
-  }
+      const firstPartition = chunkPlan.partitions[0]
+      if (!firstPartition) {
+        throw new BackfillConfigError(
+          `No partitions found for ${chunkSource.database}.${chunkSource.table}${opts.from || opts.to ? ' within the specified time range' : ''}. The table may be empty.`,
+        )
+      }
 
-  const env = computeEnvironmentFingerprint(input.clickhouse)
-  const derivedFrom = opts.from ?? chunkPlan.partitions.reduce(
-    (min, partition) => (partition.minTime < min ? partition.minTime : min),
-    firstPartition.minTime
+      const env = computeEnvironmentFingerprint(input.clickhouse)
+      const derivedFrom =
+        opts.from ??
+        chunkPlan.partitions.reduce(
+          (min, partition) => (partition.minTime < min ? partition.minTime : min),
+          firstPartition.minTime,
+        )
+      const derivedTo =
+        opts.to ??
+        chunkPlan.partitions.reduce(
+          (max, partition) => (partition.maxTime > max ? partition.maxTime : max),
+          firstPartition.maxTime,
+        )
+
+      const stateDir = computeBackfillStateDir(input.config, input.configPath, opts.stateDir)
+      const paths = backfillPaths(stateDir, chunkPlan.planId)
+
+      const { mvReplayQueries } = strategy
+
+      const plan = {
+        planId: chunkPlan.planId,
+        target: opts.target,
+        createdAt: nowIso(),
+        ...(env ? { environment: env } : {}),
+        from: derivedFrom,
+        to: derivedTo,
+        chunkPlan,
+        execution: {
+          mode: mvReplayQueries ? ('mv_replay' as const) : ('copy' as const),
+          sourceTarget: opts.target,
+          ...(mvReplayQueries ? { mvReplayQueries } : {}),
+          ...(targetColumns ? { targetColumns } : {}),
+          requireIdempotencyToken: opts.requireIdempotencyToken,
+        },
+        options: {
+          maxChunkBytes: opts.maxChunkBytes,
+          maxParallelChunks: opts.maxParallelChunks,
+          maxRetriesPerChunk: opts.maxRetriesPerChunk,
+          requireIdempotencyToken: opts.requireIdempotencyToken,
+          sortKeyColumn: chunkPlan.table.sortKeys[0]?.name,
+        },
+        policy: {
+          requireDryRunBeforeRun: opts.requireDryRunBeforeRun,
+          requireExplicitWindow: opts.requireExplicitWindow,
+          blockOverlappingRuns: opts.blockOverlappingRuns,
+          failCheckOnRequiredPendingBackfill: opts.failCheckOnRequiredPendingBackfill,
+        },
+        limits: {
+          maxWindowHours: opts.maxWindowHours,
+          minChunkMinutes: opts.minChunkMinutes,
+        },
+      }
+
+      yield* fromPromise(() =>
+        writeJson(paths.planPath, {
+          ...plan,
+          chunkPlan: encodeChunkPlanForPersistence(plan.chunkPlan),
+        }),
+      )
+
+      return {
+        plan,
+        planPath: paths.planPath,
+      }
+    }),
   )
-  const derivedTo = opts.to ?? chunkPlan.partitions.reduce(
-    (max, partition) => (partition.maxTime > max ? partition.maxTime : max),
-    firstPartition.maxTime
-  )
-
-  const stateDir = computeBackfillStateDir(input.config, input.configPath, opts.stateDir)
-  const paths = backfillPaths(stateDir, chunkPlan.planId)
-
-  const { mvReplayQueries } = strategy
-
-  const plan = {
-    planId: chunkPlan.planId,
-    target: opts.target,
-    createdAt: nowIso(),
-    ...(env ? { environment: env } : {}),
-    from: derivedFrom,
-    to: derivedTo,
-    chunkPlan,
-    execution: {
-      mode: mvReplayQueries ? 'mv_replay' as const : 'copy' as const,
-      sourceTarget: opts.target,
-      ...(mvReplayQueries ? { mvReplayQueries } : {}),
-      ...(targetColumns ? { targetColumns } : {}),
-      requireIdempotencyToken: opts.requireIdempotencyToken,
-    },
-    options: {
-      maxChunkBytes: opts.maxChunkBytes,
-      maxParallelChunks: opts.maxParallelChunks,
-      maxRetriesPerChunk: opts.maxRetriesPerChunk,
-      requireIdempotencyToken: opts.requireIdempotencyToken,
-      sortKeyColumn: chunkPlan.table.sortKeys[0]?.name,
-    },
-    policy: {
-      requireDryRunBeforeRun: opts.requireDryRunBeforeRun,
-      requireExplicitWindow: opts.requireExplicitWindow,
-      blockOverlappingRuns: opts.blockOverlappingRuns,
-      failCheckOnRequiredPendingBackfill: opts.failCheckOnRequiredPendingBackfill,
-    },
-    limits: {
-      maxWindowHours: opts.maxWindowHours,
-      minChunkMinutes: opts.minChunkMinutes,
-    },
-  }
-
-  await writeJson(paths.planPath, {
-    ...plan,
-    chunkPlan: encodeChunkPlanForPersistence(plan.chunkPlan),
-  })
-
-  return {
-    plan,
-    planPath: paths.planPath,
-  }
 }
 
 /**
@@ -250,28 +281,45 @@ async function resolveReplayColumns(input: {
   query: ClickHouseQuery
   querySettings?: Record<string, string | number | boolean | undefined>
 }): Promise<string[]> {
-  const outputs = await Promise.all(input.mvs.map(async (mv) => {
-    const rows = await input.query<{ name: string }>(
-      `DESCRIBE TABLE (\n${mv.as}\n) SETTINGS ${ASTERISK_SETTINGS}`,
-      input.querySettings
-    )
-    const names = rows.map((row) => row.name)
-    if (!names.length) {
-      throw new BackfillConfigError(`Cannot read the output columns of materialized view ${mv.database}.${mv.name}; automatic backfill is blocked.`)
-    }
-    const rejected = names.filter((name) => !input.insertableColumns.includes(name))
-    if (rejected.length) {
-      throw new BackfillConfigError(`Materialized view ${mv.database}.${mv.name} outputs column(s) ${rejected.join(', ')}, which ${input.target} cannot take (missing, MATERIALIZED or ALIAS). ClickHouse matches view output to target columns by name and refuses such a view by default; align the view's SELECT with the target (use AS to rename) before backfilling.`)
-    }
-    return { mv, names: new Set(names) }
-  }))
+  const outputs = await runEffect(
+    Effect.forEach(
+      input.mvs,
+      (mv) =>
+        Effect.gen(function* () {
+          const rows = yield* fromPromise(() =>
+            input.query<{ name: string }>(
+              `DESCRIBE TABLE (\n${mv.as}\n) SETTINGS ${ASTERISK_SETTINGS}`,
+              input.querySettings,
+            ),
+          )
+          const names = rows.map((row) => row.name)
+          if (!names.length) {
+            throw new BackfillConfigError(
+              `Cannot read the output columns of materialized view ${mv.database}.${mv.name}; automatic backfill is blocked.`,
+            )
+          }
+          const rejected = names.filter((name) => !input.insertableColumns.includes(name))
+          if (rejected.length) {
+            throw new BackfillConfigError(
+              `Materialized view ${mv.database}.${mv.name} outputs column(s) ${rejected.join(', ')}, which ${input.target} cannot take (missing, MATERIALIZED or ALIAS). ClickHouse matches view output to target columns by name and refuses such a view by default; align the view's SELECT with the target (use AS to rename) before backfilling.`,
+            )
+          }
+          return { mv, names: new Set(names) }
+        }),
+      { concurrency: 10 },
+    ),
+  )
 
   const [first, ...rest] = outputs
   if (!first) return []
-  const mismatch = rest.find(({ names }) => names.size !== first.names.size || [...names].some((name) => !first.names.has(name)))
+  const mismatch = rest.find(
+    ({ names }) => names.size !== first.names.size || [...names].some((name) => !first.names.has(name)),
+  )
   if (mismatch) {
     const describe = ({ mv, names }: typeof first) => `${mv.database}.${mv.name} (${[...names].join(', ')})`
-    throw new BackfillConfigError(`Materialized views feeding ${input.target} output different columns: ${describe(first)} vs ${describe(mismatch)}. Backfill replays them in one INSERT, which cannot leave a column to its DEFAULT for only some views' rows.`)
+    throw new BackfillConfigError(
+      `Materialized views feeding ${input.target} output different columns: ${describe(first)} vs ${describe(mismatch)}. Backfill replays them in one INSERT, which cannot leave a column to its DEFAULT for only some views' rows.`,
+    )
   }
   return input.insertableColumns.filter((name) => first.names.has(name))
 }
@@ -289,6 +337,8 @@ export function assertReplayColumnsStillInsertable(input: {
 }): void {
   const missing = (input.targetColumns ?? []).filter((name) => !input.insertableColumns.includes(name))
   if (missing.length) {
-    throw new BackfillConfigError(`Target ${input.target} changed since plan ${input.planId} was created: column(s) ${missing.join(', ')} are gone or no longer insertable. Create a new plan with backfill plan.`)
+    throw new BackfillConfigError(
+      `Target ${input.target} changed since plan ${input.planId} was created: column(s) ${missing.join(', ')} are gone or no longer insertable. Create a new plan with backfill plan.`,
+    )
   }
 }

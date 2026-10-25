@@ -1,5 +1,6 @@
 import type { ClickHouseSettings } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
+import * as Effect from 'effect/Effect'
 import {
 	type BackfillPlanState,
 	buildBackfillPlan,
@@ -12,6 +13,7 @@ import {
 import { isSessionExpiredError } from '../api-request.js'
 import type { Credentials } from '../auth/index.js'
 import { createRemoteExecutor } from '../query/remote-executor.js'
+import { failureValue, fromPromise, runEffect } from '../runtime.js'
 import { createJobsClient } from './client.js'
 import { buildJobConsoleUrl } from './console-url.js'
 
@@ -67,7 +69,10 @@ function flagString(
 		: undefined
 }
 
-function coerceTimestamp(raw: string | undefined, flag: string): string | undefined {
+function coerceTimestamp(
+	raw: string | undefined,
+	flag: string,
+): string | undefined {
 	if (!raw) return undefined
 	const date = new Date(raw)
 	if (Number.isNaN(date.getTime())) {
@@ -90,7 +95,9 @@ export function parseSubmitInput(
 	if (rawConcurrency !== undefined) {
 		const parsed = Number(rawConcurrency)
 		if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 48) {
-			throw new Error('Invalid value for --concurrency. Expected an integer between 1 and 48.')
+			throw new Error(
+				'Invalid value for --concurrency. Expected an integer between 1 and 48.',
+			)
 		}
 		concurrency = parsed
 	}
@@ -118,65 +125,109 @@ export interface SubmitContext {
 export async function handleSubmit(
 	context: SubmitContext,
 ): Promise<{ handled: true; exitCode: number }> {
-	try {
-		const { opts, title, concurrency } = parseSubmitInput(context.flags)
+	return runEffect(
+		Effect.gen(function* () {
+			const { opts, title, concurrency } = parseSubmitInput(context.flags)
 
-		const executor = createRemoteExecutor({
-			credentials: context.credentials,
-			serviceSlug: context.serviceSlug,
-		})
+			return yield* Effect.acquireUseRelease(
+				Effect.sync(() =>
+					createRemoteExecutor({
+						credentials: context.credentials,
+						serviceSlug: context.serviceSlug,
+					}),
+				),
+				(executor) =>
+					Effect.gen(function* () {
+						const { plan } = yield* fromPromise(() =>
+							buildBackfillPlan({
+								opts,
+								configPath: context.configPath,
+								config: context.config,
+								clickhouseQuery: <T>(
+									sql: string,
+									settings?: Record<
+										string,
+										string | number | boolean | undefined
+									>,
+								) =>
+									executor.query<T>(
+										sql,
+										settings as ClickHouseSettings | undefined,
+									),
+								// ObsessionDB enables parallel replicas by default, which inflates
+								// aggregate results used for chunk sizing. Disable for planning.
+								querySettings: { enable_parallel_replicas: 0 },
+							}),
+						)
 
-		const { plan } = await buildBackfillPlan({
-			opts,
-			configPath: context.configPath,
-			config: context.config,
-			clickhouseQuery: <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) =>
-				executor.query<T>(sql, settings as ClickHouseSettings | undefined),
-			// ObsessionDB enables parallel replicas by default, which inflates
-			// aggregate results used for chunk sizing. Disable for planning.
-			querySettings: { enable_parallel_replicas: 0 },
-		})
+						const tasks = buildSubmitTasks(plan)
+						const jobs = createJobsClient(context.credentials)
+						const { jobId } = yield* fromPromise((signal) =>
+							jobs.submit(
+								{
+									serviceSlug: context.serviceSlug,
+									type: 'backfill',
+									target: plan.target,
+									tasks,
+									...(title ? { title } : {}),
+									...(concurrency !== undefined ? { concurrency } : {}),
+									metadata: {
+										planId: plan.planId,
+										mode: plan.execution.mode,
+										source: 'chkit',
+									},
+								},
+								{ signal },
+							),
+						)
 
-		const tasks = buildSubmitTasks(plan)
-		const jobs = createJobsClient(context.credentials)
-		const { jobId } = await jobs.submit({
-			serviceSlug: context.serviceSlug,
-			type: 'backfill',
-			target: plan.target,
-			tasks,
-			...(title ? { title } : {}),
-			...(concurrency !== undefined ? { concurrency } : {}),
-			metadata: { planId: plan.planId, mode: plan.execution.mode, source: 'chkit' },
-		})
-
-		const url = buildJobConsoleUrl(context.credentials.base_url, context.serviceSlug, jobId)
-		if (context.jsonMode) {
-			context.print({
-				ok: true,
-				command: 'backfill submit',
-				jobId,
-				target: plan.target,
-				taskCount: tasks.length,
-				url,
-			})
-		} else {
-			context.print(
-				`Submitted backfill job ${jobId} for ${plan.target} (${tasks.length} task${tasks.length === 1 ? '' : 's'}).\n` +
-					`Track progress: ${url}`,
+						const url = buildJobConsoleUrl(
+							context.credentials.base_url,
+							context.serviceSlug,
+							jobId,
+						)
+						if (context.jsonMode) {
+							context.print({
+								ok: true,
+								command: 'backfill submit',
+								jobId,
+								target: plan.target,
+								taskCount: tasks.length,
+								url,
+							})
+						} else {
+							context.print(
+								`Submitted backfill job ${jobId} for ${plan.target} (${tasks.length} task${tasks.length === 1 ? '' : 's'}).\n` +
+									`Track progress: ${url}`,
+							)
+						}
+						return { handled: true as const, exitCode: 0 }
+					}),
+				(executor) => fromPromise(() => executor.close()),
 			)
-		}
-		return { handled: true, exitCode: 0 }
-	} catch (error) {
-		if (isSessionExpiredError(error)) {
-			context.print(error instanceof Error ? error.message : String(error))
-			return { handled: true, exitCode: 1 }
-		}
-		const message = error instanceof Error ? error.message : String(error)
-		if (context.jsonMode) {
-			context.print({ ok: false, command: 'backfill submit', error: message })
-		} else {
-			context.print(`Backfill submit failed: ${message}`)
-		}
-		return { handled: true, exitCode: 1 }
-	}
+		}).pipe(
+			Effect.catchCause((cause) =>
+				Effect.sync(() => {
+					const error = failureValue(cause)
+					if (isSessionExpiredError(error)) {
+						context.print(
+							error instanceof Error ? error.message : String(error),
+						)
+						return { handled: true as const, exitCode: 1 }
+					}
+					const message = error instanceof Error ? error.message : String(error)
+					if (context.jsonMode) {
+						context.print({
+							ok: false,
+							command: 'backfill submit',
+							error: message,
+						})
+					} else {
+						context.print(`Backfill submit failed: ${message}`)
+					}
+					return { handled: true as const, exitCode: 1 }
+				}),
+			),
+		),
+	)
 }

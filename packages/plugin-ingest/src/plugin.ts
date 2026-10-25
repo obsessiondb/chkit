@@ -9,6 +9,8 @@ import {
   type ResolvedChxConfig,
 } from '@chkit/core'
 import { loadDefinitionModules } from '@chkit/core/schema-loader'
+import * as Effect from 'effect/Effect'
+import type * as Scope from 'effect/Scope'
 import { z } from 'zod'
 
 import { BATCH_ID_COLUMN, createClickHouseDestination, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
@@ -17,6 +19,7 @@ import { runIngestion, type BackfillRequest } from './executor.js'
 import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE } from './journal.js'
 import { collectPipelines, selectStreams, type SelectedStream } from './registry.js'
 import { doctorJournal, repairJournal } from './recovery.js'
+import { foreign, runPublic, sync } from './runtime.js'
 import type { PipelineDefinition } from './types.js'
 
 const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
@@ -64,6 +67,21 @@ interface IngestPluginCommandContext {
   pluginContext?: { executor: ClickHouseExecutor; hasExecutor: boolean }
 }
 
+interface IngestFinding {
+  code: string
+  message: string
+  severity: 'info' | 'warn' | 'error'
+}
+
+export type IngestPlugin = ReturnType<typeof createIngestPlugin>
+
+interface IngestTarget {
+  executor: ClickHouseExecutor
+  database: string
+  targetId: string
+  close(): Promise<void>
+}
+
 const runCommand = createPluginRunner<IngestPluginCommandContext>({ configErrorClass: IngestConfigError })
 
 export function createIngestPlugin(options: IngestPluginOptions = {}) {
@@ -81,18 +99,25 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         run: runCommand({
           command: 'run',
           label: 'Ingest run',
-          fn: async (context) => {
-            const selected = await loadSelection(context)
+          fn: (context) => runPublic(Effect.gen(function* () {
+            const selected = yield* loadSelection(context)
             const backfill = parseBackfill(context.flags)
             const maxDurationSeconds = parseMaxDuration(context.flags['--max-duration']) ?? context.options.maxDurationSeconds
-            const target = openTarget(context)
-            const abort = new AbortController()
-            const onSignal = () => abort.abort(new DOMException('Interrupted', 'AbortError'))
-            process.once('SIGINT', onSignal)
-            process.once('SIGTERM', onSignal)
-
-            try {
-              const result = await runIngestion(
+            return yield* withTarget(context, (target) => Effect.gen(function* () {
+              const abort = new AbortController()
+              yield* Effect.acquireRelease(
+                sync(() => {
+                  const onSignal = () => abort.abort(new DOMException('Interrupted', 'AbortError'))
+                  process.once('SIGINT', onSignal)
+                  process.once('SIGTERM', onSignal)
+                  return onSignal
+                }),
+                (onSignal) => Effect.sync(() => {
+                  process.off('SIGINT', onSignal)
+                  process.off('SIGTERM', onSignal)
+                })
+              )
+              const result = yield* foreign(() => runIngestion(
                 { selected, backfill },
                 {
                   journal: createClickHouseJournal({
@@ -107,20 +132,16 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                   prefetchBatches: context.options.prefetchBatches,
                   log: context.jsonMode ? undefined : (message) => context.print(message),
                 }
-              )
+              ))
               if (context.jsonMode) {
-                context.print({ command: 'run', ...result })
+                yield* sync(() => context.print({ command: 'run', ...result }))
               } else {
                 const rows = result.streams.reduce((sum, stream) => sum + stream.rows, 0)
-                context.print(`Ingest run ${result.runId}: ${result.ok ? 'ok' : 'incomplete'} (${result.streams.length} streams, ${rows} rows)`)
+                yield* sync(() => context.print(`Ingest run ${result.runId}: ${result.ok ? 'ok' : 'incomplete'} (${result.streams.length} streams, ${rows} rows)`))
               }
               return result.ok ? 0 : 1
-            } finally {
-              process.off('SIGINT', onSignal)
-              process.off('SIGTERM', onSignal)
-              await target.close()
-            }
-          },
+            }))
+          })),
         }),
       },
       {
@@ -131,18 +152,18 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         run: runCommand({
           command: 'list',
           label: 'Ingest list',
-          fn: async (context) => {
-            const selected = await loadSelection(context)
+          fn: (context) => runPublic(Effect.gen(function* () {
+            const selected = yield* loadSelection(context)
             const streams = selected.map(describeStream)
             if (context.jsonMode) {
-              context.print({ ok: true, command: 'list', streams })
+              yield* sync(() => context.print({ ok: true, command: 'list', streams }))
             } else {
               for (const stream of streams) {
-                context.print(`${stream.streamId} -> ${stream.destination} [${stream.tags.join(', ')}]`)
+                yield* sync(() => context.print(`${stream.streamId} -> ${stream.destination} [${stream.tags.join(', ')}]`))
               }
             }
             return 0
-          },
+          })),
         }),
       },
       {
@@ -153,31 +174,28 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         run: runCommand({
           command: 'doctor',
           label: 'Ingest doctor',
-          fn: async (context) => {
-            const selected = await loadSelection(context)
+          fn: (context) => runPublic(Effect.gen(function* () {
+            const selected = yield* loadSelection(context)
             const backfill = parseBackfill(context.flags)
-            const target = openTarget(context)
-            try {
-              const streams = await Promise.all(selected.map(async (entry) => {
+            return yield* withTarget(context, (target) => Effect.gen(function* () {
+              const streams = yield* Effect.forEach(selected, (entry) => Effect.gen(function* () {
                 const namespaceId = backfill ? `${entry.stream.id}#backfill:${backfill.id}` : entry.stream.id
-                const report = await doctorJournal(namespaceId, {
+                const report = yield* foreign(() => doctorJournal(namespaceId, {
                   executor: target.executor, database: target.database, targetId: target.targetId, table: context.options.journalTable,
-                })
+                }))
                 return { ...describeStream(entry), report }
-              }))
+              }), { concurrency: 'unbounded' })
               const ok = streams.every((stream) => stream.report.healthy)
               if (context.jsonMode) {
-                context.print({ ok, command: 'doctor', targetId: target.targetId, streams })
+                yield* sync(() => context.print({ ok, command: 'doctor', targetId: target.targetId, streams }))
               } else {
                 for (const { report } of streams) {
-                  context.print(`${report.namespaceId}: ${report.healthy ? 'healthy' : report.problems.join('; ')} (${report.runs} runs, selected checkpoint v${report.checkpoint.version}, ${report.selectedEvidenceRows} stream evidence rows)`)
+                  yield* sync(() => context.print(`${report.namespaceId}: ${report.healthy ? 'healthy' : report.problems.join('; ')} (${report.runs} runs, selected checkpoint v${report.checkpoint.version}, ${report.selectedEvidenceRows} stream evidence rows)`))
                 }
               }
               return ok ? 0 : 1
-            } finally {
-              await target.close()
-            }
-          },
+            }))
+          })),
         }),
       },
       {
@@ -188,44 +206,40 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         run: runCommand({
           command: 'repair',
           label: 'Ingest repair',
-          fn: async (context) => {
-            const selected = await loadSelection(context)
+          fn: (context) => runPublic(Effect.gen(function* () {
+            const selected = yield* loadSelection(context)
             const backfill = parseBackfill(context.flags)
             const apply = context.flags['--apply']
             if (typeof apply === 'string' && selected.length !== 1) {
-              throw new IngestConfigError('--apply requires exactly one selected stream; use --tag to narrow the selection.')
+              return yield* Effect.fail(new IngestConfigError('--apply requires exactly one selected stream; use --tag to narrow the selection.'))
             }
-            const target = openTarget(context)
-            try {
-              const streams = []
-              for (const entry of selected) {
+            return yield* withTarget(context, (target) => Effect.gen(function* () {
+              const streams = yield* Effect.forEach(selected, (entry) => Effect.gen(function* () {
                 const namespaceId = backfill ? `${entry.stream.id}#backfill:${backfill.id}` : entry.stream.id
-                const result = await repairJournal(namespaceId, typeof apply === 'string' ? apply : undefined, {
+                const result = yield* foreign(() => repairJournal(namespaceId, typeof apply === 'string' ? apply : undefined, {
                   executor: target.executor, database: target.database, targetId: target.targetId, table: context.options.journalTable,
-                })
-                streams.push({ ...describeStream(entry), ...result })
-              }
+                }))
+                return { ...describeStream(entry), ...result }
+              }))
               if (context.jsonMode) {
-                context.print({ ok: true, command: 'repair', targetId: target.targetId, streams })
+                yield* sync(() => context.print({ ok: true, command: 'repair', targetId: target.targetId, streams }))
               } else {
                 for (const { applied, plan } of streams) {
                   if (plan.healthy) {
-                    context.print(`${plan.namespaceId}: healthy; ${plan.runs} runs, selected checkpoint v${plan.checkpoint.version}.`)
+                    yield* sync(() => context.print(`${plan.namespaceId}: healthy; ${plan.runs} runs, selected checkpoint v${plan.checkpoint.version}.`))
                     continue
                   }
-                  context.print(`${plan.namespaceId}: ${applied ? 'repair materialized; configuration activation required' : 'repair plan'}; retain ${plan.retainedFacts} facts, selected checkpoint v${plan.checkpoint.version}.`)
-                  for (const problem of plan.problems) context.print(problem)
-                  context.print(`Evidence: ${plan.evidenceRows} rows ${applied ? 'preserved in' : 'will be archived to'} ${applied ? plan.archiveTable : `${plan.archiveTable}_<copy id>`}; original table retained.`)
-                  context.print(plan.replayWarning)
-                  context.print(plan.activation)
-                  if (!applied && !plan.healthy && plan.repairable) context.print(`Review this plan, then run ingest repair --tag stream:${plan.namespaceId.split('#backfill:')[0]}${backfill ? ` --backfill ${backfill.id}` : ''} --apply ${plan.fingerprint}`)
+                  yield* sync(() => context.print(`${plan.namespaceId}: ${applied ? 'repair materialized; configuration activation required' : 'repair plan'}; retain ${plan.retainedFacts} facts, selected checkpoint v${plan.checkpoint.version}.`))
+                  for (const problem of plan.problems) yield* sync(() => context.print(problem))
+                  yield* sync(() => context.print(`Evidence: ${plan.evidenceRows} rows ${applied ? 'preserved in' : 'will be archived to'} ${applied ? plan.archiveTable : `${plan.archiveTable}_<copy id>`}; original table retained.`))
+                  yield* sync(() => context.print(plan.replayWarning))
+                  yield* sync(() => context.print(plan.activation))
+                  if (!applied && !plan.healthy && plan.repairable) yield* sync(() => context.print(`Review this plan, then run ingest repair --tag stream:${plan.namespaceId.split('#backfill:')[0]}${backfill ? ` --backfill ${backfill.id}` : ''} --apply ${plan.fingerprint}`))
                 }
               }
               return 0
-            } finally {
-              await target.close()
-            }
-          },
+            }))
+          })),
         }),
       },
       {
@@ -236,61 +250,58 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         run: runCommand({
           command: 'status',
           label: 'Ingest status',
-          fn: async (context) => {
-            const selected = await loadSelection(context)
-            const target = openTarget(context)
-            try {
+          fn: (context) => runPublic(Effect.gen(function* () {
+            const selected = yield* loadSelection(context)
+            return yield* withTarget(context, (target) => Effect.gen(function* () {
               const journal = createClickHouseJournal({
                 executor: target.executor,
                 database: target.database,
                 targetId: target.targetId,
                 table: context.options.journalTable,
               })
-              await journal.ensure()
-              const streams = await Promise.all(
-                selected.map(async (entry) => {
-                  const checkpoint = await journal.readCheckpoint(entry.stream.id)
+              yield* foreign(() => journal.ensure())
+              const streams = yield* Effect.forEach(
+                selected, (entry) => Effect.gen(function* () {
+                  const checkpoint = yield* foreign(() => journal.readCheckpoint(entry.stream.id))
                   return { ...describeStream(entry), checkpointVersion: checkpoint.version, checkpoint: checkpoint.envelope ?? null }
-                })
+                }), { concurrency: 'unbounded' }
               )
               if (context.jsonMode) {
-                context.print({ ok: true, command: 'status', targetId: target.targetId, streams })
+                yield* sync(() => context.print({ ok: true, command: 'status', targetId: target.targetId, streams }))
               } else {
                 for (const stream of streams) {
-                  context.print(`${stream.streamId}: v${stream.checkpointVersion} ${stream.checkpoint ? JSON.stringify(stream.checkpoint.state) : '(no checkpoint)'}`)
+                  yield* sync(() => context.print(`${stream.streamId}: v${stream.checkpointVersion} ${stream.checkpoint ? JSON.stringify(stream.checkpoint.state) : '(no checkpoint)'}`))
                 }
               }
               return 0
-            } finally {
-              await target.close()
-            }
-          },
+            }))
+          })),
         }),
       },
     ],
     hooks: {
-      async onCheck(context: { config: ResolvedChxConfig }) {
-        const findings = checkGraph(await loadGraph(context.config))
-        return {
-          plugin: 'ingest',
-          evaluated: true,
-          ok: findings.every((finding) => finding.severity !== 'error'),
-          findings,
-        }
+      onCheck(context: { config: ResolvedChxConfig }) {
+        return runPublic(Effect.gen(function* () {
+          const findings = checkGraph(yield* loadGraph(context.config))
+          return {
+            plugin: 'ingest',
+            evaluated: true,
+            ok: findings.every((finding) => finding.severity !== 'error'),
+            findings,
+          }
+        }))
       },
     },
   }
 }
-
-export type IngestPlugin = ReturnType<typeof createIngestPlugin>
 
 export function ingest(options: IngestPluginOptions = {}): ChxInlinePluginRegistration<IngestPlugin, IngestPluginOptions> {
   return { plugin: createIngestPlugin(options), name: 'ingest', enabled: true, options }
 }
 
 /** Local, zero-network graph checks: they hold in `--offline` mode too. */
-export function checkGraph(pipelines: readonly PipelineDefinition[]) {
-  const findings: Array<{ code: string; message: string; severity: 'info' | 'warn' | 'error' }> = []
+export function checkGraph(pipelines: readonly PipelineDefinition[]): IngestFinding[] {
+  const findings: IngestFinding[] = []
   if (pipelines.length === 0) {
     findings.push({ code: 'ingest_no_pipelines', message: 'No ingestion pipeline is exported by the project entry.', severity: 'warn' })
   }
@@ -311,21 +322,41 @@ export function checkGraph(pipelines: readonly PipelineDefinition[]) {
 }
 
 // Discover values exported from the configured entry (or legacy schema files).
-async function loadGraph(config: ResolvedChxConfig): Promise<PipelineDefinition[]> {
-  if (config.schema.length === 0) return []
-  return collectPipelines(await loadDefinitionModules(config.schema, { cwd: process.cwd() }))
+function loadGraph(config: ResolvedChxConfig): Effect.Effect<PipelineDefinition[], unknown> {
+  return Effect.gen(function* () {
+    if (config.schema.length === 0) return []
+    return collectPipelines(yield* foreign(() => loadDefinitionModules(config.schema, { cwd: process.cwd() })))
+  })
 }
 
-async function loadSelection(context: IngestPluginCommandContext): Promise<SelectedStream[]> {
-  const pipelines = await loadGraph(context.config)
-  if (pipelines.length === 0) {
-    throw new IngestConfigError('No ingestion pipeline is exported. Export a definePipeline(...) value from the module configured as "entry".')
-  }
-  const tags = context.flags['--tag']
-  return selectStreams(pipelines, Array.isArray(tags) ? tags : typeof tags === 'string' ? [tags] : [])
+function loadSelection(context: IngestPluginCommandContext): Effect.Effect<SelectedStream[], unknown> {
+  return Effect.gen(function* () {
+    const pipelines = yield* loadGraph(context.config)
+    if (pipelines.length === 0) {
+      return yield* Effect.fail(new IngestConfigError('No ingestion pipeline is exported. Export a definePipeline(...) value from the module configured as "entry".'))
+    }
+    const tags = context.flags['--tag']
+    return selectStreams(pipelines, Array.isArray(tags) ? tags : typeof tags === 'string' ? [tags] : [])
+  })
 }
 
-function openTarget(context: IngestPluginCommandContext) {
+function withTarget<T>(
+  context: IngestPluginCommandContext,
+  use: (target: IngestTarget) => Effect.Effect<T, unknown, Scope.Scope>
+): Effect.Effect<T, unknown> {
+  return Effect.scoped(Effect.gen(function* () {
+    const target = yield* Effect.acquireRelease(
+      sync(() => openTarget(context)),
+      (target) => foreign(() => target.close()).pipe(
+        Effect.timeoutOrElse({ duration: 5000, orElse: () => Effect.fail(new Error('Ingestion target cleanup timed out')) }),
+        Effect.orDie
+      )
+    )
+    return yield* Effect.exit(use(target))
+  })).pipe(Effect.flatten)
+}
+
+function openTarget(context: IngestPluginCommandContext): IngestTarget {
   const clickhouse = context.config.clickhouse
   // Ingestion requires JSONEachRow and per-insert deduplication settings.
   // The host executor contract does not guarantee either capability.

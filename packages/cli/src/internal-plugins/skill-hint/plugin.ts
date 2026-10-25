@@ -1,32 +1,18 @@
 import process from 'node:process'
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
 
 import { definePlugin, type ChxPlugin } from '../../plugins.js'
 
-import {
-  findAgentRoot,
-  isSkillInstalledAt,
-  type AgentKind,
-  type AgentRootResult,
-} from './agent-detect.js'
+import { findAgentRoot, isSkillInstalledAt, type AgentKind, type AgentRootResult } from './agent-detect.js'
 import {
   installSkill as defaultInstallSkill,
   promptInstall as defaultPromptInstall,
   SKILL_INSTALL_COMMAND,
 } from './prompt.js'
-import {
-  HINT_INTERVAL_MS,
-  readSkillHintState,
-  writeSkillHintState,
-  type SkillHintState,
-} from './state.js'
+import { HINT_INTERVAL_MS, readSkillHintState, writeSkillHintState, type SkillHintState } from './state.js'
 
-export {
-  findAgentRoot,
-  HINT_INTERVAL_MS,
-  SKILL_INSTALL_COMMAND,
-  type AgentKind,
-  type SkillHintState,
-}
+export { findAgentRoot, HINT_INTERVAL_MS, SKILL_INSTALL_COMMAND, type AgentKind, type SkillHintState }
 
 export interface SkillHintDeps {
   detectAgent(): AgentRootResult
@@ -64,23 +50,27 @@ export function createSkillHintPlugin(overrides?: Partial<SkillHintDeps>): ChxPl
     },
     hooks: {
       async onInit(ctx) {
-        if (!ctx.isInteractive || ctx.jsonMode) return
-        if (deps.isSkillInstalled()) return
+        return runEffect(
+          Effect.gen(function* () {
+            if (!ctx.isInteractive || ctx.jsonMode) return
+            if (deps.isSkillInstalled()) return
 
-        const state = deps.readState()
-        if (state.lastDismissed) {
-          const elapsed = deps.now() - new Date(state.lastDismissed).getTime()
-          if (elapsed < HINT_INTERVAL_MS) return
-        }
+            const state = deps.readState()
+            if (state.lastDismissed) {
+              const elapsed = deps.now() - new Date(state.lastDismissed).getTime()
+              if (elapsed < HINT_INTERVAL_MS) return
+            }
 
-        const { agent } = deps.detectAgent()
-        const accepted = await deps.promptUser(agent)
-        if (accepted) {
-          await deps.installSkill()
-        } else {
-          deps.writeState({ lastDismissed: new Date(deps.now()).toISOString() })
-          pendingMessage = `You can install it later with: ${SKILL_INSTALL_COMMAND}`
-        }
+            const { agent } = deps.detectAgent()
+            const accepted = yield* fromPromise(() => deps.promptUser(agent))
+            if (accepted) {
+              yield* fromPromise(() => deps.installSkill())
+            } else {
+              deps.writeState({ lastDismissed: new Date(deps.now()).toISOString() })
+              pendingMessage = `You can install it later with: ${SKILL_INSTALL_COMMAND}`
+            }
+          }),
+        )
       },
 
       onComplete(ctx) {

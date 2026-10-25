@@ -1,5 +1,8 @@
 import type { MigrationOperationType } from '@chkit/core'
-import pRetry from 'p-retry'
+import * as Effect from 'effect/Effect'
+import * as Schedule from 'effect/Schedule'
+import isNetworkError from 'is-network-error'
+import { attempt, run } from './effect-runtime.js'
 import { parseModifyColumnIntent, parseRenameColumn, type ColumnIntent } from './alter-column-statement.js'
 import type { ClickHouseExecutor } from './index.js'
 import { allReplicas, resolveReplicaFanout, stringLiteral, type ReplicaFanout } from './replicas.js'
@@ -113,10 +116,14 @@ export async function waitForDictionary(
 ): Promise<void> {
   const where = `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)} AND engine = 'Dictionary'`
   const label = `waitForDictionary: ${database}.${dictionaryName} not yet visible`
-  const fanout = await resolveReplicaFanout(executor, options?.cluster)
-  await pRetry(async () => {
-    if (!(await dictionaryCatalogVisible(executor, where, fanout))) throw new Error(label)
-  }, RETRY_OPTIONS)
+  return run(Effect.gen(function* () {
+    const fanout = yield* attempt(() => resolveReplicaFanout(executor, options?.cluster))
+    yield* retryVisible(Effect.gen(function* () {
+      if (!(yield* attempt(() => dictionaryCatalogVisible(executor, where, fanout)))) {
+        return yield* Effect.fail(new Error(label))
+      }
+    }))
+  }))
 }
 
 export async function waitForColumn(
@@ -270,13 +277,12 @@ export async function waitForRows<T>(
   predicate: (rows: T[]) => boolean,
   label = 'waitForRows',
 ): Promise<T[]> {
-  return pRetry(async () => {
-    const rows = await executor.query<T>(sql)
-    if (!predicate(rows)) {
-      throw new Error(`${label}: predicate not yet satisfied`)
-    }
+  return run(retryVisible(Effect.gen(function* () {
+    const rows = yield* attempt(() => executor.query<T>(sql))
+    const satisfied = yield* Effect.try({ try: () => predicate(rows), catch: (error) => error })
+    if (!satisfied) return yield* Effect.fail(new Error(`${label}: predicate not yet satisfied`))
     return rows
-  }, RETRY_OPTIONS)
+  })))
 }
 
 export async function waitForTableAbsent(
@@ -455,10 +461,14 @@ async function waitForSystemRows(
   wait: SystemRowsWait,
   options: PropagationOptions | undefined,
 ): Promise<void> {
-  const fanout = await resolveReplicaFanout(executor, options?.cluster)
-  await pRetry(async () => {
-    if (!(await systemRowsMatch(executor, wait, fanout))) throw new Error(wait.label)
-  }, RETRY_OPTIONS)
+  return run(Effect.gen(function* () {
+    const fanout = yield* attempt(() => resolveReplicaFanout(executor, options?.cluster))
+    yield* retryVisible(Effect.gen(function* () {
+      if (!(yield* attempt(() => systemRowsMatch(executor, wait, fanout)))) {
+        return yield* Effect.fail(new Error(wait.label))
+      }
+    }))
+  }))
 }
 
 async function dictionaryCatalogVisible(
@@ -520,40 +530,42 @@ function constraintWhere(database: string, tableName: string, constraintName: st
 async function waitUntilApplied(subject: string, check: () => Promise<string | undefined>): Promise<void> {
   const deadline = Date.now() + DEFINITION_WAIT_DEADLINE_MS
   let checks = 0
-  let detail = ''
-  for (;;) {
+  return run(Effect.gen(function* () {
     checks += 1
-    const outcome = await checkBefore(check, deadline)
-    if (outcome.mismatch === undefined && outcome.failure === undefined) return
-    detail = outcome.failure ?? outcome.mismatch ?? ''
-    if (checks > RETRY_OPTIONS.retries || Date.now() + RETRY_OPTIONS.minTimeout >= deadline) break
-    await new Promise((resolve) => setTimeout(resolve, RETRY_OPTIONS.minTimeout))
-  }
-  throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
+    const detail = yield* attempt(check).pipe(
+      Effect.catch((error) => Effect.succeed(error instanceof Error ? error.message : String(error))),
+      Effect.timeoutOrElse({
+        duration: Math.max(deadline - Date.now(), 0),
+        orElse: () => Effect.succeed(`a check did not return within the ${DEFINITION_WAIT_DEADLINE_MS / 1000}s deadline`),
+      }),
+    )
+    if (detail !== undefined) return yield* Effect.fail(detail)
+  }).pipe(
+    Effect.retry({
+      times: RETRY_OPTIONS.retries,
+      schedule: Schedule.spaced(RETRY_OPTIONS.minTimeout),
+      while: () => Date.now() + RETRY_OPTIONS.minTimeout < deadline,
+    }),
+    Effect.mapError((detail) => new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)),
+  ))
 }
 
-async function checkBefore(
-  check: () => Promise<string | undefined>,
-  deadline: number,
-): Promise<{ mismatch?: string; failure?: string }> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<{ failure: string }>((resolve) => {
-    timer = setTimeout(
-      () => resolve({ failure: `a check did not return within the ${DEFINITION_WAIT_DEADLINE_MS / 1000}s deadline` }),
-      Math.max(deadline - Date.now(), 0),
-    )
-  })
-  try {
-    return await Promise.race([
-      check().then(
-        (mismatch) => ({ mismatch }),
-        (error: unknown) => ({ failure: error instanceof Error ? error.message : String(error) }),
-      ),
-      expired,
-    ])
-  } finally {
-    clearTimeout(timer)
-  }
+function retryVisible<A>(program: Effect.Effect<A, unknown>): Effect.Effect<A, Error> {
+  return program.pipe(
+    Effect.mapError((error) => error instanceof Error
+      ? error
+      : new TypeError(`Non-error was thrown: "${error}". You should only throw errors.`)),
+    Effect.retry({
+      times: RETRY_OPTIONS.retries,
+      schedule: Schedule.spaced(RETRY_OPTIONS.minTimeout),
+      while: (error) => !isRetryAbort(error) && (!(error instanceof TypeError) || isNetworkError(error)),
+    }),
+    Effect.mapError((error) => isRetryAbort(error) ? error.originalError : error),
+  )
+}
+
+function isRetryAbort(error: Error): error is Error & { originalError: Error } {
+  return error.name === 'AbortError' && 'originalError' in error && error.originalError instanceof Error
 }
 
 /**

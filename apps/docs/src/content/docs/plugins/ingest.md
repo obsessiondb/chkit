@@ -214,6 +214,8 @@ Successful syncs start a new batch identity cycle, recorded by the existing jour
 
 The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle. Terminal journal appends are bounded by the duration budget while the run is live. After cancellation or budget exhaustion, each one gets a separate five-second limit. Interrupted writes never count as successful ingestion.
 
+Cancellation is cooperative. A custom reader or loader that ignores its `AbortSignal` may finish external work after chkit stops waiting; cancelling the local run does not undo a remote write. A generator's pending `next()` can also delay its `finally` block. ChKit does not start new checkpoint commits from abandoned reader or loader results, but a journal append already sent to an external service can still complete there.
+
 Overlapping processes record independent histories. Scheduler concurrency controls limit resource use; a stale valid read may replay acknowledged work. ChKit validates journal facts before using their checkpoint.
 
 ## Options
@@ -223,6 +225,12 @@ Overlapping processes record independent histories. Scheduler concurrency contro
 | `journalTable` | `_chkit_ingestion_journal` | Append-only checkpoint journal in the configured database |
 | `maxDurationSeconds` | `3600` | Execution budget. Exhausting it ends the run as incomplete and keeps committed progress |
 | `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading |
+
+Programmatic `runIngestion` calls validate capacities before starting work: `prefetchBatches`, pipeline concurrency limits, `batchSize`, `maxChunkRows`, and an explicitly set `maxChunks` must be positive finite safe integers. `maxDurationMs` must be a positive finite number.
+
+`simpleLoader({ maxRowsPerInsert })` applies the same positive finite safe-integer rule to its physical insert size.
+
+Prefetch uses a suspending queue, never a dropping buffer. Its capacity counts queued logical batches, not total source pull-ahead or process memory: active loading, the producer's pending batch, and a reader's current page also retain data. Custom readers must pull lazily and bound their own pages and buffers.
 
 ## Related pages
 

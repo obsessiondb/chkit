@@ -1,5 +1,5 @@
 import { IngestConfigError } from './errors.js'
-import { canonicalJson } from './journal.js'
+import { canonicalJson } from './journal-records.js'
 import type { AttemptOptions, FetchContext } from './types.js'
 
 export interface Page<TItem, TCursor, TMetadata = undefined> {

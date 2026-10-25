@@ -16,8 +16,10 @@ import {
 	type SystemTableRow,
 } from '@chkit/clickhouse'
 import { unquoteIdentifiers } from '@chkit/core'
+import * as Effect from 'effect/Effect'
 import type { Credentials } from '../auth/index.js'
 import { type ApiClient, createApiClient } from '../client.js'
+import { fromPromise, runEffect } from '../runtime.js'
 
 function throwIfError(
 	res: Awaited<ReturnType<ApiClient['workbench']['query']['execute']>>,
@@ -111,36 +113,44 @@ export function createRemoteExecutor(deps: {
 }): ClickHouseExecutor {
 	const { credentials, serviceSlug } = deps
 	const client = createApiClient(credentials)
+	const execute = (
+		query: string,
+		settings?: ClickHouseSettings,
+		queryId?: string,
+	) => {
+		const apiSettings = toApiSettings(settings)
+		return fromPromise((signal) =>
+			client.workbench.query.execute(
+				{
+					serviceSlug,
+					query,
+					...(apiSettings ? { settings: apiSettings } : {}),
+					...(queryId ? { queryId } : {}),
+				},
+				{ signal },
+			),
+		).pipe(Effect.tap((res) => Effect.sync(() => throwIfError(res))))
+	}
+	const queryEffect = <T>(sql: string, settings?: ClickHouseSettings) =>
+		execute(sql, settings).pipe(Effect.map((res) => normalizeQueryData<T>(res)))
 
 	const executor: ClickHouseExecutor = {
 		async command(sql) {
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query: sql,
-			})
-			throwIfError(res)
+			return runEffect(execute(sql).pipe(Effect.asVoid))
 		},
 
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
-			const apiSettings = toApiSettings(settings)
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query: sql,
-				...(apiSettings ? { settings: apiSettings } : {}),
-			})
-			throwIfError(res)
-			return normalizeQueryData<T>(res)
+			return runEffect(queryEffect<T>(sql, settings))
 		},
 
 		async queryJson<T extends Record<string, unknown>>(
 			sql: string,
 		): Promise<ClickHouseJsonQueryResult<T>> {
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query: sql,
-			})
-			throwIfError(res)
-			return normalizeQueryJsonResult<T>(res)
+			return runEffect(
+				execute(sql).pipe(
+					Effect.map((res) => normalizeQueryJsonResult<T>(res)),
+				),
+			)
 		},
 
 		async insert<T extends Record<string, unknown>>(
@@ -150,64 +160,63 @@ export function createRemoteExecutor(deps: {
 			if (!query) return
 			// Per-insert settings such as insert_deduplication_token must reach
 			// ClickHouse, so this cannot go through command(), which sends none.
-			const apiSettings = toApiSettings(params.settings)
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query,
-				...(apiSettings ? { settings: apiSettings } : {}),
-			})
-			throwIfError(res)
+			return runEffect(execute(query, params.settings).pipe(Effect.asVoid))
 		},
 
 		async submit(sql, queryId?) {
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query: sql,
-				// The API takes the id as a top-level field and ignores a
-				// `query_id` setting, which would leave the query under a random id.
-				...(queryId ? { queryId } : {}),
-			})
-			throwIfError(res)
-			return queryId ?? res.query_id ?? 'submitted'
+			return runEffect(
+				execute(sql, undefined, queryId).pipe(
+					Effect.map((res) => {
+						// The API takes the id as a top-level field and ignores a
+						// `query_id` setting, which would leave the query under a random id.
+						return queryId ?? res.query_id ?? 'submitted'
+					}),
+				),
+			)
 		},
 
 		async queryStatus(queryId, options?) {
-			// afterTime bounds the query's start, as in the native executor. A
-			// string compared with a DateTime column may carry neither fractional
-			// seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
-			// '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
-			const afterFilter = options?.afterTime
-				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
-				: ''
+			return runEffect(
+				Effect.gen(function* () {
+					// afterTime bounds the query's start, as in the native executor. A
+					// string compared with a DateTime column may carry neither fractional
+					// seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
+					// '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
+					const afterFilter = options?.afterTime
+						? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
+						: ''
 
-			// The query runs on the replica that received it, so a multi-replica
-			// service reads every replica (#246). A poll skips a replica it cannot
-			// reach; with everyReplica the read fails instead.
-			const fanout = await resolveReplicaFanout(executor)
-			const from = (table: string) => (fanout ? allReplicas(fanout, table) : table)
-			const readSettings = `SETTINGS skip_unavailable_shards = ${options?.everyReplica ? 0 : 1}`
+					// The query runs on the replica that received it, so a multi-replica
+					// service reads every replica (#246). A poll skips a replica it cannot
+					// reach; with everyReplica the read fails instead.
+					const fanout = yield* fromPromise(() =>
+						resolveReplicaFanout(executor),
+					)
+					const from = (table: string) =>
+						fanout ? allReplicas(fanout, table) : table
+					const readSettings = `SETTINGS skip_unavailable_shards = ${options?.everyReplica ? 0 : 1}`
 
-			// migrate bounds an attach by how long the running attempt has run.
-			// The API returns every cell as a string.
-			const running = await executor.query<{ elapsed: string }>(
-				`SELECT elapsed FROM ${from('system.processes')} WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1 ${readSettings}`,
-			)
-			const [proc] = running
-			if (proc) {
-				return {
-					status: 'running' as const,
-					elapsedMs: Math.round(Number(proc.elapsed) * 1000),
-				}
-			}
+					// migrate bounds an attach by how long the running attempt has run.
+					// The API returns every cell as a string.
+					const running = yield* queryEffect<{ elapsed: string }>(
+						`SELECT elapsed FROM ${from('system.processes')} WHERE user = currentUser() AND query_id = '${queryId}' LIMIT 1 ${readSettings}`,
+					)
+					const [proc] = running
+					if (proc) {
+						return {
+							status: 'running' as const,
+							elapsedMs: Math.round(Number(proc.elapsed) * 1000),
+						}
+					}
 
-			const log = await executor.query<{
-				type: string
-				written_rows: string
-				written_bytes: string
-				query_duration_ms: string
-				exception: string
-			}>(
-				`SELECT type, written_rows, written_bytes, query_duration_ms, exception
+					const log = yield* queryEffect<{
+						type: string
+						written_rows: string
+						written_bytes: string
+						query_duration_ms: string
+						exception: string
+					}>(
+						`SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'
@@ -216,68 +225,81 @@ WHERE user = currentUser()
 ORDER BY event_time DESC
 LIMIT 1
 ${readSettings}`,
+					)
+
+					const [row] = log
+					if (!row) return { status: 'unknown' as const }
+
+					if (row.type === 'QueryFinish') {
+						return {
+							status: 'finished' as const,
+							writtenRows: Number(row.written_rows),
+							writtenBytes: Number(row.written_bytes),
+							durationMs: Number(row.query_duration_ms),
+						}
+					}
+
+					return {
+						status: 'failed' as const,
+						durationMs: Number(row.query_duration_ms),
+						error: row.exception,
+					} satisfies QueryStatus
+				}),
 			)
-
-			const [row] = log
-			if (!row) return { status: 'unknown' as const }
-
-			if (row.type === 'QueryFinish') {
-				return {
-					status: 'finished' as const,
-					writtenRows: Number(row.written_rows),
-					writtenBytes: Number(row.written_bytes),
-					durationMs: Number(row.query_duration_ms),
-				}
-			}
-
-			return {
-				status: 'failed' as const,
-				durationMs: Number(row.query_duration_ms),
-				error: row.exception,
-			} satisfies QueryStatus
 		},
 
 		async listSchemaObjects() {
-			const rows = await executor.query<{
-				database: string
-				name: string
-				engine: string
-			}>(
-				`SELECT database, name, engine
+			return runEffect(
+				Effect.gen(function* () {
+					const rows = yield* queryEffect<{
+						database: string
+						name: string
+						engine: string
+					}>(
+						`SELECT database, name, engine
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
   AND name NOT LIKE '_chkit_%'`,
-			)
+					)
 
-			const out: SchemaObjectRef[] = []
-			for (const row of rows) {
-				const kind = inferSchemaKindFromEngine(row.engine)
-				if (!kind) continue
-				out.push({ kind, database: row.database, name: row.name })
-			}
-			return out
+					const out: SchemaObjectRef[] = []
+					for (const row of rows) {
+						const kind = inferSchemaKindFromEngine(row.engine)
+						if (!kind) continue
+						out.push({ kind, database: row.database, name: row.name })
+					}
+					return out
+				}),
+			)
 		},
 
 		async listTableDetails(databases) {
-			if (databases.length === 0) return []
-			const quoted = databases
-				.map((db) => `'${db.replace(/'/g, "''")}'`)
-				.join(', ')
+			return runEffect(
+				Effect.gen(function* () {
+					if (databases.length === 0) return []
+					const quoted = databases
+						.map((db) => `'${db.replace(/'/g, "''")}'`)
+						.join(', ')
 
-			const [tables, columns, indexes] = await Promise.all([
-				executor.query<SystemTableRow>(
-					`SELECT database, name, engine, create_table_query FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
-				),
-				executor.query<SystemColumnRow>(
-					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position FROM system.columns WHERE database IN (${quoted})`,
-				),
-				executor.query<SystemSkippingIndexRow>(
-					`SELECT database, \`table\`, name, expr, type_full AS type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,
-				),
-			])
+					const [tables, columns, indexes] = yield* Effect.all(
+						[
+							queryEffect<SystemTableRow>(
+								`SELECT database, name, engine, create_table_query FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
+							),
+							queryEffect<SystemColumnRow>(
+								`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position FROM system.columns WHERE database IN (${quoted})`,
+							),
+							queryEffect<SystemSkippingIndexRow>(
+								`SELECT database, \`table\`, name, expr, type_full AS type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,
+							),
+						],
+						{ concurrency: 'unbounded' },
+					)
 
-			return buildIntrospectedTables(tables, columns, indexes)
+					return buildIntrospectedTables(tables, columns, indexes)
+				}),
+			)
 		},
 
 		async close() {},

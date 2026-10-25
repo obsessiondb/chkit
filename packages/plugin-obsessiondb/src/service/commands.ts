@@ -1,3 +1,5 @@
+import * as Effect from 'effect/Effect'
+import { fromPromise, runEffect } from '../runtime.js'
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { errorEnvelope, serviceListEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
@@ -29,38 +31,51 @@ interface PluginCommand {
 	run: (context: PluginCommandContext) => Promise<number>
 }
 
-async function loadEffectiveCredentials(
+function loadEffectiveCredentials(
 	print: (msg: string) => void,
-): Promise<NonNullable<Awaited<ReturnType<typeof loadCredentials>>> | null> {
-	const creds = await loadCredentials()
-	if (!creds) {
-		print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
-		return null
-	}
-	return {
-		...creds,
-		base_url: resolveBaseUrl(creds.base_url),
-	}
+): Effect.Effect<
+	NonNullable<Awaited<ReturnType<typeof loadCredentials>>> | null,
+	unknown
+> {
+	return Effect.gen(function* () {
+		const creds = yield* fromPromise(() => loadCredentials())
+		if (!creds) {
+			print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
+			return null
+		}
+		return {
+			...creds,
+			base_url: resolveBaseUrl(creds.base_url),
+		}
+	})
 }
 
-async function runServiceSelect(
+function runServiceSelect(
 	context: PluginCommandContext,
-): Promise<number> {
-	const print = (msg: string) => context.print(msg)
-	const effectiveCreds = await loadEffectiveCredentials(print)
-	if (!effectiveCreds) return 1
+): Effect.Effect<number, unknown> {
+	return Effect.gen(function* () {
+		const print = (msg: string) => context.print(msg)
+		const effectiveCreds = yield* loadEffectiveCredentials(print)
+		if (!effectiveCreds) return 1
 
-	const organizations = await listServiceOrganizations(effectiveCreds)
-	const selected = await selectServiceInteractive(organizations, print)
-	if (!selected) return 1
+		const organizations = yield* fromPromise(() =>
+			listServiceOrganizations(effectiveCreds),
+		)
+		const selected = yield* fromPromise(() =>
+			selectServiceInteractive(organizations, print),
+		)
+		if (!selected) return 1
 
-	await saveSelectedService(context.configPath, {
-		service_slug: selected.service.slug,
-		service_name: selected.service.name,
+		yield* fromPromise(() =>
+			saveSelectedService(context.configPath, {
+				service_slug: selected.service.slug,
+				service_name: selected.service.name,
+			}),
+		)
+
+		print(`Service selected: ${serviceChoiceLabel(selected)}`)
+		return 0
 	})
-
-	print(`Service selected: ${serviceChoiceLabel(selected)}`)
-	return 0
 }
 
 function serviceArgs(args: string[]): string[] {
@@ -80,87 +95,122 @@ function printServiceUsage(print: (msg: string) => void): void {
 export const SERVICE_COMMAND: PluginCommand = {
 	name: 'service',
 	description: 'Manage ObsessionDB services',
-	async run(context) {
-		const print = (msg: string) => context.print(msg)
-		const [action] = serviceArgs(context.args)
+	async run(context): Promise<number> {
+		return runEffect(
+			Effect.gen(function* () {
+				const print = (msg: string) => context.print(msg)
+				const [action] = serviceArgs(context.args)
 
-		if (
-			!action ||
-			action === 'help' ||
-			action === '--help' ||
-			action === '-h'
-		) {
-			printServiceUsage(print)
-			return action ? 0 : 1
-		}
-
-		if (action === 'list' || action === 'ls') {
-			// Inline the credential check so a `--json` run emits one error envelope
-			// (not a stringified line) on the not-logged-in path.
-			const creds = await loadCredentials()
-			if (!creds) {
-				const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
-				context.print(
-					context.jsonMode
-						? errorEnvelope('obsessiondb service list', 'not_logged_in', message)
-						: message,
-				)
-				return 1
-			}
-			const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
-
-			const [organizations, selected] = await Promise.all([
-				listServiceOrganizations(effectiveCreds),
-				loadSelectedService(context.configPath),
-			])
-			if (context.jsonMode) {
-				const services = organizations.flatMap((org) =>
-					org.services.map((service) => ({
-						organization: org.name,
-						slug: service.slug,
-						name: service.name,
-						selected:
-							selected?.service_slug === service.slug ||
-							selected?.service_name === service.name,
-					})),
-				)
-				context.print(serviceListEnvelope(services))
-				return 0
-			}
-			for (const line of renderServiceOrganizations(organizations, selected)) {
-				print(line)
-			}
-			return 0
-		}
-
-		if (action === 'select') {
-			return runServiceSelect(context)
-		}
-
-		if (action === 'claim') {
-			// Inline the credential check (rather than loadEffectiveCredentials) so a `--json` run
-			// emits a single error envelope instead of stringified prose on the not-logged-in path.
-			const creds = await loadCredentials()
-			if (!creds) {
-				const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
-				if (context.jsonMode) {
-					context.print(errorEnvelope('obsessiondb service claim', 'not_logged_in', message))
-				} else {
-					print(message)
+				if (
+					!action ||
+					action === 'help' ||
+					action === '--help' ||
+					action === '-h'
+				) {
+					printServiceUsage(print)
+					return action ? 0 : 1
 				}
+
+				if (action === 'list' || action === 'ls') {
+					// Inline the credential check so a `--json` run emits one error envelope
+					// (not a stringified line) on the not-logged-in path.
+					const creds = yield* fromPromise(() => loadCredentials())
+					if (!creds) {
+						const message =
+							'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+						context.print(
+							context.jsonMode
+								? errorEnvelope(
+										'obsessiondb service list',
+										'not_logged_in',
+										message,
+									)
+								: message,
+						)
+						return 1
+					}
+					const effectiveCreds = {
+						...creds,
+						base_url: resolveBaseUrl(creds.base_url),
+					}
+
+					const [organizations, selected] = yield* Effect.all(
+						[
+							fromPromise(() => listServiceOrganizations(effectiveCreds)),
+							fromPromise(() => loadSelectedService(context.configPath)),
+						],
+						{ concurrency: 'unbounded' },
+					)
+					if (context.jsonMode) {
+						const services = organizations.flatMap((org) =>
+							org.services.map((service) => ({
+								organization: org.name,
+								slug: service.slug,
+								name: service.name,
+								selected:
+									selected?.service_slug === service.slug ||
+									selected?.service_name === service.name,
+							})),
+						)
+						context.print(serviceListEnvelope(services))
+						return 0
+					}
+					for (const line of renderServiceOrganizations(
+						organizations,
+						selected,
+					)) {
+						print(line)
+					}
+					return 0
+				}
+
+				if (action === 'select') {
+					return yield* runServiceSelect(context)
+				}
+
+				if (action === 'claim') {
+					// Inline the credential check (rather than loadEffectiveCredentials) so a `--json` run
+					// emits a single error envelope instead of stringified prose on the not-logged-in path.
+					const creds = yield* fromPromise(() => loadCredentials())
+					if (!creds) {
+						const message =
+							'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+						if (context.jsonMode) {
+							context.print(
+								errorEnvelope(
+									'obsessiondb service claim',
+									'not_logged_in',
+									message,
+								),
+							)
+						} else {
+							print(message)
+						}
+						return 1
+					}
+					const effectiveCreds = {
+						...creds,
+						base_url: resolveBaseUrl(creds.base_url),
+					}
+					return yield* fromPromise(() =>
+						runClaim(
+							effectiveCreds,
+							context.configPath,
+							context.print,
+							context.jsonMode === true,
+						),
+					)
+				}
+
+				if (action === 'alias') {
+					return yield* runServiceAlias(context)
+				}
+
+				print(`Unknown service action: ${action}`)
+				printServiceUsage(print)
 				return 1
-			}
-			const effectiveCreds = { ...creds, base_url: resolveBaseUrl(creds.base_url) }
-			return runClaim(effectiveCreds, context.configPath, context.print, context.jsonMode === true)
-		}
-
-		if (action === 'alias') {
-			return runServiceAlias(context)
-		}
-
-		print(`Unknown service action: ${action}`)
-		printServiceUsage(print)
-		return 1
+			}),
+		)
 	},
 }
 
@@ -185,101 +235,118 @@ function validateAlias(alias: string): string | null {
 	return null
 }
 
-async function runServiceAlias(context: PluginCommandContext): Promise<number> {
-	const print = (msg: string) => context.print(msg)
-	const [action, alias, ...serviceNameParts] = serviceAliasArgs(context.args)
+function runServiceAlias(
+	context: PluginCommandContext,
+): Effect.Effect<number, unknown> {
+	return Effect.gen(function* () {
+		const print = (msg: string) => context.print(msg)
+		const [action, alias, ...serviceNameParts] = serviceAliasArgs(context.args)
 
-	if (!action || action === 'help' || action === '--help' || action === '-h') {
-		printServiceAliasUsage(print)
-		return action ? 0 : 1
-	}
+		if (
+			!action ||
+			action === 'help' ||
+			action === '--help' ||
+			action === '-h'
+		) {
+			printServiceAliasUsage(print)
+			return action ? 0 : 1
+		}
 
-	if (action === 'list' || action === 'ls') {
-		const aliases = await loadServiceAliases(context.configPath)
-		const entries = Object.entries(aliases).sort(([a], [b]) =>
-			a.localeCompare(b),
-		)
-		if (entries.length === 0) {
-			print('No service aliases defined.')
+		if (action === 'list' || action === 'ls') {
+			const aliases = yield* fromPromise(() =>
+				loadServiceAliases(context.configPath),
+			)
+			const entries = Object.entries(aliases).sort(([a], [b]) =>
+				a.localeCompare(b),
+			)
+			if (entries.length === 0) {
+				print('No service aliases defined.')
+				return 0
+			}
+			print('Service aliases:')
+			for (const [name, service] of entries) {
+				print(`  ${name} -> ${service.service_name}`)
+			}
 			return 0
 		}
-		print('Service aliases:')
-		for (const [name, service] of entries) {
-			print(`  ${name} -> ${service.service_name}`)
-		}
-		return 0
-	}
 
-	if (action === 'remove' || action === 'rm' || action === 'delete') {
-		if (!alias) {
-			print('Alias is required.')
-			printServiceAliasUsage(print)
-			return 1
-		}
-		const removed = await removeServiceAlias(context.configPath, alias)
-		print(
-			removed
-				? `Service alias removed: ${alias}`
-				: `Service alias not found: ${alias}`,
-		)
-		return removed ? 0 : 1
-	}
-
-	if (action === 'set' || action === 'add') {
-		if (!alias) {
-			print('Alias is required.')
-			printServiceAliasUsage(print)
-			return 1
-		}
-		const aliasError = validateAlias(alias)
-		if (aliasError) {
-			print(aliasError)
-			return 1
-		}
-
-		const serviceName = serviceNameParts.join(' ').trim()
-		if (serviceName.length === 0) {
-			print('Service name is required.')
-			printServiceAliasUsage(print)
-			return 1
-		}
-
-		const creds = await loadCredentials()
-		if (!creds) {
-			print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
-			return 1
-		}
-
-		const effectiveCreds = {
-			...creds,
-			base_url: resolveBaseUrl(creds.base_url),
-		}
-		const services = await listServices(effectiveCreds)
-		const service = services.find((candidate) => candidate.name === serviceName)
-		if (!service) {
-			const available =
-				services.map((candidate) => candidate.name).join(', ') || '<none>'
-			print(
-				`Service not found: ${serviceName}. Available services: ${available}`,
+		if (action === 'remove' || action === 'rm' || action === 'delete') {
+			if (!alias) {
+				print('Alias is required.')
+				printServiceAliasUsage(print)
+				return 1
+			}
+			const removed = yield* fromPromise(() =>
+				removeServiceAlias(context.configPath, alias),
 			)
-			return 1
-		}
-		if (services.some((candidate) => candidate.name === alias)) {
 			print(
-				`Alias "${alias}" matches an existing service name; use --service ${alias} directly.`,
+				removed
+					? `Service alias removed: ${alias}`
+					: `Service alias not found: ${alias}`,
 			)
-			return 1
+			return removed ? 0 : 1
 		}
 
-		await saveServiceAlias(context.configPath, alias, {
-			service_slug: service.slug,
-			service_name: service.name,
-		})
-		print(`Service alias saved: ${alias} -> ${service.name}`)
-		return 0
-	}
+		if (action === 'set' || action === 'add') {
+			if (!alias) {
+				print('Alias is required.')
+				printServiceAliasUsage(print)
+				return 1
+			}
+			const aliasError = validateAlias(alias)
+			if (aliasError) {
+				print(aliasError)
+				return 1
+			}
 
-	print(`Unknown service alias action: ${action}`)
-	printServiceAliasUsage(print)
-	return 1
+			const serviceName = serviceNameParts.join(' ').trim()
+			if (serviceName.length === 0) {
+				print('Service name is required.')
+				printServiceAliasUsage(print)
+				return 1
+			}
+
+			const creds = yield* fromPromise(() => loadCredentials())
+			if (!creds) {
+				print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
+				return 1
+			}
+
+			const effectiveCreds = {
+				...creds,
+				base_url: resolveBaseUrl(creds.base_url),
+			}
+			const services = yield* fromPromise(() => listServices(effectiveCreds))
+			const service = services.find(
+				(candidate) => candidate.name === serviceName,
+			)
+			if (!service) {
+				const available =
+					services.map((candidate) => candidate.name).join(', ') || '<none>'
+				print(
+					`Service not found: ${serviceName}. Available services: ${available}`,
+				)
+				return 1
+			}
+			if (services.some((candidate) => candidate.name === alias)) {
+				print(
+					`Alias "${alias}" matches an existing service name; use --service ${alias} directly.`,
+				)
+				return 1
+			}
+
+			yield* fromPromise(() =>
+				saveServiceAlias(context.configPath, alias, {
+					service_slug: service.slug,
+					service_name: service.name,
+				}),
+			)
+			print(`Service alias saved: ${alias} -> ${service.name}`)
+			return 0
+		}
+
+		print(`Unknown service alias action: ${action}`)
+		printServiceAliasUsage(print)
+		return 1
+	})
 }

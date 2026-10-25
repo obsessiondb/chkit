@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
 
 import { waitForTable, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
+import * as Effect from 'effect/Effect'
 
 import { IngestConfigError } from './errors.js'
 import { validateJournalHistory } from './journal-history.js'
 import { canonicalJson, DEFAULT_JOURNAL_TABLE, digest, journalTableSql, type JournalRow } from './journal.js'
+import { foreign, runPublic, sync } from './runtime.js'
 import type { CommittedCheckpoint } from './types.js'
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -78,53 +80,57 @@ export function planJournalRepair(
 }
 
 /** Diagnose one complete source-table snapshot without modifying it. */
-export async function doctorJournal(namespaceId: string, options: JournalRecoveryOptions): Promise<JournalRepairPlan> {
-  const table = recoveryTable(options)
-  const snapshot = await inspectSource(table, options)
-  return sourcePlan(snapshot, namespaceId, table, options.targetId)
+export function doctorJournal(namespaceId: string, options: JournalRecoveryOptions): Promise<JournalRepairPlan> {
+  return runPublic(Effect.gen(function* () {
+    const table = yield* sync(() => recoveryTable(options))
+    const snapshot = yield* inspectSource(table, options)
+    return sourcePlan(snapshot, namespaceId, table, options.targetId)
+  }))
 }
 
 /** Materialize a reviewed repair; activation is an explicit configuration change. */
-export async function repairJournal(
+export function repairJournal(
   namespaceId: string,
   fingerprint: string | undefined,
   options: JournalRecoveryOptions
 ): Promise<JournalRepairResult> {
-  const table = recoveryTable(options)
-  const source = await inspectSource(table, options)
-  const plan = sourcePlan(source, namespaceId, table, options.targetId)
-  if (fingerprint === undefined) return { applied: false, activated: false, plan }
-  if (fingerprint !== plan.fingerprint) throw new IngestConfigError('Journal changed since review. Stop all writers, run ingest repair again, and review the new fingerprint.')
-  if (!plan.repairable) throw new IngestConfigError(plan.problems.join(' '))
-  if (plan.healthy) return { applied: false, activated: false, plan }
+  return runPublic(Effect.gen(function* () {
+    const table = yield* sync(() => recoveryTable(options))
+    const source = yield* inspectSource(table, options)
+    const plan = sourcePlan(source, namespaceId, table, options.targetId)
+    if (fingerprint === undefined) return { applied: false, activated: false, plan }
+    if (fingerprint !== plan.fingerprint) return yield* Effect.fail(new IngestConfigError('Journal changed since review. Stop all writers, run ingest repair again, and review the new fingerprint.'))
+    if (!plan.repairable) return yield* Effect.fail(new IngestConfigError(plan.problems.join(' ')))
+    if (plan.healthy) return { applied: false, activated: false, plan }
 
-  // Each attempt writes its own tables. Concurrent or interrupted repairs cannot
-  // change another attempt's verified output; none of them routes active writers.
-  const copyId = randomUUID().replaceAll('-', '').slice(0, 12)
-  const replacementTable = `${plan.replacementTable}_${copyId}`
-  const materializedPlan = {
-    ...plan,
-    archiveTable: `${plan.archiveTable}_${copyId}`,
-    replacementTable,
-    activation: `Keep all ingestion writers stopped. Configure ingest({ journalTable: '${replacementTable}' }), then restart them. The active journal has not been changed.`,
-  }
-  await preserveSnapshot(materializedPlan.archiveTable, source.rows, options)
-  const selected = selectedRows(source.rows, namespaceId, options.targetId)
-  const validated = validateJournalHistory(selected, namespaceId)
-  const retained = [
-    ...source.rows.filter((row) => !isSelected(row, namespaceId, options.targetId)),
-    ...validated.rows,
-  ]
-  await preserveSnapshot(replacementTable, retained, options)
-  const copied = validateJournalHistory(selectedRows(await readSnapshot(replacementTable, options), namespaceId, options.targetId), namespaceId)
-  if (copied.problems.length > 0 || canonicalJson(copied.checkpoint) !== canonicalJson(plan.checkpoint)) {
-    throw new Error('Replacement journal verification failed; the active journal remains unchanged.')
-  }
-  const finalSnapshot = await readSnapshot(table, options)
-  if (repairFingerprint(finalSnapshot, namespaceId, table, options.targetId) !== fingerprint) {
-    throw new IngestConfigError('Journal changed while copying. Keep the original journal active, stop all writers, and review a new repair plan.')
-  }
-  return { applied: true, activated: false, plan: materializedPlan }
+    // Each attempt writes its own tables. Concurrent or interrupted repairs cannot
+    // change another attempt's verified output; none of them routes active writers.
+    const copyId = randomUUID().replaceAll('-', '').slice(0, 12)
+    const replacementTable = `${plan.replacementTable}_${copyId}`
+    const materializedPlan = {
+      ...plan,
+      archiveTable: `${plan.archiveTable}_${copyId}`,
+      replacementTable,
+      activation: `Keep all ingestion writers stopped. Configure ingest({ journalTable: '${replacementTable}' }), then restart them. The active journal has not been changed.`,
+    }
+    yield* preserveSnapshot(materializedPlan.archiveTable, source.rows, options)
+    const selected = selectedRows(source.rows, namespaceId, options.targetId)
+    const validated = validateJournalHistory(selected, namespaceId)
+    const retained = [
+      ...source.rows.filter((row) => !isSelected(row, namespaceId, options.targetId)),
+      ...validated.rows,
+    ]
+    yield* preserveSnapshot(replacementTable, retained, options)
+    const copied = validateJournalHistory(selectedRows(yield* readSnapshot(replacementTable, options), namespaceId, options.targetId), namespaceId)
+    if (copied.problems.length > 0 || canonicalJson(copied.checkpoint) !== canonicalJson(plan.checkpoint)) {
+      return yield* Effect.fail(new Error('Replacement journal verification failed; the active journal remains unchanged.'))
+    }
+    const finalSnapshot = yield* readSnapshot(table, options)
+    if (repairFingerprint(finalSnapshot, namespaceId, table, options.targetId) !== fingerprint) {
+      return yield* Effect.fail(new IngestConfigError('Journal changed while copying. Keep the original journal active, stop all writers, and review a new repair plan.'))
+    }
+    return { applied: true, activated: false, plan: materializedPlan }
+  }))
 }
 
 function recoveryTable(options: JournalRecoveryOptions): string {
@@ -134,13 +140,15 @@ function recoveryTable(options: JournalRecoveryOptions): string {
   return table
 }
 
-async function inspectSource(table: string, options: JournalRecoveryOptions): Promise<{ rows: JournalRow[]; missing: boolean }> {
-  const exists = await options.executor.query<{ x: number }>(
-    `SELECT 1 AS x FROM system.tables WHERE database = ${sqlString(options.database)} AND name = ${sqlString(table)}`,
-    READ_SETTINGS
-  )
-  if (exists.length === 0) return { rows: [], missing: true }
-  return { rows: await readSnapshot(table, options), missing: false }
+function inspectSource(table: string, options: JournalRecoveryOptions): Effect.Effect<{ rows: JournalRow[]; missing: boolean }, unknown> {
+  return Effect.gen(function* () {
+    const exists = yield* foreign(() => options.executor.query<{ x: number }>(
+      `SELECT 1 AS x FROM system.tables WHERE database = ${sqlString(options.database)} AND name = ${sqlString(table)}`,
+      READ_SETTINGS
+    ))
+    if (exists.length === 0) return { rows: [], missing: true }
+    return { rows: yield* readSnapshot(table, options), missing: false }
+  })
 }
 
 function sourcePlan(snapshot: { rows: JournalRow[]; missing: boolean }, namespaceId: string, table: string, targetId: string): JournalRepairPlan {
@@ -152,27 +160,29 @@ function sourcePlan(snapshot: { rows: JournalRow[]; missing: boolean }, namespac
   }
 }
 
-async function readSnapshot(table: string, options: JournalRecoveryOptions): Promise<JournalRow[]> {
-  return options.executor.query<JournalRow>(
+function readSnapshot(table: string, options: JournalRecoveryOptions): Effect.Effect<JournalRow[], unknown> {
+  return foreign(() => options.executor.query<JournalRow>(
     `SELECT * FROM ${qualified(options.database, table)} ORDER BY target_id, namespace_id, run_id, event_seq, event_id, payload_hash, event_at`,
     READ_SETTINGS
-  )
+  ))
 }
 
-async function preserveSnapshot(table: string, rows: readonly JournalRow[], options: JournalRecoveryOptions): Promise<void> {
-  await options.executor.command(journalTableSql(qualified(options.database, table)))
-  await waitForTable(options.executor, options.database, table)
-  if (rows.length > 0) {
-    await options.executor.insert({
-      table: `${options.database}.${table}`,
-      values: [...rows],
-      settings: { async_insert: 0, insert_deduplication_token: snapshotFingerprint(rows) },
-    })
-  }
-  const archived = await readSnapshot(table, options)
-  if (snapshotFingerprint(archived) !== snapshotFingerprint(rows)) {
-    throw new Error(`Evidence verification failed for ${table}; the active journal remains unchanged.`)
-  }
+function preserveSnapshot(table: string, rows: readonly JournalRow[], options: JournalRecoveryOptions): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    yield* foreign(() => options.executor.command(journalTableSql(qualified(options.database, table))))
+    yield* foreign(() => waitForTable(options.executor, options.database, table))
+    if (rows.length > 0) {
+      yield* foreign(() => options.executor.insert({
+        table: `${options.database}.${table}`,
+        values: [...rows],
+        settings: { async_insert: 0, insert_deduplication_token: snapshotFingerprint(rows) },
+      }))
+    }
+    const archived = yield* readSnapshot(table, options)
+    if (snapshotFingerprint(archived) !== snapshotFingerprint(rows)) {
+      return yield* Effect.fail(new Error(`Evidence verification failed for ${table}; the active journal remains unchanged.`))
+    }
+  })
 }
 
 function selectedRows(rows: readonly JournalRow[], namespaceId: string, targetId: string | undefined): JournalRow[] {

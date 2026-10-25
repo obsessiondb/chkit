@@ -1,5 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import * as Effect from 'effect/Effect'
+import { attempt, run } from './effect-runtime.js'
 
 import {
   createSnapshot,
@@ -82,27 +84,25 @@ function isFileExistsError(error: unknown): boolean {
   )
 }
 
-async function writeNewMigrationFile(input: {
+function writeNewMigrationFile(input: {
   migrationsDir: string
   timestamp: string
   migrationName: string
   sql: string
-}): Promise<string> {
-  for (let collisionIndex = 0; ; collisionIndex += 1) {
-    const filePath = migrationFilePath(
-      input.migrationsDir,
-      input.timestamp,
-      input.migrationName,
-      collisionIndex
-    )
-    try {
-      await writeFile(filePath, input.sql, { encoding: 'utf8', flag: 'wx' })
+}): Effect.Effect<string, unknown> {
+  return Effect.suspend(() => {
+    let collisionIndex = 0
+    return Effect.gen(function* () {
+      const filePath = migrationFilePath(
+        input.migrationsDir,
+        input.timestamp,
+        input.migrationName,
+        collisionIndex++
+      )
+      yield* attempt(() => writeFile(filePath, input.sql, { encoding: 'utf8', flag: 'wx' }))
       return filePath
-    } catch (error) {
-      if (isFileExistsError(error)) continue
-      throw error
-    }
-  }
+    }).pipe(Effect.retry({ while: isFileExistsError }))
+  })
 }
 
 function buildMigrationHeader(input: {
@@ -164,41 +164,43 @@ function buildEmptyMigrationContent(input: { generatedAt: string; cliVersion: st
 }
 
 export async function generateArtifacts(input: GenerateArtifactsInput): Promise<GenerateArtifactsOutput> {
-  const now = input.now ?? new Date()
-  const generatedTimestamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
-  const customMigrationId = input.migrationId ? safeMigrationId(input.migrationId) : ''
-  const timestamp = customMigrationId || generatedTimestamp
-  const migrationName = safeName(input.migrationName ?? 'auto')
+  return run(Effect.gen(function* () {
+    const now = input.now ?? new Date()
+    const generatedTimestamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
+    const customMigrationId = input.migrationId ? safeMigrationId(input.migrationId) : ''
+    const timestamp = customMigrationId || generatedTimestamp
+    const migrationName = safeName(input.migrationName ?? 'auto')
 
-  await mkdir(input.migrationsDir, { recursive: true })
+    yield* attempt(() => mkdir(input.migrationsDir, { recursive: true }))
 
-  const generatedAt = now.toISOString()
-  const sql = buildMigrationContent({
-    generatedAt,
-    cliVersion: input.cliVersion ?? '0.1.0',
-    definitionCount: input.definitions.length,
-    plan: input.plan,
-  })
-  const migrationFile =
-    input.plan.operations.length > 0
-      ? await writeNewMigrationFile({
-          migrationsDir: input.migrationsDir,
-          timestamp,
-          migrationName,
-          sql,
-        })
-      : null
-  const { snapshotFile, snapshot } = await writeSnapshot({
-    metaDir: input.metaDir,
-    definitions: input.definitions,
-  })
+    const generatedAt = now.toISOString()
+    const sql = buildMigrationContent({
+      generatedAt,
+      cliVersion: input.cliVersion ?? '0.1.0',
+      definitionCount: input.definitions.length,
+      plan: input.plan,
+    })
+    const migrationFile =
+      input.plan.operations.length > 0
+        ? yield* writeNewMigrationFile({
+            migrationsDir: input.migrationsDir,
+            timestamp,
+            migrationName,
+            sql,
+          })
+        : null
+    const { snapshotFile, snapshot } = yield* writeSnapshotEffect({
+      metaDir: input.metaDir,
+      definitions: input.definitions,
+    })
 
-  return {
-    migrationFile,
-    snapshotFile,
-    sql,
-    snapshot,
-  }
+    return {
+      migrationFile,
+      snapshotFile,
+      sql,
+      snapshot,
+    }
+  }))
 }
 
 /** Render a snapshot exactly as `chkit generate` writes it: 2-space JSON plus a trailing newline. */
@@ -212,11 +214,17 @@ export function serializeSnapshot(snapshot: Snapshot): string {
  * `generatedAt`).
  */
 export async function writeSnapshot(input: WriteSnapshotInput): Promise<WriteSnapshotOutput> {
-  await mkdir(input.metaDir, { recursive: true })
-  const snapshotFile = join(input.metaDir, 'snapshot.json')
-  const snapshot = createSnapshot(input.definitions)
-  await writeFile(snapshotFile, serializeSnapshot(snapshot), 'utf8')
-  return { snapshotFile, snapshot }
+  return run(writeSnapshotEffect(input))
+}
+
+function writeSnapshotEffect(input: WriteSnapshotInput): Effect.Effect<WriteSnapshotOutput, unknown> {
+  return Effect.gen(function* () {
+    yield* attempt(() => mkdir(input.metaDir, { recursive: true }))
+    const snapshotFile = join(input.metaDir, 'snapshot.json')
+    const snapshot = createSnapshot(input.definitions)
+    yield* attempt(() => writeFile(snapshotFile, serializeSnapshot(snapshot), 'utf8'))
+    return { snapshotFile, snapshot }
+  })
 }
 
 /**
@@ -227,25 +235,27 @@ export async function writeSnapshot(input: WriteSnapshotInput): Promise<WriteSna
 export async function generateEmptyMigration(
   input: GenerateEmptyMigrationInput
 ): Promise<GenerateEmptyMigrationOutput> {
-  const now = input.now ?? new Date()
-  const generatedTimestamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
-  const customMigrationId = input.migrationId ? safeMigrationId(input.migrationId) : ''
-  const timestamp = customMigrationId || generatedTimestamp
-  const migrationName = safeName(input.migrationName ?? 'manual')
+  return run(Effect.gen(function* () {
+    const now = input.now ?? new Date()
+    const generatedTimestamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
+    const customMigrationId = input.migrationId ? safeMigrationId(input.migrationId) : ''
+    const timestamp = customMigrationId || generatedTimestamp
+    const migrationName = safeName(input.migrationName ?? 'manual')
 
-  await mkdir(input.migrationsDir, { recursive: true })
+    yield* attempt(() => mkdir(input.migrationsDir, { recursive: true }))
 
-  const sql = buildEmptyMigrationContent({
-    generatedAt: now.toISOString(),
-    cliVersion: input.cliVersion ?? '0.1.0',
-  })
+    const sql = buildEmptyMigrationContent({
+      generatedAt: now.toISOString(),
+      cliVersion: input.cliVersion ?? '0.1.0',
+    })
 
-  const migrationFile = await writeNewMigrationFile({
-    migrationsDir: input.migrationsDir,
-    timestamp,
-    migrationName,
-    sql,
-  })
+    const migrationFile = yield* writeNewMigrationFile({
+      migrationsDir: input.migrationsDir,
+      timestamp,
+      migrationName,
+      sql,
+    })
 
-  return { migrationFile, sql }
+    return { migrationFile, sql }
+  }))
 }

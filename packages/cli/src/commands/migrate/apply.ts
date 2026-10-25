@@ -1,11 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-
-import { waitForDDLPropagation, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, waitForDDLPropagation } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
-
+import * as Effect from 'effect/Effect'
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../plugins.js'
 import { debug } from '../../runtime/debug.js'
+import { fromPromise, runEffect } from '../../runtime/effect.js'
 import type {
   createJournalStore,
   MigrationRowState,
@@ -13,33 +13,23 @@ import type {
   OperationStatus,
 } from '../../runtime/journal-store.js'
 import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration-store.js'
-import {
-  extractExecutableStatements,
-  extractMigrationOperationSummaries,
-} from '../../runtime/safety-markers.js'
-import {
-  applyAsyncStatement,
-  freshMigrationState,
-  isoWithoutZone,
-  upsertOperation,
-} from './async-apply.js'
+import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
+import { applyAsyncStatement, freshMigrationState, isoWithoutZone, upsertOperation } from './async-apply.js'
 import { inProgressChecksumMismatchError } from './errors.js'
 import {
   hasStatementProgress,
   rebaseInProgressState,
   retryMismatchError,
+  type StatementIdentity,
   statementIdentities,
   statementIdentity,
   verifyRetryEdit,
-  type StatementIdentity,
 } from './recovery.js'
 
 type JournalStore = ReturnType<typeof createJournalStore>
 
 function operationIsCompleted(state: MigrationRowState | null, index: number): boolean {
-  return (
-    state?.operations.some((op) => op.operationIndex === index && op.status === 'completed') ?? false
-  )
+  return state?.operations.some((op) => op.operationIndex === index && op.status === 'completed') ?? false
 }
 
 function errorMessage(error: unknown): string {
@@ -94,7 +84,7 @@ function syncOperationState(
   }
 }
 
-export async function applyMigration(input: {
+export function applyMigration(input: {
   db: ClickHouseExecutor
   journalStore: JournalStore
   pluginRuntime: PluginRuntime
@@ -108,127 +98,160 @@ export async function applyMigration(input: {
   /** Progress lines; the command sends them to stderr in --json mode. */
   log?: (line: string) => void
 }): Promise<MigrationJournalEntry> {
-  const { db, journalStore, pluginRuntime, config, tableScope, flags, migrationsDir, file, retry } = input
-  const log = input.log ?? ((line: string) => console.log(line))
+  return runEffect(
+    Effect.gen(function* () {
+      const { db, journalStore, pluginRuntime, config, tableScope, flags, migrationsDir, file, retry } = input
+      const log = input.log ?? ((line: string) => console.log(line))
 
-  debug('migrate', `applying ${file}`)
-  const sql = await readFile(join(migrationsDir, file), 'utf8')
-  const parsedStatements = extractExecutableStatements(sql)
-  const operationSummaries = extractMigrationOperationSummaries(sql)
-  debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
+      debug('migrate', `applying ${file}`)
+      const sql = yield* fromPromise(() => readFile(join(migrationsDir, file), 'utf8'))
+      const parsedStatements = extractExecutableStatements(sql)
+      const operationSummaries = extractMigrationOperationSummaries(sql)
+      debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
 
-  const statements = await pluginRuntime.runOnBeforeApply({
-    command: 'migrate',
-    config,
-    tableScope,
-    flags,
-    migration: file,
-    sql,
-    statements: parsedStatements,
-  })
+      const statements = yield* fromPromise(() =>
+        pluginRuntime.runOnBeforeApply({
+          command: 'migrate',
+          config,
+          tableScope,
+          flags,
+          migration: file,
+          sql,
+          statements: parsedStatements,
+        }),
+      )
 
-  const migrationChecksum = checksumSQL(sql)
+      const migrationChecksum = checksumSQL(sql)
 
-  // Resume support (#6): if a prior run left per-statement journal state for
-  // this migration, statements already marked completed are skipped instead of
-  // replayed — so a partial failure no longer bricks the migration on re-run
-  // with "column already exists". Resuming across a file edit needs care (#233).
-  const initialState = await journalStore.readMigrationState(file)
-  if (
-    initialState !== null &&
-    !initialState.migrationCompleted &&
-    initialState.checksum !== migrationChecksum
-  ) {
-    await acceptEditedMigration({
-      file,
-      state: initialState,
-      checksum: migrationChecksum,
-      identities: statementIdentities(operationSummaries, statements.length),
-      retry,
-      journalStore,
-      log,
-    })
-  }
-
-  for (let i = 0; i < statements.length; i++) {
-    const statement = statements[i] as string
-    const operation = operationSummaries[i]
-    if (operation?.mode === 'async') {
-      try {
-        await applyAsyncStatement({
-          db,
+      // Resume support (#6): if a prior run left per-statement journal state for
+      // this migration, statements already marked completed are skipped instead of
+      // replayed — so a partial failure no longer bricks the migration on re-run
+      // with "column already exists". Resuming across a file edit needs care (#233).
+      const initialState = yield* fromPromise(() => journalStore.readMigrationState(file))
+      if (initialState !== null && !initialState.migrationCompleted && initialState.checksum !== migrationChecksum) {
+        yield* acceptEditedMigration({
+          file,
+          state: initialState,
+          checksum: migrationChecksum,
+          identities: statementIdentities(operationSummaries, statements.length),
+          retry,
           journalStore,
-          sql: statement,
-          migrationName: file,
-          migrationChecksum,
-          statementIndex: i,
-          operationType: operation.type,
-          operationKey: operation.key,
-          beforeRetry: operation.beforeRetry,
           log,
         })
-      } catch (error) {
-        throw statementError({ file, index: i, total: statements.length, statement, error })
       }
-      // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
-      continue
-    }
-    // Sync DDL path with per-statement journaling + resume. Re-read state each
-    // iteration so async ops written above (or in a prior run) are preserved.
-    const stateBefore = await journalStore.readMigrationState(file)
-    if (operationIsCompleted(stateBefore, i)) {
-      debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
-      continue
-    }
-    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
-    const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
-    await journalStore.writeMigrationState(
-      upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
-    )
-    try {
-      await db.command(statement)
-    } catch (error) {
-      const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
-      await journalStore.writeMigrationState(
-        upsertOperation(
-          stateOnError,
-          syncOperationState(i, opType, opKey, 'failed', errorMessage(error)),
-          Date.now,
-        ),
+
+      for (let i = 0; i < statements.length; i++) {
+        const statement = statements[i] as string
+        const operation = operationSummaries[i]
+        if (operation?.mode === 'async') {
+          yield* fromPromise(() =>
+            applyAsyncStatement({
+              db,
+              journalStore,
+              sql: statement,
+              migrationName: file,
+              migrationChecksum,
+              statementIndex: i,
+              operationType: operation.type,
+              operationKey: operation.key,
+              beforeRetry: operation.beforeRetry,
+              log,
+            }),
+          ).pipe(
+            Effect.mapError((error) =>
+              statementError({
+                file,
+                index: i,
+                total: statements.length,
+                statement,
+                error,
+              }),
+            ),
+          )
+          // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
+          continue
+        }
+        // Sync DDL path with per-statement journaling + resume. Re-read state each
+        // iteration so async ops written above (or in a prior run) are preserved.
+        const stateBefore = yield* fromPromise(() => journalStore.readMigrationState(file))
+        if (operationIsCompleted(stateBefore, i)) {
+          debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
+          continue
+        }
+        const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
+        const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
+        yield* fromPromise(() =>
+          journalStore.writeMigrationState(
+            upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
+          ),
+        )
+        yield* fromPromise(() => db.command(statement)).pipe(
+          Effect.catch((error) =>
+            Effect.gen(function* () {
+              const stateOnError = (yield* fromPromise(() => journalStore.readMigrationState(file))) ?? baseState
+              yield* fromPromise(() =>
+                journalStore.writeMigrationState(
+                  upsertOperation(
+                    stateOnError,
+                    syncOperationState(i, opType, opKey, 'failed', errorMessage(error)),
+                    Date.now,
+                  ),
+                ),
+              )
+              return yield* Effect.fail(
+                statementError({
+                  file,
+                  index: i,
+                  total: statements.length,
+                  statement,
+                  error,
+                }),
+              )
+            }),
+          ),
+        )
+        // Mark completed as soon as the statement has executed — BEFORE waiting for
+        // DDL propagation. The statement already ran, so if the propagation wait
+        // later times out and throws, a re-run must skip this statement rather than
+        // replay it into an "already exists" error (the brick this fix prevents).
+        const stateAfter = (yield* fromPromise(() => journalStore.readMigrationState(file))) ?? baseState
+        yield* fromPromise(() =>
+          journalStore.writeMigrationState(
+            upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
+          ),
+        )
+        if (operation) {
+          yield* fromPromise(() =>
+            waitForDDLPropagation(db, operation.type, operation.key, {
+              cluster: config.clickhouse?.cluster,
+              statement,
+            }),
+          )
+        }
+      }
+
+      const entry: MigrationJournalEntry = {
+        name: file,
+        appliedAt: new Date().toISOString().replace('Z', ''),
+        checksum: migrationChecksum,
+      }
+      yield* fromPromise(() => journalStore.appendEntry(entry))
+
+      yield* fromPromise(() =>
+        pluginRuntime.runOnAfterApply({
+          command: 'migrate',
+          config,
+          tableScope,
+          flags,
+          migration: file,
+          statements,
+          appliedAt: entry.appliedAt,
+        }),
       )
-      throw statementError({ file, index: i, total: statements.length, statement, error })
-    }
-    // Mark completed as soon as the statement has executed — BEFORE waiting for
-    // DDL propagation. The statement already ran, so if the propagation wait
-    // later times out and throws, a re-run must skip this statement rather than
-    // replay it into an "already exists" error (the brick this fix prevents).
-    const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
-    await journalStore.writeMigrationState(
-      upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
-    )
-    if (operation) {
-      await waitForDDLPropagation(db, operation.type, operation.key, { cluster: config.clickhouse?.cluster, statement })
-    }
-  }
 
-  const entry: MigrationJournalEntry = {
-    name: file,
-    appliedAt: new Date().toISOString().replace('Z', ''),
-    checksum: migrationChecksum,
-  }
-  await journalStore.appendEntry(entry)
-
-  await pluginRuntime.runOnAfterApply({
-    command: 'migrate',
-    config,
-    tableScope,
-    flags,
-    migration: file,
-    statements,
-    appliedAt: entry.appliedAt,
-  })
-
-  return entry
+      return entry
+    }),
+  )
 }
 
 // An in-progress migration whose file changed resumes when this run's --retry
@@ -236,7 +259,7 @@ export async function applyMigration(input: {
 // (the first statement failed, or --abandon marked every statement failed):
 // the file then runs again from statement 1. The state is re-keyed to the new
 // checksum before anything runs, so a later failure resumes without --retry.
-async function acceptEditedMigration(input: {
+function acceptEditedMigration(input: {
   file: string
   state: MigrationRowState
   checksum: string
@@ -244,29 +267,39 @@ async function acceptEditedMigration(input: {
   retry: { previousChecksum: string; checksum: string } | undefined
   journalStore: JournalStore
   log: (line: string) => void
-}): Promise<void> {
-  const { file, state, checksum, identities, retry, journalStore } = input
-  const retryVerified =
-    retry !== undefined && retry.previousChecksum === state.checksum && retry.checksum === checksum
-  if (retryVerified) {
-    // --retry checked the file's statements; apply indexes the statements the
-    // plugins returned, so check those too.
-    const check = verifyRetryEdit(state.operations, identities)
-    if (!check.ok) throw retryMismatchError(file, check)
-    debug('migrate', `${file}: --retry accepted checksum ${state.checksum} → ${checksum}`)
-  } else if (hasStatementProgress(state)) {
-    throw inProgressChecksumMismatchError({
-      migration: file,
-      journalChecksum: state.checksum,
-      fileChecksum: checksum,
-      async: false,
-    })
-  } else {
-    input.log(
-      `${file} changed since its last failed attempt; no statement is recorded as completed, so it runs again from statement 1.`,
+}): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    const { file, state, checksum, identities, retry, journalStore } = input
+    const retryVerified =
+      retry !== undefined && retry.previousChecksum === state.checksum && retry.checksum === checksum
+    if (retryVerified) {
+      // --retry checked the file's statements; apply indexes the statements the
+      // plugins returned, so check those too.
+      const check = verifyRetryEdit(state.operations, identities)
+      if (!check.ok) return yield* Effect.fail(retryMismatchError(file, check))
+      debug('migrate', `${file}: --retry accepted checksum ${state.checksum} → ${checksum}`)
+    } else if (hasStatementProgress(state)) {
+      return yield* Effect.fail(
+        inProgressChecksumMismatchError({
+          migration: file,
+          journalChecksum: state.checksum,
+          fileChecksum: checksum,
+          async: false,
+        }),
+      )
+    } else {
+      input.log(
+        `${file} changed since its last failed attempt; no statement is recorded as completed, so it runs again from statement 1.`,
+      )
+    }
+    yield* fromPromise(() =>
+      journalStore.writeMigrationState(
+        rebaseInProgressState(state, {
+          checksum,
+          identities,
+          appliedAt: isoWithoutZone(new Date()),
+        }),
+      ),
     )
-  }
-  await journalStore.writeMigrationState(
-    rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) }),
-  )
+  })
 }

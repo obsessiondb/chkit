@@ -40,6 +40,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chkit/core": "workspace:*"
+    "@chkit/core": "workspace:*",
+    "effect": "4.0.6"
   }
 }

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import * as Effect from 'effect/Effect'
+import * as Exit from 'effect/Exit'
+import { fromPromise, runEffect } from '../runtime/effect.js'
 import process from 'node:process'
 import type { ParsedFlags } from '@chkit/core'
 
@@ -37,9 +40,7 @@ const PROJECT_ONLY_COMMANDS = new Set([
 let activeCommand = 'chkit'
 
 function firstPluginPositional(argv: string[]): string | undefined {
-  const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(
-    GLOBAL_FLAGS.map((flag) => [flag.name, flag]),
-  )
+  const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(GLOBAL_FLAGS.map((flag) => [flag.name, flag]))
   for (let i = 1; i < argv.length; i += 1) {
     const token = argv[i]
     if (!token) continue
@@ -75,9 +76,7 @@ function formatFatalError(error: unknown): string {
 
 function toJsonError(error: unknown): JsonError {
   const code =
-    error instanceof Error &&
-    'code' in error &&
-    typeof (error as NodeJS.ErrnoException).code === 'string'
+    error instanceof Error && 'code' in error && typeof (error as NodeJS.ErrnoException).code === 'string'
       ? ((error as NodeJS.ErrnoException).code as string)
       : 'error'
   return { code, message: formatFatalError(error) }
@@ -145,205 +144,217 @@ function createInternalRegistry(): ReturnType<typeof createCommandRegistry> {
 }
 
 async function run(): Promise<void> {
-  configureCliLogging()
+  return runEffect(
+    Effect.gen(function* () {
+      configureCliLogging()
 
-  const argv = normalizeGlobalArgs(process.argv.slice(2))
-  const commandName = argv[0]
-  activeCommand = commandName ?? 'chkit'
-  debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
-  const includePluginHelp = argv.includes('--help-plugins')
-  const wantsHelp = includePluginHelp || argv.includes('--help') || argv.includes('-h')
+      const argv = normalizeGlobalArgs(process.argv.slice(2))
+      const commandName = argv[0]
+      activeCommand = commandName ?? 'chkit'
+      debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
+      const includePluginHelp = argv.includes('--help-plugins')
+      const wantsHelp = includePluginHelp || argv.includes('--help') || argv.includes('-h')
 
-  if (!commandName || commandName === '-h' || commandName === '--help') {
-    await printGlobalHelp(argv)
-    return
-  }
+      if (!commandName || commandName === '-h' || commandName === '--help') {
+        yield* fromPromise(() => printGlobalHelp(argv))
+        return
+      }
 
-  if (commandName === '-v' || commandName === '--version') {
-    console.log(CLI_VERSION)
-    return
-  }
+      if (commandName === '-v' || commandName === '--version') {
+        console.log(CLI_VERSION)
+        return
+      }
 
-  if (commandName === 'init') {
-    await cmdInit(wantsHelp ? ['--help'] : argv.slice(1))
-    return
-  }
+      if (commandName === 'init') {
+        yield* fromPromise(() => cmdInit(wantsHelp ? ['--help'] : argv.slice(1)))
+        return
+      }
 
-  // `skills` proxies to the external `skills` CLI and needs no project config, so handle it
-  // before config loading (like `init`).
-  if (commandName === 'skills') {
-    process.exitCode = await cmdSkills(wantsHelp ? ['--help'] : argv.slice(1))
-    return
-  }
+      // `skills` proxies to the external `skills` CLI and needs no project config, so handle it
+      // before config loading (like `init`).
+      if (commandName === 'skills') {
+        process.exitCode = yield* fromPromise(() => cmdSkills(wantsHelp ? ['--help'] : argv.slice(1)))
+        return
+      }
 
-  // Registry discovery and bootstrapping work before a project config exists.
-  if (commandName === 'add' || commandName === 'registry') {
-    const { cmdRegistry } = await import('../commands/registry.js')
-    await cmdRegistry(commandName, wantsHelp ? ['--help'] : argv.slice(1))
-    return
-  }
+      // Registry discovery and bootstrapping work before a project config exists.
+      if (commandName === 'add' || commandName === 'registry') {
+        const { cmdRegistry } = yield* fromPromise(() => import('../commands/registry.js'))
+        yield* fromPromise(() => cmdRegistry(commandName, wantsHelp ? ['--help'] : argv.slice(1)))
+        return
+      }
 
-  // Built-in help must work in an empty directory, with missing credentials,
-  // or with an invalid config. In particular, do not run initialization hooks
-  // (which may connect or bootstrap metadata) just to describe a command.
-  if (wantsHelp && !includePluginHelp) {
-    const registry = createInternalRegistry()
-    const command = registry.get(commandName)
-    if (command) {
-      console.log(formatCommandHelp(command, registry.globalFlags))
-      return
-    }
-  }
+      // Built-in help must work in an empty directory, with missing credentials,
+      // or with an invalid config. In particular, do not run initialization hooks
+      // (which may connect or bootstrap metadata) just to describe a command.
+      if (wantsHelp && !includePluginHelp) {
+        const registry = createInternalRegistry()
+        const command = registry.get(commandName)
+        if (command) {
+          console.log(formatCommandHelp(command, registry.globalFlags))
+          return
+        }
+      }
 
-  const configPathArg = extractConfigPath(argv)
-  const env = { command: commandName, mode: process.env.NODE_ENV }
-  const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
-    command: commandName,
-    allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
-  })
+      const configPathArg = extractConfigPath(argv)
+      const env = { command: commandName, mode: process.env.NODE_ENV }
+      const {
+        config,
+        path: configPath,
+        source: configSource,
+      } = yield* fromPromise(() =>
+        loadConfig(configPathArg, env, {
+          command: commandName,
+          allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
+        }),
+      )
 
-  if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
-    reportUsageError({
-      command: commandName,
-      code: 'project_config_required',
-      message:
-        `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
-        `You are running chkit from a user profile (no local config found).`,
-      jsonMode: argv.includes('--json'),
-    })
-    return
-  }
-
-  const pluginRuntime = await loadPluginRuntime({
-    config,
-    configPath,
-    cliVersion: CLI_VERSION,
-    internalPlugins: getInternalPlugins(),
-  })
-
-  const registry = createCommandRegistry({
-    globalFlags: GLOBAL_FLAGS,
-    pluginExtensions: collectExtensions(pluginRuntime),
-    pluginCommands: collectPluginCommands(pluginRuntime),
-  })
-
-  const resolved = registry.get(commandName)
-  let initFlags: ParsedFlags = {}
-  if (
-    resolved &&
-    !resolved.subcommands &&
-    commandName !== 'plugin' &&
-    !wantsHelp
-  ) {
-    const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
-    if (!parsed) return
-    initFlags = parsed.flags
-  }
-
-  const initCtx = {
-    command: commandName,
-    configPath,
-    isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
-    jsonMode: argv.includes('--json'),
-    flags: initFlags,
-    config,
-  }
-
-  if (wantsHelp) {
-    if (resolved) {
-      console.log(formatCommandHelp(resolved, registry.globalFlags))
-    } else {
-      reportUsageError({
-        command: commandName,
-        code: 'unknown_command',
-        message: `Unknown command: ${commandName}`,
-        jsonMode: argv.includes('--json'),
-        onText: () => console.log(formatGlobalHelp(registry, CLI_VERSION)),
-      })
-    }
-    return
-  }
-
-  await pluginRuntime.runOnInit(initCtx)
-  let completed = false
-  const complete = async (exitCode: number): Promise<void> => {
-    if (completed) return
-    completed = true
-    await pluginRuntime.runOnComplete({ ...initCtx, exitCode })
-  }
-
-  debug(
-    'cli',
-    `command "${commandName}" resolved: ${resolved ? `plugin (${resolved.pluginName ?? '?'})` : 'not found'}`,
-  )
-
-  try {
-    if (!resolved) {
-      const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
-      if (wellKnown) {
+      if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
         reportUsageError({
           command: commandName,
-          code: 'plugin_not_configured',
-          message: `${wellKnown} plugin is not configured. Add it to config.plugins first.`,
+          code: 'project_config_required',
+          message:
+            `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
+            `You are running chkit from a user profile (no local config found).`,
           jsonMode: argv.includes('--json'),
         })
         return
       }
-      reportUsageError({
-        command: commandName,
-        code: 'unknown_command',
-        message: `Unknown command: ${commandName}`,
-        jsonMode: argv.includes('--json'),
-        onText: () => {
-          console.log('')
-          console.log(formatGlobalHelp(registry, CLI_VERSION))
-        },
+
+      const pluginRuntime = yield* fromPromise(() =>
+        loadPluginRuntime({
+          config,
+          configPath,
+          cliVersion: CLI_VERSION,
+          internalPlugins: getInternalPlugins(),
+        }),
+      )
+
+      const registry = createCommandRegistry({
+        globalFlags: GLOBAL_FLAGS,
+        pluginExtensions: collectExtensions(pluginRuntime),
+        pluginCommands: collectPluginCommands(pluginRuntime),
       })
-      return
-    }
 
-    await runResolvedCommand({
-      argv,
-      commandName,
-      resolved,
-      registry,
-      config,
-      configPath,
-      pluginRuntime,
-      onAmbiguousPluginSubcommand() {
-        console.log(formatCommandHelp(resolved, registry.globalFlags))
-      },
-    })
-  } catch (error) {
-    try {
-      await complete(1)
-    } catch {
-      // onComplete errors must not mask the original error
-    }
-    throw error
-  }
+      const resolved = registry.get(commandName)
+      let initFlags: ParsedFlags = {}
+      if (resolved && !resolved.subcommands && commandName !== 'plugin' && !wantsHelp) {
+        const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
+        if (!parsed) return
+        initFlags = parsed.flags
+      }
 
-  await complete(resolveExitCode())
+      const initCtx = {
+        command: commandName,
+        configPath,
+        isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
+        jsonMode: argv.includes('--json'),
+        flags: initFlags,
+        config,
+      }
+
+      if (wantsHelp) {
+        if (resolved) {
+          console.log(formatCommandHelp(resolved, registry.globalFlags))
+        } else {
+          reportUsageError({
+            command: commandName,
+            code: 'unknown_command',
+            message: `Unknown command: ${commandName}`,
+            jsonMode: argv.includes('--json'),
+            onText: () => console.log(formatGlobalHelp(registry, CLI_VERSION)),
+          })
+        }
+        return
+      }
+
+      yield* fromPromise(() => pluginRuntime.runOnInit(initCtx))
+      const complete = (exitCode: number): Effect.Effect<void, unknown> =>
+        fromPromise(() => pluginRuntime.runOnComplete({ ...initCtx, exitCode }))
+
+      debug(
+        'cli',
+        `command "${commandName}" resolved: ${resolved ? `plugin (${resolved.pluginName ?? '?'})` : 'not found'}`,
+      )
+
+      const dispatched = yield* Effect.exit(
+        Effect.gen(function* () {
+          if (!resolved) {
+            const wellKnown = WELL_KNOWN_PLUGIN_COMMANDS[commandName]
+            if (wellKnown) {
+              reportUsageError({
+                command: commandName,
+                code: 'plugin_not_configured',
+                message: `${wellKnown} plugin is not configured. Add it to config.plugins first.`,
+                jsonMode: argv.includes('--json'),
+              })
+              return
+            }
+            reportUsageError({
+              command: commandName,
+              code: 'unknown_command',
+              message: `Unknown command: ${commandName}`,
+              jsonMode: argv.includes('--json'),
+              onText: () => {
+                console.log('')
+                console.log(formatGlobalHelp(registry, CLI_VERSION))
+              },
+            })
+            return
+          }
+
+          yield* fromPromise(() =>
+            runResolvedCommand({
+              argv,
+              commandName,
+              resolved,
+              registry,
+              config,
+              configPath,
+              pluginRuntime,
+              onAmbiguousPluginSubcommand() {
+                console.log(formatCommandHelp(resolved, registry.globalFlags))
+              },
+            }),
+          )
+          return true
+        }),
+      )
+      if (Exit.isFailure(dispatched)) {
+        yield* complete(1).pipe(Effect.catchCause(() => Effect.void))
+        return yield* Effect.failCause(dispatched.cause)
+      }
+      if (!dispatched.value) return
+
+      yield* complete(resolveExitCode())
+    }),
+  )
 }
 
 async function printGlobalHelp(argv: string[]): Promise<void> {
-  let registry = createInternalRegistry()
-  if (argv.includes('--help-plugins')) {
-    const configPathArg = extractConfigPath(argv)
-    const { config, path: configPath } = await loadConfig(configPathArg)
-    const pluginRuntime = await loadPluginRuntime({
-      config,
-      configPath,
-      cliVersion: CLI_VERSION,
-      internalPlugins: getInternalPlugins(),
-    })
-    registry = createCommandRegistry({
-      globalFlags: GLOBAL_FLAGS,
-      pluginExtensions: collectExtensions(pluginRuntime),
-      pluginCommands: collectPluginCommands(pluginRuntime),
-    })
-  }
-  console.log(formatGlobalHelp(registry, CLI_VERSION))
+  return runEffect(
+    Effect.gen(function* () {
+      let registry = createInternalRegistry()
+      if (argv.includes('--help-plugins')) {
+        const configPathArg = extractConfigPath(argv)
+        const { config, path: configPath } = yield* fromPromise(() => loadConfig(configPathArg))
+        const pluginRuntime = yield* fromPromise(() =>
+          loadPluginRuntime({
+            config,
+            configPath,
+            cliVersion: CLI_VERSION,
+            internalPlugins: getInternalPlugins(),
+          }),
+        )
+        registry = createCommandRegistry({
+          globalFlags: GLOBAL_FLAGS,
+          pluginExtensions: collectExtensions(pluginRuntime),
+          pluginCommands: collectPluginCommands(pluginRuntime),
+        })
+      }
+      console.log(formatGlobalHelp(registry, CLI_VERSION))
+    }),
+  )
 }
 
 run()

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 
-import { DEFAULT_REGISTRY } from '../../registry/model.js'
+import { DEFAULT_REGISTRY, MAX_ARTIFACT_BYTES } from '../../registry/model.js'
 import { readRegistryCatalog, resolveRegistryItem } from '../../registry/resolve.js'
 import { fixtureTracker } from './fixtures.js'
 
@@ -46,4 +46,45 @@ test.serial('the default registry lists GitHub manifests and installs committed 
     'https://raw.githubusercontent.com/obsessiondb/chkit/main/registry/fixture/releases/1.0.0.json',
     'https://raw.githubusercontent.com/obsessiondb/chkit/main/registry/fixture/releases/1.0.0.json',
   ])
+})
+
+test.serial('catalog manifests load concurrently while preserving sorted output order', async () => {
+  const fixture = await fixtures.create()
+  const manifest = {
+    ...fixture.sourceItem,
+    files: fixture.sourceItem.files.map((file) => ({ ...file, path: file.path.slice('fixture/'.length) })),
+  }
+  const requests: string[] = []
+  const secondStarted = Promise.withResolvers<void>()
+  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input))
+    if (url.hostname === 'api.github.com') return Response.json([{ name: 'beta', type: 'dir' }, { name: 'alpha', type: 'dir' }])
+    const name = url.pathname.split('/').at(-2)
+    requests.push(String(name))
+    if (name === 'alpha') await secondStarted.promise
+    else secondStarted.resolve()
+    return Response.json({ ...manifest, name })
+  }, { preconnect: originalFetch.preconnect })
+  const catalog = await readRegistryCatalog()
+  expect(requests).toEqual(['alpha', 'beta'])
+  expect(catalog.items.map((item) => item.name)).toEqual(['alpha', 'beta'])
+})
+
+test.serial('oversized artifact responses are cancelled before rejecting', async () => {
+  let cancelled = 0
+  globalThis.fetch = Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(MAX_ARTIFACT_BYTES + 1)) },
+    cancel() { cancelled += 1 },
+  })), { preconnect: originalFetch.preconnect })
+  await expect(resolveRegistryItem('https://example.com/item.json')).rejects.toThrow('Registry artifact exceeds the 8 MiB limit')
+  expect(cancelled).toBe(1)
+})
+
+test.serial('response cleanup failures win over an artifact limit failure', async () => {
+  const failure = new Error('response cleanup failed')
+  globalThis.fetch = Object.assign(async () => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(MAX_ARTIFACT_BYTES + 1)) },
+    cancel() { throw failure },
+  })), { preconnect: originalFetch.preconnect })
+  await expect(resolveRegistryItem('https://example.com/item.json')).rejects.toBe(failure)
 })

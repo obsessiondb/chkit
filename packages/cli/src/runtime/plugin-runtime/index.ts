@@ -1,19 +1,15 @@
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import { resolveOptions, type ResolvedChxConfig } from '@chkit/core'
+import * as Effect from 'effect/Effect'
+import * as Exit from 'effect/Exit'
+import * as Scope from 'effect/Scope'
 
-import type {
-  ChxPlugin,
-  LoadedPlugin,
-  PluginContext,
-  PluginRuntime,
-} from '../../plugins.js'
+import type { ChxPlugin, LoadedPlugin, PluginContext, PluginRuntime } from '../../plugins.js'
 import { debug } from '../debug.js'
+import { bindExecution, ensuring, fromPromise, runEffect, scopedExecution } from '../effect.js'
 import { formatPluginError } from './errors.js'
 import { wrapExecutorWithDebug } from './executor-debug.js'
-import {
-  normalizePluginRegistration,
-  validatePlugin,
-} from './loader.js'
+import { normalizePluginRegistration, validatePlugin } from './loader.js'
 import { NULL_EXECUTOR } from './null-executor.js'
 import {
   UNFILTERED_TABLE_SCOPE,
@@ -29,10 +25,7 @@ import {
   runOnSchemaLoaded,
 } from './hooks.js'
 
-function resolvePluginOptions(
-  plugin: ChxPlugin,
-  options: Record<string, unknown>,
-): Record<string, unknown> {
+function resolvePluginOptions(plugin: ChxPlugin, options: Record<string, unknown>): Record<string, unknown> {
   if (!plugin.optionsSchema) return options
   const result = plugin.optionsSchema.safeParse(options)
   // Soft-validate at load time: command-level optionsSchema catches strict errors at dispatch.
@@ -50,6 +43,7 @@ export async function loadPluginRuntime(input: {
   const registrations = input.config.plugins ?? []
   const loaded: LoadedPlugin[] = []
   const byName = new Map<string, LoadedPlugin>()
+  const contextScopes = new WeakMap<PluginContext, Scope.Closeable>()
 
   for (const registration of registrations) {
     const normalized = normalizePluginRegistration(registration)
@@ -65,19 +59,13 @@ export async function loadPluginRuntime(input: {
       )
     }
     if (byName.has(plugin.manifest.name)) {
-      throw new Error(
-        `Duplicate plugin name "${plugin.manifest.name}" in config.plugins.`,
-      )
+      throw new Error(`Duplicate plugin name "${plugin.manifest.name}" in config.plugins.`)
     }
 
-    debug(
-      'plugin',
-      `loaded "${plugin.manifest.name}" v${plugin.manifest.version ?? '?'}`,
-      {
-        hooks: Object.keys(plugin.hooks ?? {}),
-        commands: (plugin.commands ?? []).map((c) => c.name),
-      },
-    )
+    debug('plugin', `loaded "${plugin.manifest.name}" v${plugin.manifest.version ?? '?'}`, {
+      hooks: Object.keys(plugin.hooks ?? {}),
+      commands: (plugin.commands ?? []).map((c) => c.name),
+    })
 
     const resolved = resolvePluginOptions(plugin, normalized.options)
     const item: LoadedPlugin = { plugin, options: resolved, rawOptions: normalized.options }
@@ -96,57 +84,68 @@ export async function loadPluginRuntime(input: {
   const runtimeSelf: PluginRuntime = {
     plugins: loaded,
     async resolveContext(input) {
-      const hasClickhouseConfig = !!input.config.clickhouse
-      debug(
-        'context',
-        `resolving executor — clickhouse config: ${hasClickhouseConfig ? 'yes' : 'no'}`,
-      )
-      const rawExecutor = input.config.clickhouse
-        ? createClickHouseExecutor(input.config.clickhouse)
-        : NULL_EXECUTOR
-      const defaults: PluginContext = {
-        executor: wrapExecutorWithDebug(rawExecutor),
-        hasExecutor: hasClickhouseConfig,
-      }
-      let ctx = defaults
-      for (const item of loaded) {
-        const hook = item.plugin.hooks?.getContext
-        if (!hook) continue
-        try {
-          const result = await hook({ ...input, defaults })
-          if (
-            result &&
-            typeof result === 'object' &&
-            'executor' in result &&
-            result.executor
-          ) {
-            debug(
-              'context',
-              `plugin "${item.plugin.manifest.name}" provided executor override`,
-            )
-            if (ctx.executor !== defaults.executor) {
-              await ctx.executor.close()
-            } else if (ctx === defaults && defaults.executor !== NULL_EXECUTOR) {
-              await defaults.executor.close()
+      return runEffect(
+        Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            const hasClickhouseConfig = !!input.config.clickhouse
+            debug('context', `resolving executor — clickhouse config: ${hasClickhouseConfig ? 'yes' : 'no'}`)
+            const rawExecutor = input.config.clickhouse
+              ? createClickHouseExecutor(input.config.clickhouse)
+              : NULL_EXECUTOR
+            const defaults: PluginContext = {
+              executor: wrapExecutorWithDebug(rawExecutor),
+              hasExecutor: hasClickhouseConfig,
             }
-            ctx = { ...ctx, ...result, hasExecutor: true }
-          }
-        } catch (error) {
-          await ctx.executor.close()
-          throw formatPluginError(item.plugin.manifest.name, 'getContext', error)
-        }
-      }
-      return ctx
+            let ctx = defaults
+            let executor = defaults.executor
+            const scope = yield* Scope.make()
+            yield* Scope.addFinalizer(scope, Effect.scoped(Effect.gen(function* () {
+              const closing = yield* fromPromise(() => ({ pending: executor.close() }))
+              yield* fromPromise(() => closing.pending).pipe(Effect.interruptible)
+            })).pipe(Effect.orDie))
+            const resolved = yield* Effect.exit(
+              restore(
+                Effect.gen(function* () {
+                  for (const item of loaded) {
+                    const hook = item.plugin.hooks?.getContext
+                    if (!hook) continue
+                    yield* Effect.gen(function* () {
+                      const result = yield* fromPromise(() => hook({ ...input, defaults }))
+                      if (result && typeof result === 'object' && 'executor' in result && result.executor) {
+                        debug('context', `plugin "${item.plugin.manifest.name}" provided executor override`)
+                        if (result.executor !== executor) {
+                          const previous = executor
+                          executor = result.executor
+                          yield* fromPromise(() => previous.close())
+                        }
+                        ctx = { ...ctx, ...result, hasExecutor: true }
+                      }
+                    }).pipe(
+                      Effect.mapError((error) => formatPluginError(item.plugin.manifest.name, 'getContext', error)),
+                    )
+                  }
+                  return ctx
+                }).pipe(Effect.provideService(Scope.Scope, scope)),
+              ),
+            )
+            if (Exit.isFailure(resolved)) {
+              yield* Scope.close(scope, resolved)
+              return yield* resolved
+            }
+            contextScopes.set(resolved.value, scope)
+            return resolved.value
+          }),
+        ),
+      )
     },
     async disposeContext(ctx) {
-      await ctx.executor.close()
+      const scope = contextScopes.get(ctx)
+      return runEffect(scope ? Scope.close(scope, Exit.void) : fromPromise(() => ctx.executor.close()))
     },
     getCommand(pluginName, commandName) {
       const item = byName.get(pluginName)
       if (!item) return null
-      const command = (item.plugin.commands ?? []).find(
-        (entry) => entry.name === commandName,
-      )
+      const command = (item.plugin.commands ?? []).find((entry) => entry.name === commandName)
       if (!command) return null
       return { plugin: item, command }
     },
@@ -162,83 +161,114 @@ export async function loadPluginRuntime(input: {
     runOnBeforePluginCommand: (pluginName, commandName, context) =>
       runOnBeforePluginCommand(loaded, pluginName, commandName, context),
     async runPluginCommand(pluginName, commandName, context) {
-      debug('command', `running plugin command "${pluginName}:${commandName}"`)
-      const item = byName.get(pluginName)
-      if (!item) return 1
-      const command = (item.plugin.commands ?? []).find(
-        (entry) => entry.name === commandName,
-      )
-      if (!command) return 1
+      return runEffect(
+        Effect.gen(function* () {
+          debug('command', `running plugin command "${pluginName}:${commandName}"`)
+          const item = byName.get(pluginName)
+          if (!item) return 1
+          const command = (item.plugin.commands ?? []).find((entry) => entry.name === commandName)
+          if (!command) return 1
 
-      const beforeResult = await runOnBeforePluginCommand(
-        loaded,
-        pluginName,
-        commandName,
-        {
-          config: context.config,
-          configPath: context.configPath,
-          jsonMode: context.jsonMode,
-          args: context.args,
-          flags: context.flags,
-          tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
-          print: context.print,
-        },
-      )
-      if (beforeResult.handled) return beforeResult.exitCode
-
-      let resolvedOptions: Record<string, unknown> = item.options
-      if (command.optionsSchema) {
-        try {
-          resolvedOptions = resolveOptions(
-            command.optionsSchema,
-            item.options,
-            context.flags,
-            command.flagMapping ?? {},
+          const beforeResult = yield* fromPromise(() =>
+            runOnBeforePluginCommand(loaded, pluginName, commandName, {
+              config: context.config,
+              configPath: context.configPath,
+              jsonMode: context.jsonMode,
+              args: context.args,
+              flags: context.flags,
+              tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
+              print: context.print,
+            }),
           )
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          if (context.jsonMode) {
-            context.print({ ok: false, command: commandName, error: message })
-          } else {
-            context.print(`${commandName} failed: ${message}`)
-          }
-          return 2
-        }
-      }
+          if (beforeResult.handled) return beforeResult.exitCode
 
-      const pluginContext = await runtimeSelf.resolveContext({
-        config: context.config,
-        configPath: context.configPath,
-        command: commandName,
-        flags: context.flags,
-      })
-      try {
-        const code = await command.run({
-          ...context,
-          pluginName,
-          options: resolvedOptions,
-          rawOptions: item.rawOptions,
-          tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
-          pluginRuntime: runtimeSelf,
-          pluginContext,
-        })
-        return typeof code === 'number' ? code : 0
-      } catch (error) {
-        // Built-in plugins (core) own the user-facing commands; their errors
-        // should read as the command's own clean message, not as a leaked
-        // internal-plugin failure. Only wrap third-party plugin errors.
-        if (item.internal) {
-          throw error instanceof Error ? error : new Error(String(error))
-        }
-        throw formatPluginError(
-          item.plugin.manifest.name,
-          `command:${commandName}`,
-          error,
-        )
-      } finally {
-        await runtimeSelf.disposeContext(pluginContext)
-      }
+          let resolvedOptions: Record<string, unknown> = item.options
+          if (command.optionsSchema) {
+            const schema = command.optionsSchema
+            const parsed = yield* Effect.result(
+              Effect.try({
+                try: () => resolveOptions(schema, item.options, context.flags, command.flagMapping ?? {}),
+                catch: (error) => error,
+              }),
+            )
+            if (parsed._tag === 'Failure') {
+              const error = parsed.failure
+              const message = error instanceof Error ? error.message : String(error)
+              if (context.jsonMode) {
+                context.print({ ok: false, command: commandName, error: message })
+              } else {
+                context.print(`${commandName} failed: ${message}`)
+              }
+              return 2
+            }
+            resolvedOptions = parsed.success
+          }
+
+          return yield* Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              const pluginContext = yield* fromPromise(() =>
+                runtimeSelf.resolveContext({
+                  config: context.config,
+                  configPath: context.configPath,
+                  command: commandName,
+                  flags: context.flags,
+                }),
+              )
+              return yield* ensuring(
+                restore(
+                  scopedExecution(
+                    Effect.gen(function* () {
+                      const pluginRuntime = yield* bindRuntime(runtimeSelf)
+                      const code = yield* fromPromise(() =>
+                        command.run({
+                          ...context,
+                          pluginName,
+                          options: resolvedOptions,
+                          rawOptions: item.rawOptions,
+                          tableScope: context.tableScope ?? UNFILTERED_TABLE_SCOPE,
+                          pluginRuntime,
+                          pluginContext,
+                        }),
+                      )
+                      return typeof code === 'number' ? code : 0
+                    }).pipe(
+                      Effect.mapError((error) => {
+                        if (item.internal) {
+                          return error instanceof Error ? error : new Error(String(error))
+                        }
+                        return formatPluginError(item.plugin.manifest.name, `command:${commandName}`, error)
+                      }),
+                    ),
+                  ),
+                ),
+                fromPromise(() => runtimeSelf.disposeContext(pluginContext)),
+              )
+            }),
+          )
+        }),
+      )
     },
   }
   return runtimeSelf
+}
+
+function bindRuntime(runtime: PluginRuntime): Effect.Effect<PluginRuntime> {
+  return Effect.gen(function* () {
+    return {
+      ...runtime,
+      resolveContext: yield* bindExecution(runtime.resolveContext),
+      disposeContext: yield* bindExecution(runtime.disposeContext),
+      runOnInit: yield* bindExecution(runtime.runOnInit),
+      runOnComplete: yield* bindExecution(runtime.runOnComplete),
+      runOnConfigLoaded: yield* bindExecution(runtime.runOnConfigLoaded),
+      runOnSchemaLoaded: yield* bindExecution(runtime.runOnSchemaLoaded),
+      runOnPlanCreated: yield* bindExecution(runtime.runOnPlanCreated),
+      runOnBeforeApply: yield* bindExecution(runtime.runOnBeforeApply),
+      runOnAfterApply: yield* bindExecution(runtime.runOnAfterApply),
+      runOnCheck: yield* bindExecution(runtime.runOnCheck),
+      runOnCheckReport: yield* bindExecution(runtime.runOnCheckReport),
+      runOnBeforePluginCommand: yield* bindExecution(runtime.runOnBeforePluginCommand),
+      runPluginCommand: yield* bindExecution(runtime.runPluginCommand),
+    }
+  })
 }

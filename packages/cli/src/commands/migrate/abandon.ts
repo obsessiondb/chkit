@@ -1,9 +1,7 @@
-import type {
-  JournalStore,
-  MigrationRowState,
-  OperationState,
-  OperationStatus,
-} from '../../runtime/journal-store.js'
+import * as Effect from 'effect/Effect'
+
+import { fromPromise, runEffect } from '../../runtime/effect.js'
+import type { JournalStore, MigrationRowState, OperationState, OperationStatus } from '../../runtime/journal-store.js'
 import { isoWithoutZone } from './async-apply.js'
 import { MigrateError } from './errors.js'
 
@@ -21,21 +19,27 @@ export interface AbandonReport {
 const OPERATION_STATUSES: readonly OperationStatus[] = ['completed', 'failed', 'started']
 
 /** Read the in-progress state --abandon <migration> resets; throws when there is none. */
-export async function readAbandonableState(
+export function readAbandonableState(
   input: { migration: string; appliedNames: ReadonlySet<string> },
   deps: { journalStore: JournalStore },
 ): Promise<MigrationRowState> {
-  const { migration } = input
-  if (input.appliedNames.has(migration)) throw alreadyAppliedError(migration)
-  const state = await deps.journalStore.readMigrationState(migration)
-  if (state === null) {
-    throw new MigrateError(
-      'migration_not_in_progress',
-      `Cannot abandon ${migration}: the journal has no in-progress state for it.`,
-    )
-  }
-  if (state.migrationCompleted) throw alreadyAppliedError(migration)
-  return state
+  return runEffect(
+    Effect.gen(function* () {
+      const { migration } = input
+      if (input.appliedNames.has(migration)) return yield* Effect.fail(alreadyAppliedError(migration))
+      const state = yield* fromPromise(() => deps.journalStore.readMigrationState(migration))
+      if (state === null) {
+        return yield* Effect.fail(
+          new MigrateError(
+            'migration_not_in_progress',
+            `Cannot abandon ${migration}: the journal has no in-progress state for it.`,
+          ),
+        )
+      }
+      if (state.migrationCompleted) return yield* Effect.fail(alreadyAppliedError(migration))
+      return state
+    }),
+  )
 }
 
 /**
@@ -46,12 +50,16 @@ export async function readAbandonableState(
  * Like every journal write this is an INSERT of a newer row version, so it
  * needs no DELETE privilege and leaves no mutation behind.
  */
-export async function abandonMigrationState(
+export function abandonMigrationState(
   state: MigrationRowState,
   deps: { journalStore: JournalStore; now?: () => number },
 ): Promise<void> {
-  const now = isoWithoutZone(new Date((deps.now ?? Date.now)()))
-  await deps.journalStore.writeMigrationState(abandonedState(state, now))
+  return runEffect(
+    Effect.gen(function* () {
+      const now = isoWithoutZone(new Date((deps.now ?? Date.now)()))
+      yield* fromPromise(() => deps.journalStore.writeMigrationState(abandonedState(state, now)))
+    }),
+  )
 }
 
 export function abandonReport(state: MigrationRowState): AbandonReport {

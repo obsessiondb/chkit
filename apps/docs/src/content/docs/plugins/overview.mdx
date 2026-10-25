@@ -53,6 +53,10 @@ Plugin authors use lifecycle hooks to transform schema definitions before a diff
 
 Follow the plugin reference to configure a published plugin. Use the lifecycle hooks when writing a plugin.
 
+TypeScript hooks and commands use ordinary functions and promises; option schemas remain Zod schemas. Await nested commands and SDK operations that must finish before a hook returns. Nested work inherits its calling execution's lifetime, so returning without awaiting it abandons its managed continuation.
+
+The runtime closes executors it creates or adopts through `getContext`; an SDK does not close a caller-supplied executor. Normal command completion waits for executor cleanup and propagates cleanup failures. Abandonment starts cleanup once and waits at most five seconds for it; a foreign `close()` that ignores cancellation can continue afterward. Stopping local observation does not cancel server-side SQL.
+
 You can author your own plugins; the existing official plugins are the reference. See [Contributing](https://github.com/obsessiondb/chkit/blob/main/CONTRIBUTING.md#plugins) for the entry point.
 
 ## Schema workflow plugins

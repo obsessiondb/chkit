@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
+import * as Effect from 'effect/Effect'
 
 import {
   applyAsyncStatement,
@@ -11,6 +12,7 @@ import type {
   MigrationRowState,
   OperationState,
 } from '../../../runtime/journal-store.js'
+import { fromPromise, runEffect } from '../../../runtime/effect.js'
 
 type StatusCall = { queryId: string; afterTime?: string; everyReplica?: boolean }
 type SubmitCall = { sql: string; queryId?: string }
@@ -127,6 +129,170 @@ function freshStateWith(op: OperationState): MigrationRowState {
 }
 
 describe('applyAsyncStatement', () => {
+  test.each(['polling', 'completed', 'failed'] as const)(
+    'owner interruption stops observing a held submit during %s without cancelling SQL',
+    async (phase) => {
+      const submission = Promise.withResolvers<string>()
+      const reachedPhase = Promise.withResolvers<void>()
+      const { db, statusCalls, commandCalls } = createFakeExecutor([
+        { status: 'unknown' },
+        phase === 'failed' ? { status: 'failed', error: 'server failure' } : { status: 'finished' },
+      ])
+      db.submit = () => submission.promise
+      const { store, writes } = createFakeJournalStore()
+      const write = store.writeMigrationState.bind(store)
+      store.writeMigrationState = async (state) => {
+        await write(state)
+        if (state.operations[0]?.status !== 'started') reachedPhase.resolve()
+      }
+      const lines: string[] = []
+      let child: Promise<unknown> | undefined
+      const owner = runEffect(Effect.gen(function* () {
+        yield* fromPromise(async () => {
+          child = applyAsyncStatement({
+            ...BASE_INPUT,
+            db, journalStore: store,
+            sleep: () => {
+              if (phase !== 'polling') return Promise.resolve()
+              reachedPhase.resolve()
+              return new Promise<void>(() => {})
+            },
+            now: FIXED_NOW,
+            log: (line) => { lines.push(line) },
+          })
+          void child.catch(() => {})
+          await reachedPhase.promise
+          await new Promise<void>((resolve) => setImmediate(resolve))
+        })
+      }))
+      const deadline = Promise.withResolvers<boolean>()
+      const timer = setTimeout(() => deadline.resolve(false), 1_000)
+      const completedWhileSubmissionHeld = await Promise.race([owner.then(() => true), deadline.promise])
+      clearTimeout(timer)
+      const recordedStatuses = writes.map((state) => state.operations[0]?.status)
+      const observedLines = [...lines]
+      if (phase === 'polling') submission.resolve('late-query-id')
+      else submission.reject(new Error('late submit rejection'))
+      await owner
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      expect(child).toBeDefined()
+      await expect(child).rejects.toBeInstanceOf(Error)
+      expect(completedWhileSubmissionHeld).toBe(true)
+      expect(recordedStatuses).toEqual(phase === 'polling' ? ['started'] : ['started', phase])
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(recordedStatuses)
+      expect(lines).toEqual(observedLines)
+      expect(statusCalls).toHaveLength(phase === 'polling' ? 1 : 2)
+      expect(commandCalls).toEqual([])
+    },
+  )
+
+  test.each([
+    'completed',
+    'failed',
+    'journal failure',
+    'sleep failure',
+  ] as const)('drains submission after %s without letting a late submit rejection override polling', async (terminal) => {
+    const submission = Promise.withResolvers<string>()
+    const reachedTerminal = Promise.withResolvers<void>()
+    const { db, statusCalls } = createFakeExecutor([
+      { status: 'unknown' },
+      terminal === 'failed'
+        ? { status: 'failed', error: 'server failure' }
+        : { status: 'finished' },
+    ])
+    db.submit = () => submission.promise
+    const { store, writes } = createFakeJournalStore()
+    const write = store.writeMigrationState.bind(store)
+    const failure = new Error(terminal)
+    store.writeMigrationState = async (state) => {
+      if (state.operations[0]?.status !== 'started') {
+        reachedTerminal.resolve()
+        if (terminal === 'journal failure') throw failure
+      }
+      await write(state)
+    }
+    const result = applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      sleep: async () => {
+        if (terminal === 'sleep failure') {
+          reachedTerminal.resolve()
+          throw failure
+        }
+      },
+      now: FIXED_NOW,
+      log: () => {},
+    })
+    let settled = false
+    void result.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+    await reachedTerminal.promise
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(settled).toBe(false)
+
+    submission.reject(new Error('late submit transport failure'))
+    if (terminal === 'completed') await expect(result).resolves.toMatchObject({ kind: 'completed' })
+    else if (terminal === 'failed') await expect(result).rejects.toThrow('server failure')
+    else await expect(result).rejects.toBe(failure)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(
+      terminal === 'completed'
+        ? ['started', 'completed']
+        : terminal === 'failed'
+          ? ['started', 'failed']
+          : ['started'],
+    )
+    expect(statusCalls).toHaveLength(terminal === 'sleep failure' ? 1 : 2)
+  })
+
+  test('a successful status read resets the consecutive transient poll-error budget', async () => {
+    const { db, statusCalls } = createFakeExecutor([
+      { status: 'unknown' },
+      ...Array.from({ length: 20 }, () => new Error('temporary gateway failure')),
+      { status: 'running' },
+      ...Array.from({ length: 20 }, () => new Error('temporary gateway failure')),
+      { status: 'finished' },
+    ])
+    const { store, writes } = createFakeJournalStore()
+    const delays: number[] = []
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      pollIntervalMs: 123,
+      sleep: async (ms) => {
+        delays.push(ms)
+      },
+      now: FIXED_NOW,
+      log: () => {},
+    })
+    expect(result.kind).toBe('completed')
+    expect(statusCalls).toHaveLength(43)
+    expect(delays).toEqual(Array.from({ length: 42 }, () => 123))
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+  })
+
+  test('uses the default poll timer when no sleep adapter is supplied', async () => {
+    const { db } = createFakeExecutor([{ status: 'unknown' }, { status: 'finished' }])
+    const { store } = createFakeJournalStore()
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        pollIntervalMs: 1,
+        log: () => {},
+      }),
+    ).resolves.toMatchObject({ kind: 'completed' })
+  })
+
   test('produces a deterministic UUID-shaped query_id from (migration, statement_index)', () => {
     const a = makeDeterministicQueryId('20260526_load.sql', 0)
     const b = makeDeterministicQueryId('20260526_load.sql', 0)

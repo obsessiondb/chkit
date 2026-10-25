@@ -1,6 +1,9 @@
 import { access, mkdir, rename, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import * as Effect from 'effect/Effect'
+import type * as Scope from 'effect/Scope'
+import { attempt, run } from './effect-runtime.js'
 
 import { z } from 'zod'
 import {
@@ -203,7 +206,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
         run: runCommand({
           command: 'schema',
           label: 'Pull schema',
-          fn: async ({ flags, jsonMode, print, options: opts, config, pluginContext }) => {
+          fn: ({ flags, jsonMode, print, options: opts, config, pluginContext }) => run(Effect.scoped(Effect.gen(function* () {
             const flagOptions = {
               ...(typeof flags['--out-file'] === 'string' ? { outFile: flags['--out-file'] } : {}),
               ...(flags['--force'] === true || flags['--overwrite'] === true
@@ -219,14 +222,14 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
               ...flagOptions,
             })
             const dryrun = flags['--dryrun'] === true
-            const pulled = await pullSchema({
+            const pulled = yield* pullSchema({
               config,
               executor: pluginContext?.hasExecutor ? pluginContext.executor : null,
               options: { ...effectiveOptions, introspect: introspector },
             })
 
             if (!dryrun) {
-              await writeSchemaFile({
+              yield* writeSchemaFile({
                 outFile: pulled.outFile,
                 content: pulled.content,
                 overwrite: effectiveOptions.overwrite,
@@ -263,7 +266,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
             }
             for (const warning of pulled.warnings) console.warn(`Warning: ${warning}`)
             return 0
-          },
+          }))),
         }),
       },
     ],
@@ -298,91 +301,99 @@ function isObsessionDbMetadataTable(object: { kind?: string; name: string }): bo
   return isTable && OBSESSIONDB_METADATA_TABLES.has(object.name)
 }
 
-async function pullSchema(input: {
+function pullSchema(input: {
   config: ResolvedChxConfig
   executor?: ClickHouseExecutor | null
   options: PullOptions & { introspect?: PullIntrospector }
-}): Promise<PullSchemaResult> {
-  const customIntrospector = input.options.introspect
+}): Effect.Effect<PullSchemaResult, unknown, Scope.Scope> {
+  return Effect.gen(function* () {
+    const customIntrospector = input.options.introspect
 
-  // Prefer the host-provided executor — e.g. the ObsessionDB remote executor when a service is
-  // selected — so pull introspects through whatever target the rest of the CLI targets, not just a
-  // direct ClickHouse URL. Fall back to building one from the clickhouse config block.
-  const db: ClickHouseExecutor | null =
-    input.executor ??
-    (input.config.clickhouse ? createClickHouseExecutor(input.config.clickhouse) : null)
+    // Prefer the host-provided executor — e.g. the ObsessionDB remote executor when a service is
+    // selected — so pull introspects through whatever target the rest of the CLI targets, not just a
+    // direct ClickHouse URL. Fall back to building one from the clickhouse config block.
+    const connection = input.config.clickhouse
+    const db: ClickHouseExecutor | null = input.executor ?? (connection
+      ? yield* Effect.acquireRelease(
+          Effect.sync(() => createClickHouseExecutor(connection)),
+          (owned) => attempt(() => owned.close()).pipe(Effect.orDie),
+        )
+      : null)
 
-  // A custom introspector opens its own raw-ClickHouse connection and needs the config block.
-  if (customIntrospector && !input.config.clickhouse) {
-    throw new PullConfigError('clickhouse config is required for a custom pull introspector')
-  }
-  if (!customIntrospector && !db) {
-    throw new PullConfigError(
-      'pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service (chkit obsessiondb service select)'
-    )
-  }
-
-  const outFile = resolve(process.cwd(), input.options.outFile)
-  let objects: Array<{
-    kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
-    database: string
-    name: string
-  }> = []
-  let selectedDatabases = input.options.databases
-
-  if (db && (!customIntrospector || selectedDatabases.length === 0)) {
-    objects = (await db.listSchemaObjects()).filter(
-      (item) => !isObsessionDbMetadataTable(item)
-    )
-    if (selectedDatabases.length === 0) {
-      selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+    // A custom introspector opens its own raw-ClickHouse connection and needs the config block.
+    if (customIntrospector && !input.config.clickhouse) {
+      throw new PullConfigError('clickhouse config is required for a custom pull introspector')
     }
-  }
+    if (!customIntrospector && !db) {
+      throw new PullConfigError(
+        'pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service (chkit obsessiondb service select)'
+      )
+    }
 
-  const introspected = (
-    customIntrospector
-      ? await customIntrospector({
-          config: input.config.clickhouse as NonNullable<ResolvedChxConfig['clickhouse']>,
-          databases: selectedDatabases,
-        })
-      : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
-  ).filter((object) => !isObsessionDbMetadataTable(object))
+    const outFile = resolve(process.cwd(), input.options.outFile)
+    let objects: Array<{
+      kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
+      database: string
+      name: string
+    }> = []
+    let selectedDatabases = input.options.databases
 
-  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
-  const content = renderSchemaFile(definitions)
-  const tableCount = definitions.filter((definition) => definition.kind === 'table').length
-  const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
-  const warnings = [
-    ...dictionaryPasswordWarnings(definitions),
-    ...definitions.flatMap((def) => def.kind === 'table' && isKafkaEngine(def.engine)
-      ? Object.entries(def.settings ?? {}).filter(([key]) => /password|secret|token/i.test(key)).map(([key, value]) =>
-        value === '[HIDDEN]'
-          ? `Kafka table "${def.database}.${def.name}" setting ${key} was redacted by ClickHouse. Restore it or use server-side configuration before generating migrations.`
-          : `Kafka table "${def.database}.${def.name}" setting ${key} contains a credential returned by ClickHouse and written into the schema file. Prefer server-side configuration.`)
-      : []),
-  ]
+    if (db && (!customIntrospector || selectedDatabases.length === 0)) {
+      objects = (yield* attempt(() => db.listSchemaObjects())).filter(
+        (item) => !isObsessionDbMetadataTable(item)
+      )
+      if (selectedDatabases.length === 0) {
+        selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+      }
+    }
 
-  return {
-    outFile,
-    definitionCount: definitions.length,
-    tableCount,
-    databases: selectedDatabases,
-    skippedObjects,
-    content,
-    warnings,
-  }
+    const introspected = (
+      customIntrospector
+        ? yield* attempt(() => customIntrospector({
+            config: input.config.clickhouse as NonNullable<ResolvedChxConfig['clickhouse']>,
+            databases: selectedDatabases,
+          }))
+        : yield* introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
+    ).filter((object) => !isObsessionDbMetadataTable(object))
+
+    const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
+    const content = renderSchemaFile(definitions)
+    const tableCount = definitions.filter((definition) => definition.kind === 'table').length
+    const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
+    const warnings = [
+      ...dictionaryPasswordWarnings(definitions),
+      ...definitions.flatMap((def) => def.kind === 'table' && isKafkaEngine(def.engine)
+        ? Object.entries(def.settings ?? {}).filter(([key]) => /password|secret|token/i.test(key)).map(([key, value]) =>
+          value === '[HIDDEN]'
+            ? `Kafka table "${def.database}.${def.name}" setting ${key} was redacted by ClickHouse. Restore it or use server-side configuration before generating migrations.`
+            : `Kafka table "${def.database}.${def.name}" setting ${key} contains a credential returned by ClickHouse and written into the schema file. Prefer server-side configuration.`)
+        : []),
+    ]
+
+    return {
+      outFile,
+      definitionCount: definitions.length,
+      tableCount,
+      databases: selectedDatabases,
+      skippedObjects,
+      content,
+      warnings,
+    }
+  })
 }
 
-async function introspectWithExecutor(
+function introspectWithExecutor(
   db: ClickHouseExecutor,
   databases: string[]
-): Promise<IntrospectedObject[]> {
-  const tables = await db.listTableDetails(databases)
-  const nonTableRows = await listNonTableRows(db, databases)
-  const nonTableObjects = nonTableRows
-    .map(mapSystemTableRowToDefinition)
-    .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)
-  return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
+): Effect.Effect<IntrospectedObject[], unknown> {
+  return Effect.gen(function* () {
+    const tables = yield* attempt(() => db.listTableDetails(databases))
+    const nonTableRows = yield* attempt(() => listNonTableRows(db, databases))
+    const nonTableObjects = nonTableRows
+      .map(mapSystemTableRowToDefinition)
+      .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)
+    return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
+  })
 }
 
 function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefinition {
@@ -507,24 +518,26 @@ export const __testUtils = {
   mapSystemTableRowToDefinition,
 }
 
-async function writeSchemaFile(input: {
+function writeSchemaFile(input: {
   outFile: string
   content: string
   overwrite: boolean
-}): Promise<void> {
-  if (!input.overwrite) {
-    const exists = await pathExists(input.outFile)
-    if (exists) {
-      throw new PullConfigError(
-        `Output file already exists at ${input.outFile}. Re-run with --force or set plugin option overwrite=true.`
-      )
+}): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    if (!input.overwrite) {
+      const exists = yield* attempt(() => pathExists(input.outFile))
+      if (exists) {
+        throw new PullConfigError(
+          `Output file already exists at ${input.outFile}. Re-run with --force or set plugin option overwrite=true.`
+        )
+      }
     }
-  }
 
-  await mkdir(dirname(input.outFile), { recursive: true })
-  const tempPath = join(dirname(input.outFile), `.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`)
-  await writeFile(tempPath, input.content, 'utf8')
-  await rename(tempPath, input.outFile)
+    yield* attempt(() => mkdir(dirname(input.outFile), { recursive: true }))
+    const tempPath = join(dirname(input.outFile), `.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`)
+    yield* attempt(() => writeFile(tempPath, input.content, 'utf8'))
+    yield* attempt(() => rename(tempPath, input.outFile))
+  })
 }
 
 async function pathExists(path: string): Promise<boolean> {

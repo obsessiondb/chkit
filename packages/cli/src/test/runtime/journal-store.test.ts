@@ -291,6 +291,82 @@ describe('createJournalStore', () => {
     expect(attempts).toBe(mode === 'recovers' ? 3 : mode === 'exhausts' ? 5 : 1)
   })
 
+  test.each([
+    'type error',
+    'malformed type error',
+    'non-error',
+    'abort',
+  ] as const)('does not retry or remember an unacknowledged insert rejected with %s', async (kind) => {
+    const { db } = createScriptedExecutor(new Map())
+    const original = new Error('original abort error')
+    const failure =
+      kind === 'type error'
+        ? new TypeError('Please retry the INSERT')
+        : kind === 'malformed type error'
+          ? Object.defineProperty(new TypeError('original failure'), 'message', { value: 42 })
+        : kind === 'non-error'
+          ? 'Please retry the INSERT'
+          : Object.assign(new Error('Please retry the INSERT'), {
+              name: 'AbortError',
+              originalError: original,
+            })
+    let attempts = 0
+    db.command = async (sql) => {
+      if (sql.startsWith('INSERT INTO')) {
+        attempts += 1
+        throw failure
+      }
+    }
+    const store = createJournalStore(db)
+    const result = store.writeMigrationState({
+      name: 'unacknowledged.sql',
+      appliedAt: '2026-05-26 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: false,
+      operations: [],
+    })
+    if (kind === 'non-error') {
+      await expect(result).rejects.toBeInstanceOf(TypeError)
+      await expect(result).rejects.toThrow(
+        'Non-error was thrown: "Please retry the INSERT". You should only throw errors.',
+      )
+    } else await expect(result).rejects.toBe(kind === 'abort' ? original : failure)
+    expect(attempts).toBe(1)
+    expect(await store.readMigrationState('unacknowledged.sql')).toBeNull()
+  })
+
+  test.each([
+    'transient',
+    'type error',
+    'network type error',
+    'tagged network type error',
+  ] as const)('keeps bootstrap propagation retries best-effort for %s', async (kind) => {
+    const { db, commandCalls } = createScriptedExecutor(new Map())
+    const query = db.query.bind(db)
+    let probes = 0
+    db.query = async <T>(sql: string): Promise<T[]> => {
+      if (/SELECT name FROM .* LIMIT 0/.test(sql)) {
+        probes += 1
+        if (probes === 1) throw new Error('table does not exist')
+        throw kind === 'tagged network type error'
+          ? Object.assign(new TypeError('fetch failed'), { [Symbol.toStringTag]: 'ProviderFailure' })
+          : kind === 'type error'
+          ? new TypeError('invalid request')
+          : kind === 'network type error'
+            ? new TypeError('fetch failed')
+            : new Error('not visible yet')
+      }
+      return query<T>(sql)
+    }
+    const store = createJournalStore(db)
+    expect(await store.readJournal()).toEqual({ version: 1, applied: [] })
+    expect(probes).toBe(kind === 'type error' || kind === 'tagged network type error' ? 2 : 11)
+    expect(commandCalls.filter((sql) => sql.startsWith('CREATE TABLE'))).toHaveLength(1)
+    await store.readJournal()
+    expect(probes).toBe(kind === 'type error' || kind === 'tagged network type error' ? 2 : 11)
+  })
+
   describe('read-your-writes on a lagging replica', () => {
     // On a replicated service each request can land on a different replica, so
     // the read after a write may return the previous row version. Every apply

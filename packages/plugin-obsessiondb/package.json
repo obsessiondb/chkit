@@ -47,6 +47,7 @@
     "@clack/prompts": "^1.4.0",
     "@orpc/client": "1.15.4",
     "@orpc/contract": "1.15.4",
+    "effect": "4.0.6",
     "zod": "^4.3.6"
   }
 }
