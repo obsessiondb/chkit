@@ -6,7 +6,7 @@ While this evaluation ran, main advanced independently to `e8f8e06` with the unr
 
 ## Recommendation
 
-**Do not adopt this full rewrite as a simplification or performance improvement.** The complete internal migration passes the compatibility gates below, but production code grows by **2,082 lines**, ordinary extension compatibility requires a substantial private ownership bridge, and the measured runtime is slower and uses more memory. Preserve this branch as the evaluated implementation; do not merge it by default.
+**Do not adopt this full rewrite as a simplification or performance improvement.** The complete internal migration passes the compatibility gates below, but production code grows by **2,078 lines**, ordinary extension compatibility requires a substantial private ownership bridge, and the measured runtime is slower and uses more memory. Preserve this branch as the evaluated implementation; do not merge it by default.
 
 Owned concurrency is a real architectural benefit, but backpressure already existed and is unchanged here. Reconsider adoption only for a concrete need that justifies these costs, or after a revised implementation recovers the overhead without weakening ordinary extension semantics. These measurements evaluate this implementation, not every possible use of Effect.
 
@@ -26,7 +26,7 @@ Counts are physical lines, including comments and blanks, using identical baseli
 
 | Package | Before | After | Net |
 | --- | ---: | ---: | ---: |
-| CLI | 10,561 | 11,476 | +915 |
+| CLI | 10,561 | 11,472 | +911 |
 | ClickHouse | 2,477 | 2,554 | +77 |
 | Codegen | 251 | 316 | +65 |
 | Core | 5,997 | 5,997 | 0 |
@@ -36,9 +36,9 @@ Counts are physical lines, including comments and blanks, using identical baseli
 | Ingestion | 2,960 | 3,028 | +68 |
 | ObsessionDB | 3,276 | 3,874 | +598 |
 | Pull | 1,194 | 1,262 | +68 |
-| **Total** | **33,632** | **35,714** | **+2,082 (+6.2%)** |
+| **Total** | **33,632** | **35,710** | **+2,078 (+6.2%)** |
 
-Production diff: 9,945 lines added and 7,863 removed across 92 files. Tests separately add 3,859 and remove four lines: net +3,855 across 30 files, without weakening existing assertions. Removed lines are three imports and one stale fixture configuration corrected for strict compilation. Ten package/root manifests add 14 lines and remove eight; the lockfile adds 15 and removes 11. Documentation consists of two updated plugin references, a changeset, this evaluation and the inventory; it is excluded from the runtime comparison.
+Production diff: 9,941 lines added and 7,863 removed across 92 files. Tests separately add 3,908 and remove four lines: net +3,904 across 31 files, without weakening existing assertions. Removed lines are three imports and one stale fixture configuration corrected for strict compilation. Ten package/root manifests add 14 lines and remove eight; the lockfile adds 15 and removes 11. Documentation consists of two updated plugin references, a changeset, this evaluation and the inventory; it is excluded from the runtime comparison.
 
 The bespoke 56-line ingestion queue is deleted. Direct `p-limit`, `p-retry` and `p-map` dependencies are removed, including root `p-map`; no production Promise-race/Promise-all scheduler remains. Native promises remain at process/event/foreign adapters and the nine ownership bridges. Effect is added to nine execution packages, not core. `is-network-error` remains a direct dependency where the old retry behavior requires its classifier, rather than reimplementing that classifier. Domain checkpoint/receipt/replay state and exact retry-budget bookkeeping remain explicit code: Effect does not replace those policies.
 
@@ -58,6 +58,8 @@ Effect's default queue dispatcher delayed consumer handoff relative to the forme
 
 The final Node trace also exposed premature interruption of an already-issued journal transaction. An owned commit child now keeps append acknowledgement and managed publication together: normal joining remains interruptible, and its interruption cleanup drains for at most the existing five-second grace before stopping observation. The grace begins on actual interruption, not on a signal whose finalizer might be blocked. This does not block producer prefetch or impose a timeout on a healthy journal. Six additional scenarios run under both Node and Bun, including late acknowledgements and repeated owner interruption after the producer has finished.
 
+Remote scanning also surfaced a pre-existing SQL/LIKE escaping defect in moved backfill reconciliation code. The final implementation escapes the LIKE pattern before the SQL literal; eight live ClickHouse cases cover quotes, backslashes, wildcard characters, escape sequences and injection-shaped identifiers, with literal matches and near misses. Four cases fail against the baseline. The obsolete private `guardHook` wrapper was removed. Fallow's remaining duplicate-export-name reports concern intentionally separate private adapters; their review threads were dispositioned without cosmetic renaming or disabling rules, and their duplication remains part of the negative assessment.
+
 Intentional lifecycle/validation changes are explicit:
 
 - Programmatic ingestion capacities reject invalid, non-finite or unsafe integer values before work starts. Duration must be positive and finite.
@@ -69,12 +71,12 @@ Intentional lifecycle/validation changes are explicit:
 
 | Metric | Baseline median | Effect median | Change |
 | --- | ---: | ---: | ---: |
-| Fresh-process CLI `--help` | 171.6 ms | 256.8 ms | +49.7% |
-| In-memory ingestion | 578,149 rows/s | 418,942 rows/s | −27.5% |
-| Ingestion peak RSS | 209,360 KiB | 291,428 KiB | +39.2% |
+| Fresh-process CLI `--help` | 161.2 ms | 264.2 ms | +63.9% |
+| In-memory ingestion | 648,291 rows/s | 467,854 rows/s | −27.8% |
+| Ingestion peak RSS | 209,828 KiB | 292,580 KiB | +39.4% |
 | Pulls at capacities 1 / 2 / 4 | 3 / 4 / 6 | 3 / 4 / 6 | Unchanged in all repeats |
 
-Startup ranges were 144.3–226.8 ms before and 212.7–273.0 ms after. Throughput ranges were 494,539–639,630 rows/s before and 349,589–471,437 after; every measured candidate throughput sample was below every baseline sample. Peak RSS medians are approximately 204.5 MiB and 284.6 MiB. Raw samples are retained in the evaluation handoff, rather than comparing these results with the earlier baseline-only run.
+Startup ranges were 140.6–175.7 ms before and 234.8–304.6 ms after. Throughput ranges were 630,983–682,598 rows/s before and 435,378–501,286 after; every measured candidate throughput sample was below every baseline sample. Peak RSS medians are approximately 204.9 MiB and 285.7 MiB. Raw samples are retained in the evaluation handoff, rather than comparing these results with the earlier baseline-only run. A separate controlled run before the small scan fixes also showed a 49.7% startup penalty, 27.5% throughput loss and 39.2% RSS increase; the table uses only the final rebuilt artifacts, not pooled samples.
 
 The comparison uses the same quiet four-CPU AMD EPYC machine, Node 24.22.1 and identical ordinary packed-consumer fixtures, with one warmup and seven measured fresh processes per version in alternating order. Builds/tests/review probes had stopped and the local ClickHouse/Kafka containers were stopped before sampling. CLI `--help` includes process startup; ingestion excludes imports and processes 1,000,000 rows of 64-byte payload through one stream and a non-retaining in-memory sink/journal. RSS is the child process high-water mark. This measures orchestration overhead, not real provider/ClickHouse throughput; the filesystem cache is warm/uncontrolled.
 
