@@ -30,6 +30,17 @@ Credentials and service selection live in separate files:
 - **Credentials** — `~/.config/chkit/credentials.json`. The access token and API base URL, written by `login`/`signup` and shared across all projects.
 - **Service selection and aliases** — `obsessiondb.json`. Stored per project at `.chkit/obsessiondb.json` (next to `clickhouse.config.ts`), or at `~/.config/chkit/obsessiondb.json` when running without a project config.
 
+### Services in another organization
+
+The ObsessionDB API looks a service up in the active organization of the chkit login session only. That organization is set when the session is created and is separate from the one selected in the console, so switching organizations in the console does not change it. A command for a service of another organization fails with an error that names the service, the session's organization, and the organization that owns the service:
+
+```sh
+$ chkit query "SELECT 1"
+obsessiondb: service "benchmarks" is not in the active organization "Acme" of this chkit session (it belongs to "Benchmarks"). ...
+```
+
+With `--json`, the error code is `service_not_in_active_organization`, or `service_not_found` when no organization you belong to has the service. Select a service from the session's organization with `chkit obsessiondb service select`.
+
 ## Per-command override
 
 Any command that hits ClickHouse accepts `--service <name-or-alias>` to target a different service for one invocation without changing the saved selection:

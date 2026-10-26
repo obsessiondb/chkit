@@ -571,19 +571,25 @@ def test_handler_status_with_service_slug_calls_list(
 def test_handler_cancel_requires_job_id(
     isolated_home: Path,
 ) -> None:
-    """Missing-flag errors PROPAGATE (TS rethrows non-session errors)."""
+    """Missing-flag errors are reported, like the TS hook."""
     save_credentials(_creds())
-    with pytest.raises(RuntimeError, match="--job-id is required"):
-        handle_backfill_command(_bf_ctx(command="cancel", flags={}))
+    msgs: list[Any] = []
+    result = handle_backfill_command(_bf_ctx(command="cancel", flags={}, msgs=msgs))
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 1
+    assert msgs == ["Backfill cancel failed: --job-id is required for remote cancel"]
 
 
 def test_handler_list_requires_service_slug(
     isolated_home: Path,
 ) -> None:
-    """Missing-flag errors PROPAGATE (TS rethrows non-session errors)."""
+    """Missing-flag errors are reported, like the TS hook."""
     save_credentials(_creds())
-    with pytest.raises(RuntimeError, match="--service-slug is required"):
-        handle_backfill_command(_bf_ctx(command="list", flags={}))
+    msgs: list[Any] = []
+    result = handle_backfill_command(_bf_ctx(command="list", flags={}, msgs=msgs))
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 1
+    assert msgs == ["Backfill list failed: --service-slug is required for remote list"]
 
 
 # ---------- onboarding (full wizard) ----------

@@ -88,6 +88,12 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- `chkit plugin backfill status --job-id` and `cancel --job-id` against ObsessionDB now
+  print the job in text mode (status, tasks completed and failed, the last error and a
+  console link) instead of nothing, and wrap `--json` output in the standard
+  `command`/`schemaVersion`/`ok` envelope instead of the raw console API object. A missing
+  flag or an API failure now prints an error (an error envelope under `--json`) and exits
+  1 instead of raising (#303).
 - backfill: `chkit check` now judges a plan sent with the ObsessionDB managed `submit`
   by its job (#304). The job runs server-side and never writes a local run, so the
   check counted the saved plan as pending (`backfill_required_pending`) until the plan
@@ -127,6 +133,13 @@
   a view outputs a column the target cannot take or views feeding one target output
   different columns; `run`/`resume` refuse a plan whose target lost a planned
   column. ObsessionDB managed submit renders the same SQL (#291).
+- obsessiondb: a console call for a service outside the session's active organization
+  no longer fails with a bare 404 (#305). The API looks a service slug up in the active
+  organization only. On a 404 for a call with a `serviceSlug` (workbench queries, job
+  submit and list), `_rpc_post` reads `services.listAll` and the session, and raises
+  `ServiceNotFoundError` naming the service, the active organization and the one that
+  owns it (`code="service_not_in_active_organization"`), or saying no organization has
+  it (`code="service_not_found"`). Both point to `chkit obsessiondb service select`.
 - backfill: resume reads chunk status on every replica of a multi-replica target
   (#289). `sync_progress` read only the local `system.processes` /
   `system.query_log`, even with `clickhouse.cluster` set, so a chunk running or

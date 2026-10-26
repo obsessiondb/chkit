@@ -6,6 +6,9 @@ Wire protocol (mirrors ``@orpc/client/fetch``'s ``RPCLink``):
 
 The token is sent as ``Authorization: Bearer <token>``. HTTP 401 returns are
 translated into ``SessionExpiredError`` so callers can route to a re-login.
+A 404 for a call with a ``serviceSlug`` raises ``ServiceNotFoundError`` when
+the service is in another organization than the session's active one, or in
+none.
 
 Subset of the TS contracts ported here:
 
@@ -25,6 +28,7 @@ from chkit_plugin_obsessiondb.api_client import (
     USER_AGENT,
     SessionExpiredError,
     SessionResponse,
+    get_session,
 )
 from chkit_plugin_obsessiondb.api_model import ConsoleApiModel
 from chkit_plugin_obsessiondb.credentials import Credentials
@@ -108,6 +112,22 @@ ClaimInstanceResult = (
 
 HTTP_TIMEOUT_SECONDS = 30.0
 HTTP_401_UNAUTHORIZED = 401
+HTTP_404_NOT_FOUND = 404
+
+ServiceNotFoundCode = Literal["service_not_in_active_organization", "service_not_found"]
+
+
+class ServiceNotFoundError(RuntimeError):
+    """A console call for a service failed because the console could not find it.
+
+    ``code`` is the stable ``--json`` error code, as in the TS client.
+    """
+
+    def __init__(
+        self, message: str, *, code: ServiceNotFoundCode = "service_not_found"
+    ) -> None:
+        super().__init__(message)
+        self.code: ServiceNotFoundCode = code
 
 
 def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
@@ -131,6 +151,13 @@ def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
         res = http.post(url, json=body, headers=headers)
     if res.status_code == HTTP_401_UNAUTHORIZED:
         raise SessionExpiredError
+    service_slug = payload.get("serviceSlug") if isinstance(payload, dict) else None
+    if res.status_code == HTTP_404_NOT_FOUND and isinstance(service_slug, str):
+        # Every call for a service (workbench queries, job submit and list)
+        # passes here, so query, migrate and backfill all get the explanation.
+        explained = explain_service_not_found(creds, service_slug)
+        if explained is not None:
+            raise explained
     if res.status_code >= httpx.codes.BAD_REQUEST:
         msg = f"RPC {procedure} failed: {res.status_code} {res.text}"
         raise RuntimeError(msg)
@@ -140,6 +167,60 @@ def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
         msg = f"RPC {procedure} returned non-JSON body: {res.text[:200]}"
         raise RuntimeError(msg)  # noqa: B904
     return envelope["json"] if isinstance(envelope, dict) and "json" in envelope else envelope
+
+
+def explain_service_not_found(
+    creds: Credentials, service_slug: str
+) -> ServiceNotFoundError | None:
+    """Explain a 404 for ``service_slug``, or ``None`` when the lookup cannot.
+
+    The console looks a service slug up in the session's active organization
+    only, so a call for a service of another organization fails with a bare
+    404. Mirrors ``explainServiceNotFound`` in the TS plugin.
+    """
+    try:
+        organizations = list_service_organizations(creds)
+        session = get_session(creds.base_url, creds.access_token).session
+    except Exception:
+        # The original 404 is more useful than a failure of the lookup.
+        return None
+    active_organization_id = session.active_organization_id if session else None
+
+    owners = [
+        org
+        for org in organizations
+        if any(service.slug == service_slug for service in org.services)
+    ]
+    if not owners:
+        return ServiceNotFoundError(
+            f'obsessiondb: service "{service_slug}" was not found in any '
+            "organization you can access. It may have been deleted, or you may "
+            "no longer have access to it. Select another service with "
+            "`chkit obsessiondb service select`.",
+            code="service_not_found",
+        )
+
+    # Without an active organization the console searches every organization;
+    # with the service in the active one, the 404 has another cause.
+    if not active_organization_id:
+        return None
+    if any(org.id == active_organization_id for org in owners):
+        return None
+
+    active = next(
+        (org for org in organizations if org.id == active_organization_id), None
+    )
+    active_label = f'"{active.name if active else active_organization_id}"'
+    owner_label = ", ".join(f'"{org.name}"' for org in owners)
+    return ServiceNotFoundError(
+        f'obsessiondb: service "{service_slug}" is not in the active organization '
+        f"{active_label} of this chkit session (it belongs to {owner_label}). "
+        "The ObsessionDB console only finds services in the session's active "
+        "organization, and switching organizations in the console does not "
+        "change the chkit session's. Select a service from "
+        f"{active_label} with `chkit obsessiondb service select`.",
+        code="service_not_in_active_organization",
+    )
 
 
 def list_service_organizations(creds: Credentials) -> list[ServiceOrganization]:
@@ -198,10 +279,12 @@ __all__ = [
     "InstanceClaimStatusIneligible",
     "ListAllResponse",
     "Service",
+    "ServiceNotFoundError",
     "ServiceOrganization",
     "ServiceStatus",
     "SessionResponse",
     "claim_instance",
+    "explain_service_not_found",
     "get_service",
     "instance_claim_status",
     "list_service_organizations",
