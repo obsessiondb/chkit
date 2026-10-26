@@ -6,6 +6,7 @@ import {
   computeBackfillStateDir,
   listPlanIds,
   readRun,
+  readSubmission,
 } from './state.js'
 import type {
   BackfillPluginCheckResult,
@@ -20,6 +21,7 @@ export async function evaluateBackfillCheck(input: {
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
   const plansDir = join(stateDir, 'plans')
   const runsDir = join(stateDir, 'runs')
+  const submissionsDir = join(stateDir, 'submissions')
 
   const planIds = await listPlanIds(plansDir)
   if (planIds.length === 0) {
@@ -32,6 +34,7 @@ export async function evaluateBackfillCheck(input: {
         requiredCount: 0,
         activeRuns: 0,
         failedRuns: 0,
+        submittedCount: 0,
       },
     }
   }
@@ -39,12 +42,18 @@ export async function evaluateBackfillCheck(input: {
   let requiredCount = 0
   let activeRuns = 0
   let failedRuns = 0
+  let submittedCount = 0
 
   for (const planId of planIds) {
     const runPath = join(runsDir, `${planId}.json`)
     const run = await readRun(runPath)
     if (!run) {
-      requiredCount += 1
+      // A managed job runs on the backend and never writes a local run. Its
+      // backend's plugin (e.g. ObsessionDB) checks whether the job completed,
+      // so it is not pending here. A local run, if any, still wins.
+      const submission = await readSubmission(join(submissionsDir, `${planId}.json`))
+      if (submission) submittedCount += 1
+      else requiredCount += 1
       continue
     }
 
@@ -94,6 +103,7 @@ export async function evaluateBackfillCheck(input: {
       requiredCount,
       activeRuns,
       failedRuns,
+      submittedCount,
     },
   }
 }

@@ -1,8 +1,13 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import * as backfillSdk from '@chkit/plugin-backfill/sdk'
 import type { BackfillPlanState } from '@chkit/plugin-backfill/sdk'
 
-import { buildSubmitTasks, parseSubmitInput } from './submit'
+import { buildSubmitTasks, handleSubmit, parseSubmitInput } from './submit'
 
 function makePlan(requireIdempotencyToken = true): BackfillPlanState {
 	return {
@@ -177,5 +182,51 @@ describe('parseSubmitInput', () => {
 	test('passes through a title', () => {
 		const { title } = parseSubmitInput({ '--target': 'app.events', '--title': 'My backfill' })
 		expect(title).toBe('My backfill')
+	})
+})
+
+describe('handleSubmit', () => {
+	const originalFetch = globalThis.fetch
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch
+		mock.restore()
+	})
+
+	test('records the job id next to the plan so check does not wait for a local run', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'chkit-submit-'))
+		const configPath = join(dir, 'clickhouse.config.ts')
+		const plan = makePlan()
+		spyOn(backfillSdk, 'buildBackfillPlan').mockResolvedValue({
+			plan,
+			planPath: join(dir, 'chkit/meta/backfill/plans', `${plan.planId}.json`),
+		})
+		globalThis.fetch = mock(async () =>
+			new Response(JSON.stringify({ json: { jobId: 'job-123' } }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' },
+			}),
+		) as typeof fetch
+		const printed: unknown[] = []
+
+		const result = await handleSubmit({
+			flags: { '--target': 'app.events' },
+			configPath,
+			jsonMode: true,
+			config: { metaDir: './chkit/meta', schema: [] },
+			print: (value) => printed.push(value),
+			credentials: { access_token: 'test-tok', base_url: 'https://api.example.com' },
+			serviceSlug: 'svc',
+		})
+
+		expect(result).toEqual({ handled: true, exitCode: 0 })
+		expect(printed[0]).toMatchObject({ ok: true, jobId: 'job-123' })
+		const submissionPath = join(dir, 'chkit/meta/backfill/submissions', `${plan.planId}.json`)
+		expect(existsSync(submissionPath)).toBe(true)
+		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({
+			planId: plan.planId,
+			target: 'app.events',
+			jobId: 'job-123',
+		})
 	})
 })

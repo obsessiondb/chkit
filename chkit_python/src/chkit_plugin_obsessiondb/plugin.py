@@ -44,6 +44,7 @@ from chkit_plugin_obsessiondb.auth_signup import (
     SignupOptions,
     run_signup,
 )
+from chkit_plugin_obsessiondb.backfill_check import check_submitted_backfill_jobs
 from chkit_plugin_obsessiondb.backfill_handler import handle_backfill_command
 from chkit_plugin_obsessiondb.credentials import resolve_base_url
 from chkit_plugin_obsessiondb.engine import (
@@ -99,19 +100,40 @@ class _ObsessionDBHooks:
         # Same target decision as on_schema_loaded: ObsessionDB host or
         # --force-shared-engines.
         flags = dict(ctx.flags) if ctx.flags else {}
-        if resolve_strip_behavior(ctx.config, flags):
-            return None
-        definitions = load_schema_definitions(
-            list(ctx.config.schema_), cwd=Path(ctx.config_path).resolve().parent
-        )
-        findings = [
-            ChxCheckFinding(
-                code="obsessiondb_distributed_unsupported", message=message, severity="error"
+        distributed_findings: list[ChxCheckFinding] | None = None
+        if not resolve_strip_behavior(ctx.config, flags):
+            definitions = load_schema_definitions(
+                list(ctx.config.schema_), cwd=Path(ctx.config_path).resolve().parent
             )
-            for message in find_distributed_tables(definitions)
+            distributed_findings = [
+                ChxCheckFinding(
+                    code="obsessiondb_distributed_unsupported",
+                    message=message,
+                    severity="error",
+                )
+                for message in find_distributed_tables(definitions)
+            ]
+        # Submitted backfill jobs run on ObsessionDB whatever the check target is.
+        backfill_jobs = check_submitted_backfill_jobs(
+            config=ctx.config, config_path=ctx.config_path
+        )
+        if distributed_findings is None and backfill_jobs is None:
+            return None
+
+        findings = [
+            *(distributed_findings or []),
+            *(backfill_jobs.findings if backfill_jobs else []),
         ]
         return ChxOnCheckResult(
-            plugin="obsessiondb", evaluated=True, ok=not findings, findings=findings
+            plugin="obsessiondb",
+            evaluated=True,
+            ok=not findings,
+            findings=findings,
+            metadata=(
+                {"backfillJobs": backfill_jobs.counts.to_metadata()}
+                if backfill_jobs
+                else None
+            ),
         )
 
     def on_check_report(self, ctx: ChxOnCheckReportContext) -> None:

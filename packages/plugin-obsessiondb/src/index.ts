@@ -9,6 +9,7 @@ import {
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { AUTH_COMMANDS, loadCredentials, resolveBaseUrl } from './auth/index.js'
+import { type BackfillJobFinding, checkSubmittedBackfillJobs } from './backfill/check.js'
 import {
 	BACKFILL_EXTEND_COMMANDS,
 	handleBackfillCommand,
@@ -120,11 +121,15 @@ interface ObsessionDBCheckResult {
 	plugin: 'obsessiondb'
 	evaluated: boolean
 	ok: boolean
-	findings: Array<{
-		code: 'obsessiondb_distributed_unsupported'
-		message: string
-		severity: 'error'
-	}>
+	findings: Array<
+		| {
+				code: 'obsessiondb_distributed_unsupported'
+				message: string
+				severity: 'error'
+		  }
+		| BackfillJobFinding
+	>
+	metadata?: Record<string, unknown>
 }
 
 type ObsessionDBRegistration = ChxInlinePluginRegistration<
@@ -405,16 +410,27 @@ function createObsessionDBPlugin(
 			async onCheck({ config, configPath, flags }) {
 				// Same target decision as onSchemaLoaded: ObsessionDB host or
 				// --force-shared-engines.
-				if (resolveStripBehavior(config, flags)) return undefined
-				const definitions = await loadSchemaDefinitions(config.schema, {
-					cwd: resolve(configPath, '..'),
-				})
-				const findings = findDistributedTables(definitions).map((message) => ({
-					code: 'obsessiondb_distributed_unsupported' as const,
-					message,
-					severity: 'error' as const,
-				}))
-				return { plugin: 'obsessiondb', evaluated: true, ok: findings.length === 0, findings }
+				const distributedFindings = resolveStripBehavior(config, flags)
+					? undefined
+					: findDistributedTables(
+							await loadSchemaDefinitions(config.schema, { cwd: resolve(configPath, '..') }),
+						).map((message) => ({
+							code: 'obsessiondb_distributed_unsupported' as const,
+							message,
+							severity: 'error' as const,
+						}))
+				// Submitted backfill jobs run on ObsessionDB whatever the check target is.
+				const backfillJobs = await checkSubmittedBackfillJobs({ config, configPath })
+				if (!distributedFindings && !backfillJobs) return undefined
+
+				const findings = [...(distributedFindings ?? []), ...(backfillJobs?.findings ?? [])]
+				return {
+					plugin: 'obsessiondb',
+					evaluated: true,
+					ok: findings.length === 0,
+					findings,
+					...(backfillJobs ? { metadata: { backfillJobs: backfillJobs.counts } } : {}),
+				}
 			},
 			onCheckReport({ result, print }) {
 				if (result.ok) return

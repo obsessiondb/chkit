@@ -99,6 +99,38 @@ Two ways forward:
 
 Each chunk renders the same idempotent `INSERT … SELECT` the local executor would run, including CTE-wrapped materialized-view replay when the target is an MV's `to` table. The backend receives the task list, executes chunks with the requested `--concurrency` (1–48), and retries failed chunks up to the plan's per-chunk retry budget. Idempotency tokens make re-runs safe: re-submitting the same window does not double-write.
 
+## Submitted jobs in `chkit check`
+
+`submit` saves its plan under `<metaDir>/backfill/plans/`, like `plan`, and records the job ID in `<metaDir>/backfill/submissions/<planId>.json`. The job writes no local run checkpoint, so the backfill plugin's check leaves a submitted plan to the ObsessionDB plugin, whose check asks the jobs API for the job's status:
+
+| Job status | Finding | Check |
+| --- | --- | --- |
+| `completed` | none; the confirmation is saved in the submission file | passes |
+| `pending`, `running`, `draining`, `paused` | `obsessiondb_backfill_job_incomplete` | fails |
+| `failed`, `cancelled` | `obsessiondb_backfill_job_failed`, with the last task error | fails |
+| not logged in, session expired, API error | `obsessiondb_backfill_job_unverified` | fails |
+
+Each finding names the plan and job IDs. Once a job is confirmed completed, later checks pass for that plan without contacting ObsessionDB. A project without submitted plans makes no API call.
+
+```sh
+chkit check --json
+```
+
+```json
+"obsessiondb": {
+  "evaluated": true,
+  "ok": false,
+  "findingCodes": ["obsessiondb_backfill_job_incomplete"],
+  "backfillJobs": { "submitted": 1, "confirmed": 0, "incomplete": 1, "failed": 0, "unverified": 0 }
+}
+```
+
+:::note
+CI that runs `chkit check` needs an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A confirmation is saved in `<metaDir>/backfill/submissions/`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
+:::
+
+For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then submit the backfill again and delete the old plan file (`plans/<planId>.json`), or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.
+
 ## Related
 
 - [Backfill Plugin (beta)](/plugins/backfill/) — full command reference, planning options, and local execution.

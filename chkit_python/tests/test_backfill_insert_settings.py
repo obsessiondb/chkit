@@ -10,6 +10,7 @@ live server; it hard-fails when ClickHouse is unreachable.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -174,6 +175,7 @@ def test_build_submit_tasks_renders_the_insert_settings() -> None:
 
 def test_handle_submit_uses_the_backfill_plugin_insert_settings(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     submitted: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -193,13 +195,14 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
 
     monkeypatch.setattr(backfill_submit_module, "jobs_submit", fake_jobs_submit)
     config = SimpleNamespace(
-        plugins=[backfill({"insertSettings": {"max_insert_threads": 6}})]
+        meta_dir="meta",
+        plugins=[backfill({"insertSettings": {"max_insert_threads": 6}})],
     )
 
     code = handle_submit(
         SubmitContext(
             flags={"--target": "app.events"},
-            config_path="cfg.py",
+            config_path=str(tmp_path / "cfg.py"),
             json_mode=False,
             config=config,
             print=lambda _value: None,

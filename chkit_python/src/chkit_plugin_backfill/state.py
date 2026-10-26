@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -29,6 +30,7 @@ from chkit_plugin_backfill.types import (
     BackfillRunState,
     BackfillStatusSummary,
     BackfillStatusTotals,
+    BackfillSubmissionState,
 )
 
 
@@ -134,6 +136,7 @@ def backfill_paths(state_dir: Path | str, plan_id: str) -> BackfillPathSet:
         runs_dir=str(runs_dir),
         plan_path=str(plans_dir / f"{plan_id}.json"),
         run_path=str(runs_dir / f"{plan_id}.json"),
+        submission_path=str(base / "submissions" / f"{plan_id}.json"),
     )
 
 
@@ -233,6 +236,74 @@ def read_run(run_path: str | Path) -> BackfillRunState | None:
     return BackfillRunState.model_validate(raw)
 
 
+def read_submission(submission_path: str | Path) -> BackfillSubmissionState | None:
+    raw = _read_json_maybe(Path(submission_path))
+    if raw is None:
+        return None
+    return BackfillSubmissionState.model_validate(raw)
+
+
+def record_backfill_submission(
+    *,
+    plan_id: str,
+    target: str,
+    job_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> str:
+    """Record that a plan was handed to a managed job backend, so ``check``
+    does not wait for a local run that will never be written.
+    """
+    resolved_state_dir = compute_backfill_state_dir(config, config_path, state_dir)
+    submission_path = backfill_paths(resolved_state_dir, plan_id).submission_path
+    write_json(
+        submission_path,
+        BackfillSubmissionState(
+            plan_id=plan_id, target=target, job_id=job_id, submitted_at=now_iso()
+        ),
+    )
+    return submission_path
+
+
+@dataclass(frozen=True)
+class RemoteSubmission:
+    submission_path: str
+    submission: BackfillSubmissionState
+
+
+def list_remote_submissions(
+    *,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> list[RemoteSubmission]:
+    """Submissions of saved plans that have no local run. The job backend, not
+    a local run, decides whether these backfills are done.
+    """
+    resolved_state_dir = compute_backfill_state_dir(config, config_path, state_dir)
+    entries: list[RemoteSubmission] = []
+    for plan_id in list_plan_ids(resolved_state_dir / "plans"):
+        paths = backfill_paths(resolved_state_dir, plan_id)
+        if read_run(paths.run_path) is not None:
+            continue
+        submission = read_submission(paths.submission_path)
+        if submission is not None:
+            entries.append(RemoteSubmission(paths.submission_path, submission))
+    return entries
+
+
+def confirm_backfill_submission(
+    *, submission_path: str | Path, submission: BackfillSubmissionState
+) -> BackfillSubmissionState:
+    """Record that the job backend reported the submitted job completed."""
+    confirmed = submission.model_copy(
+        update={"status": "completed", "confirmed_at": now_iso()}
+    )
+    write_json(submission_path, confirmed)
+    return confirmed
+
+
 def list_plan_ids(plans_dir: str | Path) -> list[str]:
     path = Path(plans_dir)
     if not path.exists():
@@ -304,18 +375,23 @@ def chunk_ids_in_order(plan: BackfillPlanState) -> Iterable[str]:
 
 __all__ = [
     "BackfillPathSet",
+    "RemoteSubmission",
     "backfill_paths",
     "chunk_ids_in_order",
     "compute_backfill_state_dir",
     "compute_environment_fingerprint",
+    "confirm_backfill_submission",
     "ensure_environment_match",
     "hash_id",
     "list_plan_ids",
+    "list_remote_submissions",
     "now_iso",
     "plan_status_for",
     "random_plan_id",
     "read_plan",
     "read_run",
+    "read_submission",
+    "record_backfill_submission",
     "summarize_run_status",
     "write_json",
 ]

@@ -128,6 +128,22 @@ class BackfillRunState(BaseModel):
     model_config = ConfigDict(frozen=False, extra="ignore", populate_by_name=True)
 
 
+class BackfillSubmissionState(BaseModel):
+    """Written by a managed ``submit`` (e.g. ObsessionDB): the plan's chunks run
+    as a job on the backend, so no local run state is ever written for it.
+    """
+
+    plan_id: str = Field(..., alias="planId")
+    target: str
+    job_id: str = Field(..., alias="jobId")
+    submitted_at: str = Field(..., alias="submittedAt")
+    # Set once the job backend reported the job completed; check stops asking then.
+    status: Literal["completed"] | None = None
+    confirmed_at: str | None = Field(default=None, alias="confirmedAt")
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+
 class BackfillStatusTotals(BaseModel):
     total: int = 0
     pending: int = 0
@@ -158,6 +174,7 @@ class BackfillPathSet(BaseModel):
     runs_dir: str = Field(..., alias="runsDir")
     plan_path: str = Field(..., alias="planPath")
     run_path: str = Field(..., alias="runPath")
+    submission_path: str = Field(..., alias="submissionPath")
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
@@ -190,4 +207,5 @@ __all__ = [
     "BackfillRunStatus",
     "BackfillStatusSummary",
     "BackfillStatusTotals",
+    "BackfillSubmissionState",
 ]

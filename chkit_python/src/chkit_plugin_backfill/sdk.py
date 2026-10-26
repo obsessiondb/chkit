@@ -50,10 +50,17 @@ from chkit_plugin_backfill.planner import (
     BuildBackfillPlanOutput,
     build_backfill_plan,
 )
+from chkit_plugin_backfill.state import (
+    RemoteSubmission,
+    confirm_backfill_submission,
+    list_remote_submissions,
+    record_backfill_submission,
+)
 from chkit_plugin_backfill.types import (
     BackfillChunkState,
     BackfillPlanState,
     BackfillProgress,
+    BackfillSubmissionState,
 )
 
 __all__ = [
@@ -63,6 +70,7 @@ __all__ = [
     "BackfillPlanState",
     "BackfillProgress",
     "BackfillResult",
+    "BackfillSubmissionState",
     "BuildBackfillPlanOutput",
     "Chunk",
     "ChunkDerivationStep",
@@ -74,6 +82,7 @@ __all__ = [
     "Partition",
     "PartitionDiagnostics",
     "PlanOptions",
+    "RemoteSubmission",
     "SortKey",
     "SubmitOptions",
     "analyze_and_chunk",
@@ -81,6 +90,7 @@ __all__ = [
     "build_backfill_plan",
     "build_chunk_execution_sql",
     "build_where_clause_from_chunk",
+    "confirm_backfill_submission",
     "decode_chunk_plan_from_persistence",
     "encode_chunk_plan_for_persistence",
     "execute_backfill",
@@ -88,7 +98,9 @@ __all__ = [
     "generate_idempotency_token",
     "get_backfill_logger",
     "inject_sort_key_filter",
+    "list_remote_submissions",
     "parse_byte_size",
+    "record_backfill_submission",
     "rewrite_select_columns",
     "sync_progress",
 ]

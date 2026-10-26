@@ -8,6 +8,11 @@ export {
 } from './chunking/boundary-codec.js'
 export { generateChunkPlan } from './chunking/planner.js'
 export { buildBackfillPlan } from './planner.js'
+export {
+  confirmBackfillSubmission,
+  listRemoteSubmissions,
+  recordBackfillSubmission,
+} from './state.js'
 export { PlanSchema, SubmitSchema, parseByteSize } from './options.js'
 export {
   CHKIT_BACKFILL_LOGGER_CATEGORY,
@@ -23,7 +28,7 @@ export {
 export { generateIdempotencyToken } from './chunking/utils/ids.js'
 
 export type { PlanOptions, SubmitOptions } from './options.js'
-export type { BackfillPlanState, BuildBackfillPlanOutput } from './types.js'
+export type { BackfillPlanState, BackfillSubmissionState, BuildBackfillPlanOutput } from './types.js'
 
 export type {
   BackfillOptions,

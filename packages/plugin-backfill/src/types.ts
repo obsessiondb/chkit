@@ -79,6 +79,20 @@ export interface BackfillRunState {
   progress: BackfillProgress
 }
 
+/**
+ * Written by a managed `submit` (e.g. ObsessionDB): the plan's chunks run as a
+ * job on the backend, so no local run state is ever written for it.
+ */
+export interface BackfillSubmissionState {
+  planId: string
+  target: string
+  jobId: string
+  submittedAt: string
+  /** Set once the job backend reported the job completed; check stops asking then. */
+  status?: 'completed'
+  confirmedAt?: string
+}
+
 export interface BackfillStatusSummary {
   planId: string
   target: string
@@ -142,6 +156,7 @@ export interface BackfillPathSet {
   runsDir: string
   planPath: string
   runPath: string
+  submissionPath: string
 }
 
 export interface BackfillDoctorReport {
