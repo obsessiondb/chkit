@@ -9,7 +9,8 @@ state):
 - ``plan`` / ``run`` / ``resume`` — refused when ObsessionDB is the intended
   target (the managed path is ``backfill submit``); ``--local`` bypasses.
 - ``status`` / ``cancel`` / ``list`` — routed to the jobs API by
-  ``--job-id`` / ``--service-slug``; ``--plan-id`` keeps them local.
+  ``--job-id`` / ``--service-slug``; ``--plan-id`` keeps them local. They
+  print the job as text, or the standard envelope under ``--json``.
 """
 
 from __future__ import annotations
@@ -23,7 +24,14 @@ from chkit.plugins import (
     ChxOnBeforePluginCommandUnhandled,
 )
 from chkit_plugin_obsessiondb.api_client import SessionExpiredError
+from chkit_plugin_obsessiondb.backfill_job_output import (
+    JobOutput,
+    job_cancel_output,
+    job_list_output,
+    job_status_output,
+)
 from chkit_plugin_obsessiondb.backfill_submit import SubmitContext, handle_submit
+from chkit_plugin_obsessiondb.console_url import build_job_console_url
 from chkit_plugin_obsessiondb.credentials import (
     Credentials,
     load_credentials,
@@ -34,6 +42,7 @@ from chkit_plugin_obsessiondb.jobs_api import (
     jobs_get,
     jobs_list,
 )
+from chkit_plugin_obsessiondb.json_envelope import error_envelope
 from chkit_plugin_obsessiondb.storage import load_selected_service
 
 _REMOTE_SUBCOMMANDS = frozenset({"status", "cancel", "list"})
@@ -62,28 +71,50 @@ def _effective_credentials(creds: Credentials) -> Credentials:
 
 def _dispatch(
     creds: Credentials,
-    command: str,
-    flags: dict[str, Any],
-) -> Any:
+    context: ChxOnBeforePluginCommandContext,
+) -> JobOutput:
+    flags = context.flags
+    command = context.command
     job_id = _str_flag(flags, "--job-id")
     service_slug = _str_flag(flags, "--service-slug")
+
+    # The console deep-link needs a service slug; the job itself only carries
+    # the service id.
+    def console_url(job: str) -> str | None:
+        slug = service_slug
+        if slug is None:
+            selected = load_selected_service(context.config_path)
+            slug = selected.service_slug if selected is not None else None
+        return build_job_console_url(creds.base_url, slug, job) if slug else None
+
     if command == "status":
         if job_id is not None:
-            return jobs_get(creds, job_id=job_id)
+            return job_status_output(
+                jobs_get(creds, job_id=job_id), console_url(job_id)
+            )
         if service_slug is not None:
-            return jobs_list(creds, service_slug=service_slug)
+            return job_list_output(
+                f"backfill {command}",
+                service_slug,
+                jobs_list(creds, service_slug=service_slug),
+            )
         msg = "Either --job-id or --service-slug is required for remote status"
         raise RuntimeError(msg)
     if command == "cancel":
         if job_id is None:
             msg = "--job-id is required for remote cancel"
             raise RuntimeError(msg)
-        return jobs_cancel(creds, job_id=job_id)
+        jobs_cancel(creds, job_id=job_id)
+        return job_cancel_output(job_id, console_url(job_id))
     if command == "list":
         if service_slug is None:
             msg = "--service-slug is required for remote list"
             raise RuntimeError(msg)
-        return jobs_list(creds, service_slug=service_slug)
+        return job_list_output(
+            f"backfill {command}",
+            service_slug,
+            jobs_list(creds, service_slug=service_slug),
+        )
     msg = f"Unsupported remote command: {command}"
     raise RuntimeError(msg)
 
@@ -182,28 +213,35 @@ def handle_backfill_command(  # noqa: PLR0911
     if isinstance(context.flags.get("--plan-id"), str):
         return ChxOnBeforePluginCommandUnhandled()
 
+    command_id = f"backfill {context.command}"
     creds = load_credentials()
     if creds is None:
+        message = "Not logged in. Run `chkit obsessiondb login` to authenticate."
         context.print(
-            "Not logged in. Run `chkit obsessiondb login` to authenticate."
+            error_envelope(command_id, "not_logged_in", message)
+            if context.json_mode
+            else message
         )
         return ChxOnBeforePluginCommandHandled(exit_code=1)
 
-    # Non-session errors (missing flags, API failures) PROPAGATE, exactly as
-    # the TS hook rethrows them into the plugin runtime's error wrapper.
     try:
-        result = _dispatch(
-            _effective_credentials(creds), context.command, context.flags
-        )
+        output = _dispatch(_effective_credentials(creds), context)
     except SessionExpiredError as error:
-        context.print(str(error))
+        context.print(
+            error_envelope(command_id, "session_expired", str(error))
+            if context.json_mode
+            else str(error)
+        )
+        return ChxOnBeforePluginCommandHandled(exit_code=1)
+    except Exception as error:
+        context.print(
+            error_envelope(command_id, "error", str(error))
+            if context.json_mode
+            else f"Backfill {context.command} failed: {error}"
+        )
         return ChxOnBeforePluginCommandHandled(exit_code=1)
 
-    context.print(
-        result.model_dump(by_alias=True)
-        if hasattr(result, "model_dump")
-        else result
-    )
+    context.print(output.json if context.json_mode else output.text)
     return ChxOnBeforePluginCommandHandled(exit_code=0)
 
 

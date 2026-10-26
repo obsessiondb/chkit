@@ -88,6 +88,12 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- `chkit plugin backfill status --job-id` and `cancel --job-id` against ObsessionDB now
+  print the job in text mode (status, tasks completed and failed, the last error and a
+  console link) instead of nothing, and wrap `--json` output in the standard
+  `command`/`schemaVersion`/`ok` envelope instead of the raw console API object. A missing
+  flag or an API failure now prints an error (an error envelope under `--json`) and exits
+  1 instead of raising (#303).
 - `clickhouse.url` with an `https://` scheme now connects over HTTPS when `secure` is
   not set (#298). Before, an unset `secure` meant plain HTTP, so
   `"url": "https://host"` connected to `http://host:8123`. The URL scheme now sets the

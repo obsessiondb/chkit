@@ -81,14 +81,12 @@ describe('handleBackfillCommand', () => {
     expect(printed[0]).toContain('chkit obsessiondb login')
   })
 
-  test('routes status to remote ORPC get when authenticated', async () => {
-    await setupAuth()
-
-    const jobDetail = {
+  function jobDetail(overrides: Record<string, unknown> = {}) {
+    return {
       id: 'job-123',
       serviceId: 'svc-1',
       type: 'backfill',
-      target: 'my_table',
+      target: 'analytics.events',
       status: 'running',
       concurrency: 4,
       totalTasks: 10,
@@ -99,16 +97,77 @@ describe('handleBackfillCommand', () => {
       workflowId: null,
       metadata: null,
       tasks: [],
+      ...overrides,
     }
+  }
 
-    globalThis.fetch = mock(async () => orpcResponse(jobDetail)) as typeof fetch
+  function failedRun(error: string, finishedAt: string) {
+    return { id: `run-${finishedAt}`, attempt: 1, type: 'insert', status: 'failed', error, startedAt: finishedAt, finishedAt }
+  }
+
+  async function selectService(): Promise<string> {
+    const configPath = join(tempDir, 'clickhouse.config.ts')
+    await saveSelectedService(configPath, { service_slug: 'svc-1', service_name: 'My Service' })
+    return configPath
+  }
+
+  test('prints the remote job status as text', async () => {
+    await setupAuth()
+    const configPath = await selectService()
+    globalThis.fetch = mock(async () =>
+      orpcResponse(
+        jobDetail({
+          failedTasks: 1,
+          tasks: [
+            { id: 't1', runs: [failedRun('first failure', '2026-03-29T00:10:00Z')] },
+            { id: 't2', runs: [failedRun('Memory limit exceeded', '2026-03-29T00:20:00Z')] },
+          ],
+        }),
+      )
+    ) as typeof fetch
+
+    const { context, printed } = makeContext({ configPath })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    expect(printed).toEqual([
+      'Backfill job job-123 (analytics.events): running\n' +
+        'Tasks: 3/10 completed, 1 failed\n' +
+        'Last error: Memory limit exceeded\n' +
+        'Track progress: https://api.example.com/svc-1/jobs/job-123',
+    ])
+  })
+
+  test('omits the console link when no service is known', async () => {
+    await setupAuth()
+    globalThis.fetch = mock(async () => orpcResponse(jobDetail())) as typeof fetch
 
     const { context, printed } = makeContext()
     const result = await handleBackfillCommand(context)
 
     expect(result).toEqual({ handled: true, exitCode: 0 })
-    expect(printed).toHaveLength(1)
-    expect((printed[0] as Record<string, unknown>).id).toBe('job-123')
+    expect(printed).toEqual([
+      'Backfill job job-123 (analytics.events): running\nTasks: 3/10 completed, 0 failed',
+    ])
+  })
+
+  test('wraps the remote job status in the JSON envelope', async () => {
+    await setupAuth()
+    const configPath = await selectService()
+    globalThis.fetch = mock(async () => orpcResponse(jobDetail())) as typeof fetch
+
+    const { context, printed } = makeContext({ configPath, jsonMode: true })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    expect(printed[0]).toMatchObject({
+      command: 'backfill status',
+      schemaVersion: 1,
+      ok: true,
+      job: { id: 'job-123', status: 'running', completedTasks: 3 },
+      lastError: null,
+      url: 'https://api.example.com/svc-1/jobs/job-123',
+    })
   })
 
   test('handles 401 with session expired message', async () => {
@@ -125,6 +184,44 @@ describe('handleBackfillCommand', () => {
     expect(printed[0]).toContain('Session expired')
   })
 
+  test('reports a missing login as a JSON error envelope', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'chkit-bf-'))
+    originalXdg = process.env.XDG_CONFIG_HOME
+    process.env.XDG_CONFIG_HOME = tempDir
+
+    const { context, printed } = makeContext({ jsonMode: true })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 1 })
+    expect(printed[0]).toMatchObject({
+      command: 'backfill status',
+      schemaVersion: 1,
+      ok: false,
+      error: { code: 'not_logged_in' },
+    })
+  })
+
+  test('reports a remote API failure as a JSON error envelope', async () => {
+    await setupAuth()
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ json: { defined: false, code: 'NOT_FOUND', status: 404, message: 'Job not found' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      })
+    ) as typeof fetch
+
+    const { context, printed } = makeContext({ jsonMode: true })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 1 })
+    expect(printed[0]).toMatchObject({
+      command: 'backfill status',
+      schemaVersion: 1,
+      ok: false,
+      error: { code: 'error', message: 'Job not found' },
+    })
+  })
+
   test('returns handled: false for unknown backfill subcommand', async () => {
     await setupAuth()
 
@@ -133,19 +230,37 @@ describe('handleBackfillCommand', () => {
     expect(result).toEqual({ handled: false })
   })
 
-  test('routes cancel to remote ORPC cancel', async () => {
+  test('routes cancel to remote ORPC cancel and confirms it as text', async () => {
     await setupAuth()
+    const configPath = await selectService()
+    const fetchMock = mock(async (_request: Request) => orpcResponse({}))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
-    globalThis.fetch = mock(async () => orpcResponse({})) as typeof fetch
-
-    const { context, printed } = makeContext({ command: 'cancel', flags: { '--job-id': 'job-456' } })
+    const { context, printed } = makeContext({ command: 'cancel', configPath, flags: { '--job-id': 'job-456' } })
     const result = await handleBackfillCommand(context)
 
     expect(result).toEqual({ handled: true, exitCode: 0 })
-    expect(printed).toHaveLength(1)
+    expect(fetchMock.mock.calls[0]?.[0].url).toContain('/rpc/jobs/cancel')
+    expect(printed).toEqual([
+      'Cancellation requested for backfill job job-456.\n' +
+        'Track progress: https://api.example.com/svc-1/jobs/job-456',
+    ])
   })
 
-  test('routes list to remote ORPC list', async () => {
+  test('wraps the cancel result in the JSON envelope', async () => {
+    await setupAuth()
+    globalThis.fetch = mock(async () => orpcResponse({})) as typeof fetch
+
+    const { context, printed } = makeContext({ command: 'cancel', jsonMode: true, flags: { '--job-id': 'job-456' } })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    expect(printed).toEqual([
+      { command: 'backfill cancel', schemaVersion: 1, ok: true, jobId: 'job-456', url: null },
+    ])
+  })
+
+  test('lists a service\'s jobs for status --service-slug', async () => {
     await setupAuth()
 
     const listResponse = {
@@ -164,16 +279,28 @@ describe('handleBackfillCommand', () => {
           updatedAt: '2026-03-28T01:00:00Z',
         },
       ],
+      total: 1,
     }
 
     globalThis.fetch = mock(async () => orpcResponse(listResponse)) as typeof fetch
 
-    const { context, printed } = makeContext({ command: 'list', flags: { '--service-slug': 'svc-1' } })
+    const { context, printed } = makeContext({ flags: { '--service-slug': 'svc-1' } })
     const result = await handleBackfillCommand(context)
-
     expect(result).toEqual({ handled: true, exitCode: 0 })
-    expect(printed).toHaveLength(1)
-    expect((printed[0] as { jobs: unknown[] }).jobs).toHaveLength(1)
+    expect(printed).toEqual([
+      'Backfill jobs for service svc-1 (1):\n- job-1 table_a: completed (5/5 completed, 0 failed)',
+    ])
+
+    const json = makeContext({ jsonMode: true, flags: { '--service-slug': 'svc-1' } })
+    await handleBackfillCommand(json.context)
+    expect(json.printed[0]).toMatchObject({
+      command: 'backfill status',
+      schemaVersion: 1,
+      ok: true,
+      serviceSlug: 'svc-1',
+      total: 1,
+      jobs: [{ id: 'job-1' }],
+    })
   })
 
   test('runs execution commands locally when authenticated but no service is selected', async () => {
