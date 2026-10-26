@@ -41,10 +41,12 @@ from chkit_plugin_obsessiondb.service_api import (
     ClaimInstanceNoneAvailable,
     InstanceClaimStatusEligible,
     InstanceClaimStatusIneligible,
+    ServiceNotFoundError,
     SessionExpiredError,
     get_service,
 )
 from chkit_plugin_obsessiondb.storage import SelectedService
+from chkit_plugin_obsessiondb.workbench_api import workbench_query_execute
 
 BASE = "https://api.test.obsessiondb.com"
 
@@ -194,6 +196,92 @@ def test_rpc_post_raises_runtime_error_on_5xx(httpx_mock: HTTPXMock) -> None:
     )
     with pytest.raises(RuntimeError, match="RPC services/listAll failed"):
         list_service_organizations(_creds())
+
+
+# #305: the console resolves a slug in the session's active organization only
+# and answers a service of another organization with a bare 404.
+
+
+def _mock_service_lookup(httpx_mock: HTTPXMock, *, active_org_id: str | None) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        status_code=404,
+        json={"error": "Service not found"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll",
+        json={
+            "json": {
+                "organizations": [
+                    _org(name="Acme", slug="acme", services=[_service(name="prod", slug="prod")]),
+                    _org(
+                        name="Benchmarks",
+                        slug="bench",
+                        services=[_service(name="benchmarks", slug="benchmarks")],
+                    ),
+                ]
+            }
+        },
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/auth/get-session",
+        json={
+            "user": {"id": "u1", "name": "User", "email": "user@example.test"},
+            "session": {"activeOrganizationId": active_org_id},
+        },
+    )
+
+
+def test_rpc_post_explains_a_service_of_another_organization(
+    httpx_mock: HTTPXMock,
+) -> None:
+    _mock_service_lookup(httpx_mock, active_org_id="org-acme")
+    with pytest.raises(ServiceNotFoundError) as excinfo:
+        workbench_query_execute(_creds(), service_slug="benchmarks", query="SELECT 1")
+    assert excinfo.value.code == "service_not_in_active_organization"
+    message = str(excinfo.value)
+    assert (
+        'service "benchmarks" is not in the active organization "Acme" of this '
+        'chkit session (it belongs to "Benchmarks")'
+    ) in message
+    assert 'Select a service from "Acme" with `chkit obsessiondb service select`' in message
+
+
+def test_rpc_post_reports_a_service_no_organization_has(httpx_mock: HTTPXMock) -> None:
+    _mock_service_lookup(httpx_mock, active_org_id="org-acme")
+    with pytest.raises(ServiceNotFoundError) as excinfo:
+        workbench_query_execute(_creds(), service_slug="gone", query="SELECT 1")
+    assert excinfo.value.code == "service_not_found"
+    assert 'service "gone" was not found in any organization you can access' in str(
+        excinfo.value
+    )
+
+
+def test_rpc_post_keeps_the_404_when_the_service_is_in_the_active_organization(
+    httpx_mock: HTTPXMock,
+) -> None:
+    _mock_service_lookup(httpx_mock, active_org_id="org-bench")
+    with pytest.raises(RuntimeError, match="RPC workbench/query/execute failed: 404") as excinfo:
+        workbench_query_execute(_creds(), service_slug="benchmarks", query="SELECT 1")
+    assert not isinstance(excinfo.value, ServiceNotFoundError)
+
+
+def test_rpc_post_keeps_the_404_when_the_lookup_fails(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute", status_code=404, text="Not Found"
+    )
+    httpx_mock.add_response(url=f"{BASE}/rpc/services/listAll", status_code=500, text="boom")
+    with pytest.raises(RuntimeError, match="RPC workbench/query/execute failed: 404"):
+        workbench_query_execute(_creds(), service_slug="benchmarks", query="SELECT 1")
+
+
+def test_rpc_post_does_not_look_up_a_404_without_a_service(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll", status_code=404, text="Not Found"
+    )
+    with pytest.raises(RuntimeError, match="RPC services/listAll failed: 404"):
+        list_service_organizations(_creds())
+    assert len(httpx_mock.get_requests()) == 1
 
 
 # ---------- service_select: pure rendering ----------

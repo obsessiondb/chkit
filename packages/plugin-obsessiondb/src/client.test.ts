@@ -139,6 +139,67 @@ describe('createApiClient transport', () => {
 		)
 	})
 
+	// #305: the console resolves a slug in the session's active organization only
+	// and answers a service of another organization with a bare 404.
+	test('explains a NOT_FOUND for a service of another organization', async () => {
+		const requested: string[] = []
+		fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(
+			async (input, init) => {
+				const request = new Request(input, init)
+				const { pathname } = new URL(request.url)
+				requested.push(pathname)
+				if (pathname === '/rpc/workbench/query/execute') {
+					return Response.json({ error: 'Service not found' }, { status: 404 })
+				}
+				if (pathname === '/rpc/services/listAll') {
+					return Response.json({
+						json: {
+							organizations: [
+								{ id: 'org-acme', name: 'Acme', slug: 'acme', services: [] },
+								{
+									id: 'org-bench',
+									name: 'Benchmarks',
+									slug: 'benchmarks',
+									services: [{ slug: 'benchmarks', name: 'benchmarks' }],
+								},
+							],
+						},
+					})
+				}
+				expect(pathname).toBe('/api/auth/get-session')
+				expect(request.headers.get('Authorization')).toBe('Bearer test-token')
+				return Response.json({
+					user: { id: 'u1', name: 'User', email: 'user@example.test' },
+					session: { activeOrganizationId: 'org-acme' },
+				})
+			},
+		)
+
+		await expect(
+			client.workbench.query.execute({ serviceSlug: 'benchmarks', query: 'SELECT 1' }),
+		).rejects.toMatchObject({
+			code: 'service_not_in_active_organization',
+			message: expect.stringContaining(
+				'service "benchmarks" is not in the active organization "Acme" of this chkit session (it belongs to "Benchmarks")',
+			),
+		})
+		expect(requested.sort()).toEqual([
+			'/api/auth/get-session',
+			'/rpc/services/listAll',
+			'/rpc/workbench/query/execute',
+		])
+	})
+
+	test('leaves a NOT_FOUND of a call without a service unchanged', async () => {
+		fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+			Response.json({ error: 'Not found' }, { status: 404 }),
+		)
+		await expect(client.services.list({})).rejects.toMatchObject({
+			code: 'NOT_FOUND',
+		})
+		expect(fetchSpy).toHaveBeenCalledTimes(1)
+	})
+
 	test('rejects a prototype-polluting RPC response', async () => {
 		fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
 			Response.json({
