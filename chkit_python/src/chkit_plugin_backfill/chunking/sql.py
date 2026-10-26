@@ -83,12 +83,26 @@ def build_chunk_execution_sql(
     target_columns: list[str] | None = None,
     idempotency_token: str | None = None,
     insert_settings: Mapping[str, str | int | float | bool] | None = None,
+    cutover_key: list[str] | None = None,
 ) -> str:
     resolved_source = source_target if source_target is not None else target
     token = idempotency_token if idempotency_token is not None else ""
     header = f"/* chkit backfill plan={plan_id} chunk={chunk.id} token={token} */"
     settings = _build_settings_clause(token, insert_settings)
     chunk_conditions = _build_chunk_conditions(chunk, table.sort_keys)
+
+    if cutover_key and target_columns:
+        return _build_cutover_chunk_sql(
+            chunk=chunk,
+            target=target,
+            table=table,
+            source_target=resolved_source,
+            target_columns=target_columns,
+            cutover_key=cutover_key,
+            header=header,
+            chunk_conditions=chunk_conditions,
+            insert_settings=insert_settings,
+        )
 
     if mv_replay_queries:
         # Each MV feeding the target becomes a filtered SELECT; UNION ALL replays
@@ -120,6 +134,58 @@ def build_chunk_execution_sql(
     lines.extend(f"  AND {condition}" for condition in chunk_conditions)
 
     lines.append(settings)
+    return "\n".join(lines)
+
+
+def _build_cutover_chunk_sql(
+    *,
+    chunk: Chunk,
+    target: str,
+    table: TableProfile,
+    source_target: str,
+    target_columns: list[str],
+    cutover_key: list[str],
+    header: str,
+    chunk_conditions: list[str],
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> str:
+    """A cutover chunk copies the snapshot rows of the chunk whose key the
+    shadow table does not hold yet (TS ``buildCutoverChunkSql``).
+
+    Rows the mirror already wrote, and rows an earlier attempt of this chunk
+    wrote, are skipped, so a retry never duplicates rows. The key set is
+    narrowed to the chunk's range when the range is on columns the copy writes
+    unchanged. ``select_sequential_consistency`` makes a SharedMergeTree
+    replica read the parts other replicas committed, including mirrored rows.
+    """
+    columns = ", ".join(_quote_identifier(name) for name in target_columns)
+    key = ", ".join(_quote_identifier(name) for name in cutover_key)
+    copied = set(target_columns)
+    shadow_conditions: list[str] = []
+    for range_ in chunk.ranges:
+        sort_key = _sort_key_at(table.sort_keys, range_.dimension_index)
+        if sort_key is None or sort_key.name.strip("`") not in copied:
+            continue
+        shadow_conditions.extend(_build_range_bound_conditions(range_, sort_key))
+    narrowed = f" WHERE {' AND '.join(shadow_conditions)}" if shadow_conditions else ""
+    parts = [
+        "async_insert=0",
+        *_ASTERISK_SETTINGS,
+        "insert_deduplicate=0",
+        "select_sequential_consistency=1",
+    ]
+    for setting, value in (insert_settings or {}).items():
+        parts.append(f"{setting}={_render_insert_setting_value(value)}")
+    lines = [
+        header,
+        f"INSERT INTO {target} ({columns})",
+        f"SELECT {columns}",
+        f"FROM {source_target}",
+        f"WHERE _partition_id = {_quote_sql_string(chunk.partition_id)}",
+        *(f"  AND {condition}" for condition in chunk_conditions),
+        f"  AND ({key}) NOT IN (SELECT {key} FROM {target}{narrowed})",
+        f"SETTINGS {', '.join(parts)}",
+    ]
     return "\n".join(lines)
 
 

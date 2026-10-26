@@ -318,6 +318,26 @@ describe('@chkit/cli snapshot rebuild', () => {
     }
   }, 30_000)
 
+  test('keeps a table that a keep-mode cutover retained, which only the snapshot declares', async () => {
+    const fixture = await createFixture(INITIAL_SCHEMA)
+    try {
+      expect(chkit(fixture, ['generate', '--name', 'init', '--json']).exitCode).toBe(0)
+      const snapshot = JSON.parse(await readFile(snapshotPath(fixture), 'utf8'))
+      const events = snapshot.definitions.find((def: { name: string }) => def.name === 'events')
+      snapshot.definitions.push({ ...events, name: 'events_previous', retainedBy: { cutover: 'app.events' } })
+      await writeFile(snapshotPath(fixture), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
+
+      const json = chkit(fixture, ['snapshot', 'rebuild', '--json'])
+
+      expect(json.exitCode).toBe(0)
+      expect(parseRebuild(json.stdout).previous).toEqual({ status: 'parsed', added: [], removed: [], changed: [] })
+      const rebuilt = JSON.parse(await readFile(snapshotPath(fixture), 'utf8'))
+      expect(rebuilt.definitions.map((def: { name: string }) => def.name)).toContain('events_previous')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
   test('rebuilds a snapshot with merge conflict markers and prints the review commands', async () => {
     const fixture = await createProjectFixture(INITIAL_SCHEMA)
     try {

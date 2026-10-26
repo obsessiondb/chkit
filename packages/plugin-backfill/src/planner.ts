@@ -1,6 +1,6 @@
 import { dirname } from 'node:path'
 
-import type { MaterializedViewDefinition, ResolvedChxConfig } from '@chkit/core'
+import { parseCutoverMetadata, type CutoverMetadata, type MaterializedViewDefinition, type ResolvedChxConfig } from '@chkit/core'
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
@@ -78,7 +78,7 @@ async function detectBackfillStrategy(input: {
 export async function assertBackfillTargetSafe(input: {
   database: string
   table: string
-  mode: 'copy' | 'mv_replay'
+  mode: 'copy' | 'mv_replay' | 'cutover_copy'
   query: ClickHouseQuery
   querySettings?: Record<string, string | number | boolean | undefined>
 }): Promise<string[]> {
@@ -121,6 +121,7 @@ export async function buildBackfillPlan(input: {
   querySettings?: Record<string, string | number | boolean | undefined>
 }): Promise<BuildBackfillPlanOutput> {
   const { opts } = input
+  if (opts.cutover) return buildCutoverBackfillPlan({ ...input, cutover: opts.cutover })
   const [database, table] = opts.target.split('.')
   if (!database || !table) {
     throw new BackfillConfigError('Invalid target format. Expected <database.table>.')
@@ -227,6 +228,129 @@ export async function buildBackfillPlan(input: {
     plan,
     planPath: paths.planPath,
   }
+}
+
+/**
+ * Plans the copy step of a `chkit generate --cutover ... --cutover-copy
+ * backfill` migration: chunks over the frozen snapshot table the migration
+ * took, inserted into the shadow table. Each chunk skips the rows whose key
+ * the shadow already holds (mirrored rows, or rows an earlier attempt of the
+ * chunk wrote), so a chunk can run again without duplicating rows. The
+ * cutover's metadata (snapshot, shadow, key, columns) is read from the
+ * snapshot table's comment.
+ */
+async function buildCutoverBackfillPlan(input: {
+  opts: PlanOptions
+  cutover: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir' | 'schema'>
+  clickhouse?: { url: string; database: string }
+  clickhouseQuery: ClickHouseQuery
+  querySettings?: Record<string, string | number | boolean | undefined>
+}): Promise<BuildBackfillPlanOutput> {
+  const { opts, cutover } = input
+  if (opts.target) {
+    throw new BackfillConfigError('Use either --target or --cutover, not both: --cutover targets the shadow table of the cutover.')
+  }
+  const metadata = await readCutoverMetadata(cutover, input.clickhouseQuery, input.querySettings)
+  const target = `${metadata.database}.${metadata.shadow}`
+  const insertableColumns = await assertBackfillTargetSafe({
+    database: metadata.database,
+    table: metadata.shadow,
+    mode: 'cutover_copy',
+    query: input.clickhouseQuery,
+    querySettings: input.querySettings,
+  })
+  assertReplayColumnsStillInsertable({ planId: 'cutover', target, targetColumns: metadata.columns, insertableColumns })
+
+  const chunkPlan = await generateChunkPlan({
+    database: metadata.database,
+    table: metadata.snapshot,
+    targetChunkBytes: opts.maxChunkBytes,
+    query: input.clickhouseQuery,
+    querySettings: input.querySettings,
+  })
+  const firstPartition = chunkPlan.partitions[0]
+  if (!firstPartition) {
+    throw new BackfillConfigError(
+      `The cutover snapshot ${metadata.database}.${metadata.snapshot} has no rows, so there is nothing to copy. Run chkit migrate --apply to verify and swap.`
+    )
+  }
+
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, opts.stateDir)
+  const paths = backfillPaths(stateDir, chunkPlan.planId)
+  const env = computeEnvironmentFingerprint(input.clickhouse)
+  const plan = {
+    planId: chunkPlan.planId,
+    target,
+    createdAt: nowIso(),
+    ...(env ? { environment: env } : {}),
+    from: chunkPlan.partitions.reduce((min, partition) => (partition.minTime < min ? partition.minTime : min), firstPartition.minTime),
+    to: chunkPlan.partitions.reduce((max, partition) => (partition.maxTime > max ? partition.maxTime : max), firstPartition.maxTime),
+    chunkPlan,
+    execution: {
+      mode: 'cutover_copy' as const,
+      sourceTarget: `${metadata.database}.${metadata.snapshot}`,
+      targetColumns: metadata.columns,
+      cutoverKey: metadata.key,
+      // The key-based skip makes a chunk safe to run again. A deduplication
+      // token would instead drop the smaller retry blocks as duplicates.
+      requireIdempotencyToken: false,
+    },
+    options: {
+      maxChunkBytes: opts.maxChunkBytes,
+      maxParallelChunks: opts.maxParallelChunks,
+      maxRetriesPerChunk: opts.maxRetriesPerChunk,
+      requireIdempotencyToken: false,
+      sortKeyColumn: chunkPlan.table.sortKeys[0]?.name,
+    },
+    policy: {
+      requireDryRunBeforeRun: opts.requireDryRunBeforeRun,
+      requireExplicitWindow: opts.requireExplicitWindow,
+      blockOverlappingRuns: opts.blockOverlappingRuns,
+      failCheckOnRequiredPendingBackfill: opts.failCheckOnRequiredPendingBackfill,
+    },
+    limits: {
+      maxWindowHours: opts.maxWindowHours,
+      minChunkMinutes: opts.minChunkMinutes,
+    },
+  }
+
+  await writeJson(paths.planPath, {
+    ...plan,
+    chunkPlan: encodeChunkPlanForPersistence(plan.chunkPlan),
+  })
+  return { plan, planPath: paths.planPath }
+}
+
+/** Finds the snapshot table of a pending cutover of `cutover` (`db.table`) and reads its metadata. */
+async function readCutoverMetadata(
+  cutover: string,
+  query: ClickHouseQuery,
+  querySettings: Record<string, string | number | boolean | undefined> | undefined,
+): Promise<CutoverMetadata> {
+  const [database, table] = cutover.split('.')
+  if (!database || !table) throw new BackfillConfigError('Invalid value for --cutover. Expected <database.table>.')
+  const quote = (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+  const rows = await query<{ name: string; comment: string }>(
+    `SELECT name, comment FROM system.tables WHERE database = ${quote(database)} AND startsWith(name, ${quote(`${table}__cutover_`)}) AND endsWith(name, '_snapshot') ORDER BY name`,
+    querySettings
+  )
+  const cutovers = rows.flatMap((row) => {
+    const metadata = parseCutoverMetadata(row.comment)
+    return metadata && metadata.database === database && metadata.table === table && metadata.snapshot === row.name ? [metadata] : []
+  })
+  if (cutovers.length === 0) {
+    throw new BackfillConfigError(
+      `No pending cutover of ${cutover} was found: its snapshot table (${table}__cutover_<stamp>_snapshot) does not exist. Generate the cutover with chkit generate --cutover ${cutover}=<key> --cutover-copy backfill and run chkit migrate --apply first; it stops before the copy.`
+    )
+  }
+  if (cutovers.length > 1) {
+    throw new BackfillConfigError(
+      `Several pending cutovers of ${cutover} exist (${cutovers.map((metadata) => metadata.snapshot).join(', ')}). Drop the objects of the abandoned ones first.`
+    )
+  }
+  return cutovers[0] as CutoverMetadata
 }
 
 /**

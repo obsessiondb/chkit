@@ -1,7 +1,15 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { waitForDDLPropagation, type ClickHouseExecutor } from '@chkit/clickhouse'
+import {
+  assertNoFireAndForgetAsyncInserts,
+  parseExchangeTables,
+  waitForDDLPropagation,
+  waitForExchange,
+  waitForInsertBarrier,
+  type ClickHouseExecutor,
+  type QualifiedTable,
+} from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../plugins.js'
@@ -181,12 +189,36 @@ export async function applyMigration(input: {
       continue
     }
     const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
+    const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
+    if (priorAttempt !== undefined && operation?.beforeRetry) {
+      try {
+        await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
+          cluster: config.clickhouse?.cluster,
+          log,
+          status: priorAttempt.status,
+        })
+      } catch (error) {
+        throw statementError({ file, index: i, total: statements.length, statement, error })
+      }
+    }
+    const swapped = operation ? swappedTables(operation.type, operation.key, statement) : undefined
+    if (swapped) {
+      try {
+        await assertNoFireAndForgetAsyncInserts(db, swapped, { cluster: config.clickhouse?.cluster, log })
+      } catch (error) {
+        throw statementError({ file, index: i, total: statements.length, statement, error })
+      }
+    }
     const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
     await journalStore.writeMigrationState(
       upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
     )
     try {
-      await db.command(statement)
+      if (operation?.mode === 'barrier') {
+        await waitForInsertBarrier(db, statement, { cluster: config.clickhouse?.cluster, log })
+      } else {
+        await db.command(statement)
+      }
     } catch (error) {
       const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
       await journalStore.writeMigrationState(
@@ -206,7 +238,7 @@ export async function applyMigration(input: {
     await journalStore.writeMigrationState(
       upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
     )
-    if (operation) {
+    if (operation && operation.mode !== 'barrier') {
       await waitForDDLPropagation(db, operation.type, operation.key, { cluster: config.clickhouse?.cluster, statement })
     }
   }
@@ -229,6 +261,42 @@ export async function applyMigration(input: {
   })
 
   return entry
+}
+
+const CUTOVER_START_KEY = /^table:([^.]+)\.(.+):cutover:start$/
+
+/**
+ * The tables a statement is about to swap, whose fire-and-forget async inserts
+ * would be dropped: both tables of an EXCHANGE TABLES, and the table of a
+ * cutover at its first step, so that the cutover stops before its copy.
+ */
+function swappedTables(operationType: string, operationKey: string, statement: string): QualifiedTable[] | undefined {
+  if (operationType === 'exchange_tables') return parseExchangeTables(statement)
+  if (operationType !== 'cutover_validate') return undefined
+  const match = CUTOVER_START_KEY.exec(operationKey)
+  if (!match?.[1] || !match[2]) return undefined
+  return [{ database: match[1], name: match[2] }]
+}
+
+/**
+ * Runs a statement's `-- before-retry:` SQL before chkit attempts it again
+ * after an earlier attempt failed or was interrupted. Before an EXCHANGE
+ * TABLES the replicas first have to agree on both tables: a swap that ran but
+ * whose acknowledgement was lost may not have reached the replica the guard
+ * reads yet, and exchanging again would swap the tables back.
+ */
+async function runBeforeRetry(
+  db: ClickHouseExecutor,
+  operationType: string,
+  statement: string,
+  beforeRetry: string,
+  options: { cluster: string | undefined; log: (line: string) => void; status: OperationStatus },
+): Promise<void> {
+  if (operationType === 'exchange_tables') {
+    await waitForExchange(db, statement, { cluster: options.cluster })
+  }
+  options.log(`  ${operationType}: an earlier attempt ${options.status === 'failed' ? 'failed' : 'was interrupted'} — running before-retry SQL`)
+  await db.command(beforeRetry)
 }
 
 // An in-progress migration whose file changed resumes when this run's --retry

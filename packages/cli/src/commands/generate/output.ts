@@ -3,6 +3,7 @@ import type { MigrationPlan, SchemaDefinition } from '@chkit/core'
 import { emitJson } from '../../runtime/json-output.js'
 import { summarizePlan } from '../../runtime/migration-store.js'
 import type { TableScope } from '../../runtime/table-scope.js'
+import type { CutoverSummary } from './cutover.js'
 
 interface GeneratePlanPayload {
   scope: TableScope
@@ -12,6 +13,7 @@ interface GeneratePlanPayload {
   operations: MigrationPlan['operations']
   renameSuggestions: MigrationPlan['renameSuggestions']
   warnings: string[]
+  cutovers?: CutoverSummary[]
 }
 
 interface GenerateApplyPayload {
@@ -22,6 +24,7 @@ interface GenerateApplyPayload {
   operationCount: number
   riskSummary: MigrationPlan['riskSummary']
   warnings: string[]
+  cutovers?: CutoverSummary[]
 }
 
 interface GenerateEmptyPayload {
@@ -48,7 +51,8 @@ export function emitGeneratePlanOutput(
   plan: MigrationPlan,
   jsonMode: boolean,
   scope: TableScope,
-  warnings: string[] = []
+  warnings: string[] = [],
+  cutovers: CutoverSummary[] = []
 ): void {
   const payload: GeneratePlanPayload = {
     scope,
@@ -58,6 +62,7 @@ export function emitGeneratePlanOutput(
     operations: plan.operations,
     renameSuggestions: plan.renameSuggestions,
     warnings,
+    ...(cutovers.length > 0 ? { cutovers } : {}),
   }
 
   if (jsonMode) {
@@ -71,6 +76,7 @@ export function emitGeneratePlanOutput(
   )
   for (const line of summarizePlan(payload.operations)) console.log(`- ${line}`)
   for (const warning of payload.warnings) console.warn(`Warning: ${warning}`)
+  printCutovers(cutovers)
   if (payload.renameSuggestions.length > 0) {
     console.log('\nRename suggestions (review and confirm manually):')
     for (const suggestion of payload.renameSuggestions) {
@@ -89,7 +95,8 @@ export function emitGenerateApplyOutput(
   plan: MigrationPlan,
   jsonMode: boolean,
   scope: TableScope,
-  warnings: string[] = []
+  warnings: string[] = [],
+  cutovers: CutoverSummary[] = []
 ): void {
   const payload: GenerateApplyPayload = {
     scope,
@@ -99,6 +106,7 @@ export function emitGenerateApplyOutput(
     operationCount: plan.operations.length,
     riskSummary: plan.riskSummary,
     warnings,
+    ...(cutovers.length > 0 ? { cutovers } : {}),
   }
 
   if (jsonMode) {
@@ -124,4 +132,15 @@ export function emitGenerateApplyOutput(
     `Risk summary:       safe=${plan.riskSummary.safe}, caution=${plan.riskSummary.caution}, danger=${plan.riskSummary.danger}`
   )
   for (const warning of payload.warnings) console.warn(`Warning: ${warning}`)
+  printCutovers(cutovers)
+}
+
+function printCutovers(cutovers: CutoverSummary[]): void {
+  for (const cutover of cutovers) {
+    console.log(`\nCutover ${cutover.table} (key ${cutover.key.join(', ')}, copy: ${cutover.copy}, old table: ${cutover.oldTable})`)
+    console.log(`  shadow ${cutover.shadow}, mirror ${cutover.mirror}, snapshot ${cutover.snapshot}`)
+    if (cutover.retainedAs) console.log(`  the old table is kept as ${cutover.retainedAs}`)
+    console.log('  Next:')
+    for (const step of cutover.nextSteps) console.log(`  - ${step}`)
+  }
 }

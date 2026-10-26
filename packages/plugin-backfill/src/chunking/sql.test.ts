@@ -313,3 +313,43 @@ describe('buildChunkExecutionSql mv_replay column list', () => {
     expect(sql).toContain('INSERT INTO db.t\nSELECT * FROM db.a\nWHERE')
   })
 })
+
+describe('buildChunkExecutionSql cutover_copy', () => {
+  const chunk: Chunk = {
+    id: 'c1',
+    partitionId: 'all',
+    ranges: [
+      { dimensionIndex: 0, from: '100', to: '200' },
+      { dimensionIndex: 1, from: '5' },
+    ],
+    estimate: { rows: 1, bytesCompressed: 1, bytesUncompressed: 1, confidence: 'exact', reason: 'exact-count' },
+    analysis: { lineage: [] },
+  }
+  const sortKeys = [
+    { name: 'id', type: 'UInt64', category: 'numeric' as const, boundaryEncoding: 'literal' as const },
+    { name: 'toDate(ts)', type: 'Date', category: 'numeric' as const, boundaryEncoding: 'literal' as const },
+  ]
+
+  test('skips rows whose key the shadow holds, narrowing the key set to copied range columns', () => {
+    const sql = buildChunkExecutionSql({
+      planId: 'p',
+      chunk,
+      target: 'db.events__cutover_1',
+      sourceTarget: 'db.events__cutover_1_snapshot',
+      table: { sortKeys },
+      targetColumns: ['id', 'ts'],
+      cutoverKey: ['id'],
+    })
+    expect(sql.split('\n').slice(1)).toEqual([
+      'INSERT INTO db.events__cutover_1 (`id`, `ts`)',
+      'SELECT `id`, `ts`',
+      'FROM db.events__cutover_1_snapshot',
+      "WHERE _partition_id = 'all'",
+      "  AND id >= '100'",
+      "  AND id < '200'",
+      "  AND toDate(ts) >= '5'",
+      "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= '100' AND id < '200')",
+      'SETTINGS async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1',
+    ])
+  })
+})

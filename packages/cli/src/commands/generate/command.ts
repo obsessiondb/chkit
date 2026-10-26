@@ -1,5 +1,5 @@
 import { generateArtifacts, generateEmptyMigration } from '@chkit/codegen'
-import { applyOnClusterToPlan, ChxValidationError, planDiff } from '@chkit/core'
+import { applyOnClusterToPlan, ChxValidationError, planDiff, type PlannedCutover } from '@chkit/core'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
@@ -41,6 +41,7 @@ import {
   resolveActiveTableMappings,
 } from './rename-mappings.js'
 import { emitGenerateApplyOutput, emitGenerateEmptyOutput, emitGeneratePlanOutput } from './output.js'
+import { applyCutovers, carryRetainedDefinitions, resolveCutoverFlags, summarizeCutover } from './cutover.js'
 import { debug } from '../../runtime/debug.js'
 
 const GENERATE_FLAGS = defineFlags([
@@ -51,6 +52,10 @@ const GENERATE_FLAGS = defineFlags([
   { name: '--rename-dictionary', type: 'string[]', description: 'Explicit dictionary rename mapping', placeholder: '<mapping>' },
   { name: '--dryrun', type: 'boolean', description: 'Print plan without writing artifacts' },
   { name: '--empty', type: 'boolean', description: 'Scaffold a blank manual migration (no schema diff, snapshot untouched)' },
+  { name: '--cutover', type: 'string[]', description: 'Cut a structural table change over without downtime, keyed by a unique key', placeholder: '<database.table=key>' },
+  { name: '--cutover-copy', type: 'string', description: 'Where the cutover copies existing rows: migration (default) or backfill', placeholder: '<mode>' },
+  { name: '--cutover-old', type: 'string', description: 'What happens to the pre-cutover table: keep (default, as <table>_previous) or drop', placeholder: '<mode>' },
+  { name: '--drop-retained', type: 'string[]', description: 'Drop a table a cutover retained', placeholder: '<database.table>' },
 ] as const)
 
 export const generateCommand: ChxPluginCommand = {
@@ -88,7 +93,15 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     return 0
   }
 
-  const definitions = await loadSchemaDefinitionsWithHooks(
+  const cutoverFlags = resolveCutoverFlags({
+    cutover: f['--cutover'] ?? [],
+    copy: f['--cutover-copy'],
+    oldTable: f['--cutover-old'],
+    dropRetained: f['--drop-retained'] ?? [],
+  })
+  const now = new Date()
+
+  const schemaDefinitions = await loadSchemaDefinitionsWithHooks(
     { command: 'generate', config, configPath, flags, jsonMode, tableSelector },
     { pluginRuntime },
   )
@@ -99,13 +112,18 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   const cliTableMappings = parseRenameTableMappings(renameTableValues)
   const cliColumnMappings = parseRenameColumnMappings(renameColumnValues)
   const cliDictionaryMappings = parseRenameDictionaryMappings(renameDictionaryValues)
-  const schemaMappings = collectSchemaRenameMappings(definitions)
+  const schemaMappings = collectSchemaRenameMappings(schemaDefinitions)
   const tableMappings = mergeTableMappings(schemaMappings.tableMappings, cliTableMappings)
   const columnMappings = mergeColumnMappings(schemaMappings.columnMappings, cliColumnMappings)
   const dictionaryMappings = mergeDictionaryMappings(schemaMappings.dictionaryMappings, cliDictionaryMappings)
 
   const { migrationsDir, metaDir } = dirs
   const previousDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
+  const definitions = carryRetainedDefinitions({
+    previousDefinitions,
+    definitions: schemaDefinitions,
+    dropRetained: f['--drop-retained'] ?? [],
+  })
   const resolvedScope = resolveTableScope(tableSelector, [
     ...tableKeysFromDefinitions(previousDefinitions),
     ...tableKeysFromDefinitions(definitions),
@@ -151,19 +169,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   try {
     plan = planDiff(remappedPreviousDefinitions, definitions)
   } catch (error) {
-    if (error instanceof ChxValidationError) {
-      if (jsonMode) {
-        emitJson('generate', {
-          error: 'validation_failed',
-          issues: error.issues,
-        })
-        return 1
-      }
-
-      const details = error.issues.map((issue) => `- [${issue.code}] ${issue.message}`).join('\n')
-      throw new Error(`${error.message}\n${details}`)
-    }
-    throw error
+    return reportValidationError(error, jsonMode)
   }
 
   plan = applyExplicitTableRenames(plan, activeTableMappings)
@@ -187,6 +193,26 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     }).plan
   }
 
+  // A cutover replaces the DROP + CREATE of a structural change with a
+  // zero-downtime copy and swap. It runs after scope filtering, so a table
+  // outside --table has no DROP + CREATE to replace.
+  let cutovers: PlannedCutover[] = []
+  if (cutoverFlags.requests.length > 0) {
+    try {
+      ;({ plan, cutovers } = applyCutovers({
+        plan,
+        previousDefinitions: remappedPreviousDefinitions,
+        definitions,
+        cutovers: cutoverFlags,
+        cluster: config.clickhouse?.cluster,
+        stamp: migrationStamp(now),
+      }))
+    } catch (error) {
+      return reportValidationError(error, jsonMode)
+    }
+  }
+  const cutoverSummaries = cutovers.map(summarizeCutover)
+
   // Cluster mode: stamp `ON CLUSTER <name>` onto every DDL statement as a final
   // post-pass, after all plan transforms (renames, plugins, scope filtering).
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
@@ -197,11 +223,11 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   ]
 
   if (planMode) {
-    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)
+    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings, cutoverSummaries)
     return 0
   }
 
-  const artifactDefinitions = resolvedScope.enabled
+  const scopedDefinitions = resolvedScope.enabled
     ? buildScopedSnapshotDefinitions({
         previousDefinitions,
         nextDefinitions: definitions,
@@ -209,6 +235,12 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
         renameMappings: activeTableMappings,
       })
     : definitions
+  // A keep-mode cutover leaves the old table as <table>_previous: record it so
+  // drift, check and the next generate treat it as managed.
+  const artifactDefinitions = [
+    ...scopedDefinitions,
+    ...cutovers.flatMap((cutover) => (cutover.retained ? [cutover.retained] : [])),
+  ]
 
   debug('generate', `plan: ${plan.operations.length} operations — writing artifacts`)
 
@@ -220,6 +252,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     migrationId,
     plan,
     cliVersion: CLI_VERSION,
+    now,
   })
 
   const codegenPlugin = pluginRuntime.plugins.find((entry) => entry.plugin.manifest.name === 'codegen')
@@ -239,6 +272,25 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     }
   }
 
-  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, dictionaryPasswordWarnings)
+  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, dictionaryPasswordWarnings, cutoverSummaries)
   return 0
+}
+
+/** Prints a schema or cutover validation failure; rethrows anything else. */
+function reportValidationError(error: unknown, jsonMode: boolean): number {
+  if (!(error instanceof ChxValidationError)) throw error
+  if (jsonMode) {
+    emitJson('generate', {
+      error: 'validation_failed',
+      issues: error.issues,
+    })
+    return 1
+  }
+  const details = error.issues.map((issue) => `- [${issue.code}] ${issue.message}`).join('\n')
+  throw new Error(`${error.message}\n${details}`)
+}
+
+/** The migration file's timestamp prefix, `YYYYMMDDHHMMSS`; names a cutover's temporary objects. */
+function migrationStamp(now: Date): string {
+  return now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
 }

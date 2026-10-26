@@ -263,10 +263,10 @@ export function renderAbandonText(
   console.log(
     `Next: edit ${migration} if needed and run chkit migrate --apply. It runs again from statement 1, including the statements that completed, so they must be safe to run twice (for example CREATE ... IF NOT EXISTS), or remove them from the file. A column's MODIFY COLUMN ... REMOVE DEFAULT or REMOVE MATERIALIZED is not safe: it fails once the column has no such expression.`,
   )
-  // chkit runs -- before-retry: only on the async path, and only for a record
-  // whose operation type and key still match (rebaseInProgressState).
+  // chkit runs -- before-retry: only for a record whose operation type and key
+  // still match (rebaseInProgressState).
   console.log(
-    'A data load adds its rows again unless it is marked mode=async with a -- before-retry: line that undoes it. That line runs only for an async statement that keeps its position, operation type and key.',
+    'A data load adds its rows again unless it has a -- before-retry: line that undoes it. That line runs only for a statement that keeps its position, operation type and key.',
   )
   console.log(
     `Or regenerate it: delete ${migration}, restore ${input.snapshotFile} from git to its state before ${migration} was generated, and run chkit generate. ${REPEATED_STATEMENTS_HINT}`,

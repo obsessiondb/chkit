@@ -144,9 +144,11 @@ describe('resolveOptions', () => {
     expect(opts.forceEnvironment).toBe(false)
   })
 
+  // --target is optional at the schema level: --cutover can name the table
+  // instead, and planning rejects a plan with neither.
   test('throws on invalid options', () => {
     expect(() =>
-      resolveOptions(PlanSchema, {}, {}, {})
+      resolveOptions(PlanSchema, {}, { '--max-chunk-bytes': '-1' }, { '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: Number } })
     ).toThrow()
   })
 })

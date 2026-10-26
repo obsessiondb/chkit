@@ -370,6 +370,14 @@ class TableRenamedFrom(_StrictModel):
     name: str
 
 
+class TableRetainedBy(_StrictModel):
+    """Set by ``chkit generate --cutover`` with ``--cutover-old keep`` on the
+    table that keeps the pre-cutover rows (``<table>_previous``). Only the
+    snapshot carries it (TS ``TableDefinition.retainedBy``)."""
+
+    cutover: str
+
+
 class TableDefinition(_StrictModel):
     kind: Literal["table"] = "table"
     database: str
@@ -391,6 +399,10 @@ class TableDefinition(_StrictModel):
     # `{"backfill": {"timeColumn": "ts"}}`). Ignored by the diff engine —
     # never affects migration planning or SQL generation.
     plugins: dict[str, Any] | None = None
+    # Set on the `<table>_previous` a keep-mode cutover retains (TS
+    # `retainedBy`). `generate` keeps planning it as declared until
+    # `--drop-retained` removes it, so it never reads as a pending drop.
+    retained_by: TableRetainedBy | None = Field(default=None, alias="retainedBy")
 
     model_config = ConfigDict(
         frozen=True,
@@ -697,7 +709,23 @@ MigrationOperationType: TypeAlias = Literal[
     "create_dictionary",
     "drop_dictionary",
     "rename_dictionary",
+    # Zero-downtime cutover of a structural table change (`generate --cutover`).
+    "exchange_tables",
+    "cutover_validate",
+    "cutover_wait_for_inserts",
+    "cutover_snapshot",
+    "cutover_sync_replicas",
+    "cutover_copy",
+    "cutover_verify",
+    "cutover_reconcile",
+    "cutover_attach",
 ]
+
+
+MigrationOperationMode: TypeAlias = Literal["async", "barrier"]
+"""How `migrate` runs a statement: `async` submits it and polls its query id;
+`barrier` reads the running INSERT query ids once and waits until none of them
+is still running. Unset means synchronous."""
 
 
 class MigrationOperation(_StrictModel):
@@ -706,6 +734,18 @@ class MigrationOperation(_StrictModel):
     risk: RiskLevel
     sql: str
     warning: str | None = None
+    mode: MigrationOperationMode | None = None
+    # One line of SQL `migrate` runs before it attempts the statement again
+    # after an earlier attempt failed or was interrupted.
+    before_retry: str | None = Field(default=None, alias="beforeRetry")
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        validate_assignment=True,
+        populate_by_name=True,
+    )
 
 
 class ColumnRenameSuggestion(_StrictModel):
@@ -796,6 +836,7 @@ ValidationIssueCode: TypeAlias = Literal[
     "dictionary_attribute_default_expression_exclusive",
     "dictionary_range_missing_attribute",
     "dictionary_bidirectional_requires_hierarchical",
+    "cutover_unsupported",
 ]
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from chkit.core.cutover import CutoverMetadata, parse_cutover_metadata
 from chkit.core.model import (
     MaterializedViewDefinition,
     TableDefinition,
@@ -108,7 +109,8 @@ def _detect_backfill_strategy(
 
 
 def assert_backfill_target_safe(
-    *, database: str, table: str, mode: Literal["copy", "mv_replay"], query: PlannerQuery,
+    *, database: str, table: str, mode: Literal["copy", "mv_replay", "cutover_copy"],
+    query: PlannerQuery,
     query_settings: QuerySettings | None = None,
 ) -> list[str]:
     """Fail closed when live metadata cannot establish safe input semantics.
@@ -180,6 +182,16 @@ def build_backfill_plan(
     clickhouse: dict[str, str] | None = None,
     query_settings: QuerySettings | None = None,
 ) -> BuildBackfillPlanOutput:
+    if opts.cutover:
+        return _build_cutover_backfill_plan(
+            opts=opts,
+            cutover=opts.cutover,
+            config_path=config_path,
+            config=config,
+            clickhouse_query=clickhouse_query,
+            clickhouse=clickhouse,
+            query_settings=query_settings,
+        )
     target_parts = opts.target.split(".")
     database = target_parts[0] if len(target_parts) > 0 else ""
     table = target_parts[1] if len(target_parts) > 1 else ""
@@ -318,6 +330,161 @@ def build_backfill_plan(
     )
 
     return BuildBackfillPlanOutput(plan=plan, plan_path=paths.plan_path)
+
+
+def _build_cutover_backfill_plan(
+    *,
+    opts: PlanOptions,
+    cutover: str,
+    config_path: str | Path,
+    config: _PlanConfig,
+    clickhouse_query: PlannerQuery,
+    clickhouse: dict[str, str] | None,
+    query_settings: QuerySettings | None,
+) -> BuildBackfillPlanOutput:
+    """Plan the copy step of a ``generate --cutover ... --cutover-copy backfill``
+    migration (TS ``buildCutoverBackfillPlan``).
+
+    Chunks over the frozen snapshot table the migration took, inserted into the
+    shadow table. Each chunk skips the rows whose key the shadow already holds
+    (mirrored rows, or rows an earlier attempt of the chunk wrote), so a chunk
+    can run again without duplicating rows. The cutover's metadata is read from
+    the snapshot table's comment.
+    """
+    if opts.target:
+        msg = (
+            "Use either --target or --cutover, not both: --cutover targets the shadow "
+            "table of the cutover."
+        )
+        raise BackfillConfigError(msg)
+    metadata = _read_cutover_metadata(cutover, clickhouse_query, query_settings)
+    target = f"{metadata.database}.{metadata.shadow}"
+    insertable_columns = assert_backfill_target_safe(
+        database=metadata.database,
+        table=metadata.shadow,
+        mode="cutover_copy",
+        query=clickhouse_query,
+        query_settings=query_settings,
+    )
+    assert_replay_columns_still_insertable(
+        plan_id="cutover",
+        target=target,
+        target_columns=metadata.columns,
+        insertable_columns=insertable_columns,
+    )
+    chunk_plan = generate_chunk_plan(
+        GenerateChunkPlanInput(
+            database=metadata.database,
+            table=metadata.snapshot,
+            from_=None,
+            to=None,
+            target_chunk_bytes=opts.max_chunk_bytes,
+            query=clickhouse_query,
+            query_settings=query_settings,
+        )
+    )
+    if not chunk_plan.partitions:
+        msg = (
+            f"The cutover snapshot {metadata.database}.{metadata.snapshot} has no rows, so "
+            "there is nothing to copy. Run chkit migrate --apply to verify and swap."
+        )
+        raise BackfillConfigError(msg)
+    state_dir = compute_backfill_state_dir(config, config_path, opts.state_dir)
+    paths = backfill_paths(state_dir, chunk_plan.plan_id)
+    plan = BackfillPlanState(
+        plan_id=chunk_plan.plan_id,
+        target=target,
+        created_at=now_iso(),
+        environment=compute_environment_fingerprint(clickhouse),
+        from_=min(partition.min_time for partition in chunk_plan.partitions),
+        to=max(partition.max_time for partition in chunk_plan.partitions),
+        chunk_plan=chunk_plan,
+        execution=BackfillExecutionPlan(
+            mode="cutover_copy",
+            source_target=f"{metadata.database}.{metadata.snapshot}",
+            target_columns=list(metadata.columns),
+            cutover_key=list(metadata.key),
+            # The key-based skip makes a chunk safe to run again. A deduplication
+            # token would instead drop the smaller retry blocks as duplicates.
+            require_idempotency_token=False,
+        ),
+        options=BackfillPlanOptions(
+            max_chunk_bytes=opts.max_chunk_bytes,
+            max_parallel_chunks=opts.max_parallel_chunks,
+            max_retries_per_chunk=opts.max_retries_per_chunk,
+            require_idempotency_token=False,
+            sort_key_column=(
+                chunk_plan.table.sort_keys[0].name if chunk_plan.table.sort_keys else None
+            ),
+        ),
+        policy=BackfillPlanPolicy(
+            require_dry_run_before_run=opts.require_dry_run_before_run,
+            require_explicit_window=opts.require_explicit_window,
+            block_overlapping_runs=opts.block_overlapping_runs,
+            fail_check_on_required_pending_backfill=(
+                opts.fail_check_on_required_pending_backfill
+            ),
+        ),
+        limits=BackfillPlanLimits(
+            max_window_hours=opts.max_window_hours,
+            min_chunk_minutes=opts.min_chunk_minutes,
+        ),
+    )
+    write_json(
+        paths.plan_path,
+        plan.model_copy(
+            update={"chunk_plan": encode_chunk_plan_for_persistence(plan.chunk_plan)}
+        ),
+    )
+    return BuildBackfillPlanOutput(plan=plan, plan_path=paths.plan_path)
+
+
+def _read_cutover_metadata(
+    cutover: str, query: PlannerQuery, query_settings: QuerySettings | None
+) -> CutoverMetadata:
+    """Find the snapshot table of a pending cutover of ``cutover`` and read its metadata."""
+    parts = cutover.split(".")
+    database = parts[0] if parts else ""
+    table = parts[1] if len(parts) > 1 else ""
+    if not database or not table:
+        msg = "Invalid value for --cutover. Expected <database.table>."
+        raise BackfillConfigError(msg)
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    rows = query(
+        "SELECT name, comment FROM system.tables "
+        f"WHERE database = {quote(database)} AND startsWith(name, {quote(f'{table}__cutover_')}) "
+        "AND endsWith(name, '_snapshot') ORDER BY name",
+        query_settings,
+    )
+    cutovers: list[CutoverMetadata] = []
+    for row in rows:
+        metadata = parse_cutover_metadata(str(row.get("comment") or ""))
+        if (
+            metadata is not None
+            and metadata.database == database
+            and metadata.table == table
+            and metadata.snapshot == row.get("name")
+        ):
+            cutovers.append(metadata)
+    if not cutovers:
+        msg = (
+            f"No pending cutover of {cutover} was found: its snapshot table "
+            f"({table}__cutover_<stamp>_snapshot) does not exist. Generate the cutover with "
+            f"chkit generate --cutover {cutover}=<key> --cutover-copy backfill and run chkit "
+            "migrate --apply first; it stops before the copy."
+        )
+        raise BackfillConfigError(msg)
+    if len(cutovers) > 1:
+        snapshots = ", ".join(metadata.snapshot for metadata in cutovers)
+        msg = (
+            f"Several pending cutovers of {cutover} exist ({snapshots}). Drop the objects of "
+            "the abandoned ones first."
+        )
+        raise BackfillConfigError(msg)
+    return cutovers[0]
 
 
 def _resolve_replay_columns(

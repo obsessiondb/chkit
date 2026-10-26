@@ -234,6 +234,47 @@ describe('@chkit/codegen smoke', () => {
   })
 })
 
+describe('operation rendering', () => {
+  test('renders mode= on the marker and the before-retry line before the warning', async () => {
+    const workdir = await mkdtemp(join(tmpdir(), 'chkit-codegen-test-'))
+    try {
+      const result = await generateArtifacts({
+        definitions: [],
+        plan: {
+          operations: [
+            { type: 'cutover_wait_for_inserts', key: 'table:app.t:cutover:mirror_barrier', risk: 'safe', mode: 'barrier', sql: 'SELECT query_id FROM system.processes;' },
+            {
+              type: 'exchange_tables',
+              key: 'table:app.t',
+              risk: 'caution',
+              beforeRetry: "SELECT throwIf(1,\n 'swapped')",
+              warning: 'Check first.',
+              sql: 'EXCHANGE TABLES app.t AND app.s;',
+            },
+          ],
+          riskSummary: { safe: 1, caution: 1, danger: 0 },
+          renameSuggestions: [],
+        },
+        migrationsDir: join(workdir, 'migrations'),
+        metaDir: join(workdir, 'meta'),
+      })
+      expect(result.sql).toContain(
+        [
+          '-- operation: cutover_wait_for_inserts key=table:app.t:cutover:mirror_barrier risk=safe mode=barrier',
+          'SELECT query_id FROM system.processes;',
+          '',
+          '-- operation: exchange_tables key=table:app.t risk=caution',
+          "-- before-retry: SELECT throwIf(1, 'swapped')",
+          '-- Warning: Check first.',
+          'EXCHANGE TABLES app.t AND app.s;',
+        ].join('\n')
+      )
+    } finally {
+      await rm(workdir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('snapshot writer', () => {
   const usersTable = table({
     database: 'app',

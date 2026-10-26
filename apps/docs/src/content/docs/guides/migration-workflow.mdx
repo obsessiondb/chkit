@@ -133,12 +133,12 @@ Run `chkit migrate` and it is picked up like any generated migration, applied in
 - **Destructive statements** (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, …) require `--allow-destructive` in CI, even when hand-written. See [destructive operation safety](/cli/migrate/#destructive-operation-safety).
 - **Large data loads**, such as a multi-minute `INSERT ... SELECT` or a backfill, can be marked `mode=async` so chkit submits the query without blocking on the HTTP response and polls for progress. See [async operations](/cli/migrate/#async-operations-modeasync).
 
-For structural changes that must preserve data, use a reviewed copy, validation, and cutover instead of applying a generated drop/recreate. The [data-preserving structural migration recipe](/guides/data-preserving-migrations/) walks through a populated table, an exact transformed-row comparison, an atomic swap, snapshot alignment, and recovery with writers paused. Use the [backfill plugin](/plugins/backfill/) for supported same-table or materialized-view replay; arbitrary source-to-replacement transformations belong in tracked SQL.
+For structural changes that must preserve data, generate a cutover instead of applying a generated drop/recreate: `chkit generate --cutover <db.table>=<key>` mirrors new inserts into a shadow table, copies and verifies the existing rows, and swaps the tables atomically while writers keep inserting. [Zero-downtime structural migrations](/guides/data-preserving-migrations/) covers the preconditions, recovery, and a manual recipe for changes a cutover does not cover. Use the [backfill plugin](/plugins/backfill/) for supported same-table or materialized-view replay; arbitrary source-to-replacement transformations belong in tracked SQL.
 
 ## Related pages
 
 - [Adopt an existing database](/getting-started/add-to-existing-project/) — establish a reviewed baseline and preserve existing rows/views
-- [Data-preserving structural migrations](/guides/data-preserving-migrations/) — copy, validate, atomically swap, and retain a recovery table
+- [Zero-downtime structural migrations](/guides/data-preserving-migrations/) — mirror, copy, verify, atomically swap, and retain the old table
 - [Tutorial: your first schema](/tutorials/first-schema/) — the same loop, hands-on from an empty folder
 - [`chkit generate`](/cli/generate/) — the offline diff-and-write command in detail
 - [`chkit migrate`](/cli/migrate/) — applying migrations, the journal, checksums, and destructive-operation safety

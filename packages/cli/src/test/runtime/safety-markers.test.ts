@@ -86,6 +86,22 @@ describe('extractExecutableStatements', () => {
     ])
   })
 
+  test('extractMigrationOperationSummaries parses mode=barrier and a before-retry line after a warning', () => {
+    const sql = [
+      '-- operation: cutover_wait_for_inserts key=table:app.t:cutover:mirror_barrier risk=safe mode=barrier',
+      'SELECT query_id FROM system.processes;',
+      '-- operation: exchange_tables key=table:app.t risk=caution',
+      "-- before-retry: SELECT throwIf(1, 'swapped')",
+      '-- Warning: Check first.',
+      'EXCHANGE TABLES app.t AND app.s;',
+    ].join('\n')
+
+    expect(extractMigrationOperationSummaries(sql).map(({ type, mode, beforeRetry }) => ({ type, mode, beforeRetry }))).toEqual([
+      { type: 'cutover_wait_for_inserts', mode: 'barrier', beforeRetry: null },
+      { type: 'exchange_tables', mode: 'sync', beforeRetry: "SELECT throwIf(1, 'swapped')" },
+    ])
+  })
+
   test('extractMigrationOperationSummaries parses before-retry SQL attached to an operation', () => {
     const sql = `
       -- operation: load_table_data key=table:app.events risk=caution mode=async

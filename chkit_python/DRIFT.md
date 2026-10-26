@@ -1851,6 +1851,31 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `tests_cluster/test_definition_wait_cluster_e2e.py`, the port of
   `packages/cli/test/cluster-2shard-definition-wait.e2e.test.ts`.
 
+### Zero-downtime cutover (#202)
+- Same design and SQL as TS (`chkit.core.cutover`, `chkit.cli.commands.generate_cutover`,
+  `chkit.clickhouse.insert_barrier`, `wait_for_exchange`): the planner output of TS and
+  Python was compared statement by statement for the in-migration/keep, backfill/drop and
+  cluster/drop cases and is identical. The backfill `cutover_copy` strategy is ported
+  too (`plan --cutover`, managed `submit --cutover`, chunk SQL without a dedup token).
+- chkit-py's default `drift` and `check` compare the snapshot with the schema files (TS
+  compares with the live database). They carry the retained `<table>_previous` like
+  `generate` does, so a keep-mode cutover is clean in both.
+- `migrate_apply` raises when the swap of an `exchange_tables` statement has not reached
+  every replica, as TS does; other propagation waits still only warn (see #290 above).
+  Python keeps the `-- operation:` marker lines in executed statements, so
+  `parse_exchange_tables` skips leading `--` comment lines (TS gets statements without
+  them).
+- The fire-and-forget async insert guard (`chkit.clickhouse.async_insert_guard`, TS
+  `async-insert-guard.ts`) reads the same `system.query_log` SQL at the cutover's first
+  step and before each `EXCHANGE TABLES`, with the same error and warning text.
+- The Python e2e scenario uses a MergeTree table as the chained insert source instead
+  of a Null table: chkit-py's live drift reports a Null table as `engine_mismatch`
+  (pre-existing, unrelated to the cutover).
+- `tests_cluster/test_cutover_cluster_e2e.py` is the port of
+  `packages/cli/test/cluster-2shard-cutover.e2e.test.ts`.
+- Correction to the backfill notes above: local `plan` / `run` / `resume` are ported
+  (Phase 2 landed); the cutover e2e drives them.
+
 ### `clickhouse.url` scheme and `secure` (#298)
 - No divergence left. Both ports take the protocol from the URL scheme and, without a
   port, its default port (443/80), which is what `@clickhouse/client` does: it keeps

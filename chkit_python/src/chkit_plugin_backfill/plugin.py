@@ -281,6 +281,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
                 mv_replay_queries=plan.execution.mv_replay_queries,
                 insert_settings=insert_settings,
                 target_columns=plan.execution.target_columns,
+                cutover_key=plan.execution.cutover_key,
                 idempotency_token=(
                     generate_idempotency_token(plan.plan_id, plan_chunk.id)
                     if plan.execution.require_idempotency_token
@@ -373,8 +374,8 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
         merged = _with_factory_defaults(
             set(PlanOptions.model_fields), plugin_options, flag_options
         )
-        if "target" not in merged:
-            msg = "backfill plan requires --target <database.table>"
+        if "target" not in merged and "cutover" not in merged:
+            msg = "backfill plan requires --target <database.table> or --cutover <database.table>"
             raise BackfillConfigError(msg)
         return PlanOptions.model_validate(merged)
 

@@ -23,8 +23,14 @@ export interface BackfillEnvironment {
 export type BackfillPlanStatus = 'planned' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
 
 interface BackfillExecutionPlan {
-  mode: 'copy' | 'mv_replay'
+  /**
+   * `cutover_copy` copies a `generate --cutover` snapshot into its shadow
+   * table, skipping rows whose key the shadow already holds.
+   */
+  mode: 'copy' | 'mv_replay' | 'cutover_copy'
   sourceTarget: string
+  /** cutover_copy: the unique key that tells copied rows from mirrored rows. */
+  cutoverKey?: string[]
   /**
    * One `SELECT` per materialized view feeding the target table. mv_replay
    * inserts all of them (via `UNION ALL`) so every MV's rows are rebuilt.

@@ -624,3 +624,175 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
   })
 })
 
+describe('applyMigration -- before-retry on sync statements', () => {
+  const SQL =
+    '-- operation: cutover_validate key=table:default.t:cutover:start risk=caution\n' +
+    'SELECT 1;\n' +
+    '-- operation: exchange_tables key=table:default.t risk=caution\n' +
+    "-- before-retry: SELECT throwIf(swapped, 'already swapped')\n" +
+    'EXCHANGE TABLES default.t AND default.s;\n'
+  const START = { type: 'cutover_validate', key: 'table:default.t:cutover:start' }
+  const EXCHANGE = { type: 'exchange_tables', key: 'table:default.t' }
+
+  function args(db: ClickHouseExecutor, store: JournalStore, dir: string) {
+    return {
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    }
+  }
+
+  test('does not run before-retry SQL on the first attempt', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore()
+    await applyMigration(args(db, store, dir))
+    expect(commandCalls).toEqual(['SELECT 1;', 'EXCHANGE TABLES default.t AND default.s;'])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  // A lost acknowledgement leaves the EXCHANGE recorded as started although it
+  // ran. Its guard runs first and stops the retry instead of swapping back.
+  test('runs the guard before retrying an interrupted statement, and stops when it throws', async () => {
+    const dir = writeMigration(SQL)
+    const { store } = createFakeStore(
+      inProgressState(checksumSQL(SQL), [operation(0, 'completed', START), operation(1, 'started', EXCHANGE)]),
+    )
+    const { db, commandCalls } = recordingDb({ fail: (sql) => sql.startsWith('SELECT throwIf(swapped') })
+    await expect(applyMigration(args(db, store, dir))).rejects.toThrow('boom: SELECT throwIf(swapped')
+    expect(commandCalls).toEqual(["SELECT throwIf(swapped, 'already swapped')"])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('retries a failed statement once its guard passes', async () => {
+    const dir = writeMigration(SQL)
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SQL), [operation(0, 'completed', START), operation(1, 'failed', EXCHANGE)]),
+    )
+    const { db, commandCalls } = recordingDb()
+    await applyMigration(args(db, store, dir))
+    expect(commandCalls).toEqual([
+      "SELECT throwIf(swapped, 'already swapped')",
+      'EXCHANGE TABLES default.t AND default.s;',
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('applyMigration mode=barrier', () => {
+  test('waits for the INSERTs running at the first read instead of executing the statement', async () => {
+    const sql =
+      '-- operation: cutover_wait_for_inserts key=table:default.t:cutover:mirror_barrier risk=safe mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');\n"
+    const dir = writeMigration(sql)
+    const polls = [['q1'], ['q1'], []]
+    const reads: string[] = []
+    const commandCalls: string[] = []
+    const db = {
+      async command(statement: string) {
+        commandCalls.push(statement)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        if (statement.includes('system.one')) throw new Error('no cluster')
+        reads.push(statement)
+        return (polls[Math.min(reads.length - 1, polls.length - 1)] ?? []).map((query_id) => ({ query_id })) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, appended } = createFakeStore()
+    await applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+    expect(commandCalls).toEqual([])
+    expect(reads).toHaveLength(3)
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  }, 15_000)
+})
+
+
+describe('applyMigration fire-and-forget async insert guard', () => {
+  const SQL =
+    '-- operation: cutover_validate key=table:app.events:cutover:start risk=caution\n' +
+    'SELECT 1;\n' +
+    '-- operation: cutover_snapshot key=table:app.events:cutover:snapshot risk=caution\n' +
+    'ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;\n' +
+    '-- operation: exchange_tables key=table:app.events risk=caution\n' +
+    'EXCHANGE TABLES app.events AND app.events__cutover_1;\n'
+
+  // query_log reports fire-and-forget async inserts into the tables listed in `busy`.
+  function queryLogDb(busy: (sql: string) => string[]) {
+    const commandCalls: string[] = []
+    const guardReads: string[] = []
+    const db = {
+      async command(statement: string) {
+        commandCalls.push(statement)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        if (statement.includes('system.one')) throw new Error('no cluster')
+        if (!statement.includes('system.query_log')) return [] as T[]
+        guardReads.push(statement)
+        return busy(statement).map((table) => ({ table, inserts: 3 })) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    return { db, commandCalls, guardReads }
+  }
+
+  function run(db: ClickHouseExecutor, dir: string, store: JournalStore) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+  }
+
+  test('checks the cutover table at the first step and both tables before the EXCHANGE', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls, guardReads } = queryLogDb(() => [])
+    const { store } = createFakeStore()
+    await run(db, dir, store)
+    expect(guardReads).toHaveLength(2)
+    expect(guardReads[0]).toContain("hasAny(tables, ['app.events'])")
+    expect(guardReads[1]).toContain("hasAny(tables, ['app.events', 'app.events__cutover_1'])")
+    expect(commandCalls).toHaveLength(3)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('stops a cutover before its copy while fire-and-forget async inserts reach the table', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls } = queryLogDb(() => ['app.events'])
+    const { store } = createFakeStore()
+    await expect(run(db, dir, store)).rejects.toThrow('3 into app.events')
+    expect(commandCalls).toEqual([])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('refuses the EXCHANGE when such inserts started during the cutover', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls } = queryLogDb((sql) => (sql.includes('app.events__cutover_1') ? ['app.events'] : []))
+    const { store } = createFakeStore()
+    await expect(run(db, dir, store)).rejects.toThrow('wait_for_async_insert = 0')
+    expect(commandCalls).toEqual(['SELECT 1;', 'ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;'])
+    rmSync(dir, { recursive: true, force: true })
+  })
+})

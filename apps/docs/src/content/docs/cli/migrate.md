@@ -114,7 +114,7 @@ Resets the journal state of a failed migration so the next `chkit migrate --appl
 The report lists the statements that completed. They **stay applied** in ClickHouse, and the next apply runs them again with the rest of the file:
 
 - Each statement must be safe to run twice. Generated `CREATE` and `DROP` statements use `IF NOT EXISTS` / `IF EXISTS`, but a table recreate drops the table again, with any rows written since, a data load such as `INSERT ... SELECT` adds its rows again, and a column's `REMOVE DEFAULT` or `REMOVE MATERIALIZED` fails, because the column no longer has that expression. Remove such statements from the file. When the `MODIFY COLUMN` after a completed `REMOVE` failed, [`--retry`](#retrying-a-failed-migration) skips the `REMOVE` instead. The destructive-operation check asks again for destructive statements.
-- An [async](#async-operations-modeasync) load (`mode=async`) can undo its earlier run with a `-- before-retry:` line instead. The line runs only when the statement keeps its position and its `-- operation:` type and key, so adding a marker to a load after the abandon does not help. A statement without `mode=async` ignores `-- before-retry:`.
+- A data load can undo its earlier run with a `-- before-retry:` line instead. The line runs only when the statement keeps its position and its `-- operation:` type and key, so adding a marker to a load after the abandon does not help.
 - An async statement that was interrupted may still be running on the server. The report prints its `query_id`; wait for the query to finish or run `KILL QUERY WHERE query_id = '…'` before you apply the migration again.
 
 To regenerate the migration instead, delete the file, restore `chkit/meta/snapshot.json` from git to its state before the migration was generated, and run `chkit generate`. The statements that completed stay applied. The new migration runs the ones it repeats again, so they must be safe to run twice, as above: delete a repeated `REMOVE DEFAULT` or `REMOVE MATERIALIZED` from it before you apply it. Run `chkit drift` after you apply the new migration: a completed statement that the new migration does not repeat, such as a `DROP VIEW`, leaves the database out of step with the schema.
@@ -160,6 +160,7 @@ On a service whose endpoint spreads requests over several replicas, such as a mu
 
 - After each DDL statement, `migrate` waits until every replica shows the change (the new table, view, dictionary, or column, or the dropped one) before it runs the next statement. A replaced dictionary waits until every replica's catalog entry stores the same uuid, including when the only change is a SOURCE password that ClickHouse redacts from the stored definition. An `ALTER` that ran on a replica that had not applied the previous one could otherwise write back the old schema.
 - A column change waits for the definition, not only the column: `ADD COLUMN` and `MODIFY COLUMN` wait until every replica reports the same type, default, comment, and codec in `system.columns`, and `RENAME COLUMN` until no replica lists the old name. `ADD INDEX` and `DROP INDEX` wait for the index on every replica.
+- After an `EXCHANGE TABLES`, `migrate` waits until every replica lists both tables with one uuid each, so the next statement cannot run on a replica that still has the old names. Before it retries an interrupted `EXCHANGE TABLES`, it waits for the same agreement and then runs the statement's `-- before-retry:` guard.
 - The journal is read from every replica with `clusterAllReplicas`, keeping the newest version of each migration's row, so a lagging replica cannot make `migrate` replay a statement that already completed.
 - An [async](#async-operations-modeasync) statement's status is read from `system.processes` and `system.query_log` of every replica, because the query runs only on the replica that received it.
 
@@ -202,7 +203,7 @@ When an earlier attempt of the statement failed, was interrupted, or was [abando
 INSERT INTO default.hits SELECT * FROM s3(...);
 ```
 
-Only async statements run `-- before-retry:`. On a statement without `mode=async`, chkit ignores the line.
+A synchronous statement runs its `-- before-retry:` SQL the same way, before chkit runs it again after a failed or interrupted attempt; the first attempt never runs it. A guard that throws stops the retry, which is how a [cutover](/guides/data-preserving-migrations/) keeps a replayed `EXCHANGE TABLES` from swapping the tables back.
 
 In `--json` mode, progress lines go to stderr, so stdout holds only the JSON output.
 
@@ -212,6 +213,12 @@ This unblocks two scenarios the synchronous path cannot handle:
 - **Transient client-side errors during a multi-minute load** — re-running `chkit migrate` resumes the in-flight query rather than starting over.
 
 The annotation is opt-in and forward-compatible: statements without `mode=async` use the synchronous path, and an unknown mode value falls back to sync. Pair it with the [`-- log:` metadata header](#per-migration-metadata) to print context before the load begins.
+
+### Insert barriers (`mode=barrier`)
+
+A statement marked `mode=barrier` is a `SELECT` over `system.processes` that returns a `query_id` column. chkit runs it once, then again every second until none of the query ids of the first run is listed: it waits for the `INSERT`s that were running when the step started, not for the ones that start later. On a [multi-replica target](#multi-replica-targets) it reads every replica through `clusterAllReplicas`. After 10 minutes it stops with an error that lists the query ids still running; `chkit migrate --apply` then runs the barrier again from a fresh read. A [cutover](/guides/data-preserving-migrations/) uses two barriers: an `INSERT` builds its pipeline, including the materialized views it writes to, when it starts.
+
+Before every `exchange_tables` statement, and at a cutover's first step, `migrate` reads `system.query_log` on every replica and stops when asynchronous inserts with `wait_for_async_insert = 0` reached one of the tables in the last 10 minutes: ClickHouse drops the buffered rows of such an insert when its table is swapped, and the writer is never told. A user who cannot read `system.query_log` gets a warning instead.
 
 ## Examples
 

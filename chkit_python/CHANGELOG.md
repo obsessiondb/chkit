@@ -3,6 +3,33 @@
 ## Unreleased
 
 ### Added
+- `chkit generate --cutover <db.table>=<key>[,<key>]` (repeatable) plans a zero-downtime
+  cutover of a structural change (engine, ORDER BY, PRIMARY KEY, PARTITION BY) instead of
+  DROP + CREATE (#202): a shadow table with the new definition, a mirror materialized
+  view, insert barriers, an `ATTACH PARTITION ALL` snapshot, a key-based copy, a per-key
+  verification, a guarded `EXCHANGE TABLES` (operation `exchange_tables`, risk `caution`)
+  and a reconcile of rows an INSERT racing the swap left in the old table.
+  `--cutover-copy backfill` leaves the copy to `chkit plugin backfill plan|submit
+  --cutover <db.table>`; `--cutover-old keep|drop` keeps the old table as
+  `<table>_previous` (recorded in the snapshot with `retainedBy`, so `generate`, `drift`
+  and `check` treat it as managed) or drops it. `--drop-retained <db.table>` plans its
+  drop later. Unsupported changes fail with `cutover_unsupported`.
+- Migration operations render `mode=` on their marker and a `-- before-retry:` line.
+  `migrate` now runs a synchronous statement's `-- before-retry:` SQL before it retries
+  the statement (it ran only for `mode=async` before), and before retrying an
+  `EXCHANGE TABLES` waits until every replica agrees on both tables. `mode=barrier`
+  statements wait for the INSERTs running at their first read
+  (`chkit.clickhouse.insert_barrier`). After an `EXCHANGE TABLES` on a multi-replica
+  target without `clickhouse.cluster`, `migrate` waits for every replica to list the
+  swapped tables.
+- The cutover (#202) now refuses fire-and-forget async inserts (`async_insert = 1`,
+  `wait_for_async_insert = 0`) into the table at its first step and before the `EXCHANGE
+  TABLES`, a table TTL, table or column renames, new CHECK constraints, Buffer tables and
+  streaming sources behind intermediate tables that write into the table, dependent views
+  recreated in the same migration, and Replicated tables without `clickhouse.cluster`;
+  `migrate` stops when the swap has not reached every replica. The verify step compares
+  rows with NULL columns, and `snapshot rebuild` keeps tables retained by a keep-mode
+  cutover.
 - `SkipIndexVectorSimilarity` (`type="vector_similarity"`: `method`, `distanceFunction`,
   optional `dimensions` and the three HNSW tuning fields, validated as
   `vector_index_invalid_parameters`), `SkipIndexRaw` (`type="raw"`, `rawType` rendered

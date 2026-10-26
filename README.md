@@ -10,7 +10,7 @@ Define ClickHouse schemas in code, generate reviewable SQL migrations, and detec
 
 **Define → generate → review → migrate → check.**
 
-[Getting started](https://chkit.obsessiondb.com/getting-started/) · [Adopt an existing database](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) · [Data-preserving migrations](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) · [Documentation](https://chkit.obsessiondb.com)
+[Getting started](https://chkit.obsessiondb.com/getting-started/) · [Adopt an existing database](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) · [Zero-downtime structural migrations](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) · [Documentation](https://chkit.obsessiondb.com)
 
 ## Quickstart
 
@@ -118,7 +118,7 @@ The initial migration can include `CREATE DATABASE`. If the target already exist
 
 `migrate --json` previews pending work without applying its migration statements, but a connected command may initialize the journal. Commit definitions, migration SQL and `chkit/meta/snapshot.json` together. `check --strict` exits nonzero for pending migrations, modified checksums or live drift. `drift --json` describes differences; use `check` as the CI failure gate.
 
-For existing tables, start with the [adoption guide](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) instead of generating a replacement schema. For changes to sorting/partition keys or stored values, follow the [data-preserving migration recipe](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) and review the data copy and recovery plan before applying.
+For existing tables, start with the [adoption guide](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) instead of generating a replacement schema. For changes to sorting/partition keys, generate a [zero-downtime cutover](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) (`chkit generate --cutover <db.table>=<key>`) and review the migration before applying.
 
 ## Documentation
 
@@ -126,7 +126,7 @@ For existing tables, start with the [adoption guide](https://chkit.obsessiondb.c
 | --- | --- |
 | Build a first schema, insert/query data and evolve it | [First-schema tutorial](https://chkit.obsessiondb.com/tutorials/first-schema/) |
 | Adopt populated tables and establish migration history | [Existing-database adoption](https://chkit.obsessiondb.com/getting-started/add-to-existing-project/) |
-| Change layout and backfill without discarding data | [Data-preserving migrations](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) |
+| Change layout without discarding data or pausing writers | [Zero-downtime structural migrations](https://chkit.obsessiondb.com/guides/data-preserving-migrations/) |
 | Define tables, views and dictionaries | [Schema DSL reference](https://chkit.obsessiondb.com/schema/dsl-reference/) |
 | Deploy migrations and enforce checks in CI | [CI/CD integration](https://chkit.obsessiondb.com/guides/ci-cd/) |
 | Generate TypeScript row types and Zod schemas | [Codegen](https://chkit.obsessiondb.com/plugins/codegen/) |
