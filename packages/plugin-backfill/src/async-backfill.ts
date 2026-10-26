@@ -160,10 +160,11 @@ export async function syncProgress(
 
   if (chunkIdsToSync.length === 0) return progress
 
-  const safePrefix = prefix
-    .replace(/[\\%_]/g, '\\$&')
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "''")
+  const safePrefix = prefix.replace(/[\\%_']/g, (character) => {
+    if (character === "'") return "''"
+    if (character === '\\') return '\\\\\\\\'
+    return '\\\\' + character
+  })
 
   const { runningRows, logRows } = await readChunkQueries(executor, planId, safePrefix, options?.cluster)
   const runningSet = new Set(runningRows.map((r) => r.query_id))
