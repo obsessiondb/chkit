@@ -414,6 +414,16 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
     ])
   })
 
+  test('a Buffer engine is matched by its arguments, quoted or not, without a slow regex', () => {
+    const buffer = (engine: string) => table({ database: 'app', name: 'events_buffer', engine, columns } as never)
+    const refused = (engine: string) => messages(() => plan({ definitions: [NEW, buffer(engine)] })).length
+    expect(refused("Buffer(`app`, \"events\", 16, 10, 100, 10000, 1000000, 10000000, 100000000)")).toBe(1)
+    expect(() => plan({ definitions: [NEW, buffer("Buffer('app', 'other', 16, 10, 100, 10000, 1000000, 10000000, 100000000)")] })).not.toThrow()
+    const started = Date.now()
+    expect(() => plan({ definitions: [NEW, buffer(`Buffer(${'\t'.repeat(50_000)}`)] })).not.toThrow()
+    expect(Date.now() - started).toBeLessThan(1_000)
+  })
+
   test('writers the insert barrier cannot see, and a taken <table>_previous name', () => {
     const queue = table({
       database: 'app',

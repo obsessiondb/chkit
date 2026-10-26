@@ -768,8 +768,15 @@ export function readsTable(query: string, table: { database: string; name: strin
 /** A `Buffer(database, table, ...)` engine that flushes into the cutover table. */
 function isBufferInto(engine: string, request: CutoverRequest): boolean {
   if (engineName(engine) !== 'Buffer') return false
-  const match = /^\s*Buffer\s*\(\s*'?`?([^,'`]+)`?'?\s*,\s*'?`?([^,'`]+)`?'?\s*,/.exec(engine)
-  return match?.[1]?.trim() === request.database && match[2]?.trim() === request.table
+  // Split instead of matching with a regex: the arguments are user input.
+  const args = engine.slice(engine.indexOf('(') + 1).split(',')
+  // database, table, then the flush settings
+  if (args.length < 3) return false
+  return unquoteArgument(args[0] ?? '') === request.database && unquoteArgument(args[1] ?? '') === request.table
+}
+
+function unquoteArgument(value: string): string {
+  return value.trim().replace(/^['"`]|['"`]$/g, '')
 }
 
 function canonicalTable(def: TableDefinition): TableDefinition {

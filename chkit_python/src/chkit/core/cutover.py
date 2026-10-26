@@ -78,10 +78,6 @@ _STREAMING_ENGINES: Final = frozenset(
 _COMMENT_PREFIX: Final = "chkit cutover "
 _REPLICATED_PATH: Final = re.compile(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'")
 _NULLABLE: Final = re.compile(r"^\s*Nullable\s*\(")
-_BUFFER_TARGET: Final = re.compile(
-    r"^\s*Buffer\s*\(\s*'?`?([^,'`]+)`?'?\s*,\s*'?`?([^,'`]+)`?'?\s*,"
-)
-
 
 @dataclass(frozen=True)
 class CutoverRequest:
@@ -1066,12 +1062,16 @@ def _is_buffer_into(engine: str, request: CutoverRequest) -> bool:
     """A ``Buffer(database, table, ...)`` engine that flushes into the cutover table."""
     if engine_name(engine) != "Buffer":
         return False
-    match = _BUFFER_TARGET.match(engine)
-    return (
-        match is not None
-        and match.group(1).strip() == request.database
-        and match.group(2).strip() == request.table
-    )
+    # Split instead of matching with a regex: the arguments are user input.
+    arguments = engine[engine.find("(") + 1 :].split(",", 2)
+    if len(arguments) < 3:  # noqa: PLR2004 - database, table, then the flush settings
+        return False
+    database, table = (_unquote_argument(argument) for argument in arguments[:2])
+    return database == request.database and table == request.table
+
+
+def _unquote_argument(value: str) -> str:
+    return re.sub(r"^['\"`]|['\"`]$", "", value.strip())
 
 
 def _canonical_table(definition: TableDefinition) -> TableDefinition:
