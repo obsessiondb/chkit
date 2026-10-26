@@ -82,9 +82,9 @@ def wait_for_insert_barrier(
                 f"{len(remaining)} INSERT {'query' if one else 'queries'} that started before "
                 f"this step {'is' if one else 'are'} still running after {round(elapsed)}s "
                 f"(query_id {listed}). Their rows may not be mirrored or snapshotted yet. "
-                "Let them finish (or KILL QUERY them and retry those inserts after the "
-                "cutover), then run chkit migrate --apply again: this step reads the running "
-                "INSERTs anew."
+                "Let them finish, then run chkit migrate --apply again: this step reads the "
+                "running INSERTs anew. A killed INSERT may have committed part of its rows, so "
+                "inserting them again would reuse keys."
             )
             raise RuntimeError(msg)
         if now() - last_progress >= _PROGRESS_EVERY_SECONDS:

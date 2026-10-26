@@ -78,6 +78,9 @@ _STREAMING_ENGINES: Final = frozenset(
 _COMMENT_PREFIX: Final = "chkit cutover "
 _REPLICATED_PATH: Final = re.compile(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'")
 _NULLABLE: Final = re.compile(r"^\s*Nullable\s*\(")
+_BUFFER_TARGET: Final = re.compile(
+    r"^\s*Buffer\s*\(\s*'?`?([^,'`]+)`?'?\s*,\s*'?`?([^,'`]+)`?'?\s*,"
+)
 
 
 @dataclass(frozen=True)
@@ -601,15 +604,17 @@ def _create_cutover_sql(
     )
 
     settings = "" if cluster else " SETTINGS select_sequential_consistency = 1"
+    # Hash a tuple: cityHash64 returns NULL when one of its arguments is NULL,
+    # and sumIf skips NULLs, so a row with a NULL column would not be compared.
     verify_query = " ".join(
         [
             "SELECT count() AS bad FROM (",
             f"SELECT {key_list}, sum(src) AS snapshot_rows, sum(1 - src) AS shadow_rows, "
             "sumIf(h, src = 1) AS snapshot_hash, sumIf(h, src = 0) AS shadow_hash",
-            f"FROM (SELECT {key_list}, toUInt8(1) AS src, cityHash64({column_list}) AS h "
+            f"FROM (SELECT {key_list}, toUInt8(1) AS src, cityHash64(tuple({column_list})) AS h "
             f"FROM {q(names.snapshot)}",
-            f"UNION ALL SELECT {key_list}, toUInt8(0) AS src, cityHash64({column_list}) AS h "
-            f"FROM {q(names.shadow)})",
+            f"UNION ALL SELECT {key_list}, toUInt8(0) AS src, "
+            f"cityHash64(tuple({column_list})) AS h FROM {q(names.shadow)})",
             f"GROUP BY {key_list} HAVING snapshot_rows > 0 AND "
             "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash))",
         ]
@@ -727,8 +732,10 @@ def _create_cutover_sql(
             "  throwIf(max(leftovers) > 0, "
             + _string_literal(
                 f"Objects of an earlier attempt of this cutover exist ({names.shadow}, "
-                f"{names.mirror}, {names.snapshot} or {names.reconcile}). Inspect and drop them "
-                "before you run the migration again."
+                f"{names.mirror}, {names.snapshot} or {names.reconcile}). If the tables were "
+                f"already swapped, {names.shadow} is the pre-cutover table and may hold rows "
+                f"not yet reconciled into {table}: do not drop it. Inspect them before you run "
+                "the migration again."
             )
             + "),",
             "  throwIf(max(mutations) > 0, "
@@ -805,7 +812,7 @@ def _create_cutover_sql(
     )
 
 
-def _assert_cutover_supported(  # noqa: PLR0912
+def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
     *,
     old_def: TableDefinition,
     new_def: TableDefinition,
@@ -838,6 +845,38 @@ def _assert_cutover_supported(  # noqa: PLR0912
             )
         if side.unique_key:
             problems.append("a UNIQUE KEY table cannot be cut over.")
+        if not options.cluster and engine.startswith("Replicated"):
+            problems.append(
+                f"engine {side.engine} without clickhouse.cluster: the shadow table would exist "
+                "on one replica only. Set clickhouse.cluster so every statement runs ON CLUSTER."
+            )
+        if side.ttl:
+            problems.append(
+                f"TTL {side.ttl} deletes rows in the background, at different times in the old "
+                "and the new table, so the copy cannot be verified and the reconcile would insert "
+                "expired rows again. Remove the TTL for the cutover and add it back in a separate "
+                "migration."
+            )
+
+    if new_def.renamed_from:
+        problems.append("the table is also renamed. Rename it in a separate migration.")
+    problems.extend(
+        f"column {column.renamed_from} is renamed to {column.name}: the copy matches columns "
+        f"by name and would leave {column.name} empty. Rename the column in a separate migration."
+        for column in new_def.columns
+        if column.renamed_from
+    )
+    old_checks = {
+        f"{constraint.name}:{constraint.check}"
+        for constraint in old_def.constraints or []
+        if constraint.check
+    }
+    problems.extend(
+        f"CHECK constraint {constraint.name} is new: rows the old table accepts would fail the "
+        "mirror, and with it the writers' INSERTs. Add the constraint in a separate migration."
+        for constraint in new_def.constraints or []
+        if constraint.check and f"{constraint.name}:{constraint.check}" not in old_checks
+    )
 
     layout_changed = (
         engine_name(old_def.engine) != engine_name(new_def.engine)
@@ -881,6 +920,12 @@ def _assert_cutover_supported(  # noqa: PLR0912
                 f"{request.database}.{names.previous} already exists in the schema; the old "
                 "table is kept under that name. Drop it first (chkit generate --drop-retained "
                 f"{request.database}.{names.previous}) or use --cutover-old drop."
+            )
+        if definition.kind == "table" and _is_buffer_into(definition.engine, request):
+            problems.append(
+                f"Buffer table {definition.database}.{definition.name} flushes into {target} "
+                "from a background thread, which the insert barrier cannot see. Drop it for the "
+                "cutover and recreate it afterwards."
             )
         if (
             definition.kind != "materialized_view"
@@ -970,25 +1015,63 @@ def _replicated_path(engine: str) -> str | None:
 
 
 def _streaming_source(
-    query: str, definitions: list[SchemaDefinition], default_database: str
+    query: str,
+    definitions: list[SchemaDefinition],
+    default_database: str,
+    visited: set[str] | None = None,
 ) -> str | None:
+    """The streaming table a materialized view's query reads, directly or through
+    tables that other materialized views fill from one (Kafka -> Null -> view)."""
+    if visited is None:
+        visited = set()
     for definition in definitions:
-        if definition.kind != "table":
+        if definition.kind != "table" or not reads_table(
+            query, (definition.database, definition.name), default_database
+        ):
             continue
         engine = engine_name(definition.engine)
-        if engine not in _STREAMING_ENGINES and not is_kafka_engine(definition.engine):
-            continue
-        qualified = re.compile(
-            rf"\b{re.escape(definition.database)}\s*\.\s*`?{re.escape(definition.name)}\b"
-        )
-        bare = (
-            re.compile(rf"\bFROM\s+`?{re.escape(definition.name)}\b", re.IGNORECASE)
-            if definition.database == default_database
-            else None
-        )
-        if qualified.search(query) or (bare is not None and bare.search(query)):
+        if engine in _STREAMING_ENGINES or is_kafka_engine(definition.engine):
             return f"{definition.database}.{definition.name} ({engine})"
+        key = f"{definition.database}.{definition.name}"
+        if key in visited:
+            continue
+        visited.add(key)
+        for feeder in definitions:
+            if (
+                feeder.kind != "materialized_view"
+                or feeder.to.database != definition.database
+                or feeder.to.name != definition.name
+            ):
+                continue
+            source = _streaming_source(feeder.as_, definitions, feeder.database, visited)
+            if source:
+                return source
     return None
+
+
+def reads_table(query: str, table: tuple[str, str], default_database: str) -> bool:
+    """Whether a view's query reads ``table`` (database, name), qualified or (in its
+    own database) bare."""
+    database, name = table
+    qualified = re.compile(rf"\b{re.escape(database)}\s*\.\s*`?{re.escape(name)}\b")
+    bare = (
+        re.compile(rf"\bFROM\s+`?{re.escape(name)}\b", re.IGNORECASE)
+        if database == default_database
+        else None
+    )
+    return bool(qualified.search(query)) or (bare is not None and bool(bare.search(query)))
+
+
+def _is_buffer_into(engine: str, request: CutoverRequest) -> bool:
+    """A ``Buffer(database, table, ...)`` engine that flushes into the cutover table."""
+    if engine_name(engine) != "Buffer":
+        return False
+    match = _BUFFER_TARGET.match(engine)
+    return (
+        match is not None
+        and match.group(1).strip() == request.database
+        and match.group(2).strip() == request.table
+    )
 
 
 def _canonical_table(definition: TableDefinition) -> TableDefinition:
@@ -1037,4 +1120,5 @@ __all__ = [
     "parse_cutover_metadata",
     "parse_cutover_request",
     "plan_cutover",
+    "reads_table",
 ]

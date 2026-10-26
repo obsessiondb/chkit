@@ -451,11 +451,13 @@ function createCutoverSql(input: {
   const pendingMutations = `(SELECT count() FROM system.mutations WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)} AND NOT is_done)`
 
   const settings = cluster ? '' : ' SETTINGS select_sequential_consistency = 1'
+  // Hash a tuple: cityHash64 returns NULL when one of its arguments is NULL,
+  // and sumIf skips NULLs, so a row with a NULL column would not be compared.
   const verifyQuery = [
     'SELECT count() AS bad FROM (',
     `SELECT ${keyList}, sum(src) AS snapshot_rows, sum(1 - src) AS shadow_rows, sumIf(h, src = 1) AS snapshot_hash, sumIf(h, src = 0) AS shadow_hash`,
-    `FROM (SELECT ${keyList}, toUInt8(1) AS src, cityHash64(${columnList}) AS h FROM ${q(names.snapshot)}`,
-    `UNION ALL SELECT ${keyList}, toUInt8(0) AS src, cityHash64(${columnList}) AS h FROM ${q(names.shadow)})`,
+    `FROM (SELECT ${keyList}, toUInt8(1) AS src, cityHash64(tuple(${columnList})) AS h FROM ${q(names.snapshot)}`,
+    `UNION ALL SELECT ${keyList}, toUInt8(0) AS src, cityHash64(tuple(${columnList})) AS h FROM ${q(names.shadow)})`,
     `GROUP BY ${keyList} HAVING snapshot_rows > 0 AND (snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash))`,
   ].join(' ')
   const verify = (message: string) =>
@@ -510,7 +512,7 @@ function createCutoverSql(input: {
       'SELECT',
       `  throwIf(min(atomic) = 0, ${stringLiteral(`Database ${database} must use the Atomic or Replicated engine: EXCHANGE TABLES needs it.`)}),`,
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
-      `  throwIf(max(leftovers) > 0, ${stringLiteral(`Objects of an earlier attempt of this cutover exist (${names.shadow}, ${names.mirror}, ${names.snapshot} or ${names.reconcile}). Inspect and drop them before you run the migration again.`)}),`,
+      `  throwIf(max(leftovers) > 0, ${stringLiteral(`Objects of an earlier attempt of this cutover exist (${names.shadow}, ${names.mirror}, ${names.snapshot} or ${names.reconcile}). If the tables were already swapped, ${names.shadow} is the pre-cutover table and may hold rows not yet reconciled into ${table}: do not drop it. Inspect them before you run the migration again.`)}),`,
       `  throwIf(max(mutations) > 0, ${stringLiteral(`${target} has unfinished mutations. Wait for them to finish: rows they change would not reach the new table.`)})`,
       `FROM ${everyReplica(
         [
@@ -584,6 +586,35 @@ function assertCutoverSupported(input: {
       )
     }
     if (def.uniqueKey && def.uniqueKey.length > 0) problems.push('a UNIQUE KEY table cannot be cut over.')
+    if (!options.cluster && engine.startsWith('Replicated')) {
+      problems.push(
+        `engine ${def.engine} without clickhouse.cluster: the shadow table would exist on one replica only. Set clickhouse.cluster so every statement runs ON CLUSTER.`
+      )
+    }
+    if (def.ttl) {
+      problems.push(
+        `TTL ${def.ttl} deletes rows in the background, at different times in the old and the new table, so the copy cannot be verified and the reconcile would insert expired rows again. Remove the TTL for the cutover and add it back in a separate migration.`
+      )
+    }
+  }
+
+  if (newDef.renamedFrom) {
+    problems.push('the table is also renamed. Rename it in a separate migration.')
+  }
+  for (const column of newDef.columns) {
+    if (column.renamedFrom) {
+      problems.push(
+        `column ${column.renamedFrom} is renamed to ${column.name}: the copy matches columns by name and would leave ${column.name} empty. Rename the column in a separate migration.`
+      )
+    }
+  }
+  const oldChecks = new Set((oldDef.constraints ?? []).flatMap((constraint) => (constraint.check ? [`${constraint.name}:${constraint.check}`] : [])))
+  for (const constraint of newDef.constraints ?? []) {
+    if (constraint.check && !oldChecks.has(`${constraint.name}:${constraint.check}`)) {
+      problems.push(
+        `CHECK constraint ${constraint.name} is new: rows the old table accepts would fail the mirror, and with it the writers' INSERTs. Add the constraint in a separate migration.`
+      )
+    }
   }
 
   const layoutChanged =
@@ -618,6 +649,11 @@ function assertCutoverSupported(input: {
     if (options.oldTable === 'keep' && def.kind === 'table' && def.database === request.database && def.name === names.previous) {
       problems.push(
         `${request.database}.${names.previous} already exists in the schema; the old table is kept under that name. Drop it first (chkit generate --drop-retained ${request.database}.${names.previous}) or use --cutover-old drop.`
+      )
+    }
+    if (def.kind === 'table' && isBufferInto(def.engine, request)) {
+      problems.push(
+        `Buffer table ${def.database}.${def.name} flushes into ${target} from a background thread, which the insert barrier cannot see. Drop it for the cutover and recreate it afterwards.`
       )
     }
     if (def.kind !== 'materialized_view' || def.to.database !== request.database || def.to.name !== request.table) continue
@@ -694,15 +730,46 @@ function replicatedPath(engine: string): string | undefined {
   return match?.[1]
 }
 
-function streamingSource(query: string, definitions: SchemaDefinition[], defaultDatabase: string): string | undefined {
+/**
+ * The streaming table a materialized view's query reads, directly or through
+ * tables that other materialized views fill from one (Kafka -> Null -> view).
+ */
+function streamingSource(
+  query: string,
+  definitions: SchemaDefinition[],
+  defaultDatabase: string,
+  visited: Set<string> = new Set(),
+): string | undefined {
   for (const def of definitions) {
-    if (def.kind !== 'table') continue
-    if (!STREAMING_ENGINES.has(engineName(def.engine)) && !isKafkaEngine(def.engine)) continue
-    const qualified = new RegExp(`\\b${escapeRegex(def.database)}\\s*\\.\\s*\`?${escapeRegex(def.name)}\\b`)
-    const bare = def.database === defaultDatabase ? new RegExp(`\\bFROM\\s+\`?${escapeRegex(def.name)}\\b`, 'i') : undefined
-    if (qualified.test(query) || bare?.test(query)) return `${def.database}.${def.name} (${engineName(def.engine)})`
+    if (def.kind !== 'table' || !readsTable(query, def, defaultDatabase)) continue
+    if (STREAMING_ENGINES.has(engineName(def.engine)) || isKafkaEngine(def.engine)) {
+      return `${def.database}.${def.name} (${engineName(def.engine)})`
+    }
+    const key = `${def.database}.${def.name}`
+    if (visited.has(key)) continue
+    visited.add(key)
+    for (const feeder of definitions) {
+      if (feeder.kind !== 'materialized_view' || feeder.to.database !== def.database || feeder.to.name !== def.name) continue
+      const source = streamingSource(feeder.as, definitions, feeder.database, visited)
+      if (source) return source
+    }
   }
   return undefined
+}
+
+/** Whether a view's query reads `table`, qualified or (in its own database) bare. */
+export function readsTable(query: string, table: { database: string; name: string }, defaultDatabase: string): boolean {
+  const def = table
+  const qualified = new RegExp(`\\b${escapeRegex(def.database)}\\s*\\.\\s*\`?${escapeRegex(def.name)}\\b`)
+  const bare = def.database === defaultDatabase ? new RegExp(`\\bFROM\\s+\`?${escapeRegex(def.name)}\\b`, 'i') : undefined
+  return qualified.test(query) || (bare?.test(query) ?? false)
+}
+
+/** A `Buffer(database, table, ...)` engine that flushes into the cutover table. */
+function isBufferInto(engine: string, request: CutoverRequest): boolean {
+  if (engineName(engine) !== 'Buffer') return false
+  const match = /^\s*Buffer\s*\(\s*'?`?([^,'`]+)`?'?\s*,\s*'?`?([^,'`]+)`?'?\s*,/.exec(engine)
+  return match?.[1]?.trim() === request.database && match[2]?.trim() === request.table
 }
 
 function canonicalTable(def: TableDefinition): TableDefinition {

@@ -36,6 +36,7 @@ from chkit.cli.safety_markers import extract_migration_operation_summaries
 from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import parse_exchange_tables, wait_for_exchange
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
+from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.cutover import (
     CutoverMetadata,
     CutoverOptions,
@@ -46,15 +47,20 @@ from chkit.core.cutover import (
     parse_cutover_metadata,
     parse_cutover_request,
     plan_cutover,
+    reads_table,
 )
 from chkit.core.model import (
     ChxValidationError,
+    ColumnDefinition,
     MigrationPlan,
     SchemaDefinition,
+    TableConstraintDefinition,
     TableDefinition,
+    TableRenamedFrom,
     TableRetainedBy,
     materialized_view,
     table,
+    view,
 )
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
@@ -249,7 +255,8 @@ def test_mirror_and_copy_sql() -> None:
 
 def test_verify_compares_rows_per_key() -> None:
     verify = plan().operations[8].sql
-    assert "cityHash64(`id`, `user_id`, `payload`)" in verify
+    # A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
+    assert "cityHash64(tuple(`id`, `user_id`, `payload`))" in verify
     assert (
         "GROUP BY `id` HAVING snapshot_rows > 0 AND "
         "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)"
@@ -469,6 +476,7 @@ def test_refuses_an_engine_argument_only_change() -> None:
     found = messages(
         old_def=events(["id"], engine="ReplicatedMergeTree('/t/{uuid}', '{replica}')"),
         new_def=events(["id"], engine="ReplicatedMergeTree('/t2/{uuid}', '{replica}')"),
+        cluster="c2",
     )
     assert len(found) == 1
     assert "only the engine arguments change" in found[0]
@@ -476,7 +484,11 @@ def test_refuses_an_engine_argument_only_change() -> None:
 
 def test_refuses_a_replication_path_without_a_macro() -> None:
     engine = "ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}')"
-    found = messages(old_def=events(["id"], engine=engine), new_def=events(["user_id", "id"], engine=engine))
+    found = messages(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    )
     assert len(found) == 2
     assert all("names no {table} or {uuid} macro" in message for message in found)
 
@@ -487,6 +499,119 @@ def test_refuses_plain_merge_tree_and_backfill_on_a_cluster() -> None:
     assert "engine MergeTree() with clickhouse.cluster" in found[0]
     assert "engine MergeTree() with clickhouse.cluster" in found[1]
     assert "--cutover-copy backfill is not supported with clickhouse.cluster" in found[2]
+
+
+def test_refuses_a_replicated_table_without_a_cluster() -> None:
+    engine = "ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{replica}')"
+    found = messages(
+        old_def=events(["id"], engine=engine), new_def=events(["user_id", "id"], engine=engine)
+    )
+    assert len(found) == 2
+    assert all(
+        f"engine {engine} without clickhouse.cluster: the shadow table would exist on one "
+        "replica only. Set clickhouse.cluster so every statement runs ON CLUSTER." in message
+        for message in found
+    )
+
+
+def test_refuses_a_ttl_on_the_old_or_the_new_table() -> None:
+    ttl = "toDateTime(id) + INTERVAL 1 DAY"
+    expected = (
+        f"Cannot cut over app.events: TTL {ttl} deletes rows in the background, at different "
+        "times in the old and the new table, so the copy cannot be verified and the reconcile "
+        "would insert expired rows again. Remove the TTL for the cutover and add it back in a "
+        "separate migration."
+    )
+    assert messages(new_def=NEW.model_copy(update={"ttl": ttl})) == [expected]
+    assert messages(old_def=OLD.model_copy(update={"ttl": ttl})) == [expected]
+
+
+def test_refuses_a_rename_of_the_table_or_of_a_column() -> None:
+    renamed_table = NEW.model_copy(update={"renamed_from": TableRenamedFrom(name="old_events")})
+    assert messages(new_def=renamed_table) == [
+        "Cannot cut over app.events: the table is also renamed. Rename it in a separate migration."
+    ]
+    body = ColumnDefinition.model_validate({"name": "body", "type": "String", "renamedFrom": "payload"})
+    renamed_column = NEW.model_copy(update={"columns": [*NEW.columns[:2], body]})
+    assert messages(new_def=renamed_column) == [
+        "Cannot cut over app.events: column payload is renamed to body: the copy matches columns "
+        "by name and would leave body empty. Rename the column in a separate migration."
+    ]
+
+
+def test_refuses_a_new_check_constraint() -> None:
+    check = TableConstraintDefinition(name="positive", check="user_id > 0")
+    assert messages(new_def=NEW.model_copy(update={"constraints": [check]})) == [
+        "Cannot cut over app.events: CHECK constraint positive is new: rows the old table accepts "
+        "would fail the mirror, and with it the writers' INSERTs. Add the constraint in a "
+        "separate migration."
+    ]
+    # Unchanged CHECK constraints and ASSUME constraints are fine.
+    assert plan(
+        old_def=OLD.model_copy(update={"constraints": [check]}),
+        new_def=NEW.model_copy(update={"constraints": [check]}),
+    ).operations
+    assume = TableConstraintDefinition(name="hint", assume="user_id > 0")
+    assert plan(new_def=NEW.model_copy(update={"constraints": [assume]})).operations
+
+
+def test_refuses_a_buffer_table_and_a_streaming_source_behind_an_intermediate_table() -> None:
+    buffer = table(
+        database="app",
+        name="events_buffer",
+        engine="Buffer('app', 'events', 16, 10, 100, 10000, 1000000, 10000000, 100000000)",
+        columns=COLUMNS,
+    )
+    queue = table(
+        database="app",
+        name="events_queue",
+        engine="Kafka('broker:9092', 'events', 'g', 'JSONEachRow')",
+        columns=COLUMNS,
+    )
+    landing = table(database="app", name="events_landing", engine="Null", columns=COLUMNS)
+    to_landing = materialized_view(
+        database="app",
+        name="queue_to_landing",
+        to={"database": "app", "name": "events_landing"},
+        as_="SELECT id, user_id, payload FROM app.events_queue",
+    )
+    to_events = materialized_view(
+        database="app",
+        name="landing_to_events",
+        to={"database": "app", "name": "events"},
+        as_="SELECT id, user_id, payload FROM app.events_landing",
+    )
+    found = messages(definitions=[NEW, buffer, queue, landing, to_landing, to_events])
+    assert found == [
+        "Cannot cut over app.events: Buffer table app.events_buffer flushes into app.events from "
+        "a background thread, which the insert barrier cannot see. Drop it for the cutover and "
+        "recreate it afterwards.",
+        "Cannot cut over app.events: materialized view app.landing_to_events feeds app.events "
+        "from the app.events_queue (Kafka) table, whose consumer is invisible to the insert "
+        "barrier. Detach the consumer view for the cutover and attach it afterwards.",
+    ]
+    # A Buffer table into another table is fine.
+    other = buffer.model_copy(
+        update={"engine": "Buffer(app, other, 16, 10, 100, 10000, 1000000, 10000000, 100000000)"}
+    )
+    assert plan(definitions=[NEW, other]).operations
+
+
+def test_validate_start_explains_leftovers_of_an_earlier_attempt() -> None:
+    validate = plan().operations[0].sql
+    assert (
+        "If the tables were already swapped, events__cutover_20261024120000 is the pre-cutover "
+        "table and may hold rows not yet reconciled into events: do not drop it. Inspect them "
+        "before you run the migration again."
+    ) in validate
+
+
+def test_reads_table_matches_qualified_and_bare_reads() -> None:
+    assert reads_table("SELECT * FROM app.events", ("app", "events"), "other")
+    assert reads_table("SELECT * FROM app . `events`", ("app", "events"), "other")
+    assert reads_table("select * from events", ("app", "events"), "app")
+    assert not reads_table("select * from events", ("app", "events"), "other")
+    assert not reads_table("SELECT * FROM app.events_queue", ("app", "events"), "app")
 
 
 def test_refuses_invisible_writers_and_a_taken_previous_name() -> None:
@@ -643,6 +768,13 @@ def test_parse_exchange_tables() -> None:
         "EXCHANGE TABLES app.events AND app.`events shadow` ON CLUSTER 'c';"
     ) == (("app", "events"), ("app", "events shadow"))
     assert parse_exchange_tables("DROP TABLE app.events") is None
+    # migrate_apply runs a statement together with its marker comment lines.
+    assert parse_exchange_tables(
+        "-- operation: exchange_tables key=table:app.events risk=caution\n"
+        "-- before-retry: SELECT 1\n"
+        "EXCHANGE TABLES app.events AND app.events__cutover_1"
+    ) == (("app", "events"), ("app", "events__cutover_1"))
+    assert parse_exchange_tables("-- EXCHANGE TABLES app.a AND app.b") is None
 
 
 def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -668,6 +800,14 @@ def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPa
 
     wait_for_exchange(_Client(), "EXCHANGE TABLES app.a AND app.b;")
     assert len(polls) == 2
+    # The same SQL as TS waitForExchange: the names are string literals.
+    assert polls[0] == (
+        "SELECT database, name, count(DISTINCT hostName()) AS replicas, "
+        "uniqExact(uuid) AS uuids, any(toString(uuid)) AS sample_uuid "
+        "FROM clusterAllReplicas('default', system.tables) "
+        "WHERE (database = 'app' AND name = 'a') OR (database = 'app' AND name = 'b') "
+        "GROUP BY database, name"
+    )
 
 
 def test_wait_for_exchange_skips_on_cluster() -> None:
@@ -791,6 +931,9 @@ def _apply_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(migrate_apply, "__version__", "0.0.0-test")
     monkeypatch.setattr("chkit.clickhouse.ddl_propagation.resolve_replica_fanout", lambda *_: None)
     monkeypatch.setattr("chkit.clickhouse.insert_barrier.resolve_replica_fanout", lambda *_: None)
+    monkeypatch.setattr(
+        "chkit.clickhouse.async_insert_guard.resolve_replica_fanout", lambda *_: None
+    )
 
 
 START = ("cutover_validate", "table:default.t:cutover:start")
@@ -844,6 +987,146 @@ def test_apply_barrier_waits_instead_of_executing(
     _run(tmp_path, sql, client, store)
     assert client.calls == []
     assert len([read for read in client.reads if "system.processes" in read]) == 3
+    assert len(store.appended) == 1
+
+
+# ---------- apply: fire-and-forget async insert guard ----------
+
+_GUARD_SQL = (
+    "-- operation: cutover_validate key=table:app.events:cutover:start risk=caution\n"
+    "SELECT 1;\n"
+    "-- operation: cutover_snapshot key=table:app.events:cutover:snapshot risk=caution\n"
+    "ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;\n"
+    "-- operation: exchange_tables key=table:app.events risk=caution\n"
+    "EXCHANGE TABLES app.events AND app.events__cutover_1;\n"
+)
+
+
+class _QueryLogClient(_RecordingClient):
+    """query_log reports fire-and-forget async inserts into the tables ``busy`` returns."""
+
+    def __init__(self, busy: Any) -> None:
+        super().__init__()
+        self.guard_reads: list[str] = []
+        self._busy = busy
+
+    def query(self, sql: str) -> _Rows:
+        if "system.query_log" not in sql:
+            return super().query(sql)
+        self.guard_reads.append(sql)
+        return _Rows([{"table": name, "inserts": 3} for name in self._busy(sql)])
+
+
+@pytest.mark.usefixtures("_apply_env")
+def test_apply_checks_the_cutover_table_at_the_start_and_both_tables_before_the_exchange(
+    tmp_path: Path,
+) -> None:
+    client = _QueryLogClient(lambda _sql: [])
+    _run(tmp_path, _GUARD_SQL, client, _FakeStore())
+    assert len(client.guard_reads) == 2
+    assert "hasAny(tables, ['app.events'])" in client.guard_reads[0]
+    assert "hasAny(tables, ['app.events', 'app.events__cutover_1'])" in client.guard_reads[1]
+    assert len(client.calls) == 3
+
+
+@pytest.mark.usefixtures("_apply_env")
+def test_apply_stops_a_cutover_before_its_copy_while_fire_and_forget_inserts_run(
+    tmp_path: Path,
+) -> None:
+    client = _QueryLogClient(lambda _sql: ["app.events"])
+    with pytest.raises(
+        migrate_apply.StatementError,
+        match=r"(?s)Migration m.sql failed at statement 1 of 3:.*3 into app.events",
+    ):
+        _run(tmp_path, _GUARD_SQL, client, _FakeStore())
+    assert client.calls == []
+
+
+@pytest.mark.usefixtures("_apply_env")
+def test_apply_refuses_the_exchange_when_such_inserts_started_during_the_cutover(
+    tmp_path: Path,
+) -> None:
+    client = _QueryLogClient(
+        lambda sql: ["app.events"] if "app.events__cutover_1" in sql else []
+    )
+    store = _FakeStore()
+    with pytest.raises(migrate_apply.StatementError, match="wait_for_async_insert = 0"):
+        _run(tmp_path, _GUARD_SQL, client, store)
+    assert _sql_lines(client.calls) == [
+        "SELECT 1",
+        "ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events",
+    ]
+    # The refused EXCHANGE is not journaled as started.
+    assert store.state is not None
+    assert [op.operation_index for op in store.state.operations] == [0, 1]
+
+
+@pytest.mark.usefixtures("_apply_env")
+def test_apply_does_not_guard_other_statements(tmp_path: Path) -> None:
+    sql = (
+        "-- operation: cutover_validate key=table:app.events:cutover:before_exchange risk=caution\n"
+        "SELECT 1;\n"
+        "-- operation: drop_table key=table:app.events__cutover_1 risk=danger\n"
+        "DROP TABLE app.events__cutover_1;\n"
+    )
+    client = _QueryLogClient(lambda _sql: ["app.events"])
+    _run(tmp_path, sql, client, _FakeStore())
+    assert client.guard_reads == []
+
+
+@pytest.mark.usefixtures("_apply_env")
+def test_apply_stops_when_the_exchange_does_not_reach_every_replica(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two replicas behind a load balancer, and system.tables never agrees on the swap.
+    monkeypatch.setattr(
+        "chkit.clickhouse.ddl_propagation.resolve_replica_fanout",
+        lambda *_: ReplicaFanout(cluster="default", replicas=2),
+    )
+    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    client = _QueryLogClient(lambda _sql: [])
+    store = _FakeStore()
+    with pytest.raises(
+        RuntimeError,
+        match=r"EXCHANGE TABLES app.events AND app.events__cutover_1 not applied on every "
+        r"replica after \d+ checks: only 1 of the 2 tables are listed",
+    ):
+        _run(tmp_path, _GUARD_SQL, client, store)
+    assert any("system.tables" in read for read in client.reads)
+    assert store.appended == []
+    # The EXCHANGE ran and is journaled as completed, so a re-run does not swap back.
+    assert store.state is not None
+    assert [op.status for op in store.state.operations] == ["completed"] * 3
+
+
+@pytest.mark.usefixtures("_apply_env")
+def test_apply_still_only_warns_when_another_propagation_wait_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def slow(*_args: Any, **_kwargs: Any) -> None:
+        msg = "not visible yet"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(migrate_apply, "wait_for_ddl_propagation", slow)
+    sql = "-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;\n"
+    warnings: list[str] = []
+    (tmp_path / "m.sql").write_text(sql, encoding="utf-8")
+    store = _FakeStore()
+    apply_migration(
+        ApplyMigrationInput(
+            client=cast(Any, _RecordingClient()),
+            journal_store=cast(Any, store),
+            plugin_runtime=cast(Any, _Runtime()),
+            config=cast(Any, SimpleNamespace(clickhouse=None)),
+            table_scope=cast(Any, None),
+            migrations_dir=tmp_path,
+            file="m.sql",
+            retry=None,
+            log=lambda _line: None,
+            warn=warnings.append,
+        )
+    )
+    assert warnings == ["  ⚠ DDL propagation wait failed for table:app.t: not visible yet"]
     assert len(store.appended) == 1
 
 
@@ -928,6 +1211,52 @@ def test_apply_cutovers_refuses_a_table_that_is_not_recreated() -> None:
             plan=plan_diff([OLD], [OLD]),
             previous_definitions=[OLD],
             definitions=[OLD],
+            cutovers=resolve_cutover_flags(cutover=["app.events=id"], copy=None, old_table=None),
+            cluster=None,
+            stamp=STAMP,
+        )
+
+
+def test_apply_cutovers_refuses_a_dependent_view_recreated_in_the_same_migration() -> None:
+    def counts(as_: str) -> SchemaDefinition:
+        return materialized_view(
+            database="app",
+            name="events_counts_mv",
+            to={"database": "app", "name": "events_counts"},
+            as_=as_,
+        )
+
+    before = counts("SELECT user_id, count() AS n FROM app.events GROUP BY user_id")
+    after = counts("SELECT user_id, count() AS n, max(id) AS last FROM app.events GROUP BY user_id")
+    plan_ = plan_diff([OLD, before], [NEW, after])
+    assert "drop_materialized_view" in [op.type for op in plan_.operations]
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "--cutover app.events: app.events_counts_mv reads from or writes into app.events and "
+            "is recreated in the same migration, so it would miss every INSERT during the "
+            "cutover. Change it in a separate migration, before or after the cutover."
+        ),
+    ):
+        apply_cutovers(
+            plan=plan_,
+            previous_definitions=[OLD, before],
+            definitions=[NEW, after],
+            cutovers=resolve_cutover_flags(cutover=["app.events=id"], copy=None, old_table=None),
+            cluster=None,
+            stamp=STAMP,
+        )
+
+
+def test_apply_cutovers_refuses_a_recreated_view_that_reads_the_table() -> None:
+    before = view(database="app", name="events_v", as_="SELECT id FROM events")
+    after = view(database="app", name="events_v", as_="SELECT id, user_id FROM events")
+    plan_ = plan_diff([OLD, before], [NEW, after])
+    with pytest.raises(ValueError, match=re.escape("--cutover app.events: app.events_v reads from")):
+        apply_cutovers(
+            plan=plan_,
+            previous_definitions=[OLD, before],
+            definitions=[NEW, after],
             cutovers=resolve_cutover_flags(cutover=["app.events=id"], copy=None, old_table=None),
             cluster=None,
             stamp=STAMP,

@@ -491,8 +491,8 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
         return
     (db1, t1), (db2, t2) = tables
     where = (
-        f"(database = {_quote(db1)} AND name = {_quote(t1)}) OR "
-        f"(database = {_quote(db2)} AND name = {_quote(t2)})"
+        f"(database = '{_quote(db1)}' AND name = '{_quote(t1)}') OR "
+        f"(database = '{_quote(db2)}' AND name = '{_quote(t2)}')"
     )
     sql = (
         "SELECT database, name, count(DISTINCT hostName()) AS replicas, "
@@ -520,8 +520,11 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
 
 
 _QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"
+# Python keeps the ``-- operation:`` / ``-- before-retry:`` marker lines in the
+# statements it executes (TS strips them), so leading line comments are skipped.
 _EXCHANGE_PATTERN = re.compile(
-    rf"^\s*EXCHANGE\s+TABLES\s+({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
+    rf"^(?:\s*--[^\n]*(?:\n|$))*\s*EXCHANGE\s+TABLES\s+"
+    rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
     rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})",
     re.IGNORECASE,
 )

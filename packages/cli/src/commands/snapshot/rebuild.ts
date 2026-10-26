@@ -15,7 +15,9 @@ import {
 import type { PluginRuntime } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { emitJson } from '../../runtime/json-output.js'
+import { readSnapshot } from '../../runtime/migration-store.js'
 import { loadSchemaDefinitionsWithHooks } from '../../runtime/schema-loader.js'
+import { carryRetainedDefinitions } from '../generate/cutover.js'
 import {
   diffSnapshotDefinitions,
   parseSnapshotDocument,
@@ -57,7 +59,13 @@ export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: Snap
   // A hook that edits definitions in place (instead of returning them) leaves
   // them non-canonical. The snapshot always stores canonical definitions, so
   // canonicalize once and validate, compare, count and write that same list.
-  const definitions = canonicalizeDefinitions(loaded)
+  // A table that a keep-mode cutover retained is declared in the snapshot only,
+  // so the rebuild keeps it, as `generate` does.
+  const definitions = carryRetainedDefinitions({
+    previousDefinitions: await readRetainedSource(metaDir),
+    definitions: canonicalizeDefinitions(loaded),
+    dropRetained: [],
+  })
 
   // Same validation and error contract as `chkit generate` (planDiff validates the new definitions).
   const issues = validateDefinitions(definitions)
@@ -90,6 +98,15 @@ export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: Snap
     input.jsonMode,
   )
   return 0
+}
+
+/** The definitions of the current snapshot, or none when it is missing or unreadable. */
+async function readRetainedSource(metaDir: string): Promise<SchemaDefinition[]> {
+  try {
+    return (await readSnapshot(metaDir))?.definitions ?? []
+  } catch {
+    return []
+  }
 }
 
 async function describePreviousSnapshot(

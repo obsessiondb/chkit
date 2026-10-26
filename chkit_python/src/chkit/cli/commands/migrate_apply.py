@@ -47,14 +47,20 @@ from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql, now_i
 from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import extract_migration_operation_summaries
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.async_insert_guard import assert_no_fire_and_forget_async_inserts
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation, wait_for_exchange
+from chkit.clickhouse.ddl_propagation import (
+    parse_exchange_tables,
+    wait_for_ddl_propagation,
+    wait_for_exchange,
+)
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.core.model import ChxResolvedConfig
 from chkit.core.sql_splitter import extract_executable_statements
 from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
 
 _WHITESPACE_RE = re.compile(r"\s+")
+_CUTOVER_START_KEY = re.compile(r"^table:([^.]+)\.(.+):cutover:start$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +84,7 @@ class StatementError(RuntimeError):
     """A statement-execution failure with the file, position and SQL preview."""
 
 
-def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
+def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # noqa: PLR0912, PLR0915
     file = input_.file
     journal_store = input_.journal_store
     sql = (input_.migrations_dir / file).read_text(encoding="utf-8")
@@ -168,6 +174,20 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
                 raise statement_error(
                     file=file, index=index, total=total, statement=statement, error=error
                 ) from error
+        swapped = (
+            _swapped_tables(operation.type, operation.key, statement)
+            if operation is not None
+            else None
+        )
+        if swapped:
+            try:
+                assert_no_fire_and_forget_async_inserts(
+                    input_.client, swapped, cluster=cluster, log=input_.log
+                )
+            except Exception as error:
+                raise statement_error(
+                    file=file, index=index, total=total, statement=statement, error=error
+                ) from error
         base_state = state_before or fresh_migration_state(file, migration_checksum)
         journal_store.write_migration_state(
             upsert_operation(
@@ -206,7 +226,12 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:
                 iso_without_zone(datetime.now(tz=UTC)),
             )
         )
-        if operation is not None and operation.mode != "barrier":
+        if operation is not None and operation.type == "exchange_tables":
+            # A swap that has not reached every replica stops the migration (as
+            # in TS): the cutover steps after it would read a replica that
+            # still has the old names.
+            wait_for_exchange(input_.client, statement, cluster=cluster)
+        elif operation is not None and operation.mode != "barrier":
             # Poll system.tables / system.columns until the DDL is visible.
             # Critical for Replicated / ObsessionDB Shared engines.
             try:
@@ -255,6 +280,24 @@ def statement_error(
         f"  {preview_statement(statement)}\n"
         f"{error}"
     )
+
+
+def _swapped_tables(
+    operation_type: str, operation_key: str, statement: str
+) -> list[tuple[str, str]] | None:
+    """The tables a statement is about to swap, whose fire-and-forget async
+    inserts would be dropped: both tables of an EXCHANGE TABLES, and the table
+    of a cutover at its first step, so that the cutover stops before its copy
+    (TS ``swappedTables``)."""
+    if operation_type == "exchange_tables":
+        tables = parse_exchange_tables(statement)
+        return list(tables) if tables is not None else None
+    if operation_type != "cutover_validate":
+        return None
+    match = _CUTOVER_START_KEY.match(operation_key)
+    if match is None:
+        return None
+    return [(match.group(1), match.group(2))]
 
 
 def _run_before_retry(

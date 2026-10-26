@@ -5,6 +5,7 @@ Port of ``packages/cli/src/commands/generate/cutover.ts``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import cast
 
@@ -18,13 +19,18 @@ from chkit.core.cutover import (
     PlannedCutover,
     parse_cutover_request,
     plan_cutover,
+    reads_table,
 )
 from chkit.core.model import (
+    MaterializedViewDefinition,
     MigrationOperation,
     MigrationPlan,
     SchemaDefinition,
     TableDefinition,
+    ViewDefinition,
 )
+
+_KIND_PREFIX = re.compile(r"^\w+:")
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,9 @@ def apply_cutovers(
                 "the --table scope."
             )
             raise ValueError(msg)
+        _assert_no_dependent_recreated(
+            operations, [*previous_definitions, *definitions], request
+        )
         old_def = _find_table(previous_definitions, request)
         new_def = _find_table(definitions, request)
         if old_def is None or new_def is None:
@@ -227,6 +236,47 @@ def cutover_text_lines(summaries: list[dict[str, object]]) -> list[str]:
         lines.append("  Next:")
         lines.extend(f"  - {step}" for step in cast("list[str]", summary["nextSteps"]))
     return lines
+
+
+def _assert_no_dependent_recreated(
+    operations: list[MigrationOperation],
+    definitions: list[SchemaDefinition],
+    request: CutoverRequest,
+) -> None:
+    """A view that reads from or writes into the cutover table and is dropped and
+    recreated by the same migration would miss every INSERT of the cutover: the
+    drop runs before the cutover's first step and the CREATE after its last."""
+    target = f"{request.database}.{request.table}"
+    table = (request.database, request.table)
+    dependents: set[str] = set()
+    for definition in definitions:
+        if isinstance(definition, MaterializedViewDefinition):
+            writes = (
+                definition.to.database == request.database
+                and definition.to.name == request.table
+            )
+            if writes or reads_table(definition.as_, table, definition.database):
+                dependents.add(f"materialized_view:{definition.database}.{definition.name}")
+        elif isinstance(definition, ViewDefinition) and reads_table(
+            definition.as_, table, definition.database
+        ):
+            dependents.add(f"view:{definition.database}.{definition.name}")
+    recreated = next(
+        (
+            op
+            for op in operations
+            if op.type in ("drop_materialized_view", "drop_view") and op.key in dependents
+        ),
+        None,
+    )
+    if recreated is not None:
+        msg = (
+            f"--cutover {target}: {_KIND_PREFIX.sub('', recreated.key, count=1)} reads from or "
+            f"writes into {target} and is recreated in the same migration, so it would miss "
+            "every INSERT during the cutover. Change it in a separate migration, before or "
+            "after the cutover."
+        )
+        raise ValueError(msg)
 
 
 def _find_table(

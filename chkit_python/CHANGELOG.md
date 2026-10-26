@@ -22,6 +22,14 @@
   (`chkit.clickhouse.insert_barrier`). After an `EXCHANGE TABLES` on a multi-replica
   target without `clickhouse.cluster`, `migrate` waits for every replica to list the
   swapped tables.
+- The cutover (#202) now refuses fire-and-forget async inserts (`async_insert = 1`,
+  `wait_for_async_insert = 0`) into the table at its first step and before the `EXCHANGE
+  TABLES`, a table TTL, table or column renames, new CHECK constraints, Buffer tables and
+  streaming sources behind intermediate tables that write into the table, dependent views
+  recreated in the same migration, and Replicated tables without `clickhouse.cluster`;
+  `migrate` stops when the swap has not reached every replica. The verify step compares
+  rows with NULL columns, and `snapshot rebuild` keeps tables retained by a keep-mode
+  cutover.
 - `SkipIndexVectorSimilarity` (`type="vector_similarity"`: `method`, `distanceFunction`,
   optional `dimensions` and the three HNSW tuning fields, validated as
   `vector_index_invalid_parameters`), `SkipIndexRaw` (`type="raw"`, `rawType` rendered

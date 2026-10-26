@@ -64,7 +64,7 @@ export async function waitForInsertBarrier(
     if (elapsed >= timeoutMs) {
       throw new Error(
         `${remaining.length} INSERT ${remaining.length === 1 ? 'query' : 'queries'} that started before this step ${remaining.length === 1 ? 'is' : 'are'} still running after ${Math.round(elapsed / 1000)}s (query_id ${remaining.slice(0, 10).join(', ')}${remaining.length > 10 ? ', …' : ''}). ` +
-          'Their rows may not be mirrored or snapshotted yet. Let them finish (or KILL QUERY them and retry those inserts after the cutover), then run chkit migrate --apply again: this step reads the running INSERTs anew.',
+          'Their rows may not be mirrored or snapshotted yet. Let them finish, then run chkit migrate --apply again: this step reads the running INSERTs anew. A killed INSERT may have committed part of its rows, so inserting them again would reuse keys.',
       )
     }
     if (now() - lastProgress >= PROGRESS_EVERY_MS) {

@@ -325,6 +325,28 @@ def test_leaves_an_up_to_date_snapshot_untouched(project_dir: Path) -> None:
     assert project.snapshot_path.read_text(encoding="utf-8") == generated
 
 
+def test_keeps_a_table_that_a_keep_mode_cutover_retained(project_dir: Path) -> None:
+    """Only the snapshot declares the retained ``<table>_previous``."""
+    project = create_project(project_dir, INITIAL_SCHEMA)
+    assert chkit(project, ["generate", "--name", "init", "--json"]).exit_code == 0
+    snapshot = json.loads(project.snapshot_path.read_text(encoding="utf-8"))
+    events = next(d for d in snapshot["definitions"] if d["name"] == "events")
+    snapshot["definitions"].append(
+        {**events, "name": "events_previous", "retainedBy": {"cutover": "app.events"}}
+    )
+    project.snapshot_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+
+    result = chkit(project, ["snapshot", "rebuild", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = payload_of(result)
+    assert payload["previous"] == {"status": "parsed", "added": [], "removed": [], "changed": []}
+    assert payload["definitionCount"] == 3
+    rebuilt = json.loads(project.snapshot_path.read_text(encoding="utf-8"))
+    assert "events_previous" in [d["name"] for d in rebuilt["definitions"]]
+    assert operation_count(project) == 0
+
+
 def test_rebuilds_a_conflicted_snapshot_and_prints_the_review_commands(project_dir: Path) -> None:
     project = create_project(project_dir, INITIAL_SCHEMA)
     assert chkit(project, ["generate", "--name", "init", "--json"]).exit_code == 0

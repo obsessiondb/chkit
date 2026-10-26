@@ -724,3 +724,75 @@ describe('applyMigration mode=barrier', () => {
   }, 15_000)
 })
 
+
+describe('applyMigration fire-and-forget async insert guard', () => {
+  const SQL =
+    '-- operation: cutover_validate key=table:app.events:cutover:start risk=caution\n' +
+    'SELECT 1;\n' +
+    '-- operation: cutover_snapshot key=table:app.events:cutover:snapshot risk=caution\n' +
+    'ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;\n' +
+    '-- operation: exchange_tables key=table:app.events risk=caution\n' +
+    'EXCHANGE TABLES app.events AND app.events__cutover_1;\n'
+
+  // query_log reports fire-and-forget async inserts into the tables listed in `busy`.
+  function queryLogDb(busy: (sql: string) => string[]) {
+    const commandCalls: string[] = []
+    const guardReads: string[] = []
+    const db = {
+      async command(statement: string) {
+        commandCalls.push(statement)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        if (statement.includes('system.one')) throw new Error('no cluster')
+        if (!statement.includes('system.query_log')) return [] as T[]
+        guardReads.push(statement)
+        return busy(statement).map((table) => ({ table, inserts: 3 })) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    return { db, commandCalls, guardReads }
+  }
+
+  function run(db: ClickHouseExecutor, dir: string, store: JournalStore) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+  }
+
+  test('checks the cutover table at the first step and both tables before the EXCHANGE', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls, guardReads } = queryLogDb(() => [])
+    const { store } = createFakeStore()
+    await run(db, dir, store)
+    expect(guardReads).toHaveLength(2)
+    expect(guardReads[0]).toContain("hasAny(tables, ['app.events'])")
+    expect(guardReads[1]).toContain("hasAny(tables, ['app.events', 'app.events__cutover_1'])")
+    expect(commandCalls).toHaveLength(3)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('stops a cutover before its copy while fire-and-forget async inserts reach the table', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls } = queryLogDb(() => ['app.events'])
+    const { store } = createFakeStore()
+    await expect(run(db, dir, store)).rejects.toThrow('3 into app.events')
+    expect(commandCalls).toEqual([])
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('refuses the EXCHANGE when such inserts started during the cutover', async () => {
+    const dir = writeMigration(SQL)
+    const { db, commandCalls } = queryLogDb((sql) => (sql.includes('app.events__cutover_1') ? ['app.events'] : []))
+    const { store } = createFakeStore()
+    await expect(run(db, dir, store)).rejects.toThrow('wait_for_async_insert = 0')
+    expect(commandCalls).toEqual(['SELECT 1;', 'ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;'])
+    rmSync(dir, { recursive: true, force: true })
+  })
+})

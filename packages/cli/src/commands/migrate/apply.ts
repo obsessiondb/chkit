@@ -2,10 +2,13 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
+  assertNoFireAndForgetAsyncInserts,
+  parseExchangeTables,
   waitForDDLPropagation,
   waitForExchange,
   waitForInsertBarrier,
   type ClickHouseExecutor,
+  type QualifiedTable,
 } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
 
@@ -198,6 +201,14 @@ export async function applyMigration(input: {
         throw statementError({ file, index: i, total: statements.length, statement, error })
       }
     }
+    const swapped = operation ? swappedTables(operation.type, operation.key, statement) : undefined
+    if (swapped) {
+      try {
+        await assertNoFireAndForgetAsyncInserts(db, swapped, { cluster: config.clickhouse?.cluster, log })
+      } catch (error) {
+        throw statementError({ file, index: i, total: statements.length, statement, error })
+      }
+    }
     const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
     await journalStore.writeMigrationState(
       upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
@@ -250,6 +261,21 @@ export async function applyMigration(input: {
   })
 
   return entry
+}
+
+const CUTOVER_START_KEY = /^table:([^.]+)\.(.+):cutover:start$/
+
+/**
+ * The tables a statement is about to swap, whose fire-and-forget async inserts
+ * would be dropped: both tables of an EXCHANGE TABLES, and the table of a
+ * cutover at its first step, so that the cutover stops before its copy.
+ */
+function swappedTables(operationType: string, operationKey: string, statement: string): QualifiedTable[] | undefined {
+  if (operationType === 'exchange_tables') return parseExchangeTables(statement)
+  if (operationType !== 'cutover_validate') return undefined
+  const match = CUTOVER_START_KEY.exec(operationKey)
+  if (!match?.[1] || !match[2]) return undefined
+  return [{ database: match[1], name: match[2] }]
 }
 
 /**

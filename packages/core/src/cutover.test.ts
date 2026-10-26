@@ -166,7 +166,8 @@ describe('planCutover', () => {
 
   test('verifies per key that the shadow holds exactly the snapshot rows', () => {
     const verify = plan().operations[8]?.sql ?? ''
-    expect(verify).toContain('cityHash64(`id`, `user_id`, `payload`)')
+    // A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
+    expect(verify).toContain('cityHash64(tuple(`id`, `user_id`, `payload`))')
     expect(verify).toContain('GROUP BY `id` HAVING snapshot_rows > 0 AND (snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)')
     expect(verify).toContain('The table was not swapped.')
   })
@@ -328,12 +329,12 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
   test('a change of the engine arguments only', () => {
     const oldDef = events({ engine: "ReplicatedMergeTree('/t/{uuid}', '{replica}')" })
     const newDef = events({ engine: "ReplicatedMergeTree('/t2/{uuid}', '{replica}')" })
-    expect(messages(() => plan({ oldDef, newDef }))).toEqual([expect.stringContaining('only the engine arguments change')])
+    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
   })
 
   test('a replication path without {table} or {uuid}, where the shadow would collide', () => {
     const replicated = (def: TableDefinition) => ({ ...def, engine: "ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}')" })
-    expect(messages(() => plan({ oldDef: replicated(OLD), newDef: replicated(NEW) }))).toEqual([
+    expect(messages(() => plan({ oldDef: replicated(OLD), newDef: replicated(NEW), options: { cluster: 'c2' } }))).toEqual([
       expect.stringContaining('names no {table} or {uuid} macro'),
       expect.stringContaining('names no {table} or {uuid} macro'),
     ])
@@ -344,6 +345,72 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
       expect.stringContaining('engine MergeTree() with clickhouse.cluster'),
       expect.stringContaining('engine MergeTree() with clickhouse.cluster'),
       expect.stringContaining('--cutover-copy backfill is not supported with clickhouse.cluster'),
+    ])
+  })
+
+  test('a Replicated table without clickhouse.cluster, whose shadow would exist on one replica', () => {
+    const replicated = (def: TableDefinition) => ({ ...def, engine: "ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{replica}')" })
+    expect(messages(() => plan({ oldDef: replicated(OLD), newDef: replicated(NEW) }))).toEqual([
+      expect.stringContaining('without clickhouse.cluster: the shadow table would exist on one replica only'),
+      expect.stringContaining('without clickhouse.cluster: the shadow table would exist on one replica only'),
+    ])
+  })
+
+  test('a TTL, which deletes rows at different times in the old and the new table', () => {
+    const ttl = 'toDateTime(id) + INTERVAL 1 DAY'
+    expect(messages(() => plan({ newDef: { ...NEW, ttl } }))).toEqual([expect.stringContaining(`TTL ${ttl} deletes rows in the background`)])
+    expect(messages(() => plan({ oldDef: { ...OLD, ttl } }))).toEqual([expect.stringContaining(`TTL ${ttl} deletes rows in the background`)])
+  })
+
+  test('a rename of the table or of a column, which the copy would not follow', () => {
+    expect(messages(() => plan({ newDef: { ...NEW, renamedFrom: { name: 'old_events' } } }))).toEqual([
+      expect.stringContaining('the table is also renamed'),
+    ])
+    const renamed = [columns[0], columns[1], { name: 'body', type: 'String', renamedFrom: 'payload' }] as TableDefinition['columns']
+    expect(messages(() => plan({ newDef: { ...NEW, columns: renamed } }))).toEqual([
+      expect.stringContaining('column payload is renamed to body: the copy matches columns by name'),
+    ])
+  })
+
+  test('a new CHECK constraint, which would fail the writers through the mirror', () => {
+    const check = { name: 'positive', check: 'user_id > 0' }
+    expect(messages(() => plan({ newDef: { ...NEW, constraints: [check] } }))).toEqual([
+      expect.stringContaining('CHECK constraint positive is new'),
+    ])
+    // Unchanged CHECK constraints and ASSUME constraints are fine.
+    expect(plan({ oldDef: { ...OLD, constraints: [check] }, newDef: { ...NEW, constraints: [check] } }).operations.length).toBeGreaterThan(0)
+    expect(plan({ newDef: { ...NEW, constraints: [{ name: 'hint', assume: 'user_id > 0' }] } }).operations.length).toBeGreaterThan(0)
+  })
+
+  test('a Buffer table, and a streaming source behind an intermediate table', () => {
+    const buffer = table({
+      database: 'app',
+      name: 'events_buffer',
+      engine: "Buffer('app', 'events', 16, 10, 100, 10000, 1000000, 10000000, 100000000)",
+      columns,
+    } as never)
+    const queue = table({
+      database: 'app',
+      name: 'events_queue',
+      engine: "Kafka('broker:9092', 'events', 'g', 'JSONEachRow')",
+      columns,
+    } as never)
+    const landing = table({ database: 'app', name: 'events_landing', engine: 'Null', columns } as never)
+    const toLanding = materializedView({
+      database: 'app',
+      name: 'queue_to_landing',
+      to: { database: 'app', name: 'events_landing' },
+      as: 'SELECT id, user_id, payload FROM app.events_queue',
+    })
+    const toEvents = materializedView({
+      database: 'app',
+      name: 'landing_to_events',
+      to: { database: 'app', name: 'events' },
+      as: 'SELECT id, user_id, payload FROM app.events_landing',
+    })
+    expect(messages(() => plan({ definitions: [NEW, buffer, queue, landing, toLanding, toEvents] }))).toEqual([
+      expect.stringContaining('Buffer table app.events_buffer flushes into app.events'),
+      expect.stringContaining('materialized view app.landing_to_events feeds app.events from the app.events_queue (Kafka) table'),
     ])
   })
 

@@ -18,6 +18,7 @@ from typing import Annotated, Any
 
 import typer
 
+from chkit.cli.commands.generate_cutover import carry_retained_definitions
 from chkit.cli.commands.snapshot_output import (
     PreviousSnapshotReport,
     SnapshotRebuildPayload,
@@ -25,7 +26,7 @@ from chkit.cli.commands.snapshot_output import (
 )
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json, emit_json_error
-from chkit.cli.migration_store import write_snapshot
+from chkit.cli.migration_store import read_snapshot, write_snapshot
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.schema_loader import load_schema_definitions_with_hooks
 from chkit.cli.shared_engine_flags import (
@@ -137,8 +138,13 @@ def run_snapshot_rebuild(
     )
     # A hook may return definitions that are not canonical. The snapshot always
     # stores canonical definitions, so canonicalize once and validate, compare,
-    # count and write that same list.
-    definitions = canonicalize_definitions(loaded)
+    # count and write that same list. A table that a keep-mode cutover retained
+    # is declared in the snapshot only, so the rebuild keeps it, as `generate` does.
+    definitions = carry_retained_definitions(
+        previous_definitions=_read_retained_source(meta_dir),
+        definitions=canonicalize_definitions(loaded),
+        drop_retained=[],
+    )
 
     # Same validation and error contract as `chkit generate`.
     issues = validate_definitions(definitions)
@@ -174,6 +180,15 @@ def run_snapshot_rebuild(
         json_mode=json_mode,
     )
     return 0
+
+
+def _read_retained_source(meta_dir: Path) -> list[SchemaDefinition]:
+    """The definitions of the current snapshot, or none when it is missing or unreadable."""
+    try:
+        snapshot = read_snapshot(meta_dir)
+    except Exception:  # an unreadable snapshot is what rebuild repairs
+        return []
+    return list(snapshot.definitions) if snapshot is not None else []
 
 
 def _assert_rebuild_invocation(args: list[str], table_selector: str | None) -> None:

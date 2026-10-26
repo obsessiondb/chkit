@@ -1860,10 +1860,14 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - chkit-py's default `drift` and `check` compare the snapshot with the schema files (TS
   compares with the live database). They carry the retained `<table>_previous` like
   `generate` does, so a keep-mode cutover is clean in both.
-- `migrate_apply` still only warns when a propagation wait times out (see #290 above);
-  for `exchange_tables` that means a slow swap propagation is a warning, and the
-  `after_exchange` guard that follows fails the migration on a replica that has not
-  applied the swap.
+- `migrate_apply` raises when the swap of an `exchange_tables` statement has not reached
+  every replica, as TS does; other propagation waits still only warn (see #290 above).
+  Python keeps the `-- operation:` marker lines in executed statements, so
+  `parse_exchange_tables` skips leading `--` comment lines (TS gets statements without
+  them).
+- The fire-and-forget async insert guard (`chkit.clickhouse.async_insert_guard`, TS
+  `async-insert-guard.ts`) reads the same `system.query_log` SQL at the cutover's first
+  step and before each `EXCHANGE TABLES`, with the same error and warning text.
 - The Python e2e scenario uses a MergeTree table as the chained insert source instead
   of a Null table: chkit-py's live drift reports a Null table as `engine_mismatch`
   (pre-existing, unrelated to the cutover).

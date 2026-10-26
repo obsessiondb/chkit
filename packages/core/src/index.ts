@@ -67,6 +67,7 @@ export {
   parseCutoverMetadata,
   parseCutoverRequest,
   planCutover,
+  readsTable,
   type CutoverCopyMode,
   type CutoverMetadata,
   type CutoverNames,

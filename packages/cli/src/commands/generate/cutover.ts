@@ -3,6 +3,7 @@ import {
   CUTOVER_OLD_TABLE_MODES,
   parseCutoverRequest,
   planCutover,
+  readsTable,
   type CutoverCopyMode,
   type CutoverOldTableMode,
   type CutoverRequest,
@@ -121,6 +122,7 @@ export function applyCutovers(input: {
         `--cutover ${target}: the plan does not recreate ${target}. A cutover replaces the DROP TABLE and CREATE TABLE of a change to the engine, ORDER BY, PRIMARY KEY or PARTITION BY of an existing table${input.plan.operations.length === 0 ? '; the plan is empty' : ''}. Check the table name and the --table scope.`
       )
     }
+    assertNoDependentRecreated(operations, [...input.previousDefinitions, ...input.definitions], request)
     const oldDef = findTable(input.previousDefinitions, request)
     const newDef = findTable(input.definitions, request)
     if (!oldDef || !newDef) throw new Error(`--cutover ${target}: the table is missing from the snapshot or the schema.`)
@@ -164,6 +166,34 @@ export function summarizeCutover(cutover: PlannedCutover): CutoverSummary {
     columns: cutover.columns,
     ...(cutover.retained ? { retainedAs: `${request.database}.${names.previous}` } : {}),
     nextSteps,
+  }
+}
+
+/**
+ * A view that reads from or writes into the cutover table and is dropped and
+ * recreated by the same migration would miss every INSERT of the cutover: the
+ * drop runs before the cutover's first step and the CREATE after its last.
+ */
+function assertNoDependentRecreated(operations: MigrationOperation[], definitions: SchemaDefinition[], request: CutoverRequest): void {
+  const target = `${request.database}.${request.table}`
+  const table = { database: request.database, name: request.table }
+  const dependents = new Set(
+    definitions.flatMap((def) => {
+      if (def.kind === 'materialized_view') {
+        const writes = def.to.database === request.database && def.to.name === request.table
+        return writes || readsTable(def.as, table, def.database) ? [`materialized_view:${def.database}.${def.name}`] : []
+      }
+      if (def.kind === 'view') return readsTable(def.as, table, def.database) ? [`view:${def.database}.${def.name}`] : []
+      return []
+    })
+  )
+  const recreated = operations.find(
+    (op) => (op.type === 'drop_materialized_view' || op.type === 'drop_view') && dependents.has(op.key)
+  )
+  if (recreated) {
+    throw new Error(
+      `--cutover ${target}: ${recreated.key.replace(/^\w+:/, '')} reads from or writes into ${target} and is recreated in the same migration, so it would miss every INSERT during the cutover. Change it in a separate migration, before or after the cutover.`
+    )
   }
 }
 

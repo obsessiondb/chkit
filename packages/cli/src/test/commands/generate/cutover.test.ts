@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { planDiff, table, type TableDefinition } from '@chkit/core'
+import { materializedView, planDiff, table, type TableDefinition } from '@chkit/core'
 
 import {
   applyCutovers,
@@ -96,6 +96,25 @@ describe('applyCutovers', () => {
       retainedAs: 'app.events_previous',
       nextSteps: ['chkit migrate --apply'],
     })
+  })
+
+  test('refuses a dependent view recreated in the same migration, which would miss the cutover', () => {
+    const counts = (as: string) =>
+      materializedView({ database: 'app', name: 'events_counts_mv', to: { database: 'app', name: 'events_counts' }, as })
+    const before = counts('SELECT user_id, count() AS n FROM app.events GROUP BY user_id')
+    const after = counts('SELECT user_id, count() AS n, max(id) AS last FROM app.events GROUP BY user_id')
+    const plan = planDiff([OLD, before], [NEW, after])
+    expect(plan.operations.map((op) => op.type)).toContain('drop_materialized_view')
+    expect(() =>
+      applyCutovers({
+        plan,
+        previousDefinitions: [OLD, before],
+        definitions: [NEW, after],
+        cutovers: resolveCutoverFlags({ ...FLAGS, cutover: ['app.events=id'] }),
+        cluster: undefined,
+        stamp: '20261024120000',
+      })
+    ).toThrow('app.events_counts_mv reads from or writes into app.events and is recreated in the same migration')
   })
 
   test('refuses a table whose change is not a recreate', () => {
