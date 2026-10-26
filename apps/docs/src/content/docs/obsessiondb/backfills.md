@@ -52,6 +52,32 @@ chkit plugin backfill status --service-slug <service>
 chkit plugin backfill cancel --job-id <jobId>
 ```
 
+`status --job-id` prints the job's state, task progress, the most recent task error (if any), and the console link:
+
+```
+Backfill job 4f2c… (analytics.events): running
+Tasks: 3/12 completed, 1 failed
+Last error: Memory limit (total) exceeded
+Track progress: https://console.obsessiondb.com/<service>/jobs/4f2c…
+```
+
+The console link uses `--service-slug` when given, otherwise the selected service; without either it is left out. `cancel --job-id` prints `Cancellation requested for backfill job <jobId>.` followed by the same link.
+
+With `--json`, each command returns one envelope. `status --job-id` carries the full job from the backend under `job`, with `lastError` and `url` alongside:
+
+```json
+{
+  "command": "backfill status",
+  "schemaVersion": 1,
+  "ok": true,
+  "job": { "id": "4f2c…", "target": "analytics.events", "status": "running", "totalTasks": 12, "completedTasks": 3, "failedTasks": 1, "tasks": [] },
+  "lastError": "Memory limit (total) exceeded",
+  "url": "https://console.obsessiondb.com/<service>/jobs/4f2c…"
+}
+```
+
+`status --service-slug` returns `jobs` and `total`; `cancel` returns `jobId` and `url`. Failures, such as a missing session or an unknown job, return `{"command": "backfill status", "schemaVersion": 1, "ok": false, "error": {"code": "…", "message": "…"}}` and exit 1.
+
 Passing `--plan-id` instead keeps `status`/`cancel` local, operating on on-disk run state rather than the backend.
 
 ## Local execution is guarded against ObsessionDB

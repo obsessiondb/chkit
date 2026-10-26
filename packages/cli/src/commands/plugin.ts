@@ -1,7 +1,7 @@
-import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
+import { typedFlags, type ChxPluginCommand, type ParsedFlags, type PluginRuntime } from '../plugins.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
-import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
+import { type FlagDef, parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
@@ -111,12 +111,17 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     tableScope = resolveTableScope(tableSelector, [])
   }
 
-  // Parse plugin-specific flags when the command declares them
+  // Parse plugin-specific flags when the command declares them or another plugin
+  // extends this plugin's namespace (the same flags `chkit <plugin> <command>` accepts).
   const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
+  const commandFlags = [
+    ...(targetCommand?.flags ?? []),
+    ...collectExtensionFlags(pluginRuntime.plugins, pluginName),
+  ]
   let mergedFlags: ParsedFlags = { ...flags }
-  if (targetCommand?.flags && targetCommand.flags.length > 0) {
+  if (commandFlags.length > 0) {
     try {
-      const parsed = parseFlags(commandArgs, targetCommand.flags)
+      const parsed = parseFlags(commandArgs, commandFlags)
       mergedFlags = { ...flags, ...parsed }
     } catch (error) {
       if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
@@ -144,4 +149,16 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   })
 
   return exitCode
+}
+
+function collectExtensionFlags(
+  plugins: PluginRuntime['plugins'],
+  pluginName: string,
+): FlagDef[] {
+  return plugins.flatMap((entry) =>
+    (entry.plugin.extendCommands ?? []).flatMap((extension) => {
+      const targets = Array.isArray(extension.command) ? extension.command : [extension.command]
+      return targets.includes(pluginName) ? [...extension.flags] : []
+    }),
+  )
 }

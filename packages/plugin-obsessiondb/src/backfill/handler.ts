@@ -1,8 +1,11 @@
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
+import { errorEnvelope } from '../json-envelope.js'
 import { loadSelectedService } from '../service/storage.js'
 import { createJobsClient, isSessionExpiredError, type JobsClient } from './client.js'
+import { buildJobConsoleUrl } from './console-url.js'
+import { jobCancelOutput, jobListOutput, jobStatusOutput, type JobOutput } from './job-output.js'
 import { handleSubmit } from './submit.js'
 
 interface BeforePluginCommandContext {
@@ -53,9 +56,11 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
   // remote ObsessionDB hook shadow project-local backfill state commands.
   if (typeof context.flags['--plan-id'] === 'string') return { handled: false }
 
+  const commandId = `backfill ${context.command}`
   const creds = await loadCredentials()
   if (!creds) {
-    context.print('Not logged in. Run `chkit obsessiondb login` to authenticate.')
+    const message = 'Not logged in. Run `chkit obsessiondb login` to authenticate.'
+    context.print(context.jsonMode ? errorEnvelope(commandId, 'not_logged_in', message) : message)
     return { handled: true, exitCode: 1 }
   }
 
@@ -64,15 +69,21 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
   const client = createJobsClient(effectiveCreds)
 
   try {
-    const result = await dispatchCommand(client, context.command, context.flags)
-    context.print(result)
+    const output = await dispatchCommand(client, context, effectiveCreds.base_url)
+    context.print(context.jsonMode ? output.json : output.text)
     return { handled: true, exitCode: 0 }
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
     if (isSessionExpiredError(error)) {
-      context.print(error instanceof Error ? error.message : String(error))
+      context.print(context.jsonMode ? errorEnvelope(commandId, 'session_expired', message) : message)
       return { handled: true, exitCode: 1 }
     }
-    throw error
+    context.print(
+      context.jsonMode
+        ? errorEnvelope(commandId, 'error', message)
+        : `Backfill ${context.command} failed: ${message}`,
+    )
+    return { handled: true, exitCode: 1 }
   }
 }
 
@@ -128,28 +139,38 @@ async function guardRemoteExecution(
 
 async function dispatchCommand(
   client: JobsClient,
-  command: string,
-  flags: Record<string, string | string[] | boolean | undefined>,
-): Promise<unknown> {
+  context: BeforePluginCommandContext,
+  apiBaseUrl: string,
+): Promise<JobOutput> {
+  const { flags } = context
   const jobId = typeof flags['--job-id'] === 'string' ? flags['--job-id'] : undefined
   const serviceSlug =
     typeof flags['--service-slug'] === 'string' ? flags['--service-slug'] : undefined
 
-  switch (command) {
+  // The console deep-link needs a service slug; the job itself only carries the service id.
+  const consoleUrl = async (id: string): Promise<string | null> => {
+    const slug = serviceSlug ?? (await loadSelectedService(context.configPath))?.service_slug
+    return slug ? buildJobConsoleUrl(apiBaseUrl, slug, id) : null
+  }
+
+  switch (context.command) {
     case 'status': {
-      if (jobId) return client.get({ jobId })
-      if (serviceSlug) return client.list({ serviceSlug })
+      if (jobId) return jobStatusOutput(await client.get({ jobId }), await consoleUrl(jobId))
+      if (serviceSlug) {
+        return jobListOutput('backfill status', serviceSlug, await client.list({ serviceSlug }))
+      }
       throw new Error('Either --job-id or --service-slug is required for remote status')
     }
     case 'cancel': {
       if (!jobId) throw new Error('--job-id is required for remote cancel')
-      return client.cancel({ jobId })
+      await client.cancel({ jobId })
+      return jobCancelOutput(jobId, await consoleUrl(jobId))
     }
     case 'list': {
       if (!serviceSlug) throw new Error('--service-slug is required for remote list')
-      return client.list({ serviceSlug })
+      return jobListOutput('backfill list', serviceSlug, await client.list({ serviceSlug }))
     }
     default:
-      throw new Error(`Unsupported remote command: ${command}`)
+      throw new Error(`Unsupported remote command: ${context.command}`)
   }
 }
