@@ -163,6 +163,42 @@ export async function recordBackfillSubmission(input: {
   return submissionPath
 }
 
+/**
+ * Submissions of saved plans that have no local run. The job backend, not a
+ * local run, decides whether these backfills are done.
+ */
+export async function listRemoteSubmissions(input: {
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  stateDir?: string
+}): Promise<Array<{ submissionPath: string; submission: BackfillSubmissionState }>> {
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
+  const planIds = await listPlanIds(join(stateDir, 'plans'))
+  const entries = await Promise.all(
+    planIds.map(async (planId) => {
+      const paths = backfillPaths(stateDir, planId)
+      if (await readRun(paths.runPath)) return undefined
+      const submission = await readSubmission(paths.submissionPath)
+      return submission ? { submissionPath: paths.submissionPath, submission } : undefined
+    })
+  )
+  return entries.filter((entry) => entry !== undefined)
+}
+
+/** Records that the job backend reported the submitted job completed. */
+export async function confirmBackfillSubmission(input: {
+  submissionPath: string
+  submission: BackfillSubmissionState
+}): Promise<BackfillSubmissionState> {
+  const confirmed: BackfillSubmissionState = {
+    ...input.submission,
+    status: 'completed',
+    confirmedAt: nowIso(),
+  }
+  await writeJson(input.submissionPath, confirmed)
+  return confirmed
+}
+
 export async function listPlanIds(plansDir: string): Promise<string[]> {
   if (!existsSync(plansDir)) return []
   const entries = await readdir(plansDir, { withFileTypes: true })

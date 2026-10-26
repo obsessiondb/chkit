@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -265,6 +266,44 @@ def record_backfill_submission(
     return submission_path
 
 
+@dataclass(frozen=True)
+class RemoteSubmission:
+    submission_path: str
+    submission: BackfillSubmissionState
+
+
+def list_remote_submissions(
+    *,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> list[RemoteSubmission]:
+    """Submissions of saved plans that have no local run. The job backend, not
+    a local run, decides whether these backfills are done.
+    """
+    resolved_state_dir = compute_backfill_state_dir(config, config_path, state_dir)
+    entries: list[RemoteSubmission] = []
+    for plan_id in list_plan_ids(resolved_state_dir / "plans"):
+        paths = backfill_paths(resolved_state_dir, plan_id)
+        if read_run(paths.run_path) is not None:
+            continue
+        submission = read_submission(paths.submission_path)
+        if submission is not None:
+            entries.append(RemoteSubmission(paths.submission_path, submission))
+    return entries
+
+
+def confirm_backfill_submission(
+    *, submission_path: str | Path, submission: BackfillSubmissionState
+) -> BackfillSubmissionState:
+    """Record that the job backend reported the submitted job completed."""
+    confirmed = submission.model_copy(
+        update={"status": "completed", "confirmed_at": now_iso()}
+    )
+    write_json(submission_path, confirmed)
+    return confirmed
+
+
 def list_plan_ids(plans_dir: str | Path) -> list[str]:
     path = Path(plans_dir)
     if not path.exists():
@@ -336,13 +375,16 @@ def chunk_ids_in_order(plan: BackfillPlanState) -> Iterable[str]:
 
 __all__ = [
     "BackfillPathSet",
+    "RemoteSubmission",
     "backfill_paths",
     "chunk_ids_in_order",
     "compute_backfill_state_dir",
     "compute_environment_fingerprint",
+    "confirm_backfill_submission",
     "ensure_environment_match",
     "hash_id",
     "list_plan_ids",
+    "list_remote_submissions",
     "now_iso",
     "plan_status_for",
     "random_plan_id",

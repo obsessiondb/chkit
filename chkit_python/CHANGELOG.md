@@ -88,16 +88,23 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
-- backfill: `chkit check` no longer fails on a plan sent with the ObsessionDB managed
-  `submit` (#304). The job runs server-side and never writes a local run, so the
+- backfill: `chkit check` now judges a plan sent with the ObsessionDB managed `submit`
+  by its job (#304). The job runs server-side and never writes a local run, so the
   check counted the saved plan as pending (`backfill_required_pending`) until the plan
-  file was deleted by hand. `submit` now records the job ID in
-  `<meta_dir>/backfill/submissions/<plan_id>.json` (same layout as the TS CLI), and
-  the check reports such plans with the non-failing `backfill_submitted_remote` info
-  finding and a new `submittedCount`. The check does not query the backend; follow
-  the job with `chkit plugin backfill status --job-id <job_id>`. A local run of the
-  plan, once it exists, still decides its result. `sdk` exports
-  `record_backfill_submission`.
+  file was deleted by hand, even after the job completed. `submit` now records the job
+  ID in `<meta_dir>/backfill/submissions/<plan_id>.json` (same layout as the TS CLI).
+  The backfill check leaves such a plan to its job backend and counts it in a new
+  `submittedCount`; a local run of the plan, once it exists, still decides its result.
+  The ObsessionDB plugin's check asks the jobs API for each submitted job without a
+  local run, whatever the check target: a completed job passes and its confirmation is
+  saved in the submission file, so later checks skip the API call; a pending or
+  running job fails with `obsessiondb_backfill_job_incomplete`, a failed or cancelled
+  one with `obsessiondb_backfill_job_failed`, and a missing or expired session or an
+  API error with `obsessiondb_backfill_job_unverified`. Projects without submitted
+  plans make no API call. CI that runs `chkit check` needs an ObsessionDB session until
+  every submitted job is confirmed completed. `sdk` exports
+  `record_backfill_submission`, `list_remote_submissions` and
+  `confirm_backfill_submission`.
 - `clickhouse.url` with an `https://` scheme now connects over HTTPS when `secure` is
   not set (#298). Before, an unset `secure` meant plain HTTP, so
   `"url": "https://host"` connected to `http://host:8123`. The URL scheme now sets the

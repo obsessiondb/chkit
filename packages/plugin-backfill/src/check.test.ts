@@ -8,11 +8,13 @@ import { evaluateBackfillCheck } from './check.js'
 import {
   backfillPaths,
   computeBackfillStateDir,
+  confirmBackfillSubmission,
+  listRemoteSubmissions,
   readSubmission,
   recordBackfillSubmission,
   writeJson,
 } from './state.js'
-import type { BackfillRunState } from './types.js'
+import type { BackfillRunState, BackfillSubmissionState } from './types.js'
 
 const PLAN_ID = '0123456789abcdef'
 const TARGET = 'app.events'
@@ -29,21 +31,15 @@ describe('evaluateBackfillCheck', () => {
     expect(result.metadata).toEqual({ requiredCount: 1, activeRuns: 0, failedRuns: 0, submittedCount: 0 })
   })
 
-  test('passes on a plan submitted to a managed job backend and names its job', async () => {
+  test('leaves a plan submitted to a managed job backend to that backend', async () => {
     const { configPath } = await setupPlan()
     await recordBackfillSubmission({ plan: { planId: PLAN_ID, target: TARGET }, jobId: 'job-123', configPath, config })
 
     const result = await evaluateBackfillCheck({ configPath, config, failCheckOnRequiredPendingBackfill: true })
 
     expect(result.ok).toBe(true)
+    expect(result.findings).toEqual([])
     expect(result.metadata).toEqual({ requiredCount: 0, activeRuns: 0, failedRuns: 0, submittedCount: 1 })
-    expect(result.findings).toHaveLength(1)
-    expect(result.findings[0]).toMatchObject({
-      code: 'backfill_submitted_remote',
-      severity: 'info',
-      metadata: { submittedCount: 1, jobIds: ['job-123'] },
-    })
-    expect(result.findings[0]?.message).toContain('status --job-id')
   })
 
   test('still fails on an unsubmitted plan next to a submitted one', async () => {
@@ -54,10 +50,7 @@ describe('evaluateBackfillCheck', () => {
     const result = await evaluateBackfillCheck({ configPath, config, failCheckOnRequiredPendingBackfill: true })
 
     expect(result.ok).toBe(false)
-    expect(result.findings.map((finding) => finding.code)).toEqual([
-      'backfill_required_pending',
-      'backfill_submitted_remote',
-    ])
+    expect(result.findings.map((finding) => finding.code)).toEqual(['backfill_required_pending'])
     expect(result.metadata).toMatchObject({ requiredCount: 1, submittedCount: 1 })
   })
 
@@ -104,6 +97,53 @@ describe('recordBackfillSubmission', () => {
       failCheckOnRequiredPendingBackfill: true,
     })
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('listRemoteSubmissions', () => {
+  test('lists submitted plans without a local run and nothing else', async () => {
+    const { configPath, stateDir } = await setupPlan()
+    const ranLocally = 'fedcba9876543210'
+    await writeJson(backfillPaths(stateDir, ranLocally).planPath, {})
+    await writeJson(backfillPaths(stateDir, '1111111111111111').planPath, {})
+    await recordBackfillSubmission({ plan: { planId: PLAN_ID, target: TARGET }, jobId: 'job-123', configPath, config })
+    await recordBackfillSubmission({ plan: { planId: ranLocally, target: TARGET }, jobId: 'job-456', configPath, config })
+    await writeJson(backfillPaths(stateDir, ranLocally).runPath, { planId: ranLocally, status: 'completed' })
+
+    const submissions = await listRemoteSubmissions({ configPath, config })
+
+    expect(submissions).toEqual([
+      {
+        submissionPath: backfillPaths(stateDir, PLAN_ID).submissionPath,
+        submission: expect.objectContaining({ planId: PLAN_ID, jobId: 'job-123' }),
+      },
+    ])
+  })
+
+  test('returns nothing without saved plans', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-backfill-check-'))
+
+    expect(await listRemoteSubmissions({ configPath: join(dir, 'clickhouse.config.ts'), config })).toEqual([])
+  })
+})
+
+describe('confirmBackfillSubmission', () => {
+  test('marks the submission completed on disk', async () => {
+    const { stateDir } = await setupPlan()
+    const { submissionPath } = backfillPaths(stateDir, PLAN_ID)
+    const submission: BackfillSubmissionState = {
+      planId: PLAN_ID,
+      target: TARGET,
+      jobId: 'job-123',
+      submittedAt: '2026-01-01T00:00:00.000Z',
+    }
+    await writeJson(submissionPath, submission)
+
+    const confirmed = await confirmBackfillSubmission({ submissionPath, submission })
+
+    expect(confirmed).toMatchObject({ ...submission, status: 'completed' })
+    expect(await readSubmission(submissionPath)).toEqual(confirmed)
+    expect(Number.isNaN(Date.parse(confirmed.confirmedAt ?? ''))).toBe(false)
   })
 })
 

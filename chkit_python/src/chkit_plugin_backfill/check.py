@@ -44,18 +44,19 @@ def evaluate_backfill_check(
     required_count = 0
     active_runs = 0
     failed_runs = 0
-    submitted_job_ids: list[str] = []
+    submitted_count = 0
 
     for plan_id in plan_ids:
         run_path = runs_dir / f"{plan_id}.json"
         run = read_run(run_path)
         if run is None:
-            # A managed job runs on the backend and never writes a local run, so
-            # a submitted plan is not pending locally. A local run, if any,
-            # still wins.
+            # A managed job runs on the backend and never writes a local run.
+            # Its backend's plugin (e.g. ObsessionDB) checks whether the job
+            # completed, so it is not pending here. A local run, if any, still
+            # wins.
             submission = read_submission(submissions_dir / f"{plan_id}.json")
             if submission is not None:
-                submitted_job_ids.append(submission.job_id)
+                submitted_count += 1
             else:
                 required_count += 1
             continue
@@ -77,24 +78,6 @@ def evaluate_backfill_check(
                     "error" if fail_check_on_required_pending_backfill else "warn"
                 ),
                 metadata={"requiredCount": required_count},
-            )
-        )
-
-    if submitted_job_ids:
-        findings.append(
-            ChxCheckFinding(
-                code="backfill_submitted_remote",
-                message=(
-                    "Backfills submitted to a managed job backend:"
-                    f" {len(submitted_job_ids)}. chkit check does not track"
-                    " their completion; follow each with chkit plugin backfill"
-                    " status --job-id <jobId>."
-                ),
-                severity="info",
-                metadata={
-                    "submittedCount": len(submitted_job_ids),
-                    "jobIds": submitted_job_ids,
-                },
             )
         )
 
@@ -130,7 +113,7 @@ def evaluate_backfill_check(
             "requiredCount": required_count,
             "activeRuns": active_runs,
             "failedRuns": failed_runs,
-            "submittedCount": len(submitted_job_ids),
+            "submittedCount": submitted_count,
         },
     )
 

@@ -14,11 +14,17 @@ from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.state import (
     backfill_paths,
     compute_backfill_state_dir,
+    confirm_backfill_submission,
+    list_remote_submissions,
     read_submission,
     record_backfill_submission,
     write_json,
 )
-from chkit_plugin_backfill.types import BackfillRunState, BackfillRunStatus
+from chkit_plugin_backfill.types import (
+    BackfillRunState,
+    BackfillRunStatus,
+    BackfillSubmissionState,
+)
 
 PLAN_ID = "0123456789abcdef"
 TARGET = "app.events"
@@ -43,7 +49,7 @@ def test_fails_on_a_saved_plan_with_no_local_run(tmp_path: Path) -> None:
     }
 
 
-def test_passes_on_a_plan_submitted_to_a_managed_job_backend_and_names_its_job(
+def test_leaves_a_plan_submitted_to_a_managed_job_backend_to_that_backend(
     tmp_path: Path,
 ) -> None:
     config, config_path, _state_dir = _setup_plan(tmp_path)
@@ -64,11 +70,7 @@ def test_passes_on_a_plan_submitted_to_a_managed_job_backend_and_names_its_job(
         "failedRuns": 0,
         "submittedCount": 1,
     }
-    [finding] = result.findings
-    assert finding.code == "backfill_submitted_remote"
-    assert finding.severity == "info"
-    assert finding.metadata == {"submittedCount": 1, "jobIds": ["job-123"]}
-    assert "status --job-id" in finding.message
+    assert result.findings == []
 
 
 def test_still_fails_on_an_unsubmitted_plan_next_to_a_submitted_one(
@@ -87,10 +89,7 @@ def test_still_fails_on_an_unsubmitted_plan_next_to_a_submitted_one(
     )
 
     assert result.ok is False
-    assert [finding.code for finding in result.findings] == [
-        "backfill_required_pending",
-        "backfill_submitted_remote",
-    ]
+    assert [finding.code for finding in result.findings] == ["backfill_required_pending"]
     assert result.metadata is not None
     assert result.metadata["requiredCount"] == 1
     assert result.metadata["submittedCount"] == 1
@@ -179,6 +178,68 @@ def test_submission_file_uses_the_ts_layout(tmp_path: Path) -> None:
     assert text.startswith('{\n  "planId": "0123456789abcdef",\n  "target": "app.events",\n')
     assert '\n  "jobId": "job-123",\n  "submittedAt": "' in text
     assert text.endswith('"\n}\n')
+
+
+def test_list_remote_submissions_lists_submitted_plans_without_a_local_run(
+    tmp_path: Path,
+) -> None:
+    config, config_path, state_dir = _setup_plan(tmp_path)
+    ran_locally = "fedcba9876543210"
+    write_json(backfill_paths(state_dir, ran_locally).plan_path, {})
+    write_json(backfill_paths(state_dir, "1111111111111111").plan_path, {})
+    record_backfill_submission(
+        plan_id=PLAN_ID, target=TARGET, job_id="job-123", config_path=config_path, config=config
+    )
+    record_backfill_submission(
+        plan_id=ran_locally, target=TARGET, job_id="job-456", config_path=config_path, config=config
+    )
+    write_json(
+        backfill_paths(state_dir, ran_locally).run_path,
+        BackfillRunState(
+            planId=ran_locally,
+            target=TARGET,
+            status="completed",
+            startedAt="2026-01-01T00:00:00.000Z",
+            updatedAt="2026-01-01T00:00:00.000Z",
+        ),
+    )
+
+    [entry] = list_remote_submissions(config_path=config_path, config=config)
+
+    assert entry.submission_path == backfill_paths(state_dir, PLAN_ID).submission_path
+    assert (entry.submission.plan_id, entry.submission.job_id) == (PLAN_ID, "job-123")
+
+
+def test_list_remote_submissions_returns_nothing_without_saved_plans(
+    tmp_path: Path,
+) -> None:
+    config, _config_path, _state_dir = _setup_plan(tmp_path)
+
+    assert list_remote_submissions(config_path=tmp_path / "other" / "c.py", config=config) == []
+
+
+def test_confirm_backfill_submission_marks_the_submission_completed_on_disk(
+    tmp_path: Path,
+) -> None:
+    _config, _config_path, state_dir = _setup_plan(tmp_path)
+    submission_path = backfill_paths(state_dir, PLAN_ID).submission_path
+    submission = BackfillSubmissionState(
+        plan_id=PLAN_ID,
+        target=TARGET,
+        job_id="job-123",
+        submitted_at="2026-01-01T00:00:00.000Z",
+    )
+    write_json(submission_path, submission)
+
+    confirmed = confirm_backfill_submission(
+        submission_path=submission_path, submission=submission
+    )
+
+    assert confirmed.status == "completed"
+    assert confirmed.job_id == "job-123"
+    assert read_submission(submission_path) == confirmed
+    assert confirmed.confirmed_at is not None
+    datetime.fromisoformat(confirmed.confirmed_at)
 
 
 def _setup_plan(

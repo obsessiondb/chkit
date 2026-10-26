@@ -42,16 +42,17 @@ export async function evaluateBackfillCheck(input: {
   let requiredCount = 0
   let activeRuns = 0
   let failedRuns = 0
-  const submittedJobIds: string[] = []
+  let submittedCount = 0
 
   for (const planId of planIds) {
     const runPath = join(runsDir, `${planId}.json`)
     const run = await readRun(runPath)
     if (!run) {
-      // A managed job runs on the backend and never writes a local run, so a
-      // submitted plan is not pending locally. A local run, if any, still wins.
+      // A managed job runs on the backend and never writes a local run. Its
+      // backend's plugin (e.g. ObsessionDB) checks whether the job completed,
+      // so it is not pending here. A local run, if any, still wins.
       const submission = await readSubmission(join(submissionsDir, `${planId}.json`))
-      if (submission) submittedJobIds.push(submission.jobId)
+      if (submission) submittedCount += 1
       else requiredCount += 1
       continue
     }
@@ -69,20 +70,6 @@ export async function evaluateBackfillCheck(input: {
       severity: input.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
       metadata: {
         requiredCount,
-      },
-    })
-  }
-
-  if (submittedJobIds.length > 0) {
-    findings.push({
-      code: 'backfill_submitted_remote',
-      message:
-        `Backfills submitted to a managed job backend: ${submittedJobIds.length}. ` +
-        'chkit check does not track their completion; follow each with chkit plugin backfill status --job-id <jobId>.',
-      severity: 'info',
-      metadata: {
-        submittedCount: submittedJobIds.length,
-        jobIds: submittedJobIds,
       },
     })
   }
@@ -116,7 +103,7 @@ export async function evaluateBackfillCheck(input: {
       requiredCount,
       activeRuns,
       failedRuns,
-      submittedCount: submittedJobIds.length,
+      submittedCount,
     },
   }
 }

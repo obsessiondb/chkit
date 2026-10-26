@@ -88,6 +88,9 @@ export interface BackfillSubmissionState {
   target: string
   jobId: string
   submittedAt: string
+  /** Set once the job backend reported the job completed; check stops asking then. */
+  status?: 'completed'
+  confirmedAt?: string
 }
 
 export interface BackfillStatusSummary {
@@ -129,7 +132,6 @@ export interface BackfillPluginCheckResult {
       | 'backfill_window_exceeds_limit'
       | 'backfill_chunk_failed_retry_exhausted'
       | 'backfill_policy_relaxed'
-      | 'backfill_submitted_remote'
     message: string
     severity: 'info' | 'warn' | 'error'
     metadata?: Record<string, unknown>
