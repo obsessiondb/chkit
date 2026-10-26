@@ -7,6 +7,9 @@ flow tests with the jobs client / remote executor / planner monkeypatched.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -241,12 +244,13 @@ def _submit_context(
     flags: dict[str, Any],
     msgs: list[Any],
     json_mode: bool = False,
+    config_dir: Path | None = None,
 ) -> SubmitContext:
     return SubmitContext(
         flags=flags,
-        config_path="cfg.py",
+        config_path=str(config_dir / "cfg.py") if config_dir else "cfg.py",
         json_mode=json_mode,
-        config=None,
+        config=SimpleNamespace(meta_dir="meta") if config_dir else None,
         print=msgs.append,
         credentials=Credentials(access_token="tok", base_url=BASE),
         service_slug="svc-1",
@@ -278,6 +282,7 @@ def _patch_submit_pipeline(
 
 def test_handle_submit_success_submits_tasks_and_prints_console_url(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     submitted: list[dict[str, Any]] = []
     _patch_submit_pipeline(monkeypatch, submitted)
@@ -285,7 +290,9 @@ def test_handle_submit_success_submits_tasks_and_prints_console_url(
     msgs: list[Any] = []
     code = handle_submit(
         _submit_context(
-            flags={"--target": "app.events", "--title": "My backfill"}, msgs=msgs
+            flags={"--target": "app.events", "--title": "My backfill"},
+            msgs=msgs,
+            config_dir=tmp_path,
         )
     )
 
@@ -307,13 +314,19 @@ def test_handle_submit_success_submits_tasks_and_prints_console_url(
 
 def test_handle_submit_success_json_mode_emits_envelope(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     submitted: list[dict[str, Any]] = []
     _patch_submit_pipeline(monkeypatch, submitted)
 
     msgs: list[Any] = []
     code = handle_submit(
-        _submit_context(flags={"--target": "app.events"}, msgs=msgs, json_mode=True)
+        _submit_context(
+            flags={"--target": "app.events"},
+            msgs=msgs,
+            json_mode=True,
+            config_dir=tmp_path,
+        )
     )
 
     assert code == 0
@@ -326,6 +339,28 @@ def test_handle_submit_success_json_mode_emits_envelope(
         "taskCount": 2,
         "url": f"{BASE}/svc-1/jobs/job-9",
     }
+
+
+def test_handle_submit_records_the_job_id_so_check_does_not_wait_for_a_local_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    submitted: list[dict[str, Any]] = []
+    _patch_submit_pipeline(monkeypatch, submitted)
+
+    msgs: list[Any] = []
+    code = handle_submit(
+        _submit_context(flags={"--target": "app.events"}, msgs=msgs, config_dir=tmp_path)
+    )
+
+    assert code == 0
+    submission_path = (
+        tmp_path / "meta" / "backfill" / "submissions" / "abcdef0123456789.json"
+    )
+    submission = json.loads(submission_path.read_text(encoding="utf-8"))
+    assert submission["planId"] == "abcdef0123456789"
+    assert submission["target"] == "app.events"
+    assert submission["jobId"] == "job-9"
 
 
 def test_handle_submit_invalid_input_returns_error_exit_code() -> None:

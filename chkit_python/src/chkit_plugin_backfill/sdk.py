@@ -50,10 +50,12 @@ from chkit_plugin_backfill.planner import (
     BuildBackfillPlanOutput,
     build_backfill_plan,
 )
+from chkit_plugin_backfill.state import record_backfill_submission
 from chkit_plugin_backfill.types import (
     BackfillChunkState,
     BackfillPlanState,
     BackfillProgress,
+    BackfillSubmissionState,
 )
 
 __all__ = [
@@ -63,6 +65,7 @@ __all__ = [
     "BackfillPlanState",
     "BackfillProgress",
     "BackfillResult",
+    "BackfillSubmissionState",
     "BuildBackfillPlanOutput",
     "Chunk",
     "ChunkDerivationStep",
@@ -89,6 +92,7 @@ __all__ = [
     "get_backfill_logger",
     "inject_sort_key_filter",
     "parse_byte_size",
+    "record_backfill_submission",
     "rewrite_select_columns",
     "sync_progress",
 ]

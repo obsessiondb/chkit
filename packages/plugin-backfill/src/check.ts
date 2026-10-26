@@ -6,6 +6,7 @@ import {
   computeBackfillStateDir,
   listPlanIds,
   readRun,
+  readSubmission,
 } from './state.js'
 import type {
   BackfillPluginCheckResult,
@@ -20,6 +21,7 @@ export async function evaluateBackfillCheck(input: {
   const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
   const plansDir = join(stateDir, 'plans')
   const runsDir = join(stateDir, 'runs')
+  const submissionsDir = join(stateDir, 'submissions')
 
   const planIds = await listPlanIds(plansDir)
   if (planIds.length === 0) {
@@ -32,6 +34,7 @@ export async function evaluateBackfillCheck(input: {
         requiredCount: 0,
         activeRuns: 0,
         failedRuns: 0,
+        submittedCount: 0,
       },
     }
   }
@@ -39,12 +42,17 @@ export async function evaluateBackfillCheck(input: {
   let requiredCount = 0
   let activeRuns = 0
   let failedRuns = 0
+  const submittedJobIds: string[] = []
 
   for (const planId of planIds) {
     const runPath = join(runsDir, `${planId}.json`)
     const run = await readRun(runPath)
     if (!run) {
-      requiredCount += 1
+      // A managed job runs on the backend and never writes a local run, so a
+      // submitted plan is not pending locally. A local run, if any, still wins.
+      const submission = await readSubmission(join(submissionsDir, `${planId}.json`))
+      if (submission) submittedJobIds.push(submission.jobId)
+      else requiredCount += 1
       continue
     }
 
@@ -61,6 +69,20 @@ export async function evaluateBackfillCheck(input: {
       severity: input.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
       metadata: {
         requiredCount,
+      },
+    })
+  }
+
+  if (submittedJobIds.length > 0) {
+    findings.push({
+      code: 'backfill_submitted_remote',
+      message:
+        `Backfills submitted to a managed job backend: ${submittedJobIds.length}. ` +
+        'chkit check does not track their completion; follow each with chkit plugin backfill status --job-id <jobId>.',
+      severity: 'info',
+      metadata: {
+        submittedCount: submittedJobIds.length,
+        jobIds: submittedJobIds,
       },
     })
   }
@@ -94,6 +116,7 @@ export async function evaluateBackfillCheck(input: {
       requiredCount,
       activeRuns,
       failedRuns,
+      submittedCount: submittedJobIds.length,
     },
   }
 }

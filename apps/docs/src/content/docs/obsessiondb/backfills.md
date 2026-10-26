@@ -73,6 +73,28 @@ Two ways forward:
 
 Each chunk renders the same idempotent `INSERT … SELECT` the local executor would run, including CTE-wrapped materialized-view replay when the target is an MV's `to` table. The backend receives the task list, executes chunks with the requested `--concurrency` (1–48), and retries failed chunks up to the plan's per-chunk retry budget. Idempotency tokens make re-runs safe: re-submitting the same window does not double-write.
 
+## Submitted plans in `chkit check`
+
+`submit` saves its plan under `<metaDir>/backfill/plans/`, like `plan`, and records the job ID in `<metaDir>/backfill/submissions/<planId>.json`. The job writes no local run checkpoint, so `chkit check` does not count a submitted plan as a pending backfill. It reports the plan with the `backfill_submitted_remote` info finding, and the check passes:
+
+```sh
+chkit check --json
+```
+
+```json
+"backfill": {
+  "evaluated": true,
+  "ok": true,
+  "findingCodes": ["backfill_submitted_remote"],
+  "requiredCount": 0,
+  "activeRuns": 0,
+  "failedRuns": 0,
+  "submittedCount": 1
+}
+```
+
+`check` does not query the backend, so it cannot tell whether the job finished. Follow it with `chkit plugin backfill status --job-id <jobId>`. If you later run the same plan locally with `--local`, `check` judges it by that local run instead.
+
 ## Related
 
 - [Backfill Plugin (beta)](/plugins/backfill/) — full command reference, planning options, and local execution.

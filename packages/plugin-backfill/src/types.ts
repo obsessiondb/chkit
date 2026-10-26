@@ -79,6 +79,17 @@ export interface BackfillRunState {
   progress: BackfillProgress
 }
 
+/**
+ * Written by a managed `submit` (e.g. ObsessionDB): the plan's chunks run as a
+ * job on the backend, so no local run state is ever written for it.
+ */
+export interface BackfillSubmissionState {
+  planId: string
+  target: string
+  jobId: string
+  submittedAt: string
+}
+
 export interface BackfillStatusSummary {
   planId: string
   target: string
@@ -118,6 +129,7 @@ export interface BackfillPluginCheckResult {
       | 'backfill_window_exceeds_limit'
       | 'backfill_chunk_failed_retry_exhausted'
       | 'backfill_policy_relaxed'
+      | 'backfill_submitted_remote'
     message: string
     severity: 'info' | 'warn' | 'error'
     metadata?: Record<string, unknown>
@@ -142,6 +154,7 @@ export interface BackfillPathSet {
   runsDir: string
   planPath: string
   runPath: string
+  submissionPath: string
 }
 
 export interface BackfillDoctorReport {

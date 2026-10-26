@@ -88,6 +88,16 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- backfill: `chkit check` no longer fails on a plan sent with the ObsessionDB managed
+  `submit` (#304). The job runs server-side and never writes a local run, so the
+  check counted the saved plan as pending (`backfill_required_pending`) until the plan
+  file was deleted by hand. `submit` now records the job ID in
+  `<meta_dir>/backfill/submissions/<plan_id>.json` (same layout as the TS CLI), and
+  the check reports such plans with the non-failing `backfill_submitted_remote` info
+  finding and a new `submittedCount`. The check does not query the backend; follow
+  the job with `chkit plugin backfill status --job-id <job_id>`. A local run of the
+  plan, once it exists, still decides its result. `sdk` exports
+  `record_backfill_submission`.
 - `clickhouse.url` with an `https://` scheme now connects over HTTPS when `secure` is
   not set (#298). Before, an unset `secure` meant plain HTTP, so
   `"url": "https://host"` connected to `http://host:8123`. The URL scheme now sets the

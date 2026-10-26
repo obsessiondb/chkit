@@ -29,6 +29,7 @@ from chkit_plugin_backfill.types import (
     BackfillRunState,
     BackfillStatusSummary,
     BackfillStatusTotals,
+    BackfillSubmissionState,
 )
 
 
@@ -134,6 +135,7 @@ def backfill_paths(state_dir: Path | str, plan_id: str) -> BackfillPathSet:
         runs_dir=str(runs_dir),
         plan_path=str(plans_dir / f"{plan_id}.json"),
         run_path=str(runs_dir / f"{plan_id}.json"),
+        submission_path=str(base / "submissions" / f"{plan_id}.json"),
     )
 
 
@@ -233,6 +235,36 @@ def read_run(run_path: str | Path) -> BackfillRunState | None:
     return BackfillRunState.model_validate(raw)
 
 
+def read_submission(submission_path: str | Path) -> BackfillSubmissionState | None:
+    raw = _read_json_maybe(Path(submission_path))
+    if raw is None:
+        return None
+    return BackfillSubmissionState.model_validate(raw)
+
+
+def record_backfill_submission(
+    *,
+    plan_id: str,
+    target: str,
+    job_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> str:
+    """Record that a plan was handed to a managed job backend, so ``check``
+    does not wait for a local run that will never be written.
+    """
+    resolved_state_dir = compute_backfill_state_dir(config, config_path, state_dir)
+    submission_path = backfill_paths(resolved_state_dir, plan_id).submission_path
+    write_json(
+        submission_path,
+        BackfillSubmissionState(
+            plan_id=plan_id, target=target, job_id=job_id, submitted_at=now_iso()
+        ),
+    )
+    return submission_path
+
+
 def list_plan_ids(plans_dir: str | Path) -> list[str]:
     path = Path(plans_dir)
     if not path.exists():
@@ -316,6 +348,8 @@ __all__ = [
     "random_plan_id",
     "read_plan",
     "read_run",
+    "read_submission",
+    "record_backfill_submission",
     "summarize_run_status",
     "write_json",
 ]

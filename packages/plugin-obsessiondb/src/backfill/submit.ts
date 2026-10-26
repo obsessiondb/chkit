@@ -7,6 +7,7 @@ import {
 	generateIdempotencyToken,
 	parseByteSize,
 	PlanSchema,
+	recordBackfillSubmission,
 } from '@chkit/plugin-backfill/sdk'
 
 import { isSessionExpiredError } from '../api-request.js'
@@ -151,6 +152,15 @@ export async function handleSubmit(
 			...(title ? { title } : {}),
 			...(concurrency !== undefined ? { concurrency } : {}),
 			metadata: { planId: plan.planId, mode: plan.execution.mode, source: 'chkit' },
+		})
+		// The job runs server-side and never writes a local run, so mark the plan
+		// as submitted; otherwise `chkit check` counts it as pending forever.
+		await recordBackfillSubmission({
+			plan,
+			jobId,
+			configPath: context.configPath,
+			config: context.config,
+			stateDir: opts.stateDir,
 		})
 
 		const url = buildJobConsoleUrl(context.credentials.base_url, context.serviceSlug, jobId)

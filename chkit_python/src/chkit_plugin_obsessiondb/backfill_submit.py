@@ -21,6 +21,7 @@ from chkit_plugin_backfill.sdk import (
     build_backfill_plan,
     build_chunk_execution_sql,
     generate_idempotency_token,
+    record_backfill_submission,
 )
 from chkit_plugin_obsessiondb.api_client import is_session_expired_error
 from chkit_plugin_obsessiondb.console_url import build_job_console_url
@@ -217,6 +218,16 @@ def handle_submit(context: SubmitContext) -> int:
                 "mode": plan.execution.mode,
                 "source": "chkit",
             },
+        )
+        # The job runs server-side and never writes a local run, so mark the
+        # plan as submitted; otherwise `chkit check` counts it as pending forever.
+        record_backfill_submission(
+            plan_id=plan.plan_id,
+            target=plan.target,
+            job_id=job_id,
+            config_path=context.config_path,
+            config=context.config,
+            state_dir=parsed.opts.state_dir,
         )
 
         url = build_job_console_url(

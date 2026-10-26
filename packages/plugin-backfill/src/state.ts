@@ -13,6 +13,7 @@ import type {
   BackfillPlanState,
   BackfillRunState,
   BackfillStatusSummary,
+  BackfillSubmissionState,
   ReadPlanOutput,
 } from './types.js'
 
@@ -82,6 +83,7 @@ export function backfillPaths(stateDir: string, planId: string): BackfillPathSet
     runsDir,
     planPath: join(plansDir, `${planId}.json`),
     runPath: join(runsDir, `${planId}.json`),
+    submissionPath: join(stateDir, 'submissions', `${planId}.json`),
   }
 }
 
@@ -132,6 +134,33 @@ export async function readPlan(input: {
 
 export async function readRun(runPath: string): Promise<BackfillRunState | null> {
   return readJsonMaybe<BackfillRunState>(runPath)
+}
+
+export async function readSubmission(submissionPath: string): Promise<BackfillSubmissionState | null> {
+  return readJsonMaybe<BackfillSubmissionState>(submissionPath)
+}
+
+/**
+ * Records that a plan was handed to a managed job backend, so `check` does not
+ * wait for a local run that will never be written.
+ */
+export async function recordBackfillSubmission(input: {
+  plan: Pick<BackfillPlanState, 'planId' | 'target'>
+  jobId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  stateDir?: string
+}): Promise<string> {
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
+  const { submissionPath } = backfillPaths(stateDir, input.plan.planId)
+  const submission: BackfillSubmissionState = {
+    planId: input.plan.planId,
+    target: input.plan.target,
+    jobId: input.jobId,
+    submittedAt: nowIso(),
+  }
+  await writeJson(submissionPath, submission)
+  return submissionPath
 }
 
 export async function listPlanIds(plansDir: string): Promise<string[]> {
