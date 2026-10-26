@@ -31,6 +31,7 @@ from chkit_plugin_obsessiondb import (
     handle_backfill_command,
     save_credentials,
 )
+from chkit_plugin_obsessiondb.storage import SelectedService, save_selected_service
 
 BASE = "https://api.test.obsessiondb.com"
 SVC = "svc-1"
@@ -56,13 +57,15 @@ def _bf_ctx(
     command: str,
     flags: dict[str, Any],
     msgs: list[Any] | None = None,
+    json_mode: bool = False,
+    config_path: str = "cfg.py",
 ) -> ChxOnBeforePluginCommandContext:
     return ChxOnBeforePluginCommandContext(
         target_plugin="backfill",
         command=command,
         config=_cfg(),
-        config_path="cfg.py",
-        json_mode=False,
+        config_path=config_path,
+        json_mode=json_mode,
         args=[],
         flags=flags,
         options={},
@@ -151,10 +154,182 @@ def test_handler_routes_list_to_remote_jobs_list(
     )
     msgs: list[Any] = []
     result = handle_backfill_command(
-        _bf_ctx(command="list", flags={"--service-slug": SVC}, msgs=msgs)
+        _bf_ctx(command="list", flags={"--service-slug": SVC}, msgs=msgs, json_mode=True)
     )
     assert isinstance(result, ChxOnBeforePluginCommandHandled)
     assert result.exit_code == 0
     [printed] = msgs
+    assert printed["command"] == "backfill list"
+    assert printed["schemaVersion"] == 1
+    assert printed["ok"] is True
     assert printed["total"] == 1
     assert printed["jobs"][0]["id"] == "job-1"
+
+
+def _job_detail(**extra: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": "job-123",
+        "serviceId": "svc-id-1",
+        "title": None,
+        "type": "backfill",
+        "target": "analytics.events",
+        "status": "running",
+        "concurrency": 4,
+        "totalTasks": 10,
+        "completedTasks": 3,
+        "failedTasks": 0,
+        "createdAt": "2026-03-29T00:00:00Z",
+        "updatedAt": "2026-03-29T01:00:00Z",
+        "maxRetries": 3,
+        "workflowId": None,
+        "metadata": None,
+        "tasks": [],
+    }
+    payload.update(extra)
+    return payload
+
+
+def _failed_run(error: str, finished_at: str) -> dict[str, object]:
+    return {
+        "id": f"run-{finished_at}",
+        "attempt": 1,
+        "type": "insert",
+        "status": "failed",
+        "error": error,
+        "startedAt": finished_at,
+        "finishedAt": finished_at,
+    }
+
+
+def _select_service(tmp_path: Path) -> str:
+    config_path = str(tmp_path / "clickhouse.config.py")
+    save_selected_service(
+        config_path, SelectedService(service_slug=SVC, service_name="My Service")
+    )
+    return config_path
+
+
+def test_handler_prints_remote_job_status_as_text(
+    isolated_home: Path, tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = _select_service(tmp_path)
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/jobs/get",
+        json=_job_detail(
+            failedTasks=1,
+            tasks=[
+                {"id": "t1", "runs": [_failed_run("first failure", "2026-03-29T00:10:00Z")]},
+                {"id": "t2", "runs": [_failed_run("Memory limit exceeded", "2026-03-29T00:20:00Z")]},
+            ],
+        ),
+    )
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="status",
+            flags={"--job-id": "job-123"},
+            msgs=msgs,
+            config_path=config_path,
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 0
+    assert msgs == [
+        "Backfill job job-123 (analytics.events): running\n"
+        "Tasks: 3/10 completed, 1 failed\n"
+        "Last error: Memory limit exceeded\n"
+        f"Track progress: https://api.test.obsessiondb.com/{SVC}/jobs/job-123"
+    ]
+
+
+def test_handler_wraps_remote_job_status_in_json_envelope(
+    isolated_home: Path, tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = _select_service(tmp_path)
+    httpx_mock.add_response(url=f"{BASE}/rpc/jobs/get", json=_job_detail())
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="status",
+            flags={"--job-id": "job-123"},
+            msgs=msgs,
+            json_mode=True,
+            config_path=config_path,
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 0
+    [printed] = msgs
+    assert printed["command"] == "backfill status"
+    assert printed["schemaVersion"] == 1
+    assert printed["ok"] is True
+    assert printed["job"]["id"] == "job-123"
+    assert printed["job"]["completedTasks"] == 3
+    assert printed["lastError"] is None
+    assert printed["url"] == f"https://api.test.obsessiondb.com/{SVC}/jobs/job-123"
+
+
+def test_handler_confirms_remote_cancel_as_text(
+    isolated_home: Path, tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = _select_service(tmp_path)
+    httpx_mock.add_response(url=f"{BASE}/rpc/jobs/cancel", json={})
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="cancel",
+            flags={"--job-id": "job-456"},
+            msgs=msgs,
+            config_path=config_path,
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 0
+    assert msgs == [
+        "Cancellation requested for backfill job job-456.\n"
+        f"Track progress: https://api.test.obsessiondb.com/{SVC}/jobs/job-456"
+    ]
+
+
+def test_handler_wraps_remote_cancel_in_json_envelope(
+    isolated_home: Path, httpx_mock: HTTPXMock
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    httpx_mock.add_response(url=f"{BASE}/rpc/jobs/cancel", json={})
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="cancel", flags={"--job-id": "job-456"}, msgs=msgs, json_mode=True
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 0
+    assert msgs == [
+        {
+            "command": "backfill cancel",
+            "schemaVersion": 1,
+            "ok": True,
+            "jobId": "job-456",
+            "url": None,
+        }
+    ]
+
+
+def test_handler_reports_missing_login_as_json_error_envelope(
+    isolated_home: Path,
+) -> None:
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="status", flags={"--job-id": "job-123"}, msgs=msgs, json_mode=True
+        )
+    )
+    assert isinstance(result, ChxOnBeforePluginCommandHandled)
+    assert result.exit_code == 1
+    [printed] = msgs
+    assert printed["command"] == "backfill status"
+    assert printed["ok"] is False
+    assert printed["error"]["code"] == "not_logged_in"

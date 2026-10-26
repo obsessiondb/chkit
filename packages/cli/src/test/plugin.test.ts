@@ -206,6 +206,51 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('plugin namespace accepts flags another plugin extends onto the target plugin', async () => {
+    const fixture = await createFixture()
+    const targetPath = join(fixture.dir, 'target-plugin.ts')
+    const extenderPath = join(fixture.dir, 'extender-plugin.ts')
+    try {
+      await writeFile(
+        targetPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'target', apiVersion: 1 },\n  commands: [\n    {\n      name: 'greet',\n      description: 'Original greet',\n      flags: [{ name: '--name', type: 'string', description: 'Who to greet' }],\n      run({ flags, print }) {\n        print({ flags })\n        return 0\n      },\n    },\n  ],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        extenderPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'extender', apiVersion: 1 },\n  extendCommands: [\n    { command: ['target'], flags: [{ name: '--job-id', type: 'string', description: 'Remote job ID' }] },\n  ],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `import { plugin as target } from '${targetPath}'\nimport { plugin as extender } from '${extenderPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [\n    { plugin: target },\n    { plugin: extender },\n  ],\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'plugin',
+        'target',
+        'greet',
+        '--job-id',
+        'job-123',
+        '--name',
+        'ada',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(result.stderr).toBe('')
+      expect(result.exitCode).toBe(0)
+      const payload = JSON.parse(result.stdout) as { flags: Record<string, unknown> }
+      expect(payload.flags['--job-id']).toBe('job-123')
+      expect(payload.flags['--name']).toBe('ada')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('plugin pull schema command writes pulled schema artifact', async () => {
     const fixture = await createFixture()
     const pluginPath = join(fixture.dir, 'pull-plugin.ts')

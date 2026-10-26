@@ -775,7 +775,7 @@ describe('onBeforePluginCommand — backfill interception', () => {
 
 		expect(result.handled).toBe(true)
 		expect(result.exitCode).toBe(0)
-		expect((printed[0] as Record<string, unknown>).id).toBe('job-123')
+		expect(printed[0]).toContain('Backfill job job-123 (my_table): running')
 	})
 
 	test('requires login when not authenticated', async () => {
