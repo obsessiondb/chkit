@@ -491,6 +491,24 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
           },
         }),
       },
+      {
+        name: 'list',
+        description: 'List the backfill jobs of a managed job backend service (e.g. ObsessionDB)',
+        run: runCommand({
+          command: 'list',
+          label: 'Backfill list',
+          fn: async () => {
+            // Reaching this handler means no managed backend intercepted the
+            // command. The ObsessionDB plugin lists a service's jobs via its
+            // onBeforePluginCommand hook; local runs have no job list.
+            throw new BackfillConfigError(
+              'backfill list shows the jobs of a managed job backend. Register the ObsessionDB plugin, log in and select a service ' +
+                '(`chkit obsessiondb login`, then `chkit obsessiondb service select`). ' +
+                'Inspect a local run with `chkit plugin backfill status --plan-id <id>`.',
+            )
+          },
+        }),
+      },
     ],
     hooks: {
       onConfigLoaded() {

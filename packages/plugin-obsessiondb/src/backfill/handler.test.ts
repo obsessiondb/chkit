@@ -303,6 +303,98 @@ describe('handleBackfillCommand', () => {
     })
   })
 
+  function listResponse() {
+    return {
+      jobs: [
+        {
+          id: 'job-1',
+          serviceId: 'svc-1',
+          type: 'backfill',
+          target: 'table_a',
+          status: 'completed',
+          concurrency: 2,
+          totalTasks: 5,
+          completedTasks: 5,
+          failedTasks: 0,
+          createdAt: '2026-03-28T00:00:00Z',
+          updatedAt: '2026-03-28T01:00:00Z',
+        },
+      ],
+      total: 1,
+    }
+  }
+
+  test('list --service-slug lists that service\'s jobs', async () => {
+    await setupAuth()
+    const configPath = await selectService()
+    const fetchMock = mock(async (_request: Request) => orpcResponse(listResponse()))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const { context, printed } = makeContext({
+      command: 'list',
+      configPath,
+      flags: { '--service-slug': 'other-svc' },
+    })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    const request = fetchMock.mock.calls[0]?.[0]
+    expect(request?.url).toContain('/rpc/jobs/list')
+    expect(await request?.json()).toEqual({ json: { serviceSlug: 'other-svc' } })
+    expect(printed).toEqual([
+      'Backfill jobs for service other-svc (1):\n- job-1 table_a: completed (5/5 completed, 0 failed)',
+    ])
+  })
+
+  test('list defaults to the selected service', async () => {
+    await setupAuth()
+    const configPath = await selectService()
+    const fetchMock = mock(async (_request: Request) => orpcResponse(listResponse()))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const { context, printed } = makeContext({ command: 'list', configPath, jsonMode: true, flags: {} })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 0 })
+    expect(await fetchMock.mock.calls[0]?.[0].json()).toEqual({ json: { serviceSlug: 'svc-1' } })
+    expect(printed[0]).toMatchObject({
+      command: 'backfill list',
+      schemaVersion: 1,
+      ok: true,
+      serviceSlug: 'svc-1',
+      total: 1,
+      jobs: [{ id: 'job-1' }],
+    })
+  })
+
+  test('list without --service-slug or a selected service asks for one', async () => {
+    await setupAuth()
+    const fetchMock = mock(async () => orpcResponse(listResponse()))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const { context, printed } = makeContext({
+      command: 'list',
+      configPath: join(tempDir, 'clickhouse.config.ts'),
+      jsonMode: true,
+      flags: {},
+    })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 1 })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(printed).toEqual([
+      {
+        command: 'backfill list',
+        schemaVersion: 1,
+        ok: false,
+        error: {
+          code: 'error',
+          message: 'No service selected. Pass --service-slug or run `chkit obsessiondb service select`.',
+        },
+      },
+    ])
+  })
+
   test('runs execution commands locally when authenticated but no service is selected', async () => {
     await setupAuth()
 

@@ -265,7 +265,10 @@ def create_obsessiondb_plugin(
                     {
                         "name": "--service-slug",
                         "type": "string",
-                        "description": "ObsessionDB service slug for listing jobs",
+                        "description": (
+                            "ObsessionDB service slug for listing jobs"
+                            " (list defaults to the selected service)"
+                        ),
                     },
                 ],
             },
