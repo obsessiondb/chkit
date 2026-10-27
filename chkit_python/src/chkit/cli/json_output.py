@@ -83,6 +83,17 @@ class JsonErrorEnvelope(TypedDict):
     error: JsonError
 
 
+def json_error_code(error: BaseException) -> str:
+    """The ``--json`` error code for ``error``: its ``code`` attribute when that
+    is a string (the stable code of e.g. ``MigrateError`` or
+    ``ServiceNotFoundError``), else ``"error"``.
+
+    Mirrors ``toJsonError`` in ``packages/cli/src/bin/chkit.ts``.
+    """
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) else "error"
+
+
 def build_json_error_envelope(command: str, error: JsonError) -> JsonErrorEnvelope:
     return JsonErrorEnvelope(
         command=command,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from chkit.cli.json_output import json_error_code
 from chkit.plugins import (
     ChxOnBeforePluginCommandContext,
     ChxOnBeforePluginCommandHandled,
@@ -235,7 +236,7 @@ def handle_backfill_command(  # noqa: PLR0911
         return ChxOnBeforePluginCommandHandled(exit_code=1)
     except Exception as error:
         context.print(
-            error_envelope(command_id, "error", str(error))
+            error_envelope(command_id, json_error_code(error), str(error))
             if context.json_mode
             else f"Backfill {context.command} failed: {error}"
         )
