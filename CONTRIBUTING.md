@@ -4,7 +4,7 @@ Thanks for considering a contribution. chkit is a young project — bug reports,
 
 ## Prerequisites
 
-- Bun `1.3.5+`
+- Bun `1.3.13+` (the version pinned in `packageManager` in `package.json`; `bun run build` and `bun run verify` stop with an upgrade hint on an older Bun)
 - Node.js `20+`
 
 ## Setup
