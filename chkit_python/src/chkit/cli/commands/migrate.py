@@ -65,7 +65,7 @@ from chkit.cli.commands.migrate_retry import (
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
-from chkit.cli.json_output import emit_json_error
+from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.migration_metadata import extract_migration_metadata
 from chkit.cli.migration_store import (
     MigrationJournal,
@@ -215,11 +215,12 @@ def run(  # noqa: PLR0917
         raise
     except Exception as error:
         # Like the TS CLI's top-level handler: in --json mode stdout carries a
-        # parseable error envelope (with the stable code of a MigrateError);
-        # the message always goes to stderr.
-        code = error.code if isinstance(error, MigrateError) else "error"
+        # parseable error envelope (with the error's stable code, if it has
+        # one); the message always goes to stderr.
         if output_json:
-            emit_json_error("migrate", {"code": code, "message": str(error)})
+            emit_json_error(
+                "migrate", {"code": json_error_code(error), "message": str(error)}
+            )
         typer.secho(str(error), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from error
 

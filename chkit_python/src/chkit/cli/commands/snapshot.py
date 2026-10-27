@@ -25,7 +25,7 @@ from chkit.cli.commands.snapshot_output import (
     emit_snapshot_rebuild_output,
 )
 from chkit.cli.config_loader import load_config
-from chkit.cli.json_output import emit_json, emit_json_error
+from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
 from chkit.cli.migration_store import read_snapshot, write_snapshot
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.schema_loader import load_schema_definitions_with_hooks
@@ -248,4 +248,6 @@ def _report_error(error: Exception, *, json_mode: bool) -> None:
     message = str(error) or type(error).__name__
     typer.echo(message, err=True)
     if json_mode:
-        emit_json_error("snapshot", {"code": "error", "message": message})
+        emit_json_error(
+            "snapshot", {"code": json_error_code(error), "message": message}
+        )

@@ -140,6 +140,13 @@
   `ServiceNotFoundError` naming the service, the active organization and the one that
   owns it (`code="service_not_in_active_organization"`), or saying no organization has
   it (`code="service_not_found"`). Both point to `chkit obsessiondb service select`.
+- `--json` error envelopes now carry the raised error's stable code (#312). `migrate`,
+  `snapshot` and the ObsessionDB `backfill status|cancel` commands reported
+  `"code": "error"` for any error other than a `MigrateError`, so a
+  `ServiceNotFoundError` lost its `service_not_in_active_organization` /
+  `service_not_found` code. Like the TS CLI, any error with a string `code` attribute
+  now reports that code (`chkit.cli.json_output.json_error_code`); other errors still
+  report `"error"`.
 - backfill: resume reads chunk status on every replica of a multi-replica target
   (#289). `sync_progress` read only the local `system.processes` /
   `system.query_log`, even with `clickhouse.cluster` set, so a chunk running or
