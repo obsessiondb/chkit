@@ -11,11 +11,11 @@ import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
-from chkit_plugin_backfill.options import PlanOptions, parse_byte_size
+from chkit_plugin_backfill.options import PlanOptions, PluginConfig, parse_byte_size
 from chkit_plugin_backfill.sdk import (
     BackfillPlanState,
     build_backfill_plan,
@@ -24,6 +24,9 @@ from chkit_plugin_backfill.sdk import (
     record_backfill_submission,
 )
 from chkit_plugin_obsessiondb.api_client import is_session_expired_error
+from chkit_plugin_obsessiondb.backfill_plugin_options import (
+    resolve_backfill_plugin_options,
+)
 from chkit_plugin_obsessiondb.console_url import build_job_console_url
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.jobs_api import JobSubmitTask, jobs_submit
@@ -69,24 +72,6 @@ def build_submit_tasks(
     ]
 
 
-def _backfill_insert_settings(
-    plugins: object,
-) -> Mapping[str, str | int | float | bool] | None:
-    """``insert_settings`` from the registered ``backfill()`` plugin's options."""
-    if not isinstance(plugins, list):
-        return None
-    for plugin in cast("list[object]", plugins):
-        manifest = getattr(plugin, "manifest", None)
-        if getattr(manifest, "name", None) != "backfill":
-            continue
-        options = getattr(getattr(plugin, "hooks", None), "options", None)
-        settings: object = getattr(options, "insert_settings", None)
-        if isinstance(settings, dict):
-            return cast("dict[str, str | int | float | bool]", settings)
-        return None
-    return None
-
-
 @dataclass(frozen=True)
 class ParsedSubmitInput:
     opts: PlanOptions
@@ -115,7 +100,14 @@ def _coerce_timestamp(raw: str | None, flag: str) -> str | None:
         raise ValueError(msg) from error
 
 
-def parse_submit_input(flags: dict[str, Any]) -> ParsedSubmitInput:
+def parse_submit_input(
+    flags: dict[str, Any], plugin_options: PluginConfig | None = None
+) -> ParsedSubmitInput:
+    """``plugin_options`` are the backfill plugin's options (see
+    ``resolve_backfill_plugin_options``). The flags override them, as for the
+    local ``plan``, and the plan and its submission marker land in their
+    ``stateDir``.
+    """
     target = _flag_string(flags, "--target")
     cutover = _flag_string(flags, "--cutover")
     named = target if target is not None else cutover
@@ -144,17 +136,24 @@ def parse_submit_input(flags: dict[str, Any]) -> ParsedSubmitInput:
             raise ValueError(msg)
         concurrency = int(parsed)
 
-    plan_fields: dict[str, Any] = {"target": target or ""}
+    plan_fields: dict[str, Any] = {
+        key: value
+        for key, value in (plugin_options or PluginConfig())
+        .model_dump(exclude_none=True)
+        .items()
+        if key in PlanOptions.model_fields
+    }
+    plan_fields["target"] = target or ""
     if cutover:
         plan_fields["cutover"] = cutover
     from_value = _coerce_timestamp(_flag_string(flags, "--from"), "--from")
     to_value = _coerce_timestamp(_flag_string(flags, "--to"), "--to")
     if from_value is not None:
-        plan_fields["from"] = from_value
+        plan_fields["from_"] = from_value
     if to_value is not None:
         plan_fields["to"] = to_value
     if raw_bytes is not None:
-        plan_fields["maxChunkBytes"] = parse_byte_size(raw_bytes)
+        plan_fields["max_chunk_bytes"] = parse_byte_size(raw_bytes)
 
     opts = PlanOptions.model_validate(plan_fields)
 
@@ -177,7 +176,10 @@ class SubmitContext:
 def handle_submit(context: SubmitContext) -> int:
     """Run the managed submit flow; returns the exit code (always handled)."""
     try:
-        parsed = parse_submit_input(context.flags)
+        plugin_options = resolve_backfill_plugin_options(
+            getattr(context.config, "plugins", None)
+        )
+        parsed = parse_submit_input(context.flags, plugin_options)
 
         executor = create_remote_executor(
             context.credentials,
@@ -203,9 +205,7 @@ def handle_submit(context: SubmitContext) -> int:
         plan = output.plan
 
         # Same INSERT settings the local executor applies (backfill({insertSettings})).
-        tasks = build_submit_tasks(
-            plan, _backfill_insert_settings(getattr(context.config, "plugins", None))
-        )
+        tasks = build_submit_tasks(plan, plugin_options.insert_settings)
         job_id = jobs_submit(
             context.credentials,
             service_slug=context.service_slug,

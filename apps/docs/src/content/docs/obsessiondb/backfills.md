@@ -112,7 +112,7 @@ Each chunk renders the same idempotent `INSERT … SELECT` the local executor wo
 
 ## Submitted jobs in `chkit check`
 
-`submit` saves its plan under `<metaDir>/backfill/plans/`, like `plan`, and records the job ID in `<metaDir>/backfill/submissions/<planId>.json`. The job writes no local run checkpoint, so the backfill plugin's check leaves a submitted plan to the ObsessionDB plugin, whose check asks the jobs API for the job's status:
+`submit` applies the [backfill plugin options](/plugins/backfill/#configuration-and-persisted-state) like `plan`, with flags overriding them. It saves its plan in the plugin's `stateDir` (default `<metaDir>/backfill/`) under `plans/`, and records the job ID in `submissions/<planId>.json` there. The job writes no local run checkpoint, so the backfill plugin's check leaves a submitted plan to the ObsessionDB plugin, whose check asks the jobs API for the job's status:
 
 | Job status | Finding | Check |
 | --- | --- | --- |
@@ -137,7 +137,7 @@ chkit check --json
 ```
 
 :::note
-CI that runs `chkit check` needs an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A confirmation is saved in `<metaDir>/backfill/submissions/`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
+CI that runs `chkit check` needs an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A confirmation is saved in `submissions/` in the backfill `stateDir`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
 :::
 
 For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then submit the backfill again and delete the old plan file (`plans/<planId>.json`), or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.

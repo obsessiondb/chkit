@@ -15,6 +15,7 @@ import type { Credentials } from '../auth/index.js'
 import { createRemoteExecutor } from '../query/remote-executor.js'
 import { createJobsClient } from './client.js'
 import { buildJobConsoleUrl } from './console-url.js'
+import { resolveBackfillPluginOptions } from './plugin-options.js'
 
 interface SubmitTask {
 	id: string
@@ -78,8 +79,14 @@ function coerceTimestamp(raw: string | undefined, flag: string): string | undefi
 	return date.toISOString()
 }
 
+/**
+ * `pluginOptions` are the backfill plugin's resolved options (see
+ * resolveBackfillPluginOptions). The flags override them, as for the local
+ * `plan`, and the plan and its submission marker land in their `stateDir`.
+ */
 export function parseSubmitInput(
 	flags: Record<string, string | string[] | boolean | undefined>,
+	pluginOptions: Record<string, unknown> = {},
 ): ParsedSubmitInput {
 	const target = flagString(flags, '--target')
 	const cutover = flagString(flags, '--cutover')
@@ -99,12 +106,15 @@ export function parseSubmitInput(
 		concurrency = parsed
 	}
 
+	const from = coerceTimestamp(flagString(flags, '--from'), '--from')
+	const to = coerceTimestamp(flagString(flags, '--to'), '--to')
 	const opts = PlanSchema.parse({
+		...pluginOptions,
 		target: target ?? '',
 		...(cutover ? { cutover } : {}),
-		from: coerceTimestamp(flagString(flags, '--from'), '--from'),
-		to: coerceTimestamp(flagString(flags, '--to'), '--to'),
-		maxChunkBytes: rawBytes !== undefined ? parseByteSize(rawBytes) : undefined,
+		...(from ? { from } : {}),
+		...(to ? { to } : {}),
+		...(rawBytes !== undefined ? { maxChunkBytes: parseByteSize(rawBytes) } : {}),
 	})
 
 	return { opts, title: flagString(flags, '--title'), concurrency }
@@ -114,7 +124,7 @@ export interface SubmitContext {
 	flags: Record<string, string | string[] | boolean | undefined>
 	configPath: string
 	jsonMode: boolean
-	config: Pick<ResolvedChxConfig, 'metaDir' | 'schema'>
+	config: Pick<ResolvedChxConfig, 'metaDir' | 'schema' | 'plugins'>
 	print: (value: unknown) => void
 	credentials: Credentials
 	serviceSlug: string
@@ -124,7 +134,10 @@ export async function handleSubmit(
 	context: SubmitContext,
 ): Promise<{ handled: true; exitCode: number }> {
 	try {
-		const { opts, title, concurrency } = parseSubmitInput(context.flags)
+		const { opts, title, concurrency } = parseSubmitInput(
+			context.flags,
+			resolveBackfillPluginOptions(context.config.plugins),
+		)
 
 		const executor = createRemoteExecutor({
 			credentials: context.credentials,

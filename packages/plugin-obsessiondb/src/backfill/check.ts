@@ -44,8 +44,14 @@ type JobDetail = Awaited<ReturnType<JobsClient['get']>>
 export async function checkSubmittedBackfillJobs(input: {
 	config: Pick<ResolvedChxConfig, 'metaDir'>
 	configPath: string
+	/** The backfill plugin's `stateDir`, where `submit` saves plans and markers. */
+	stateDir?: string
 }): Promise<{ findings: BackfillJobFinding[]; counts: BackfillJobCounts } | undefined> {
-	const submissions = await listRemoteSubmissions({ configPath: input.configPath, config: input.config })
+	const submissions = await listRemoteSubmissions({
+		configPath: input.configPath,
+		config: input.config,
+		stateDir: input.stateDir,
+	})
 	if (submissions.length === 0) return undefined
 
 	const needsBackend = submissions.some(({ submission }) => submission.status !== 'completed')

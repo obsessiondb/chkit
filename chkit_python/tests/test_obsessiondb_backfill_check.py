@@ -20,6 +20,7 @@ from chkit.core.model import (
     ChxResolvedSafetyConfig,
 )
 from chkit.plugins import ChxOnCheckContext
+from chkit_plugin_backfill.plugin import backfill
 from chkit_plugin_backfill.state import record_backfill_submission, write_json
 from chkit_plugin_obsessiondb import backfill_check as backfill_check_module
 from chkit_plugin_obsessiondb import obsessiondb
@@ -227,6 +228,43 @@ def test_on_check_reports_submitted_jobs_for_a_non_obsessiondb_check_target_too(
             "unverified": 0,
         }
     }
+
+
+def test_on_check_reads_submissions_from_the_backfill_plugin_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "schema.py").write_text("")
+    state_dir = "state/backfill"
+    write_json(tmp_path / state_dir / "plans" / f"{PLAN_ID}.json", {})
+    record_backfill_submission(
+        plan_id=PLAN_ID,
+        target="app.events",
+        job_id="job-123",
+        config_path=_config_path(tmp_path),
+        config=_config(),
+        state_dir=state_dir,
+    )
+    _patch_backend(monkeypatch, logged_in=True, job={"status": "running"})
+    hooks = obsessiondb().hooks
+    assert hooks is not None
+
+    result = hooks.on_check(  # type: ignore[union-attr]
+        ChxOnCheckContext(
+            command="check",
+            config=_config().model_copy(
+                update={"plugins": [backfill({"stateDir": state_dir})]}
+            ),
+            table_scope=TableScope(enabled=False),
+            flags={},
+            config_path=str(_config_path(tmp_path)),
+        )
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert [finding.code for finding in result.findings] == ["obsessiondb_backfill_job_incomplete"]
+    assert result.metadata is not None
+    assert result.metadata["backfillJobs"]["submitted"] == 1
 
 
 def _config(url: str | None = None) -> ChxResolvedConfig:

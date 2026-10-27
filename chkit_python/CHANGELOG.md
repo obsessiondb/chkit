@@ -93,6 +93,13 @@
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional
   and defaults to the selected service. Without the ObsessionDB plugin (or with
   `--local`), `list` exits 2 and explains how to set up a managed backend.
+- backfill: the ObsessionDB managed `chkit plugin backfill submit` now applies the
+  backfill plugin's options, as the local `plan` does (#309). It ignored
+  `backfill({"stateDir": ...})` and saved the plan and the submission marker in the
+  default `<metaDir>/backfill/`, while `chkit check` read the configured `stateDir`. Both
+  now go to the configured `stateDir`, and the ObsessionDB check reads the markers from
+  it. The other planning options (`maxChunkBytes`, `maxRetriesPerChunk`,
+  `requireIdempotencyToken`, ...) now apply to `submit` too; flags still override them.
 - `chkit plugin backfill status --job-id` and `cancel --job-id` against ObsessionDB now
   print the job in text mode (status, tasks completed and failed, the last error and a
   console link) instead of nothing, and wrap `--json` output in the standard

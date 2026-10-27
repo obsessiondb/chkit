@@ -14,6 +14,7 @@ import {
 	BACKFILL_EXTEND_COMMANDS,
 	handleBackfillCommand,
 } from './backfill/index.js'
+import { resolveBackfillStateDir } from './backfill/plugin-options.js'
 import { createRemoteExecutor } from './query/remote-executor.js'
 import { listServices } from './service/api.js'
 import { SERVICE_COMMAND } from './service/commands.js'
@@ -420,7 +421,11 @@ function createObsessionDBPlugin(
 							severity: 'error' as const,
 						}))
 				// Submitted backfill jobs run on ObsessionDB whatever the check target is.
-				const backfillJobs = await checkSubmittedBackfillJobs({ config, configPath })
+				const backfillJobs = await checkSubmittedBackfillJobs({
+					config,
+					configPath,
+					stateDir: resolveBackfillStateDir(config.plugins),
+				})
 				if (!distributedFindings && !backfillJobs) return undefined
 
 				const findings = [...(distributedFindings ?? []), ...(backfillJobs?.findings ?? [])]

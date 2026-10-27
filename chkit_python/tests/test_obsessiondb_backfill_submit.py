@@ -14,7 +14,9 @@ from typing import Any
 
 import pytest
 
+from chkit_plugin_backfill.options import PluginConfig
 from chkit_plugin_backfill.planner import BuildBackfillPlanOutput
+from chkit_plugin_backfill.plugin import backfill
 from chkit_plugin_backfill.types import BackfillPlanState
 from chkit_plugin_obsessiondb import backfill_submit as backfill_submit_module
 from chkit_plugin_obsessiondb.api_client import SessionExpiredError
@@ -228,6 +230,34 @@ def test_parse_submit_input_passes_through_a_title() -> None:
     assert parsed.title == "My backfill"
 
 
+def test_parse_submit_input_applies_the_backfill_plugin_options_like_the_local_plan() -> None:
+    parsed = parse_submit_input(
+        {"--target": "app.events"},
+        PluginConfig.model_validate(
+            {
+                "stateDir": "state/backfill",
+                "maxChunkBytes": 1024,
+                "requireIdempotencyToken": False,
+                "insertSettings": {"max_insert_threads": 4},
+            }
+        ),
+    )
+    assert parsed.opts.target == "app.events"
+    assert parsed.opts.state_dir == "state/backfill"
+    assert parsed.opts.max_chunk_bytes == 1024
+    assert parsed.opts.require_idempotency_token is False
+
+
+def test_parse_submit_input_lets_flags_override_the_backfill_plugin_options() -> None:
+    parsed = parse_submit_input(
+        {"--target": "app.events", "--max-chunk-bytes": "500M", "--from": "2026-01-01"},
+        PluginConfig.model_validate({"stateDir": "state/backfill", "maxChunkBytes": 1024}),
+    )
+    assert parsed.opts.max_chunk_bytes == 500 * 1024**2
+    assert parsed.opts.from_ == "2026-01-01T00:00:00.000Z"
+    assert parsed.opts.state_dir == "state/backfill"
+
+
 # ---------- handle_submit (planner / executor / jobs client monkeypatched) ----------
 
 
@@ -361,6 +391,47 @@ def test_handle_submit_records_the_job_id_so_check_does_not_wait_for_a_local_run
     assert submission["planId"] == "abcdef0123456789"
     assert submission["target"] == "app.events"
     assert submission["jobId"] == "job-9"
+
+
+def test_handle_submit_plans_and_records_the_submission_in_the_backfill_plugin_state_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    submitted: list[dict[str, Any]] = []
+    _patch_submit_pipeline(monkeypatch, submitted)
+    planned: list[dict[str, Any]] = []
+
+    def fake_build_backfill_plan(**kwargs: Any) -> BuildBackfillPlanOutput:
+        planned.append(kwargs)
+        return BuildBackfillPlanOutput(
+            plan=make_plan(), plan_path="/state/plans/abcdef0123456789.json"
+        )
+
+    monkeypatch.setattr(
+        backfill_submit_module, "build_backfill_plan", fake_build_backfill_plan
+    )
+
+    code = handle_submit(
+        SubmitContext(
+            flags={"--target": "app.events"},
+            config_path=str(tmp_path / "cfg.py"),
+            json_mode=True,
+            config=SimpleNamespace(
+                meta_dir="meta", plugins=[backfill({"stateDir": "state/backfill"})]
+            ),
+            print=lambda _value: None,
+            credentials=Credentials(access_token="tok", base_url=BASE),
+            service_slug="svc-1",
+        )
+    )
+
+    assert code == 0
+    [call] = planned
+    assert call["opts"].state_dir == "state/backfill"
+    assert (
+        tmp_path / "state" / "backfill" / "submissions" / "abcdef0123456789.json"
+    ).is_file()
+    assert not (tmp_path / "meta" / "backfill").exists()
 
 
 def test_handle_submit_invalid_input_returns_error_exit_code() -> None:

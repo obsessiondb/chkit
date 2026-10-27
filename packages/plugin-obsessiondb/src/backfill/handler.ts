@@ -104,7 +104,7 @@ async function routeSubmit(
     flags: context.flags,
     configPath: context.configPath,
     jsonMode: context.jsonMode,
-    config: context.config as Pick<ResolvedChxConfig, 'metaDir' | 'schema'>,
+    config: context.config as Pick<ResolvedChxConfig, 'metaDir' | 'schema' | 'plugins'>,
     print: context.print,
     credentials: effectiveCreds,
     serviceSlug: selected.service_slug,

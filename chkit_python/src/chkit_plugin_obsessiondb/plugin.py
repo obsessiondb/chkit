@@ -46,6 +46,7 @@ from chkit_plugin_obsessiondb.auth_signup import (
 )
 from chkit_plugin_obsessiondb.backfill_check import check_submitted_backfill_jobs
 from chkit_plugin_obsessiondb.backfill_handler import handle_backfill_command
+from chkit_plugin_obsessiondb.backfill_plugin_options import resolve_backfill_state_dir
 from chkit_plugin_obsessiondb.credentials import resolve_base_url
 from chkit_plugin_obsessiondb.engine import (
     find_distributed_tables,
@@ -115,7 +116,9 @@ class _ObsessionDBHooks:
             ]
         # Submitted backfill jobs run on ObsessionDB whatever the check target is.
         backfill_jobs = check_submitted_backfill_jobs(
-            config=ctx.config, config_path=ctx.config_path
+            config=ctx.config,
+            config_path=ctx.config_path,
+            state_dir=resolve_backfill_state_dir(ctx.config.plugins),
         )
         if distributed_findings is None and backfill_jobs is None:
             return None
