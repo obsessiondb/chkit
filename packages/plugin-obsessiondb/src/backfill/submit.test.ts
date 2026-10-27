@@ -4,6 +4,7 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { backfill } from '@chkit/plugin-backfill'
 import * as backfillSdk from '@chkit/plugin-backfill/sdk'
 import type { BackfillPlanState } from '@chkit/plugin-backfill/sdk'
 
@@ -183,6 +184,28 @@ describe('parseSubmitInput', () => {
 		const { title } = parseSubmitInput({ '--target': 'app.events', '--title': 'My backfill' })
 		expect(title).toBe('My backfill')
 	})
+
+	test('applies the backfill plugin options, like the local plan', () => {
+		const { opts } = parseSubmitInput(
+			{ '--target': 'app.events' },
+			{ stateDir: 'state/backfill', maxChunkBytes: 1024, requireIdempotencyToken: false },
+		)
+		expect(opts).toMatchObject({
+			target: 'app.events',
+			stateDir: 'state/backfill',
+			maxChunkBytes: 1024,
+			requireIdempotencyToken: false,
+		})
+	})
+
+	test('lets flags override the backfill plugin options', () => {
+		const { opts } = parseSubmitInput(
+			{ '--target': 'app.events', '--max-chunk-bytes': '500M' },
+			{ stateDir: 'state/backfill', maxChunkBytes: 1024 },
+		)
+		expect(opts.maxChunkBytes).toBe(500 * 1024 ** 2)
+		expect(opts.stateDir).toBe('state/backfill')
+	})
 })
 
 describe('handleSubmit', () => {
@@ -213,7 +236,7 @@ describe('handleSubmit', () => {
 			flags: { '--target': 'app.events' },
 			configPath,
 			jsonMode: true,
-			config: { metaDir: './chkit/meta', schema: [] },
+			config: { metaDir: './chkit/meta', schema: [], plugins: [] },
 			print: (value) => printed.push(value),
 			credentials: { access_token: 'test-tok', base_url: 'https://api.example.com' },
 			serviceSlug: 'svc',
@@ -228,5 +251,36 @@ describe('handleSubmit', () => {
 			target: 'app.events',
 			jobId: 'job-123',
 		})
+	})
+
+	test('plans and records the submission in the backfill plugin stateDir', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'chkit-submit-'))
+		const configPath = join(dir, 'clickhouse.config.ts')
+		const plan = makePlan()
+		const buildPlan = spyOn(backfillSdk, 'buildBackfillPlan').mockResolvedValue({
+			plan,
+			planPath: join(dir, 'state/backfill/plans', `${plan.planId}.json`),
+		})
+		globalThis.fetch = mock(async () =>
+			new Response(JSON.stringify({ json: { jobId: 'job-123' } }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' },
+			}),
+		) as typeof fetch
+
+		const result = await handleSubmit({
+			flags: { '--target': 'app.events' },
+			configPath,
+			jsonMode: true,
+			config: { metaDir: './chkit/meta', schema: [], plugins: [backfill({ stateDir: 'state/backfill' })] },
+			print: () => {},
+			credentials: { access_token: 'test-tok', base_url: 'https://api.example.com' },
+			serviceSlug: 'svc',
+		})
+
+		expect(result).toEqual({ handled: true, exitCode: 0 })
+		expect(buildPlan.mock.calls[0]?.[0].opts.stateDir).toBe('state/backfill')
+		expect(existsSync(join(dir, 'state/backfill/submissions', `${plan.planId}.json`))).toBe(true)
+		expect(existsSync(join(dir, 'chkit/meta/backfill'))).toBe(false)
 	})
 })

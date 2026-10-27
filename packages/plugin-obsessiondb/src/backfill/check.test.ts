@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
+import { backfill } from '@chkit/plugin-backfill'
 import { recordBackfillSubmission } from '@chkit/plugin-backfill/sdk'
 
 import { saveCredentials } from '../auth/credentials'
@@ -179,6 +180,33 @@ describe('checkSubmittedBackfillJobs', () => {
 		expect(result).toMatchObject({
 			plugin: 'obsessiondb',
 			evaluated: true,
+			ok: false,
+			findings: [{ code: 'obsessiondb_backfill_job_incomplete' }],
+			metadata: { backfillJobs: { submitted: 1, incomplete: 1 } },
+		})
+	})
+
+	test('onCheck reads submissions from the backfill plugin stateDir', async () => {
+		const configPath = await setupProject({ loggedIn: true })
+		await writeFile(join(configPath, '..', 'schema.ts'), 'export {}\n')
+		const stateDir = 'state/backfill'
+		await writeJsonFile(join(configPath, '..', stateDir, 'plans', `${PLAN_ID}.json`), {})
+		await recordBackfillSubmission({
+			plan: { planId: PLAN_ID, target: 'app.events' },
+			jobId: 'job-123',
+			configPath,
+			config,
+			stateDir,
+		})
+		mockJob({ status: 'running' })
+
+		const result = await obsessiondb().plugin.hooks.onCheck({
+			config: { ...localConfig, plugins: [backfill({ stateDir })] },
+			configPath,
+			flags: {},
+		})
+
+		expect(result).toMatchObject({
 			ok: false,
 			findings: [{ code: 'obsessiondb_backfill_job_incomplete' }],
 			metadata: { backfillJobs: { submitted: 1, incomplete: 1 } },

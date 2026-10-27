@@ -55,10 +55,16 @@ class BackfillJobCheck:
 
 
 def check_submitted_backfill_jobs(
-    *, config: Any, config_path: str | Path
+    *, config: Any, config_path: str | Path, state_dir: str | None = None
 ) -> BackfillJobCheck | None:
-    """Check every submitted plan's job; ``None`` when nothing was submitted."""
-    submissions = list_remote_submissions(config_path=config_path, config=config)
+    """Check every submitted plan's job; ``None`` when nothing was submitted.
+
+    ``state_dir`` is the backfill plugin's ``stateDir``, where ``submit``
+    saves plans and markers.
+    """
+    submissions = list_remote_submissions(
+        config_path=config_path, config=config, state_dir=state_dir
+    )
     if not submissions:
         return None
 
