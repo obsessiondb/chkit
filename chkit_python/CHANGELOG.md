@@ -88,6 +88,11 @@
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
 
 ### Fixed
+- `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
+  ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
+  command, so the CLI rejected it before the hook ran. `--service-slug` is now optional
+  and defaults to the selected service. Without the ObsessionDB plugin (or with
+  `--local`), `list` exits 2 and explains how to set up a managed backend.
 - `chkit plugin backfill status --job-id` and `cancel --job-id` against ObsessionDB now
   print the job in text mode (status, tasks completed and failed, the last error and a
   console link) instead of nothing, and wrap `--json` output in the standard

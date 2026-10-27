@@ -160,7 +160,7 @@ chkit obsessiondb service select
 chkit plugin backfill submit --target analytics.daily_event_counts --max-chunk-bytes 1G
 ```
 
-The result supplies a job ID and console link. `submit` saves the plan like `plan` does and records the job ID next to it; `chkit check` then passes for that plan only once the ObsessionDB plugin confirms the job completed. See [managed backfill jobs](/obsessiondb/backfills/). If ObsessionDB is the active target, local `plan`/`run`/`resume` require an explicit `--local` choice; they do not silently bypass the selected managed service.
+The result supplies a job ID and console link. `chkit plugin backfill list` lists the selected service's jobs (`--service-slug <service>` picks another service); `status` and `cancel` take `--job-id` for one job. Without the ObsessionDB plugin, `list` fails with setup guidance: local runs have no job list, so inspect them with `status --plan-id`. `submit` saves the plan like `plan` does and records the job ID next to it; `chkit check` then passes for that plan only once the ObsessionDB plugin confirms the job completed. See [managed backfill jobs](/obsessiondb/backfills/). If ObsessionDB is the active target, local `plan`/`run`/`resume` require an explicit `--local` choice; they do not silently bypass the selected managed service.
 
 ## Configuration and persisted state
 

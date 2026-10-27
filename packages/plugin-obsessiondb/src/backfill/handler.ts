@@ -147,9 +147,13 @@ async function dispatchCommand(
   const serviceSlug =
     typeof flags['--service-slug'] === 'string' ? flags['--service-slug'] : undefined
 
+  // --service-slug wins; otherwise the project's selected service.
+  const resolveServiceSlug = async (): Promise<string | undefined> =>
+    serviceSlug ?? (await loadSelectedService(context.configPath))?.service_slug
+
   // The console deep-link needs a service slug; the job itself only carries the service id.
   const consoleUrl = async (id: string): Promise<string | null> => {
-    const slug = serviceSlug ?? (await loadSelectedService(context.configPath))?.service_slug
+    const slug = await resolveServiceSlug()
     return slug ? buildJobConsoleUrl(apiBaseUrl, slug, id) : null
   }
 
@@ -167,8 +171,13 @@ async function dispatchCommand(
       return jobCancelOutput(jobId, await consoleUrl(jobId))
     }
     case 'list': {
-      if (!serviceSlug) throw new Error('--service-slug is required for remote list')
-      return jobListOutput('backfill list', serviceSlug, await client.list({ serviceSlug }))
+      const slug = await resolveServiceSlug()
+      if (!slug) {
+        throw new Error(
+          'No service selected. Pass --service-slug or run `chkit obsessiondb service select`.',
+        )
+      }
+      return jobListOutput('backfill list', slug, await client.list({ serviceSlug: slug }))
     }
     default:
       throw new Error(`Unsupported remote command: ${context.command}`)

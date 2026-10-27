@@ -2,13 +2,14 @@
 
 Ports the remaining ``packages/plugin-obsessiondb/src/backfill/handler.test.ts``
 cases (401 session expiry, unknown subcommand while authed, successful remote
-cancel/list routing). The rest of the TS file — including submit routing and
+cancel/list routing, list defaulting to the selected service). The rest of the TS file — including submit routing and
 submit deferring to the local command — is covered by
 ``test_obsessiondb_phase4.py`` and ``test_main_sync_2026_06_29.py``.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +165,73 @@ def test_handler_routes_list_to_remote_jobs_list(
     assert printed["ok"] is True
     assert printed["total"] == 1
     assert printed["jobs"][0]["id"] == "job-1"
+
+
+_LIST_RESPONSE = {
+    "jobs": [
+        {
+            "id": "job-1",
+            "serviceId": "svc-id-1",
+            "title": None,
+            "type": "backfill",
+            "target": "table_a",
+            "status": "completed",
+            "concurrency": 2,
+            "totalTasks": 5,
+            "completedTasks": 5,
+            "failedTasks": 0,
+            "createdAt": "2026-03-28T00:00:00Z",
+            "updatedAt": "2026-03-28T01:00:00Z",
+        },
+    ],
+    "total": 1,
+}
+
+
+def test_handler_list_service_slug_overrides_selected_service(
+    isolated_home: Path, tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = _select_service(tmp_path)
+    httpx_mock.add_response(url=f"{BASE}/rpc/jobs/list", json=_LIST_RESPONSE)
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="list",
+            flags={"--service-slug": "other-svc"},
+            msgs=msgs,
+            config_path=config_path,
+        )
+    )
+    assert result == ChxOnBeforePluginCommandHandled(exit_code=0)
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content)["json"] == {"serviceSlug": "other-svc"}
+    assert msgs == [
+        "Backfill jobs for service other-svc (1):\n"
+        "- job-1 table_a: completed (5/5 completed, 0 failed)"
+    ]
+
+
+def test_handler_list_defaults_to_selected_service(
+    isolated_home: Path, tmp_path: Path, httpx_mock: HTTPXMock
+) -> None:
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    config_path = _select_service(tmp_path)
+    httpx_mock.add_response(url=f"{BASE}/rpc/jobs/list", json=_LIST_RESPONSE)
+    msgs: list[Any] = []
+    result = handle_backfill_command(
+        _bf_ctx(
+            command="list", flags={}, msgs=msgs, json_mode=True, config_path=config_path
+        )
+    )
+    assert result == ChxOnBeforePluginCommandHandled(exit_code=0)
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content)["json"] == {"serviceSlug": SVC}
+    [printed] = msgs
+    assert printed["command"] == "backfill list"
+    assert printed["ok"] is True
+    assert printed["serviceSlug"] == SVC
+    assert printed["total"] == 1
 
 
 def _job_detail(**extra: object) -> dict[str, object]:

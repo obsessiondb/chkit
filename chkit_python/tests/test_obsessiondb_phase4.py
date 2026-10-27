@@ -580,16 +580,19 @@ def test_handler_cancel_requires_job_id(
     assert msgs == ["Backfill cancel failed: --job-id is required for remote cancel"]
 
 
-def test_handler_list_requires_service_slug(
+def test_handler_list_requires_a_service(
     isolated_home: Path,
 ) -> None:
-    """Missing-flag errors are reported, like the TS hook."""
+    """Without --service-slug or a selected service, list asks for one."""
     save_credentials(_creds())
     msgs: list[Any] = []
     result = handle_backfill_command(_bf_ctx(command="list", flags={}, msgs=msgs))
     assert isinstance(result, ChxOnBeforePluginCommandHandled)
     assert result.exit_code == 1
-    assert msgs == ["Backfill list failed: --service-slug is required for remote list"]
+    assert msgs == [
+        "Backfill list failed: No service selected. Pass --service-slug or run "
+        "`chkit obsessiondb service select`."
+    ]
 
 
 # ---------- onboarding (full wizard) ----------

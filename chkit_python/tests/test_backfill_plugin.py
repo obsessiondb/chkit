@@ -451,6 +451,7 @@ def test_backfill_plugin_factory_shape() -> None:
         "run",
         "resume",
         "doctor",
+        "list",
     }
 
 
@@ -467,6 +468,25 @@ def test_submit_without_backend_prints_managed_backend_error(tmp_path: Path) -> 
     assert code == 2
     assert any("Backfill submit failed:" in str(m) for m in msgs)
     assert any("managed job backend" in str(m) for m in msgs)
+
+
+def test_list_without_backend_prints_managed_backend_error(tmp_path: Path) -> None:
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "list")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=_cfg(tmp_path), tmp_path=tmp_path, flags={}, msgs=msgs
+        )
+    )
+    assert code == 2
+    assert msgs == [
+        "Backfill list failed: backfill list shows the jobs of a managed job "
+        "backend. Register the ObsessionDB plugin, log in and select a service "
+        "(`chkit obsessiondb login`, then `chkit obsessiondb service select`). "
+        "Inspect a local run with `chkit plugin backfill status --plan-id <id>`."
+    ]
 
 
 def test_plan_without_clickhouse_reports_config_error(tmp_path: Path) -> None:

@@ -2,8 +2,9 @@
 
 Port of ``packages/plugin-backfill/src/plugin.ts``: real ``plan`` / ``run`` /
 ``resume`` / ``status`` / ``cancel`` / ``doctor`` command handlers plus the
-``on_check`` hook. ``submit`` keeps the TS local-handler behaviour (clear
-error when no managed backend intercepts via the ObsessionDB plugin).
+``on_check`` hook. ``submit`` and ``list`` keep the TS local-handler
+behaviour (clear error when no managed backend intercepts via the ObsessionDB
+plugin).
 """
 
 from __future__ import annotations
@@ -474,6 +475,20 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
         )
         raise BackfillConfigError(msg)
 
+    def _list(ctx: ChxPluginCommandContext) -> int:
+        # Reaching this handler means no managed backend intercepted the
+        # command. The ObsessionDB plugin lists a service's jobs via its
+        # on_before_plugin_command hook; local runs have no job list.
+        _ = ctx
+        msg = (
+            "backfill list shows the jobs of a managed job backend. Register "
+            "the ObsessionDB plugin, log in and select a service "
+            "(`chkit obsessiondb login`, then "
+            "`chkit obsessiondb service select`). Inspect a local run with "
+            "`chkit plugin backfill status --plan-id <id>`."
+        )
+        raise BackfillConfigError(msg)
+
     def _run(ctx: ChxPluginCommandContext) -> int:
         opts = _parse_run_options(ctx.flags, resume=False)
         clickhouse = _require_clickhouse(ctx, "execution")
@@ -690,6 +705,14 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                 ),
                 run=_guarded(_doctor, "doctor", "Backfill doctor"),
                 flags=list(PLAN_ID_FLAGS),
+            ),
+            ChxPluginCommand(
+                name="list",
+                description=(
+                    "List the backfill jobs of a managed job backend service"
+                    " (e.g. ObsessionDB)"
+                ),
+                run=_guarded(_list, "list", "Backfill list"),
             ),
         ],
         options_schema=PluginConfig,

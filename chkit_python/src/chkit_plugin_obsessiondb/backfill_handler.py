@@ -9,8 +9,9 @@ state):
 - ``plan`` / ``run`` / ``resume`` — refused when ObsessionDB is the intended
   target (the managed path is ``backfill submit``); ``--local`` bypasses.
 - ``status`` / ``cancel`` / ``list`` — routed to the jobs API by
-  ``--job-id`` / ``--service-slug``; ``--plan-id`` keeps them local. They
-  print the job as text, or the standard envelope under ``--json``.
+  ``--job-id`` / ``--service-slug`` (``list`` defaults to the selected
+  service); ``--plan-id`` keeps them local. They print the job as text, or
+  the standard envelope under ``--json``.
 """
 
 from __future__ import annotations
@@ -78,13 +79,17 @@ def _dispatch(
     job_id = _str_flag(flags, "--job-id")
     service_slug = _str_flag(flags, "--service-slug")
 
+    # --service-slug wins; otherwise the project's selected service.
+    def resolve_service_slug() -> str | None:
+        if service_slug is not None:
+            return service_slug
+        selected = load_selected_service(context.config_path)
+        return selected.service_slug if selected is not None else None
+
     # The console deep-link needs a service slug; the job itself only carries
     # the service id.
     def console_url(job: str) -> str | None:
-        slug = service_slug
-        if slug is None:
-            selected = load_selected_service(context.config_path)
-            slug = selected.service_slug if selected is not None else None
+        slug = resolve_service_slug()
         return build_job_console_url(creds.base_url, slug, job) if slug else None
 
     if command == "status":
@@ -107,13 +112,17 @@ def _dispatch(
         jobs_cancel(creds, job_id=job_id)
         return job_cancel_output(job_id, console_url(job_id))
     if command == "list":
-        if service_slug is None:
-            msg = "--service-slug is required for remote list"
+        slug = resolve_service_slug()
+        if slug is None:
+            msg = (
+                "No service selected. Pass --service-slug or run "
+                "`chkit obsessiondb service select`."
+            )
             raise RuntimeError(msg)
         return job_list_output(
             f"backfill {command}",
-            service_slug,
-            jobs_list(creds, service_slug=service_slug),
+            slug,
+            jobs_list(creds, service_slug=slug),
         )
     msg = f"Unsupported remote command: {command}"
     raise RuntimeError(msg)

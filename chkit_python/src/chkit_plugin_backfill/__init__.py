@@ -2,8 +2,8 @@
 
 Full Python port of ``packages/plugin-backfill``:
 
-- ``backfill()`` plugin factory with all seven commands (plan / submit /
-  run / resume / status / cancel / doctor) and the ``on_check`` hook.
+- ``backfill()`` plugin factory with all eight commands (plan / submit /
+  run / resume / status / cancel / doctor / list) and the ``on_check`` hook.
 - ``chunking/`` — the chunk-plan engine (partition introspection, smart
   size-aware splitting strategies, boundary codec, execution SQL builder).
 - ``async_backfill.py`` — bounded-concurrency submit + poll execution

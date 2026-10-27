@@ -55,6 +55,7 @@ def test_plugin_exposes_commands_in_ts_order() -> None:
         "status",
         "cancel",
         "doctor",
+        "list",
     ]
     assert registration.manifest.name == "backfill"
 

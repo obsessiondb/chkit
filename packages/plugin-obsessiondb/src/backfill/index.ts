@@ -27,7 +27,7 @@ export const BACKFILL_EXTEND_COMMANDS = [
       {
         name: '--service-slug',
         type: 'string' as const,
-        description: 'ObsessionDB service slug for listing jobs',
+        description: 'ObsessionDB service slug for listing jobs (list defaults to the selected service)',
       },
     ],
   },

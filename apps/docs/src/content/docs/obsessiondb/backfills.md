@@ -42,14 +42,25 @@ The backend runs the chunks server-side, so there is no local checkpoint and not
 The console link from `submit` is the primary way to watch a job. It opens the job in the ObsessionDB console under Service → Jobs, with live progress and controls to pause, retry, or cancel the run. The [Jobs docs](https://obsessiondb.com/docs/jobs) cover that view in full. From the CLI, the remote job commands query the backend directly — they take a `--job-id` or `--service-slug` instead of a local `--plan-id`:
 
 ```sh
+# All backfill jobs of the selected service
+chkit plugin backfill list
+
+# All backfill jobs of another service
+chkit plugin backfill list --service-slug <service>
+
 # Status of one job
 chkit plugin backfill status --job-id <jobId>
 
-# All backfill jobs for a service
-chkit plugin backfill status --service-slug <service>
-
 # Cancel a running job
 chkit plugin backfill cancel --job-id <jobId>
+```
+
+`list` lists the jobs of the service named by `--service-slug`, or of the selected service when the flag is left out; with neither it fails and asks for one. `status --service-slug <service>` prints the same list. Each job is one line with its ID, target table, state and task counts:
+
+```
+Backfill jobs for service <service> (2):
+- 4f2c… analytics.events: running (3/12 completed, 1 failed)
+- 9a1d… analytics.sessions: completed (8/8 completed, 0 failed)
 ```
 
 `status --job-id` prints the job's state, task progress, the most recent task error (if any), and the console link:
@@ -76,9 +87,9 @@ With `--json`, each command returns one envelope. `status --job-id` carries the 
 }
 ```
 
-`status --service-slug` returns `jobs` and `total`; `cancel` returns `jobId` and `url`. Failures, such as a missing session or an unknown job, return `{"command": "backfill status", "schemaVersion": 1, "ok": false, "error": {"code": "…", "message": "…"}}` and exit 1.
+`list` and `status --service-slug` return `serviceSlug`, `jobs` and `total`; `cancel` returns `jobId` and `url`. Failures, such as a missing session or an unknown job, return `{"command": "backfill status", "schemaVersion": 1, "ok": false, "error": {"code": "…", "message": "…"}}` and exit 1.
 
-Passing `--plan-id` instead keeps `status`/`cancel` local, operating on on-disk run state rather than the backend.
+Passing `--plan-id` instead keeps `status`/`cancel` local, operating on on-disk run state rather than the backend. `list` has no local counterpart: without the ObsessionDB plugin, or with `--local`, it fails and explains how to set up a managed backend.
 
 ## Local execution is guarded against ObsessionDB
 

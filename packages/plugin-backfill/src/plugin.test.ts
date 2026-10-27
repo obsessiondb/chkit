@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
+import { resolveConfig } from '@chkit/core'
+
 import * as sdk from './sdk.js'
 import * as root from './index.js'
 import { backfill, createBackfillPlugin } from './plugin.js'
@@ -26,10 +28,34 @@ describe('@chkit/plugin-backfill plugin surface', () => {
       'status',
       'cancel',
       'doctor',
+      'list',
     ])
     expect(registration.name).toBe('backfill')
     expect(registration.enabled).toBe(true)
     expect(registration.options?.maxParallelChunks).toBe(4)
+  })
+
+  test('list without a managed job backend explains how to set one up', async () => {
+    const list = createBackfillPlugin().commands.find((command) => command.name === 'list')
+    const printed: unknown[] = []
+
+    const exitCode = await list?.run({
+      args: [],
+      flags: {},
+      jsonMode: false,
+      options: {},
+      rawOptions: {},
+      config: resolveConfig({ schema: './schema.ts' }),
+      configPath: '/project/clickhouse.config.ts',
+      print: (value) => printed.push(value),
+    })
+
+    expect(exitCode).toBe(2)
+    expect(printed).toEqual([
+      'Backfill list failed: backfill list shows the jobs of a managed job backend. Register the ObsessionDB plugin, ' +
+        'log in and select a service (`chkit obsessiondb login`, then `chkit obsessiondb service select`). ' +
+        'Inspect a local run with `chkit plugin backfill status --plan-id <id>`.',
+    ])
   })
 
   test('createBackfillPlugin carries factory options into runtime schemas', () => {
