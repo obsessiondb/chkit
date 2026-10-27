@@ -119,6 +119,8 @@ export type PlanOptions = z.infer<typeof PlanSchema>
 // fields a managed job backend cares about: a human-readable title and the
 // backend-side execution concurrency.
 export const SubmitSchema = PlanSchema.extend({
+  // Re-submits a saved plan whose job failed or was cancelled, instead of planning.
+  planId: z.string().optional(),
   title: z.string().min(1).optional(),
   concurrency: z.number().int().positive().max(48).optional(),
 })
@@ -167,6 +169,7 @@ export const SUBMIT_FLAGS = defineFlags([
   { name: '--max-chunk-bytes', type: 'string', description: 'Max bytes per chunk (e.g. 10G, 500M)', placeholder: '<bytes>' },
   { name: '--title', type: 'string', description: 'Human-readable job title', placeholder: '<title>' },
   { name: '--concurrency', type: 'string', description: 'Max concurrent tasks the backend runs', placeholder: '<n>' },
+  { name: '--plan-id', type: 'string', description: 'Re-submit this saved plan, whose job failed or was cancelled', placeholder: '<id>' },
 ] as const)
 
 export const RUN_FLAGS = defineFlags([
@@ -206,6 +209,7 @@ export const SUBMIT_FLAG_MAP: FlagMapping = {
   '--max-chunk-bytes': { key: 'maxChunkBytes', coerce: parseByteSize },
   '--title': { key: 'title' },
   '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
+  '--plan-id': { key: 'planId', coerce: normalizePlanId },
 }
 
 function coercePositiveInt(v: string, flag: string): number {

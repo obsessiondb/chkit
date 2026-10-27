@@ -7,10 +7,13 @@ export {
   encodeChunkPlanForPersistence,
 } from './chunking/boundary-codec.js'
 export { generateChunkPlan } from './chunking/planner.js'
+export { findExecutedChunks } from './executed-chunks.js'
+export type { ExecutedChunks } from './executed-chunks.js'
 export { buildBackfillPlan } from './planner.js'
 export {
   confirmBackfillSubmission,
   listRemoteSubmissions,
+  readPlanSubmission,
   recordBackfillSubmission,
 } from './state.js'
 export { PlanSchema, SubmitSchema, parseByteSize } from './options.js'

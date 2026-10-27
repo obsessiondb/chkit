@@ -36,6 +36,7 @@ from chkit_plugin_backfill.chunking.types import (
     SortKey,
 )
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
+from chkit_plugin_backfill.executed_chunks import ExecutedChunks, find_executed_chunks
 from chkit_plugin_backfill.logging_utils import (
     CHKIT_BACKFILL_LOGGER_CATEGORY,
     CHKIT_LOGGER_CATEGORY,
@@ -51,9 +52,11 @@ from chkit_plugin_backfill.planner import (
     build_backfill_plan,
 )
 from chkit_plugin_backfill.state import (
+    PlanSubmission,
     RemoteSubmission,
     confirm_backfill_submission,
     list_remote_submissions,
+    read_plan_submission,
     record_backfill_submission,
 )
 from chkit_plugin_backfill.types import (
@@ -78,10 +81,12 @@ __all__ = [
     "ChunkRange",
     "EstimateConfidence",
     "EstimateReason",
+    "ExecutedChunks",
     "FocusedValue",
     "Partition",
     "PartitionDiagnostics",
     "PlanOptions",
+    "PlanSubmission",
     "RemoteSubmission",
     "SortKey",
     "SubmitOptions",
@@ -94,12 +99,14 @@ __all__ = [
     "decode_chunk_plan_from_persistence",
     "encode_chunk_plan_for_persistence",
     "execute_backfill",
+    "find_executed_chunks",
     "generate_chunk_plan",
     "generate_idempotency_token",
     "get_backfill_logger",
     "inject_sort_key_filter",
     "list_remote_submissions",
     "parse_byte_size",
+    "read_plan_submission",
     "record_backfill_submission",
     "rewrite_select_columns",
     "sync_progress",

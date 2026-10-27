@@ -180,6 +180,8 @@ class SubmitOptions(PlanOptions):
     and the backend-side execution concurrency.
     """
 
+    # Re-submits a saved plan whose job failed or was cancelled, instead of planning.
+    plan_id: str | None = Field(default=None, alias="planId")
     title: str | None = Field(default=None, min_length=1)
     concurrency: int | None = Field(default=None, gt=0, le=48)
 
@@ -320,6 +322,12 @@ SUBMIT_FLAGS: list[dict[str, Any]] = [
         "description": "Max concurrent tasks the backend runs",
         "placeholder": "<n>",
     },
+    {
+        "name": "--plan-id",
+        "type": "string",
+        "description": "Re-submit this saved plan, whose job failed or was cancelled",
+        "placeholder": "<id>",
+    },
 ]
 
 SUBMIT_FLAG_MAP: dict[str, dict[str, Any]] = {
@@ -329,6 +337,7 @@ SUBMIT_FLAG_MAP: dict[str, dict[str, Any]] = {
         "key": "concurrency",
         "coerce": lambda v: _coerce_positive_int(v, "--concurrency"),
     },
+    "--plan-id": {"key": "plan_id", "coerce": _normalize_plan_id},
 }
 
 RUN_FLAG_MAP: dict[str, dict[str, Any]] = {

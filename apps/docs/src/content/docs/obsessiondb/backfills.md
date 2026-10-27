@@ -140,7 +140,46 @@ chkit check --json
 CI that runs `chkit check` needs an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A confirmation is saved in `submissions/` in the backfill `stateDir`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
 :::
 
-For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then submit the backfill again and delete the old plan file (`plans/<planId>.json`), or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.
+For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then [re-submit the plan](#re-submit-a-failed-or-cancelled-job) with `--plan-id`, or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.
+
+## Re-submit a failed or cancelled job
+
+`submit --plan-id` sends the chunks of a saved plan that never finished as a new job, and replaces the job ID in its submission file. The next `chkit check` follows the new job:
+
+```sh
+chkit plugin backfill status --job-id <jobId>
+chkit plugin backfill submit --plan-id <planId>
+```
+
+```
+Re-submitted backfill plan 3f9a… as job 7c1e… for analytics.events (9 tasks), replacing cancelled job 4f2c….
+Skipped 3 chunks that already finished on the service.
+Track progress: https://console.obsessiondb.com/<service>/jobs/7c1e…
+```
+
+The plan ID is in the `obsessiondb_backfill_job_failed` finding. `--title` and `--concurrency` apply to the new job; the planning flags (`--target`, `--cutover`, `--from`, `--to`, `--max-chunk-bytes`) are rejected with `--plan-id`, because the saved plan already fixes its chunks. The new job runs on the selected service.
+
+### Chunks that already ran
+
+A chunk the earlier job already wrote is left out of the new job. Writing it again would duplicate its rows whenever the second INSERT differs from the first, for example when a table is copied into itself and the chunk now also reads the rows it wrote; the idempotency token does not prevent that. The job's own task counts miss a chunk whose INSERT finished after the cancel, so `submit --plan-id` reads `system.processes` and `system.query_log` on every replica of the service instead, looking for the plan's chunk queries from any earlier job. A chunk whose `system.query_log` entry has already expired is submitted again.
+
+### Refusals
+
+`submit --plan-id` reads the current job's status first and only replaces a job that failed or was cancelled. Otherwise it starts no job, exits 1, and with `--json` returns `{"ok": false, "command": "backfill submit", "error": "…", "code": "…"}`:
+
+| Code | Cause |
+| --- | --- |
+| `backfill_resubmit_job_active` | The job is `pending`, `running`, `draining` or `paused`. Cancel it with `cancel --job-id` or wait for it to finish. |
+| `backfill_resubmit_job_completed` | The job already completed. |
+| `backfill_resubmit_job_unverified` | The job status could not be read (session expired, API error). |
+| `backfill_resubmit_chunks_running` | A chunk query of the plan still runs on the service. Retry once it finishes. |
+| `backfill_resubmit_chunks_unverified` | `system.processes` or `system.query_log` could not be read. |
+| `backfill_resubmit_nothing_to_run` | Every chunk already finished on the service. Check the target table; if the backfill is complete, delete `plans/<planId>.json` to clear the finding. |
+| `backfill_resubmit_plan_not_found` | No saved plan has this ID. |
+| `backfill_resubmit_not_submitted` | The plan has no submission file, so chkit cannot tell whether a job already runs it. |
+| `backfill_resubmit_invalid_flags` | The plan ID is malformed, or planning flags were passed with `--plan-id`. |
+
+On success the `--json` envelope adds `planId`, `replacedJobId` and `skippedChunks` to the usual `submit` fields.
 
 ## Related
 

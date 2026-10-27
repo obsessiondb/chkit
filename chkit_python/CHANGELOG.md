@@ -86,6 +86,26 @@
   and a missing target fails with "does not exist or is not visible yet".
 - Live drift compares defaults token by token. Write expressions in the
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
+- `chkit plugin backfill submit --plan-id <id>` re-submits a saved plan whose
+  ObsessionDB job failed or was cancelled (#313), and replaces the job ID in its
+  submission file, so `chkit check` follows the new job instead of failing with
+  `obsessiondb_backfill_job_failed`. Chunks an earlier job already wrote, found in
+  `system.processes` and `system.query_log` on every replica, are left out of the
+  new job, since writing one again can duplicate its rows. It reads the job's
+  status first and refuses, without starting a job, when the job is still active
+  (`backfill_resubmit_job_active`), already completed
+  (`backfill_resubmit_job_completed`) or its status cannot be read
+  (`backfill_resubmit_job_unverified`), when a chunk query still runs
+  (`backfill_resubmit_chunks_running`), the query log cannot be read
+  (`backfill_resubmit_chunks_unverified`) or every chunk already finished
+  (`backfill_resubmit_nothing_to_run`), when the plan does not exist
+  (`backfill_resubmit_plan_not_found`) or has no submission file
+  (`backfill_resubmit_not_submitted`), and when planning flags are passed with
+  `--plan-id` (`backfill_resubmit_invalid_flags`). The `--json` error carries the
+  code under `code`; a success adds `planId`, `replacedJobId` and
+  `skippedChunks`. The
+  `obsessiondb_backfill_job_failed` finding now points to `submit --plan-id`. The
+  backfill SDK exports `read_plan_submission` and `find_executed_chunks`.
 
 ### Fixed
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The

@@ -164,6 +164,23 @@ export async function recordBackfillSubmission(input: {
 }
 
 /**
+ * A saved plan and its submission marker (null when it was never submitted),
+ * or null when no plan with this id is saved.
+ */
+export async function readPlanSubmission(input: {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  stateDir?: string
+}): Promise<{ plan: BackfillPlanState; submission: BackfillSubmissionState | null } | null> {
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
+  const paths = backfillPaths(stateDir, input.planId)
+  if (!existsSync(paths.planPath)) return null
+  const { plan } = await readPlan(input)
+  return { plan, submission: await readSubmission(paths.submissionPath) }
+}
+
+/**
  * Submissions of saved plans that have no local run. The job backend, not a
  * local run, decides whether these backfills are done.
  */
