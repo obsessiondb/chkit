@@ -313,7 +313,7 @@ describe('handleSubmit --plan-id', () => {
 
 	const config = { metaDir: './chkit/meta', schema: [] }
 
-	async function setupPlan(options: { jobId?: string; confirmed?: boolean } = {}) {
+	async function setupPlan(options: { jobId?: string } = {}) {
 		const dir = await mkdtemp(join(tmpdir(), 'chkit-resubmit-'))
 		const configPath = join(dir, 'clickhouse.config.ts')
 		const plan = makePlan()
@@ -327,38 +327,21 @@ describe('handleSubmit --plan-id', () => {
 		if (options.jobId) {
 			await backfillSdk.recordBackfillSubmission({ plan, jobId: options.jobId, configPath, config })
 		}
-		if (options.confirmed) {
-			const marker = JSON.parse(await readFile(submissionPath, 'utf8'))
-			await writeFile(
-				submissionPath,
-				JSON.stringify({ ...marker, status: 'completed', confirmedAt: '2026-01-02T00:00:00.000Z' }),
-			)
-		}
 		return { configPath, submissionPath, planId: plan.planId }
 	}
 
-	let executedSpy: ReturnType<typeof spyOn> | undefined
-
 	/**
-	 * Answers jobs/get with the given status and jobs/submit with job-new, and the
-	 * query-log lookup of chunks that already ran with `executed`; records the procedures called.
+	 * Answers jobs/get with a job in `status` whose tasks `doneTaskIds` finished,
+	 * and jobs/submit with job-new; records the procedures called.
 	 */
-	function mockJobsApi(
-		status: string | Response,
-		executed: backfillSdk.ExecutedChunks | Error = { finished: [], running: [] },
-	) {
-		executedSpy = spyOn(backfillSdk, 'findExecutedChunks').mockImplementation(async () => {
-			if (executed instanceof Error) throw executed
-			return executed
-		})
+	function mockJobsApi(status: string, doneTaskIds: string[] = []) {
 		const calls: Array<{ procedure: string; body: { json?: Record<string, unknown> } }> = []
 		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const request = new Request(input, init)
 			const procedure = new URL(request.url).pathname.replace(/^\/rpc\//, '')
 			calls.push({ procedure, body: await request.json() })
 			if (procedure === 'jobs/submit') return orpcResponse({ jobId: 'job-new' })
-			if (status instanceof Response) return status
-			return orpcResponse(jobDetail(status))
+			return orpcResponse(jobDetail(status, doneTaskIds))
 		}) as typeof fetch
 		return calls
 	}
@@ -386,8 +369,6 @@ describe('handleSubmit --plan-id', () => {
 
 		expect(result).toEqual({ handled: true, exitCode: 0 })
 		expect(planSpy).not.toHaveBeenCalled()
-		expect(executedSpy).toHaveBeenCalledTimes(1)
-		expect(executedSpy?.mock.calls[0]?.[0]).toMatchObject({ planId, since: '2026-06-30T00:00:00.000Z' })
 		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get', 'jobs/submit'])
 		expect(calls[0]?.body.json).toEqual({ jobId: 'job-old' })
 		expect(calls[1]?.body.json).toMatchObject({
@@ -413,9 +394,9 @@ describe('handleSubmit --plan-id', () => {
 		expect(marker).not.toHaveProperty('status')
 	})
 
-	test('leaves out the chunks that already finished on the service', async () => {
+	test('leaves out the chunks whose task finished in the replaced job', async () => {
 		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
-		const calls = mockJobsApi('cancelled', { finished: ['c1'], running: [] })
+		const calls = mockJobsApi('cancelled', ['c1'])
 
 		const { result, printed } = await resubmit(configPath, { '--plan-id': planId }, false)
 
@@ -424,62 +405,23 @@ describe('handleSubmit --plan-id', () => {
 		expect(tasks.map((task) => task.id)).toEqual(['c2'])
 		expect(printed[0]).toBe(
 			`Re-submitted backfill plan ${planId} as job job-new for app.events (1 task), replacing cancelled job job-old.\n` +
-				'Skipped 1 chunk that already finished on the service.\n' +
+				'Skipped 1 chunk that already finished.\n' +
 				'Track progress: https://api.example.com/svc/jobs/job-new',
 		)
 	})
 
-	test('refuses while chunk queries of the plan still run on the service', async () => {
-		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
-		const before = await readFile(submissionPath, 'utf8')
-		const calls = mockJobsApi('cancelled', { finished: ['c1'], running: ['c2'] })
+	test('refuses when every chunk finished in the replaced job', async () => {
+		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const calls = mockJobsApi('failed', ['c1', 'c2'])
 
 		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
 
 		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_chunks_running' })
-		expect((printed[0] as { error: string }).error).toContain(`1 chunk query of plan ${planId} (job job-old) still run`)
-		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
-		expect(await readFile(submissionPath, 'utf8')).toBe(before)
-	})
-
-	test('refuses when every chunk already finished on the service', async () => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
-		const calls = mockJobsApi('failed', { finished: ['c1', 'c2'], running: [] })
-
-		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
-
-		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_nothing_to_run' })
+		expect((printed[0] as { error: string }).error).toContain(`Every chunk of plan ${planId} already finished`)
 		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
 	})
 
-	test('refuses when the chunks that already ran cannot be read', async () => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
-		const calls = mockJobsApi('failed', new Error('Not enough privileges'))
-
-		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
-
-		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_chunks_unverified' })
-		expect((printed[0] as { error: string }).error).toContain('Not enough privileges.')
-		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
-	})
-
-	test('re-submits the saved plan of a cancelled job', async () => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
-		mockJobsApi('cancelled')
-
-		const { result, printed } = await resubmit(configPath, { '--plan-id': planId }, false)
-
-		expect(result).toEqual({ handled: true, exitCode: 0 })
-		expect(printed[0]).toBe(
-			`Re-submitted backfill plan ${planId} as job job-new for app.events (2 tasks), replacing cancelled job job-old.\n` +
-				'Track progress: https://api.example.com/svc/jobs/job-new',
-		)
-	})
-
-	test.each(['pending', 'running', 'draining', 'paused'])('refuses while the job is %s', async (status) => {
+	test.each(['pending', 'running', 'draining', 'paused', 'completed'])('refuses when the job is %s', async (status) => {
 		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
 		const before = await readFile(submissionPath, 'utf8')
 		const calls = mockJobsApi(status)
@@ -487,45 +429,8 @@ describe('handleSubmit --plan-id', () => {
 		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
 
 		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, command: 'backfill submit', code: 'backfill_resubmit_job_active' })
+		expect(printed[0]).toMatchObject({ ok: false, command: 'backfill submit' })
 		expect((printed[0] as { error: string }).error).toContain(`Job job-old for plan ${planId} is ${status}`)
-		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
-		expect(executedSpy).not.toHaveBeenCalled()
-		expect(await readFile(submissionPath, 'utf8')).toBe(before)
-	})
-
-	test('refuses when the job already completed', async () => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
-		const calls = mockJobsApi('completed')
-
-		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
-
-		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_job_completed' })
-		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
-	})
-
-	test('refuses a confirmed submission without contacting the API', async () => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-old', confirmed: true })
-		const calls = mockJobsApi('failed')
-
-		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
-
-		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_job_completed' })
-		expect(calls).toEqual([])
-	})
-
-	test('refuses when the job status cannot be read', async () => {
-		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
-		const before = await readFile(submissionPath, 'utf8')
-		const calls = mockJobsApi(new Response('upstream down', { status: 503 }))
-
-		const { result, printed } = await resubmit(configPath, { '--plan-id': planId }, false)
-
-		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toContain('Backfill submit failed: Cannot read the status of job job-old')
-		expect(printed[0]).toContain('Not re-submitting')
 		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
 		expect(await readFile(submissionPath, 'utf8')).toBe(before)
 	})
@@ -537,18 +442,18 @@ describe('handleSubmit --plan-id', () => {
 		const { result, printed } = await resubmit(configPath, { '--plan-id': '0000000000000000' })
 
 		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_plan_not_found' })
+		expect((printed[0] as { error: string }).error).toContain('Backfill plan 0000000000000000 not found')
 		expect(calls).toEqual([])
 	})
 
-	test('refuses a plan that has no submission marker', async () => {
+	test('refuses a plan that was never submitted', async () => {
 		const { configPath, submissionPath, planId } = await setupPlan()
 		const calls = mockJobsApi('failed')
 
 		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
 
 		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_not_submitted' })
+		expect((printed[0] as { error: string }).error).toContain(`Backfill plan ${planId} was never submitted`)
 		expect(calls).toEqual([])
 		expect(existsSync(submissionPath)).toBe(false)
 	})
@@ -560,12 +465,12 @@ describe('handleSubmit --plan-id', () => {
 		const { result, printed } = await resubmit(configPath, { '--plan-id': planId, '--target': 'app.events' })
 
 		expect(result).toEqual({ handled: true, exitCode: 1 })
-		expect(printed[0]).toMatchObject({ ok: false, code: 'backfill_resubmit_invalid_flags' })
+		expect((printed[0] as { error: string }).error).toContain('cannot be combined with --target')
 		expect(calls).toEqual([])
 	})
 })
 
-function jobDetail(status: string) {
+function jobDetail(status: string, doneTaskIds: string[]) {
 	return {
 		id: 'job-old',
 		serviceId: 'svc-1',
@@ -578,14 +483,54 @@ function jobDetail(status: string) {
 		pollIntervalBaseSec: null,
 		pollIntervalMaxSec: null,
 		totalTasks: 2,
-		completedTasks: 0,
+		completedTasks: doneTaskIds.length,
 		failedTasks: 0,
 		createdAt: '2026-03-29T00:00:00Z',
 		updatedAt: '2026-03-29T01:00:00Z',
 		maxRetries: 3,
 		workflowId: null,
 		metadata: null,
-		tasks: [],
+		tasks: ['c1', 'c2'].map((id, taskIndex) => jobTask(id, taskIndex, doneTaskIds.includes(id) ? 'done' : 'failed')),
+	}
+}
+
+function jobTask(id: string, taskIndex: number, runStatus: 'done' | 'failed') {
+	return {
+		id,
+		taskIndex,
+		taskGroup: null,
+		sql: 'INSERT INTO app.events SELECT 1',
+		settings: null,
+		cleanupSql: null,
+		cleanupType: null,
+		maxRetries: 3,
+		estimatedBytes: null,
+		estimatedBytesUncompressed: null,
+		runs: [
+			{
+				id: `run-${id}`,
+				attempt: 1,
+				type: 'insert',
+				status: runStatus,
+				queryId: null,
+				sql: null,
+				settings: null,
+				mutationId: null,
+				readRows: null,
+				readBytes: null,
+				readBytesCompressed: null,
+				writtenRows: null,
+				writtenBytes: null,
+				writtenBytesCompressed: null,
+				durationMs: null,
+				error: null,
+				node: null,
+				executingNode: null,
+				executingHost: null,
+				startedAt: null,
+				finishedAt: null,
+			},
+		],
 	}
 }
 

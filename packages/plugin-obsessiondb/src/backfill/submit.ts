@@ -16,7 +16,7 @@ import { createRemoteExecutor } from '../query/remote-executor.js'
 import { createJobsClient, type JobsClient } from './client.js'
 import { buildJobConsoleUrl } from './console-url.js'
 import { resolveBackfillPluginOptions, resolveBackfillStateDir } from './plugin-options.js'
-import { loadPlanForResubmit, type ReplacedJob, ResubmitRefusedError } from './resubmit.js'
+import { loadPlanForResubmit, type ReplacedJob } from './resubmit.js'
 
 interface SubmitTask {
 	id: string
@@ -120,17 +120,11 @@ export function parseResubmitInput(
 ): { planId: string; title?: string; concurrency?: number } {
 	const planId = flagString(flags, '--plan-id')
 	if (!planId || !/^[a-f0-9]{16}$/.test(planId)) {
-		throw new ResubmitRefusedError(
-			'backfill_resubmit_invalid_flags',
-			'Invalid value for --plan-id. Expected a 16-char lowercase hex id.',
-		)
+		throw new Error('Invalid value for --plan-id. Expected a 16-char lowercase hex id.')
 	}
 	const planningFlags = PLANNING_FLAGS.filter((name) => flags[name] !== undefined)
 	if (planningFlags.length > 0) {
-		throw new ResubmitRefusedError(
-			'backfill_resubmit_invalid_flags',
-			`--plan-id re-submits a saved plan and cannot be combined with ${planningFlags.join(', ')}.`,
-		)
+		throw new Error(`--plan-id re-submits a saved plan and cannot be combined with ${planningFlags.join(', ')}.`)
 	}
 	return { planId, ...parseJobFlags(flags) }
 }
@@ -209,7 +203,7 @@ export async function handleSubmit(
 				`Re-submitted backfill plan ${plan.planId} as job ${jobId} for ${plan.target} (${taskLabel}), ` +
 					`replacing ${replacedJob.status} job ${replacedJob.id}.\n` +
 					(skippedChunks
-						? `Skipped ${skippedChunks} chunk${skippedChunks === 1 ? '' : 's'} that already finished on the service.\n`
+						? `Skipped ${skippedChunks} chunk${skippedChunks === 1 ? '' : 's'} that already finished.\n`
 						: '') +
 					`Track progress: ${url}`,
 			)
@@ -227,12 +221,7 @@ export async function handleSubmit(
 		}
 		const message = error instanceof Error ? error.message : String(error)
 		if (context.jsonMode) {
-			context.print({
-				ok: false,
-				command: 'backfill submit',
-				error: message,
-				...(error instanceof ResubmitRefusedError ? { code: error.code } : {}),
-			})
+			context.print({ ok: false, command: 'backfill submit', error: message })
 		} else {
 			context.print(`Backfill submit failed: ${message}`)
 		}
@@ -247,7 +236,7 @@ interface PreparedSubmission {
 	stateDir?: string
 	/** The failed or cancelled job that a `--plan-id` re-submission replaces. */
 	replacedJob?: ReplacedJob
-	/** Chunks a re-submission leaves out because they already finished on the service. */
+	/** Chunks a re-submission leaves out because they finished in the replaced job. */
 	skippedChunks?: number
 }
 
@@ -278,15 +267,11 @@ async function prepareNewPlan(context: SubmitContext): Promise<PreparedSubmissio
 
 async function prepareResubmit(context: SubmitContext, jobs: JobsClient): Promise<PreparedSubmission> {
 	const { planId, title, concurrency } = parseResubmitInput(context.flags)
-	const executor = createRemoteExecutor({
-		credentials: context.credentials,
-		serviceSlug: context.serviceSlug,
-	})
 	// The saved plan and its marker live in the backfill plugin's stateDir.
 	const stateDir = resolveBackfillStateDir(context.config.plugins)
 	const { plan, replacedJob, skippedChunks } = await loadPlanForResubmit(
 		{ planId, configPath: context.configPath, config: context.config, stateDir },
-		{ jobs, executor },
+		{ jobs },
 	)
 	return { plan, title, concurrency, stateDir, replacedJob, skippedChunks }
 }

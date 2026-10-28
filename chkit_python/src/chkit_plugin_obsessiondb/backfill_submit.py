@@ -29,7 +29,6 @@ from chkit_plugin_obsessiondb.backfill_plugin_options import (
 )
 from chkit_plugin_obsessiondb.backfill_resubmit import (
     ReplacedJob,
-    ResubmitRefusedError,
     load_plan_for_resubmit,
 )
 from chkit_plugin_obsessiondb.console_url import build_job_console_url
@@ -160,17 +159,15 @@ def parse_resubmit_input(flags: dict[str, Any]) -> ParsedResubmitInput:
     """``submit --plan-id <id>``: re-submit a saved plan instead of planning."""
     plan_id = _flag_string(flags, "--plan-id")
     if plan_id is None or _PLAN_ID_RE.match(plan_id) is None:
-        raise ResubmitRefusedError(
-            "backfill_resubmit_invalid_flags",
-            "Invalid value for --plan-id. Expected a 16-char lowercase hex id.",
-        )
+        msg = "Invalid value for --plan-id. Expected a 16-char lowercase hex id."
+        raise ValueError(msg)
     planning_flags = [name for name in _PLANNING_FLAGS if flags.get(name) is not None]
     if planning_flags:
-        raise ResubmitRefusedError(
-            "backfill_resubmit_invalid_flags",
+        msg = (
             "--plan-id re-submits a saved plan and cannot be combined with"
-            f" {', '.join(planning_flags)}.",
+            f" {', '.join(planning_flags)}."
         )
+        raise ValueError(msg)
     title, concurrency = _parse_job_flags(flags)
     return ParsedResubmitInput(plan_id=plan_id, title=title, concurrency=concurrency)
 
@@ -273,7 +270,7 @@ def handle_submit(context: SubmitContext) -> int:
             skipped = prepared.skipped_chunks
             skipped_line = (
                 f"Skipped {skipped} chunk{'' if skipped == 1 else 's'} that already"
-                " finished on the service.\n"
+                " finished.\n"
                 if skipped
                 else ""
             )
@@ -297,14 +294,9 @@ def handle_submit(context: SubmitContext) -> int:
             return 1
         message = str(error)
         if context.json_mode:
-            envelope: dict[str, Any] = {
-                "ok": False,
-                "command": "backfill submit",
-                "error": message,
-            }
-            if isinstance(error, ResubmitRefusedError):
-                envelope["code"] = error.code
-            context.print(envelope)
+            context.print(
+                {"ok": False, "command": "backfill submit", "error": message}
+            )
         else:
             context.print(f"Backfill submit failed: {message}")
         return 1
@@ -318,7 +310,7 @@ class _PreparedSubmission:
     state_dir: str | None = None
     # The failed or cancelled job that a `--plan-id` re-submission replaces.
     replaced_job: ReplacedJob | None = None
-    # Chunks a re-submission leaves out because they already finished on the service.
+    # Chunks a re-submission leaves out because they finished in the replaced job.
     skipped_chunks: int = 0
 
 
@@ -367,9 +359,6 @@ def _prepare_resubmit(
         config_path=context.config_path,
         config=context.config,
         credentials=context.credentials,
-        executor=create_remote_executor(
-            context.credentials, service_slug=context.service_slug
-        ),
         state_dir=state_dir,
     )
     return _PreparedSubmission(

@@ -36,7 +36,6 @@ from chkit_plugin_backfill.chunking.types import (
     SortKey,
 )
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
-from chkit_plugin_backfill.executed_chunks import ExecutedChunks, find_executed_chunks
 from chkit_plugin_backfill.logging_utils import (
     CHKIT_BACKFILL_LOGGER_CATEGORY,
     CHKIT_LOGGER_CATEGORY,
@@ -81,7 +80,6 @@ __all__ = [
     "ChunkRange",
     "EstimateConfidence",
     "EstimateReason",
-    "ExecutedChunks",
     "FocusedValue",
     "Partition",
     "PartitionDiagnostics",
@@ -99,7 +97,6 @@ __all__ = [
     "decode_chunk_plan_from_persistence",
     "encode_chunk_plan_for_persistence",
     "execute_backfill",
-    "find_executed_chunks",
     "generate_chunk_plan",
     "generate_idempotency_token",
     "get_backfill_logger",

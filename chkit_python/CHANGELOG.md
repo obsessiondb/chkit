@@ -89,23 +89,12 @@
 - `chkit plugin backfill submit --plan-id <id>` re-submits a saved plan whose
   ObsessionDB job failed or was cancelled (#313), and replaces the job ID in its
   submission file, so `chkit check` follows the new job instead of failing with
-  `obsessiondb_backfill_job_failed`. Chunks an earlier job already wrote, found in
-  `system.processes` and `system.query_log` on every replica, are left out of the
-  new job, since writing one again can duplicate its rows. It reads the job's
-  status first and refuses, without starting a job, when the job is still active
-  (`backfill_resubmit_job_active`), already completed
-  (`backfill_resubmit_job_completed`) or its status cannot be read
-  (`backfill_resubmit_job_unverified`), when a chunk query still runs
-  (`backfill_resubmit_chunks_running`), the query log cannot be read
-  (`backfill_resubmit_chunks_unverified`) or every chunk already finished
-  (`backfill_resubmit_nothing_to_run`), when the plan does not exist
-  (`backfill_resubmit_plan_not_found`) or has no submission file
-  (`backfill_resubmit_not_submitted`), and when planning flags are passed with
-  `--plan-id` (`backfill_resubmit_invalid_flags`). The `--json` error carries the
-  code under `code`; a success adds `planId`, `replacedJobId` and
-  `skippedChunks`. The
+  `obsessiondb_backfill_job_failed`. Chunks whose task finished in that job are
+  left out. It starts no job when the job is in any other state, the plan does
+  not exist or was never submitted, or planning flags are passed with
+  `--plan-id`. `--json` adds `planId`, `replacedJobId` and `skippedChunks`. The
   `obsessiondb_backfill_job_failed` finding now points to `submit --plan-id`. The
-  backfill SDK exports `read_plan_submission` and `find_executed_chunks`.
+  backfill SDK exports `read_plan_submission`.
 
 ### Fixed
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The

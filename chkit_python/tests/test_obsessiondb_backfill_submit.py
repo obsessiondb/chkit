@@ -17,7 +17,6 @@ import pytest
 from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
-from chkit_plugin_backfill.executed_chunks import ExecutedChunks
 from chkit_plugin_backfill.options import PluginConfig
 from chkit_plugin_backfill.planner import BuildBackfillPlanOutput
 from chkit_plugin_backfill.plugin import backfill
@@ -26,7 +25,6 @@ from chkit_plugin_backfill.types import BackfillPlanState
 from chkit_plugin_obsessiondb import backfill_resubmit as backfill_resubmit_module
 from chkit_plugin_obsessiondb import backfill_submit as backfill_submit_module
 from chkit_plugin_obsessiondb.api_client import SessionExpiredError
-from chkit_plugin_obsessiondb.backfill_resubmit import ResubmitRefusedError
 from chkit_plugin_obsessiondb.backfill_submit import (
     ParsedResubmitInput,
     SubmitContext,
@@ -502,14 +500,12 @@ def test_parse_resubmit_input_accepts_a_plan_id_with_job_settings() -> None:
 
 
 def test_parse_resubmit_input_rejects_a_malformed_plan_id() -> None:
-    with pytest.raises(ResubmitRefusedError, match="Invalid value for --plan-id"):
+    with pytest.raises(ValueError, match="Invalid value for --plan-id"):
         parse_resubmit_input({"--plan-id": "not-a-plan"})
 
 
 def test_parse_resubmit_input_rejects_planning_flags_next_to_plan_id() -> None:
-    with pytest.raises(
-        ResubmitRefusedError, match="cannot be combined with --target, --from"
-    ):
+    with pytest.raises(ValueError, match="cannot be combined with --target, --from"):
         parse_resubmit_input(
             {
                 "--plan-id": "abcdef0123456789",
@@ -524,9 +520,7 @@ def test_parse_resubmit_input_rejects_planning_flags_next_to_plan_id() -> None:
 PLAN_ID = "abcdef0123456789"
 
 
-def _setup_saved_plan(
-    tmp_path: Path, *, job_id: str | None = None, confirmed: bool = False
-) -> Path:
+def _setup_saved_plan(tmp_path: Path, *, job_id: str | None = None) -> Path:
     """Save ``make_plan()`` as ``backfill plan`` would; optionally its marker."""
     plan = make_plan()
     write_json(
@@ -535,7 +529,6 @@ def _setup_saved_plan(
             update={"chunk_plan": encode_chunk_plan_for_persistence(plan.chunk_plan)}
         ),
     )
-    submission_path = tmp_path / "meta/backfill/submissions" / f"{PLAN_ID}.json"
     if job_id is not None:
         record_backfill_submission(
             plan_id=PLAN_ID,
@@ -544,35 +537,21 @@ def _setup_saved_plan(
             config_path=tmp_path / "cfg.py",
             config=SimpleNamespace(meta_dir="meta"),
         )
-    if confirmed:
-        marker = json.loads(submission_path.read_text(encoding="utf-8"))
-        write_json(
-            submission_path,
-            {**marker, "status": "completed", "confirmedAt": "2026-01-02T00:00:00.000Z"},
-        )
-    return submission_path
+    return tmp_path / "meta/backfill/submissions" / f"{PLAN_ID}.json"
 
 
 def _patch_jobs_api(
     monkeypatch: pytest.MonkeyPatch,
-    status: str | Exception,
-    executed: ExecutedChunks | Exception | None = None,
+    status: str,
+    done_task_ids: tuple[str, ...] = (),
 ) -> list[tuple[str, dict[str, Any]]]:
-    """``jobs_get`` answers with ``status`` (or raises it); ``jobs_submit`` returns
-    job-new; the query-log lookup of chunks that already ran answers ``executed``.
+    """``jobs_get`` answers with a job in ``status`` whose tasks ``done_task_ids``
+    finished; ``jobs_submit`` returns job-new.
     """
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    def fake_find_executed_chunks(**kwargs: Any) -> ExecutedChunks:
-        calls.append(("find_executed_chunks", kwargs))
-        if isinstance(executed, Exception):
-            raise executed
-        return executed or ExecutedChunks(finished=[], running=[])
-
     def fake_jobs_get(_creds: Credentials, *, job_id: str) -> JobDetail:
         calls.append(("jobs/get", {"job_id": job_id}))
-        if isinstance(status, Exception):
-            raise status
         return JobDetail.model_validate(
             {
                 "id": job_id,
@@ -582,12 +561,26 @@ def _patch_jobs_api(
                 "status": status,
                 "concurrency": 4,
                 "totalTasks": 2,
-                "completedTasks": 0,
+                "completedTasks": len(done_task_ids),
                 "failedTasks": 0,
                 "createdAt": "2026-03-29T00:00:00Z",
                 "updatedAt": "2026-03-29T01:00:00Z",
                 "maxRetries": 3,
-                "tasks": [],
+                "tasks": [
+                    {
+                        "id": task_id,
+                        "taskIndex": index,
+                        "runs": [
+                            {
+                                "type": "insert",
+                                "status": "done"
+                                if task_id in done_task_ids
+                                else "failed",
+                            }
+                        ],
+                    }
+                    for index, task_id in enumerate(("c1", "c2"))
+                ],
             }
         )
 
@@ -600,14 +593,6 @@ def _patch_jobs_api(
         raise AssertionError(msg)
 
     monkeypatch.setattr(backfill_resubmit_module, "jobs_get", fake_jobs_get)
-    monkeypatch.setattr(
-        backfill_resubmit_module, "find_executed_chunks", fake_find_executed_chunks
-    )
-    monkeypatch.setattr(
-        backfill_submit_module,
-        "create_remote_executor",
-        lambda _creds, *, service_slug: _UnusedExecutor(),
-    )
     monkeypatch.setattr(backfill_submit_module, "jobs_submit", fake_jobs_submit)
     monkeypatch.setattr(backfill_submit_module, "build_backfill_plan", no_planning)
     return calls
@@ -630,19 +615,17 @@ def test_handle_submit_plan_id_resubmits_a_failed_job_and_replaces_its_marker(
     )
 
     assert code == 0
-    assert [procedure for procedure, _ in calls] == [
-        "jobs/get",
-        "find_executed_chunks",
-        "jobs/submit",
-    ]
+    assert [procedure for procedure, _ in calls] == ["jobs/get", "jobs/submit"]
     assert calls[0][1] == {"job_id": "job-old"}
-    assert calls[1][1]["plan_id"] == PLAN_ID
-    assert calls[1][1]["since"] == "2026-06-30T00:00:00.000Z"
-    submitted = calls[2][1]
+    submitted = calls[1][1]
     assert submitted["target"] == "app.events"
     assert submitted["title"] == "Retry"
     assert [t.id for t in submitted["tasks"]] == ["c1", "c2"]
-    assert submitted["metadata"] == {"planId": PLAN_ID, "mode": "copy", "source": "chkit"}
+    assert submitted["metadata"] == {
+        "planId": PLAN_ID,
+        "mode": "copy",
+        "source": "chkit",
+    }
     assert msgs == [
         {
             "ok": True,
@@ -665,32 +648,11 @@ def test_handle_submit_plan_id_resubmits_a_failed_job_and_replaces_its_marker(
     assert "status" not in marker
 
 
-def test_handle_submit_plan_id_resubmits_a_cancelled_job(
+def test_handle_submit_plan_id_leaves_out_chunks_that_finished_in_the_job(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _setup_saved_plan(tmp_path, job_id="job-old")
-    _patch_jobs_api(monkeypatch, "cancelled")
-
-    msgs: list[Any] = []
-    code = handle_submit(
-        _submit_context(flags={"--plan-id": PLAN_ID}, msgs=msgs, config_dir=tmp_path)
-    )
-
-    assert code == 0
-    assert msgs == [
-        f"Re-submitted backfill plan {PLAN_ID} as job job-new for app.events"
-        " (2 tasks), replacing cancelled job job-old.\n"
-        f"Track progress: {BASE}/svc-1/jobs/job-new"
-    ]
-
-
-def test_handle_submit_plan_id_leaves_out_chunks_that_already_finished(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _setup_saved_plan(tmp_path, job_id="job-old")
-    calls = _patch_jobs_api(
-        monkeypatch, "cancelled", ExecutedChunks(finished=["c1"], running=[])
-    )
+    calls = _patch_jobs_api(monkeypatch, "cancelled", ("c1",))
 
     msgs: list[Any] = []
     code = handle_submit(
@@ -703,41 +665,16 @@ def test_handle_submit_plan_id_leaves_out_chunks_that_already_finished(
     assert msgs == [
         f"Re-submitted backfill plan {PLAN_ID} as job job-new for app.events"
         " (1 task), replacing cancelled job job-old.\n"
-        "Skipped 1 chunk that already finished on the service.\n"
+        "Skipped 1 chunk that already finished.\n"
         f"Track progress: {BASE}/svc-1/jobs/job-new"
     ]
 
 
-def test_handle_submit_plan_id_refuses_while_chunk_queries_still_run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    submission_path = _setup_saved_plan(tmp_path, job_id="job-old")
-    before = submission_path.read_text(encoding="utf-8")
-    calls = _patch_jobs_api(
-        monkeypatch, "cancelled", ExecutedChunks(finished=["c1"], running=["c2"])
-    )
-
-    msgs: list[Any] = []
-    code = handle_submit(
-        _submit_context(
-            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
-        )
-    )
-
-    assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_chunks_running"
-    assert f"1 chunk query of plan {PLAN_ID} (job job-old) still run" in msgs[0]["error"]
-    assert "jobs/submit" not in [procedure for procedure, _ in calls]
-    assert submission_path.read_text(encoding="utf-8") == before
-
-
-def test_handle_submit_plan_id_refuses_when_every_chunk_already_finished(
+def test_handle_submit_plan_id_refuses_when_every_chunk_finished_in_the_job(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _setup_saved_plan(tmp_path, job_id="job-old")
-    calls = _patch_jobs_api(
-        monkeypatch, "failed", ExecutedChunks(finished=["c1", "c2"], running=[])
-    )
+    calls = _patch_jobs_api(monkeypatch, "failed", ("c1", "c2"))
 
     msgs: list[Any] = []
     code = handle_submit(
@@ -747,33 +684,14 @@ def test_handle_submit_plan_id_refuses_when_every_chunk_already_finished(
     )
 
     assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_nothing_to_run"
-    assert "jobs/submit" not in [procedure for procedure, _ in calls]
+    assert f"Every chunk of plan {PLAN_ID} already finished" in msgs[0]["error"]
+    assert [procedure for procedure, _ in calls] == ["jobs/get"]
 
 
-def test_handle_submit_plan_id_refuses_when_executed_chunks_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _setup_saved_plan(tmp_path, job_id="job-old")
-    calls = _patch_jobs_api(
-        monkeypatch, "failed", RuntimeError("Not enough privileges")
-    )
-
-    msgs: list[Any] = []
-    code = handle_submit(
-        _submit_context(
-            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
-        )
-    )
-
-    assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_chunks_unverified"
-    assert "Not enough privileges." in msgs[0]["error"]
-    assert "jobs/submit" not in [procedure for procedure, _ in calls]
-
-
-@pytest.mark.parametrize("status", ["pending", "running", "draining", "paused"])
-def test_handle_submit_plan_id_refuses_while_the_job_is_active(
+@pytest.mark.parametrize(
+    "status", ["pending", "running", "draining", "paused", "completed"]
+)
+def test_handle_submit_plan_id_refuses_unless_the_job_failed_or_was_cancelled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
 ) -> None:
     submission_path = _setup_saved_plan(tmp_path, job_id="job-old")
@@ -791,65 +709,7 @@ def test_handle_submit_plan_id_refuses_while_the_job_is_active(
     [payload] = msgs
     assert payload["ok"] is False
     assert payload["command"] == "backfill submit"
-    assert payload["code"] == "backfill_resubmit_job_active"
     assert f"Job job-old for plan {PLAN_ID} is {status}" in payload["error"]
-    assert [procedure for procedure, _ in calls] == ["jobs/get"]
-    assert submission_path.read_text(encoding="utf-8") == before
-
-
-def test_handle_submit_plan_id_refuses_when_the_job_already_completed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _setup_saved_plan(tmp_path, job_id="job-old")
-    calls = _patch_jobs_api(monkeypatch, "completed")
-
-    msgs: list[Any] = []
-    code = handle_submit(
-        _submit_context(
-            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
-        )
-    )
-
-    assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_job_completed"
-    assert [procedure for procedure, _ in calls] == ["jobs/get"]
-
-
-def test_handle_submit_plan_id_refuses_a_confirmed_submission_without_the_api(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _setup_saved_plan(tmp_path, job_id="job-old", confirmed=True)
-    calls = _patch_jobs_api(monkeypatch, "failed")
-
-    msgs: list[Any] = []
-    code = handle_submit(
-        _submit_context(
-            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
-        )
-    )
-
-    assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_job_completed"
-    assert calls == []
-
-
-def test_handle_submit_plan_id_refuses_when_the_job_status_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    submission_path = _setup_saved_plan(tmp_path, job_id="job-old")
-    before = submission_path.read_text(encoding="utf-8")
-    calls = _patch_jobs_api(monkeypatch, SessionExpiredError())
-
-    msgs: list[Any] = []
-    code = handle_submit(
-        _submit_context(flags={"--plan-id": PLAN_ID}, msgs=msgs, config_dir=tmp_path)
-    )
-
-    assert code == 1
-    [message] = msgs
-    assert "Backfill submit failed: Cannot read the status of job job-old" in message
-    assert "Session expired" in message
-    assert "Not re-submitting" in message
     assert [procedure for procedure, _ in calls] == ["jobs/get"]
     assert submission_path.read_text(encoding="utf-8") == before
 
@@ -871,11 +731,11 @@ def test_handle_submit_plan_id_refuses_an_unknown_plan_id(
     )
 
     assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_plan_not_found"
+    assert "Backfill plan 0000000000000000 not found" in msgs[0]["error"]
     assert calls == []
 
 
-def test_handle_submit_plan_id_refuses_a_plan_without_a_submission_marker(
+def test_handle_submit_plan_id_refuses_a_plan_that_was_never_submitted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     submission_path = _setup_saved_plan(tmp_path)
@@ -889,7 +749,7 @@ def test_handle_submit_plan_id_refuses_a_plan_without_a_submission_marker(
     )
 
     assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_not_submitted"
+    assert f"Backfill plan {PLAN_ID} was never submitted" in msgs[0]["error"]
     assert calls == []
     assert not submission_path.exists()
 
@@ -911,5 +771,5 @@ def test_handle_submit_plan_id_refuses_planning_flags_before_the_api(
     )
 
     assert code == 1
-    assert msgs[0]["code"] == "backfill_resubmit_invalid_flags"
+    assert "cannot be combined with --target" in msgs[0]["error"]
     assert calls == []
