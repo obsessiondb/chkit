@@ -145,6 +145,23 @@ def test_check_without_clickhouse_block_runs_through_the_selected_service(
     assert any("_chkit_migrations" in query for _, query in calls)
 
 
+def test_check_names_the_selected_service_in_text_mode(
+    isolated_home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = project / "clickhouse.config.py"
+    _log_in_and_select(config_path)
+    monkeypatch.setattr(
+        remote_executor,
+        "workbench_query_execute",
+        lambda *_args, **_kwargs: WorkbenchExecuteResult(data=[], meta=[], rows=0),
+    )
+    monkeypatch.chdir(project)
+    result = CliRunner().invoke(app, ["check", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f'obsessiondb: using service "{SLUG}"\n')
+
+
 def test_check_without_clickhouse_block_or_service_says_what_is_missing(
     isolated_home: Path, project: Path
 ) -> None:

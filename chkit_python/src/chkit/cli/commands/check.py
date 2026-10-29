@@ -14,6 +14,7 @@ The live-DB drift comparison from the TS port lives in ``chkit drift``.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -39,29 +40,24 @@ from chkit.cli.table_scope import (
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
+from chkit.core.model import ChxConfigEnv, ChxResolvedClickHouseConfig
 from chkit.core.validate import validate_definitions
 from chkit.plugins import (
     ChxGetContextInput,
     ChxOnCheckContext,
+    ChxOnInitContext,
     ChxPlugin,
-    PluginContext,
-)
-
-_NO_EXECUTOR_MESSAGE = (
-    "clickhouse.config.py must include a `clickhouse` block or select an "
-    "ObsessionDB service (journal lives in ClickHouse)."
 )
 
 
 def _open_client(
-    plugin_context: PluginContext | None, config: ChxResolvedConfig
+    executor: ClickHouseClient | None, clickhouse: ChxResolvedClickHouseConfig | None
 ) -> ClickHouseClient:
-    if plugin_context is not None and plugin_context.executor is not None:
-        return plugin_context.executor
-    if config.clickhouse is None:
-        raise typer.BadParameter(_NO_EXECUTOR_MESSAGE)
-    return ClickHouseClient.connect(config.clickhouse)
+    # run() has checked that one of the two is set.
+    if executor is not None:
+        return executor
+    assert clickhouse is not None
+    return ClickHouseClient.connect(clickhouse)
 
 
 def run(  # noqa: PLR0912, PLR0915, PLR0917
@@ -106,6 +102,18 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
     resolved_config_path = str(config_path or "clickhouse.config.py")
+    # TS onInit: ObsessionDB names the selected service (text mode only).
+    plugin_runtime.run_on_init(
+        ChxOnInitContext(
+            command="check",
+            config_path=resolved_config_path,
+            is_interactive=sys.stdin.isatty(),
+            json_mode=output_json,
+            flags={},
+            config=config,
+            options={},
+        )
+    )
     # A plugin executor (ObsessionDB with a selected service) takes precedence
     # over the `clickhouse` block, as in TS.
     plugin_context = plugin_runtime.resolve_context(
@@ -117,8 +125,13 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             defaults=null_plugin_context(),
         )
     )
-    if plugin_context is None and config.clickhouse is None:
-        raise typer.BadParameter(_NO_EXECUTOR_MESSAGE)
+    executor = plugin_context.executor if plugin_context is not None else None
+    if executor is None and config.clickhouse is None:
+        msg = (
+            "clickhouse.config.py must include a `clickhouse` block or select an "
+            "ObsessionDB service (journal lives in ClickHouse)."
+        )
+        raise typer.BadParameter(msg)
 
     migrations_dir = Path(config.migrations_dir)
     meta_dir = Path(config.meta_dir)
@@ -146,7 +159,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         drift_ops = [op.key for op in plan.operations]
 
     live_drifted = False
-    with _open_client(plugin_context, config) as client:
+    with _open_client(executor, config.clickhouse) as client:
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )

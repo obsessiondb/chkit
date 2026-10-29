@@ -70,7 +70,7 @@ The rest of this page covers each path as standalone CLI commands, which is also
 You don't need a `clickhouse` block — once a service is selected, the plugin routes SQL through the ObsessionDB API.
 
 :::note
-In `chkit-py`, `chkit check` runs through the selected service; `status`, `migrate`, `drift`, `query` and `pull` still need a `clickhouse` block.
+In `chkit-py`, `chkit check` runs through the selected service, which takes precedence over a `clickhouse` block (it prints `obsessiondb: using service "<name>"`); `status`, `migrate`, `drift`, `query` and `pull` still need a `clickhouse` block.
 :::
 
 ## Sign up from the CLI

@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
+from chkit.cli.plugin_runtime import make_plugin_context
 from chkit.cli.shared_engine_flags import (
     FORCE_SHARED_ENGINES_HELP,
     NO_SHARED_ENGINES_HELP,
@@ -32,6 +33,7 @@ from chkit.plugins import (
     ChxOnCheckContext,
     ChxOnCheckReportContext,
     ChxOnCheckResult,
+    ChxOnInitContext,
     ChxOnSchemaLoadedContext,
     ChxPlugin,
     ChxPluginCommand,
@@ -93,7 +95,16 @@ class _ObsessionDBHooks:
             ),
             service_slug=service.service_slug,
         )
-        return PluginContext(executor=cast(Any, executor), has_executor=True)
+        return make_plugin_context(executor)
+
+    def on_init(self, ctx: ChxOnInitContext) -> None:
+        # TS onInit: say which service SQL goes to, since it takes precedence
+        # over a `clickhouse` block.
+        if ctx.json_mode or load_credentials() is None:
+            return
+        service = load_selected_service(ctx.config_path)
+        if service is not None:
+            print(f'obsessiondb: using service "{service.service_name}"\n')
 
     def on_before_plugin_command(
         self, ctx: ChxOnBeforePluginCommandContext
