@@ -108,14 +108,24 @@ def test_get_context_defers_without_a_selected_service(
 
 
 def test_get_context_returns_the_remote_executor_for_the_selected_service(
-    isolated_home: Path, project: Path
+    isolated_home: Path, project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _log_in_and_select(project / "clickhouse.config.py")
+    slugs: list[str] = []
+
+    def fake_execute(
+        _creds: Credentials, *, service_slug: str, **_kwargs: Any
+    ) -> WorkbenchExecuteResult:
+        slugs.append(service_slug)
+        return WorkbenchExecuteResult(data=[], meta=[], rows=0)
+
+    monkeypatch.setattr(remote_executor, "workbench_query_execute", fake_execute)
     ctx = _resolve(project / "clickhouse.config.py")
     assert ctx is not None
     assert ctx.has_executor is True
     assert isinstance(ctx.executor, RemoteClickHouseClient)
-    assert ctx.executor._service_slug == SLUG
+    ctx.executor.execute("SELECT 1")
+    assert slugs == [SLUG]
 
 
 def test_check_without_clickhouse_block_runs_through_the_selected_service(

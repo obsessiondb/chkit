@@ -65,7 +65,7 @@ from chkit_plugin_obsessiondb.engine import (
 )
 from chkit_plugin_obsessiondb.remote_executor import create_remote_executor
 from chkit_plugin_obsessiondb.service_commands import service_command_run
-from chkit_plugin_obsessiondb.storage import load_selected_service
+from chkit_plugin_obsessiondb.storage import SelectedService, load_selected_service
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,12 +82,10 @@ class _ObsessionDBHooks:
     def get_context(self, ctx: ChxGetContextInput) -> PluginContext | None:
         # TS getContext: logged in with a service selected routes SQL through
         # the ObsessionDB API instead of the `clickhouse` block.
-        creds = load_credentials()
-        if creds is None:
+        session = _load_session(ctx.config_path)
+        if session is None:
             return None
-        service = load_selected_service(ctx.config_path)
-        if service is None:
-            return None
+        creds, service = session
         executor = create_remote_executor(
             Credentials(
                 access_token=creds.access_token,
@@ -100,10 +98,11 @@ class _ObsessionDBHooks:
     def on_init(self, ctx: ChxOnInitContext) -> None:
         # TS onInit: say which service SQL goes to, since it takes precedence
         # over a `clickhouse` block.
-        if ctx.json_mode or load_credentials() is None:
+        if ctx.json_mode or ctx.command == "obsessiondb":
             return
-        service = load_selected_service(ctx.config_path)
-        if service is not None:
+        session = _load_session(ctx.config_path)
+        if session is not None:
+            _creds, service = session
             print(f'obsessiondb: using service "{service.service_name}"\n')
 
     def on_before_plugin_command(
@@ -183,6 +182,17 @@ class _ObsessionDBHooks:
             return
         for finding in ctx.result.findings:
             ctx.print(f"obsessiondb: {finding.message}")
+
+
+def _load_session(config_path: str) -> tuple[Credentials, SelectedService] | None:
+    """The stored login and the project's selected service, or None without both."""
+    creds = load_credentials()
+    if creds is None:
+        return None
+    service = load_selected_service(config_path)
+    if service is None:
+        return None
+    return creds, service
 
 
 def _resolve_base_url_from_flags(flags: dict[str, Any]) -> str:

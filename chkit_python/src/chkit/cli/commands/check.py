@@ -50,16 +50,6 @@ from chkit.plugins import (
 )
 
 
-def _open_client(
-    executor: ClickHouseClient | None, clickhouse: ChxResolvedClickHouseConfig | None
-) -> ClickHouseClient:
-    # run() has checked that one of the two is set.
-    if executor is not None:
-        return executor
-    assert clickhouse is not None
-    return ClickHouseClient.connect(clickhouse)
-
-
 def run(  # noqa: PLR0912, PLR0915, PLR0917
     config_path: Annotated[
         Path | None,
@@ -300,3 +290,13 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             typer.echo(f"Failed checks: {', '.join(failed_checks)}")
     if not ok:
         raise typer.Exit(code=1)
+
+
+def _open_client(
+    executor: ClickHouseClient | None, clickhouse: ChxResolvedClickHouseConfig | None
+) -> ClickHouseClient:
+    # run() has checked that one of the two is set.
+    if executor is not None:
+        return executor
+    assert clickhouse is not None
+    return ClickHouseClient.connect(clickhouse)
