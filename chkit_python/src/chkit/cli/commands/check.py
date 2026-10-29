@@ -14,6 +14,7 @@ The live-DB drift comparison from the TS port lives in ``chkit drift``.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -30,7 +31,7 @@ from chkit.cli.migration_store import (
     list_migration_filenames,
     read_snapshot,
 )
-from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.cli.plugin_runtime import load_plugin_runtime, null_plugin_context
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
@@ -39,9 +40,14 @@ from chkit.cli.table_scope import (
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, ChxResolvedClickHouseConfig
 from chkit.core.validate import validate_definitions
-from chkit.plugins import ChxOnCheckContext, ChxPlugin
+from chkit.plugins import (
+    ChxGetContextInput,
+    ChxOnCheckContext,
+    ChxOnInitContext,
+    ChxPlugin,
+)
 
 
 def run(  # noqa: PLR0912, PLR0915, PLR0917
@@ -85,10 +91,35 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
-    if config.clickhouse is None:
+    resolved_config_path = str(config_path or "clickhouse.config.py")
+    # TS onInit: ObsessionDB names the selected service (text mode only).
+    plugin_runtime.run_on_init(
+        ChxOnInitContext(
+            command="check",
+            config_path=resolved_config_path,
+            is_interactive=sys.stdin.isatty(),
+            json_mode=output_json,
+            flags={},
+            config=config,
+            options={},
+        )
+    )
+    # A plugin executor (ObsessionDB with a selected service) takes precedence
+    # over the `clickhouse` block, as in TS.
+    plugin_context = plugin_runtime.resolve_context(
+        ChxGetContextInput(
+            config=config,
+            config_path=resolved_config_path,
+            command="check",
+            flags={},
+            defaults=null_plugin_context(),
+        )
+    )
+    executor = plugin_context.executor if plugin_context is not None else None
+    if executor is None and config.clickhouse is None:
         msg = (
-            "clickhouse.config.py must include a `clickhouse` block "
-            "(journal lives in ClickHouse)."
+            "clickhouse.config.py must include a `clickhouse` block or select an "
+            "ObsessionDB service (journal lives in ClickHouse)."
         )
         raise typer.BadParameter(msg)
 
@@ -118,7 +149,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         drift_ops = [op.key for op in plan.operations]
 
     live_drifted = False
-    with ClickHouseClient.connect(config.clickhouse) as client:
+    with _open_client(executor, config.clickhouse) as client:
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )
@@ -131,7 +162,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 client=client,
                 meta_dir=meta_dir,
                 snapshot=snapshot,
-                database=config.clickhouse.database,
+                database=config.clickhouse.database if config.clickhouse else None,
                 fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
             )
@@ -171,7 +202,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             config=config,
             table_scope=table_scope,
             flags={},
-            config_path=str(config_path or "clickhouse.config.py"),
+            config_path=resolved_config_path,
             json_mode=output_json,
             options={},
         )
@@ -259,3 +290,13 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             typer.echo(f"Failed checks: {', '.join(failed_checks)}")
     if not ok:
         raise typer.Exit(code=1)
+
+
+def _open_client(
+    executor: ClickHouseClient | None, clickhouse: ChxResolvedClickHouseConfig | None
+) -> ClickHouseClient:
+    # run() has checked that one of the two is set.
+    if executor is not None:
+        return executor
+    assert clickhouse is not None
+    return ClickHouseClient.connect(clickhouse)

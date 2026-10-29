@@ -110,6 +110,13 @@
   a plan sent with `submit`, so the plan passed unchecked. The backfill check now reports
   submitted plans not yet confirmed completed as `backfill_submitted_unverified` when no
   ObsessionDB plugin is configured, with the same severity as `backfill_required_pending`.
+- `chkit check` no longer requires a `clickhouse` block when you are logged in to
+  ObsessionDB with a service selected (#325). The ObsessionDB plugin now has a
+  `get_context` hook that returns the remote executor, as in TS, so `check` reads the
+  journal and checks submitted backfills through the selected service; the service
+  takes precedence over a `clickhouse` block, and `check` names it
+  (`obsessiondb: using service "<name>"`, text mode only). `status`, `migrate`,
+  `drift`, `query` and `pull` still need a `clickhouse` block.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional
