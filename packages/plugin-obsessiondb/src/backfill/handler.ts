@@ -2,6 +2,7 @@ import type { ResolvedChxConfig } from '@chkit/core'
 
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { errorEnvelope } from '../json-envelope.js'
+import { ServiceNotFoundError } from '../service/not-found.js'
 import { loadSelectedService } from '../service/storage.js'
 import { createJobsClient, isSessionExpiredError, type JobsClient } from './client.js'
 import { buildJobConsoleUrl } from './console-url.js'
@@ -78,9 +79,12 @@ export async function handleBackfillCommand(context: BeforePluginCommandContext)
       context.print(context.jsonMode ? errorEnvelope(commandId, 'session_expired', message) : message)
       return { handled: true, exitCode: 1 }
     }
+    // A service lookup failure keeps its stable code; other failures (including
+    // oRPC errors, whose codes are transport-level) report `error`, like Python.
+    const code = error instanceof ServiceNotFoundError ? error.code : 'error'
     context.print(
       context.jsonMode
-        ? errorEnvelope(commandId, 'error', message)
+        ? errorEnvelope(commandId, code, message)
         : `Backfill ${context.command} failed: ${message}`,
     )
     return { handled: true, exitCode: 1 }
