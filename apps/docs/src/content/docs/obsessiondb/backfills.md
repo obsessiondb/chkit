@@ -108,7 +108,9 @@ Two ways forward:
 
 ## How it works
 
-Each chunk renders the same idempotent `INSERT … SELECT` the local executor would run, including CTE-wrapped materialized-view replay when the target is an MV's `to` table. The backend receives the task list, executes chunks with the requested `--concurrency` (1–48), and retries failed chunks up to the plan's per-chunk retry budget. Idempotency tokens make re-runs safe: re-submitting the same window does not double-write.
+Each chunk renders the same `INSERT … SELECT` the local executor would run, including CTE-wrapped materialized-view replay when the target is an MV's `to` table. The backend receives the task list, executes chunks with the requested `--concurrency` (1–48), and retries failed chunks up to the plan's per-chunk retry budget.
+
+Idempotency tokens do not make re-submitting safe. A chunk's token is stable only within its plan, and `submit` creates a new plan with new tokens, so submitting the same window again writes it twice. Even with the same token, ClickHouse only deduplicates an identical insert block: a chunk that runs again after its source changed, for example when a table is backfilled from itself, writes its rows twice. See [resume and duplicate protection](/plugins/backfill/#resume-and-duplicate-protection).
 
 ## Submitted jobs in `chkit check`
 
