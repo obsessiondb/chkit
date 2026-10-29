@@ -222,6 +222,35 @@ describe('handleBackfillCommand', () => {
     })
   })
 
+  // #328: the JSON envelope keeps the code of a service lookup failure.
+  test('reports a missing service with its service_not_found code', async () => {
+    await setupAuth()
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const { pathname } = new URL(new Request(input, init).url)
+      if (pathname === '/rpc/services/listAll') {
+        return orpcResponse({ organizations: [{ id: 'org-1', name: 'Acme', slug: 'acme', services: [] }] })
+      }
+      if (pathname === '/api/auth/get-session') {
+        return Response.json({ session: { activeOrganizationId: 'org-1' } })
+      }
+      expect(pathname).toBe('/rpc/jobs/list')
+      return Response.json({ error: 'Service not found' }, { status: 404 })
+    }) as typeof fetch
+
+    const { context, printed } = makeContext({ jsonMode: true, flags: { '--service-slug': 'gone' } })
+    const result = await handleBackfillCommand(context)
+
+    expect(result).toEqual({ handled: true, exitCode: 1 })
+    expect(printed[0]).toMatchObject({
+      command: 'backfill status',
+      ok: false,
+      error: {
+        code: 'service_not_found',
+        message: expect.stringContaining('service "gone" was not found in any organization'),
+      },
+    })
+  })
+
   test('returns handled: false for unknown backfill subcommand', async () => {
     await setupAuth()
 

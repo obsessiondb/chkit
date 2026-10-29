@@ -87,7 +87,7 @@ With `--json`, each command returns one envelope. `status --job-id` carries the 
 }
 ```
 
-`list` and `status --service-slug` return `serviceSlug`, `jobs` and `total`; `cancel` returns `jobId` and `url`. Failures, such as a missing session or an unknown job, return `{"command": "backfill status", "schemaVersion": 1, "ok": false, "error": {"code": "…", "message": "…"}}` and exit 1.
+`list` and `status --service-slug` return `serviceSlug`, `jobs` and `total`; `cancel` returns `jobId` and `url`. Failures, such as a missing session or an unknown job, return `{"command": "backfill status", "schemaVersion": 1, "ok": false, "error": {"code": "…", "message": "…"}}` and exit 1. A service the console cannot find reports `service_not_found` or `service_not_in_active_organization` (see [services in another organization](/obsessiondb/services/#services-in-another-organization)).
 
 Passing `--plan-id` instead keeps `status`/`cancel` local, operating on on-disk run state rather than the backend. `list` has no local counterpart: without the ObsessionDB plugin, or with `--local`, it fails and explains how to set up a managed backend.
 
