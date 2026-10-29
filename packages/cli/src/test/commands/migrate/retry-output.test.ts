@@ -149,11 +149,20 @@ describe('--retry when nothing is pending', () => {
   })
 })
 
+// Text goes through console.log; JSON goes through process.stdout.write as one
+// newline-terminated chunk.
 function captureLines(run: () => void): string[] {
-  const log = spyOn(console, 'log').mockImplementation(() => {})
+  const lines: string[] = []
+  const log = spyOn(console, 'log').mockImplementation((line) => {
+    lines.push(String(line))
+  })
+  const write = spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+    lines.push(String(chunk).replace(/\n$/, ''))
+    return true
+  })
   run()
-  const lines = log.mock.calls.map((call) => String(call[0]))
   log.mockRestore()
+  write.mockRestore()
   return lines
 }
 

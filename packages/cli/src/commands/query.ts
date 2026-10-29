@@ -1,5 +1,6 @@
 import type { ClickHouseJsonQueryResult } from '@chkit/clickhouse'
 import type { ChxPluginCommand } from '../plugins.js'
+import { writeStdout } from '../runtime/json-output.js'
 
 const DEFAULT_SHOWN_ROW_LIMIT = 25
 
@@ -82,7 +83,7 @@ export function cleanQueryError(error: unknown): unknown {
 }
 
 function printQueryJson(payload: ClickHouseJsonQueryResult): void {
-	console.log(formatQueryJson(payload))
+	writeStdout(formatQueryJson(payload))
 }
 
 function printRows(rows: Record<string, unknown>[]): void {

@@ -10,7 +10,7 @@ import { type PluginRuntime, typedFlags } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
-import { printOutput } from './json-output.js'
+import { printOutput, writeStdout } from './json-output.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 
@@ -264,7 +264,7 @@ export async function runResolvedCommand(input: {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error)
 			if (jsonMode) {
-				console.log(JSON.stringify({ ok: false, error: message }))
+				writeStdout(JSON.stringify({ ok: false, error: message }))
 			} else {
 				console.error(message)
 			}
