@@ -19,6 +19,7 @@ from typing import Annotated, Any
 import typer
 
 from chkit.cli.config_loader import load_config
+from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.clickhouse.client import (
     ClickHouseClient,
     ClickHouseJsonQueryResult,
@@ -160,5 +161,12 @@ def run(
     except typer.BadParameter:
         raise
     except Exception as error:
+        # A failed query is not a usage error: like the TS CLI, print the
+        # message (plus the --json error envelope) and exit 1.
         cleaned = clean_query_error(error)
-        raise typer.BadParameter(str(cleaned)) from cleaned
+        if output_json:
+            emit_json_error(
+                "query", {"code": json_error_code(cleaned), "message": str(cleaned)}
+            )
+        typer.secho(str(cleaned), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from cleaned

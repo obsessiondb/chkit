@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import typer
+from typer.core import TyperGroup
 
 from chkit import __version__
 from chkit.cli.commands import (
@@ -19,11 +22,42 @@ from chkit.cli.commands import (
     snapshot,
     status,
 )
+from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
+
+
+class _ChkitGroup(TyperGroup):
+    """Port of the TS CLI's top-level catch (``packages/cli/src/bin/chkit.ts``):
+    a command that fails under ``--json`` without having written JSON yet still
+    leaves stdout a parseable error envelope. The error is then re-raised, so
+    stderr and the exit code stay as they were.
+    """
+
+    # Any: typer vendors click privately (typer._click), and the public
+    # typer.Context subclass would narrow the parameter (mypy [override]).
+    def invoke(self, ctx: Any) -> Any:
+        # The group's parser leaves the subcommand's arguments in ctx.args.
+        json_mode = "--json" in ctx.args
+        try:
+            return super().invoke(ctx)
+        except (typer.Exit, typer.Abort):
+            raise
+        except Exception as error:
+            if json_mode and not has_emitted_json():
+                emit_json_error(
+                    ctx.invoked_subcommand or "chkit",
+                    {
+                        "code": json_error_code(error),
+                        "message": str(error) or type(error).__name__,
+                    },
+                )
+            raise
+
 
 app = typer.Typer(
     name="chkit",
     help="ClickHouse schema and migration toolkit",
     add_completion=False,
+    cls=_ChkitGroup,
 )
 
 app.command("init", help="Create a starter clickhouse.config.py and example schema.")(init.run)
