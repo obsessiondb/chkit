@@ -6,10 +6,9 @@ Two files:
 
 - ``<project_dir>/.chkit/obsessiondb.json`` — the service selected for
   this project (so ``chkit migrate`` etc. routes to the right cloud
-  instance). Falls back to the user-global file if the project file is
-  missing.
+  instance).
 - ``$XDG_CONFIG_HOME/chkit/obsessiondb.json`` — user-global aliases
-  (``--service <alias>`` lookup) and the user-global default selection.
+  (``--service <alias>`` lookup).
 """
 
 from __future__ import annotations
@@ -79,15 +78,8 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def load_selected_service(config_path: str | Path) -> SelectedService | None:
-    """Load the project's selected service, falling back to the user-global one."""
-    project_payload = _read_json(_project_state_path(config_path))
-    candidate: dict[str, Any] | None = project_payload
-    if candidate is None:
-        user_payload = _read_json(_user_state_path())
-        if user_payload is not None and isinstance(
-            user_payload.get("selected"), dict
-        ):
-            candidate = user_payload["selected"]
+    """Load the project's selected service from ``.chkit/obsessiondb.json``."""
+    candidate = _read_json(_project_state_path(config_path))
     if candidate is None:
         return None
     try:

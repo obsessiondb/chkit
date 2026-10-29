@@ -117,6 +117,10 @@
   takes precedence over a `clickhouse` block, and `check` names it
   (`obsessiondb: using service "<name>"`, text mode only). `status`, `migrate`,
   `drift`, `query` and `pull` still need a `clickhouse` block.
+- The ObsessionDB plugin reads the selected service only from the project's
+  `.chkit/obsessiondb.json`, as in TS (#343). It also fell back to a `"selected"` entry
+  in the user-global `~/.config/chkit/obsessiondb.json`, so such an entry would have sent
+  `check` (and backfill commands) to that service in every project with the plugin.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional

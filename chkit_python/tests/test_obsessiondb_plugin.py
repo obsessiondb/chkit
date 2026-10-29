@@ -247,6 +247,20 @@ def test_load_selected_service_returns_none_when_missing(tmp_path: Path) -> None
     assert load_selected_service(config_path) is None
 
 
+def test_load_selected_service_ignores_user_global_selection(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    user_state = isolated_home / "chkit" / "obsessiondb.json"
+    user_state.parent.mkdir(parents=True)
+    user_state.write_text(
+        json.dumps({"selected": {"service_name": "prod", "service_slug": "prod"}}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "clickhouse.config.py"
+    config_path.write_text("# config\n", encoding="utf-8")
+    assert load_selected_service(config_path) is None
+
+
 def test_save_and_load_service_alias(isolated_home: Path) -> None:
     service = SelectedService(
         organization_id="o", organization_slug="o",
