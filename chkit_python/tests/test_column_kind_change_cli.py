@@ -62,7 +62,12 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_generate_reports_the_issue_without_a_traceback() -> None:
     result = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {"error": "validation_failed", "issues": [ISSUE]}
+    assert json.loads(result.stdout) == {
+        "command": "generate",
+        "schemaVersion": 1,
+        "error": "validation_failed",
+        "issues": [ISSUE],
+    }
     result = CliRunner().invoke(app, ["generate", "--dryrun"])
     assert result.exit_code == 1
     assert result.stderr == (

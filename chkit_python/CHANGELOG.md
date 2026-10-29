@@ -101,6 +101,12 @@
   window because one of its active parts reports `min_time = 1970-01-01` in `system.parts`
   (#320). An empty part, such as one a DELETE mutation leaves, pulled the partition's
   earliest time to the epoch; zero `min_time` values are now ignored.
+- `chkit drift` and `chkit generate` errors that exited without a message (no snapshot,
+  invalid `--cutover`/`--rename-*`/`--drop-retained` flags, a failed codegen
+  integration) now print it on stderr and, under `--json`, the error envelope on stdout,
+  like the TS CLI (#342). A ClickHouse server error's envelope `code` is its exception
+  code (e.g. `"60"`) instead of `"error"`. `status`, `drift`, `check` and `generate`
+  `--json` output now starts with `command` and `schemaVersion`, as in TS.
 - `chkit plugin backfill list --json` and `status --json` keep each job's `lastError` and
   `metadata` (#327). The job models dropped both, so the output lacked fields the TS CLI
   prints.

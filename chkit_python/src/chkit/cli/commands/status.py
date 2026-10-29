@@ -12,7 +12,6 @@ Followed by lists of pending filenames and any detected checksum mismatches.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated
 
@@ -21,6 +20,7 @@ import typer
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
+from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
     find_checksum_mismatches,
     list_migration_filenames,
@@ -116,7 +116,7 @@ def run(
         payload["database"] = config.clickhouse.database
 
     if output_json:
-        typer.echo(json.dumps(payload, indent=2))
+        emit_json("status", payload)
         return
 
     if database_missing:

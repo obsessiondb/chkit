@@ -7,11 +7,15 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 from pydantic import BaseModel, ConfigDict
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
@@ -370,6 +374,26 @@ def is_unknown_database_error(error: BaseException) -> bool:
     """
     text = str(error)
     return "Code: 81" in text or "UNKNOWN_DATABASE" in text
+
+
+_CLICKHOUSE_CODE_RE = re.compile(r"\bcode: (\d+)", re.IGNORECASE)
+# REQUIRED_PASSWORD, AUTHENTICATION_FAILED: the TS client rethrows these as a
+# plain error without a code (``wrapConnectionError``).
+_AUTH_ERROR_CODES = frozenset({"194", "516"})
+
+
+def clickhouse_error_code(error: BaseException) -> str | None:
+    """The ClickHouse exception code (e.g. ``"60"``) of a server error, else None.
+
+    The TS client exposes it as ``ClickHouseError.code``; ``clickhouse-connect``
+    only puts it in the message (``Received ClickHouse exception, code: 60, ...``).
+    """
+    if not isinstance(error, DatabaseError):
+        return None
+    match = _CLICKHOUSE_CODE_RE.search(str(error))
+    if match is None or match.group(1) in _AUTH_ERROR_CODES:
+        return None
+    return match.group(1)
 
 
 _AUTH_HINTS = (
