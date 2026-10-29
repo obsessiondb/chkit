@@ -81,7 +81,7 @@ With `--json`, each command returns one envelope. `status --job-id` carries the 
   "command": "backfill status",
   "schemaVersion": 1,
   "ok": true,
-  "job": { "id": "4f2c…", "target": "analytics.events", "status": "running", "totalTasks": 12, "completedTasks": 3, "failedTasks": 1, "tasks": [] },
+  "job": { "id": "4f2c…", "target": "analytics.events", "status": "running", "totalTasks": 12, "completedTasks": 3, "failedTasks": 1, "lastError": "Memory limit (total) exceeded", "metadata": { "planId": "…", "mode": "copy", "source": "chkit" }, "tasks": [] },
   "lastError": "Memory limit (total) exceeded",
   "url": "https://console.obsessiondb.com/<service>/jobs/4f2c…"
 }
