@@ -73,6 +73,8 @@ const jobSummarySchema = z.object({
   totalTasks: z.number().int(),
   completedTasks: z.number().int(),
   failedTasks: z.number().int(),
+  lastError: z.string().nullable(),
+  metadata: z.record(z.string(), z.unknown()).nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 })
@@ -80,7 +82,6 @@ const jobSummarySchema = z.object({
 const jobDetailSchema = jobSummarySchema.extend({
   maxRetries: z.number().int(),
   workflowId: z.string().nullable(),
-  metadata: z.record(z.string(), z.unknown()).nullable(),
   tasks: z.array(jobTaskSchema),
 })
 

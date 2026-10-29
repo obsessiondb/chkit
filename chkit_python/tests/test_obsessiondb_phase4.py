@@ -40,6 +40,10 @@ from chkit_plugin_obsessiondb import (
     workbench_query_execute,
 )
 from chkit_plugin_obsessiondb import onboarding as obsessiondb_onboarding
+from chkit_plugin_obsessiondb.backfill_job_output import (
+    job_list_output,
+    job_status_output,
+)
 from chkit_plugin_obsessiondb.workbench_api import (
     WorkbenchColumn,
     WorkbenchExecuteResult,
@@ -465,6 +469,31 @@ def test_jobs_list_parses_response(httpx_mock: HTTPXMock) -> None:
     listing = jobs_list(_creds(), service_slug=SVC)
     assert [j.id for j in listing.jobs] == ["j-1", "j-2"]
     assert listing.total == 2
+
+
+def test_job_json_output_keeps_last_error_and_metadata(httpx_mock: HTTPXMock) -> None:
+    """``--json`` prints lastError and metadata like the TS CLI (#327)."""
+    extra: dict[str, object] = {
+        "lastError": "Code: 241. MEMORY_LIMIT_EXCEEDED",
+        "metadata": {"planId": "p-1", "mode": "copy", "source": "chkit"},
+    }
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/jobs/list",
+        json={"jobs": [_job_payload("j-1", "failed", **extra)], "total": 1},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/jobs/get",
+        json=_job_payload("j-1", "failed", maxRetries=3, tasks=[], **extra),
+    )
+    listed = job_list_output(
+        "backfill list", SVC, jobs_list(_creds(), service_slug=SVC)
+    ).json["jobs"][0]
+    status = job_status_output(jobs_get(_creds(), job_id="j-1"), None).json["job"]
+    for job in (listed, status):
+        assert job["lastError"] == extra["lastError"]
+        assert job["metadata"] == extra["metadata"]
+        keys = list(job)  # same key order as the TS jobSummarySchema
+        assert keys[keys.index("lastError") :][:3] == ["lastError", "metadata", "createdAt"]
 
 
 def test_jobs_cancel_returns_empty_object(httpx_mock: HTTPXMock) -> None:
