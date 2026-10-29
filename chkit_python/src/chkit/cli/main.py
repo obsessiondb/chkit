@@ -32,7 +32,9 @@ class _ChkitGroup(TyperGroup):
     stderr and the exit code stay as they were.
     """
 
-    def invoke(self, ctx: Any) -> Any:  # typer does not export its click.Context type
+    # Any: typer vendors click privately (typer._click), and the public
+    # typer.Context subclass would narrow the parameter (mypy [override]).
+    def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
         json_mode = "--json" in ctx.args
         try:
