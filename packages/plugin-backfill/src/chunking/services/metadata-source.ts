@@ -103,7 +103,7 @@ export async function introspectPartitions(context: PlannerContext): Promise<Par
   toString(sum(rows)) AS total_rows,
   toString(sum(bytes_on_disk)) AS total_bytes,
   toString(sum(data_uncompressed_bytes)) AS total_uncompressed_bytes,
-  toString(min(min_time)) AS min_time,
+  toString(minIf(min_time, min_time > 0)) AS min_time,
   toString(max(max_time)) AS max_time
 FROM system.parts
 WHERE database = '${context.database}'

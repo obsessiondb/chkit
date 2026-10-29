@@ -60,7 +60,7 @@ Planning and local execution require the real `clickhouse` connection. Obtain UR
 The planner reads active physical partitions from `system.parts`, sizes them using uncompressed input-byte metadata (falling back to on-disk bytes when necessary), and divides large partitions along sorting-key ranges. Plans contain partition IDs and the range predicates used to select rows.
 
 - `--max-chunk-bytes` controls approximate uncompressed input bytes per chunk. It is not a hard upper bound: unsplittable keys or tables without usable sorting keys can exceed it. It is not a time interval.
-- Optional `--from` and `--to` filter partitions using `system.parts.min_time` / `max_time`. Partitions whose metadata overlaps the interval are eligible.
+- Optional `--from` and `--to` filter partitions using `system.parts.min_time` / `max_time`. Partitions whose metadata overlaps the interval are eligible. Parts that report a zero `min_time` (empty parts, such as those a DELETE mutation leaves) do not move a partition's start to 1970.
 - These flags **do not add an exact timestamp-column WHERE filter** to every row. An overlapping partition can include rows outside the supplied interval.
 - Unpartitioned or non-temporal partitioned tables can report epoch timestamps in this metadata. A recent date filter may therefore select no partitions even though a timestamp column contains recent rows. For whole-table replay, omit both filters and review all selected partitions. For an exact row-level interval, use explicit reviewed SQL with the required predicate or design a suitable source; do not reinterpret the partition filter as that predicate.
 
