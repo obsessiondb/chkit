@@ -69,6 +69,10 @@ The rest of this page covers each path as standalone CLI commands, which is also
 
 You don't need a `clickhouse` block — once a service is selected, the plugin routes SQL through the ObsessionDB API.
 
+:::note
+In `chkit-py`, `chkit check` runs through the selected service; `status`, `migrate`, `drift`, `query` and `pull` still need a `clickhouse` block.
+:::
+
 ## Sign up from the CLI
 
 `chkit obsessiondb signup` is passwordless. It prompts for your email, sends a 6-digit code, and verifies it:

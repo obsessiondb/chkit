@@ -30,7 +30,7 @@ from chkit.cli.migration_store import (
     list_migration_filenames,
     read_snapshot,
 )
-from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.cli.plugin_runtime import load_plugin_runtime, null_plugin_context
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
@@ -39,9 +39,29 @@ from chkit.cli.table_scope import (
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
 from chkit.core.validate import validate_definitions
-from chkit.plugins import ChxOnCheckContext, ChxPlugin
+from chkit.plugins import (
+    ChxGetContextInput,
+    ChxOnCheckContext,
+    ChxPlugin,
+    PluginContext,
+)
+
+_NO_EXECUTOR_MESSAGE = (
+    "clickhouse.config.py must include a `clickhouse` block or select an "
+    "ObsessionDB service (journal lives in ClickHouse)."
+)
+
+
+def _open_client(
+    plugin_context: PluginContext | None, config: ChxResolvedConfig
+) -> ClickHouseClient:
+    if plugin_context is not None and plugin_context.executor is not None:
+        return plugin_context.executor
+    if config.clickhouse is None:
+        raise typer.BadParameter(_NO_EXECUTOR_MESSAGE)
+    return ClickHouseClient.connect(config.clickhouse)
 
 
 def run(  # noqa: PLR0912, PLR0915, PLR0917
@@ -85,12 +105,20 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
-    if config.clickhouse is None:
-        msg = (
-            "clickhouse.config.py must include a `clickhouse` block "
-            "(journal lives in ClickHouse)."
+    resolved_config_path = str(config_path or "clickhouse.config.py")
+    # A plugin executor (ObsessionDB with a selected service) takes precedence
+    # over the `clickhouse` block, as in TS.
+    plugin_context = plugin_runtime.resolve_context(
+        ChxGetContextInput(
+            config=config,
+            config_path=resolved_config_path,
+            command="check",
+            flags={},
+            defaults=null_plugin_context(),
         )
-        raise typer.BadParameter(msg)
+    )
+    if plugin_context is None and config.clickhouse is None:
+        raise typer.BadParameter(_NO_EXECUTOR_MESSAGE)
 
     migrations_dir = Path(config.migrations_dir)
     meta_dir = Path(config.meta_dir)
@@ -118,7 +146,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         drift_ops = [op.key for op in plan.operations]
 
     live_drifted = False
-    with ClickHouseClient.connect(config.clickhouse) as client:
+    with _open_client(plugin_context, config) as client:
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )
@@ -131,7 +159,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 client=client,
                 meta_dir=meta_dir,
                 snapshot=snapshot,
-                database=config.clickhouse.database,
+                database=config.clickhouse.database if config.clickhouse else None,
                 fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
             )
@@ -171,7 +199,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             config=config,
             table_scope=table_scope,
             flags={},
-            config_path=str(config_path or "clickhouse.config.py"),
+            config_path=resolved_config_path,
             json_mode=output_json,
             options={},
         )
