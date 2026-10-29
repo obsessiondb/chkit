@@ -74,14 +74,14 @@ Track progress: https://console.obsessiondb.com/<service>/jobs/4f2c…
 
 The console link uses `--service-slug` when given, otherwise the selected service; without either it is left out. `cancel --job-id` prints `Cancellation requested for backfill job <jobId>.` followed by the same link.
 
-With `--json`, each command returns one envelope. `status --job-id` carries the full job from the backend under `job`, with `lastError` and `url` alongside:
+With `--json`, each command returns one envelope. `status --job-id` carries the full job from the backend under `job`, with `lastError` (the error of the most recent failed task run) and `url` alongside. The job's own `lastError` stays `null` when chunks fail; the backend sets it only when its job runner gives up on the job:
 
 ```json
 {
   "command": "backfill status",
   "schemaVersion": 1,
   "ok": true,
-  "job": { "id": "4f2c…", "target": "analytics.events", "status": "running", "totalTasks": 12, "completedTasks": 3, "failedTasks": 1, "lastError": "Memory limit (total) exceeded", "metadata": { "planId": "…", "mode": "copy", "source": "chkit" }, "tasks": [] },
+  "job": { "id": "4f2c…", "target": "analytics.events", "status": "running", "totalTasks": 12, "completedTasks": 3, "failedTasks": 1, "lastError": null, "metadata": { "planId": "…", "mode": "copy", "source": "chkit" }, "tasks": [] },
   "lastError": "Memory limit (total) exceeded",
   "url": "https://console.obsessiondb.com/<service>/jobs/4f2c…"
 }
