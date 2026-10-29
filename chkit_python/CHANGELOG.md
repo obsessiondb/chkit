@@ -86,6 +86,15 @@
   and a missing target fails with "does not exist or is not visible yet".
 - Live drift compares defaults token by token. Write expressions in the
   canonical form ClickHouse stores, such as `CAST(x, 'String')`.
+- `chkit plugin backfill submit --plan-id <id>` re-submits a saved plan whose
+  ObsessionDB job failed or was cancelled (#313), and replaces the job ID in its
+  submission file, so `chkit check` follows the new job instead of failing with
+  `obsessiondb_backfill_job_failed`. Chunks whose task finished in that job are
+  left out. It starts no job when the job is in any other state, the plan does
+  not exist or was never submitted, or planning flags are passed with
+  `--plan-id`. `--json` adds `planId`, `replacedJobId` and `skippedChunks`. The
+  `obsessiondb_backfill_job_failed` finding now points to `submit --plan-id`. The
+  backfill SDK exports `read_plan_submission`.
 
 ### Fixed
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The

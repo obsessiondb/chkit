@@ -27,12 +27,19 @@ from chkit_plugin_obsessiondb.api_client import is_session_expired_error
 from chkit_plugin_obsessiondb.backfill_plugin_options import (
     resolve_backfill_plugin_options,
 )
+from chkit_plugin_obsessiondb.backfill_resubmit import (
+    ReplacedJob,
+    load_plan_for_resubmit,
+)
 from chkit_plugin_obsessiondb.console_url import build_job_console_url
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.jobs_api import JobSubmitTask, jobs_submit
 from chkit_plugin_obsessiondb.remote_executor import create_remote_executor
 
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+_PLAN_ID_RE = re.compile(r"^[a-f0-9]{16}$")
+# Flags that choose the rows of a new plan; a saved plan has already fixed them.
+_PLANNING_FLAGS = ("--target", "--cutover", "--from", "--to", "--max-chunk-bytes")
 _MAX_CONCURRENCY = 48
 
 
@@ -116,26 +123,6 @@ def parse_submit_input(
         raise ValueError(msg)
 
     raw_bytes = _flag_string(flags, "--max-chunk-bytes")
-    raw_concurrency = _flag_string(flags, "--concurrency")
-    concurrency: int | None = None
-    if raw_concurrency is not None:
-        # TS `Number(raw)` grammar — the shared JS-Number emulation rejects
-        # `3_0` and accepts `0x10` exactly as the TS parser does.
-        parsed = parse_js_number(raw_concurrency)
-        if (
-            math.isnan(parsed)
-            or not math.isfinite(parsed)
-            or not parsed.is_integer()
-            or parsed <= 0
-            or parsed > _MAX_CONCURRENCY
-        ):
-            msg = (
-                "Invalid value for --concurrency."
-                " Expected an integer between 1 and 48."
-            )
-            raise ValueError(msg)
-        concurrency = int(parsed)
-
     plan_fields: dict[str, Any] = {
         key: value
         for key, value in (plugin_options or PluginConfig())
@@ -157,9 +144,56 @@ def parse_submit_input(
 
     opts = PlanOptions.model_validate(plan_fields)
 
-    return ParsedSubmitInput(
-        opts=opts, title=_flag_string(flags, "--title"), concurrency=concurrency
-    )
+    title, concurrency = _parse_job_flags(flags)
+    return ParsedSubmitInput(opts=opts, title=title, concurrency=concurrency)
+
+
+@dataclass(frozen=True)
+class ParsedResubmitInput:
+    plan_id: str
+    title: str | None = None
+    concurrency: int | None = None
+
+
+def parse_resubmit_input(flags: dict[str, Any]) -> ParsedResubmitInput:
+    """``submit --plan-id <id>``: re-submit a saved plan instead of planning."""
+    plan_id = _flag_string(flags, "--plan-id")
+    if plan_id is None or _PLAN_ID_RE.match(plan_id) is None:
+        msg = "Invalid value for --plan-id. Expected a 16-char lowercase hex id."
+        raise ValueError(msg)
+    planning_flags = [name for name in _PLANNING_FLAGS if flags.get(name) is not None]
+    if planning_flags:
+        msg = (
+            "--plan-id re-submits a saved plan and cannot be combined with"
+            f" {', '.join(planning_flags)}."
+        )
+        raise ValueError(msg)
+    title, concurrency = _parse_job_flags(flags)
+    return ParsedResubmitInput(plan_id=plan_id, title=title, concurrency=concurrency)
+
+
+def _parse_job_flags(flags: dict[str, Any]) -> tuple[str | None, int | None]:
+    """Job settings accepted both for a new plan and for a re-submitted one."""
+    raw_concurrency = _flag_string(flags, "--concurrency")
+    concurrency: int | None = None
+    if raw_concurrency is not None:
+        # TS `Number(raw)` grammar — the shared JS-Number emulation rejects
+        # `3_0` and accepts `0x10` exactly as the TS parser does.
+        parsed = parse_js_number(raw_concurrency)
+        if (
+            math.isnan(parsed)
+            or not math.isfinite(parsed)
+            or not parsed.is_integer()
+            or parsed <= 0
+            or parsed > _MAX_CONCURRENCY
+        ):
+            msg = (
+                "Invalid value for --concurrency."
+                " Expected an integer between 1 and 48."
+            )
+            raise ValueError(msg)
+        concurrency = int(parsed)
+    return _flag_string(flags, "--title"), concurrency
 
 
 @dataclass(frozen=True)
@@ -179,30 +213,12 @@ def handle_submit(context: SubmitContext) -> int:
         plugin_options = resolve_backfill_plugin_options(
             getattr(context.config, "plugins", None)
         )
-        parsed = parse_submit_input(context.flags, plugin_options)
-
-        executor = create_remote_executor(
-            context.credentials,
-            service_slug=context.service_slug,
+        prepared = (
+            _prepare_resubmit(context, plugin_options)
+            if context.flags.get("--plan-id") is not None
+            else _prepare_new_plan(context, plugin_options)
         )
-
-        def clickhouse_query(
-            sql: str, settings: QuerySettings | None
-        ) -> list[dict[str, object]]:
-            return executor.query(
-                sql, dict(settings) if settings is not None else None
-            ).rows
-
-        output = build_backfill_plan(
-            opts=parsed.opts,
-            config_path=context.config_path,
-            config=context.config,
-            clickhouse_query=clickhouse_query,
-            # ObsessionDB enables parallel replicas by default, which inflates
-            # aggregate results used for chunk sizing. Disable for planning.
-            query_settings={"enable_parallel_replicas": 0},
-        )
-        plan = output.plan
+        plan = prepared.plan
 
         # Same INSERT settings the local executor applies (backfill({insertSettings})).
         tasks = build_submit_tasks(plan, plugin_options.insert_settings)
@@ -211,8 +227,8 @@ def handle_submit(context: SubmitContext) -> int:
             service_slug=context.service_slug,
             target=plan.target,
             tasks=tasks,
-            title=parsed.title,
-            concurrency=parsed.concurrency,
+            title=prepared.title,
+            concurrency=prepared.concurrency,
             metadata={
                 "planId": plan.plan_id,
                 "mode": plan.execution.mode,
@@ -221,34 +237,54 @@ def handle_submit(context: SubmitContext) -> int:
         )
         # The job runs server-side and never writes a local run, so mark the
         # plan as submitted; otherwise `chkit check` counts it as pending forever.
+        # A re-submission replaces the marker of the failed or cancelled job.
         record_backfill_submission(
             plan_id=plan.plan_id,
             target=plan.target,
             job_id=job_id,
             config_path=context.config_path,
             config=context.config,
-            state_dir=parsed.opts.state_dir,
+            state_dir=prepared.state_dir,
         )
 
         url = build_job_console_url(
             context.credentials.base_url, context.service_slug, job_id
         )
+        replaced = prepared.replaced_job
+        task_label = f"{len(tasks)} task{'' if len(tasks) == 1 else 's'}"
         if context.json_mode:
+            payload: dict[str, Any] = {
+                "ok": True,
+                "command": "backfill submit",
+                "jobId": job_id,
+                "target": plan.target,
+                "taskCount": len(tasks),
+                "url": url,
+            }
+            if replaced is not None:
+                payload["planId"] = plan.plan_id
+                payload["replacedJobId"] = replaced.id
+                payload["skippedChunks"] = prepared.skipped_chunks
+            context.print(payload)
+        elif replaced is not None:
+            skipped = prepared.skipped_chunks
+            skipped_line = (
+                f"Skipped {skipped} chunk{'' if skipped == 1 else 's'} that already"
+                " finished.\n"
+                if skipped
+                else ""
+            )
             context.print(
-                {
-                    "ok": True,
-                    "command": "backfill submit",
-                    "jobId": job_id,
-                    "target": plan.target,
-                    "taskCount": len(tasks),
-                    "url": url,
-                }
+                f"Re-submitted backfill plan {plan.plan_id} as job {job_id} for "
+                f"{plan.target} ({task_label}), replacing {replaced.status} job "
+                f"{replaced.id}.\n"
+                f"{skipped_line}"
+                f"Track progress: {url}"
             )
         else:
-            plural = "" if len(tasks) == 1 else "s"
             context.print(
                 f"Submitted backfill job {job_id} for {plan.target} "
-                f"({len(tasks)} task{plural}).\n"
+                f"({task_label}).\n"
                 f"Track progress: {url}"
             )
         return 0
@@ -266,10 +302,81 @@ def handle_submit(context: SubmitContext) -> int:
         return 1
 
 
+@dataclass(frozen=True)
+class _PreparedSubmission:
+    plan: BackfillPlanState
+    title: str | None = None
+    concurrency: int | None = None
+    state_dir: str | None = None
+    # The failed or cancelled job that a `--plan-id` re-submission replaces.
+    replaced_job: ReplacedJob | None = None
+    # Chunks a re-submission leaves out because they finished in the replaced job.
+    skipped_chunks: int = 0
+
+
+def _prepare_new_plan(
+    context: SubmitContext, plugin_options: PluginConfig
+) -> _PreparedSubmission:
+    parsed = parse_submit_input(context.flags, plugin_options)
+
+    executor = create_remote_executor(
+        context.credentials,
+        service_slug=context.service_slug,
+    )
+
+    def clickhouse_query(
+        sql: str, settings: QuerySettings | None
+    ) -> list[dict[str, object]]:
+        return executor.query(
+            sql, dict(settings) if settings is not None else None
+        ).rows
+
+    output = build_backfill_plan(
+        opts=parsed.opts,
+        config_path=context.config_path,
+        config=context.config,
+        clickhouse_query=clickhouse_query,
+        # ObsessionDB enables parallel replicas by default, which inflates
+        # aggregate results used for chunk sizing. Disable for planning.
+        query_settings={"enable_parallel_replicas": 0},
+    )
+    return _PreparedSubmission(
+        plan=output.plan,
+        title=parsed.title,
+        concurrency=parsed.concurrency,
+        state_dir=parsed.opts.state_dir,
+    )
+
+
+def _prepare_resubmit(
+    context: SubmitContext, plugin_options: PluginConfig
+) -> _PreparedSubmission:
+    parsed = parse_resubmit_input(context.flags)
+    # The saved plan and its marker live in the backfill plugin's stateDir.
+    state_dir = plugin_options.state_dir
+    loaded = load_plan_for_resubmit(
+        plan_id=parsed.plan_id,
+        config_path=context.config_path,
+        config=context.config,
+        credentials=context.credentials,
+        state_dir=state_dir,
+    )
+    return _PreparedSubmission(
+        plan=loaded.plan,
+        title=parsed.title,
+        concurrency=parsed.concurrency,
+        state_dir=state_dir,
+        replaced_job=loaded.replaced_job,
+        skipped_chunks=loaded.skipped_chunks,
+    )
+
+
 __all__ = [
+    "ParsedResubmitInput",
     "ParsedSubmitInput",
     "SubmitContext",
     "build_submit_tasks",
     "handle_submit",
+    "parse_resubmit_input",
     "parse_submit_input",
 ]

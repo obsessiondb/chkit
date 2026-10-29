@@ -11,6 +11,7 @@ export { buildBackfillPlan } from './planner.js'
 export {
   confirmBackfillSubmission,
   listRemoteSubmissions,
+  readPlanSubmission,
   recordBackfillSubmission,
 } from './state.js'
 export { PlanSchema, SubmitSchema, parseByteSize } from './options.js'

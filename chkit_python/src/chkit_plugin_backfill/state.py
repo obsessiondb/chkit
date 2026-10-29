@@ -267,6 +267,32 @@ def record_backfill_submission(
 
 
 @dataclass(frozen=True)
+class PlanSubmission:
+    plan: BackfillPlanState
+    submission: BackfillSubmissionState | None
+
+
+def read_plan_submission(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> PlanSubmission | None:
+    """A saved plan and its submission marker (``None`` when it was never
+    submitted), or ``None`` when no plan with this id is saved.
+    """
+    resolved_state_dir = compute_backfill_state_dir(config, config_path, state_dir)
+    paths = backfill_paths(resolved_state_dir, plan_id)
+    if not Path(paths.plan_path).exists():
+        return None
+    plan, _plan_path, _state_dir = read_plan(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    return PlanSubmission(plan, read_submission(paths.submission_path))
+
+
+@dataclass(frozen=True)
 class RemoteSubmission:
     submission_path: str
     submission: BackfillSubmissionState
@@ -375,6 +401,7 @@ def chunk_ids_in_order(plan: BackfillPlanState) -> Iterable[str]:
 
 __all__ = [
     "BackfillPathSet",
+    "PlanSubmission",
     "RemoteSubmission",
     "backfill_paths",
     "chunk_ids_in_order",
@@ -389,6 +416,7 @@ __all__ = [
     "plan_status_for",
     "random_plan_id",
     "read_plan",
+    "read_plan_submission",
     "read_run",
     "read_submission",
     "record_backfill_submission",

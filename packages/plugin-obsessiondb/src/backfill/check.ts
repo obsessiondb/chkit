@@ -102,8 +102,8 @@ async function verifySubmission(
 					code: 'obsessiondb_backfill_job_failed',
 					message:
 						`${label} ${job.status === 'cancelled' ? 'was cancelled' : 'failed'}${lastError ? `: ${lastError}` : ''}. ` +
-						`Inspect it with chkit plugin backfill status --job-id ${submission.jobId}, then submit the backfill again ` +
-						`and delete plans/${submission.planId}.json, or run the plan locally with --local.`,
+						`Inspect it with chkit plugin backfill status --job-id ${submission.jobId}, then re-submit the plan ` +
+						`with chkit plugin backfill submit --plan-id ${submission.planId}, or run the plan locally with --local.`,
 					severity: 'error',
 				},
 			}

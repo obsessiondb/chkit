@@ -51,9 +51,11 @@ from chkit_plugin_backfill.planner import (
     build_backfill_plan,
 )
 from chkit_plugin_backfill.state import (
+    PlanSubmission,
     RemoteSubmission,
     confirm_backfill_submission,
     list_remote_submissions,
+    read_plan_submission,
     record_backfill_submission,
 )
 from chkit_plugin_backfill.types import (
@@ -82,6 +84,7 @@ __all__ = [
     "Partition",
     "PartitionDiagnostics",
     "PlanOptions",
+    "PlanSubmission",
     "RemoteSubmission",
     "SortKey",
     "SubmitOptions",
@@ -100,6 +103,7 @@ __all__ = [
     "inject_sort_key_filter",
     "list_remote_submissions",
     "parse_byte_size",
+    "read_plan_submission",
     "record_backfill_submission",
     "rewrite_select_columns",
     "sync_progress",

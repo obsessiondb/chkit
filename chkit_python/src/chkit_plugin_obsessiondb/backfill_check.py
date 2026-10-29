@@ -118,9 +118,9 @@ def _verify_submission(
             code="obsessiondb_backfill_job_failed",
             message=(
                 f"{label} {verb}{detail}. Inspect it with chkit plugin backfill"
-                f" status --job-id {submission.job_id}, then submit the backfill"
-                f" again and delete plans/{submission.plan_id}.json, or run the"
-                " plan locally with --local."
+                f" status --job-id {submission.job_id}, then re-submit the plan"
+                " with chkit plugin backfill submit --plan-id"
+                f" {submission.plan_id}, or run the plan locally with --local."
             ),
             severity="error",
         )

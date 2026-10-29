@@ -124,6 +124,7 @@ describe('checkSubmittedBackfillJobs', () => {
 
 		expect(result?.findings[0]).toMatchObject({ code: 'obsessiondb_backfill_job_failed', severity: 'error' })
 		expect(result?.findings[0]?.message).toContain('was cancelled')
+		expect(result?.findings[0]?.message).toContain('chkit plugin backfill submit --plan-id abcdef0123456789')
 	})
 
 	test('fails without a session and says how to log in', async () => {

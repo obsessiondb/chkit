@@ -140,7 +140,24 @@ chkit check --json
 CI that runs `chkit check` needs an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A confirmation is saved in `submissions/` in the backfill `stateDir`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
 :::
 
-For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then submit the backfill again and delete the old plan file (`plans/<planId>.json`), or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.
+For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then [re-submit the plan](#re-submit-a-failed-or-cancelled-job) with `--plan-id`, or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.
+
+## Re-submit a failed or cancelled job
+
+`submit --plan-id` sends the saved plan again as a new job and replaces the job ID in its submission file. The next `chkit check` follows the new job:
+
+```sh
+chkit plugin backfill status --job-id <jobId>
+chkit plugin backfill submit --plan-id <planId>
+```
+
+```
+Re-submitted backfill plan 3f9a… as job 7c1e… for analytics.events (9 tasks), replacing cancelled job 4f2c….
+Skipped 3 chunks that already finished.
+Track progress: https://console.obsessiondb.com/<service>/jobs/7c1e…
+```
+
+The plan ID is in the `obsessiondb_backfill_job_failed` finding. Only a job that failed or was cancelled is replaced; for any other status, an unknown plan, or a plan that was never submitted, `submit --plan-id` starts no job and exits 1. Chunks whose task finished in the replaced job are left out, so no chunk is written twice. `--title` and `--concurrency` apply to the new job; the planning flags (`--target`, `--cutover`, `--from`, `--to`, `--max-chunk-bytes`) are rejected with `--plan-id`, because the saved plan already fixes its chunks. With `--json`, the `submit` envelope adds `planId`, `replacedJobId` and `skippedChunks`.
 
 ## Related
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,7 +8,7 @@ import { backfill } from '@chkit/plugin-backfill'
 import * as backfillSdk from '@chkit/plugin-backfill/sdk'
 import type { BackfillPlanState } from '@chkit/plugin-backfill/sdk'
 
-import { buildSubmitTasks, handleSubmit, parseSubmitInput } from './submit'
+import { buildSubmitTasks, handleSubmit, parseResubmitInput, parseSubmitInput } from './submit'
 
 function makePlan(requireIdempotencyToken = true): BackfillPlanState {
 	return {
@@ -284,3 +284,259 @@ describe('handleSubmit', () => {
 		expect(existsSync(join(dir, 'chkit/meta/backfill'))).toBe(false)
 	})
 })
+
+describe('parseResubmitInput', () => {
+	test('accepts a plan id with job settings', () => {
+		expect(
+			parseResubmitInput({ '--plan-id': 'abcdef0123456789', '--title': 'Retry', '--concurrency': '2' }),
+		).toEqual({ planId: 'abcdef0123456789', title: 'Retry', concurrency: 2 })
+	})
+
+	test('rejects a malformed plan id', () => {
+		expect(() => parseResubmitInput({ '--plan-id': 'not-a-plan' })).toThrow('Invalid value for --plan-id')
+	})
+
+	test('rejects planning flags next to --plan-id', () => {
+		expect(() =>
+			parseResubmitInput({ '--plan-id': 'abcdef0123456789', '--target': 'app.events', '--from': '2026-01-01' }),
+		).toThrow('cannot be combined with --target, --from')
+	})
+})
+
+describe('handleSubmit --plan-id', () => {
+	const originalFetch = globalThis.fetch
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch
+		mock.restore()
+	})
+
+	const config = { metaDir: './chkit/meta', schema: [] }
+
+	async function setupPlan(options: { jobId?: string } = {}) {
+		const dir = await mkdtemp(join(tmpdir(), 'chkit-resubmit-'))
+		const configPath = join(dir, 'clickhouse.config.ts')
+		const plan = makePlan()
+		const plansDir = join(dir, 'chkit/meta/backfill/plans')
+		await mkdir(plansDir, { recursive: true })
+		await writeFile(
+			join(plansDir, `${plan.planId}.json`),
+			JSON.stringify({ ...plan, chunkPlan: backfillSdk.encodeChunkPlanForPersistence(plan.chunkPlan) }),
+		)
+		const submissionPath = join(dir, 'chkit/meta/backfill/submissions', `${plan.planId}.json`)
+		if (options.jobId) {
+			await backfillSdk.recordBackfillSubmission({ plan, jobId: options.jobId, configPath, config })
+		}
+		return { configPath, submissionPath, planId: plan.planId }
+	}
+
+	/**
+	 * Answers jobs/get with a job in `status` whose tasks `doneTaskIds` finished,
+	 * and jobs/submit with job-new; records the procedures called.
+	 */
+	function mockJobsApi(status: string, doneTaskIds: string[] = []) {
+		const calls: Array<{ procedure: string; body: { json?: Record<string, unknown> } }> = []
+		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = new Request(input, init)
+			const procedure = new URL(request.url).pathname.replace(/^\/rpc\//, '')
+			calls.push({ procedure, body: await request.json() })
+			if (procedure === 'jobs/submit') return orpcResponse({ jobId: 'job-new' })
+			return orpcResponse(jobDetail(status, doneTaskIds))
+		}) as typeof fetch
+		return calls
+	}
+
+	async function resubmit(configPath: string, flags: Record<string, string>, jsonMode = true) {
+		const printed: unknown[] = []
+		const result = await handleSubmit({
+			flags,
+			configPath,
+			jsonMode,
+			config,
+			print: (value) => printed.push(value),
+			credentials: { access_token: 'test-tok', base_url: 'https://api.example.com' },
+			serviceSlug: 'svc',
+		})
+		return { result, printed }
+	}
+
+	test('re-submits the saved plan of a failed job and replaces its marker', async () => {
+		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const planSpy = spyOn(backfillSdk, 'buildBackfillPlan')
+		const calls = mockJobsApi('failed')
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId, '--title': 'Retry' })
+
+		expect(result).toEqual({ handled: true, exitCode: 0 })
+		expect(planSpy).not.toHaveBeenCalled()
+		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get', 'jobs/submit'])
+		expect(calls[0]?.body.json).toEqual({ jobId: 'job-old' })
+		expect(calls[1]?.body.json).toMatchObject({
+			target: 'app.events',
+			title: 'Retry',
+			metadata: { planId, mode: 'copy', source: 'chkit' },
+		})
+		const tasks = calls[1]?.body.json?.tasks as Array<{ id: string }>
+		expect(tasks.map((task) => task.id)).toEqual(['c1', 'c2'])
+		expect(printed[0]).toEqual({
+			ok: true,
+			command: 'backfill submit',
+			jobId: 'job-new',
+			target: 'app.events',
+			taskCount: 2,
+			url: 'https://api.example.com/svc/jobs/job-new',
+			planId,
+			replacedJobId: 'job-old',
+			skippedChunks: 0,
+		})
+		const marker = JSON.parse(await readFile(submissionPath, 'utf8'))
+		expect(marker).toMatchObject({ planId, target: 'app.events', jobId: 'job-new' })
+		expect(marker).not.toHaveProperty('status')
+	})
+
+	test('leaves out the chunks whose task finished in the replaced job', async () => {
+		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const calls = mockJobsApi('cancelled', ['c1'])
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId }, false)
+
+		expect(result).toEqual({ handled: true, exitCode: 0 })
+		const tasks = calls[1]?.body.json?.tasks as Array<{ id: string }>
+		expect(tasks.map((task) => task.id)).toEqual(['c2'])
+		expect(printed[0]).toBe(
+			`Re-submitted backfill plan ${planId} as job job-new for app.events (1 task), replacing cancelled job job-old.\n` +
+				'Skipped 1 chunk that already finished.\n' +
+				'Track progress: https://api.example.com/svc/jobs/job-new',
+		)
+	})
+
+	test('refuses when every chunk finished in the replaced job', async () => {
+		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const calls = mockJobsApi('failed', ['c1', 'c2'])
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect((printed[0] as { error: string }).error).toContain(`Every chunk of plan ${planId} already finished`)
+		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
+	})
+
+	test.each(['pending', 'running', 'draining', 'paused', 'completed'])('refuses when the job is %s', async (status) => {
+		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const before = await readFile(submissionPath, 'utf8')
+		const calls = mockJobsApi(status)
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect(printed[0]).toMatchObject({ ok: false, command: 'backfill submit' })
+		expect((printed[0] as { error: string }).error).toContain(`Job job-old for plan ${planId} is ${status}`)
+		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get'])
+		expect(await readFile(submissionPath, 'utf8')).toBe(before)
+	})
+
+	test('refuses an unknown plan id', async () => {
+		const { configPath } = await setupPlan({ jobId: 'job-old' })
+		const calls = mockJobsApi('failed')
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': '0000000000000000' })
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect((printed[0] as { error: string }).error).toContain('Backfill plan 0000000000000000 not found')
+		expect(calls).toEqual([])
+	})
+
+	test('refuses a plan that was never submitted', async () => {
+		const { configPath, submissionPath, planId } = await setupPlan()
+		const calls = mockJobsApi('failed')
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect((printed[0] as { error: string }).error).toContain(`Backfill plan ${planId} was never submitted`)
+		expect(calls).toEqual([])
+		expect(existsSync(submissionPath)).toBe(false)
+	})
+
+	test('refuses planning flags next to --plan-id before touching the API', async () => {
+		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const calls = mockJobsApi('failed')
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId, '--target': 'app.events' })
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect((printed[0] as { error: string }).error).toContain('cannot be combined with --target')
+		expect(calls).toEqual([])
+	})
+})
+
+function jobDetail(status: string, doneTaskIds: string[]) {
+	return {
+		id: 'job-old',
+		serviceId: 'svc-1',
+		title: null,
+		type: 'backfill',
+		target: 'app.events',
+		status,
+		concurrency: 4,
+		taskLimit: null,
+		pollIntervalBaseSec: null,
+		pollIntervalMaxSec: null,
+		totalTasks: 2,
+		completedTasks: doneTaskIds.length,
+		failedTasks: 0,
+		createdAt: '2026-03-29T00:00:00Z',
+		updatedAt: '2026-03-29T01:00:00Z',
+		maxRetries: 3,
+		workflowId: null,
+		metadata: null,
+		tasks: ['c1', 'c2'].map((id, taskIndex) => jobTask(id, taskIndex, doneTaskIds.includes(id) ? 'done' : 'failed')),
+	}
+}
+
+function jobTask(id: string, taskIndex: number, runStatus: 'done' | 'failed') {
+	return {
+		id,
+		taskIndex,
+		taskGroup: null,
+		sql: 'INSERT INTO app.events SELECT 1',
+		settings: null,
+		cleanupSql: null,
+		cleanupType: null,
+		maxRetries: 3,
+		estimatedBytes: null,
+		estimatedBytesUncompressed: null,
+		runs: [
+			{
+				id: `run-${id}`,
+				attempt: 1,
+				type: 'insert',
+				status: runStatus,
+				queryId: null,
+				sql: null,
+				settings: null,
+				mutationId: null,
+				readRows: null,
+				readBytes: null,
+				readBytesCompressed: null,
+				writtenRows: null,
+				writtenBytes: null,
+				writtenBytesCompressed: null,
+				durationMs: null,
+				error: null,
+				node: null,
+				executingNode: null,
+				executingHost: null,
+				startedAt: null,
+				finishedAt: null,
+			},
+		],
+	}
+}
+
+function orpcResponse(data: unknown): Response {
+	return new Response(JSON.stringify({ json: data }), {
+		status: 200,
+		headers: { 'content-type': 'application/json' },
+	})
+}

@@ -135,6 +135,7 @@ def test_fails_on_a_cancelled_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     [finding] = result.findings
     assert finding.code == "obsessiondb_backfill_job_failed"
     assert "was cancelled" in finding.message
+    assert "chkit plugin backfill submit --plan-id abcdef0123456789" in finding.message
 
 
 def test_fails_without_a_session_and_says_how_to_log_in(
