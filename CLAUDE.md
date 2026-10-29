@@ -99,7 +99,7 @@ After **verify** passes on a same-repository pull request, **deploy** builds and
 
 A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known ObsessionDB limitation with a linked issue, and must still run in **verify**.
 
-`turbo.json` passes through `CHKIT_E2E_TARGET`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
+`turbo.json` passes through `CHKIT_E2E_TARGET`, `CHKIT_TEST_PORT`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
 
 ## Release
 
