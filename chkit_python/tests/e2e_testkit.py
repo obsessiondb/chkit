@@ -50,9 +50,10 @@ class LiveEnv:
     clickhouse_database: str
 
 
-# The ClickHouse in test/infra/docker-compose.yml, which `bun run infra:up` starts.
+# The ClickHouse in test/infra/docker-compose.yml, which `bun run infra:up`
+# starts on CHKIT_TEST_PORT (default 8123).
 LOCAL_STACK_ENV = LiveEnv(
-    clickhouse_url="http://localhost:8123",
+    clickhouse_url=f"http://localhost:{(os.environ.get('CHKIT_TEST_PORT') or '').strip() or '8123'}",
     clickhouse_user="default",
     clickhouse_password="chkit-ci",
     clickhouse_database="default",

@@ -27,9 +27,12 @@ export interface LiveEnv {
   clickhouseDatabase: string
 }
 
-/** The ClickHouse in test/infra/docker-compose.yml, which `infra:up` starts. */
+/**
+ * The ClickHouse in test/infra/docker-compose.yml, which `infra:up` starts on
+ * CHKIT_TEST_PORT (default 8123).
+ */
 export const LOCAL_STACK_ENV: LiveEnv = {
-  clickhouseUrl: 'http://localhost:8123',
+  clickhouseUrl: `http://localhost:${process.env.CHKIT_TEST_PORT?.trim() || '8123'}`,
   clickhouseUser: 'default',
   clickhousePassword: 'chkit-ci',
   clickhouseDatabase: 'default',

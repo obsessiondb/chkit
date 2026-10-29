@@ -21,7 +21,7 @@ function getLiveEnv() {
   const host = process.env.CLICKHOUSE_HOST?.trim()
   const url = process.env.CLICKHOUSE_URL?.trim() || (host ? `https://${host}` : '')
   if (!url) {
-    return { url: 'http://localhost:8123', username: 'default', password: 'chkit-ci', database: 'default' }
+    return { url: `http://localhost:${process.env.CHKIT_TEST_PORT?.trim() || '8123'}`, username: 'default', password: 'chkit-ci', database: 'default' }
   }
   const username = process.env.CLICKHOUSE_USER?.trim() || 'default'
   const password = process.env.CLICKHOUSE_PASSWORD?.trim() || ''

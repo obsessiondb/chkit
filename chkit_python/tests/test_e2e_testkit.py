@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -84,7 +85,8 @@ def test_resolve_live_env_defaults_to_local_test_stack(
     _clear_clickhouse_env(monkeypatch)
     env = resolve_live_env()
     assert env == LOCAL_STACK_ENV
-    assert env.clickhouse_url == "http://localhost:8123"
+    port = (os.environ.get("CHKIT_TEST_PORT") or "").strip() or "8123"
+    assert env.clickhouse_url == f"http://localhost:{port}"
     assert env.clickhouse_user == "default"
     assert env.clickhouse_password == "chkit-ci"
     assert env.clickhouse_database == "default"

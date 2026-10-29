@@ -1,4 +1,6 @@
 <clickhouse>
+    <!-- CHKIT_TEST_PORT from docker-compose.yml: the same port inside and outside. -->
+    <http_port from_env="CHKIT_TEST_PORT"/>
     <!-- Backfill status queries use clusterAllReplicas('cluster', ...).
          A single local replica exercises the same queries without Keeper. -->
     <remote_servers>

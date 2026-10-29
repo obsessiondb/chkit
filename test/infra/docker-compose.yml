@@ -1,6 +1,8 @@
 # Test infrastructure for `bun run test` and `bun run verify`, locally and in CI.
 # Turbo starts it through the root `infra:up` task; `bun run infra:down` removes it.
-name: chkit-test
+# CHKIT_TEST_PORT (default 8123) moves ClickHouse to another port and its own
+# project (chkit-test-<port>), so several checkouts can each run a stack.
+name: chkit-test${CHKIT_TEST_PORT:+-$CHKIT_TEST_PORT}
 
 services:
   clickhouse:
@@ -8,10 +10,11 @@ services:
     environment:
       CLICKHOUSE_PASSWORD: chkit-ci
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CHKIT_TEST_PORT: ${CHKIT_TEST_PORT:-8123}
     # Same port inside and outside the container: the dictionary test points an
     # HTTP dictionary source at the server's own CLICKHOUSE_URL.
     ports:
-      - "8123:8123"
+      - "${CHKIT_TEST_PORT:-8123}:${CHKIT_TEST_PORT:-8123}"
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     volumes:
