@@ -19,6 +19,7 @@ services:
       nofile: { soft: 262144, hard: 262144 }
     volumes:
       - ./clickhouse.xml:/etc/clickhouse-server/config.d/chkit-test.xml:ro
+      - ./clickhouse-port.xml:/etc/clickhouse-server/config.d/chkit-test-port.xml:ro
     healthcheck:
       test: [CMD, clickhouse-client, --password, chkit-ci, --query, SELECT 1]
       interval: 500ms

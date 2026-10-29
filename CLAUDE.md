@@ -91,7 +91,7 @@ Turbo orchestrates; GitHub Actions only checks out, installs and calls one scrip
 
 **verify** runs on every pull request and push to `main`: `bun run verify`, the same command as locally (workspace deps check, `turbo run typecheck lint test build`, packed deps check). Pull requests also get a non-blocking Fallow report.
 
-`test/infra/clickhouse.xml` configures a one-node `cluster` for the backfill status queries, a short query-log flush interval, and Kafka consumers that read topics from the start. The replicated clusters in `test/cluster/` remain opt-in.
+`test/infra/clickhouse.xml` configures a one-node `cluster` for the backfill status queries, a short query-log flush interval, and Kafka consumers that read topics from the start. `test/infra/clickhouse-port.xml`, mounted only by Compose, sets the HTTP port from `CHKIT_TEST_PORT`; `scripts/codex-cloud-setup.sh` installs `clickhouse.xml` alone, so its server keeps 8123. The replicated clusters in `test/cluster/` remain opt-in.
 
 After **verify** passes on a push to `main`, **obsessiondb** runs `bun run test:obsessiondb` against the managed test database using the `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
 
