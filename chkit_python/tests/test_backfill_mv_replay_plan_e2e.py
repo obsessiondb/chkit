@@ -10,8 +10,8 @@ This drives the full path against a live cluster: ``build_backfill_plan``
 ``execute_backfill`` running the generated INSERT...SELECTs, then verifies the
 populated target matches the forward MV output.
 
-Requires a reachable ClickHouse (defaults to ``http://localhost:8123``; see
-``tests/e2e_testkit.py``). Hard-fails when the server is unreachable — never
+Requires a reachable ClickHouse (defaults to the local test stack on
+``CHKIT_TEST_PORT``, default 8123; see ``tests/e2e_testkit.py``). Hard-fails when the server is unreachable — never
 skips.
 """
 

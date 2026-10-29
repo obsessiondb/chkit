@@ -6,8 +6,8 @@ cluster — submitting the chunk INSERT...SELECTs, polling ``system.processes``
 the full run plus the resume and replay-failed paths, which are otherwise
 only exercised against a mock executor.
 
-Requires a reachable ClickHouse (defaults to ``http://localhost:8123``; see
-``tests/e2e_testkit.py``). Hard-fails when the server is unreachable — never
+Requires a reachable ClickHouse (defaults to the local test stack on
+``CHKIT_TEST_PORT``, default 8123; see ``tests/e2e_testkit.py``). Hard-fails when the server is unreachable — never
 skips.
 """
 

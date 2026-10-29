@@ -85,6 +85,7 @@ def test_resolve_live_env_defaults_to_local_test_stack(
     _clear_clickhouse_env(monkeypatch)
     env = resolve_live_env()
     assert env == LOCAL_STACK_ENV
+    # Re-derives the default port, so this checks the default value, not the port.
     port = (os.environ.get("CHKIT_TEST_PORT") or "").strip() or "8123"
     assert env.clickhouse_url == f"http://localhost:{port}"
     assert env.clickhouse_user == "default"
