@@ -20,21 +20,41 @@ export function hasEmittedJson(): boolean {
 }
 
 let stdoutDrain: Promise<void> | undefined
+let resolveStdoutDrain: (() => void) | undefined
+let stdoutListening = false
+let stdoutClosed = false
+
+function settleStdoutDrain(): void {
+  stdoutDrain = undefined
+  resolveStdoutDrain?.()
+  resolveStdoutDrain = undefined
+}
 
 /**
  * Write a line to stdout through the stream. Bun's `console.log` drops whatever
  * does not fit in a 64 KiB pipe buffer once stdout is non-blocking, and
  * `process.exit` drops what the stream has not flushed yet, so remember a
  * pending drain for the exit path to await (`stdoutDrained`).
+ *
+ * A reader that closes early (`| head`) makes the write fail with EPIPE. Node's
+ * console swallows that; a bare stream write would crash on the unhandled
+ * `'error'` event, so handle it here: stop writing and settle the drain so the
+ * CLI still exits with the command's own code.
  */
 export function writeStdout(text: string): void {
+  if (!stdoutListening) {
+    stdoutListening = true
+    process.stdout.on('error', () => {
+      stdoutClosed = true
+      settleStdoutDrain()
+    })
+  }
+  if (stdoutClosed) return
   if (process.stdout.write(`${text}\n`) || stdoutDrain) return
   stdoutDrain = new Promise((resolve) => {
-    process.stdout.once('drain', () => {
-      stdoutDrain = undefined
-      resolve()
-    })
+    resolveStdoutDrain = resolve
   })
+  process.stdout.once('drain', settleStdoutDrain)
 }
 
 /** Resolves once everything written with `writeStdout` has been flushed. */
