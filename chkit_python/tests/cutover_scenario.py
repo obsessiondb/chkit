@@ -410,13 +410,16 @@ def run_keep_scenario(target: CutoverTarget, label: str, directory: Path) -> Non
             project.table: "user_id, id",
             project.previous: "id",
         }
+        # The old table kept every row it received until the mirror was dropped.
+        # The rows of an INSERT that straddled the swap are in it twice (and were
+        # attached to the new table by the reconcile step).
         if target.settle is not None:
             target.settle([project.previous])
         previous = rows(
             target,
             f"SELECT count() AS total, uniqExact(id) AS ids FROM {target.rows_of(project.previous)}",
         )[0]
-        assert int(previous["total"]) == int(previous["ids"]) >= project.historic, previous
+        assert int(previous["total"]) >= int(previous["ids"]) >= project.historic, previous
         assert_chkit_clean()
     finally:
         drop_cutover_project(target, project)
