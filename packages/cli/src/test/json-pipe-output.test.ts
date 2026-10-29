@@ -24,8 +24,8 @@ export const plugin = definePlugin({
 }
 
 describe('--json output through a slow pipe reader', () => {
-  for (const subcommand of ['ok', 'fail']) {
-    test(`plugin command exiting ${subcommand === 'ok' ? 0 : 1} writes the whole payload`, async () => {
+  for (const [subcommand, exitCode] of [['ok', 0], ['fail', 1]] as const) {
+    test(`plugin command exiting ${exitCode} writes the whole payload`, async () => {
       const fixture = await createFixture()
       const pluginPath = join(fixture.dir, 'big-plugin.ts')
       try {
@@ -37,12 +37,15 @@ describe('--json output through a slow pipe reader', () => {
         )
 
         // The reader only starts once the CLI has had time to exit, so anything
-        // the CLI did not hand to the pipe before exiting is lost.
+        // the CLI did not hand to the pipe before exiting is lost. The pipeline's
+        // status is cat's, so the CLI's own exit code goes to stderr.
         const cli = `bun ./packages/cli/src/bin/chkit.ts plugin big ${subcommand} --json --config '${fixture.configPath}'`
-        const result = spawnWithTimeout(['sh', '-c', `${cli} | { sleep 2; cat; }`], {
-          cwd: WORKSPACE_ROOT,
-        })
+        const result = spawnWithTimeout(
+          ['sh', '-c', `{ ${cli}; echo "cli-exit=$?" >&2; } | { sleep 2; cat; }`],
+          { cwd: WORKSPACE_ROOT }
+        )
 
+        expect(result.stderr).toContain(`cli-exit=${exitCode}`)
         expect(result.stdout.length).toBeGreaterThan(100_000)
         const payload = JSON.parse(result.stdout) as { items: unknown[] }
         expect(payload.items).toHaveLength(ITEM_COUNT)
