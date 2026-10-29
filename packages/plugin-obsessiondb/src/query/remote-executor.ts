@@ -113,10 +113,12 @@ export function createRemoteExecutor(deps: {
 	const client = createApiClient(credentials)
 
 	const executor: ClickHouseExecutor = {
-		async command(sql) {
+		async command(sql, settings?) {
+			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
+				...(apiSettings ? { settings: apiSettings } : {}),
 			})
 			throwIfError(res)
 		},

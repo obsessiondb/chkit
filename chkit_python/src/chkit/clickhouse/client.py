@@ -119,9 +119,12 @@ class ClickHouseClient:
     def database(self) -> str:
         return self._config.database
 
-    def execute(self, statement: str) -> None:
-        """Run a statement (DDL or DML) without returning rows."""
-        self._client.command(statement)
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        """Run a statement (DDL or DML) without returning rows.
+
+        ``settings`` are per-statement ClickHouse settings (mirrors the TS
+        executor's ``command(sql, settings)``)."""
+        self._client.command(statement, settings=settings)
 
     def query(
         self,

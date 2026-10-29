@@ -866,7 +866,7 @@ class _RecordingClient:
         self._fail = fail
         self._polls = polls or [[]]
 
-    def execute(self, statement: str) -> None:
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         self.calls.append(statement)
         if self._fail is not None and statement.startswith(self._fail):
             msg = f"boom: {statement}"

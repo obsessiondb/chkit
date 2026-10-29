@@ -81,7 +81,7 @@ export interface ClickHouseJsonQueryResult<
 export type ObservableSystemTable = 'processes' | 'query_log'
 
 export interface ClickHouseExecutor {
-	command(sql: string): Promise<void>
+	command(sql: string, settings?: ClickHouseSettings): Promise<void>
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
@@ -684,11 +684,12 @@ export function createExecutorWithClient(
 	let compressedClient: ClickHouseClient | undefined
 
 	return {
-		async command(sql: string): Promise<void> {
+		async command(sql: string, settings?: ClickHouseSettings): Promise<void> {
 			try {
 				const result = await client.command({
 					query: sql,
 					http_headers: { 'X-DDL': '1' },
+					...(settings ? { clickhouse_settings: settings } : {}),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -711,6 +712,7 @@ export function createExecutorWithClient(
 						const fallbackResult = await fallback.command({
 							query: sql,
 							http_headers: { 'X-DDL': '1' },
+							...(settings ? { clickhouse_settings: settings } : {}),
 						})
 						assertStreamedQuerySucceeded({
 							response_headers: fallbackResult.response_headers,

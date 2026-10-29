@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- `chkit migrate --setting <name=value>` (repeatable, or comma-separated) sends ClickHouse
+  query settings with each migration statement (#321), e.g. `--setting
+  max_table_size_to_drop=0` to drop a table larger than the server's size limit.
+  `ClickHouseClient.execute()` and the ObsessionDB remote client take optional
+  per-statement settings.
 - `chkit generate --cutover <db.table>=<key>[,<key>]` (repeatable) plans a zero-downtime
   cutover of a structural change (engine, ORDER BY, PRIMARY KEY, PARTITION BY) instead of
   DROP + CREATE (#202): a shadow table with the new definition, a mirror materialized

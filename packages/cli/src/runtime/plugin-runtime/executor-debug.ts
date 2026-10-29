@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor, QueryStatusOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryStatusOptions } from '@chkit/clickhouse'
 
 import { debug, isDebugEnabled } from '../debug.js'
 
@@ -37,9 +37,9 @@ export function wrapExecutorWithDebug(
 
   return {
     ...(systemTableSource ? { systemTableSource } : {}),
-    command(sql: string): Promise<void> {
+    command(sql: string, settings?: ClickHouseSettings): Promise<void> {
       debug('clickhouse', `command: ${truncate(sql)}`)
-      return trace('command', null, () => executor.command(sql))
+      return trace('command', null, () => executor.command(sql, settings))
     },
     query<T>(sql: string): Promise<T[]> {
       debug('clickhouse', `query: ${truncate(sql)}`)

@@ -305,8 +305,8 @@ class _RecordingRemote:
     def query(self, statement: str) -> Any:
         return self._inner.query(statement)
 
-    def execute(self, statement: str) -> None:
-        self._inner.execute(statement)
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        self._inner.execute(statement, settings=settings)
 
     def submit(self, statement: str, query_id: str | None = None) -> str:
         return self._inner.submit(statement, query_id=query_id)

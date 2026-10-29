@@ -130,6 +130,26 @@ describe('createRemoteExecutor submit', () => {
 	})
 })
 
+// migrate --setting (#321) reaches ClickHouse through command()'s settings.
+describe('createRemoteExecutor command', () => {
+	test('forwards per-statement settings to the API', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.command('DROP TABLE t', { max_table_size_to_drop: '0' })
+			await remote.command('DROP TABLE u')
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { max_table_size_to_drop: '0' } },
+				{ serviceSlug: 'test', query: 'DROP TABLE u' },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
 // #246: the query runs on the replica that received it, so on a multi-replica
 // service queryStatus reads processes and query_log on every replica.
 describe('createRemoteExecutor queryStatus', () => {

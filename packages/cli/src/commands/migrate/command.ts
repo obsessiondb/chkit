@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import process from 'node:process'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import {
@@ -60,6 +60,7 @@ import {
 import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
+import { parseSettingFlags } from './settings.js'
 
 const MIGRATE_FLAGS = defineFlags([
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
@@ -77,6 +78,12 @@ const MIGRATE_FLAGS = defineFlags([
     description: 'Reset a failed migration so the next apply runs it from statement 1 (journal only; previews without --apply)',
     placeholder: '<migration>',
   },
+  {
+    name: '--setting',
+    type: 'string[]',
+    description: 'ClickHouse query setting sent with each migration statement, e.g. max_table_size_to_drop=0 (repeatable)',
+    placeholder: '<name=value>',
+  },
 ] as const)
 
 export const migrateCommand: ChxPluginCommand = {
@@ -93,6 +100,8 @@ interface MigrateContext {
   jsonMode: boolean
   executeRequested: boolean
   allowDestructive: boolean
+  /** --setting values, sent with each synchronous migration statement. */
+  settings: ClickHouseSettings | undefined
   mode: MigrateMode
   migrationsDir: string
   metaDir: string
@@ -172,6 +181,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const f = typedFlags(flags, [...GLOBAL_FLAGS, ...MIGRATE_FLAGS] as const)
   const executeRequested = f['--apply'] === true || f['--execute'] === true
   const allowDestructive = f['--allow-destructive'] === true
+  const settings = parseSettingFlags(f['--setting'])
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
   const { retryTarget, abandonTarget } = resolveRecoveryTargets(flags)
@@ -219,6 +229,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     jsonMode,
     executeRequested,
     allowDestructive,
+    settings,
     mode,
     migrationsDir,
     metaDir,
@@ -426,7 +437,7 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
 
 /** Apply each pending migration, journal it, and emit the final summary. */
 async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<number> {
-  const { jsonMode, migrationsDir, db, journalStore, pluginRuntime, config, tableScope, flags } = ctx
+  const { jsonMode, migrationsDir, db, journalStore, pluginRuntime, config, tableScope, flags, settings } = ctx
   const { pending, undeterminedScope, retry } = plan
   // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
   const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
@@ -443,6 +454,7 @@ async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<num
       flags,
       migrationsDir,
       file,
+      settings,
       retry: retry?.action === 'resume' && retry.migration === file ? retry : undefined,
       log,
     })

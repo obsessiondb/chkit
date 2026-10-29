@@ -214,7 +214,7 @@ class _ScriptedClient:
             raise status
         return status
 
-    def execute(self, statement: str) -> None:
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         self.executed.append(statement)
 
 

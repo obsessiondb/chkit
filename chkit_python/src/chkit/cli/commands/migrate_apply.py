@@ -78,6 +78,8 @@ class ApplyMigrationInput:
     log: Callable[[str], None]
     # Warnings (DDL propagation) are suppressed in --json mode.
     warn: Callable[[str], None]
+    # --setting values, sent with each synchronous statement.
+    settings: dict[str, str] | None = None
 
 
 class StatementError(RuntimeError):
@@ -200,7 +202,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             if operation is not None and operation.mode == "barrier":
                 wait_for_insert_barrier(input_.client, statement, cluster=cluster, log=input_.log)
             else:
-                input_.client.execute(statement)
+                input_.client.execute(statement, settings=input_.settings)
         except Exception as error:
             state_on_error = journal_store.read_migration_state(file) or base_state
             journal_store.write_migration_state(
