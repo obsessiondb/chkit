@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import process from 'node:process'
+import { format } from 'node:util'
 import type { ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
@@ -13,7 +14,13 @@ import { debug } from '../runtime/debug.js'
 import { extractConfigPath } from '../runtime/extract-config-path.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
-import { emitJsonError, hasEmittedJson, stdoutDrained, type JsonError } from '../runtime/json-output.js'
+import {
+  emitJsonError,
+  hasEmittedJson,
+  stdoutDrained,
+  writeStdout,
+  type JsonError,
+} from '../runtime/json-output.js'
 import { configureCliLogging } from '../runtime/logging.js'
 import { loadPluginRuntime } from '../runtime/plugin-runtime/index.js'
 import { CLI_VERSION } from '../runtime/version.js'
@@ -146,6 +153,10 @@ function createInternalRegistry(): ReturnType<typeof createCommandRegistry> {
 
 async function run(): Promise<void> {
   configureCliLogging()
+  // Text output from commands, plugins and prompts goes through writeStdout
+  // too, so it stays in order with JSON output and the exit path waits for it
+  // to drain instead of losing what did not fit in the pipe buffer.
+  console.log = (...args: unknown[]) => writeStdout(format(...args))
 
   const argv = normalizeGlobalArgs(process.argv.slice(2))
   const commandName = argv[0]
