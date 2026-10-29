@@ -492,6 +492,8 @@ def test_job_json_output_keeps_last_error_and_metadata(httpx_mock: HTTPXMock) ->
     for job in (listed, status):
         assert job["lastError"] == extra["lastError"]
         assert job["metadata"] == extra["metadata"]
+        keys = list(job)  # same key order as the TS jobSummarySchema
+        assert keys[keys.index("lastError") :][:3] == ["lastError", "metadata", "createdAt"]
 
 
 def test_jobs_cancel_returns_empty_object(httpx_mock: HTTPXMock) -> None:
