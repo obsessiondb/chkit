@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 from chkit.core.model import (
     ChxResolvedCheckConfig,
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
 )
+from chkit.plugins import ChxPlugin, ChxPluginManifest
 from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.state import (
     backfill_paths,
@@ -29,7 +29,7 @@ from chkit_plugin_backfill.types import (
 
 PLAN_ID = "0123456789abcdef"
 TARGET = "app.events"
-OBSESSIONDB_PLUGIN = SimpleNamespace(manifest=SimpleNamespace(name="obsessiondb"))
+OBSESSIONDB_PLUGIN = ChxPlugin(manifest=ChxPluginManifest(name="obsessiondb", api_version=1))
 
 
 def test_fails_on_a_saved_plan_with_no_local_run(tmp_path: Path) -> None:

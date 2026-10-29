@@ -132,8 +132,9 @@ function hasObsessionDBPlugin(plugins: ResolvedChxConfig['plugins']): boolean {
   return plugins.some((entry) => entry.enabled !== false && pluginName(entry.plugin) === 'obsessiondb')
 }
 
-function pluginName(plugin: unknown): unknown {
+function pluginName(plugin: unknown): string | undefined {
   if (typeof plugin !== 'object' || plugin === null || !('manifest' in plugin)) return undefined
   const { manifest } = plugin
-  return typeof manifest === 'object' && manifest !== null && 'name' in manifest ? manifest.name : undefined
+  if (typeof manifest !== 'object' || manifest === null || !('name' in manifest)) return undefined
+  return typeof manifest.name === 'string' ? manifest.name : undefined
 }
