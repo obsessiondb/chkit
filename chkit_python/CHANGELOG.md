@@ -100,6 +100,11 @@
 - `chkit plugin backfill list --json` and `status --json` keep each job's `lastError` and
   `metadata` (#327). The job models dropped both, so the output lacked fields the TS CLI
   prints.
+- A command that fails under `--json` now prints the TS CLI's error envelope
+  (`{command, schemaVersion, ok: false, error: {code, message}}`) on stdout (#329).
+  Before, only `migrate` and `snapshot` did; `query`, `status`, `check`, `drift` and
+  `pull` left stdout empty. A failed `chkit query` (connection or SQL error) now exits 1
+  with the message on stderr, like the TS CLI; it exited 2 with a usage error before.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional
