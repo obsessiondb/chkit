@@ -13,7 +13,7 @@ import { debug } from '../runtime/debug.js'
 import { extractConfigPath } from '../runtime/extract-config-path.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
-import { emitJsonError, hasEmittedJson, type JsonError } from '../runtime/json-output.js'
+import { emitJsonError, hasEmittedJson, stdoutDrained, type JsonError } from '../runtime/json-output.js'
 import { configureCliLogging } from '../runtime/logging.js'
 import { loadPluginRuntime } from '../runtime/plugin-runtime/index.js'
 import { CLI_VERSION } from '../runtime/version.js'
@@ -347,8 +347,11 @@ async function printGlobalHelp(argv: string[]): Promise<void> {
 }
 
 run()
-  .then(exitIfNeeded)
-  .catch((error) => {
+  .then(async () => {
+    await stdoutDrained()
+    exitIfNeeded()
+  })
+  .catch(async (error) => {
     debug(
       'cli',
       'fatal error',
@@ -370,5 +373,6 @@ run()
       emitJsonError(activeCommand, toJsonError(error))
     }
     console.error(formatFatalError(error))
+    await stdoutDrained()
     process.exit(1)
   })

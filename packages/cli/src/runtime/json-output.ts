@@ -19,6 +19,29 @@ export function hasEmittedJson(): boolean {
   return jsonEmitted
 }
 
+let stdoutDrain: Promise<void> | undefined
+
+/**
+ * Write a line to stdout through the stream. Bun's `console.log` drops whatever
+ * does not fit in a 64 KiB pipe buffer once stdout is non-blocking, and
+ * `process.exit` drops what the stream has not flushed yet, so remember a
+ * pending drain for the exit path to await (`stdoutDrained`).
+ */
+export function writeStdout(text: string): void {
+  if (process.stdout.write(`${text}\n`) || stdoutDrain) return
+  stdoutDrain = new Promise((resolve) => {
+    process.stdout.once('drain', () => {
+      stdoutDrain = undefined
+      resolve()
+    })
+  })
+}
+
+/** Resolves once everything written with `writeStdout` has been flushed. */
+export function stdoutDrained(): Promise<void> {
+  return stdoutDrain ?? Promise.resolve()
+}
+
 export function printOutput(value: unknown, jsonMode: boolean): void {
   if (jsonMode) {
     jsonEmitted = true
@@ -29,7 +52,7 @@ export function printOutput(value: unknown, jsonMode: boolean): void {
       typeof value === 'string'
         ? { schemaVersion: JSON_CONTRACT_VERSION, message: value }
         : value
-    console.log(JSON.stringify(payload, null, 2))
+    writeStdout(JSON.stringify(payload, null, 2))
     return
   }
   if (typeof value === 'string') {
@@ -81,5 +104,5 @@ export function buildJsonErrorEnvelope(command: string, error: JsonError): JsonE
  */
 export function emitJsonError(command: string, error: JsonError): void {
   jsonEmitted = true
-  console.log(JSON.stringify(buildJsonErrorEnvelope(command, error), null, 2))
+  writeStdout(JSON.stringify(buildJsonErrorEnvelope(command, error), null, 2))
 }
