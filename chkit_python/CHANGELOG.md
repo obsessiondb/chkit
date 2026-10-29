@@ -97,6 +97,9 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit plugin backfill list --json` and `status --json` keep each job's `lastError` and
+  `metadata` (#327). The job models dropped both, so the output lacked fields the TS CLI
+  prints.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional

@@ -44,6 +44,8 @@ class JobSummary(ConsoleApiModel):
     total_tasks: int
     completed_tasks: int
     failed_tasks: int
+    last_error: str | None = None
+    metadata: dict[str, Any] | None = None
     created_at: str
     updated_at: str
 
@@ -53,7 +55,6 @@ class JobDetail(JobSummary):
 
     max_retries: int
     workflow_id: str | None = None
-    metadata: dict[str, Any] | None = None
     # Full task rows (with runs) — kept structurally loose like the TS client,
     # which passes them through without touching individual fields.
     tasks: list[dict[str, Any]] = Field(default_factory=list)
