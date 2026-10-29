@@ -45,6 +45,7 @@ def evaluate_backfill_check(
     active_runs = 0
     failed_runs = 0
     submitted_count = 0
+    unconfirmed_count = 0
 
     for plan_id in plan_ids:
         run_path = runs_dir / f"{plan_id}.json"
@@ -55,10 +56,11 @@ def evaluate_backfill_check(
             # completed, so it is not pending here. A local run, if any, still
             # wins.
             submission = read_submission(submissions_dir / f"{plan_id}.json")
-            if submission is not None:
-                submitted_count += 1
-            else:
+            if submission is None:
                 required_count += 1
+            else:
+                submitted_count += 1
+                unconfirmed_count += int(submission.status != "completed")
             continue
 
         if run.status == "running":
@@ -78,6 +80,26 @@ def evaluate_backfill_check(
                     "error" if fail_check_on_required_pending_backfill else "warn"
                 ),
                 metadata={"requiredCount": required_count},
+            )
+        )
+
+    # Only the ObsessionDB plugin asks the jobs API whether a submitted job
+    # completed. Without it an unconfirmed submitted plan would otherwise pass
+    # unverified.
+    if unconfirmed_count > 0 and not _has_obsessiondb_plugin(config.plugins):
+        findings.append(
+            ChxCheckFinding(
+                code="backfill_submitted_unverified",
+                message=(
+                    f"Submitted backfills not verified: {unconfirmed_count}. Only the"
+                    " ObsessionDB plugin checks their jobs, and it is not loaded:"
+                    " register obsessiondb() in the config plugins and log in with"
+                    " chkit obsessiondb login."
+                ),
+                severity=(
+                    "error" if fail_check_on_required_pending_backfill else "warn"
+                ),
+                metadata={"unconfirmedCount": unconfirmed_count},
             )
         )
 
@@ -115,6 +137,13 @@ def evaluate_backfill_check(
             "failedRuns": failed_runs,
             "submittedCount": submitted_count,
         },
+    )
+
+
+def _has_obsessiondb_plugin(plugins: list[object]) -> bool:
+    return any(
+        getattr(getattr(plugin, "manifest", None), "name", None) == "obsessiondb"
+        for plugin in plugins
     )
 
 

@@ -14,7 +14,7 @@ import type {
 
 export async function evaluateBackfillCheck(input: {
   configPath: string
-  config: Pick<ResolvedChxConfig, 'metaDir'>
+  config: Pick<ResolvedChxConfig, 'metaDir' | 'plugins'>
   stateDir?: string
   failCheckOnRequiredPendingBackfill: boolean
 }): Promise<BackfillPluginCheckResult> {
@@ -43,6 +43,7 @@ export async function evaluateBackfillCheck(input: {
   let activeRuns = 0
   let failedRuns = 0
   let submittedCount = 0
+  let unconfirmedCount = 0
 
   for (const planId of planIds) {
     const runPath = join(runsDir, `${planId}.json`)
@@ -52,8 +53,11 @@ export async function evaluateBackfillCheck(input: {
       // backend's plugin (e.g. ObsessionDB) checks whether the job completed,
       // so it is not pending here. A local run, if any, still wins.
       const submission = await readSubmission(join(submissionsDir, `${planId}.json`))
-      if (submission) submittedCount += 1
-      else requiredCount += 1
+      if (!submission) requiredCount += 1
+      else {
+        submittedCount += 1
+        if (submission.status !== 'completed') unconfirmedCount += 1
+      }
       continue
     }
 
@@ -70,6 +74,22 @@ export async function evaluateBackfillCheck(input: {
       severity: input.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
       metadata: {
         requiredCount,
+      },
+    })
+  }
+
+  // Only the ObsessionDB plugin asks the jobs API whether a submitted job
+  // completed. Without it (e.g. on CI, where no login session adds it to the
+  // config) an unconfirmed submitted plan would otherwise pass unverified.
+  if (unconfirmedCount > 0 && !hasObsessionDBPlugin(input.config.plugins)) {
+    findings.push({
+      code: 'backfill_submitted_unverified',
+      message:
+        `Submitted backfills not verified: ${unconfirmedCount}. Only the ObsessionDB plugin checks their jobs, and it is ` +
+        'not loaded: register obsessiondb() in the config plugins and log in with chkit obsessiondb login.',
+      severity: input.failCheckOnRequiredPendingBackfill ? 'error' : 'warn',
+      metadata: {
+        unconfirmedCount,
       },
     })
   }
@@ -106,4 +126,14 @@ export async function evaluateBackfillCheck(input: {
       submittedCount,
     },
   }
+}
+
+function hasObsessionDBPlugin(plugins: ResolvedChxConfig['plugins']): boolean {
+  return plugins.some((entry) => entry.enabled !== false && pluginName(entry.plugin) === 'obsessiondb')
+}
+
+function pluginName(plugin: unknown): unknown {
+  if (typeof plugin !== 'object' || plugin === null || !('manifest' in plugin)) return undefined
+  const { manifest } = plugin
+  return typeof manifest === 'object' && manifest !== null && 'name' in manifest ? manifest.name : undefined
 }

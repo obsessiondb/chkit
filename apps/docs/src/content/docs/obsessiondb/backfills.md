@@ -125,6 +125,8 @@ Idempotency tokens do not make re-submitting safe. A chunk's token is stable onl
 
 Each finding names the plan and job IDs. Once a job is confirmed completed, later checks pass for that plan without contacting ObsessionDB. A project without submitted plans makes no API call.
 
+When the ObsessionDB plugin is not loaded, nothing asks the jobs API. The backfill plugin's check then reports the submitted plans not yet confirmed completed as `backfill_submitted_unverified`, which fails the check unless `failCheckOnRequiredPendingBackfill` is `false`.
+
 ```sh
 chkit check --json
 ```
@@ -139,7 +141,7 @@ chkit check --json
 ```
 
 :::note
-CI that runs `chkit check` needs an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A confirmation is saved in `submissions/` in the backfill `stateDir`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
+CI that runs `chkit check` needs the ObsessionDB plugin registered in the project config and an ObsessionDB session (`chkit obsessiondb login`) until every submitted job is confirmed completed. A login session adds the plugin on the machine that has it (see [User profile config](/configuration/overview/#user-profile-config)), not on a CI runner. A confirmation is saved in `submissions/` in the backfill `stateDir`, so a CI runner that starts from the repository only skips the API call when that directory is committed.
 :::
 
 For a failed or cancelled job, inspect it with `chkit plugin backfill status --job-id <jobId>`. Then [re-submit the plan](#re-submit-a-failed-or-cancelled-job) with `--plan-id`, or run the plan locally with `--local`: once a local run exists, `check` judges the plan by that run instead.
