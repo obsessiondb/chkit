@@ -8,7 +8,7 @@ The factory ``obsessiondb()`` is what the user puts in their
 - Auth commands: ``login``, ``signup``, ``logout``, ``whoami`` —
   dispatched via ``chkit plugin obsessiondb <command>``.
 - ``get_context`` — hands out the remote executor when logged in with a
-  service selected, so ``check`` needs no ``clickhouse`` block.
+  service selected, so commands need no ``clickhouse`` block.
 - Service commands (list / select / claim / alias) and
   ``on_before_plugin_command`` for backfill routing.
 """

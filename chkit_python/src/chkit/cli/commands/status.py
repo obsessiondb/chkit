@@ -17,6 +17,7 @@ from typing import Annotated
 
 import typer
 
+from chkit.cli.command_target import open_client, resolve_plugin_executor
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
@@ -26,13 +27,14 @@ from chkit.cli.migration_store import (
     list_migration_filenames,
     read_snapshot,
 )
+from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     resolve_table_scope,
     table_keys_from_definitions,
 )
-from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxConfigEnv
+from chkit.plugins import ChxPlugin
 
 
 def run(
@@ -60,10 +62,17 @@ def run(
     no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="status"))
-    if config.clickhouse is None:
+    executor = resolve_plugin_executor(
+        load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
+        config,
+        command="status",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+    )
+    if executor is None and config.clickhouse is None:
         msg = (
-            "clickhouse.config.py must include a `clickhouse` block "
-            "(journal lives in ClickHouse)."
+            "clickhouse.config.py must include a `clickhouse` block or select an "
+            "ObsessionDB service (journal lives in ClickHouse)."
         )
         raise typer.BadParameter(msg)
 
@@ -78,7 +87,7 @@ def run(
         table_selector, table_keys_from_definitions(snapshot_defs)
     )
 
-    with ClickHouseClient.connect(config.clickhouse) as client:
+    with open_client(executor, config.clickhouse) as client:
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )
@@ -111,9 +120,10 @@ def run(
         "checksumMismatchCount": len(mismatches),
         "checksumMismatches": [m.model_dump() for m in mismatches],
     }
+    database = config.clickhouse.database if config.clickhouse else None
     if database_missing:
         payload["databaseMissing"] = True
-        payload["database"] = config.clickhouse.database
+        payload["database"] = database
 
     if output_json:
         emit_json("status", payload)
@@ -121,7 +131,7 @@ def run(
 
     if database_missing:
         typer.echo(
-            f'⚠ Database "{config.clickhouse.database}" '
+            f'⚠ Database "{database or ""}" '
             f"does not exist on the target server."
         )
         typer.echo("  It will be created when you run: chkit migrate --apply\n")

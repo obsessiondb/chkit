@@ -43,7 +43,7 @@ from chkit.cli.journal_store import (
     OperationState,
     OperationStatus,
 )
-from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql, now_iso
+from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import extract_migration_operation_summaries
 from chkit.cli.table_scope import TableScope
@@ -247,8 +247,12 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     f"  ⚠ DDL propagation wait failed for {operation.key}: {wait_error}"
                 )
 
+    # TS ``toISOString().replace('Z', '')``: a `Z` suffix only parses with
+    # date_time_input_format=best_effort, which the ObsessionDB API does not set.
     entry = MigrationJournalEntry(
-        name=file, applied_at=now_iso(), checksum=migration_checksum
+        name=file,
+        applied_at=iso_without_zone(datetime.now(tz=UTC)),
+        checksum=migration_checksum,
     )
     journal_store.append_entry(entry, chkit_version=__version__)
     input_.plugin_runtime.run_on_after_apply(

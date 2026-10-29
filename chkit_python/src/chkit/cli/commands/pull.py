@@ -27,6 +27,7 @@ from typing import Annotated
 
 import typer
 
+from chkit.cli.command_target import open_client, resolve_plugin_executor
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.commands.pull_view_parser import (
     MaterializedViewRefreshShape,
@@ -38,7 +39,6 @@ from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
-from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.create_dictionary_parser import (
     parse_comment_from_create_dictionary_query,
     parse_dictionary_attributes_from_create_dictionary_query,
@@ -459,10 +459,20 @@ def run(  # noqa: PLR0917
     ] = False,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="pull"))
-    if config.clickhouse is None:
+    plugin_runtime = load_plugin_runtime(
+        [p for p in config.plugins if isinstance(p, ChxPlugin)]
+    )
+    executor = resolve_plugin_executor(
+        plugin_runtime,
+        config,
+        command="pull",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+    )
+    if executor is None and config.clickhouse is None:
         msg = (
-            "clickhouse.config.py must include a `clickhouse` block "
-            "(pull connects to ClickHouse to read the live schema)."
+            "clickhouse.config.py must include a `clickhouse` block or select an "
+            "ObsessionDB service (pull connects to ClickHouse to read the live schema)."
         )
         raise typer.BadParameter(msg)
 
@@ -471,9 +481,6 @@ def run(  # noqa: PLR0917
     # Allow a registered plugin to bypass the SQL-based pull entirely
     # (e.g. ObsessionDB's metadata API). Plugins implement
     # ``on_pull_introspect`` and return a list of SchemaDefinition.
-    plugin_runtime = load_plugin_runtime(
-        [p for p in config.plugins if isinstance(p, ChxPlugin)]
-    )
     custom = plugin_runtime.run_on_pull_introspect(
         ChxOnPullIntrospectContext(
             command="pull",
@@ -488,7 +495,7 @@ def run(  # noqa: PLR0917
     if custom is not None:
         definitions = list(custom)
     else:
-        with ClickHouseClient.connect(config.clickhouse) as client:
+        with open_client(executor, config.clickhouse) as client:
             # Capture objects so we can summarize what got skipped, even when
             # --database was passed explicitly.
             raw_objects = [

@@ -13,9 +13,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from chkit.cli.commands import check, drift, pull, query, status
+from chkit.cli.commands import check, drift, pull, status
 from chkit.cli.json_output import _reset_for_testing, has_emitted_json
 from chkit.cli.main import app
+from chkit.clickhouse.client import ClickHouseClient
 
 CONFIG = """
 from chkit import define_config
@@ -109,7 +110,7 @@ def test_usage_error_prints_the_envelope_and_keeps_exit_code_2(
 def _failing_query_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "clickhouse.config.py").write_text(CONFIG, encoding="utf-8")
-    monkeypatch.setattr(query.ClickHouseClient, "connect", _raise_connection_refused)
+    monkeypatch.setattr(ClickHouseClient, "connect", _raise_connection_refused)
 
 
 def test_failing_query_prints_the_envelope_and_exits_1(

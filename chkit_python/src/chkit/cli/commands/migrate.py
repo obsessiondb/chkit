@@ -29,6 +29,7 @@ from typing import Annotated
 import typer
 from typer.exceptions import TyperException
 
+from chkit.cli.command_target import open_client, resolve_plugin_executor
 from chkit.cli.commands.migrate_abandon import (
     JournalStateStore,
     abandon_migration_state,
@@ -243,13 +244,22 @@ def _run(
         allow_destructive=allow_destructive,
     )
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
-    if config.clickhouse is None:
-        msg = "clickhouse.config.py must include a `clickhouse` block to migrate."
-        raise typer.BadParameter(msg)
-
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    executor = resolve_plugin_executor(
+        plugin_runtime,
+        config,
+        command="migrate",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+    )
+    if executor is None and config.clickhouse is None:
+        msg = (
+            "clickhouse.config.py must include a `clickhouse` block or select an "
+            "ObsessionDB service to migrate."
+        )
+        raise typer.BadParameter(msg)
 
     migrations_dir = Path(config.migrations_dir)
     migrations_dir.mkdir(parents=True, exist_ok=True)
@@ -272,10 +282,12 @@ def _run(
         )
         raise MigrateError("migration_not_found", msg)
 
-    with ClickHouseClient.connect(config.clickhouse) as client:
+    with open_client(executor, config.clickhouse) as client:
         # ``cluster`` opts the journal into ReplicatedReplacingMergeTree
         # created ``ON CLUSTER`` so history stays consistent across nodes.
-        journal_store = JournalStore(client, cluster=config.clickhouse.cluster)
+        journal_store = JournalStore(
+            client, cluster=config.clickhouse.cluster if config.clickhouse else None
+        )
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         ctx = _MigrateContext(

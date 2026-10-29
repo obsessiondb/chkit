@@ -125,12 +125,21 @@
   `get_context` hook that returns the remote executor, as in TS, so `check` reads the
   journal and checks submitted backfills through the selected service; the service
   takes precedence over a `clickhouse` block, and `check` names it
-  (`obsessiondb: using service "<name>"`, text mode only). `status`, `migrate`,
-  `drift`, `query` and `pull` still need a `clickhouse` block.
+  (`obsessiondb: using service "<name>"`, text mode only).
 - The ObsessionDB plugin reads the selected service only from the project's
   `.chkit/obsessiondb.json`, as in TS (#343). It also fell back to a `"selected"` entry
   in the user-global `~/.config/chkit/obsessiondb.json`, so such an entry would have sent
   `check` (and backfill commands) to that service in every project with the plugin.
+- `status`, `migrate`, `drift --live`, `query` and `pull` now run through the selected
+  ObsessionDB service too, like `check` and the TS CLI (#340). They used only the
+  `clickhouse` block, so a project with both a selected service and a `clickhouse`
+  block split targets: `migrate` applied to the `clickhouse` block while `check` read
+  the journal from the service and reported those migrations as pending. Every command
+  that talks to ClickHouse now takes the plugin executor first, else the `clickhouse`
+  block, and names the selected service in text mode. `migrate` now records
+  `applied_at` without a zone suffix, as TS does: the ObsessionDB API rejected the
+  journal row (`Cannot parse string ... as DateTime64(3, 'UTC')`). The
+  `--service <name>` override is not ported yet.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional

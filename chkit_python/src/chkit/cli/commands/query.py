@@ -18,13 +18,13 @@ from typing import Annotated, Any
 
 import typer
 
+from chkit.cli.command_target import open_client, resolve_plugin_executor
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json_error, json_error_code
-from chkit.clickhouse.client import (
-    ClickHouseClient,
-    ClickHouseJsonQueryResult,
-)
+from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.clickhouse.client import ClickHouseJsonQueryResult
 from chkit.core.model import ChxConfigEnv
+from chkit.plugins import ChxPlugin
 
 DEFAULT_SHOWN_ROW_LIMIT = 25
 EXPECTED_TOKEN_CAP = 8
@@ -142,16 +142,23 @@ def run(
         raise typer.BadParameter(msg)
 
     config = load_config(config_path, ChxConfigEnv(command="query"))
-    if config.clickhouse is None:
+    executor = resolve_plugin_executor(
+        load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
+        config,
+        command="query",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+    )
+    if executor is None and config.clickhouse is None:
         msg = (
             "No target configured. Provide a `clickhouse` block in "
-            "clickhouse.config.py to run queries."
+            "clickhouse.config.py or select an ObsessionDB service to run queries."
         )
         raise typer.BadParameter(msg)
 
     statement = sql[0]
     try:
-        with ClickHouseClient.connect(config.clickhouse) as client:
+        with open_client(executor, config.clickhouse) as client:
             if output_json:
                 payload = client.query_json(statement)
                 typer.echo(format_query_json(payload))

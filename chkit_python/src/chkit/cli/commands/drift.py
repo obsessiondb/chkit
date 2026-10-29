@@ -27,20 +27,22 @@ from typing import Annotated
 
 import typer
 
+from chkit.cli.command_target import open_client, resolve_plugin_executor
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import read_snapshot
+from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     resolve_table_scope,
     table_keys_from_definitions,
 )
-from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxConfigEnv
+from chkit.plugins import ChxPlugin
 
 
 def run(  # noqa: PLR0912, PLR0915, PLR0917
@@ -65,7 +67,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             "--live",
             help=(
                 "Compare snapshot against live ClickHouse instead of the local "
-                "schema. Requires a clickhouse block in the config."
+                "schema. Requires a clickhouse block in the config or a selected "
+                "ObsessionDB service."
             ),
         ),
     ] = False,
@@ -93,15 +96,25 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     table_scope = resolve_table_scope(table_selector, available_keys)
 
     if live:
-        if config.clickhouse is None:
-            msg = "clickhouse.config.py must include a `clickhouse` block for --live drift."
+        executor = resolve_plugin_executor(
+            load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
+            config,
+            command="drift",
+            config_path=str(config_path or "clickhouse.config.py"),
+            json_mode=output_json,
+        )
+        if executor is None and config.clickhouse is None:
+            msg = (
+                "clickhouse.config.py must include a `clickhouse` block or select an "
+                "ObsessionDB service for --live drift."
+            )
             raise typer.BadParameter(msg)
-        with ClickHouseClient.connect(config.clickhouse) as client:
+        with open_client(executor, config.clickhouse) as client:
             payload_obj = build_drift_payload(
                 client=client,
                 meta_dir=meta_dir,
                 snapshot=snapshot,
-                database=config.clickhouse.database,
+                database=config.clickhouse.database if config.clickhouse else None,
                 fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
             )
