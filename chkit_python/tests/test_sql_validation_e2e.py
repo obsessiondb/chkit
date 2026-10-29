@@ -3,8 +3,8 @@
 Validates every SQL statement emitted by chkit is syntactically valid
 ClickHouse SQL via ``EXPLAIN AST`` against a live instance. No DDL executes.
 
-Connection defaults to the local test stack (``http://localhost:8123``, started
-by ``bun run infra:up``). Override with ``CLICKHOUSE_URL`` / ``CLICKHOUSE_PASSWORD``
+Connection defaults to the local test stack on ``CHKIT_TEST_PORT``, default 8123
+(started by ``bun run infra:up``). Override with ``CLICKHOUSE_URL`` / ``CLICKHOUSE_PASSWORD``
 env vars. See ``conftest.py``.
 """
 

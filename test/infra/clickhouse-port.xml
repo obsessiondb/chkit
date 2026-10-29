@@ -1,0 +1,6 @@
+<clickhouse>
+    <!-- CHKIT_TEST_PORT from docker-compose.yml: the same port inside and outside.
+         Kept out of clickhouse.xml, which scripts/codex-cloud-setup.sh installs on
+         a server that never sets the variable and keeps the default 8123. -->
+    <http_port from_env="CHKIT_TEST_PORT"/>
+</clickhouse>

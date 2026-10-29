@@ -60,7 +60,7 @@ bun run lint         # lint all packages
 
 ## Testing
 
-`bun run test` runs every package's tests, unit and e2e together, through Turbo. Each package's `test` task depends on the root `infra:up` task, which starts the test stack in `test/infra/docker-compose.yml` (ClickHouse 26.3 and a Redpanda Kafka broker) and waits until it is healthy. The stack stays up between runs; `bun run infra:down` removes it. Docker is required.
+`bun run test` runs every package's tests, unit and e2e together, through Turbo. Each package's `test` task depends on the root `infra:up` task, which starts the test stack in `test/infra/docker-compose.yml` (ClickHouse 26.3 and a Redpanda Kafka broker) and waits until it is healthy. The stack stays up between runs; `bun run infra:down` removes it. Docker is required. To run a second stack beside it (another worktree), set `CHKIT_TEST_PORT` (default 8123) for `infra:up`, the tests and `infra:down`: ClickHouse then listens on that port in its own Compose project, `chkit-test-<port>`. Pick a port other than 8123 (`CHKIT_TEST_PORT=8123` makes a separate project, `chkit-test-8123`, that fights `chkit-test` for the port) and other than the ports `test/cluster` publishes (8124, 8133-8136).
 
 The Python port (`chkit_python/`, published to PyPI as `chkit-py`) is the private workspace `@chkit/python`. Its Turbo tasks run through [uv](https://docs.astral.sh/uv/), which must be installed: `lint` (ruff), `typecheck` (mypy), `test` (pytest over `tests/`, against the same target as the TS e2e tests) and `build` (`scripts/build.sh`: sdist + wheel, `twine check`, a smoke test of the wheel). Dependencies are pinned in `chkit_python/uv.lock`; after changing `pyproject.toml` run `uv lock` there. `tests_cluster/` and `tests_workbench_api/` stay opt-in (run them with `uv run --extra dev pytest tests_cluster`). CI installs the uv version pinned in `.github/actions/setup`.
 
@@ -91,7 +91,7 @@ Turbo orchestrates; GitHub Actions only checks out, installs and calls one scrip
 
 **verify** runs on every pull request and push to `main`: `bun run verify`, the same command as locally (workspace deps check, `turbo run typecheck lint test build`, packed deps check). Pull requests also get a non-blocking Fallow report.
 
-`test/infra/clickhouse.xml` configures a one-node `cluster` for the backfill status queries, a short query-log flush interval, and Kafka consumers that read topics from the start. The replicated clusters in `test/cluster/` remain opt-in.
+`test/infra/clickhouse.xml` configures a one-node `cluster` for the backfill status queries, a short query-log flush interval, and Kafka consumers that read topics from the start. `test/infra/clickhouse-port.xml`, mounted only by Compose, sets the HTTP port from `CHKIT_TEST_PORT`; `scripts/codex-cloud-setup.sh` installs `clickhouse.xml` alone, so its server keeps 8123. The replicated clusters in `test/cluster/` remain opt-in.
 
 After **verify** passes on a push to `main`, **obsessiondb** runs `bun run test:obsessiondb` against the managed test database using the `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, and optional `CLICKHOUSE_DB` repository secrets. These runs are serialized because the chunking fixture tables are shared. Deployment waits for both jobs to pass.
 
@@ -99,7 +99,7 @@ After **verify** passes on a same-repository pull request, **deploy** builds and
 
 A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known ObsessionDB limitation with a linked issue, and must still run in **verify**.
 
-`turbo.json` passes through `CHKIT_E2E_TARGET`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
+`turbo.json` passes through `CHKIT_E2E_TARGET`, `CHKIT_TEST_PORT`, `CLICKHOUSE_DB`, `CLICKHOUSE_HOST`, `CLICKHOUSE_PASSWORD`, `CLICKHOUSE_URL`, and `CLICKHOUSE_USER` to the `test` task. Test results are never cached: both targets must execute the suite, even when the code has not changed.
 
 ## Release
 

@@ -2,6 +2,7 @@
 /**
  * Starts the test stack in test/infra (ClickHouse + Redpanda) and waits until
  * it is healthy. Every package's `test` task depends on this through Turbo.
+ * CHKIT_TEST_PORT selects the port and compose project (default 8123 / chkit-test).
  *
  * With CLICKHOUSE_URL or CLICKHOUSE_HOST set, the tests target that server
  * instead (the ObsessionDB job), so there is nothing to start.

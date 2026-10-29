@@ -125,6 +125,6 @@ bash scripts/build.sh   # sdist + wheel, twine check, wheel smoke test
 Tests under `tests/test_*_parity.py` and `tests/test_sql_validation_e2e.py`
 are direct ports of the TS suites in
 `packages/core/src/*.test.ts`. The E2E tests target the local test stack
-(`http://localhost:8123`, started by `bun run infra:up`) unless
+(`http://localhost:$CHKIT_TEST_PORT`, default 8123, started by `bun run infra:up`) unless
 `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; a remote target also needs
 `CLICKHOUSE_PASSWORD`.
