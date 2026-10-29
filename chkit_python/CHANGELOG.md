@@ -105,6 +105,11 @@
   Before, only `migrate` and `snapshot` did; `query`, `status`, `check`, `drift` and
   `pull` left stdout empty. A failed `chkit query` (connection or SQL error) now exits 1
   with the message on stderr, like the TS CLI; it exited 2 with a usage error before.
+- backfill: `chkit check` no longer passes a submitted backfill that nothing verifies
+  (#326). Without the ObsessionDB plugin in the config, nothing asked the jobs API about
+  a plan sent with `submit`, so the plan passed unchecked. The backfill check now reports
+  submitted plans not yet confirmed completed as `backfill_submitted_unverified` when no
+  ObsessionDB plugin is configured, with the same severity as `backfill_required_pending`.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional

@@ -126,6 +126,7 @@ export interface BackfillPluginCheckResult {
   findings: Array<{
     code:
       | 'backfill_required_pending'
+      | 'backfill_submitted_unverified'
       | 'backfill_plan_missing'
       | 'backfill_plan_stale'
       | 'backfill_overlap_blocked'

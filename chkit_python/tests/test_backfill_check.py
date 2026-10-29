@@ -10,6 +10,7 @@ from chkit.core.model import (
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
 )
+from chkit.plugins import ChxPlugin, ChxPluginManifest
 from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.state import (
     backfill_paths,
@@ -28,6 +29,7 @@ from chkit_plugin_backfill.types import (
 
 PLAN_ID = "0123456789abcdef"
 TARGET = "app.events"
+OBSESSIONDB_PLUGIN = ChxPlugin(manifest=ChxPluginManifest(name="obsessiondb", api_version=1))
 
 
 def test_fails_on_a_saved_plan_with_no_local_run(tmp_path: Path) -> None:
@@ -49,7 +51,7 @@ def test_fails_on_a_saved_plan_with_no_local_run(tmp_path: Path) -> None:
     }
 
 
-def test_leaves_a_plan_submitted_to_a_managed_job_backend_to_that_backend(
+def test_leaves_a_plan_submitted_to_a_managed_job_backend_to_the_obsessiondb_plugin(
     tmp_path: Path,
 ) -> None:
     config, config_path, _state_dir = _setup_plan(tmp_path)
@@ -59,7 +61,7 @@ def test_leaves_a_plan_submitted_to_a_managed_job_backend_to_that_backend(
 
     result = evaluate_backfill_check(
         config_path=config_path,
-        config=config,
+        config=_with_obsessiondb(config),
         fail_check_on_required_pending_backfill=True,
     )
 
@@ -73,6 +75,77 @@ def test_leaves_a_plan_submitted_to_a_managed_job_backend_to_that_backend(
     assert result.findings == []
 
 
+def test_fails_on_a_submitted_plan_when_no_obsessiondb_plugin_verifies_its_job(
+    tmp_path: Path,
+) -> None:
+    config, config_path, _state_dir = _setup_plan(tmp_path)
+    record_backfill_submission(
+        plan_id=PLAN_ID, target=TARGET, job_id="job-123", config_path=config_path, config=config
+    )
+
+    strict = evaluate_backfill_check(
+        config_path=config_path,
+        config=config,
+        fail_check_on_required_pending_backfill=True,
+    )
+    relaxed = evaluate_backfill_check(
+        config_path=config_path,
+        config=config,
+        fail_check_on_required_pending_backfill=False,
+    )
+
+    assert strict.ok is False
+    [finding] = strict.findings
+    assert (finding.code, finding.severity, finding.metadata) == (
+        "backfill_submitted_unverified",
+        "error",
+        {"unconfirmedCount": 1},
+    )
+    assert strict.metadata == {
+        "requiredCount": 0,
+        "activeRuns": 0,
+        "failedRuns": 0,
+        "submittedCount": 1,
+    }
+    assert relaxed.ok is True
+    assert [(f.code, f.severity) for f in relaxed.findings] == [
+        ("backfill_submitted_unverified", "warn"),
+        ("backfill_policy_relaxed", "warn"),
+    ]
+
+
+def test_passes_a_confirmed_submitted_plan_without_the_obsessiondb_plugin(
+    tmp_path: Path,
+) -> None:
+    config, config_path, state_dir = _setup_plan(tmp_path)
+    write_json(
+        backfill_paths(state_dir, PLAN_ID).submission_path,
+        BackfillSubmissionState(
+            plan_id=PLAN_ID,
+            target=TARGET,
+            job_id="job-123",
+            submitted_at="2026-01-01T00:00:00.000Z",
+            status="completed",
+            confirmed_at="2026-01-01T01:00:00.000Z",
+        ),
+    )
+
+    result = evaluate_backfill_check(
+        config_path=config_path,
+        config=config,
+        fail_check_on_required_pending_backfill=True,
+    )
+
+    assert result.ok is True
+    assert result.findings == []
+    assert result.metadata == {
+        "requiredCount": 0,
+        "activeRuns": 0,
+        "failedRuns": 0,
+        "submittedCount": 1,
+    }
+
+
 def test_still_fails_on_an_unsubmitted_plan_next_to_a_submitted_one(
     tmp_path: Path,
 ) -> None:
@@ -84,7 +157,7 @@ def test_still_fails_on_an_unsubmitted_plan_next_to_a_submitted_one(
 
     result = evaluate_backfill_check(
         config_path=config_path,
-        config=config,
+        config=_with_obsessiondb(config),
         fail_check_on_required_pending_backfill=True,
     )
 
@@ -160,7 +233,7 @@ def test_record_backfill_submission_writes_the_job_id_in_a_custom_state_dir(
 
     result = evaluate_backfill_check(
         config_path=config_path,
-        config=config,
+        config=_with_obsessiondb(config),
         state_dir="./backfill-state",
         fail_check_on_required_pending_backfill=True,
     )
@@ -259,6 +332,10 @@ def _setup_plan(
     state_dir = compute_backfill_state_dir(config, config_path, state_dir_option)
     write_json(backfill_paths(state_dir, PLAN_ID).plan_path, {})
     return config, config_path, state_dir
+
+
+def _with_obsessiondb(config: ChxResolvedConfig) -> ChxResolvedConfig:
+    return config.model_copy(update={"plugins": [OBSESSIONDB_PLUGIN]})
 
 
 def _write_run(state_dir: Path, status: BackfillRunStatus) -> None:

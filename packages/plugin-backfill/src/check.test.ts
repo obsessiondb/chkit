@@ -18,7 +18,8 @@ import type { BackfillRunState, BackfillSubmissionState } from './types.js'
 
 const PLAN_ID = '0123456789abcdef'
 const TARGET = 'app.events'
-const config = { metaDir: './chkit/meta' }
+const config = { metaDir: './chkit/meta', plugins: [] }
+const withObsessionDB = { ...config, plugins: [{ plugin: { manifest: { name: 'obsessiondb' } } }] }
 
 describe('evaluateBackfillCheck', () => {
   test('fails on a saved plan with no local run', async () => {
@@ -31,9 +32,56 @@ describe('evaluateBackfillCheck', () => {
     expect(result.metadata).toEqual({ requiredCount: 1, activeRuns: 0, failedRuns: 0, submittedCount: 0 })
   })
 
-  test('leaves a plan submitted to a managed job backend to that backend', async () => {
+  test('leaves a plan submitted to a managed job backend to the ObsessionDB plugin', async () => {
     const { configPath } = await setupPlan()
     await recordBackfillSubmission({ plan: { planId: PLAN_ID, target: TARGET }, jobId: 'job-123', configPath, config })
+
+    const result = await evaluateBackfillCheck({
+      configPath,
+      config: withObsessionDB,
+      failCheckOnRequiredPendingBackfill: true,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.findings).toEqual([])
+    expect(result.metadata).toEqual({ requiredCount: 0, activeRuns: 0, failedRuns: 0, submittedCount: 1 })
+  })
+
+  test('fails on a submitted plan when no ObsessionDB plugin verifies its job', async () => {
+    const { configPath } = await setupPlan()
+    await recordBackfillSubmission({ plan: { planId: PLAN_ID, target: TARGET }, jobId: 'job-123', configPath, config })
+    const disabled = { ...config, plugins: [{ ...withObsessionDB.plugins[0], enabled: false }] }
+
+    const strict = await evaluateBackfillCheck({ configPath, config: disabled, failCheckOnRequiredPendingBackfill: true })
+    const relaxed = await evaluateBackfillCheck({ configPath, config, failCheckOnRequiredPendingBackfill: false })
+
+    expect(strict.ok).toBe(false)
+    expect(strict.findings).toEqual([
+      expect.objectContaining({
+        code: 'backfill_submitted_unverified',
+        severity: 'error',
+        metadata: { unconfirmedCount: 1 },
+      }),
+    ])
+    expect(strict.metadata).toEqual({ requiredCount: 0, activeRuns: 0, failedRuns: 0, submittedCount: 1 })
+    expect(relaxed.ok).toBe(true)
+    expect(relaxed.findings.map((finding) => [finding.code, finding.severity])).toEqual([
+      ['backfill_submitted_unverified', 'warn'],
+      ['backfill_policy_relaxed', 'warn'],
+    ])
+  })
+
+  test('passes a confirmed submitted plan without the ObsessionDB plugin', async () => {
+    const { configPath, stateDir } = await setupPlan()
+    const submission: BackfillSubmissionState = {
+      planId: PLAN_ID,
+      target: TARGET,
+      jobId: 'job-123',
+      submittedAt: '2026-01-01T00:00:00.000Z',
+      status: 'completed',
+      confirmedAt: '2026-01-01T01:00:00.000Z',
+    }
+    await writeJson(backfillPaths(stateDir, PLAN_ID).submissionPath, submission)
 
     const result = await evaluateBackfillCheck({ configPath, config, failCheckOnRequiredPendingBackfill: true })
 
@@ -47,7 +95,11 @@ describe('evaluateBackfillCheck', () => {
     await writeJson(backfillPaths(stateDir, 'fedcba9876543210').planPath, {})
     await recordBackfillSubmission({ plan: { planId: PLAN_ID, target: TARGET }, jobId: 'job-123', configPath, config })
 
-    const result = await evaluateBackfillCheck({ configPath, config, failCheckOnRequiredPendingBackfill: true })
+    const result = await evaluateBackfillCheck({
+      configPath,
+      config: withObsessionDB,
+      failCheckOnRequiredPendingBackfill: true,
+    })
 
     expect(result.ok).toBe(false)
     expect(result.findings.map((finding) => finding.code)).toEqual(['backfill_required_pending'])
@@ -92,7 +144,7 @@ describe('recordBackfillSubmission', () => {
 
     const result = await evaluateBackfillCheck({
       configPath,
-      config,
+      config: withObsessionDB,
       stateDir: './backfill-state',
       failCheckOnRequiredPendingBackfill: true,
     })
