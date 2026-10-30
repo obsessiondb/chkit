@@ -240,6 +240,23 @@ describe('createJournalStore', () => {
     )
   })
 
+  test('writeMigrationState writes nothing while the database is still missing (#365)', async () => {
+    const { db, commandCalls } = createScriptedExecutor(new Map())
+    db.query = async () => {
+      throw Object.assign(new Error('Database new_db does not exist'), { code: '81' })
+    }
+
+    const store = createJournalStore(db)
+    await store.readJournal()
+    await store.writeMigrationState({
+      name: 'bootstrap.sql', appliedAt: '2026-05-26 12:00:00.000', checksum: 'cs',
+      chkitVersion: 'v', migrationCompleted: false, operations: [],
+    })
+
+    expect(store.databaseMissing).toBe(true)
+    expect(commandCalls.filter((sql) => sql.startsWith('INSERT INTO'))).toEqual([])
+  })
+
   test('writeMigrationState escapes single quotes inside lastError so SQL stays valid', async () => {
     const { db, commandCalls } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([

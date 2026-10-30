@@ -349,6 +349,12 @@ SETTINGS index_granularity = 1`
         bootstrapped = false
       }
       await ensureTable()
+      if (_databaseMissing) {
+        // Nothing to journal until the migration creates the database; the
+        // INSERT would otherwise fall back to the server's default database.
+        debug('journal', 'database still missing — skipping journal write')
+        return
+      }
       const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion || CLI_VERSION)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
       await pRetry(() => db.command(insertSql), {
         retries: 4,
