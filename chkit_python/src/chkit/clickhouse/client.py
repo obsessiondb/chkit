@@ -100,14 +100,20 @@ class ClickHouseClient:
         if port is None:
             port = 443 if secure else 80
 
+        # Connect without the database: clickhouse-connect's connect-time
+        # probes would send it, and ClickHouse rejects every request for a
+        # database that does not exist yet (UNKNOWN_DATABASE). Setting it
+        # afterwards sends it with each request instead, as the TS client does,
+        # so commands report a missing database and ``migrate --apply`` can
+        # create it (#351).
         client = clickhouse_connect.get_client(
             host=host,
             port=port,
             username=config.username,
             password=config.password,
-            database=config.database,
             secure=secure,
         )
+        client.database = config.database
         return cls(client, config)
 
     def close(self) -> None:
@@ -127,8 +133,15 @@ class ClickHouseClient:
         """Run a statement (DDL or DML) without returning rows.
 
         ``settings`` are per-statement ClickHouse settings (mirrors the TS
-        executor's ``command(sql, settings)``)."""
-        self._client.command(statement, settings=settings)
+        executor's ``command(sql, settings)``). As in TS, a statement that
+        fails because the configured database does not exist is retried without
+        it, which lets the ``CREATE DATABASE`` of a first migration run."""
+        try:
+            self._client.command(statement, settings=settings)
+        except DatabaseError as error:
+            if not is_unknown_database_error(error):
+                raise
+            self._client.command(statement, settings=settings, use_database=False)
 
     def query(
         self,

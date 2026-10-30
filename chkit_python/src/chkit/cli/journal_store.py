@@ -37,7 +37,7 @@ from chkit.cli.migration_store import (
     MigrationJournalEntry,
     checksum_sql,
 )
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
 from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.clickhouse.replicas import resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
@@ -192,17 +192,6 @@ def _is_retryable_insert_race(error: BaseException) -> bool:
     return "INSERT race condition" in message or "Please retry the INSERT" in message
 
 
-def _is_unknown_database_error(error: BaseException) -> bool:
-    """Detect the "Database X doesn't exist" error from clickhouse-connect."""
-    text = str(error)
-    return (
-        "Code: 81" in text  # UNKNOWN_DATABASE
-        or "doesn't exist" in text
-        or ("does not exist" in text
-        and "DB::Exception" in text)
-    )
-
-
 class JournalStore:
     """Imperative wrapper over the ``_chkit_migrations`` table.
 
@@ -286,14 +275,14 @@ class JournalStore:
             self._bootstrapped = True
             return
         except Exception as exc:
-            if _is_unknown_database_error(exc):
+            if is_unknown_database_error(exc):
                 self._database_missing = True
                 self._bootstrapped = True
                 return
         try:
             self._client.execute(self._create_table_sql())
         except Exception as exc:
-            if _is_unknown_database_error(exc):
+            if is_unknown_database_error(exc):
                 self._database_missing = True
                 self._bootstrapped = True
                 return
@@ -444,6 +433,10 @@ class JournalStore:
             self._database_missing = False
             self._bootstrapped = False
         self._ensure_table()
+        if self._database_missing:
+            # Nothing to journal until the migration creates the database; the
+            # INSERT would otherwise fall back to the server's default database.
+            return
         sql = (
             f"INSERT INTO {self._table} "
             f"(name, applied_at, checksum, chkit_version, "

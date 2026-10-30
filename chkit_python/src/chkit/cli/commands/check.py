@@ -138,6 +138,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )
         journal = store.read_journal(project_files=files)
+        database_missing = store.database_missing
         applied_names = {entry.name for entry in journal.applied}
         pending_all = [f for f in files if f not in applied_names]
         mismatches = find_checksum_mismatches(migrations_dir, journal)
@@ -261,10 +262,20 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             }
             for r in plugin_results
         ]
+    database = config.clickhouse.database if config.clickhouse else None
+    if database_missing:
+        summary["databaseMissing"] = True
+        summary["database"] = database
 
     if output_json:
         emit_json("check", summary)
     else:
+        if database_missing:
+            typer.echo(
+                f'⚠ Database "{database or ""}" '
+                f"does not exist on the target server."
+            )
+            typer.echo("  It will be created when you run: chkit migrate --apply\n")
         typer.echo(f"Validation issues:    {len(issues)}")
         typer.echo(f"Pending migrations:   {len(pending)}")
         typer.echo(f"Checksum mismatches:  {len(mismatches)}")
