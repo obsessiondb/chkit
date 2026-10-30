@@ -1,6 +1,6 @@
 # Codex Cloud setup for chkit
 
-This setup follows the repository's CI: Bun 1.3.13, Node.js 22, a disposable
+This setup follows the repository's CI: Bun 1.4.4, Node.js 22, a disposable
 ClickHouse 26.3 server, the one-node `cluster` configuration, and chunking fixtures.
 ClickHouse runs directly inside the cloud container; Docker is not required there.
 
@@ -101,7 +101,7 @@ already has internet access independently of this setting. See
 ## 6. Verify
 
 Run the environment setup test. It should end with `Cloud environment ready`,
-Bun `1.3.13`, and a ClickHouse `26.3.x` version. Then start a cloud task on `main`
+Bun `1.4.4`, and a ClickHouse `26.3.x` version. Then start a cloud task on `main`
 with this prompt:
 
 ```text
