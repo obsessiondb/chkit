@@ -19,7 +19,7 @@ from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit_plugin_backfill.chunking.services.metadata_source import introspect_partitions
-from chkit_plugin_backfill.chunking.types import PlannerContext, QuerySettings
+from chkit_plugin_backfill.chunking.types import Partition, PlannerContext, QuerySettings
 from tests.e2e_testkit import create_prefix, poll_until, resolve_live_env
 
 
@@ -106,5 +106,75 @@ def test_zero_min_time_part_does_not_widen_partition_into_window(
 
         october_2026 = partitions_in("2026-10-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z")
         assert october_2026 == [("202610", "2026-10-01T00:00:00.000Z")]
+    finally:
+        client.execute(f"DROP TABLE IF EXISTS {fqn}")
+
+
+def test_date_partition_column_windows_by_min_date_max_date(
+    client: ClickHouseClient,
+) -> None:
+    # chkit#352: for a Date partition column system.parts reports min_time =
+    # max_time = 1970-01-01 and fills min_date/max_date instead.
+    db = client.database
+    table = f"{create_prefix('backfill_date_parts')}events"
+    fqn = f"{db}.{table}"
+
+    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+        return client.query(sql, dict(settings) if settings is not None else None).rows
+
+    def partitions_in(from_: str, to: str) -> list[Partition]:
+        context = PlannerContext(
+            database=db,
+            table=table,
+            target_chunk_bytes=1024**3,
+            query=query,
+            row_probe_strategy="count",
+            from_=from_,
+            to=to,
+        )
+        return introspect_partitions(context)
+
+    try:
+        client.execute(
+            f"""
+            CREATE TABLE {fqn} (id UInt64, d Date)
+            ENGINE = MergeTree
+            PARTITION BY toYYYYMM(d)
+            ORDER BY (d, id)
+            SETTINGS remove_empty_parts = 0
+            """
+        )
+        wait_for_table(client, db, table)
+        client.execute(
+            f"INSERT INTO {fqn} SELECT number, toDate('2026-08-01') + number FROM numbers(70)"
+        )
+        client.execute(f"INSERT INTO {fqn} SELECT number, toDate('2026-09-20') FROM numbers(10)")
+        client.execute(
+            f"ALTER TABLE {fqn} DELETE WHERE d = '2026-09-20' SETTINGS mutations_sync = 2"
+        )
+
+        parts = poll_until(
+            lambda: client.query(
+                "SELECT partition_id, toString(min(min_time)) AS min_time, "
+                "toString(min(min_date)) AS min_date FROM system.parts "
+                f"WHERE database = '{db}' AND table = '{table}' AND active = 1 "
+                "GROUP BY partition_id ORDER BY partition_id "
+                "SETTINGS select_sequential_consistency = 1"
+            ).rows,
+            lambda rows: len(rows) == 3 and rows[1]["min_date"] == "1970-01-01",
+        )
+        assert parts == [
+            {"partition_id": "202608", "min_time": "1970-01-01 00:00:00", "min_date": "2026-08-01"},
+            {"partition_id": "202609", "min_time": "1970-01-01 00:00:00", "min_date": "1970-01-01"},
+            {"partition_id": "202610", "min_time": "1970-01-01 00:00:00", "min_date": "2026-10-01"},
+        ]
+
+        september = partitions_in("2026-09-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z")
+        assert [(p.partition_id, p.min_time, p.max_time) for p in september] == [
+            ("202609", "2026-09-01T00:00:00.000Z", "2026-09-30T23:59:59.000Z")
+        ]
+
+        last_day_of_august = partitions_in("2026-08-31T12:00:00.000Z", "2026-09-01T00:00:00.000Z")
+        assert [p.partition_id for p in last_day_of_august] == ["202608"]
     finally:
         client.execute(f"DROP TABLE IF EXISTS {fqn}")

@@ -91,6 +91,9 @@ export async function introspectPartitions(context: PlannerContext): Promise<Par
     `SELECT 1 FROM ${context.database}.${context.table} LIMIT 1 SETTINGS select_sequential_consistency = 1`
   )
 
+  // system.parts fills min_time/max_time only for a DateTime partition column. For
+  // a Date column it fills min_date/max_date instead, so fall back to those, with
+  // max_date ending at that day's last second like an inclusive max_time.
   const rows = await context.query<{
     partition_id: string
     total_rows: string
@@ -103,8 +106,13 @@ export async function introspectPartitions(context: PlannerContext): Promise<Par
   toString(sum(rows)) AS total_rows,
   toString(sum(bytes_on_disk)) AS total_bytes,
   toString(sum(data_uncompressed_bytes)) AS total_uncompressed_bytes,
-  toString(minIf(min_time, min_time > 0)) AS min_time,
-  toString(max(max_time)) AS max_time
+  toString(minIf(
+    if(min_time > 0, min_time, toDateTime(min_date)),
+    min_time > 0 OR min_date > toDate(0)
+  )) AS min_time,
+  toString(max(
+    if(max_time = 0 AND max_date > toDate(0), toDateTime(max_date + 1) - 1, max_time)
+  )) AS max_time
 FROM system.parts
 WHERE database = '${context.database}'
   AND table = '${context.table}'
