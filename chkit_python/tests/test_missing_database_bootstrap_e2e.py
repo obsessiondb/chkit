@@ -102,6 +102,9 @@ def test_migrate_apply_creates_a_missing_database(
 
         check = chkit_json("check", exit_code=1)
         assert check["databaseMissing"] is True
+        assert check["database"] == database
+        check_text = chkit("check")
+        assert f'Database "{database}" does not exist' in check_text.stdout
         assert check["failedChecks"] == ["pending_migrations"]
 
         plan = chkit_json("migrate")

@@ -11,6 +11,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 
 from chkit.clickhouse import (
     ClickHouseClient,
@@ -90,6 +91,33 @@ def test_is_unknown_database_error_matches_name_only() -> None:
 
 def test_is_unknown_database_error_rejects_unrelated() -> None:
     assert is_unknown_database_error(RuntimeError("Code: 42. Anything else.")) is False
+
+
+# ---------- execute ----------
+
+
+def test_execute_retries_unknown_database_without_the_database() -> None:
+    client, fake = _stub_client()
+    fake.command.side_effect = [
+        DatabaseError("Code: 81. DB::Exception: Database x does not exist. (UNKNOWN_DATABASE)"),
+        None,
+    ]
+
+    client.execute("CREATE DATABASE IF NOT EXISTS x")
+
+    assert fake.command.call_count == 2
+    assert "use_database" not in fake.command.call_args_list[0].kwargs
+    assert fake.command.call_args_list[1].kwargs["use_database"] is False
+
+
+def test_execute_reraises_other_database_errors_without_retry() -> None:
+    client, fake = _stub_client()
+    fake.command.side_effect = DatabaseError("Code: 62. DB::Exception: Syntax error. (SYNTAX_ERROR)")
+
+    with pytest.raises(DatabaseError, match="Code: 62"):
+        client.execute("CREATE TABL x")
+
+    assert fake.command.call_count == 1
 
 
 # ---------- format_connection_error ----------

@@ -31,12 +31,19 @@ def _resolve(url: str, secure: bool | None = None) -> ChxResolvedClickHouseConfi
     return resolved
 
 
-def _connect_kwargs(url: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def _connect_kwargs(
+    url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    created: list[SimpleNamespace] | None = None,
+) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
     def fake_get_client(**kwargs: Any) -> object:
         captured.update(kwargs)
-        return SimpleNamespace()
+        client = SimpleNamespace()
+        if created is not None:
+            created.append(client)
+        return client
 
     monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
     ClickHouseClient.connect(_resolve(url))
@@ -103,6 +110,14 @@ def test_explicit_port_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     http = _connect_kwargs("http://localhost:8123", monkeypatch)
     assert http["port"] == 8123
     assert http["secure"] is False
+
+
+def test_database_is_set_after_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The connect-time probes must not carry a database that may not exist yet (#351).
+    created: list[SimpleNamespace] = []
+    kwargs = _connect_kwargs("http://host", monkeypatch, created)
+    assert "database" not in kwargs
+    assert created[0].database == "default"
 
 
 def test_url_without_http_scheme_is_rejected() -> None:
