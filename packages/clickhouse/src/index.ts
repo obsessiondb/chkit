@@ -835,11 +835,14 @@ export function createExecutorWithClient(
 		},
 		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
 			const id = queryId ?? crypto.randomUUID()
+			// A query_id in the settings would put a second query_id on the URL, and
+			// the server could run the query under an id queryStatus() never sees (#353).
+			const { query_id: _ignored, ...clickhouseSettings } = settings ?? {}
 			try {
 				await fireAndForgetClient.command({
 					query: sql,
 					query_id: id,
-					...(settings ? { clickhouse_settings: settings } : {}),
+					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)

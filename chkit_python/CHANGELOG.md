@@ -110,6 +110,11 @@
   partitions found … The table may be empty") and `--to` alone selected all of them. The
   planner now falls back to `min_date`/`max_date`, with a partition's last day ending at
   23:59:59.
+- `chkit migrate --setting` rejects ClickHouse HTTP parameters with a usage error before
+  anything runs (#353): `query`, `database`, `query_id`, `session_id`, `session_check`,
+  `session_timeout`, `user` and `password`. They are not query settings: `database` sent
+  unqualified statements, async INSERTs included, to another database while the journal
+  recorded the migration as applied.
 - `chkit plugin backfill plan --from/--to` no longer selects a partition outside the
   window because one of its active parts reports `min_time = 1970-01-01` in `system.parts`
   (#320). An empty part, such as one a DELETE mutation leaves, pulled the partition's

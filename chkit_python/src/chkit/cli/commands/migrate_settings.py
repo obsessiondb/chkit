@@ -12,6 +12,20 @@ from chkit.cli.commands.migrate_errors import MigrateError
 
 _SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+# ClickHouse HTTP-interface parameters, not query settings: they would change
+# the target database, the credentials, the query text or the query_id chkit
+# tracks, so ``--setting`` rejects them (#353).
+_RESERVED_NAMES = frozenset({
+    "query",
+    "database",
+    "query_id",
+    "session_id",
+    "session_check",
+    "session_timeout",
+    "user",
+    "password",
+})
+
 
 def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
     """Parse ``--setting name=value`` flags into ClickHouse query settings,
@@ -34,6 +48,12 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
             msg = (
                 "--setting expects <name>=<value>, e.g. --setting "
                 f"max_table_size_to_drop=0. Got: {entry}"
+            )
+            raise MigrateError("invalid_usage", msg)
+        if name in _RESERVED_NAMES:
+            msg = (
+                f"--setting {name} is not allowed: {name} is a ClickHouse HTTP "
+                "parameter, not a query setting."
             )
             raise MigrateError("invalid_usage", msg)
         settings[name] = value.strip()

@@ -24,4 +24,12 @@ describe('migrate --setting parsing (#321)', () => {
       expect(() => parseSettingFlags([entry])).toThrow(`--setting expects <name>=<value>`)
     }
   })
+
+  test('rejects HTTP parameters that would retarget the statement (#353)', () => {
+    for (const name of ['query', 'database', 'query_id', 'session_id', 'session_check', 'session_timeout', 'user', 'password']) {
+      expect(() => parseSettingFlags(['max_table_size_to_drop=0', `${name}=secret`])).toThrow(
+        `--setting ${name} is not allowed: ${name} is a ClickHouse HTTP parameter, not a query setting.`,
+      )
+    }
+  })
 })
