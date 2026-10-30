@@ -81,7 +81,7 @@ export interface ClickHouseJsonQueryResult<
 export type ObservableSystemTable = 'processes' | 'query_log'
 
 export interface ClickHouseExecutor {
-	command(sql: string): Promise<void>
+	command(sql: string, settings?: ClickHouseSettings): Promise<void>
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
@@ -97,8 +97,9 @@ export interface ClickHouseExecutor {
 	 *  Returns immediately without waiting for completion.
 	 *  @param sql - The SQL to execute
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
+	 *  @param settings - Optional ClickHouse settings sent with the query.
 	 *  @returns The query_id assigned to this query. */
-	submit(sql: string, queryId?: string): Promise<string>
+	submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string>
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
@@ -684,11 +685,12 @@ export function createExecutorWithClient(
 	let compressedClient: ClickHouseClient | undefined
 
 	return {
-		async command(sql: string): Promise<void> {
+		async command(sql: string, settings?: ClickHouseSettings): Promise<void> {
 			try {
 				const result = await client.command({
 					query: sql,
 					http_headers: { 'X-DDL': '1' },
+					...(settings ? { clickhouse_settings: settings } : {}),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -711,6 +713,7 @@ export function createExecutorWithClient(
 						const fallbackResult = await fallback.command({
 							query: sql,
 							http_headers: { 'X-DDL': '1' },
+							...(settings ? { clickhouse_settings: settings } : {}),
 						})
 						assertStreamedQuerySucceeded({
 							response_headers: fallbackResult.response_headers,
@@ -830,10 +833,14 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
-		async submit(sql: string, queryId?: string): Promise<string> {
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
 			const id = queryId ?? crypto.randomUUID()
 			try {
-				await fireAndForgetClient.command({ query: sql, query_id: id })
+				await fireAndForgetClient.command({
+					query: sql,
+					query_id: id,
+					...(settings ? { clickhouse_settings: settings } : {}),
+				})
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}

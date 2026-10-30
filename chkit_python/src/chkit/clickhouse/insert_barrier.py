@@ -36,6 +36,7 @@ def wait_for_insert_barrier(
     sql: str,
     *,
     cluster: str | None = None,
+    settings: dict[str, Any] | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     log: Callable[[str], None] | None = None,
@@ -44,6 +45,7 @@ def wait_for_insert_barrier(
 ) -> int:
     """Run ``sql`` (a SELECT over ``system.processes`` returning ``query_id``)
     once, then again until none of the query ids of the first run is listed.
+    ``settings`` (``migrate --setting``) are sent with each read of ``sql``.
 
     Returns how many INSERTs it waited for.
     """
@@ -56,7 +58,7 @@ def wait_for_insert_barrier(
     query = _TRAILING_SEMICOLON.sub("", query)
 
     def read() -> set[str]:
-        return {str(row.get("query_id")) for row in client.query(query).rows}
+        return {str(row.get("query_id")) for row in client.query(query, settings).rows}
 
     initial = read()
     if not initial:

@@ -180,6 +180,8 @@ class _ScriptedClient:
         self._statuses = list(statuses)
         self.submitted: list[tuple[str, str | None]] = []
         self.executed: list[str] = []
+        # The settings each submit / execute call received, in call order.
+        self.sent_settings: list[tuple[str, dict[str, Any] | None]] = []
         self.after_times: list[str | None] = []
         self.every_replica: list[bool] = []
         # Server-time reads, status checks and submissions, in call order.
@@ -190,9 +192,15 @@ class _ScriptedClient:
         self.events.append(f"query: {statement}")
         return QueryResult(column_names=["now_ms"], rows=[{"now_ms": str(SERVER_NOW_MS)}])
 
-    def submit(self, statement: str, query_id: str | None = None) -> str:
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
         self.events.append("submit")
         self.submitted.append((statement, query_id))
+        self.sent_settings.append(("submit", settings))
         if self._submit_raises is not None:
             raise self._submit_raises
         return query_id or "auto-id"
@@ -214,8 +222,9 @@ class _ScriptedClient:
             raise status
         return status
 
-    def execute(self, statement: str) -> None:
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         self.executed.append(statement)
+        self.sent_settings.append(("execute", settings))
 
 
 def _input(
@@ -251,6 +260,8 @@ def test_apply_async_happy_path_writes_started_then_completed() -> None:
     assert result.kind == "completed"
     assert result.operation.status == "completed"
     assert len(client.submitted) == 1
+    # Without migrate --setting the submission carries no settings.
+    assert client.sent_settings == [("submit", None)]
     assert journal.writes is not None
     # Two writes: started + completed
     statuses = [w.operations[0].status for w in journal.writes]
@@ -369,9 +380,15 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
             client=client,
             journal=journal,
             before_retry="TRUNCATE TABLE db.t",
+            settings={"max_table_size_to_drop": "0"},
         )
     )
     assert client.executed == ["TRUNCATE TABLE db.t"]
+    # migrate --setting reaches the before-retry SQL and the resubmission (#321).
+    assert client.sent_settings == [
+        ("execute", {"max_table_size_to_drop": "0"}),
+        ("submit", {"max_table_size_to_drop": "0"}),
+    ]
     assert client.after_times == [None, SUBMISSION_BOUND]
     # #246: only the in-flight check, which decides on the retry, must read
     # every replica; a poll skips a replica it cannot reach.

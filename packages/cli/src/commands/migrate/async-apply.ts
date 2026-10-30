@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { setTimeout as defaultSleep } from 'node:timers/promises'
 
-import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
 
 import { debug } from '../../runtime/debug.js'
 import type {
@@ -46,6 +46,8 @@ export interface AsyncApplyInput {
   operationType: string
   operationKey: string
   beforeRetry: string | null
+  /** --setting values, sent with the submitted statement and its before-retry SQL. */
+  settings?: ClickHouseSettings
   log: (line: string) => void
   pollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
@@ -67,6 +69,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     operationType,
     operationKey,
     beforeRetry,
+    settings,
     log,
     pollIntervalMs = POLL_INTERVAL_MS,
     sleep = defaultSleep,
@@ -140,7 +143,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     )
     if (beforeRetry !== null) {
       log(`  ${operationType}: running before-retry SQL`)
-      await db.command(beforeRetry)
+      await db.command(beforeRetry, settings)
     }
   } else {
     log(`  ${operationType}: submitting async (query_id=${queryId})`)
@@ -172,7 +175,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   const stateAfterStart = await journalStore.readMigrationState(migrationName)
 
   const pollAfterTime = await readSubmissionLowerBound(db)
-  const submitPromise = db.submit(sql, queryId)
+  const submitPromise = db.submit(sql, queryId, settings)
 
   return await pollUntilTerminal({
     db,

@@ -1,23 +1,28 @@
 import { describe, expect, test } from 'bun:test'
 
 import { parseExchangeTables, waitForExchange } from './ddl-propagation.js'
-import type { ClickHouseExecutor } from './index.js'
+import type { ClickHouseExecutor, ClickHouseSettings } from './index.js'
 import { waitForInsertBarrier } from './insert-barrier.js'
 
 // `polls` lists the query ids system.processes returns on each successive read.
-function processesExecutor(polls: string[][], replicas = 1): { db: ClickHouseExecutor; queries: string[] } {
+function processesExecutor(
+  polls: string[][],
+  replicas = 1,
+): { db: ClickHouseExecutor; queries: string[]; sentSettings: Array<ClickHouseSettings | undefined> } {
   const queries: string[] = []
+  const sentSettings: Array<ClickHouseSettings | undefined> = []
   let poll = 0
   const db = {
-    async query<T>(sql: string): Promise<T[]> {
+    async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
       queries.push(sql)
+      sentSettings.push(settings)
       if (sql.includes('system.one')) return [{ replicas }] as T[]
       const ids = polls[Math.min(poll, polls.length - 1)] ?? []
       poll += 1
       return ids.map((query_id) => ({ query_id })) as T[]
     },
   } as unknown as ClickHouseExecutor
-  return { db, queries }
+  return { db, queries, sentSettings }
 }
 
 const SQL = "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');"
@@ -41,6 +46,13 @@ describe('waitForInsertBarrier', () => {
     const { db, queries } = processesExecutor([['a'], []], 2)
     await waitForInsertBarrier(db, SQL, { sleep: noSleep })
     expect(queries.at(-1)).toContain("FROM clusterAllReplicas('default', system.processes) WHERE")
+  })
+
+  test('sends the settings with its reads only, not with the replica probe', async () => {
+    const { db, sentSettings } = processesExecutor([['a'], []], 2)
+    const settings = { max_execution_time: '60' }
+    await waitForInsertBarrier(db, SQL, { settings, sleep: noSleep })
+    expect(sentSettings).toEqual([undefined, settings, settings])
   })
 
   test('fails with the query ids that are still running after the timeout', async () => {

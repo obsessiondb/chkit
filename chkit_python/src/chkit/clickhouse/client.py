@@ -123,9 +123,12 @@ class ClickHouseClient:
     def database(self) -> str:
         return self._config.database
 
-    def execute(self, statement: str) -> None:
-        """Run a statement (DDL or DML) without returning rows."""
-        self._client.command(statement)
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        """Run a statement (DDL or DML) without returning rows.
+
+        ``settings`` are per-statement ClickHouse settings (mirrors the TS
+        executor's ``command(sql, settings)``)."""
+        self._client.command(statement, settings=settings)
 
     def query(
         self,
@@ -176,18 +179,24 @@ class ClickHouseClient:
             query_id=query_id,
         )
 
-    def submit(self, statement: str, query_id: str | None = None) -> str:
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
         """Fire-and-forget a query. Returns the assigned query_id.
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
-        and the CLI polls ``query_status`` until terminal.
+        and the CLI polls ``query_status`` until terminal. ``settings`` are
+        sent with the query (TS ``submit(sql, queryId, settings)``).
         """
         qid = query_id or str(uuid.uuid4())
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        self._client.command(statement, settings={"query_id": qid})
+        self._client.command(statement, settings={**(settings or {}), "query_id": qid})
         return qid
 
     def insert(

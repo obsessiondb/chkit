@@ -14,6 +14,8 @@ Flags mirror the TypeScript ``migrateCommand``:
 - ``--abandon <migration>``    Reset a failed migration so the next apply
                                runs it from statement 1 (journal only;
                                previews without ``--apply``).
+- ``--setting <name=value>``   ClickHouse query setting sent with each
+                               migration statement (repeatable).
 - ``--json``                   Emit JSON instead of human text.
 """
 
@@ -64,6 +66,7 @@ from chkit.cli.commands.migrate_retry import (
     retry_payload,
 )
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
+from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json_error, json_error_code
@@ -99,6 +102,8 @@ class _MigrateContext:
     json_mode: bool
     execute_requested: bool
     allow_destructive: bool
+    # --setting values, sent with every migration statement.
+    settings: dict[str, str] | None
     mode: str
     migrations_dir: Path
     meta_dir: Path
@@ -193,6 +198,17 @@ def run(  # noqa: PLR0917
             ),
         ),
     ] = None,
+    setting: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--setting",
+            metavar="<name=value>",
+            help=(
+                "ClickHouse query setting sent with each migration statement, "
+                "e.g. max_table_size_to_drop=0 (repeatable)."
+            ),
+        ),
+    ] = None,
     output_json: Annotated[
         bool,
         typer.Option("--json", help="Emit a JSON-formatted summary."),
@@ -210,6 +226,7 @@ def run(  # noqa: PLR0917
             table_selector=table_selector,
             retry=retry,
             abandon=abandon,
+            setting=setting,
             output_json=output_json,
         )
     except (typer.Exit, typer.Abort, TyperException):
@@ -234,6 +251,7 @@ def _run(
     table_selector: str | None,
     retry: str | None,
     abandon: str | None,
+    setting: list[str] | None,
     output_json: bool,
 ) -> None:
     # Usage errors surface before any connection is made.
@@ -243,6 +261,7 @@ def _run(
         table=table_selector,
         allow_destructive=allow_destructive,
     )
+    settings = parse_setting_flags(setting)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -294,6 +313,7 @@ def _run(
             json_mode=output_json,
             execute_requested=execute_requested,
             allow_destructive=allow_destructive,
+            settings=settings,
             mode="execute" if execute_requested else "plan",
             migrations_dir=migrations_dir,
             meta_dir=meta_dir,
@@ -656,6 +676,7 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                 ),
                 log=log,
                 warn=warn,
+                settings=ctx.settings,
             )
         )
         applied_now.append(entry)

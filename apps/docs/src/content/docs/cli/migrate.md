@@ -23,6 +23,7 @@ chkit migrate [flags]
 | `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
 | `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
+| `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -61,6 +62,20 @@ Each destructive operation includes a warning code, reason, impact description, 
 | `drop_column_irreversible` | `DROP COLUMN` |
 | `drop_view_dependency_break` | `DROP VIEW` / `DROP MATERIALIZED VIEW` |
 | `destructive_operation_review_required` | Other destructive operations |
+
+### Query settings
+
+`--setting <name=value>` sends a ClickHouse query setting with each statement of the migrations this run applies, through the HTTP request or, with an ObsessionDB service selected, the console API. It applies to this run only, and the migration files stay unchanged, so their checksums do too. The flag is optional and has no config equivalent: without it, chkit sends no settings.
+
+The main use is a `DROP TABLE` that the server refuses because the table is larger than `max_table_size_to_drop` (50 GB by default). On a managed service there is no shell access to create the `force_drop_table` flag file, so lift the limit for the run:
+
+```sh
+chkit migrate --apply --allow-destructive --setting max_table_size_to_drop=0
+```
+
+A refused statement leaves the migration [in progress](#failed-migrations), so re-running with the setting resumes it at the `DROP`. Use `max_partition_size_to_drop=0` for a large `DROP PARTITION`.
+
+The settings go with every statement a migration runs: synchronous statements, statements submitted with [`mode=async`](#async-operations-modeasync), the reads of a [`mode=barrier`](#insert-barriers-modebarrier) statement, and `-- before-retry:` SQL. chkit's own queries, such as journal reads and writes and the `system.*` polling of async statements, run without them.
 
 ### Checksum verification
 
@@ -238,6 +253,12 @@ chkit migrate --apply --json
 
 ```sh
 chkit migrate --apply --allow-destructive
+```
+
+**Drop a table larger than `max_table_size_to_drop`:**
+
+```sh
+chkit migrate --apply --allow-destructive --setting max_table_size_to_drop=0
 ```
 
 **Scope to a specific table:**

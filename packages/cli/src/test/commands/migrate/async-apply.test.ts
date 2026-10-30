@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
 
 import {
   applyAsyncStatement,
@@ -13,8 +13,8 @@ import type {
 } from '../../../runtime/journal-store.js'
 
 type StatusCall = { queryId: string; afterTime?: string; everyReplica?: boolean }
-type SubmitCall = { sql: string; queryId?: string }
-type CommandCall = { sql: string }
+type SubmitCall = { sql: string; queryId?: string; settings?: ClickHouseSettings }
+type CommandCall = { sql: string; settings?: ClickHouseSettings }
 
 interface FakeExecutor {
   db: ClickHouseExecutor
@@ -50,9 +50,9 @@ function createFakeExecutor(
       events.push(`query: ${sql}`)
       return [{ now_ms: String(SERVER_NOW_MS) }]
     },
-    async submit(sql: string, queryId?: string) {
+    async submit(sql: string, queryId?: string, settings?: ClickHouseSettings) {
       events.push('submit')
-      submitCalls.push({ sql, queryId })
+      submitCalls.push({ sql, queryId, ...(settings ? { settings } : {}) })
       if (options.failSubmit) throw options.failSubmit()
       return queryId ?? 'fallback-id'
     },
@@ -66,8 +66,8 @@ function createFakeExecutor(
       if (next instanceof Error) throw next
       return next
     },
-    async command(sql: string) {
-      commandCalls.push({ sql })
+    async command(sql: string, settings?: ClickHouseSettings) {
+      commandCalls.push({ sql, ...(settings ? { settings } : {}) })
     },
   } as unknown as ClickHouseExecutor
   return { db, statusCalls, submitCalls, commandCalls, events }
@@ -423,6 +423,41 @@ describe('applyAsyncStatement', () => {
     expect(writes).toHaveLength(2)
     expect(writes[0]?.operations[0]?.status).toBe('started')
     expect(writes[1]?.operations[0]?.status).toBe('completed')
+  })
+
+  test('migrate --setting reaches the before-retry SQL and the resubmission (#321)', async () => {
+    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const { db, submitCalls, commandCalls } = createFakeExecutor([
+      { status: 'unknown' },
+      { status: 'finished', writtenRows: 1, durationMs: 10 },
+    ])
+    const { store } = createFakeJournalStore(
+      freshStateWith({
+        operationIndex: 0,
+        operationKey: BASE_INPUT.operationKey,
+        operationType: BASE_INPUT.operationType,
+        queryId,
+        status: 'failed',
+        startedAt: '2026-05-26 10:00:00.000',
+        finishedAt: '2026-05-26 10:05:00.000',
+        lastError: 'boom',
+      }),
+    )
+    const settings = { max_table_size_to_drop: '0' }
+
+    await applyAsyncStatement({
+      ...BASE_INPUT,
+      beforeRetry: 'TRUNCATE TABLE t',
+      settings,
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t', settings }])
+    expect(submitCalls).toEqual([{ sql: BASE_INPUT.sql, queryId, settings }])
   })
 
   test('retry without before-retry SQL: still resubmits forward', async () => {

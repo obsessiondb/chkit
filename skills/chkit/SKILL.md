@@ -176,6 +176,7 @@ Diffs schema definitions against the last snapshot. Each operation gets a risk l
 chkit migrate --json           # Preview pending without applying
 chkit migrate --apply          # Apply all pending
 chkit migrate --apply --allow-destructive   # Allow danger operations
+chkit migrate --apply --allow-destructive --setting max_table_size_to_drop=0   # Drop a table over the server's size limit
 chkit migrate --apply --table analytics.events
 chkit migrate --apply --retry <file>        # Resume a failed migration after editing its file
 chkit migrate --abandon <file> --apply      # Reset a failed migration so the next apply starts it over

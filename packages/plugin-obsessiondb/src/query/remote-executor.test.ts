@@ -116,6 +116,21 @@ describe('createRemoteExecutor submit', () => {
 		}
 	})
 
+	test('forwards settings next to the queryId (#321)', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.submit('INSERT INTO t SELECT 1', 'qid-1', { log_comment: 'x' })
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { log_comment: 'x' } },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+
 	test('sends no queryId when the caller has none', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
@@ -124,6 +139,26 @@ describe('createRemoteExecutor submit', () => {
 			await remote.submit('INSERT INTO t SELECT 1')
 
 			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1' }])
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
+// migrate --setting (#321) reaches ClickHouse through command()'s settings.
+describe('createRemoteExecutor command', () => {
+	test('forwards per-statement settings to the API', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.command('DROP TABLE t', { max_table_size_to_drop: '0' })
+			await remote.command('DROP TABLE u')
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { max_table_size_to_drop: '0' } },
+				{ serviceSlug: 'test', query: 'DROP TABLE u' },
+			])
 		} finally {
 			workbench.stop()
 		}

@@ -986,7 +986,7 @@ class _RecordingClient:
         self.events: list[str] = []
         self._fail = fail
 
-    def execute(self, statement: str) -> None:
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         self.calls.append(statement)
         self.events.append("command")
         if self._fail is not None and self._fail(statement):

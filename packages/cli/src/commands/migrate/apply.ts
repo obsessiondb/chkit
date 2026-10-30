@@ -8,6 +8,7 @@ import {
   waitForExchange,
   waitForInsertBarrier,
   type ClickHouseExecutor,
+  type ClickHouseSettings,
   type QualifiedTable,
 } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
@@ -111,12 +112,14 @@ export async function applyMigration(input: {
   flags: ParsedFlags
   migrationsDir: string
   file: string
+  /** --setting values, sent with every statement of the migration (sync, async, barrier, before-retry). */
+  settings?: ClickHouseSettings
   /** Set when --retry verified an edit of this in-progress migration before the run (#233). */
   retry?: { previousChecksum: string; checksum: string }
   /** Progress lines; the command sends them to stderr in --json mode. */
   log?: (line: string) => void
 }): Promise<MigrationJournalEntry> {
-  const { db, journalStore, pluginRuntime, config, tableScope, flags, migrationsDir, file, retry } = input
+  const { db, journalStore, pluginRuntime, config, tableScope, flags, migrationsDir, file, settings, retry } = input
   const log = input.log ?? ((line: string) => console.log(line))
 
   debug('migrate', `applying ${file}`)
@@ -173,6 +176,7 @@ export async function applyMigration(input: {
           operationType: operation.type,
           operationKey: operation.key,
           beforeRetry: operation.beforeRetry,
+          settings,
           log,
         })
       } catch (error) {
@@ -194,6 +198,7 @@ export async function applyMigration(input: {
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
           cluster: config.clickhouse?.cluster,
+          settings,
           log,
           status: priorAttempt.status,
         })
@@ -215,9 +220,9 @@ export async function applyMigration(input: {
     )
     try {
       if (operation?.mode === 'barrier') {
-        await waitForInsertBarrier(db, statement, { cluster: config.clickhouse?.cluster, log })
+        await waitForInsertBarrier(db, statement, { cluster: config.clickhouse?.cluster, settings, log })
       } else {
-        await db.command(statement)
+        await db.command(statement, settings)
       }
     } catch (error) {
       const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
@@ -290,13 +295,18 @@ async function runBeforeRetry(
   operationType: string,
   statement: string,
   beforeRetry: string,
-  options: { cluster: string | undefined; log: (line: string) => void; status: OperationStatus },
+  options: {
+    cluster: string | undefined
+    settings: ClickHouseSettings | undefined
+    log: (line: string) => void
+    status: OperationStatus
+  },
 ): Promise<void> {
   if (operationType === 'exchange_tables') {
     await waitForExchange(db, statement, { cluster: options.cluster })
   }
   options.log(`  ${operationType}: an earlier attempt ${options.status === 'failed' ? 'failed' : 'was interrupted'} — running before-retry SQL`)
-  await db.command(beforeRetry)
+  await db.command(beforeRetry, options.settings)
 }
 
 // An in-progress migration whose file changed resumes when this run's --retry

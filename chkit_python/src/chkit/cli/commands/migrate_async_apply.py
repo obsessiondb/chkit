@@ -82,6 +82,8 @@ class AsyncApplyInput:
     before_retry: str | None
     log: Callable[[str], None]
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
+    # --setting values, sent with the submitted statement and its before-retry SQL.
+    settings: dict[str, str] | None = None
 
 
 def iso_without_zone(dt: datetime) -> str:
@@ -227,7 +229,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         )
         if input_.before_retry is not None:
             input_.log(f"  {input_.operation_type}: running before-retry SQL")
-            client.execute(input_.before_retry)
+            client.execute(input_.before_retry, settings=input_.settings)
     else:
         input_.log(
             f"  {input_.operation_type}: submitting async (query_id={query_id})"
@@ -260,7 +262,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     poll_after_time = _query_log_lower_bound(_read_server_now_ms(client), 0)
     submit_error: Exception | None = None
     try:
-        client.submit(input_.sql, query_id=query_id)
+        client.submit(input_.sql, query_id=query_id, settings=input_.settings)
     except Exception as error:
         submit_error = error
         input_.log(

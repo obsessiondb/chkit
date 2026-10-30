@@ -113,10 +113,12 @@ export function createRemoteExecutor(deps: {
 	const client = createApiClient(credentials)
 
 	const executor: ClickHouseExecutor = {
-		async command(sql) {
+		async command(sql, settings?) {
+			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
+				...(apiSettings ? { settings: apiSettings } : {}),
 			})
 			throwIfError(res)
 		},
@@ -159,10 +161,12 @@ export function createRemoteExecutor(deps: {
 			throwIfError(res)
 		},
 
-		async submit(sql, queryId?) {
+		async submit(sql, queryId?, settings?) {
+			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
+				...(apiSettings ? { settings: apiSettings } : {}),
 				// The API takes the id as a top-level field and ignores a
 				// `query_id` setting, which would leave the query under a random id.
 				...(queryId ? { queryId } : {}),

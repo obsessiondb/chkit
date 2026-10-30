@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor, QueryStatusOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryStatusOptions } from '@chkit/clickhouse'
 
 import { debug, isDebugEnabled } from '../debug.js'
 
@@ -37,13 +37,13 @@ export function wrapExecutorWithDebug(
 
   return {
     ...(systemTableSource ? { systemTableSource } : {}),
-    command(sql: string): Promise<void> {
+    command(sql: string, settings?: ClickHouseSettings): Promise<void> {
       debug('clickhouse', `command: ${truncate(sql)}`)
-      return trace('command', null, () => executor.command(sql))
+      return trace('command', null, () => executor.command(sql, settings))
     },
-    query<T>(sql: string): Promise<T[]> {
+    query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
       debug('clickhouse', `query: ${truncate(sql)}`)
-      return trace('query', (rows) => `${rows.length} rows`, () => executor.query<T>(sql))
+      return trace('query', (rows) => `${rows.length} rows`, () => executor.query<T>(sql, settings))
     },
     ...(queryJson
       ? {
@@ -68,12 +68,12 @@ export function wrapExecutorWithDebug(
       )
       return trace('insert', null, () => executor.insert(params))
     },
-    submit(sql: string, queryId?: string): Promise<string> {
+    submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
       debug(
         'clickhouse',
         `submit${queryId ? ` (id: ${queryId})` : ''}: ${truncate(sql)}`,
       )
-      return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId))
+      return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId, settings))
     },
     queryStatus(queryId: string, options?: QueryStatusOptions) {
       debug('clickhouse', `queryStatus for ${queryId}`)
