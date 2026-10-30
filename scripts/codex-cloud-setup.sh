@@ -18,15 +18,15 @@ apt-get install -y -qq ca-certificates curl gnupg unzip gh sudo
 
 # Match package.json and GitHub Actions. mise persists this selection across shells.
 if command -v mise >/dev/null 2>&1; then
-  mise use --global bun@1.3.13
+  mise use --global bun@1.4.4
   export PATH="$(dirname "$(mise which bun)"):$PATH"
 else
-  curl -fsSL https://bun.com/install | bash -s -- bun-v1.3.13
+  curl -fsSL https://bun.com/install | bash -s -- bun-v1.4.4
   ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
   ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bunx
   export PATH="$HOME/.bun/bin:$PATH"
 fi
-test "$(bun --version)" = 1.3.13
+test "$(bun --version)" = 1.4.4
 
 # chkit_python's Turbo tasks run through uv. Match the setup action.
 if command -v mise >/dev/null 2>&1; then
