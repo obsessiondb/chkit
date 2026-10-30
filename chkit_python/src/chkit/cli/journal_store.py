@@ -444,6 +444,10 @@ class JournalStore:
             self._database_missing = False
             self._bootstrapped = False
         self._ensure_table()
+        if self._database_missing:
+            # Nothing to journal until the migration creates the database; the
+            # INSERT would otherwise fall back to the server's default database.
+            return
         sql = (
             f"INSERT INTO {self._table} "
             f"(name, applied_at, checksum, chkit_version, "

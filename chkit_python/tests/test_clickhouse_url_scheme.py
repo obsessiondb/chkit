@@ -7,6 +7,7 @@ confirm the scheme; a contradicting value is a config error in both ports.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -35,7 +36,7 @@ def _connect_kwargs(url: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
 
     def fake_get_client(**kwargs: Any) -> object:
         captured.update(kwargs)
-        return object()
+        return SimpleNamespace()
 
     monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
     ClickHouseClient.connect(_resolve(url))

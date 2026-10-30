@@ -121,6 +121,13 @@
   `session_timeout`, `user` and `password`. They are not query settings: `database` sent
   unqualified statements, async INSERTs included, to another database while the journal
   recorded the migration as applied.
+- A project whose `clickhouse.database` does not exist yet can bootstrap again (#351):
+  `ClickHouseClient.connect()` no longer sends the database with clickhouse-connect's
+  connect-time queries, which ClickHouse rejected with `UNKNOWN_DATABASE` (code 81).
+  `status` and `check` report the missing database (`databaseMissing` and `database` in
+  `--json`), `migrate` lists the pending migrations, and `migrate --apply` runs the
+  migration's `CREATE DATABASE` (a statement failing with code 81 is retried without the
+  database, as in TS) and journals it in the new database.
 - `chkit plugin backfill plan --from/--to` no longer selects a partition outside the
   window because one of its active parts reports `min_time = 1970-01-01` in `system.parts`
   (#320). An empty part, such as one a DELETE mutation leaves, pulled the partition's
