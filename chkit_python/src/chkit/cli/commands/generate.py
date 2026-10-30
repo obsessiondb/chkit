@@ -25,6 +25,7 @@ from typing import Annotated, NoReturn
 import typer
 
 from chkit import __version__
+from chkit.cli.command_target import ServiceOption, resolve_plugin_executor
 from chkit.cli.commands.dictionary_password_warnings import (
     detect_dictionary_password_warnings,
 )
@@ -391,6 +392,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     ] = None,
     force_shared_engines: ForceSharedEnginesOption = False,
     no_shared_engines: NoSharedEnginesOption = False,
+    service: ServiceOption = None,
 ) -> None:
     try:
         cutover_flags = resolve_cutover_flags(
@@ -417,6 +419,19 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    if service is not None:
+        # generate sends no SQL, but as in TS --service still names the
+        # service, and an unknown name fails.
+        executor = resolve_plugin_executor(
+            plugin_runtime,
+            config,
+            command="generate",
+            config_path=str(config_path or "clickhouse.config.py"),
+            json_mode=output_json,
+            service=service,
+        )
+        if executor is not None:
+            executor.close()
     threaded_defs = load_schema_definitions_with_hooks(
         command="generate",
         config=config,

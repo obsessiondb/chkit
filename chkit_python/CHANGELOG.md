@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Added
+- `--service <name>` on `generate`, `migrate`, `status`, `drift`, `check`, `query` and
+  `pull` overrides the selected ObsessionDB service for one command, as in TS (#357). The
+  name is looked up among the services the login can see, then the saved aliases; an
+  unknown name fails with exit 1 and lists both. `drift` uses it with `--live`. A plugin
+  `get_context` failure now prints its message (and the `--json` error envelope) instead
+  of a traceback.
 - `chkit migrate --setting <name=value>` (optional, repeatable, or comma-separated) sends
   ClickHouse query settings with every statement a migration runs (#321): synchronous
   statements, `mode=async` submissions, `mode=barrier` reads and `-- before-retry:` SQL,

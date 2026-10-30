@@ -53,7 +53,7 @@ chkit query "SELECT count() FROM users" --service customer-b
 chkit migrate --apply --service staging
 ```
 
-`--service` is available on `generate`, `migrate`, `status`, `drift`, `check`, and `query`.
+`--service` is available on `generate`, `migrate`, `status`, `drift`, `check`, `query`, and `pull`.
 
 The lookup tries service names first (as shown in `chkit obsessiondb service list`), then saved aliases. If nothing matches, the command fails fast with the list of available services and aliases.
 

@@ -27,7 +27,12 @@ from typing import Annotated
 
 import typer
 
-from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
+from chkit.cli.command_target import (
+    ServiceOption,
+    exit_no_target,
+    open_client,
+    resolve_plugin_executor,
+)
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
@@ -76,6 +81,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     # rebuild run the on_schema_loaded hooks that read them (as in TS).
     force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
     no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="drift"))
     meta_dir = Path(config.meta_dir)
@@ -102,6 +108,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             command="drift",
             config_path=str(config_path or "clickhouse.config.py"),
             json_mode=output_json,
+            service=service,
         )
         if executor is None and config.clickhouse is None:
             msg = (

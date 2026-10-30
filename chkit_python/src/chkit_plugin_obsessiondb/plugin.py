@@ -8,7 +8,8 @@ The factory ``obsessiondb()`` is what the user puts in their
 - Auth commands: ``login``, ``signup``, ``logout``, ``whoami`` —
   dispatched via ``chkit plugin obsessiondb <command>``.
 - ``get_context`` — hands out the remote executor when logged in with a
-  service selected, so commands need no ``clickhouse`` block.
+  service selected (or named with ``--service``), so commands need no
+  ``clickhouse`` block.
 - Service commands (list / select / claim / alias) and
   ``on_before_plugin_command`` for backfill routing.
 """
@@ -64,8 +65,13 @@ from chkit_plugin_obsessiondb.engine import (
     rewrite_shared_engines,
 )
 from chkit_plugin_obsessiondb.remote_executor import create_remote_executor
+from chkit_plugin_obsessiondb.service_api import list_services
 from chkit_plugin_obsessiondb.service_commands import service_command_run
-from chkit_plugin_obsessiondb.storage import SelectedService, load_selected_service
+from chkit_plugin_obsessiondb.storage import (
+    SelectedService,
+    load_selected_service,
+    load_service_aliases,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,27 +86,25 @@ class _ObsessionDBHooks:
     json_mode_default: bool = False
 
     def get_context(self, ctx: ChxGetContextInput) -> PluginContext | None:
-        # TS getContext: logged in with a service selected routes SQL through
-        # the ObsessionDB API instead of the `clickhouse` block.
-        session = _load_session(ctx.config_path)
+        # TS getContext: logged in with a service selected (or named with
+        # --service) routes SQL through the ObsessionDB API instead of the
+        # `clickhouse` block.
+        session = _load_session(ctx.config_path, ctx.flags)
         if session is None:
             return None
         creds, service = session
-        executor = create_remote_executor(
-            Credentials(
-                access_token=creds.access_token,
-                base_url=resolve_base_url(creds.base_url),
-            ),
-            service_slug=service.service_slug,
-        )
+        executor = create_remote_executor(creds, service_slug=service.service_slug)
         return make_plugin_context(executor)
 
     def on_init(self, ctx: ChxOnInitContext) -> None:
         # TS onInit: say which service SQL goes to, since it takes precedence
-        # over a `clickhouse` block.
+        # over a `clickhouse` block. An unknown --service fails in get_context.
         if ctx.json_mode or ctx.command == "obsessiondb":
             return
-        session = _load_session(ctx.config_path)
+        try:
+            session = _load_session(ctx.config_path, ctx.flags)
+        except Exception:
+            return
         if session is not None:
             _creds, service = session
             print(f'obsessiondb: using service "{service.service_name}"\n')
@@ -184,15 +188,48 @@ class _ObsessionDBHooks:
             ctx.print(f"obsessiondb: {finding.message}")
 
 
-def _load_session(config_path: str) -> tuple[Credentials, SelectedService] | None:
-    """The stored login and the project's selected service, or None without both."""
-    creds = load_credentials()
-    if creds is None:
+def _load_session(
+    config_path: str, flags: dict[str, Any]
+) -> tuple[Credentials, SelectedService] | None:
+    """The stored login and the service named by --service, else the project's
+    selected service, or None without both."""
+    stored = load_credentials()
+    if stored is None:
         return None
-    service = load_selected_service(config_path)
+    creds = Credentials(
+        access_token=stored.access_token, base_url=resolve_base_url(stored.base_url)
+    )
+    override = flags.get("--service")
+    override_name = override.strip() if isinstance(override, str) else ""
+    service = (
+        _resolve_service_override(creds, override_name)
+        if override_name
+        else load_selected_service(config_path)
+    )
     if service is None:
         return None
     return creds, service
+
+
+def _resolve_service_override(creds: Credentials, name: str) -> SelectedService:
+    """Port of TS ``resolveServiceOverride``: a service name, then an alias."""
+    services = list_services(creds)
+    for candidate in services:
+        if candidate.name == name:
+            return SelectedService(service_slug=candidate.slug, service_name=candidate.name)
+
+    aliases = load_service_aliases().aliases
+    alias = aliases.get(name)
+    if alias is not None:
+        return alias
+
+    available_services = ", ".join(c.name for c in services) or "<none>"
+    available_aliases = ", ".join(sorted(aliases)) or "<none>"
+    msg = (
+        f'obsessiondb: service "{name}" not found. Available services: '
+        f"{available_services}. Available aliases: {available_aliases}"
+    )
+    raise ValueError(msg)
 
 
 def _resolve_base_url_from_flags(flags: dict[str, Any]) -> str:
