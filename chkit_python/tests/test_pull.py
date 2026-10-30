@@ -22,6 +22,7 @@ from chkit.cli.commands.pull_view_parser import (
     parse_to_clause,
 )
 from chkit.cli.main import app
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectRef
 from chkit.core.model import (
     MaterializedViewRefresh,
@@ -389,7 +390,7 @@ def test_excludes_obsessiondb_metadata_tables_from_pulled_schema_output(
     def pull_definitions(client: object, databases: object) -> list[TableDefinition | None]:
         return [_introspected_table_to_definition(_introspected(n)) for n in names]
 
-    monkeypatch.setattr(pull_module.ClickHouseClient, "connect", classmethod(connect))
+    monkeypatch.setattr(ClickHouseClient, "connect", classmethod(connect))
     monkeypatch.setattr(pull_module, "list_schema_objects", list_objects)
     monkeypatch.setattr(pull_module, "_pull_definitions", pull_definitions)
 

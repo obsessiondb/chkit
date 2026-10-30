@@ -1,0 +1,152 @@
+"""Every command that talks to ClickHouse runs through the selected ObsessionDB
+service, before a `clickhouse` block, as `check` and the TS CLI do (#340)."""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+from typer.testing import CliRunner
+
+from chkit.cli.main import app
+from chkit_plugin_obsessiondb import (
+    Credentials,
+    SelectedService,
+    remote_executor,
+    save_credentials,
+    save_selected_service,
+)
+from chkit_plugin_obsessiondb.workbench_api import WorkbenchExecuteResult
+
+BASE = "https://api.test.obsessiondb.com"
+SLUG = "benchmarks"
+# Nothing listens here, so a command that connects to the `clickhouse` block fails.
+UNREACHABLE_BLOCK = '{"url": "http://127.0.0.1:9", "username": "default", "password": ""}'
+
+COMMANDS = [
+    pytest.param(["status", "--json"], id="status"),
+    pytest.param(["migrate", "--json"], id="migrate"),
+    pytest.param(["drift", "--live", "--json"], id="drift"),
+    pytest.param(["query", "SELECT 1", "--json"], id="query"),
+    pytest.param(["pull", "--dryrun", "--json"], id="pull"),
+]
+
+
+@pytest.fixture
+def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    cfg_dir = tmp_path / "xdg"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.delenv("OBSESSIONDB_API_URL", raising=False)
+    return cfg_dir
+
+
+@pytest.fixture
+def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every (service slug, SQL) sent through the workbench API."""
+    sent: list[tuple[str, str]] = []
+
+    def fake_execute(
+        creds: Credentials, *, service_slug: str, query: str, **_kwargs: Any
+    ) -> WorkbenchExecuteResult:
+        assert creds.base_url == BASE
+        sent.append((service_slug, query))
+        return WorkbenchExecuteResult(data=[], meta=[], rows=0)
+
+    monkeypatch.setattr(remote_executor, "workbench_query_execute", fake_execute)
+    return sent
+
+
+def _project(root: Path, *, clickhouse_block: str | None) -> Path:
+    """A logged-in project with a selected service and an empty snapshot."""
+    root.mkdir()
+    (root / "schema.py").write_text("", encoding="utf-8")
+    clickhouse = f", clickhouse={clickhouse_block}" if clickhouse_block else ""
+    config_path = root / "clickhouse.config.py"
+    config_path.write_text(
+        "from chkit import ChxUserConfig\n"
+        "from chkit_plugin_obsessiondb import obsessiondb\n"
+        'config = ChxUserConfig(schema=["./schema.py"], '
+        f"plugins=[obsessiondb()]{clickhouse})\n",
+        encoding="utf-8",
+    )
+    meta_dir = root / "chkit" / "meta"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "snapshot.json").write_text(
+        json.dumps({"version": 1, "generatedAt": "", "definitions": []}),
+        encoding="utf-8",
+    )
+    save_credentials(Credentials(access_token="tok", base_url=BASE))
+    save_selected_service(
+        config_path, SelectedService(service_slug=SLUG, service_name=SLUG)
+    )
+    return config_path
+
+
+@pytest.mark.usefixtures("isolated_home")
+@pytest.mark.parametrize("args", COMMANDS)
+@pytest.mark.parametrize(
+    "clickhouse_block",
+    [pytest.param(None, id="no-block"), pytest.param(UNREACHABLE_BLOCK, id="block")],
+)
+def test_command_runs_through_the_selected_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, str]],
+    args: list[str],
+    clickhouse_block: str | None,
+) -> None:
+    config_path = _project(tmp_path / "project", clickhouse_block=clickhouse_block)
+    monkeypatch.chdir(config_path.parent)
+
+    result = CliRunner().invoke(app, [*args, "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls
+    assert {slug for slug, _ in calls} == {SLUG}
+
+
+@pytest.mark.usefixtures("isolated_home")
+@pytest.mark.parametrize("args", COMMANDS)
+def test_command_names_the_selected_service_in_text_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, str]],
+    args: list[str],
+) -> None:
+    config_path = _project(tmp_path / "project", clickhouse_block=None)
+    monkeypatch.chdir(config_path.parent)
+    text_args = [arg for arg in args if arg != "--json"]
+
+    result = CliRunner().invoke(app, [*text_args, "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f'obsessiondb: using service "{SLUG}"\n')
+    assert calls
+
+
+@pytest.mark.usefixtures("isolated_home")
+def test_migrate_through_the_service_records_applied_at_without_a_zone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]
+) -> None:
+    # The ObsessionDB API does not parse best effort, so a `Z` suffix on
+    # applied_at fails the journal INSERT into DateTime64(3, 'UTC').
+    config_path = _project(tmp_path / "project", clickhouse_block=None)
+    migrations_dir = config_path.parent / "chkit" / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "20260101000000_select.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    monkeypatch.chdir(config_path.parent)
+
+    result = CliRunner().invoke(
+        app, ["migrate", "--apply", "--json", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    inserts = [sql for _, sql in calls if sql.startswith("INSERT INTO _chkit_migrations")]
+    assert inserts
+    applied_at = re.search(r"VALUES \('[^']*', '([^']*)'", inserts[-1])
+    assert applied_at is not None
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}", applied_at.group(1))
