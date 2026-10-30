@@ -47,12 +47,12 @@ export function wrapExecutorWithDebug(
     },
     ...(queryJson
       ? {
-          queryJson<T extends Record<string, unknown>>(sql: string) {
+          queryJson<T extends Record<string, unknown>>(sql: string, settings?: ClickHouseSettings) {
             debug('clickhouse', `queryJson: ${truncate(sql)}`)
             return trace(
               'queryJson',
               (payload) => `${payload.rows} rows`,
-              () => queryJson<T>(sql),
+              () => queryJson<T>(sql, settings),
             )
           },
         }
