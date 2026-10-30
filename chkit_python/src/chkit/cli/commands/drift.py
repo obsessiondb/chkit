@@ -27,7 +27,7 @@ from typing import Annotated
 
 import typer
 
-from chkit.cli.command_target import open_client, resolve_plugin_executor
+from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
@@ -108,7 +108,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 "clickhouse.config.py must include a `clickhouse` block or select an "
                 "ObsessionDB service for --live drift."
             )
-            raise typer.BadParameter(msg)
+            exit_no_target("drift", msg, json_mode=output_json)
         with open_client(executor, config.clickhouse) as client:
             payload_obj = build_drift_payload(
                 client=client,

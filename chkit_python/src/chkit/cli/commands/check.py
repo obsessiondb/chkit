@@ -18,7 +18,7 @@ from typing import Annotated
 
 import typer
 
-from chkit.cli.command_target import open_client, resolve_plugin_executor
+from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
@@ -98,7 +98,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             "clickhouse.config.py must include a `clickhouse` block or select an "
             "ObsessionDB service (journal lives in ClickHouse)."
         )
-        raise typer.BadParameter(msg)
+        exit_no_target("check", msg, json_mode=output_json)
 
     migrations_dir = Path(config.migrations_dir)
     meta_dir = Path(config.meta_dir)

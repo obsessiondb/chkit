@@ -18,7 +18,7 @@ from typing import Annotated, Any
 
 import typer
 
-from chkit.cli.command_target import open_client, resolve_plugin_executor
+from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
@@ -154,7 +154,7 @@ def run(
             "No target configured. Provide a `clickhouse` block in "
             "clickhouse.config.py or select an ObsessionDB service to run queries."
         )
-        raise typer.BadParameter(msg)
+        exit_no_target("query", msg, json_mode=output_json)
 
     statement = sql[0]
     try:

@@ -150,3 +150,40 @@ def test_migrate_through_the_service_records_applied_at_without_a_zone(
     applied_at = re.search(r"VALUES \('[^']*', '([^']*)'", inserts[-1])
     assert applied_at is not None
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}", applied_at.group(1))
+
+
+@pytest.mark.usefixtures("isolated_home")
+@pytest.mark.parametrize(
+    "args", [*COMMANDS, pytest.param(["check", "--json"], id="check")]
+)
+def test_command_without_a_target_exits_1_with_the_error_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    # No `clickhouse` block and no selected service is a runtime error, as in
+    # TS: the message on stderr, the envelope on stdout, exit 1 (#354).
+    root = tmp_path / "project"
+    meta_dir = root / "chkit" / "meta"
+    meta_dir.mkdir(parents=True)
+    (root / "schema.py").write_text("", encoding="utf-8")
+    (meta_dir / "snapshot.json").write_text(
+        json.dumps({"version": 1, "generatedAt": "", "definitions": []}),
+        encoding="utf-8",
+    )
+    config_path = root / "clickhouse.config.py"
+    config_path.write_text(
+        "from chkit import ChxUserConfig\n"
+        'config = ChxUserConfig(schema=["./schema.py"])\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+
+    result = CliRunner().invoke(app, [*args, "--config", str(config_path)])
+
+    assert result.exit_code == 1, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["command"] == args[0]
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "error"
+    assert "select an ObsessionDB service" in envelope["error"]["message"]
+    assert envelope["error"]["message"] in result.stderr
+    assert "Usage:" not in result.stderr

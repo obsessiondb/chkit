@@ -31,7 +31,7 @@ from typing import Annotated
 import typer
 from typer.exceptions import TyperException
 
-from chkit.cli.command_target import open_client, resolve_plugin_executor
+from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
 from chkit.cli.commands.migrate_abandon import (
     JournalStateStore,
     abandon_migration_state,
@@ -278,7 +278,7 @@ def _run(
             "clickhouse.config.py must include a `clickhouse` block or select an "
             "ObsessionDB service to migrate."
         )
-        raise typer.BadParameter(msg)
+        exit_no_target("migrate", msg, json_mode=output_json)
 
     migrations_dir = Path(config.migrations_dir)
     migrations_dir.mkdir(parents=True, exist_ok=True)
