@@ -84,10 +84,6 @@ class ChecksumMismatch(BaseModel):
 _BEFORE_RETRY_NEWLINES = re.compile(r"\s*[\r\n]+\s*")
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
-
-
 def _timestamp_id(now: datetime | None = None) -> str:
     """ISO timestamp stripped of separators, sliced to 14 chars.
 
@@ -411,7 +407,3 @@ def applied_from_local_journal(meta_dir: Path) -> MigrationJournal:
             for name in sorted(read_applied(meta_dir))
         ]
     )
-
-
-def now_iso() -> str:
-    return _now_iso()
