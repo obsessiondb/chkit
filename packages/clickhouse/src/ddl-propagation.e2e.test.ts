@@ -169,11 +169,24 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
     }
 
     try {
+      await logDictionaryCatalog(executor, db, dict, 'before-create')
       await executor.command(definition('secret-one'))
-      await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`)
+      await logDictionaryCatalog(executor, db, dict, 'after-create')
+      const created = await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      await logDictionaryCatalog(executor, db, dict, 'after-create-wait')
+      if (created) throw created
       const before = await catalog()
       await executor.command(definition('secret-two'))
-      await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`)
+      await logDictionaryCatalog(executor, db, dict, 'after-replace')
+      const replaced = await waitForDDLPropagation(executor, 'create_dictionary', `dictionary:${db}.${dict}`).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      await logDictionaryCatalog(executor, db, dict, 'after-replace-wait')
+      if (replaced) throw replaced
       const after = await catalog()
 
       expect(before?.uuid).not.toBe('00000000-0000-0000-0000-000000000000')
@@ -186,6 +199,65 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
     }
   }, 120_000)
 })
+
+/**
+ * Temporary ObsessionDB evidence for the password-only dictionary wait.
+ * Prints database engine, cluster membership, and the raw `clusterAllReplicas`
+ * catalog and loader rows. Remove once the live signal is known.
+ */
+async function logDictionaryCatalog(
+  executor: ClickHouseExecutor,
+  database: string,
+  dictionaryName: string,
+  phase: string,
+): Promise<void> {
+  const where = `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)}`
+  const fanout = await resolveReplicaFanout(executor)
+  const catalogColumns =
+    'hostName() AS host, toString(uuid) AS uuid, engine, toString(metadata_modification_time) AS metadata_modification_time, toString(cityHash64(create_table_query)) AS create_table_query_hash'
+  const queries: Array<[string, string]> = [
+    ['version', 'SELECT version() AS version'],
+    [
+      'database',
+      `SELECT name, engine, substring(engine_full, 1, 200) AS engine_full FROM system.databases WHERE name = ${stringLiteral(database)}`,
+    ],
+    ['clusters', 'SELECT cluster, count() AS replicas FROM system.clusters GROUP BY cluster ORDER BY cluster'],
+    [
+      'default_replicas',
+      "SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas('default', system.one)",
+    ],
+    [
+      'tables_all_replicas',
+      `SELECT ${catalogColumns} FROM clusterAllReplicas('default', system.tables) WHERE ${where} ORDER BY host`,
+    ],
+    ['tables_local', `SELECT ${catalogColumns} FROM system.tables WHERE ${where}`],
+    [
+      'agreement',
+      `SELECT count(DISTINCT hostName()) AS replicas, count() AS rows, toString(min(uuid)) AS min_uuid, toString(max(uuid)) AS max_uuid, (min(uuid) = max(uuid) AND min(uuid) != toUUID('00000000-0000-0000-0000-000000000000') AND count(uuid) = count()) AS agreed FROM clusterAllReplicas('default', system.tables) WHERE ${where} AND engine = 'Dictionary'`,
+    ],
+    [
+      'engines',
+      `SELECT engine, count() AS rows, count(DISTINCT hostName()) AS hosts FROM clusterAllReplicas('default', system.tables) WHERE database = ${stringLiteral(database)} GROUP BY engine ORDER BY engine`,
+    ],
+    [
+      'loader',
+      `SELECT hostName() AS host, status, toString(last_successful_update_time) AS last_successful_update_time, toString(loading_start_time) AS loading_start_time FROM clusterAllReplicas('default', system.dictionaries) WHERE ${where} ORDER BY host`,
+    ],
+  ]
+  const snapshot: Record<string, unknown> = {
+    phase,
+    fanout: fanout ?? null,
+  }
+  for (const [name, sql] of queries) {
+    try {
+      snapshot[name] = await executor.query(sql)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      snapshot[name] = { error: message.slice(0, 500) }
+    }
+  }
+  console.log(`[ddl-diag] ${JSON.stringify(snapshot)}`)
+}
 
 /**
  * Wraps the live executor so each call runs waitForDDLPropagation and returns

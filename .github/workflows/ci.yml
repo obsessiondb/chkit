@@ -45,7 +45,10 @@ jobs:
   obsessiondb:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Push to main, and a manual dispatch of this workflow so a branch can
+    # observe the managed target. Pull requests stay off: they cannot be
+    # trusted with the test database secrets.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     # Fixture tables are shared on the managed test database. Let an active
     # run finish before another run reseeds them.
     concurrency:
