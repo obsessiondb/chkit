@@ -11,6 +11,7 @@ interface ScriptedExecutor {
 
 function createScriptedExecutor(
   queryAnswers: Map<string | RegExp, unknown[]>,
+  options: { queryError?: Error } = {},
 ): ScriptedExecutor {
   const commandCalls: string[] = []
   const db = {
@@ -18,6 +19,7 @@ function createScriptedExecutor(
       commandCalls.push(sql)
     },
     async query<T>(sql: string): Promise<T[]> {
+      if (options.queryError) throw options.queryError
       for (const [key, value] of queryAnswers) {
         if (key instanceof RegExp) {
           if (key.test(sql)) return value as T[]
@@ -241,16 +243,19 @@ describe('createJournalStore', () => {
   })
 
   test('writeMigrationState writes nothing while the database is still missing (#365)', async () => {
-    const { db, commandCalls } = createScriptedExecutor(new Map())
-    db.query = async () => {
-      throw Object.assign(new Error('Database new_db does not exist'), { code: '81' })
-    }
+    const { db, commandCalls } = createScriptedExecutor(new Map(), {
+      queryError: Object.assign(new Error('Database new_db does not exist'), { code: '81' }),
+    })
 
     const store = createJournalStore(db)
     await store.readJournal()
     await store.writeMigrationState({
-      name: 'bootstrap.sql', appliedAt: '2026-05-26 12:00:00.000', checksum: 'cs',
-      chkitVersion: 'v', migrationCompleted: false, operations: [],
+      name: 'bootstrap.sql',
+      appliedAt: '2026-05-26 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: false,
+      operations: [],
     })
 
     expect(store.databaseMissing).toBe(true)
