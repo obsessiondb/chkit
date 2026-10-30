@@ -308,8 +308,13 @@ class _RecordingRemote:
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         self._inner.execute(statement, settings=settings)
 
-    def submit(self, statement: str, query_id: str | None = None) -> str:
-        return self._inner.submit(statement, query_id=query_id)
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
+        return self._inner.submit(statement, query_id=query_id, settings=settings)
 
     def query_status(
         self, query_id: str, *, after_time: str | None = None, every_replica: bool = False

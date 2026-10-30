@@ -714,9 +714,13 @@ class _ProcessesClient:
     polls: list[list[str]]
     replicas: int = 1
     queries: list[str] = field(default_factory=list[str])
+    sent_settings: list[dict[str, Any] | None] = field(
+        default_factory=list[dict[str, Any] | None]
+    )
 
-    def query(self, sql: str) -> _Rows:
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> _Rows:
         self.queries.append(sql)
+        self.sent_settings.append(settings)
         if "system.one" in sql:
             return _Rows([{"replicas": self.replicas}])
         reads = sum(1 for q in self.queries if "system.processes" in q)
@@ -745,6 +749,14 @@ def test_barrier_reads_every_replica() -> None:
     client = _ProcessesClient([["a"], []], replicas=2)
     wait_for_insert_barrier(client, _BARRIER, sleep=lambda _s: None)
     assert "FROM clusterAllReplicas('default', system.processes) WHERE" in client.queries[-1]
+
+
+def test_barrier_sends_settings_with_its_reads_only() -> None:
+    client = _ProcessesClient([["a"], []], replicas=2)
+    settings = {"max_execution_time": "60"}
+    wait_for_insert_barrier(client, _BARRIER, settings=settings, sleep=lambda _s: None)
+    # The replica probe is chkit's own query; the barrier's reads get the settings.
+    assert client.sent_settings == [None, settings, settings]
 
 
 def test_barrier_times_out_with_the_running_query_ids() -> None:
@@ -872,7 +884,7 @@ class _RecordingClient:
             msg = f"boom: {statement}"
             raise RuntimeError(msg)
 
-    def query(self, sql: str) -> _Rows:
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> _Rows:
         if "system.one" in sql:
             msg = "no cluster"
             raise RuntimeError(msg)
@@ -1015,9 +1027,9 @@ class _QueryLogClient(_RecordingClient):
         self.guard_reads: list[str] = []
         self._busy = busy
 
-    def query(self, sql: str) -> _Rows:
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> _Rows:
         if "system.query_log" not in sql:
-            return super().query(sql)
+            return super().query(sql, settings)
         self.guard_reads.append(sql)
         return _Rows([{"table": name, "inserts": 3} for name in self._busy(sql)])
 

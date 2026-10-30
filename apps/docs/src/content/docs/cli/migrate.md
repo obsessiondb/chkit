@@ -65,7 +65,7 @@ Each destructive operation includes a warning code, reason, impact description, 
 
 ### Query settings
 
-`--setting <name=value>` sends a ClickHouse query setting with each statement of the migrations this run applies, through the HTTP request or, with an ObsessionDB service selected, the console API. It applies to this run only, and the migration files stay unchanged, so their checksums do too.
+`--setting <name=value>` sends a ClickHouse query setting with each statement of the migrations this run applies, through the HTTP request or, with an ObsessionDB service selected, the console API. It applies to this run only, and the migration files stay unchanged, so their checksums do too. The flag is optional and has no config equivalent: without it, chkit sends no settings.
 
 The main use is a `DROP TABLE` that the server refuses because the table is larger than `max_table_size_to_drop` (50 GB by default). On a managed service there is no shell access to create the `force_drop_table` flag file, so lift the limit for the run:
 
@@ -73,7 +73,9 @@ The main use is a `DROP TABLE` that the server refuses because the table is larg
 chkit migrate --apply --allow-destructive --setting max_table_size_to_drop=0
 ```
 
-A refused statement leaves the migration [in progress](#failed-migrations), so re-running with the setting resumes it at the `DROP`. Use `max_partition_size_to_drop=0` for a large `DROP PARTITION`. The settings are not sent with statements marked [`mode=async`](#async-operations-modeasync) or `mode=barrier`, or with `-- before-retry:` SQL.
+A refused statement leaves the migration [in progress](#failed-migrations), so re-running with the setting resumes it at the `DROP`. Use `max_partition_size_to_drop=0` for a large `DROP PARTITION`.
+
+The settings go with every statement a migration runs: synchronous statements, statements submitted with [`mode=async`](#async-operations-modeasync), the reads of a [`mode=barrier`](#insert-barriers-modebarrier) statement, and `-- before-retry:` SQL. chkit's own queries, such as journal reads and writes and the `system.*` polling of async statements, run without them.
 
 ### Checksum verification
 

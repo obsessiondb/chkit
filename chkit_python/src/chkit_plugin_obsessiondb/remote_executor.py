@@ -174,13 +174,19 @@ class RemoteClickHouseClient:
         _raise_if_error(result)
         return normalize_query_json_result(result)
 
-    def submit(self, statement: str, query_id: str | None = None) -> str:
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
         # The API takes the id as a top-level field and ignores a query_id
         # setting, which would leave the query under a random id.
         result = workbench_query_execute(
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
+            settings=_coerce_wire_settings(settings),
             query_id=query_id,
         )
         _raise_if_error(result)

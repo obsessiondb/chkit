@@ -100,7 +100,7 @@ interface MigrateContext {
   jsonMode: boolean
   executeRequested: boolean
   allowDestructive: boolean
-  /** --setting values, sent with each synchronous migration statement. */
+  /** --setting values, sent with every migration statement. */
   settings: ClickHouseSettings | undefined
   mode: MigrateMode
   migrationsDir: string

@@ -1,6 +1,6 @@
 import { setTimeout as defaultSleep } from 'node:timers/promises'
 
-import type { ClickHouseExecutor } from './index.js'
+import type { ClickHouseExecutor, ClickHouseSettings } from './index.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000
@@ -10,6 +10,8 @@ const PROGRESS_EVERY_MS = 30_000
 export interface InsertBarrierOptions {
   /** `clickhouse.cluster`; without it the `default` cluster is probed (ObsessionDB). */
   cluster?: string
+  /** Settings sent with each read of `sql` (`migrate --setting`). */
+  settings?: ClickHouseSettings
   timeoutMs?: number
   pollIntervalMs?: number
   log?: (line: string) => void
@@ -47,7 +49,7 @@ export async function waitForInsertBarrier(
   const fanout = await resolveReplicaFanout(executor, options.cluster)
   const query = fanout ? sql.replace(/\bsystem\.processes\b/, allReplicas(fanout, 'system.processes')) : sql
   const read = async () =>
-    new Set((await executor.query<{ query_id: string }>(stripTrailingSemicolon(query))).map((row) => row.query_id))
+    new Set((await executor.query<{ query_id: string }>(stripTrailingSemicolon(query), options.settings)).map((row) => row.query_id))
 
   const initial = await read()
   if (initial.size === 0) return { waitedFor: 0 }

@@ -101,7 +101,7 @@ class _MigrateContext:
     json_mode: bool
     execute_requested: bool
     allow_destructive: bool
-    # --setting values, sent with each synchronous migration statement.
+    # --setting values, sent with every migration statement.
     settings: dict[str, str] | None
     mode: str
     migrations_dir: Path

@@ -116,6 +116,21 @@ describe('createRemoteExecutor submit', () => {
 		}
 	})
 
+	test('forwards settings next to the queryId (#321)', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.submit('INSERT INTO t SELECT 1', 'qid-1', { log_comment: 'x' })
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { log_comment: 'x' } },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+
 	test('sends no queryId when the caller has none', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {

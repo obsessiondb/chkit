@@ -97,8 +97,9 @@ export interface ClickHouseExecutor {
 	 *  Returns immediately without waiting for completion.
 	 *  @param sql - The SQL to execute
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
+	 *  @param settings - Optional ClickHouse settings sent with the query.
 	 *  @returns The query_id assigned to this query. */
-	submit(sql: string, queryId?: string): Promise<string>
+	submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string>
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
@@ -832,10 +833,14 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
-		async submit(sql: string, queryId?: string): Promise<string> {
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
 			const id = queryId ?? crypto.randomUUID()
 			try {
-				await fireAndForgetClient.command({ query: sql, query_id: id })
+				await fireAndForgetClient.command({
+					query: sql,
+					query_id: id,
+					...(settings ? { clickhouse_settings: settings } : {}),
+				})
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}

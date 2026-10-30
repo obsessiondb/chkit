@@ -78,7 +78,8 @@ class ApplyMigrationInput:
     log: Callable[[str], None]
     # Warnings (DDL propagation) are suppressed in --json mode.
     warn: Callable[[str], None]
-    # --setting values, sent with each synchronous statement.
+    # --setting values, sent with every statement of the migration (sync,
+    # async, barrier, before-retry).
     settings: dict[str, str] | None = None
 
 
@@ -141,6 +142,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         operation_key=operation.key,
                         before_retry=operation.before_retry,
                         log=input_.log,
+                        settings=input_.settings,
                     )
                 )
             except Exception as error:
@@ -169,6 +171,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     statement,
                     operation.before_retry,
                     cluster=cluster,
+                    settings=input_.settings,
                     log=input_.log,
                     status=prior_attempt.status,
                 )
@@ -200,7 +203,13 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         )
         try:
             if operation is not None and operation.mode == "barrier":
-                wait_for_insert_barrier(input_.client, statement, cluster=cluster, log=input_.log)
+                wait_for_insert_barrier(
+                    input_.client,
+                    statement,
+                    cluster=cluster,
+                    settings=input_.settings,
+                    log=input_.log,
+                )
             else:
                 input_.client.execute(statement, settings=input_.settings)
         except Exception as error:
@@ -309,6 +318,7 @@ def _run_before_retry(
     before_retry: str,
     *,
     cluster: str | None,
+    settings: dict[str, str] | None,
     log: Callable[[str], None],
     status: OperationStatus,
 ) -> None:
@@ -323,7 +333,7 @@ def _run_before_retry(
         wait_for_exchange(client, statement, cluster=cluster)
     attempt = "failed" if status == "failed" else "was interrupted"
     log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
-    client.execute(before_retry)
+    client.execute(before_retry, settings=settings)
 
 
 def _accept_edited_migration(
