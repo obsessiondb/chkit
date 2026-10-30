@@ -36,7 +36,6 @@ from chkit.cli.migration_store import (
     MigrationJournal,
     MigrationJournalEntry,
     checksum_sql,
-    now_iso,
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
@@ -491,7 +490,3 @@ def find_checksum_mismatches_against_disk(
                 )
             )
     return mismatches
-
-
-def now_iso_for_journal() -> str:
-    return now_iso()
