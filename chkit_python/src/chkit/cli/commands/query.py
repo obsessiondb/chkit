@@ -18,7 +18,12 @@ from typing import Annotated, Any
 
 import typer
 
-from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
+from chkit.cli.command_target import (
+    ServiceOption,
+    exit_no_target,
+    open_client,
+    resolve_plugin_executor,
+)
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
@@ -128,6 +133,7 @@ def run(
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit the ClickHouseJsonQueryResult envelope.")
     ] = False,
+    service: ServiceOption = None,
 ) -> None:
     if sql is None or len(sql) == 0 or not sql[0].strip():
         msg = (
@@ -148,6 +154,7 @@ def run(
         command="query",
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
+        service=service,
     )
     if executor is None and config.clickhouse is None:
         msg = (

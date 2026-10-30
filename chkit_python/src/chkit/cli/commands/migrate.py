@@ -31,7 +31,12 @@ from typing import Annotated
 import typer
 from typer.exceptions import TyperException
 
-from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
+from chkit.cli.command_target import (
+    ServiceOption,
+    exit_no_target,
+    open_client,
+    resolve_plugin_executor,
+)
 from chkit.cli.commands.migrate_abandon import (
     JournalStateStore,
     abandon_migration_state,
@@ -217,6 +222,7 @@ def run(  # noqa: PLR0917
     # rebuild run the on_schema_loaded hooks that read them (as in TS).
     force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
     no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    service: ServiceOption = None,
 ) -> None:
     try:
         _run(
@@ -228,6 +234,7 @@ def run(  # noqa: PLR0917
             abandon=abandon,
             setting=setting,
             output_json=output_json,
+            service=service,
         )
     except (typer.Exit, typer.Abort, TyperException):
         raise
@@ -253,6 +260,7 @@ def _run(
     abandon: str | None,
     setting: list[str] | None,
     output_json: bool,
+    service: str | None,
 ) -> None:
     # Usage errors surface before any connection is made.
     targets = resolve_recovery_targets(
@@ -272,6 +280,7 @@ def _run(
         command="migrate",
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
+        service=service,
     )
     if executor is None and config.clickhouse is None:
         msg = (

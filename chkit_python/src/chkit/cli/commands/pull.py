@@ -27,7 +27,12 @@ from typing import Annotated
 
 import typer
 
-from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
+from chkit.cli.command_target import (
+    ServiceOption,
+    exit_no_target,
+    open_client,
+    resolve_plugin_executor,
+)
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.commands.pull_view_parser import (
     MaterializedViewRefreshShape,
@@ -457,6 +462,7 @@ def run(  # noqa: PLR0917
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
+    service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="pull"))
     plugin_runtime = load_plugin_runtime(
@@ -468,6 +474,7 @@ def run(  # noqa: PLR0917
         command="pull",
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
+        service=service,
     )
     if executor is None and config.clickhouse is None:
         msg = (

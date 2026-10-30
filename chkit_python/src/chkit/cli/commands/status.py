@@ -17,7 +17,12 @@ from typing import Annotated
 
 import typer
 
-from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
+from chkit.cli.command_target import (
+    ServiceOption,
+    exit_no_target,
+    open_client,
+    resolve_plugin_executor,
+)
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
@@ -37,7 +42,7 @@ from chkit.core.model import ChxConfigEnv
 from chkit.plugins import ChxPlugin
 
 
-def run(
+def run(  # noqa: PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -60,6 +65,7 @@ def run(
     # rebuild run the on_schema_loaded hooks that read them (as in TS).
     force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
     no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="status"))
     executor = resolve_plugin_executor(
@@ -68,6 +74,7 @@ def run(
         command="status",
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
+        service=service,
     )
     if executor is None and config.clickhouse is None:
         msg = (

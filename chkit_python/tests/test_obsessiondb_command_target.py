@@ -15,10 +15,13 @@ from chkit.cli.main import app
 from chkit_plugin_obsessiondb import (
     Credentials,
     SelectedService,
+    plugin,
     remote_executor,
     save_credentials,
     save_selected_service,
+    save_service_alias,
 )
+from chkit_plugin_obsessiondb.service_api import Service
 from chkit_plugin_obsessiondb.workbench_api import WorkbenchExecuteResult
 
 BASE = "https://api.test.obsessiondb.com"
@@ -60,7 +63,9 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     return sent
 
 
-def _project(root: Path, *, clickhouse_block: str | None) -> Path:
+def _project(
+    root: Path, *, clickhouse_block: str | None, selected: str | None = SLUG
+) -> Path:
     """A logged-in project with a selected service and an empty snapshot."""
     root.mkdir()
     (root / "schema.py").write_text("", encoding="utf-8")
@@ -80,9 +85,10 @@ def _project(root: Path, *, clickhouse_block: str | None) -> Path:
         encoding="utf-8",
     )
     save_credentials(Credentials(access_token="tok", base_url=BASE))
-    save_selected_service(
-        config_path, SelectedService(service_slug=SLUG, service_name=SLUG)
-    )
+    if selected is not None:
+        save_selected_service(
+            config_path, SelectedService(service_slug=selected, service_name=selected)
+        )
     return config_path
 
 
@@ -187,3 +193,130 @@ def test_command_without_a_target_exits_1_with_the_error_envelope(
     assert "select an ObsessionDB service" in envelope["error"]["message"]
     assert envelope["error"]["message"] in result.stderr
     assert "Usage:" not in result.stderr
+
+
+# ---------- --service <name> overrides the selected service (TS getContext) ----------
+
+OVERRIDE_NAME = "Analytics"
+OVERRIDE_SLUG = "analytics-eu"
+
+
+@pytest.fixture
+def listed_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The org has one service, `Analytics`, besides the selected one."""
+
+    def fake_list_services(creds: Credentials) -> list[Service]:
+        assert creds.base_url == BASE
+        return [
+            Service.model_validate(
+                {
+                    "id": f"id-{OVERRIDE_SLUG}",
+                    "slug": OVERRIDE_SLUG,
+                    "name": OVERRIDE_NAME,
+                    "status": "running",
+                    "tier": 1,
+                    "nodes": 1,
+                    "desiredStatus": "running",
+                    "desiredTier": 1,
+                    "desiredNodes": 1,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "managed": True,
+                }
+            )
+        ]
+
+    monkeypatch.setattr(plugin, "list_services", fake_list_services)
+
+
+@pytest.mark.usefixtures("isolated_home", "listed_services")
+@pytest.mark.parametrize("args", COMMANDS)
+@pytest.mark.parametrize(
+    "selected",
+    [pytest.param(None, id="none-selected"), pytest.param(SLUG, id="other-selected")],
+)
+def test_service_flag_runs_the_command_through_the_named_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, str]],
+    args: list[str],
+    selected: str | None,
+) -> None:
+    config_path = _project(
+        tmp_path / "project", clickhouse_block=UNREACHABLE_BLOCK, selected=selected
+    )
+    monkeypatch.chdir(config_path.parent)
+
+    result = CliRunner().invoke(
+        app, [*args, "--service", OVERRIDE_NAME, "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls
+    assert {slug for slug, _ in calls} == {OVERRIDE_SLUG}
+
+
+@pytest.mark.usefixtures("isolated_home", "listed_services")
+@pytest.mark.parametrize("args", [*COMMANDS, pytest.param(["generate"], id="generate")])
+def test_service_flag_names_the_named_service_in_text_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, str]],
+    args: list[str],
+) -> None:
+    config_path = _project(tmp_path / "project", clickhouse_block=None, selected=None)
+    monkeypatch.chdir(config_path.parent)
+    text_args = [arg for arg in args if arg != "--json"]
+
+    result = CliRunner().invoke(
+        app, [*text_args, "--service", OVERRIDE_NAME, "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f'obsessiondb: using service "{OVERRIDE_NAME}"\n')
+
+
+@pytest.mark.usefixtures("isolated_home", "listed_services")
+def test_service_flag_resolves_an_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]
+) -> None:
+    config_path = _project(tmp_path / "project", clickhouse_block=None, selected=None)
+    save_service_alias(
+        "prod", SelectedService(service_slug="prod-eu", service_name="Production")
+    )
+    monkeypatch.chdir(config_path.parent)
+
+    result = CliRunner().invoke(
+        app, ["status", "--service", "prod", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith('obsessiondb: using service "Production"\n')
+    assert {slug for slug, _ in calls} == {"prod-eu"}
+
+
+@pytest.mark.usefixtures("isolated_home", "listed_services")
+@pytest.mark.parametrize(
+    "args", [*COMMANDS, pytest.param(["generate", "--json"], id="generate")]
+)
+def test_service_flag_with_an_unknown_name_fails_and_lists_the_choices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, str]],
+    args: list[str],
+) -> None:
+    config_path = _project(tmp_path / "project", clickhouse_block=None)
+    monkeypatch.chdir(config_path.parent)
+
+    result = CliRunner().invoke(
+        app, [*args, "--service", "nope", "--config", str(config_path)]
+    )
+
+    assert result.exit_code == 1, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["error"]["message"] == (
+        'Plugin "obsessiondb" failed in getContext: obsessiondb: service "nope" '
+        f"not found. Available services: {OVERRIDE_NAME}. Available aliases: <none>"
+    )
+    assert envelope["error"]["message"] in result.stderr
+    assert calls == []

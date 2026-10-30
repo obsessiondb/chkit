@@ -9,15 +9,29 @@ As in TS (``runtime.resolveContext``), a plugin's ``get_context`` executor
 from __future__ import annotations
 
 import sys
-from typing import NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
-from chkit.cli.json_output import emit_json_error
-from chkit.cli.plugin_runtime import PluginRuntime, null_plugin_context
+from chkit.cli.json_output import emit_json_error, json_error_code
+from chkit.cli.plugin_runtime import (
+    PluginExecutionError,
+    PluginRuntime,
+    null_plugin_context,
+)
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxResolvedClickHouseConfig, ChxResolvedConfig
 from chkit.plugins import ChxGetContextInput, ChxOnInitContext
+
+# The TS ObsessionDB plugin adds --service to these commands through
+# extendCommands; Typer commands are static, so each declares it.
+ServiceOption = Annotated[
+    str | None,
+    typer.Option(
+        "--service",
+        help="Override the selected ObsessionDB service by name for this command",
+    ),
+]
 
 
 def resolve_plugin_executor(
@@ -27,8 +41,11 @@ def resolve_plugin_executor(
     command: str,
     config_path: str,
     json_mode: bool,
+    service: str | None,
 ) -> ClickHouseClient | None:
     """Run the on_init hooks, then return the first plugin executor, or None."""
+    # The hooks read --service under the key the TS flag parser produces.
+    flags: dict[str, Any] = {"--service": service} if service is not None else {}
     # TS onInit: ObsessionDB names the selected service (text mode only).
     plugin_runtime.run_on_init(
         ChxOnInitContext(
@@ -36,20 +53,28 @@ def resolve_plugin_executor(
             config_path=config_path,
             is_interactive=sys.stdin.isatty(),
             json_mode=json_mode,
-            flags={},
+            flags=flags,
             config=config,
             options={},
         )
     )
-    plugin_context = plugin_runtime.resolve_context(
-        ChxGetContextInput(
-            config=config,
-            config_path=config_path,
-            command=command,
-            flags={},
-            defaults=null_plugin_context(),
+    try:
+        plugin_context = plugin_runtime.resolve_context(
+            ChxGetContextInput(
+                config=config,
+                config_path=config_path,
+                command=command,
+                flags=flags,
+                defaults=null_plugin_context(),
+            )
         )
-    )
+    except PluginExecutionError as error:
+        # Like the TS CLI's top-level handler: print the message (e.g. an
+        # unknown --service) and exit 1 instead of a traceback.
+        if json_mode:
+            emit_json_error(command, {"code": json_error_code(error), "message": str(error)})
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
     return plugin_context.executor if plugin_context is not None else None
 
 
