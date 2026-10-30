@@ -19,7 +19,6 @@ from chkit_plugin_obsessiondb import (
     remote_executor,
     save_credentials,
     save_selected_service,
-    save_service_alias,
 )
 from chkit_plugin_obsessiondb.service_api import Service
 from chkit_plugin_obsessiondb.workbench_api import WorkbenchExecuteResult
@@ -280,8 +279,22 @@ def test_service_flag_resolves_an_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]
 ) -> None:
     config_path = _project(tmp_path / "project", clickhouse_block=None, selected=None)
-    save_service_alias(
-        "prod", SelectedService(service_slug="prod-eu", service_name="Production")
+    # The project file exactly as the TS CLI writes it (#366).
+    service_file = config_path.parent / ".chkit" / "obsessiondb.json"
+    service_file.parent.mkdir()
+    service_file.write_text(
+        json.dumps(
+            {
+                "service_slug": SLUG,
+                "service_name": SLUG,
+                "aliases": {
+                    "prod": {"service_slug": "prod-eu", "service_name": "Production"}
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     monkeypatch.chdir(config_path.parent)
 

@@ -202,7 +202,7 @@ def _load_session(
     override = flags.get("--service")
     override_name = override.strip() if isinstance(override, str) else ""
     service = (
-        _resolve_service_override(creds, override_name)
+        _resolve_service_override(creds, config_path, override_name)
         if override_name
         else load_selected_service(config_path)
     )
@@ -211,14 +211,16 @@ def _load_session(
     return creds, service
 
 
-def _resolve_service_override(creds: Credentials, name: str) -> SelectedService:
+def _resolve_service_override(
+    creds: Credentials, config_path: str, name: str
+) -> SelectedService:
     """Port of TS ``resolveServiceOverride``: a service name, then an alias."""
     services = list_services(creds)
     for candidate in services:
         if candidate.name == name:
             return SelectedService(service_slug=candidate.slug, service_name=candidate.name)
 
-    aliases = load_service_aliases().aliases
+    aliases = load_service_aliases(config_path).aliases
     alias = aliases.get(name)
     if alias is not None:
         return alias

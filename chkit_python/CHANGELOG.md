@@ -110,6 +110,13 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- ObsessionDB service aliases now live in the same file as the selected service, as in TS
+  (#366): the project's `<config dir>/.chkit/obsessiondb.json`, or
+  `$XDG_CONFIG_HOME/chkit/obsessiondb.json` only for a config under the user config dir.
+  An alias saved by `chkit obsessiondb service alias set` in one port now resolves through
+  `--service` and `alias list|remove` in the other. Aliases that older chkit-py versions
+  saved in the user-global file are no longer read for a project config; set them again
+  in the project. Selecting a service no longer drops the file's aliases.
 - `chkit plugin backfill plan --from/--to` now windows a table partitioned on a `Date`
   column (#352). `system.parts` reports `min_time`/`max_time` as 1970-01-01 for it and
   fills `min_date`/`max_date` instead, so any `--from` selected no partition ("No

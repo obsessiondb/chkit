@@ -73,7 +73,7 @@ chkit obsessiondb service alias list
 chkit obsessiondb service alias remove prod
 ```
 
-Project aliases live in `.chkit/obsessiondb.json`; profile-scoped aliases live in `~/.config/chkit/obsessiondb.json`. The project file wins when both define the same alias.
+Aliases live in the same file as the service selection: `.chkit/obsessiondb.json` next to your config, or `~/.config/chkit/obsessiondb.json` when running without a project config. The TypeScript CLI and chkit-py read and write the same file, so an alias set with one resolves in the other.
 
 Aliases can't shadow real service names — if `prod` is already the name of a service, setting it as an alias is rejected.
 

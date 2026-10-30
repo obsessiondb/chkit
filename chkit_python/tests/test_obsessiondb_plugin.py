@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from chkit import ColumnDefinition, table
+from chkit import SYNTHESIZED_CONFIG_PATH, ColumnDefinition, table
 from chkit.cli.main import app
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
@@ -28,6 +28,7 @@ from chkit_plugin_obsessiondb import (
     load_selected_service,
     load_service_aliases,
     obsessiondb,
+    remove_service_alias,
     resolve_base_url,
     run_onboarding,
     save_credentials,
@@ -261,20 +262,121 @@ def test_load_selected_service_ignores_user_global_selection(
     assert load_selected_service(config_path) is None
 
 
-def test_save_and_load_service_alias(isolated_home: Path) -> None:
+def test_save_and_load_service_alias(isolated_home: Path, tmp_path: Path) -> None:
+    config_path = tmp_path / "clickhouse.config.py"
     service = SelectedService(
         organization_id="o", organization_slug="o",
         service_id="s", service_name="prod", service_slug="prod",
     )
-    save_service_alias("prod", service)
-    aliases = load_service_aliases()
+    save_service_alias(config_path, "prod", service)
+    aliases = load_service_aliases(config_path)
     assert "prod" in aliases.aliases
     assert aliases.aliases["prod"].service_slug == "prod"
+    assert remove_service_alias(config_path, "prod") is True
+    assert load_service_aliases(config_path).aliases == {}
 
 
-def test_load_service_aliases_empty_when_no_file(isolated_home: Path) -> None:
-    aliases = load_service_aliases()
+def test_load_service_aliases_empty_when_no_file(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    aliases = load_service_aliases(tmp_path / "clickhouse.config.py")
     assert aliases.aliases == {}
+
+
+def test_service_aliases_live_in_the_project_file_next_to_the_selection(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Same file as TS ``getServicePath`` (#366); writes keep the other keys."""
+    config_path = tmp_path / "clickhouse.config.py"
+    service_file = tmp_path / ".chkit" / "obsessiondb.json"
+    save_selected_service(
+        config_path, SelectedService(service_slug="bench", service_name="Bench")
+    )
+    save_service_alias(
+        config_path, "prod", SelectedService(service_slug="prod-eu", service_name="Prod")
+    )
+    save_selected_service(
+        config_path, SelectedService(service_slug="dev", service_name="Dev")
+    )
+
+    written = json.loads(service_file.read_text(encoding="utf-8"))
+    assert written["service_slug"] == "dev"
+    assert written["service_name"] == "Dev"
+    assert written["aliases"]["prod"]["service_slug"] == "prod-eu"
+    assert written["aliases"]["prod"]["service_name"] == "Prod"
+    assert not (isolated_home / "chkit" / "obsessiondb.json").exists()
+
+
+def test_service_aliases_read_the_ts_project_file(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """A file written by the TS CLI keeps its selection when chkit-py adds an alias."""
+    config_path = tmp_path / "clickhouse.config.ts"
+    service_file = tmp_path / ".chkit" / "obsessiondb.json"
+    service_file.parent.mkdir()
+    service_file.write_text(
+        json.dumps(
+            {
+                "service_slug": "bench",
+                "service_name": "Bench",
+                "aliases": {"ts": {"service_slug": "ts-eu", "service_name": "TS"}},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_service_aliases(config_path).aliases == {
+        "ts": SelectedService(service_slug="ts-eu", service_name="TS")
+    }
+    save_service_alias(
+        config_path, "py", SelectedService(service_slug="py-eu", service_name="PY")
+    )
+
+    written = json.loads(service_file.read_text(encoding="utf-8"))
+    assert written["service_slug"] == "bench"
+    assert written["service_name"] == "Bench"
+    assert written["aliases"]["ts"] == {"service_slug": "ts-eu", "service_name": "TS"}
+    assert written["aliases"]["py"]["service_slug"] == "py-eu"
+    assert written["aliases"]["py"]["service_name"] == "PY"
+
+
+def test_project_config_ignores_user_global_aliases(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    user_file = isolated_home / "chkit" / "obsessiondb.json"
+    user_file.parent.mkdir()
+    user_file.write_text(
+        json.dumps({"aliases": {"old": {"service_slug": "s", "service_name": "S"}}}),
+        encoding="utf-8",
+    )
+    assert load_service_aliases(tmp_path / "clickhouse.config.py").aliases == {}
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        pytest.param(SYNTHESIZED_CONFIG_PATH, id="synthesized"),
+        pytest.param("xdg/chkit/clickhouse.config.py", id="under-user-config-dir"),
+    ],
+)
+def test_service_aliases_use_the_user_global_file_outside_a_project(
+    isolated_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_path: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    save_service_alias(
+        config_path, "prod", SelectedService(service_slug="prod-eu", service_name="Prod")
+    )
+
+    user_file = isolated_home / "chkit" / "obsessiondb.json"
+    written = json.loads(user_file.read_text(encoding="utf-8"))
+    assert written["aliases"]["prod"]["service_slug"] == "prod-eu"
+    assert load_service_aliases(config_path).aliases["prod"].service_name == "Prod"
+    assert not (tmp_path / ".chkit").exists()
 
 
 # ---------- onboarding stub ----------
