@@ -160,8 +160,11 @@ export async function syncProgress(
 
   if (chunkIdsToSync.length === 0) return progress
 
-  // Escape single-quotes in the prefix for safe SQL embedding
-  const safePrefix = prefix.replace(/'/g, "''").replace(/%/g, '\\%').replace(/_/g, '\\_')
+  const safePrefix = prefix.replace(/[\\%_']/g, (character) => {
+    if (character === "'") return "''"
+    if (character === '\\') return '\\\\\\\\'
+    return '\\\\' + character
+  })
 
   const { runningRows, logRows } = await readChunkQueries(executor, planId, safePrefix, options?.cluster)
   const runningSet = new Set(runningRows.map((r) => r.query_id))
