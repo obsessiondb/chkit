@@ -9,7 +9,11 @@ As in TS (``runtime.resolveContext``), a plugin's ``get_context`` executor
 from __future__ import annotations
 
 import sys
+from typing import NoReturn
 
+import typer
+
+from chkit.cli.json_output import emit_json_error
 from chkit.cli.plugin_runtime import PluginRuntime, null_plugin_context
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxResolvedClickHouseConfig, ChxResolvedConfig
@@ -58,3 +62,15 @@ def open_client(
         return executor
     assert clickhouse is not None
     return ClickHouseClient.connect(clickhouse)
+
+
+def exit_no_target(command: str, message: str, *, json_mode: bool) -> NoReturn:
+    """No executor and no `clickhouse` block: a runtime error, not a usage error.
+
+    As in TS, the message goes to stderr (plus the JSON error envelope on
+    stdout under ``--json``) and the command exits 1.
+    """
+    if json_mode:
+        emit_json_error(command, {"code": "error", "message": message})
+    typer.echo(message, err=True)
+    raise typer.Exit(code=1)

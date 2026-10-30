@@ -114,6 +114,11 @@
   like the TS CLI (#342). A ClickHouse server error's envelope `code` is its exception
   code (e.g. `"60"`) instead of `"error"`. `status`, `drift`, `check` and `generate`
   `--json` output now starts with `command` and `schemaVersion`, as in TS.
+- `chkit drift --live`, `status`, `migrate`, `check`, `query` and `pull` without a
+  `clickhouse` block or a selected ObsessionDB service now exit 1 with the message on
+  stderr (and the error envelope on stdout under `--json`), like the TS CLI, instead of
+  exiting 2 with a usage error box (#354). Real usage errors, such as `query` without a
+  SQL string, still exit 2.
 - `chkit plugin backfill list --json` and `status --json` keep each job's `lastError` and
   `metadata` (#327). The job models dropped both, so the output lacked fields the TS CLI
   prints.

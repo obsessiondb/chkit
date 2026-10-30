@@ -179,5 +179,5 @@ def test_check_without_clickhouse_block_or_service_says_what_is_missing(
         app, ["check", "--config", str(project / "clickhouse.config.py")]
     )
 
-    assert result.exit_code == 2
-    assert "select an ObsessionDB service" in result.output
+    assert result.exit_code == 1
+    assert "select an ObsessionDB service" in result.stderr

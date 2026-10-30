@@ -27,7 +27,7 @@ from typing import Annotated
 
 import typer
 
-from chkit.cli.command_target import open_client, resolve_plugin_executor
+from chkit.cli.command_target import exit_no_target, open_client, resolve_plugin_executor
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.commands.pull_view_parser import (
     MaterializedViewRefreshShape,
@@ -474,7 +474,7 @@ def run(  # noqa: PLR0917
             "clickhouse.config.py must include a `clickhouse` block or select an "
             "ObsessionDB service (pull connects to ClickHouse to read the live schema)."
         )
-        raise typer.BadParameter(msg)
+        exit_no_target("pull", msg, json_mode=output_json)
 
     selected = sorted({d.strip() for d in (database or []) if d.strip()})
 
