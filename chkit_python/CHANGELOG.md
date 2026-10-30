@@ -104,6 +104,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit plugin backfill plan --from/--to` now windows a table partitioned on a `Date`
+  column (#352). `system.parts` reports `min_time`/`max_time` as 1970-01-01 for it and
+  fills `min_date`/`max_date` instead, so any `--from` selected no partition ("No
+  partitions found … The table may be empty") and `--to` alone selected all of them. The
+  planner now falls back to `min_date`/`max_date`, with a partition's last day ending at
+  23:59:59.
 - `chkit plugin backfill plan --from/--to` no longer selects a partition outside the
   window because one of its active parts reports `min_time = 1970-01-01` in `system.parts`
   (#320). An empty part, such as one a DELETE mutation leaves, pulled the partition's
