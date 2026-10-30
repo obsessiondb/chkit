@@ -173,7 +173,7 @@ def _service_alias(ctx: ChxPluginCommandContext) -> int:  # noqa: PLR0911, PLR09
     subcommand = ctx.args[0]
     rest = ctx.args[1:]
     if subcommand == "list":
-        aliases = load_service_aliases()
+        aliases = load_service_aliases(ctx.config_path)
         if not aliases.aliases:
             ctx.print("No service aliases configured.")
             return 0
@@ -189,7 +189,7 @@ def _service_alias(ctx: ChxPluginCommandContext) -> int:  # noqa: PLR0911, PLR09
         if len(rest) != _ALIAS_REMOVE_ARGV_LEN:
             ctx.print("Usage: chkit obsessiondb service alias remove <name>")
             return 1
-        if remove_service_alias(rest[0]):
+        if remove_service_alias(ctx.config_path, rest[0]):
             ctx.print(f'Removed alias "{rest[0]}".')
             return 0
         ctx.print(f'Alias "{rest[0]}" not found.')
@@ -231,6 +231,7 @@ def _service_alias(ctx: ChxPluginCommandContext) -> int:  # noqa: PLR0911, PLR09
         for org, service in all_services:
             if service.name == service_name:
                 save_service_alias(
+                    ctx.config_path,
                     alias_name,
                     SelectedService(
                         organization_id=org.id,

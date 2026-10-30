@@ -1,14 +1,12 @@
-"""Service selection state files (per-project + user-global aliases).
+"""Service selection state file (selected service + aliases).
 
 1:1 port of ``packages/plugin-obsessiondb/src/service/storage.ts``.
 
-Two files:
-
-- ``<project_dir>/.chkit/obsessiondb.json`` — the service selected for
-  this project (so ``chkit migrate`` etc. routes to the right cloud
-  instance).
-- ``$XDG_CONFIG_HOME/chkit/obsessiondb.json`` — user-global aliases
-  (``--service <alias>`` lookup).
+One file holds the selected service (so ``chkit migrate`` etc. routes to
+the right cloud instance) and the ``aliases`` map (``--service <alias>``
+lookup): ``<config dir>/.chkit/obsessiondb.json``, or
+``$XDG_CONFIG_HOME/chkit/obsessiondb.json`` for a synthesized config path
+or one under the user config dir.
 """
 
 from __future__ import annotations
@@ -19,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+from chkit.core import is_synthesized_config_path
 
 
 class SelectedService(BaseModel):
@@ -45,22 +45,29 @@ class SelectedService(BaseModel):
 
 
 class ServiceAliases(BaseModel):
-    """User-global ``alias → service slug`` map."""
+    """``alias → service`` map stored next to the selected service."""
 
     model_config = ConfigDict(frozen=True, extra="ignore")
 
     aliases: dict[str, SelectedService] = {}
 
 
-def _project_state_path(config_path: str | Path) -> Path:
-    config = Path(config_path).resolve()
-    return config.parent / ".chkit" / "obsessiondb.json"
-
-
-def _user_state_path() -> Path:
+def _user_config_dir() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
     base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "chkit" / "obsessiondb.json"
+    return base / "chkit"
+
+
+def _service_path(config_path: str | Path) -> Path:
+    """Port of TS ``getServicePath``: the project file, or the user-global one
+    for a synthesized config path or a config under the user config dir."""
+    user_dir = _user_config_dir()
+    config = Path(config_path).resolve()
+    if is_synthesized_config_path(str(config_path)) or config.is_relative_to(
+        user_dir.resolve()
+    ):
+        return user_dir / "obsessiondb.json"
+    return config.parent / ".chkit" / "obsessiondb.json"
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -79,7 +86,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def load_selected_service(config_path: str | Path) -> SelectedService | None:
     """Load the project's selected service from ``.chkit/obsessiondb.json``."""
-    candidate = _read_json(_project_state_path(config_path))
+    candidate = _read_json(_service_path(config_path))
     if candidate is None:
         return None
     try:
@@ -91,16 +98,16 @@ def load_selected_service(config_path: str | Path) -> SelectedService | None:
 def save_selected_service(
     config_path: str | Path, service: SelectedService
 ) -> None:
-    """Persist the project's selected service under ``.chkit/obsessiondb.json``."""
-    path = _project_state_path(config_path)
+    """Persist the project's selected service, keeping the file's aliases."""
+    path = _service_path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = service.model_dump()
+    payload = {**(_read_json(path) or {}), **service.model_dump()}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def load_service_aliases() -> ServiceAliases:
-    """Read the user-global ``alias → SelectedService`` map."""
-    payload = _read_json(_user_state_path())
+def load_service_aliases(config_path: str | Path) -> ServiceAliases:
+    """Read the ``alias → SelectedService`` map from the service file."""
+    payload = _read_json(_service_path(config_path))
     if payload is None or not isinstance(payload.get("aliases"), dict):
         return ServiceAliases()
     out: dict[str, SelectedService] = {}
@@ -114,9 +121,11 @@ def load_service_aliases() -> ServiceAliases:
     return ServiceAliases(aliases=out)
 
 
-def save_service_alias(alias_name: str, service: SelectedService) -> None:
-    """Add or update one alias entry in the user-global file."""
-    path = _user_state_path()
+def save_service_alias(
+    config_path: str | Path, alias_name: str, service: SelectedService
+) -> None:
+    """Add or update one alias entry in the service file."""
+    path = _service_path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = _read_json(path) or {}
     aliases = existing.get("aliases")
@@ -127,9 +136,9 @@ def save_service_alias(alias_name: str, service: SelectedService) -> None:
     path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
 
 
-def remove_service_alias(alias_name: str) -> bool:
+def remove_service_alias(config_path: str | Path, alias_name: str) -> bool:
     """Drop one alias entry. Returns True if the alias was present."""
-    path = _user_state_path()
+    path = _service_path(config_path)
     existing = _read_json(path)
     if existing is None:
         return False
