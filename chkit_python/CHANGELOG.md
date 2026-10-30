@@ -97,6 +97,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit plugin backfill plan --from/--to` no longer selects a partition outside the
+  window because one of its active parts reports `min_time = 1970-01-01` in `system.parts`
+  (#320). An empty part, such as one a DELETE mutation leaves, pulled the partition's
+  earliest time to the epoch; zero `min_time` values are now ignored.
 - `chkit plugin backfill list --json` and `status --json` keep each job's `lastError` and
   `metadata` (#327). The job models dropped both, so the output lacked fields the TS CLI
   prints.
