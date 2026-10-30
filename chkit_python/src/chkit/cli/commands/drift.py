@@ -21,7 +21,6 @@ Output (``--json``):
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -31,6 +30,7 @@ import typer
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
+from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import read_snapshot
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
@@ -79,7 +79,10 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     snapshot = read_snapshot(meta_dir)
     if snapshot is None:
         msg = "Snapshot not found. Run `chkit generate` before drift checks."
-        raise typer.Exit(code=1) from RuntimeError(msg)
+        if output_json:
+            emit_json_error("drift", {"code": "error", "message": msg})
+        typer.echo(msg, err=True)
+        raise typer.Exit(code=1)
 
     schema_defs = canonicalize_definitions(load_schema(config.schema_))
     snapshot_defs = list(snapshot.definitions)
@@ -118,7 +121,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             payload_dict["databaseMissing"] = True
             payload_dict["database"] = payload_obj.database
         if output_json:
-            typer.echo(json.dumps(payload_dict, indent=2))
+            emit_json("drift", payload_dict)
             return
         if payload_obj.database_missing:
             typer.echo(
@@ -164,7 +167,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         payload["issues"] = [issue.model_dump(mode="json") for issue in issues]
 
     if output_json:
-        typer.echo(json.dumps(payload, indent=2))
+        emit_json("drift", payload)
         return
 
     typer.echo(f"Snapshot file:       {snapshot_file}")

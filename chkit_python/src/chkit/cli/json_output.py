@@ -19,6 +19,8 @@ import json
 import sys
 from typing import Any, Literal, TypedDict
 
+from chkit.clickhouse.client import clickhouse_error_code
+
 JSON_CONTRACT_VERSION = 1
 
 Command = Literal[
@@ -86,12 +88,15 @@ class JsonErrorEnvelope(TypedDict):
 def json_error_code(error: BaseException) -> str:
     """The ``--json`` error code for ``error``: its ``code`` attribute when that
     is a string (the stable code of e.g. ``MigrateError`` or
-    ``ServiceNotFoundError``), else ``"error"``.
+    ``ServiceNotFoundError``), the ClickHouse exception code of a server error
+    (e.g. ``"60"``), else ``"error"``.
 
     Mirrors ``toJsonError`` in ``packages/cli/src/bin/chkit.ts``.
     """
     code = getattr(error, "code", None)
-    return code if isinstance(code, str) else "error"
+    if isinstance(code, str):
+        return code
+    return clickhouse_error_code(error) or "error"
 
 
 def build_json_error_envelope(command: str, error: JsonError) -> JsonErrorEnvelope:

@@ -18,7 +18,6 @@ Flag set matches the TypeScript ``generateCommand``:
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -65,7 +64,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
-from chkit.cli.json_output import emit_json
+from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import (
     generate_empty_migration,
     read_snapshot,
@@ -119,8 +118,7 @@ def _run_codegen_integration(
 
     Mirrors the TS ``generate/command.ts`` integration: looks up the ``codegen``
     plugin, checks its ``run_on_generate`` option, and if both are positive
-    dispatches its ``codegen`` command with no flags. Failures bubble up as
-    ``typer.Exit(1)``.
+    dispatches its ``codegen`` command with no flags. A failure exits 1.
     """
     codegen_entry = next(
         (e for e in plugin_runtime.plugins if e.plugin.manifest.name == "codegen"),
@@ -161,7 +159,7 @@ def _run_codegen_integration(
             f'Plugin "codegen" failed in generate integration with exit '
             f"code {exit_code}."
         )
-        raise typer.Exit(code=1) from RuntimeError(msg)
+        _exit_error(msg, output_json=output_json)
 
 
 def _emit_empty_migration(migration_file: Path, *, output_json: bool) -> None:
@@ -175,14 +173,12 @@ def _emit_empty_migration(migration_file: Path, *, output_json: bool) -> None:
 
 def _exit_validation_failed(error: ChxValidationError, *, output_json: bool) -> NoReturn:
     if output_json:
-        typer.echo(
-            json.dumps(
-                {
-                    "error": "validation_failed",
-                    "issues": [i.model_dump(mode="json") for i in error.issues],
-                },
-                indent=2,
-            )
+        emit_json(
+            "generate",
+            {
+                "error": "validation_failed",
+                "issues": [i.model_dump(mode="json") for i in error.issues],
+            },
         )
     else:
         details = "\n".join(f"- [{issue.code}] {issue.message}" for issue in error.issues)
@@ -206,7 +202,11 @@ def _migration_stamp(moment: datetime) -> str:
     return "".join(ch for ch in moment.isoformat() if ch not in "-:TZ.+")[:14]
 
 
-def _usage_error(message: str) -> NoReturn:
+def _exit_error(message: str, *, output_json: bool) -> NoReturn:
+    """TS top-level catch: the message on stderr, plus a JSON error envelope on
+    stdout under ``--json``; exits 1."""
+    if output_json:
+        emit_json_error("generate", {"code": "error", "message": message})
     typer.echo(message, err=True)
     raise typer.Exit(code=1)
 
@@ -397,7 +397,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             cutover=cutover or [], copy=cutover_copy, old_table=cutover_old
         )
     except ValueError as error:
-        _usage_error(str(error))
+        _exit_error(str(error), output_json=output_json)
     now = datetime.now(tz=UTC)
     config = load_config(config_path, ChxConfigEnv(command="generate"))
     # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
@@ -446,7 +446,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             drop_retained=drop_retained or [],
         )
     except ValueError as error:
-        _usage_error(str(error))
+        _exit_error(str(error), output_json=output_json)
 
     (
         remapped_old_defs,
@@ -472,19 +472,17 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             f'No tables matched selector "{table_scope.selector or ""}". No changes planned.'
         )
         if output_json:
-            typer.echo(
-                json.dumps(
-                    {
-                        "scope": _scope_to_payload(table_scope),
-                        "mode": "plan" if dryrun else "apply",
-                        "operationCount": 0,
-                        "riskSummary": {"safe": 0, "caution": 0, "danger": 0},
-                        "operations": [],
-                        "renameSuggestions": [],
-                        "warning": warning,
-                    },
-                    indent=2,
-                )
+            emit_json(
+                "generate",
+                {
+                    "scope": _scope_to_payload(table_scope),
+                    "mode": "plan" if dryrun else "apply",
+                    "operationCount": 0,
+                    "riskSummary": {"safe": 0, "caution": 0, "danger": 0},
+                    "operations": [],
+                    "renameSuggestions": [],
+                    "warning": warning,
+                },
             )
         else:
             typer.echo(warning)
@@ -545,7 +543,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         except ChxValidationError as error:
             _exit_validation_failed(error, output_json=output_json)
         except ValueError as error:
-            _usage_error(str(error))
+            _exit_error(str(error), output_json=output_json)
     cutover_summaries = [summarize_cutover(c) for c in cutovers]
     cutover_payload: dict[str, object] = (
         {"cutovers": cutover_summaries} if cutover_summaries else {}
@@ -566,22 +564,20 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
 
     if dryrun:
         if output_json:
-            typer.echo(
-                json.dumps(
-                    {
-                        "mode": "plan",
-                        "operationCount": len(plan.operations),
-                        "riskSummary": plan.risk_summary.model_dump(),
-                        "operations": [_operation_payload(op) for op in plan.operations],
-                        "renameSuggestions": [
-                            s.model_dump(by_alias=True) for s in plan.rename_suggestions
-                        ],
-                        "scope": _scope_to_payload(table_scope),
-                        "warnings": dictionary_password_warnings,
-                        **cutover_payload,
-                    },
-                    indent=2,
-                )
+            emit_json(
+                "generate",
+                {
+                    "mode": "plan",
+                    "operationCount": len(plan.operations),
+                    "riskSummary": plan.risk_summary.model_dump(),
+                    "operations": [_operation_payload(op) for op in plan.operations],
+                    "renameSuggestions": [
+                        s.model_dump(by_alias=True) for s in plan.rename_suggestions
+                    ],
+                    "scope": _scope_to_payload(table_scope),
+                    "warnings": dictionary_password_warnings,
+                    **cutover_payload,
+                },
             )
             return
         typer.echo(f"Plan: {len(plan.operations)} operation(s)")
@@ -639,20 +635,18 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     # still refreshes the snapshot, like TS ``generateArtifacts``.
     migration_file = str(artifact.sql_path) if artifact is not None else None
     if output_json:
-        typer.echo(
-            json.dumps(
-                {
-                    "scope": _scope_to_payload(table_scope),
-                    "migrationFile": migration_file,
-                    "snapshotFile": str(snapshot_path),
-                    "definitionCount": len(artifact_definitions),
-                    "operationCount": len(plan.operations),
-                    "riskSummary": plan.risk_summary.model_dump(),
-                    "warnings": dictionary_password_warnings,
-                    **cutover_payload,
-                },
-                indent=2,
-            )
+        emit_json(
+            "generate",
+            {
+                "scope": _scope_to_payload(table_scope),
+                "migrationFile": migration_file,
+                "snapshotFile": str(snapshot_path),
+                "definitionCount": len(artifact_definitions),
+                "operationCount": len(plan.operations),
+                "riskSummary": plan.risk_summary.model_dump(),
+                "warnings": dictionary_password_warnings,
+                **cutover_payload,
+            },
         )
         return
 

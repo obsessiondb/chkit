@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from pytest_httpx import HTTPXMock
 from typer.testing import CliRunner
 
@@ -52,6 +53,27 @@ def test_json_error_code_uses_a_string_code_attribute() -> None:
 def test_json_error_code_falls_back_to_error() -> None:
     assert json_error_code(RuntimeError("boom")) == "error"
     assert json_error_code(_IntCodeError()) == "error"
+
+
+def test_json_error_code_reports_the_clickhouse_exception_code() -> None:
+    # clickhouse-connect's message for an HTTP error carrying the
+    # X-ClickHouse-Exception-Code header (TS reports ClickHouseError.code).
+    error = DatabaseError(
+        "Received ClickHouse exception, code: 60, server response: Code: 60. "
+        "DB::Exception: Unknown table expression identifier 'nope'. (UNKNOWN_TABLE) "
+        "(for url http://localhost:8123)"
+    )
+    assert json_error_code(error) == "60"
+    assert json_error_code(DatabaseError("Connection refused")) == "error"
+
+
+def test_json_error_code_keeps_error_for_authentication_failures() -> None:
+    # TS rethrows an authentication failure as a plain error without a code.
+    error = DatabaseError(
+        "Received ClickHouse exception, code: 194, server response: Code: 194. "
+        "DB::Exception: default: Authentication failed (REQUIRED_PASSWORD)"
+    )
+    assert json_error_code(error) == "error"
 
 
 def _raise_service_not_found(*_args: Any, **_kwargs: Any) -> Any:

@@ -1708,8 +1708,9 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - `migrate --json` success output stays bare JSON (no `command` /
   `schemaVersion` / `scope`), and `applied` entries keep `applied_at`. The JSON
   error envelope is emitted by `migrate.run`, not a top-level handler.
-- `generate` JSON payloads, except `--empty`, still lack the `{command,
-  schemaVersion}` envelope. `--empty` stubs use microsecond `generated-at`.
+- ~~`generate` JSON payloads, except `--empty`, still lack the `{command,
+  schemaVersion}` envelope.~~ RESOLVED (#342): every `generate` payload carries
+  it, as in TS. `--empty` stubs use microsecond `generated-at`.
 - Python keeps `--` comment lines inside executed statements; TS strips them.
 - Schema load errors include the Python exception class and resolved paths.
   `snapshot rebuild`'s error envelope always uses `code: "error"`.

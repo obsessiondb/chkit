@@ -13,7 +13,6 @@ The live-DB drift comparison from the TS port lives in ``chkit drift``.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -26,6 +25,7 @@ from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
+from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
     find_checksum_mismatches,
     list_migration_filenames,
@@ -279,7 +279,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         ]
 
     if output_json:
-        typer.echo(json.dumps(summary, indent=2))
+        emit_json("check", summary)
     else:
         typer.echo(f"Validation issues:    {len(issues)}")
         typer.echo(f"Pending migrations:   {len(pending)}")

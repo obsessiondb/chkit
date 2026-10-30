@@ -20,7 +20,6 @@ obsessiondb plugin port.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -36,6 +35,7 @@ from chkit.cli.commands.pull_view_parser import (
     parse_to_clause,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import ClickHouseClient
@@ -536,7 +536,7 @@ def run(  # noqa: PLR0917
         payload["content"] = content
 
     if output_json:
-        typer.echo(json.dumps(payload, indent=2))
+        print_output(payload, json_mode=True)
         return
 
     if dryrun:
