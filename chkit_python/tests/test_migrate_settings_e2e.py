@@ -60,6 +60,21 @@ def test_parse_setting_flags() -> None:
     for entry in ["max_table_size_to_drop", "=0", "bad-name=0"]:
         with pytest.raises(MigrateError, match="--setting expects <name>=<value>"):
             parse_setting_flags([entry])
+    for name in [
+        "query",
+        "database",
+        "query_id",
+        "session_id",
+        "session_check",
+        "session_timeout",
+        "user",
+        "password",
+    ]:
+        with pytest.raises(
+            MigrateError, match=f"--setting {name} is not allowed"
+        ) as error:
+            parse_setting_flags([f"max_table_size_to_drop=0,{name}=secret"])
+        assert "secret" not in str(error.value)
 
 
 def test_migrate_sends_settings_with_every_statement(

@@ -77,6 +77,8 @@ A refused statement leaves the migration [in progress](#failed-migrations), so r
 
 The settings go with every statement a migration runs: synchronous statements, statements submitted with [`mode=async`](#async-operations-modeasync), the reads of a [`mode=barrier`](#insert-barriers-modebarrier) statement, and `-- before-retry:` SQL. chkit's own queries, such as journal reads and writes and the `system.*` polling of async statements, run without them.
 
+`--setting` takes query settings only. It rejects the ClickHouse HTTP parameters `query`, `database`, `query_id`, `session_id`, `session_check`, `session_timeout`, `user` and `password` with a usage error before anything runs: they would change the database, credentials, query text or query ID that chkit tracks. Set the database and credentials in [`clickhouse`](/configuration/overview/) config instead.
+
 ### Checksum verification
 
 Before applying, the CLI verifies SHA-256 checksums of all previously-applied migrations against the files on disk. If any file has been modified since it was applied, the command aborts with exit code 1.
