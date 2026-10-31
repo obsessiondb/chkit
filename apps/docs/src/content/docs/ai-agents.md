@@ -165,6 +165,8 @@ chkit status                 # report applied vs pending migrations
 chkit check                  # CI gate: pending, checksums, drift, plugins
 ```
 
+`chkit check` does not fail on a change to a property that [`chkit drift` does not compare](/cli/drift/#what-drift-does-not-compare).
+
 ## Which plugins to recommend
 
 In TypeScript, plugins are npm packages registered in the `plugins` array of `clickhouse.config.ts`; in Python they ship inside chkit-py and are registered in `clickhouse.config.py`. Recommend only what the project needs:
@@ -185,7 +187,7 @@ chkit applies DDL to real databases. Treat the following as hard rules unless th
 :::caution
 - **Preview with `chkit migrate --json`.** This reports pending work without executing migration statements; connected setup can initialize the journal. Review the pending SQL, then apply with the authorization already supplied, or ask if the requested writes are not authorized. For populated structural changes, generate a [zero-downtime cutover](/guides/data-preserving-migrations/) (`chkit generate --cutover <db.table>=<key>`) instead of approving a generated DROP/CREATE. A plain `chkit migrate` in an interactive terminal can prompt to apply the plan.
 - **Recover a failed migration with the CLI, not by editing the journal.** Preview with `chkit migrate --retry <file> --json` or `chkit migrate --abandon <file> --json`, show the user the result, and add `--apply` once they confirm. Never delete rows from the `_chkit_migrations` table. See [failed migrations](/cli/migrate/#failed-migrations).
-- **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it.
+- **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it. Some properties are [not compared](/cli/drift/#what-drift-does-not-compare).
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.
 - **Never auto-apply against a production endpoint** without explicit user confirmation. Connection details come from the environment: confirm which database the env points at before `--apply`.
 - **Never resolve a `snapshot.json` merge conflict by taking one side or by editing it by hand.** Resolve the schema files and run `chkit snapshot rebuild`. A conflicted file cannot be compared before the rebuild, so show the user `git diff HEAD -- chkit/meta/snapshot.json` and the same diff against `MERGE_HEAD` (merge) or `REBASE_HEAD` (rebase), and stage the file only once they confirm; until then, `git checkout -m -- chkit/meta/snapshot.json` brings the conflict back. Rebuild only when every schema change has a migration file (`chkit generate --dryrun` reported 0 operations on each branch before the merge); after a chkit upgrade, run `chkit generate` first. Check [when not to rebuild](/cli/snapshot/#when-not-to-rebuild).
