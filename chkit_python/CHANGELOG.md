@@ -124,6 +124,11 @@
   `rows_read` and `bytes_read` numbers instead of the HTTP summary strings. Non-ASCII text
   is printed as is instead of `\u`-escaped. UInt64/Int64 values keep the exact digits
   ClickHouse sends. The text output is unchanged.
+- `schema` is optional in `ChxUserConfig`, as in TS (#376), so a user profile written with
+  `define_config()` or `ChxUserConfig(...)` may leave it out. It failed with `Field
+  required` before; only a plain dict profile could leave it out. A project config without
+  `schema` resolves to no schema globs, as in TS: a command that loads schema files fails
+  with `No schema files matched. Check config.schema patterns.`
 - `chkit obsessiondb service alias remove` drops the `aliases` key from
   `.chkit/obsessiondb.json` when it removes the last alias, as TS does, instead of writing
   `"aliases": {}` (#372).

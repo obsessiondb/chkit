@@ -64,8 +64,8 @@ def load_config(
 
     As in TS, a user profile config (``<user config dir>/config.py``, same
     export) is layered under the project config when it exists: project values
-    win, see :func:`merge_user_config`. A profile ``config`` dict may leave out
-    ``schema`` (the project always sets it).
+    win, see :func:`merge_user_config`. ``schema`` is optional, as in TS, so a
+    profile may leave it out.
     """
     path = config_path if config_path is not None else Path(DEFAULT_CONFIG_FILE)
     if not path.exists():
@@ -76,7 +76,5 @@ def load_config(
     profile_path = get_user_profile_config_path()
     if profile_path.exists():
         profile_raw = _read_raw_config(profile_path, env, "chkit_profile_config")
-        if isinstance(profile_raw, dict):
-            profile_raw = {"schema": [], **profile_raw}
         user_config = merge_user_config(_to_user_config(profile_raw), user_config)
     return resolve_config(user_config)

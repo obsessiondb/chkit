@@ -261,3 +261,45 @@ def test_load_config_invalid_profile_fails(
 
     with pytest.raises(AttributeError, match="must export a `config` attribute"):
         load_config(config_file)
+
+
+@pytest.mark.parametrize(
+    "profile_body",
+    [
+        "from chkit import define_config\n"
+        'config = define_config({"clickhouse": {"url": "http://profile:8123", "password": "p"}})\n',
+        "from chkit.core.model import ChxUserClickHouseConfig, ChxUserConfig\n"
+        "config = ChxUserConfig(\n"
+        '    clickhouse=ChxUserClickHouseConfig(url="http://profile:8123", password="p")\n'
+        ")\n",
+    ],
+    ids=["define_config", "ChxUserConfig"],
+)
+def test_load_config_profile_model_may_leave_out_schema(
+    profile_body: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As in TS, ``schema`` is optional, so a profile built as a model may omit it."""
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_profile(xdg, profile_body)
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    resolved = load_config(config_file)
+
+    assert resolved.schema_ == ["./schema/**/*.py"]
+    assert resolved.clickhouse is not None
+    assert resolved.clickhouse.url == "http://profile:8123"
+    assert resolved.clickhouse.password == "p"
+
+
+def test_load_config_project_without_schema_resolves_to_no_globs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TS parity (resolveConfig): a missing ``schema`` resolves to ``[]``."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    config_file = _write_project(tmp_path, 'config = {"outDir": "./out"}\n')
+
+    resolved = load_config(config_file)
+
+    assert resolved.schema_ == []
+    assert resolved.out_dir == "./out"

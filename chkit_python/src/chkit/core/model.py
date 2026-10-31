@@ -623,7 +623,7 @@ def _assert_valid_cluster_name(name: str) -> str:
 
 
 class ChxUserConfig(_StrictModel):
-    schema_: str | list[str] = Field(..., alias="schema")
+    schema_: str | list[str] | None = Field(default=None, alias="schema")
     out_dir: str | None = Field(default=None, alias="outDir")
     migrations_dir: str | None = Field(default=None, alias="migrationsDir")
     meta_dir: str | None = Field(default=None, alias="metaDir")
@@ -1114,7 +1114,7 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
         config.meta_dir if config.meta_dir is not None else os.path.join(out_dir, "meta")
     )
 
-    schema_value = config.schema_
+    schema_value = config.schema_ if config.schema_ is not None else []
     schema_list: list[str] = (
         list(schema_value) if isinstance(schema_value, list) else [schema_value]
     )
