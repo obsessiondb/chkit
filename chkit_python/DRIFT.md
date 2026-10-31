@@ -565,10 +565,10 @@ credentials-synthesized obsessiondb block; without a project config,
 **What ships**: ``config_loader.load_config`` layers
 ``<user config dir>/config.py`` (same ``config`` export as the project
 file, function form included) under the project config with
-``config_merge.merge_user_config``, as TS does when both exist. A profile
-dict may omit ``schema`` (Python's ``ChxUserConfig`` requires it; the
-project always sets it, so the default ``[]`` never wins). A profile that
-fails to load raises, as in TS.
+``config_merge.merge_user_config``, as TS does when both exist.
+``schema`` is optional in ``ChxUserConfig``, as in TS; ``resolve_config``
+turns a missing value into ``[]`` (#376). A profile that fails to load
+raises, as in TS.
 
 **Not ported**: the profile-only fallback when there is no project config
 (chkit-py commands keep requiring ``clickhouse.config.py``), the
