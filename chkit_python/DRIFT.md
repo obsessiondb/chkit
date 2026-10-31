@@ -554,24 +554,25 @@ trace when ``CHKIT_DEBUG=1``. The Python equivalent — when needed —
 would use ``logging.getLogger('chkit').debug(...)``. No current callers
 require this; deferred until someone files a bug needing it.
 
-### `rt/config` — deferred (foundation shipped)
+### `rt/config` — profile layering shipped (#372)
 
 The TS module orchestrates layered config resolution: project config
 (``clickhouse.config.ts``) merged on top of a user profile
-(``~/.config/chkit/config.ts``) merged on top of a
-credentials-synthesized obsessiondb block. ~250 LoC of plumbing +
-error enrichment with missing-dep hints + AggregateError unpacking.
+(``~/.config/chkit/config.ts``) or, when that file is missing, a
+credentials-synthesized obsessiondb block; without a project config,
+``query`` and ``plugin`` run from the profile alone.
 
-**What ships today**: the foundations — ``user_config.py``
-(XDG-compliant paths) and ``config_merge.py`` (``merge_user_config``).
-The Python ``config_loader.py`` currently loads ONLY the project config
-without layering.
+**What ships**: ``config_loader.load_config`` layers
+``<user config dir>/config.py`` (same ``config`` export as the project
+file, function form included) under the project config with
+``config_merge.merge_user_config``, as TS does when both exist. A profile
+dict may omit ``schema`` (Python's ``ChxUserConfig`` requires it; the
+project always sets it, so the default ``[]`` never wins). A profile that
+fails to load raises, as in TS.
 
-**What's missing**: an orchestrator that calls ``config_merge.merge_user_config``
-to layer the user profile underneath, and the enriched-error wrapper.
-Deferred so the small helpers can stabilize via callers (the obsessiondb
-plugin's credentials module is the immediate beneficiary) before
-committing to a specific composition.
+**Not ported**: the profile-only fallback when there is no project config
+(chkit-py commands keep requiring ``clickhouse.config.py``), the
+credentials-synthesized obsessiondb layer, and the enriched-error wrapper.
 
 ### Decision-N/A bucket (HTML)
 

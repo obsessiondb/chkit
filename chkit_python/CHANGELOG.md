@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Added
+- The user profile config is applied, as in TS (#372): when
+  `$XDG_CONFIG_HOME/chkit/config.py` (default `~/.config/chkit/config.py`) exists, its
+  `config` is layered under the project's `clickhouse.config.py` for every command, with
+  the TS merge rules: project values win, `clickhouse`, `check` and `safety` merge per key,
+  and profile plugins are added unless the project registers one with the same name. The
+  profile may leave out `schema`. A profile that fails to load fails the command. It is
+  only layered under a project config: chkit-py still needs a project config to run.
 - `--service <name>` on `generate`, `migrate`, `status`, `drift`, `check`, `query` and
   `pull` overrides the selected ObsessionDB service for one command, as in TS (#357). The
   name is looked up among the services the login can see, then the saved aliases; an
@@ -110,6 +117,9 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit obsessiondb service alias remove` drops the `aliases` key from
+  `.chkit/obsessiondb.json` when it removes the last alias, as TS does, instead of writing
+  `"aliases": {}` (#372).
 - ObsessionDB service aliases now live in the same file as the selected service, as in TS
   (#366): the project's `<config dir>/.chkit/obsessiondb.json`, or
   `$XDG_CONFIG_HOME/chkit/obsessiondb.json` only for a config under the user config dir.

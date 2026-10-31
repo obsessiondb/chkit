@@ -166,3 +166,98 @@ def test_load_config_supports_function_config(tmp_path: Path) -> None:
 
     resolved_default = load_config(config_file)
     assert resolved_default.schema_ == ["./schema-none/**/*.py"]
+
+
+# ---------- load_config: user profile layering ----------
+
+
+def _write_project(tmp_path: Path, body: str) -> Path:
+    config_file = tmp_path / "project" / "clickhouse.config.py"
+    config_file.parent.mkdir()
+    config_file.write_text(body, encoding="utf-8")
+    return config_file
+
+
+def _write_profile(xdg: Path, body: str) -> None:
+    profile = xdg / "chkit" / USER_PROFILE_CONFIG_FILE
+    profile.parent.mkdir(parents=True)
+    profile.write_text(body, encoding="utf-8")
+
+
+def test_load_config_layers_profile_under_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TS parity (runtime/config.ts): the profile is merged under the project."""
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_profile(
+        xdg,
+        "config = {\n"
+        '    "outDir": "./profile-out",\n'
+        '    "safety": {"allowDestructive": True},\n'
+        '    "clickhouse": {"url": "http://profile:8123", "password": "p", "database": "profile_db"},\n'
+        "}\n",
+    )
+    config_file = _write_project(
+        tmp_path,
+        "config = {\n"
+        '    "schema": "./schema/**/*.py",\n'
+        '    "outDir": "./project-out",\n'
+        '    "clickhouse": {"url": "http://project:8123", "database": "project_db"},\n'
+        "}\n",
+    )
+
+    resolved = load_config(config_file)
+
+    assert resolved.schema_ == ["./schema/**/*.py"]
+    assert resolved.out_dir == "./project-out"
+    assert resolved.safety.allow_destructive is True
+    assert resolved.clickhouse is not None
+    assert resolved.clickhouse.url == "http://project:8123"
+    assert resolved.clickhouse.database == "project_db"
+    assert resolved.clickhouse.password == "p"
+
+
+def test_load_config_profile_clickhouse_applies_when_project_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_profile(
+        xdg,
+        "config = lambda env: {\n"
+        '    "clickhouse": {"url": "http://profile:8123", "database": env.command},\n'
+        "}\n",
+    )
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    resolved = load_config(config_file, ChxConfigEnv(command="status"))
+
+    assert resolved.clickhouse is not None
+    assert resolved.clickhouse.url == "http://profile:8123"
+    assert resolved.clickhouse.database == "status"
+
+
+def test_load_config_without_profile_reads_only_the_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    resolved = load_config(config_file)
+
+    assert resolved.clickhouse is None
+    assert resolved.out_dir == "./chkit"
+
+
+def test_load_config_invalid_profile_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As in TS, a profile that cannot be read fails the command."""
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_profile(xdg, 'settings = {"outDir": "./x"}\n')
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    with pytest.raises(AttributeError, match="must export a `config` attribute"):
+        load_config(config_file)

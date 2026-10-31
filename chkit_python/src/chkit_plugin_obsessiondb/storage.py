@@ -146,6 +146,9 @@ def remove_service_alias(config_path: str | Path, alias_name: str) -> bool:
     if not isinstance(aliases, dict) or alias_name not in aliases:
         return False
     del aliases[alias_name]
-    existing["aliases"] = aliases
+    if aliases:
+        existing["aliases"] = aliases
+    else:
+        del existing["aliases"]
     path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     return True
