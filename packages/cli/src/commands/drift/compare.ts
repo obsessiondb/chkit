@@ -1,6 +1,7 @@
 import {
   constraintExpression,
   constraintKind,
+  identifierName,
   normalizeEngine as coreNormalizeEngine,
   isKafkaEngine,
   parseKafkaSettings,
@@ -19,10 +20,13 @@ import {
   type ProjectionDefinition,
   type SkipIndexDefinition,
   textIndexFingerprint,
+  tokenizeSQL,
   renderVectorIndexType,
+  type MaterializedViewDefinition,
   type TableConstraintDefinition,
   type TableDefinition,
   vectorIndexGranularity,
+  type ViewDefinition,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
@@ -59,7 +63,12 @@ type TableDriftReasonCode =
   | 'projection_mismatch'
   | 'constraint_mismatch'
 
-type ObjectDriftReasonCode = 'missing_object' | 'extra_object' | 'kind_mismatch'
+type ObjectDriftReasonCode =
+  | 'missing_object'
+  | 'extra_object'
+  | 'kind_mismatch'
+  | 'query_mismatch'
+  | 'target_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
 interface SchemaObjectShape {
@@ -73,6 +82,14 @@ export interface ObjectDriftDetail {
   object: string
   expectedKind?: SchemaObjectShape['kind']
   actualKind?: SchemaObjectShape['kind']
+  /** query_mismatch / target_mismatch: the compared query or `TO` target. */
+  expected?: string
+  actual?: string
+}
+
+interface ActualViewShape {
+  query: string
+  to?: { database: string; name: string }
 }
 
 interface ActualTableShape {
@@ -519,4 +536,74 @@ export function compareTableShape(
     projectionDiffs,
     constraintDiffs,
   }
+}
+
+/**
+ * Removes `<database>.` in front of names. ClickHouse qualifies every table
+ * name in a view's query with the database the view was created from, so a
+ * schema's `FROM events` is stored as `FROM analytics.events`. Both sides drop
+ * that qualifier, which names the same table as no qualifier.
+ */
+function stripDatabaseQualifier(sql: string, database: string): string {
+  const tokens = tokenizeSQL(sql)
+  let out = ''
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (!token) continue
+    const next = tokens[i + 2]
+    const qualifier =
+      identifierName(token) === database &&
+      tokens[i - 1]?.text !== '.' &&
+      tokens[i + 1]?.text === '.' &&
+      next !== undefined &&
+      identifierName(next) !== undefined
+    if (qualifier) {
+      i += 1
+      continue
+    }
+    out += token.text
+  }
+  return out
+}
+
+/** The view and materialized view queries `compareViewShape` will look up. */
+export function collectViewSqlQueries(
+  expected: ViewDefinition | MaterializedViewDefinition,
+  actual: ActualViewShape
+): string[] {
+  return [normalizeSQLFragment(expected.as), normalizeSQLFragment(actual.query)]
+}
+
+/**
+ * Compares a view or materialized view query with the live one, and a
+ * materialized view's `TO` target. ClickHouse stores the query reformatted, so
+ * the queries are compared only as its formatter renders them: when either side
+ * can't be formatted, the query is not compared, rather than reporting drift
+ * on a query that may be the same.
+ */
+export function compareViewShape(
+  expected: ViewDefinition | MaterializedViewDefinition,
+  actual: ActualViewShape,
+  currentDatabase: string,
+  canonicalizer?: SqlCanonicalizer
+): ObjectDriftDetail[] {
+  const object = `${expected.database}.${expected.name}`
+  const drift: ObjectDriftDetail[] = []
+  const expectedQuery = canonicalizer?.query(normalizeSQLFragment(expected.as))
+  const actualQuery = canonicalizer?.query(normalizeSQLFragment(actual.query))
+  if (expectedQuery && actualQuery) {
+    const expectedShape = stripDatabaseQualifier(expectedQuery, currentDatabase)
+    const actualShape = stripDatabaseQualifier(actualQuery, currentDatabase)
+    if (expectedShape !== actualShape) {
+      drift.push({ code: 'query_mismatch', object, expected: expectedShape, actual: actualShape })
+    }
+  }
+  if (expected.kind === 'materialized_view' && actual.to) {
+    const expectedTo = `${expected.to.database}.${expected.to.name}`
+    const actualTo = `${actual.to.database}.${actual.to.name}`
+    if (expectedTo !== actualTo) {
+      drift.push({ code: 'target_mismatch', object, expected: expectedTo, actual: actualTo })
+    }
+  }
+  return drift
 }

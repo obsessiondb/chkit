@@ -26,7 +26,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 1. Reads `snapshot.json` from `metaDir`. If no snapshot exists, the command fails with an error: _"Snapshot not found. Run 'chkit generate' before drift checks."_
 2. Requires `clickhouse` config. If missing, fails with: _"clickhouse config is required for drift checks."_
 3. Connects to ClickHouse and introspects the live schema
-4. Compares expected (snapshot) vs actual (live) objects and table shapes
+4. Compares expected (snapshot) vs actual (live) objects, table shapes, and view and materialized view queries
 5. Reports drift at both the object level and the table level
 
 ### Engine normalization
@@ -40,6 +40,12 @@ Column types are compared as rendered SQL types. `type: 'Nullable(String)'` and 
 ### Expression normalization
 
 ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. When the connected server can't format an expression, comparison falls back to plain text matching.
+
+### View and materialized view queries
+
+The query of each view and materialized view in the snapshot is compared with the query ClickHouse stores for it (`as_select` in `system.tables`), and a materialized view's `TO` target with the live one. ClickHouse stores a view's query reformatted, so both queries go through ClickHouse's own formatter first and a reformatted but equivalent query matches. ClickHouse also qualifies every unqualified table name with the database of the connection that created the view, so `FROM events` is stored as `FROM analytics.events`; `drift` drops that qualifier for the database of its own connection, as the two spellings name the same table. When the server can't format a query, `drift` does not compare it rather than report drift on a query that may be the same.
+
+A changed query reports `query_mismatch` and a changed target `target_mismatch`, with the compared values in `expected` and `actual`.
 
 ### SQL comments
 
@@ -58,6 +64,8 @@ Column defaults are compared token by token with `default_expression` in `system
 | `missing_object` | Expected object not found in ClickHouse |
 | `extra_object` | Object in ClickHouse not in snapshot |
 | `kind_mismatch` | Object exists but is a different kind (e.g. table vs view) |
+| `query_mismatch` | A view or materialized view query differs from the snapshot |
+| `target_mismatch` | A materialized view writes to a different `TO` table than the snapshot |
 
 **Table-level drift:**
 
@@ -120,7 +128,13 @@ Use [`chkit check`](/cli/check/) with `failOnDrift` to enforce drift-free state 
   "extra": ["table:analytics.temp_import"],
   "kindMismatches": [],
   "objectDrift": [
-    { "code": "missing_object", "object": "analytics.sessions", "expectedKind": "table", "actualKind": null }
+    { "code": "missing_object", "object": "analytics.sessions", "expectedKind": "table", "actualKind": null },
+    {
+      "code": "query_mismatch",
+      "object": "analytics.orders_mv",
+      "expected": "SELECT day, amount FROM orders WHERE status != 'Refunded'",
+      "actual": "SELECT day, amount FROM orders WHERE (status != 'Refunded') AND (amount > 0)"
+    }
   ],
   "tableDrift": [
     {

@@ -3,35 +3,45 @@ import { join } from 'node:path'
 import {
   canonicalizeSqlFragments,
   isUnknownDatabaseError,
+  listViewDetails,
   type ClickHouseExecutor,
   type IntrospectedTable,
   type SchemaObjectRef,
 } from '@chkit/clickhouse'
-import type { ChxConfig, Snapshot, TableDefinition } from '@chkit/core'
+import type {
+  ChxConfig,
+  MaterializedViewDefinition,
+  Snapshot,
+  TableDefinition,
+  ViewDefinition,
+} from '@chkit/core'
 
 import { debug } from '../../runtime/debug.js'
 import type { TableScope } from '../../runtime/table-scope.js'
 import {
   collectTableSqlFragments,
+  collectViewSqlQueries,
   compareSchemaObjects,
   compareTableShape,
+  compareViewShape,
   type ObjectDriftDetail,
   type SqlCanonicalizer,
   type TableDriftDetail,
 } from './compare.js'
 
 /**
- * Build a canonicalizer for every SQL fragment across the compared tables in a
- * single ClickHouse round-trip. Returns undefined when there is nothing to
+ * Build a canonicalizer for every SQL fragment across the compared tables and
+ * views, one batched ClickHouse query per kind. Returns undefined when there is nothing to
  * canonicalize or ClickHouse can't format (old server, offline) — the comparer
  * then falls back to plain string normalization.
  */
 async function buildSqlCanonicalizer(
   db: ClickHouseExecutor,
-  pairs: Array<{ expected: TableDefinition; actual: IntrospectedTable }>
+  pairs: Array<{ expected: TableDefinition; actual: IntrospectedTable }>,
+  viewQueries: string[]
 ): Promise<SqlCanonicalizer | undefined> {
   const expressions: string[] = []
-  const queries: string[] = []
+  const queries: string[] = [...viewQueries]
   for (const { expected, actual } of pairs) {
     const fragments = collectTableSqlFragments(expected, actual)
     expressions.push(...fragments.expressions)
@@ -40,10 +50,10 @@ async function buildSqlCanonicalizer(
   if (expressions.length === 0 && queries.length === 0) return undefined
 
   try {
-    const [expressionMap, queryMap] = await Promise.all([
-      canonicalizeSqlFragments(db, expressions, { wrap: true }),
-      canonicalizeSqlFragments(db, queries, { wrap: false }),
-    ])
+    // One after the other: the CLI's executor is bound to one HTTP session, and
+    // ClickHouse rejects a second query while the session is busy.
+    const expressionMap = await canonicalizeSqlFragments(db, expressions, { wrap: true })
+    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false })
     return {
       expression: (fragment) => expressionMap.get(fragment) ?? null,
       query: (fragment) => queryMap.get(fragment) ?? null,
@@ -80,6 +90,7 @@ export function computeDrifted(input: {
   missingCount: number
   kindMismatchCount: number
   tableDriftCount: number
+  viewDriftCount: number
   extraCount: number
   failOnExtraObjects: boolean
 }): boolean {
@@ -87,6 +98,7 @@ export function computeDrifted(input: {
     input.missingCount > 0 ||
     input.kindMismatchCount > 0 ||
     input.tableDriftCount > 0 ||
+    input.viewDriftCount > 0 ||
     (input.failOnExtraObjects && input.extraCount > 0)
   )
 }
@@ -165,18 +177,47 @@ export async function buildDriftPayload(
     const expected = expectedTableMap.get(`${actual.database}.${actual.name}`)
     return expected ? [{ expected, actual }] : []
   })
-  const canonicalizer = await buildSqlCanonicalizer(db, pairs)
+  const expectedViewMap = new Map(
+    snapshot.definitions
+      .filter(
+        (def): def is ViewDefinition | MaterializedViewDefinition =>
+          def.kind === 'view' || def.kind === 'materialized_view'
+      )
+      .map((def) => [`${def.kind}:${def.database}.${def.name}`, def])
+  )
+  const actualViews = expectedViewMap.size > 0 ? await listViewDetails(db, [...expectedDatabases]) : []
+  const viewPairs = actualViews.flatMap((actual) => {
+    const expected = expectedViewMap.get(`${actual.kind}:${actual.database}.${actual.name}`)
+    return expected ? [{ expected, actual }] : []
+  })
+  // Unqualified names in a view's query resolve to the session database.
+  const currentDatabase =
+    viewPairs.length > 0
+      ? (await db.query<{ database: string }>('SELECT currentDatabase() AS database'))[0]?.database
+      : undefined
+  const canonicalizer = await buildSqlCanonicalizer(
+    db,
+    pairs,
+    viewPairs.flatMap(({ expected, actual }) => collectViewSqlQueries(expected, actual))
+  )
   const tableDrift = pairs
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.table.localeCompare(b.table))
+  const viewDrift = viewPairs
+    .flatMap(({ expected, actual }) =>
+      compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
+    )
+    .sort((a, b) => a.object.localeCompare(b.object))
+  const objectDriftWithViews = [...objectDrift, ...viewDrift]
 
-  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}`)
+  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${viewDrift.length}`)
 
   const drifted = computeDrifted({
     missingCount: missing.length,
     kindMismatchCount: kindMismatches.length,
     tableDriftCount: tableDrift.length,
+    viewDriftCount: viewDrift.length,
     extraCount: extra.length,
     failOnExtraObjects: config.check?.failOnExtraObjects === true,
   })
@@ -189,7 +230,7 @@ export async function buildDriftPayload(
     missing,
     extra,
     kindMismatches,
-    objectDrift,
+    objectDrift: objectDriftWithViews,
     tableDrift,
   }
 }

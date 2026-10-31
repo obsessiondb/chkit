@@ -67,7 +67,7 @@ git diff MERGE_HEAD -- chkit/meta/snapshot.json    # during a merge
 git diff REBASE_HEAD -- chkit/meta/snapshot.json   # during a rebase
 ```
 
-Every entry that differs from one side must come from a migration file of the other side. For tables, [`chkit drift`](/cli/drift/) against an environment where every migration is applied confirms the shape, matching columns by name. `drift` does not compare column order or view queries.
+Every entry that differs from one side must come from a migration file of the other side. [`chkit drift`](/cli/drift/) against an environment where every migration is applied confirms the shape of tables, matching columns by name, and the queries of views and materialized views. `drift` does not compare column order.
 
 ### When both branches change the same object
 

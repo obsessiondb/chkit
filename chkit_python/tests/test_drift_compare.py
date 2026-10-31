@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 from chkit.cli.commands.drift_compare import (
     KindMismatch,
+    MapSqlCanonicalizer,
+    ObjectDriftDetail,
     SchemaObjectShape,
     compare_schema_objects,
     compare_table_shape,
+    compare_view_shape,
     summarize_drift_reasons,
 )
 from chkit.cli.commands.drift_diff import (
@@ -14,14 +19,16 @@ from chkit.cli.commands.drift_diff import (
     diff_named_shape_maps,
     diff_settings,
 )
-from chkit.clickhouse.introspect import IntrospectedTable
+from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView
 from chkit.core.model import (
     ColumnDefinition,
     ProjectionDefinition,
     SkipIndexBloomFilter,
     SkipIndexMinmax,
     TableDefinition,
+    materialized_view,
     table,
+    view,
 )
 
 # ---------- diff_by_name ----------
@@ -337,3 +344,97 @@ def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ep
     zero = ColumnDefinition(name="zero", type="Int64", default_kind="MATERIALIZED")
     materialized = zero.model_copy(update={"default": "fn:defaultValueOfTypeName('Int64')"})
     assert _changed_columns(materialized, zero) == ["zero"]
+
+
+# ---------- compare_view_shape (#382) ----------
+
+
+class _FormatCanonicalizer:
+    """Stand-in for ClickHouse's formatter: spaces after commas, ``!=`` spaced."""
+
+    def __init__(self, *, queries: bool = True) -> None:
+        self._queries = queries
+
+    @staticmethod
+    def _format(fragment: str) -> str:
+        return re.sub(r"\s*!=\s*", " != ", re.sub(r"\s*,\s*", ", ", fragment)).strip()
+
+    def expression(self, fragment: str) -> str | None:
+        return self._format(fragment)
+
+    def query(self, fragment: str) -> str | None:
+        return self._format(fragment) if self._queries else None
+
+
+_DAILY_REVENUE = view(
+    database="app",
+    name="daily_revenue",
+    as_="SELECT day,sum(amount) AS revenue FROM orders GROUP BY day",
+)
+_ORDERS_MV = materialized_view(
+    database="app",
+    name="orders_mv",
+    to={"database": "app", "name": "orders_by_day"},
+    as_="SELECT day, amount FROM orders WHERE status!='Refunded'",
+)
+
+
+def _live_view(query: str, to: tuple[str, str] | None = None) -> IntrospectedView:
+    kind = "view" if to is None else "materialized_view"
+    return IntrospectedView(kind=kind, database="app", name="v", query=query, to=to)
+
+
+def test_view_query_reformatted_and_qualified_with_session_database_reads_clean() -> None:
+    live = _live_view("SELECT day, sum(amount) AS revenue FROM app.orders GROUP BY day")
+    assert compare_view_shape(_DAILY_REVENUE, live, "app", _FormatCanonicalizer()) == []
+
+
+def test_view_query_qualified_with_another_database_drifts() -> None:
+    live = _live_view("SELECT day, sum(amount) AS revenue FROM other.orders GROUP BY day")
+    assert compare_view_shape(_DAILY_REVENUE, live, "app", _FormatCanonicalizer()) == [
+        ObjectDriftDetail(
+            code="query_mismatch",
+            object="app.daily_revenue",
+            expected="SELECT day, sum(amount) AS revenue FROM orders GROUP BY day",
+            actual="SELECT day, sum(amount) AS revenue FROM other.orders GROUP BY day",
+        )
+    ]
+
+
+def test_materialized_view_with_extra_where_drifts() -> None:
+    live = _live_view(
+        "SELECT day, amount FROM app.orders WHERE status != 'Refunded' AND amount > 0",
+        ("app", "orders_by_day"),
+    )
+    drift = compare_view_shape(_ORDERS_MV, live, "app", _FormatCanonicalizer())
+    assert [(d.code, d.object) for d in drift] == [("query_mismatch", "app.orders_mv")]
+
+
+def test_materialized_view_writing_to_another_target_drifts() -> None:
+    live = _live_view(
+        "SELECT day, amount FROM app.orders WHERE status != 'Refunded'", ("app", "orders_by_week")
+    )
+    assert compare_view_shape(_ORDERS_MV, live, "app", _FormatCanonicalizer()) == [
+        ObjectDriftDetail(
+            code="target_mismatch",
+            object="app.orders_mv",
+            expected="app.orders_by_day",
+            actual="app.orders_by_week",
+        )
+    ]
+
+
+def test_view_query_that_cannot_be_formatted_is_not_compared() -> None:
+    live = _live_view("SELECT something else entirely")
+    assert compare_view_shape(_DAILY_REVENUE, live, "app") == []
+    unformattable = _FormatCanonicalizer(queries=False)
+    assert compare_view_shape(_DAILY_REVENUE, live, "app", unformattable) == []
+    empty = MapSqlCanonicalizer(expressions={}, queries={})
+    assert compare_view_shape(_DAILY_REVENUE, live, "app", empty) == []
+
+
+def test_view_query_strips_only_a_database_qualifier_in_front_of_a_name() -> None:
+    expected = view(database="app", name="v", as_="SELECT app, 'app.x', t.app.c FROM `app`.t")
+    live = _live_view("SELECT app, 'app.x', t.app.c FROM t")
+    assert compare_view_shape(expected, live, "app", _FormatCanonicalizer()) == []
+

@@ -6,6 +6,7 @@ const NONE = {
   missingCount: 0,
   kindMismatchCount: 0,
   tableDriftCount: 0,
+  viewDriftCount: 0,
   extraCount: 0,
   failOnExtraObjects: false,
 }
@@ -29,6 +30,10 @@ describe('computeDrifted (#5)', () => {
 
   test('table-shape drift on managed tables always drifts', () => {
     expect(computeDrifted({ ...NONE, tableDriftCount: 1 })).toBe(true)
+  })
+
+  test('view query or target drift on managed views always drifts', () => {
+    expect(computeDrifted({ ...NONE, viewDriftCount: 1 })).toBe(true)
   })
 
   test('a clean schema with no findings is not drifted', () => {

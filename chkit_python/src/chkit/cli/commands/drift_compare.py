@@ -21,7 +21,7 @@ from chkit.cli.commands.drift_diff import (
     diff_named_shape_maps,
     diff_settings,
 )
-from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectKind
+from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView, SchemaObjectKind
 from chkit.core.column_default import render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
 from chkit.core.identifier import unquote_identifiers
@@ -29,16 +29,18 @@ from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_k
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ColumnDefinition,
+    MaterializedViewDefinition,
     ProjectionDefinition,
     SkipIndexDefinition,
     SkipIndexRaw,
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
     TableDefinition,
+    ViewDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
 from chkit.core.sql import render_key_clause_columns
-from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, identifier_name, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
     normalize_engine,
@@ -49,7 +51,7 @@ from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.vector_index import render_vector_index_type
 
 ObjectDriftReasonCode: TypeAlias = Literal[
-    "missing_object", "extra_object", "kind_mismatch"
+    "missing_object", "extra_object", "kind_mismatch", "query_mismatch", "target_mismatch"
 ]
 
 TableDriftReasonCode: TypeAlias = Literal[
@@ -134,6 +136,9 @@ class ObjectDriftDetail:
     object: str
     expected_kind: SchemaObjectKind | None = None
     actual_kind: SchemaObjectKind | None = None
+    # query_mismatch / target_mismatch: the compared query or ``TO`` target.
+    expected: str | None = None
+    actual: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,3 +642,81 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         projection_diffs=projection_diffs,
         constraint_diffs=constraint_diffs,
     )
+
+
+def _strip_database_qualifier(sql: str, database: str) -> str:
+    """Remove ``<database>.`` in front of names.
+
+    ClickHouse qualifies every table name in a view's query with the database
+    the view was created from, so a schema's ``FROM events`` is stored as
+    ``FROM analytics.events``. Both sides drop that qualifier, which names the
+    same table as no qualifier.
+    """
+    tokens = tokenize_sql(sql)
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        qualifier = (
+            identifier_name(token) == database
+            and (i == 0 or tokens[i - 1].text != ".")
+            and i + 2 < len(tokens)
+            and tokens[i + 1].text == "."
+            and identifier_name(tokens[i + 2]) is not None
+        )
+        if qualifier:
+            i += 2
+            continue
+        out.append(token.text)
+        i += 1
+    return "".join(out)
+
+
+def collect_view_sql_queries(
+    expected: ViewDefinition | MaterializedViewDefinition, actual: IntrospectedView
+) -> list[str]:
+    """The view and materialized view queries ``compare_view_shape`` will look up."""
+    return [normalize_sql_fragment(expected.as_), normalize_sql_fragment(actual.query)]
+
+
+def compare_view_shape(
+    expected: ViewDefinition | MaterializedViewDefinition,
+    actual: IntrospectedView,
+    current_database: str,
+    canonicalizer: SqlCanonicalizer | None = None,
+) -> list[ObjectDriftDetail]:
+    """Compare a view query with the live one, and a materialized view's ``TO`` target.
+
+    ClickHouse stores the query reformatted, so the queries are compared only
+    as its formatter renders them: when either side can't be formatted, the
+    query is not compared, rather than reporting drift on a query that may be
+    the same.
+    """
+    obj = f"{expected.database}.{expected.name}"
+    drift: list[ObjectDriftDetail] = []
+    if canonicalizer is not None:
+        expected_query = canonicalizer.query(normalize_sql_fragment(expected.as_))
+        actual_query = canonicalizer.query(normalize_sql_fragment(actual.query))
+        if expected_query and actual_query:
+            expected_shape = _strip_database_qualifier(expected_query, current_database)
+            actual_shape = _strip_database_qualifier(actual_query, current_database)
+            if expected_shape != actual_shape:
+                drift.append(
+                    ObjectDriftDetail(
+                        code="query_mismatch",
+                        object=obj,
+                        expected=expected_shape,
+                        actual=actual_shape,
+                    )
+                )
+    if isinstance(expected, MaterializedViewDefinition) and actual.to is not None:
+        expected_to = f"{expected.to.database}.{expected.to.name}"
+        actual_to = f"{actual.to[0]}.{actual.to[1]}"
+        if expected_to != actual_to:
+            drift.append(
+                ObjectDriftDetail(
+                    code="target_mismatch", object=obj, expected=expected_to, actual=actual_to
+                )
+            )
+    return drift
+

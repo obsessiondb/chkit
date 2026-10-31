@@ -127,6 +127,13 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit drift --live` and `chkit check` compare the query of each managed view and
+  materialized view, and a materialized view's `TO` target, with the live ones, as in TS
+  (#382). A changed query reports `query_mismatch` and a changed target `target_mismatch`,
+  with the compared values in `expected` and `actual`; before, a view recreated on the
+  server with another query passed `check --strict`. Both queries go through ClickHouse's
+  formatter and drop the qualifier ClickHouse adds for the connection's database, so an
+  unchanged view reads clean; a query the server can't format is not compared.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not

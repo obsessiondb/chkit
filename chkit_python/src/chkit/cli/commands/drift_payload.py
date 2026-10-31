@@ -16,8 +16,10 @@ from chkit.cli.commands.drift_compare import (
     SchemaObjectShape,
     TableDriftDetail,
     collect_table_sql_fragments,
+    collect_view_sql_queries,
     compare_schema_objects,
     compare_table_shape,
+    compare_view_shape,
 )
 from chkit.cli.logging_setup import debug
 from chkit.cli.table_scope import TableScope
@@ -26,8 +28,14 @@ from chkit.clickhouse.introspect import (
     IntrospectedTable,
     list_schema_objects,
     list_table_details,
+    list_view_details,
 )
-from chkit.core.model import Snapshot, TableDefinition
+from chkit.core.model import (
+    MaterializedViewDefinition,
+    Snapshot,
+    TableDefinition,
+    ViewDefinition,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +59,7 @@ class DriftedFlags:
     missing_count: int
     kind_mismatch_count: int
     table_drift_count: int
+    view_drift_count: int
     extra_count: int
     fail_on_extra_objects: bool
 
@@ -65,6 +74,7 @@ def compute_drifted(flags: DriftedFlags) -> bool:
         flags.missing_count > 0
         or flags.kind_mismatch_count > 0
         or flags.table_drift_count > 0
+        or flags.view_drift_count > 0
         or (flags.fail_on_extra_objects and flags.extra_count > 0)
     )
 
@@ -81,16 +91,18 @@ def _is_unknown_database_error(error: BaseException) -> bool:
 
 
 def _build_sql_canonicalizer(
-    client: Any, pairs: list[tuple[TableDefinition, IntrospectedTable]]
+    client: Any,
+    pairs: list[tuple[TableDefinition, IntrospectedTable]],
+    view_queries: list[str],
 ) -> MapSqlCanonicalizer | None:
-    """Canonicalize every SQL fragment across the compared tables via ClickHouse.
+    """Canonicalize every SQL fragment across the compared tables and views via ClickHouse.
 
     Returns None when there is nothing to canonicalize or ClickHouse can't
     format (old server, offline) — the comparer then falls back to plain string
     normalization.
     """
     expressions: list[str] = []
-    queries: list[str] = []
+    queries: list[str] = list(view_queries)
     for expected, actual in pairs:
         fragments = collect_table_sql_fragments(expected, actual)
         expressions.extend(fragments.expressions)
@@ -190,19 +202,62 @@ def build_drift_payload(
         for actual in actual_tables
         if (expected := expected_table_map.get(f"{actual.database}.{actual.name}")) is not None
     ]
-    canonicalizer = _build_sql_canonicalizer(client, pairs)
+    expected_view_map: dict[str, ViewDefinition | MaterializedViewDefinition] = {
+        f"{d.kind}:{d.database}.{d.name}": d
+        for d in snapshot.definitions
+        if isinstance(d, (ViewDefinition, MaterializedViewDefinition))
+    }
+    actual_views = (
+        list_view_details(client, sorted(expected_databases)) if expected_view_map else []
+    )
+    view_pairs = [
+        (expected_view, actual_view)
+        for actual_view in actual_views
+        if (
+            expected_view := expected_view_map.get(
+                f"{actual_view.kind}:{actual_view.database}.{actual_view.name}"
+            )
+        )
+        is not None
+    ]
+    # Unqualified names in a view's query resolve to the session database.
+    current_database = (
+        str(client.query("SELECT currentDatabase() AS database").rows[0]["database"])
+        if view_pairs
+        else ""
+    )
+    canonicalizer = _build_sql_canonicalizer(
+        client,
+        pairs,
+        [
+            query
+            for expected_view, actual_view in view_pairs
+            for query in collect_view_sql_queries(expected_view, actual_view)
+        ],
+    )
     table_drift_unsorted = [
         detail
         for expected, actual in pairs
         if (detail := compare_table_shape(expected, actual, canonicalizer)) is not None
     ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
+    view_drift = sorted(
+        (
+            detail
+            for expected_view, actual_view in view_pairs
+            for detail in compare_view_shape(
+                expected_view, actual_view, current_database, canonicalizer
+            )
+        ),
+        key=lambda d: d.object,
+    )
 
     drifted = compute_drifted(
         DriftedFlags(
             missing_count=len(compare_result.missing),
             kind_mismatch_count=len(compare_result.kind_mismatches),
             table_drift_count=len(table_drift),
+            view_drift_count=len(view_drift),
             extra_count=len(compare_result.extra),
             fail_on_extra_objects=fail_on_extra_objects,
         )
@@ -216,7 +271,7 @@ def build_drift_payload(
         missing=compare_result.missing,
         extra=compare_result.extra,
         kind_mismatches=compare_result.kind_mismatches,
-        object_drift=compare_result.object_drift,
+        object_drift=[*compare_result.object_drift, *view_drift],
         table_drift=table_drift,
         scope=scope,
     )
