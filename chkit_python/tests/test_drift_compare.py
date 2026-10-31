@@ -433,6 +433,31 @@ def test_view_query_that_cannot_be_formatted_is_not_compared() -> None:
     assert compare_view_shape(_DAILY_REVENUE, live, "app", empty) == []
 
 
+def test_view_query_in_which_clickhouse_hid_a_secret_is_not_compared() -> None:
+    remote_view = view(
+        database="app",
+        name="remote_one",
+        as_="SELECT * FROM remote('127.0.0.1', system.one, 'default', 'chkit-ci')",
+    )
+    live = _live_view("SELECT * FROM remote('127.0.0.1', system.one, 'default', '[HIDDEN]')")
+    assert compare_view_shape(remote_view, live, "app", _FormatCanonicalizer()) == []
+
+
+def test_materialized_view_recreated_with_an_inner_table_drifts() -> None:
+    live = IntrospectedView(
+        kind="materialized_view",
+        database="app",
+        name="orders_mv",
+        query="SELECT day, amount FROM app.orders WHERE status != 'Refunded'",
+        to=None,
+    )
+    assert compare_view_shape(_ORDERS_MV, live, "app", _FormatCanonicalizer()) == [
+        ObjectDriftDetail(
+            code="target_mismatch", object="app.orders_mv", expected="app.orders_by_day", actual=""
+        )
+    ]
+
+
 def test_view_query_strips_only_a_database_qualifier_in_front_of_a_name() -> None:
     expected = view(database="app", name="v", as_="SELECT app, 'app.x', t.app.c FROM `app`.t")
     live = _live_view("SELECT app, 'app.x', t.app.c FROM t")

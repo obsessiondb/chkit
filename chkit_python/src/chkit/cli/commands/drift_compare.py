@@ -141,6 +141,10 @@ class ObjectDriftDetail:
     actual: str | None = None
 
 
+# What ClickHouse stores in place of a secret in a view's query.
+_HIDDEN_SECRET = "'[HIDDEN]'"
+
+
 @dataclass(frozen=True, slots=True)
 class CompareSchemaObjectsResult:
     missing: list[str]
@@ -644,6 +648,58 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     )
 
 
+def collect_view_sql_queries(
+    expected: ViewDefinition | MaterializedViewDefinition, actual: IntrospectedView
+) -> list[str]:
+    """The view and materialized view queries ``compare_view_shape`` will look up."""
+    return [normalize_sql_fragment(expected.as_), normalize_sql_fragment(actual.query)]
+
+
+def compare_view_shape(
+    expected: ViewDefinition | MaterializedViewDefinition,
+    actual: IntrospectedView,
+    current_database: str,
+    canonicalizer: SqlCanonicalizer | None = None,
+) -> list[ObjectDriftDetail]:
+    """Compare a view query with the live one, and a materialized view's ``TO`` target.
+
+    ClickHouse stores the query reformatted, so the queries are compared only
+    as its formatter renders them: when either side can't be formatted, the
+    query is not compared, rather than reporting drift on a query that may be
+    the same. Nor is a query in which ClickHouse replaced a secret (a table
+    function's password) with ``'[HIDDEN]'``: it never matches the schema, and
+    the schema's side would print the secret.
+    """
+    obj = f"{expected.database}.{expected.name}"
+    drift: list[ObjectDriftDetail] = []
+    if canonicalizer is not None and _HIDDEN_SECRET not in actual.query:
+        expected_query = canonicalizer.query(normalize_sql_fragment(expected.as_))
+        actual_query = canonicalizer.query(normalize_sql_fragment(actual.query))
+        if expected_query and actual_query:
+            expected_shape = _strip_database_qualifier(expected_query, current_database)
+            actual_shape = _strip_database_qualifier(actual_query, current_database)
+            if expected_shape != actual_shape:
+                drift.append(
+                    ObjectDriftDetail(
+                        code="query_mismatch",
+                        object=obj,
+                        expected=expected_shape,
+                        actual=actual_shape,
+                    )
+                )
+    if isinstance(expected, MaterializedViewDefinition):
+        expected_to = f"{expected.to.database}.{expected.to.name}"
+        # A live materialized view with an inner table has no ``TO``.
+        actual_to = "" if actual.to is None else f"{actual.to[0]}.{actual.to[1]}"
+        if expected_to != actual_to:
+            drift.append(
+                ObjectDriftDetail(
+                    code="target_mismatch", object=obj, expected=expected_to, actual=actual_to
+                )
+            )
+    return drift
+
+
 def _strip_database_qualifier(sql: str, database: str) -> str:
     """Remove ``<database>.`` in front of names.
 
@@ -670,53 +726,3 @@ def _strip_database_qualifier(sql: str, database: str) -> str:
         out.append(token.text)
         i += 1
     return "".join(out)
-
-
-def collect_view_sql_queries(
-    expected: ViewDefinition | MaterializedViewDefinition, actual: IntrospectedView
-) -> list[str]:
-    """The view and materialized view queries ``compare_view_shape`` will look up."""
-    return [normalize_sql_fragment(expected.as_), normalize_sql_fragment(actual.query)]
-
-
-def compare_view_shape(
-    expected: ViewDefinition | MaterializedViewDefinition,
-    actual: IntrospectedView,
-    current_database: str,
-    canonicalizer: SqlCanonicalizer | None = None,
-) -> list[ObjectDriftDetail]:
-    """Compare a view query with the live one, and a materialized view's ``TO`` target.
-
-    ClickHouse stores the query reformatted, so the queries are compared only
-    as its formatter renders them: when either side can't be formatted, the
-    query is not compared, rather than reporting drift on a query that may be
-    the same.
-    """
-    obj = f"{expected.database}.{expected.name}"
-    drift: list[ObjectDriftDetail] = []
-    if canonicalizer is not None:
-        expected_query = canonicalizer.query(normalize_sql_fragment(expected.as_))
-        actual_query = canonicalizer.query(normalize_sql_fragment(actual.query))
-        if expected_query and actual_query:
-            expected_shape = _strip_database_qualifier(expected_query, current_database)
-            actual_shape = _strip_database_qualifier(actual_query, current_database)
-            if expected_shape != actual_shape:
-                drift.append(
-                    ObjectDriftDetail(
-                        code="query_mismatch",
-                        object=obj,
-                        expected=expected_shape,
-                        actual=actual_shape,
-                    )
-                )
-    if isinstance(expected, MaterializedViewDefinition) and actual.to is not None:
-        expected_to = f"{expected.to.database}.{expected.to.name}"
-        actual_to = f"{actual.to[0]}.{actual.to[1]}"
-        if expected_to != actual_to:
-            drift.append(
-                ObjectDriftDetail(
-                    code="target_mismatch", object=obj, expected=expected_to, actual=actual_to
-                )
-            )
-    return drift
-

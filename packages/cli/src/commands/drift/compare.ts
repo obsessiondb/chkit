@@ -87,6 +87,9 @@ export interface ObjectDriftDetail {
   actual?: string
 }
 
+/** What ClickHouse stores in place of a secret in a view's query. */
+const HIDDEN_SECRET = "'[HIDDEN]'"
+
 interface ActualViewShape {
   query: string
   to?: { database: string; name: string }
@@ -538,6 +541,51 @@ export function compareTableShape(
   }
 }
 
+/** The view and materialized view queries `compareViewShape` will look up. */
+export function collectViewSqlQueries(
+  expected: ViewDefinition | MaterializedViewDefinition,
+  actual: ActualViewShape
+): string[] {
+  return [normalizeSQLFragment(expected.as), normalizeSQLFragment(actual.query)]
+}
+
+/**
+ * Compares a view or materialized view query with the live one, and a
+ * materialized view's `TO` target. ClickHouse stores the query reformatted, so
+ * the queries are compared only as its formatter renders them: when either side
+ * can't be formatted, the query is not compared, rather than reporting drift
+ * on a query that may be the same. Nor is a query in which ClickHouse replaced
+ * a secret (a table function's password) with `'[HIDDEN]'`: it never matches
+ * the schema, and the schema's side would print the secret.
+ */
+export function compareViewShape(
+  expected: ViewDefinition | MaterializedViewDefinition,
+  actual: ActualViewShape,
+  currentDatabase: string,
+  canonicalizer?: SqlCanonicalizer
+): ObjectDriftDetail[] {
+  const object = `${expected.database}.${expected.name}`
+  const drift: ObjectDriftDetail[] = []
+  const expectedQuery = canonicalizer?.query(normalizeSQLFragment(expected.as))
+  const actualQuery = canonicalizer?.query(normalizeSQLFragment(actual.query))
+  if (expectedQuery && actualQuery && !actual.query.includes(HIDDEN_SECRET)) {
+    const expectedShape = stripDatabaseQualifier(expectedQuery, currentDatabase)
+    const actualShape = stripDatabaseQualifier(actualQuery, currentDatabase)
+    if (expectedShape !== actualShape) {
+      drift.push({ code: 'query_mismatch', object, expected: expectedShape, actual: actualShape })
+    }
+  }
+  if (expected.kind === 'materialized_view') {
+    const expectedTo = `${expected.to.database}.${expected.to.name}`
+    // A live materialized view with an inner table has no `TO`.
+    const actualTo = actual.to ? `${actual.to.database}.${actual.to.name}` : ''
+    if (expectedTo !== actualTo) {
+      drift.push({ code: 'target_mismatch', object, expected: expectedTo, actual: actualTo })
+    }
+  }
+  return drift
+}
+
 /**
  * Removes `<database>.` in front of names. ClickHouse qualifies every table
  * name in a view's query with the database the view was created from, so a
@@ -564,46 +612,4 @@ function stripDatabaseQualifier(sql: string, database: string): string {
     out += token.text
   }
   return out
-}
-
-/** The view and materialized view queries `compareViewShape` will look up. */
-export function collectViewSqlQueries(
-  expected: ViewDefinition | MaterializedViewDefinition,
-  actual: ActualViewShape
-): string[] {
-  return [normalizeSQLFragment(expected.as), normalizeSQLFragment(actual.query)]
-}
-
-/**
- * Compares a view or materialized view query with the live one, and a
- * materialized view's `TO` target. ClickHouse stores the query reformatted, so
- * the queries are compared only as its formatter renders them: when either side
- * can't be formatted, the query is not compared, rather than reporting drift
- * on a query that may be the same.
- */
-export function compareViewShape(
-  expected: ViewDefinition | MaterializedViewDefinition,
-  actual: ActualViewShape,
-  currentDatabase: string,
-  canonicalizer?: SqlCanonicalizer
-): ObjectDriftDetail[] {
-  const object = `${expected.database}.${expected.name}`
-  const drift: ObjectDriftDetail[] = []
-  const expectedQuery = canonicalizer?.query(normalizeSQLFragment(expected.as))
-  const actualQuery = canonicalizer?.query(normalizeSQLFragment(actual.query))
-  if (expectedQuery && actualQuery) {
-    const expectedShape = stripDatabaseQualifier(expectedQuery, currentDatabase)
-    const actualShape = stripDatabaseQualifier(actualQuery, currentDatabase)
-    if (expectedShape !== actualShape) {
-      drift.push({ code: 'query_mismatch', object, expected: expectedShape, actual: actualShape })
-    }
-  }
-  if (expected.kind === 'materialized_view' && actual.to) {
-    const expectedTo = `${expected.to.database}.${expected.to.name}`
-    const actualTo = `${actual.to.database}.${actual.to.name}`
-    if (expectedTo !== actualTo) {
-      drift.push({ code: 'target_mismatch', object, expected: expectedTo, actual: actualTo })
-    }
-  }
-  return drift
 }

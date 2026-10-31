@@ -1,4 +1,4 @@
-import { identifierName, isTrivia, type SQLToken, tokenizeSQL } from '@chkit/core'
+import { identifierName, isTrivia, tokenizeSQL } from '@chkit/core'
 
 import type { ClickHouseExecutor } from './index.js'
 
@@ -73,7 +73,8 @@ export function parseMaterializedViewTarget(
   let i = tokens[4]?.text === '.' ? 6 : 4
   let depth = 0
   for (; i < tokens.length; i++) {
-    const token = tokens[i] as SQLToken
+    const token = tokens[i]
+    if (!token) continue
     if (token.text === '(') depth++
     else if (token.text === ')') depth--
     if (depth !== 0 || token.kind !== 'identifier') continue

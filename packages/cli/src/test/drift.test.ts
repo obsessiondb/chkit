@@ -1297,6 +1297,23 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     expect(compareViewShape(dailyRevenue, live, 'app', unformattable)).toEqual([])
   })
 
+  test('a query in which ClickHouse hid a secret is not compared', () => {
+    const remoteView = view({
+      database: 'app',
+      name: 'remote_one',
+      as: "SELECT * FROM remote('127.0.0.1', system.one, 'default', 'chkit-ci')",
+    })
+    const live = { query: "SELECT * FROM remote('127.0.0.1', system.one, 'default', '[HIDDEN]')" }
+    expect(compareViewShape(remoteView, live, 'app', canonicalizer)).toEqual([])
+  })
+
+  test('a materialized view recreated with an inner table drifts', () => {
+    const live = { query: "SELECT day, amount FROM app.orders WHERE status != 'Refunded'" }
+    expect(compareViewShape(ordersMv, live, 'app', canonicalizer)).toEqual([
+      { code: 'target_mismatch', object: 'app.orders_mv', expected: 'app.orders_by_day', actual: '' },
+    ])
+  })
+
   test('only a database qualifier in front of a name is removed', () => {
     const expected = view({ database: 'app', name: 'v', as: "SELECT app, 'app.x', t.app.c FROM `app`.t" })
     const live = { query: "SELECT app, 'app.x', t.app.c FROM t" }
