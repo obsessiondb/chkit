@@ -554,7 +554,7 @@ trace when ``CHKIT_DEBUG=1``. The Python equivalent — when needed —
 would use ``logging.getLogger('chkit').debug(...)``. No current callers
 require this; deferred until someone files a bug needing it.
 
-### `rt/config` — profile layering shipped (#372)
+### `rt/config` — profile layering shipped (#372, #375)
 
 The TS module orchestrates layered config resolution: project config
 (``clickhouse.config.ts``) merged on top of a user profile
@@ -570,9 +570,17 @@ file, function form included) under the project config with
 turns a missing value into ``[]`` (#376). A profile that fails to load
 raises, as in TS.
 
-**Not ported**: the profile-only fallback when there is no project config
-(chkit-py commands keep requiring ``clickhouse.config.py``), the
-credentials-synthesized obsessiondb layer, and the enriched-error wrapper.
+**Also ships (#375)**: the profile-only fallback when there is no project
+config, gated by ``PROJECT_ONLY_COMMANDS`` (``generate``, ``migrate``,
+``status``, ... raise ``ProjectConfigRequiredError`` with the TS message and
+``project_config_required`` JSON code); the credentials-synthesized
+obsessiondb layer (``{"schema": [], "plugins": [obsessiondb()]}`` when the
+profile file is missing but ``credentials.json`` exists, with a
+project-registered instance winning by name); and the ``obsessiondb`` /
+``plugin obsessiondb`` bootstrap that synthesizes the profile without
+credentials.
+
+**Not ported**: the enriched-error wrapper.
 
 ### Decision-N/A bucket (HTML)
 
