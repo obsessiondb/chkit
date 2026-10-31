@@ -126,7 +126,7 @@ Leave `cluster` unset for single-node servers, ClickHouse Cloud, or ObsessionDB,
 
 The TypeScript CLI reads a user-profile config at `~/.config/chkit/config.ts` (honoring `XDG_CONFIG_HOME`). When that file is missing but ObsessionDB credentials are present (`~/.config/chkit/credentials.json`, written by `chkit obsessiondb login`), chkit synthesizes a profile that registers only the ObsessionDB plugin.
 
-Project-scoped commands (`generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen`, `pull`) always require a project config in the working directory. [`chkit query`](/cli/query/) is the exception: when no project config is found, it falls back to the profile, so ad-hoc queries run from any directory, including right after `chkit obsessiondb login` without a local config file at all.
+Project-scoped commands (`generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen`, `pull`) always require a project config in the working directory. The other commands, [`chkit query`](/cli/query/), `chkit plugin` and `chkit obsessiondb`, fall back to the profile when no project config is found, so ad-hoc queries run from any directory, including right after `chkit obsessiondb login` without a local config file at all. `chkit obsessiondb` and `chkit plugin obsessiondb` load the ObsessionDB plugin even without credentials, so `chkit obsessiondb login` itself runs from any directory.
 
 When a project config is found, chkit layers the profile under it for every command. Project values win, and the profile's plugins are added unless the project registers a plugin with the same name. On a logged-in machine the ObsessionDB plugin is therefore loaded even when `clickhouse.config.ts` does not register it.
 
@@ -134,7 +134,7 @@ When a project config is found, chkit layers the profile under it for every comm
 A machine without a profile, such as a CI runner, does not load the ObsessionDB plugin unless the project config registers `obsessiondb()`. Its checks (Distributed tables, [submitted backfill jobs](/obsessiondb/backfills/#submitted-jobs-in-chkit-check)), its `Shared` engine rewrite and its service executor then do not run. Register `obsessiondb()` in the project config to get the same behavior everywhere.
 :::
 
-The Python CLI reads its profile from `~/.config/chkit/config.py` (honoring `XDG_CONFIG_HOME`), a module that exports `config` like `clickhouse.config.py` and may leave out `schema`. It layers the profile under the project config with the same rules. It does not synthesize a profile from ObsessionDB credentials, and every command, `query` included, requires a project config.
+The Python CLI reads its profile from `~/.config/chkit/config.py` (honoring `XDG_CONFIG_HOME`), a module that exports `config` like `clickhouse.config.py` and may leave out `schema`. When that file is missing but ObsessionDB credentials are present, it synthesizes the same ObsessionDB-only profile. The project-config requirement, the fallback to the profile and the layering rules are the same as in the TypeScript CLI, so on a logged-in machine the ObsessionDB plugin is loaded even when `clickhouse.config.py` does not register it.
 
 ## Related pages
 

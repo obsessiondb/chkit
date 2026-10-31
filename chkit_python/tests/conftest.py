@@ -106,3 +106,13 @@ def single_replica(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr("chkit.clickhouse.ddl_propagation.resolve_replica_fanout", lambda *_: None)
     monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout", lambda *_: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_user_config_dir(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the developer's ``~/.config/chkit`` out of every test: with a login
+    (``credentials.json``) ``load_config`` layers ``obsessiondb()`` under each
+    project, as in TS. Tests that need a user config dir set their own."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))

@@ -8,8 +8,18 @@
   `config` is layered under the project's `clickhouse.config.py` for every command, with
   the TS merge rules: project values win, `clickhouse`, `check` and `safety` merge per key,
   and profile plugins are added unless the project registers one with the same name. The
-  profile may leave out `schema`. A profile that fails to load fails the command. It is
-  only layered under a project config: chkit-py still needs a project config to run.
+  profile may leave out `schema`. A profile that fails to load fails the command.
+- As in TS, ObsessionDB credentials stand in for a missing profile, and commands other than
+  `generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen` and `pull` run
+  without a project config (#375). When `config.py` is missing but
+  `$XDG_CONFIG_HOME/chkit/credentials.json` exists (after `chkit obsessiondb login`),
+  chkit-py layers a profile with only `obsessiondb()` under the project config. **Behaviour
+  change:** on a logged-in machine, a project that does not register `obsessiondb()` now
+  loads the ObsessionDB plugin (its selected-service executor, `--service`, the `Shared`
+  engine rewrite and its checks); a project that registers it keeps its own. Without a
+  project config, `query`, `plugin` and `obsessiondb` run from the profile, and
+  `obsessiondb` / `plugin obsessiondb` load the plugin even without credentials; the
+  project-scoped commands fail with `project_config_required`.
 - `--service <name>` on `generate`, `migrate`, `status`, `drift`, `check`, `query` and
   `pull` overrides the selected ObsessionDB service for one command, as in TS (#357). The
   name is looked up among the services the login can see, then the saved aliases; an
