@@ -46,6 +46,8 @@ Repeated tags use AND matching. The default `maxStreams: 1` executes selected st
 
 Every raw payload has the envelope `{ repository, data }`. Issue comments add `issue_number`; PR conversation comments, review comments, reviews, and commits add `pull_number`. Provider response fields remain under `data`. Issues and PRs contain their own metadata, while comments and reviews occupy individual rows in their respective tables.
 
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing. See [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity).
+
 PR commits retain exactly `data.sha` and `data.message`, plus the repository and PR join keys. The reader requests the paginated [GraphQL PR commit connection](https://docs.github.com/en/graphql/reference/pulls#pullrequest) and maps the provider commit object ID to `sha`. Repeated SHAs, changes in `totalCount`, or a mismatched distinct terminal count fail the commit stream rather than completing a truncated collection. It does not request changed files or patches.
 
 Join resources later in ClickHouse using `repository` plus `data.number` on issues/PRs and `issue_number` or `pull_number` on child rows. Review comments also retain their provider review ID for joining to reviews. A commit's SHA is scoped to its repository/PR membership, so a commit appearing in several PRs remains joinable to each one.
