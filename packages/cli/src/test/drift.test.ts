@@ -5,6 +5,7 @@ import {
   type SkipIndexDefinition,
   type TableConstraintDefinition,
   type TableInput,
+  parseCodec,
   table,
 } from '@chkit/core'
 
@@ -202,6 +203,35 @@ describe('@chkit/cli drift comparer', () => {
       { ...actual, defaultKind: 'MATERIALIZED' },
     ] satisfies ColumnDefinition[]) {
       expect(compareColumn(expected, column)?.changedColumns).toEqual(['value'])
+    }
+  })
+
+  // #383: a codec added, removed or changed on the server is drift, while the
+  // forms ClickHouse fills in (ZSTD(1), LZ4HC(0), no DoubleDelta width, no FPC
+  // float size) are not.
+  test('compares column codecs in the form ClickHouse stores them', () => {
+    const column = { name: 'value', type: 'Float64' }
+    const live = (compressionCodec: string) => ({ ...column, codec: parseCodec(compressionCodec) })
+    expect(compareColumn({ ...column, codec: { kind: 'ZSTD' } }, live('CODEC(ZSTD(1))'))).toBeNull()
+    expect(compareColumn({ ...column, codec: { kind: 'LZ4HC' } }, live('CODEC(LZ4HC(0))'))).toBeNull()
+    expect(compareColumn(
+      { ...column, codec: [{ kind: 'DoubleDelta', size: 8 }, { kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }] },
+      live('CODEC(DoubleDelta, FPC(12), LZ4)')
+    )).toBeNull()
+    expect(compareColumn(column, live(''))).toBeNull()
+
+    const differences: Array<[ColumnDefinition, ColumnDefinition]> = [
+      [{ ...column, codec: { kind: 'ZSTD', level: 3 } }, live('CODEC(LZ4)')],
+      [column, live('CODEC(ZSTD(3))')],
+      [{ ...column, codec: { kind: 'ZSTD', level: 3 } }, live('')],
+      [{ ...column, codec: [{ kind: 'Delta', size: 1 }, { kind: 'LZ4' }] }, live('CODEC(Delta(8), LZ4)')],
+      [{ ...column, codec: [{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }] }, live('CODEC(FPC(5), LZ4)')],
+    ]
+    for (const [expected, actual] of differences) {
+      expect(compareColumn(expected, actual)).toMatchObject({
+        changedColumns: ['value'],
+        reasonCodes: ['changed_column'],
+      })
     }
   })
 

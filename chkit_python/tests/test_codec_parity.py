@@ -7,8 +7,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from chkit.core.codec import (
+    CodecSpecInput,
     canonicalize_codec,
+    codec_fingerprint,
     codec_raw,
     codecs_equal,
     parse_codec,
@@ -147,6 +151,15 @@ def test_parse_falls_back_to_raw_when_known_codec_has_unexpected_args() -> None:
         ]
 
 
+def test_parse_reads_a_negative_level_back_from_the_unsigned_form_clickhouse_prints() -> None:
+    zstd = parse_codec("CODEC(ZSTD(18446744073709551615))")
+    lz4hc = parse_codec("CODEC(LZ4HC(18446744073709551614))")
+    assert zstd is not None
+    assert lz4hc is not None
+    assert [c.model_dump() for c in zstd] == [{"kind": "ZSTD", "level": -1}]
+    assert [c.model_dump() for c in lz4hc] == [{"kind": "LZ4HC", "level": -2}]
+
+
 # ───────────── canonicalizeCodec ─────────────
 
 
@@ -222,3 +235,84 @@ def test_codecs_equal_chain_order_matters() -> None:
     a = [{"kind": "Delta", "size": 4}, {"kind": "ZSTD"}]
     b = [{"kind": "ZSTD"}, {"kind": "Delta", "size": 4}]
     assert codecs_equal(a, b) is False
+
+
+# ───────────── codecFingerprint ─────────────
+
+# Each schema codec beside the compression_codec ClickHouse 26.3 and
+# ObsessionDB 26.8 store for the CREATE TABLE chkit renders from it (#383).
+_STORED: list[tuple[CodecSpecInput, str]] = [
+    ({"kind": "NONE"}, "CODEC(NONE)"),
+    ({"kind": "LZ4"}, "CODEC(LZ4)"),
+    ({"kind": "T64"}, "CODEC(T64)"),
+    ({"kind": "GCD"}, "CODEC(GCD)"),
+    ({"kind": "ALP"}, "CODEC(ALP)"),
+    ({"kind": "ZSTD"}, "CODEC(ZSTD(1))"),
+    ({"kind": "ZSTD", "level": 3}, "CODEC(ZSTD(3))"),
+    ({"kind": "ZSTD", "level": -1}, "CODEC(ZSTD(18446744073709551615))"),
+    ({"kind": "LZ4HC"}, "CODEC(LZ4HC(9))"),
+    ({"kind": "LZ4HC"}, "CODEC(LZ4HC(0))"),
+    ({"kind": "LZ4HC", "level": 0}, "CODEC(LZ4HC(0))"),
+    ({"kind": "LZ4HC", "level": -1}, "CODEC(LZ4HC(18446744073709551615))"),
+    ({"kind": "LZ4HC", "level": 12}, "CODEC(LZ4HC(12))"),
+    ([{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(1), ZSTD(1))"),
+    ([{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"),
+    ([{"kind": "DoubleDelta"}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
+    ([{"kind": "DoubleDelta", "size": 4}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
+    ([{"kind": "Gorilla"}, {"kind": "LZ4"}], "CODEC(Gorilla(1), LZ4)"),
+    ([{"kind": "Gorilla", "size": 8}, {"kind": "ZSTD", "level": 2}], "CODEC(Gorilla(8), ZSTD(2))"),
+    ([{"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "LZ4"}], "CODEC(FPC(12), LZ4)"),
+    (
+        [{"kind": "Delta", "size": 8}, {"kind": "T64"}, {"kind": "ZSTD"}],
+        "CODEC(Delta(8), T64, ZSTD(1))",
+    ),
+    (codec_raw("ZSTD"), "CODEC(ZSTD(1))"),
+    (codec_raw("Delta(4),ZSTD(3)"), "CODEC(Delta(4), ZSTD(3))"),
+    (codec_raw("FPC, LZ4"), "CODEC(FPC(12), LZ4)"),
+    (codec_raw("FPC(5, 4), LZ4HC"), "CODEC(FPC(5), LZ4HC(0))"),
+    (codec_raw("AES_128_GCM_SIV"), "CODEC(AES_128_GCM_SIV)"),
+    ([{"kind": "Delta", "size": 4}, codec_raw("ZSTD(3)")], "CODEC(Delta(4), ZSTD(3))"),
+]
+
+
+@pytest.mark.parametrize(("spec", "compression_codec"), _STORED)
+def test_codec_fingerprint_matches_the_stored_form(
+    spec: CodecSpecInput, compression_codec: str
+) -> None:
+    assert codec_fingerprint(spec) == codec_fingerprint(parse_codec(compression_codec))
+
+
+def test_codec_fingerprint_of_no_codec_matches_an_empty_compression_codec() -> None:
+    assert codec_fingerprint(None) == ""
+    assert codec_fingerprint(parse_codec("")) == ""
+
+
+def test_codec_fingerprint_tells_apart_codecs_clickhouse_stores_differently() -> None:
+    distinct: list[CodecSpecInput] = [
+        {"kind": "LZ4"},
+        {"kind": "NONE"},
+        {"kind": "ZSTD"},
+        {"kind": "ZSTD", "level": 3},
+        {"kind": "ZSTD", "level": 0},
+        {"kind": "LZ4HC"},
+        {"kind": "LZ4HC", "level": 12},
+        [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}],
+        [{"kind": "Delta", "size": 8}, {"kind": "LZ4"}],
+        [{"kind": "DoubleDelta"}, {"kind": "LZ4"}],
+        [{"kind": "Gorilla", "size": 8}, {"kind": "LZ4"}],
+        [{"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "LZ4"}],
+        [{"kind": "FPC", "level": 5, "floatSize": 8}, {"kind": "LZ4"}],
+        [{"kind": "T64"}, {"kind": "LZ4"}],
+        [{"kind": "LZ4"}, {"kind": "T64"}],
+    ]
+    fingerprints = [codec_fingerprint(spec) for spec in distinct]
+    assert len({*fingerprints, ""}) == len(distinct) + 1
+
+
+def test_codec_fingerprint_matches_the_typescript_strings() -> None:
+    assert codec_fingerprint({"kind": "LZ4HC"}) == "LZ4HC(9)"
+    assert codec_fingerprint(parse_codec("CODEC(ZSTD(18446744073709551615))")) == "ZSTD(-1)"
+    assert (
+        codec_fingerprint(parse_codec("CODEC(Delta(8), DoubleDelta, FPC(12), ZSTD(1))"))
+        == "Delta(8),DoubleDelta,FPC(12),ZSTD(1)"
+    )

@@ -22,6 +22,7 @@ from chkit.cli.commands.drift_diff import (
     diff_settings,
 )
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectKind
+from chkit.core.codec import codec_fingerprint
 from chkit.core.column_default import render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
 from chkit.core.identifier import unquote_identifiers
@@ -291,6 +292,7 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
+        f"codec={codec_fingerprint(column.codec)}",
     ]
     return "|".join(parts)
 
