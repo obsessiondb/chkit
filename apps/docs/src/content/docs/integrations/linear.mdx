@@ -31,6 +31,8 @@ Keep stream IDs and destinations tied to one workspace. The reader does not reso
 
 Issues, comments, projects, project updates, cycles, users, teams, issue relations, and issue history each have their own raw table and checkpoint. Relationships retain provider-shaped ID references. Join resources and calculate metrics later in ClickHouse. Issues retain fully paginated label names as strings; label definitions, workflow states, and project statuses have no separate streams. Bounded inline state/status metadata remains provider fields.
 
+The `raw` column stores native ClickHouse JSON, not an exact JSON archive. Native JSON normalization can omit explicit null properties and empty objects, including nullable relationship fields. See [native JSON storage fidelity](/api-sync/destinations/#native-json-storage-fidelity).
+
 Comments use their own collection, including nullable references for issue and other parent types. History independently discovers all accessible issues before paging their events. Neither reader depends on the issues stream's execution or checkpoint. Paginated project memberships and other associations are outside the selected resource scope.
 
 ```sh
