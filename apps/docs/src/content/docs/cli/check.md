@@ -29,7 +29,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 |--------|-----------|---------|----------------|
 | Fail on pending | `check.failOnPending` | `true` | Pending migrations exist |
 | Fail on checksum mismatch | `check.failOnChecksumMismatch` | `true` | Applied migration files have been modified |
-| Fail on drift | `check.failOnDrift` | `true` | Live ClickHouse schema differs from snapshot |
+| Fail on drift | `check.failOnDrift` | `true` | Live ClickHouse schema differs from snapshot ([not every property is compared](/cli/drift/#what-drift-does-not-compare)) |
 | Fail on extra objects | `check.failOnExtraObjects` | `false` | Objects exist in ClickHouse that are not in your schema |
 
 By default, objects that exist in ClickHouse but are not in your schema (`extra_object`) are **not** treated as drift — so chkit coexists with unmanaged tables on a shared database without breaking the CI gate. They are still reported by [`chkit drift`](/cli/drift/) for visibility. Set `check.failOnExtraObjects: true` only when chkit owns the entire database and any unmanaged object should fail the check.
