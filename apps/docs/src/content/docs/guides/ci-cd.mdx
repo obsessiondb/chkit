@@ -36,7 +36,7 @@ chkit reads ClickHouse connection details from the environment. Set these as CI 
 
 ### Read-only credentials
 
-`chkit status`, `chkit check`, `chkit drift`, `chkit query` and `chkit migrate` without `--apply` only read, so a CI gate can run them as a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted `SELECT`). A journal that does not exist yet reads as no applied migrations; it is not created. `chkit migrate --apply` writes and needs a user with the privileges for the journal and the migrations: with a read-only user it fails with the ClickHouse error, such as `Not enough privileges` or `Cannot modify 'async_insert' setting in readonly mode`.
+`chkit status`, `chkit check`, `chkit drift`, `chkit query` and `chkit migrate` without `--apply` only read, so a CI gate can run them as a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted `SELECT`). A journal that does not exist yet reads as no applied migrations; it is not created. A journal created by a chkit version without per-operation tracking needs one `ALTER TABLE ... ADD COLUMN`: run any chkit command once as a user that can alter it, or the read-only user gets an error that says so. `chkit migrate --apply` writes and needs a user with the privileges for the journal and the migrations: with a read-only user it fails with the ClickHouse error, such as `Not enough privileges` or `Cannot modify 'async_insert' setting in readonly mode`.
 
 On a target with several replicas, chkit reads the journal from every replica through `clusterAllReplicas`, which needs the `READ ON REMOTE` grant (`GRANT READ ON REMOTE TO ci_reader`). Without it, chkit reads the journal from the replica it is connected to.
 

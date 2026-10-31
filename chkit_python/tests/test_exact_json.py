@@ -23,6 +23,13 @@ BODY = """{
          "f": 0.5, "dt64": "2026-10-31 00:32:27.123"},
         {"u64": 0, "arr": [], "nd": null, "u32": 0, "f": -1e-7, "dt64": "2026-10-31 00:32:27.123"}
     ],
+    "totals": {"u64": 18446744073709551615, "arr": [], "nd": 12345678901234567890.123, "u32": 7,
+               "f": 0.5, "dt64": "2026-10-31 00:32:27.123"},
+    "extremes": {
+        "min": {"u64": 0, "arr": [], "nd": 1.500, "u32": 0, "f": -1e-7, "dt64": "2026-10-31 00:32:27.123"},
+        "max": {"u64": 18446744073709551615, "arr": [9007199254740993], "nd": 1.500, "u32": 7,
+                "f": 0.5, "dt64": "2026-10-31 00:32:27.123"}
+    },
     "rows": 2,
     "statistics": {"elapsed": 0.000613, "rows_read": 1, "bytes_read": 1}
 }"""
@@ -48,10 +55,36 @@ def test_keeps_the_digits_of_64_bit_and_wider_integers_and_decimals_as_strings()
     assert type(result["data"][0]["f"]) is float
 
 
+def test_keeps_the_digits_in_the_totals_and_extremes_rows_too_by_the_same_column_types() -> None:
+    result = parse_json_result(BODY)
+
+    assert result["totals"] == {
+        "u64": "18446744073709551615",
+        "arr": [],
+        "nd": "12345678901234567890.123",
+        "u32": 7,
+        "f": 0.5,
+        "dt64": "2026-10-31 00:32:27.123",
+    }
+    assert result["extremes"] == {
+        "min": {"u64": "0", "arr": [], "nd": "1.500", "u32": 0, "f": -1e-7, "dt64": "2026-10-31 00:32:27.123"},
+        "max": {
+            "u64": "18446744073709551615",
+            "arr": ["9007199254740993"],
+            "nd": "1.500",
+            "u32": 7,
+            "f": 0.5,
+            "dt64": "2026-10-31 00:32:27.123",
+        },
+    }
+    assert type(result["totals"]["u32"]) is int
+    assert type(result["extremes"]["max"]["f"]) is float
+
+
 def test_keeps_the_rest_of_the_envelope_as_clickhouse_sent_it() -> None:
     result = parse_json_result(BODY)
 
-    assert list(result) == ["meta", "data", "rows", "statistics"]
+    assert list(result) == ["meta", "data", "totals", "extremes", "rows", "statistics"]
     assert result["rows"] == 2
     assert result["statistics"] == {"elapsed": 0.000613, "rows_read": 1, "bytes_read": 1}
     assert type(result["statistics"]["elapsed"]) is float

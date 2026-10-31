@@ -415,14 +415,23 @@ def parse_json_result(body: str | bytes) -> dict[str, Any]:
         for column in parsed.get("meta", [])
         if _EXACT_TYPE_RE.search(column["type"])
     }
-    return {
-        key: (
-            [{name: _restore(cell, name in exact) for name, cell in row.items()} for row in value]
-            if key == "data"
-            else _restore(value, exact=False)
-        )
-        for key, value in parsed.items()
-    }
+
+    # Rows keyed by column name: data, totals (WITH TOTALS) and extremes.min/max.
+    def restore_row(row: Any) -> Any:
+        if not isinstance(row, dict):
+            return _restore(row, exact=False)
+        return {name: _restore(cell, name in exact) for name, cell in row.items()}
+
+    def restore_entry(key: str, value: Any) -> Any:
+        if key == "data":
+            return [restore_row(row) for row in value]
+        if key == "totals":
+            return restore_row(value)
+        if key == "extremes" and isinstance(value, dict):
+            return {bound: restore_row(row) for bound, row in value.items()}
+        return _restore(value, exact=False)
+
+    return {key: restore_entry(key, value) for key, value in parsed.items()}
 
 
 def _restore(value: Any, exact: bool) -> Any:

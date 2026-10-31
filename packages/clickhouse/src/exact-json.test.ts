@@ -17,6 +17,11 @@ const BODY = `{
 		{"u64": 18446744073709551615, "arr": [9007199254740993, 1], "nd": 1.500, "u32": 7, "f": 0.5, "dt64": "2026-10-31 00:32:27.123"},
 		{"u64": 0, "arr": [], "nd": null, "u32": 0, "f": -1e-7, "dt64": "2026-10-31 00:32:27.123"}
 	],
+	"totals": {"u64": 18446744073709551615, "arr": [], "nd": 12345678901234567890.123, "u32": 7, "f": 0.5, "dt64": "2026-10-31 00:32:27.123"},
+	"extremes": {
+		"min": {"u64": 0, "arr": [], "nd": 1.500, "u32": 0, "f": -1e-7, "dt64": "2026-10-31 00:32:27.123"},
+		"max": {"u64": 18446744073709551615, "arr": [9007199254740993], "nd": 1.500, "u32": 7, "f": 0.5, "dt64": "2026-10-31 00:32:27.123"}
+	},
 	"rows": 2,
 	"statistics": {"elapsed": 0.000613, "rows_read": 1, "bytes_read": 1}
 }`
@@ -31,10 +36,27 @@ describe('parseJsonResult (#381)', () => {
 		])
 	})
 
+	test('keeps the digits in the totals and extremes rows too, by the same column types', () => {
+		const result = parseJsonResult(BODY)
+
+		expect(result.totals).toEqual({
+			u64: '18446744073709551615',
+			arr: [],
+			nd: '12345678901234567890.123',
+			u32: 7,
+			f: 0.5,
+			dt64: '2026-10-31 00:32:27.123',
+		})
+		expect(result.extremes).toEqual({
+			min: { u64: '0', arr: [], nd: '1.500', u32: 0, f: -1e-7, dt64: '2026-10-31 00:32:27.123' },
+			max: { u64: '18446744073709551615', arr: ['9007199254740993'], nd: '1.500', u32: 7, f: 0.5, dt64: '2026-10-31 00:32:27.123' },
+		})
+	})
+
 	test('keeps the rest of the envelope, after data as in the Python port', () => {
 		const result = parseJsonResult(BODY)
 
-		expect(Object.keys(result)).toEqual(['data', 'meta', 'rows', 'statistics'])
+		expect(Object.keys(result)).toEqual(['data', 'meta', 'totals', 'extremes', 'rows', 'statistics'])
 		expect(result.rows).toBe(2)
 		expect(result.statistics).toEqual({ elapsed: 0.000613, rows_read: 1, bytes_read: 1 })
 	})

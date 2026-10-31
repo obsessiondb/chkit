@@ -305,12 +305,20 @@ SETTINGS index_granularity = 1`
     // columns idempotently so older deployments pick them up on first run
     // of the new chkit. ALTER ADD COLUMN IF NOT EXISTS is a metadata op,
     // no data rewrite.
-    await db.command(
-      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
-    )
-    await db.command(
-      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
-    )
+    try {
+      await db.command(
+        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
+      )
+      await db.command(
+        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
+      )
+    } catch (error) {
+      // A read-only user cannot run the ALTER (#402).
+      throw new Error(
+        `The journal table ${journalTable} predates per-operation tracking and needs its new columns added. Run chkit once as a user that can ALTER it (as migrate --apply needs). ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
+    }
   }
 
   /**

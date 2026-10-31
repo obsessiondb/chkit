@@ -369,14 +369,22 @@ class JournalStore:
         # idempotently. ``ADD COLUMN IF NOT EXISTS`` is a metadata-only op.
         # In cluster mode both ALTERs carry ``ON CLUSTER '<name>'`` so every
         # replica converges on the new column set in the same DDL round-trip.
-        self._client.execute(
-            f"ALTER TABLE {self._table}{self._on_cluster} "
-            f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
-        )
-        self._client.execute(
-            f"ALTER TABLE {self._table}{self._on_cluster} "
-            f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
-        )
+        try:
+            self._client.execute(
+                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
+            )
+            self._client.execute(
+                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
+            )
+        except Exception as exc:
+            # A read-only user cannot run the ALTER (#402). Same message as TS.
+            raise RuntimeError(
+                f"The journal table {self._table} predates per-operation tracking and needs "
+                "its new columns added. Run chkit once as a user that can ALTER it "
+                f"(as migrate --apply needs). {exc}"
+            ) from exc
 
     def _journal_rows(self, where: str, *, limit: str = "") -> list[dict[str, Any]]:
         """The rows to read the journal from.

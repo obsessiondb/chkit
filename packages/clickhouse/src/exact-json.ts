@@ -44,13 +44,24 @@ export function parseJsonResult<T extends Record<string, unknown>>(
 			typeof value === 'number' ? jsonNumber(context?.source, value) : value,
 	)
 	const exactColumns = new Set(meta.filter((column) => EXACT_TYPE_RE.test(column.type)).map((column) => column.name))
+	// Rows keyed by column name: data, totals (WITH TOTALS) and extremes.min/max.
+	const restoreRow = (row: unknown): unknown =>
+		isRecord(row)
+			? Object.fromEntries(Object.entries(row).map(([name, cell]) => [name, restore(cell, exactColumns.has(name))]))
+			: restore(row, false)
 	// data first, as the ObsessionDB executor and the Python port print it.
 	return {
-		data: data.map((row) =>
-			Object.fromEntries(Object.entries(row).map(([name, cell]) => [name, restore(cell, exactColumns.has(name))])),
-		),
+		data: data.map(restoreRow),
 		meta,
-		...(restore(rest, false) as Record<string, unknown>),
+		...Object.fromEntries(
+			Object.entries(rest).map(([key, value]) => {
+				if (key === 'totals') return [key, restoreRow(value)]
+				if (key === 'extremes' && isRecord(value)) {
+					return [key, Object.fromEntries(Object.entries(value).map(([bound, row]) => [bound, restoreRow(row)]))]
+				}
+				return [key, restore(value, false)]
+			}),
+		),
 	} as ClickHouseJsonQueryResult<T>
 }
 
@@ -60,6 +71,10 @@ function jsonNumber(source: string | undefined, value: number): JsonNumber {
 
 function isJsonNumber(value: unknown): value is JsonNumber {
 	return value !== null && typeof value === 'object' && JSON_NUMBER in value
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === 'object' && !Array.isArray(value) && !isJsonNumber(value)
 }
 
 function restore(value: unknown, exact: boolean): unknown {
@@ -75,7 +90,7 @@ function restore(value: unknown, exact: boolean): unknown {
 		return value.source
 	}
 	if (Array.isArray(value)) return value.map((item) => restore(item, exact))
-	if (value !== null && typeof value === 'object') {
+	if (isRecord(value)) {
 		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, restore(item, exact)]))
 	}
 	return value

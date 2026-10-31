@@ -124,7 +124,7 @@ ClickHouse writes 64-bit and wider integers and Decimals as bare JSON numbers, w
 | `Decimal(P, S)` of any width | string, e.g. `"12345678901234567890.123456789"` |
 | `JSON`, `Object`, `Dynamic` | every number inside is a string |
 
-Every number in a column whose type contains one of these types is a string, also inside arrays, maps, tuples and `Nullable`: `Array(UInt64)` prints `["18446744073709551615","1"]`, and `Tuple(UInt8, UInt64)` prints both numbers as strings. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string.
+Every number in a column whose type contains one of these types is a string, in `data` and in the `totals` (`WITH TOTALS`) and `extremes` (`SETTINGS extremes = 1`) rows, also inside arrays, maps, tuples and `Nullable`: `Array(UInt64)` prints `["18446744073709551615","1"]`, and `Tuple(UInt8, UInt64)` prints both numbers as strings. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string.
 
 ## Related commands
 

@@ -131,7 +131,8 @@
   same output as TS, in `--json` and in the table (#381). `query_json` parses ClickHouse's
   `FORMAT JSON` body without losing digits (`parse_json_result`) and, in every column whose
   type is or contains `Int64`/`UInt64`, a 128/256-bit integer, a `Decimal`, `JSON`, `Object`
-  or `Dynamic`, returns each number as a string of the digits ClickHouse sent. A
+  or `Dynamic`, returns each number as a string of the digits ClickHouse sent, in `data` and
+  in the `totals` (`WITH TOTALS`) and `extremes` rows. A
   `Decimal128(9)` such as `12345678901234567890.123456789` was printed as the float
   `1.2345678901234567e+19`. It sends no settings, so it works for a `readonly = 1` user.
   **Behaviour change:** in `--json`, `UInt64`, `Int64`, 128/256-bit integer and `Decimal`
@@ -154,7 +155,10 @@
   `migrate --apply`; the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` upgrade runs only for a
   journal that lacks the per-operation columns, and a `readonly = 1` user reads the journal
   without `select_sequential_consistency`. `migrate --apply` with a read-only user fails
-  with the ClickHouse error, as before.
+  with the ClickHouse error, as before. A journal created before per-operation tracking
+  needs that `ALTER` once: with a read-only user, `status`, `check` and `migrate` fail with
+  `The journal table ... predates per-operation tracking and needs its new columns added.
+  Run chkit once as a user that can ALTER it`, followed by the ClickHouse error, as in TS.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not

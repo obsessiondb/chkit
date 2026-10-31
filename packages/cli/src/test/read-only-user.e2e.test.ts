@@ -17,9 +17,9 @@ import {
 } from './e2e-testkit.js'
 
 const env = getLiveEnv()
-// ObsessionDB users have no CREATE USER (or any access-management) grant, so
-// the tests that create read-only users run in verify, against the local
-// stack, only.
+// ObsessionDB users have no CREATE USER (or any access-management) grant
+// (#403), so the tests that create read-only users run in verify, against the
+// local stack, only.
 const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 
 const SQL =
@@ -114,6 +114,7 @@ describe('read-only commands (#402)', () => {
         const user: User = { name: `${createPrefix(`ro${readonly}`)}user`, password: crypto.randomUUID() }
         const project = await createProject(`ro${readonly}`, [admin, user])
         const missingJournal = createJournalTableName(`ro${readonly}_missing`)
+        const legacyJournal = createJournalTableName(`ro${readonly}_legacy`)
         try {
           await executor.command(
             `CREATE USER ${quoteIdent(user.name)} IDENTIFIED BY '${user.password}' SETTINGS readonly = ${readonly}`,
@@ -152,10 +153,21 @@ describe('read-only commands (#402)', () => {
             `SELECT name FROM system.tables WHERE database = '${env.clickhouseDatabase}' AND name = '${missingJournal}'`,
           )
           expect(journals).toEqual([])
+
+          // A journal from before per-operation tracking needs an ALTER the user
+          // cannot run: say so, instead of a settings error.
+          await executor.command(
+            `CREATE TABLE ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(legacyJournal)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
+          )
+          const legacy = project.cli(user, ['status', '--json'], legacyJournal)
+          expect(legacy.exitCode, formatTestDiagnostic('status (legacy journal)', legacy)).toBe(1)
+          expect(`${legacy.stdout}${legacy.stderr}`).toContain(
+            `The journal table ${legacyJournal} predates per-operation tracking and needs its new columns added. Run chkit once as a user that can ALTER it`,
+          )
         } finally {
           await rm(project.dir, { recursive: true, force: true })
           await executor.command(`DROP USER IF EXISTS ${quoteIdent(user.name)}`).catch(() => {})
-          for (const name of [project.table, project.journalTable, missingJournal]) {
+          for (const name of [project.table, project.journalTable, missingJournal, legacyJournal]) {
             await executor
               .command(`DROP TABLE IF EXISTS ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)} SYNC`)
               .catch(() => {})

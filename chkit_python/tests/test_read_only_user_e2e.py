@@ -4,7 +4,8 @@ Port of the TS ``read-only-user.e2e.test.ts``. ``status``, ``check`` and
 ``migrate`` (plan) read a missing journal as empty and never create it. A user
 with ``readonly = 1`` or ``readonly = 2`` and only ``SELECT`` runs ``query``
 (every digit, #381), ``status``, ``check``, ``drift`` and ``migrate`` (plan);
-``migrate --apply`` fails with ClickHouse's own error.
+``migrate --apply`` fails with ClickHouse's own error, and a journal from before
+per-operation tracking says it needs a user that can ALTER it.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from chkit.cli.json_output import _reset_for_testing
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -30,9 +32,9 @@ from tests.e2e_testkit import (
     resolve_live_env,
 )
 
-# ObsessionDB users have no CREATE USER (or any access-management) grant, so
-# the tests that create read-only users run in verify, against the local
-# stack, only.
+# ObsessionDB users have no CREATE USER (or any access-management) grant
+# (#403), so the tests that create read-only users run in verify, against the
+# local stack, only.
 _ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 
 SQL = (
@@ -146,7 +148,7 @@ def test_a_missing_journal_reads_as_empty_and_is_not_created(
     assert not _journal_exists(admin, journal_table)
 
 
-@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant")
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#403)")
 @pytest.mark.parametrize("readonly", [1, 2])
 def test_a_read_only_user_runs_the_read_only_commands(
     admin: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readonly: int
@@ -154,6 +156,7 @@ def test_a_read_only_user_runs_the_read_only_commands(
     env = resolve_live_env()
     table, journal_table = _project(tmp_path, monkeypatch, f"ro{readonly}_py")
     missing_journal = create_journal_table_name(f"ro{readonly}_missing_py")
+    legacy_journal = create_journal_table_name(f"ro{readonly}_legacy_py")
     user, password = f"{create_prefix(f'ro{readonly}_py')}user", secrets.token_hex(16)
     as_admin = _cli(_write_config(tmp_path, env.clickhouse_user, env.clickhouse_password))
     as_user = _cli(_write_config(tmp_path, user, password))
@@ -196,9 +199,29 @@ def test_a_read_only_user_runs_the_read_only_commands(
         assert apply["ok"] is False
         assert "Not enough privileges" in json.dumps(apply["error"])
         assert not _journal_exists(admin, missing_journal)
+
+        # A journal from before per-operation tracking needs an ALTER the user
+        # cannot run: say so.
+        admin.execute(
+            f"CREATE TABLE {quote_ident(env.clickhouse_database)}.{quote_ident(legacy_journal)} "
+            "(name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) "
+            "ENGINE = ReplacingMergeTree(applied_at) ORDER BY name"
+        )
+        monkeypatch.setenv("CHKIT_JOURNAL_TABLE", legacy_journal)
+        # The CLI runs in-process: the error envelope is written only when no
+        # earlier invocation has written JSON.
+        _reset_for_testing()
+        legacy = CliRunner().invoke(
+            app, ["status", "--json", "--config", str(tmp_path / f"{user}.config.py")]
+        )
+        assert legacy.exit_code == 1, format_test_diagnostic("status (legacy journal)", legacy)
+        assert json.loads(legacy.stdout)["error"]["message"].startswith(
+            f"The journal table {legacy_journal} predates per-operation tracking and needs "
+            "its new columns added. Run chkit once as a user that can ALTER it"
+        )
     finally:
         admin.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
-        for name in (table, journal_table, missing_journal):
+        for name in (table, journal_table, missing_journal, legacy_journal):
             admin.execute(
                 f"DROP TABLE IF EXISTS {quote_ident(env.clickhouse_database)}.{quote_ident(name)} SYNC"
             )
