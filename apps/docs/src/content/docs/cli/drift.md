@@ -49,6 +49,10 @@ ClickHouse does not store SQL comments. chkit removes them from TTL, partition, 
 
 Column defaults are compared token by token with `default_expression` in `system.columns`. chkit removes the comments from an expression default (`{ expression }` or `fn:`), then ignores whitespace, outer parentheses, and quotes around plain identifiers, so `now()+1` matches the stored `now() + 1`. A literal default is compared as a value: `default: 'web'` matches the stored `'web'`. ClickHouse stores some expressions in a canonical form, and an expression written another way reports `changed_column` although the default is the same: `NOW()` is stored as `now()`, `x::String` as `CAST(x, 'String')`, and `now() + INTERVAL 1 DAY` as `now() + toIntervalDay(1)`. Write expression defaults in the stored form; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
 
+### Column codecs
+
+Column codecs are compared with `compression_codec` in `system.columns`. ClickHouse fills in some codec arguments and drops others when it stores a codec: `ZSTD` is stored as `ZSTD(1)`, `LZ4HC` as `LZ4HC(0)` (the default level, 9), `DoubleDelta(4)` as `DoubleDelta`, and `FPC(12, 8)` as `FPC(12)`. chkit compares both sides in this stored form, so these spellings do not report drift. A codec added, removed, or changed on the server reports `changed_column`. A [`raw` codec](/schema/dsl-reference/#codec-columncodecspec-optional) is compared as written, without whitespace. ClickHouse sets the size of a bare `Delta` or `Gorilla` from the column type, so a raw codec must give it (`Delta(8)`, not `Delta`).
+
 ### Drift reason codes
 
 **Object-level drift:**
@@ -65,7 +69,7 @@ Column defaults are compared token by token with `default_expression` in `system
 |------|---------|
 | `missing_column` | Column in snapshot not found in live table |
 | `extra_column` | Column in live table not in snapshot |
-| `changed_column` | Column exists but type, default, or column kind differs |
+| `changed_column` | Column exists but type, default, column kind, or codec differs |
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |
