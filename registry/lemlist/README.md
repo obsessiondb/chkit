@@ -1,6 +1,6 @@
 # Lemlist raw ingestion
 
-Sync seven Lemlist resources into independent raw ClickHouse tables. Provider records retain their native fields; transformations, campaign/contact joins, and reporting belong in ClickHouse.
+Sync seven Lemlist resources into independent raw ClickHouse tables. Readers pass provider records without field transformations; campaign/contact joins and reporting belong in ClickHouse. The `raw` column uses ClickHouse native JSON, not an exact copy of the response text: storage normalization can omit explicit null properties and empty objects. See the [native JSON storage fidelity contract](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity).
 
 Set `LEMLIST_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit `config.ts` for the account namespace, page size, initial date, overlap, and interval length. Native JSON requires ClickHouse 25.3 or later.
 
@@ -30,9 +30,9 @@ Contacts represent team-wide people; campaign leads are their distinct campaign-
 
 Campaign leads discover every campaign themselves and use [the JSON export](https://developer.lemlist.com/api-reference/endpoints/campaigns/export-campaign-leads-v2) with `state=all`. The ordinary campaign lead list documents a 500-record limit and no continuation; it is not used. Export records are preserved under `raw.data`, with `source_id` and `campaign_id` alongside them. Exports do not guarantee `contactId`; join the native lead ID against contacts' campaign references in ClickHouse rather than matching email addresses.
 
-Conversations independently discover all current team member IDs through `GET /team?version=v2`, then paginate each user's inbox. Set `inboxUserIds` to an explicit nonempty list to restrict this stream. An empty or omitted list means all discovered team members. A missing member list fails visibly; it is not an empty successful inbox. Conversation envelopes retain `source_id`, `user_id`, and untouched `data`.
+Conversations independently discover all current team member IDs through `GET /team?version=v2`, then paginate each user's inbox. Set `inboxUserIds` to an explicit nonempty list to restrict this stream. An empty or omitted list means all discovered team members. A missing member list fails visibly; it is not an empty successful inbox. Conversation envelopes contain `source_id`, `user_id`, and provider fields under `data`, subject to native JSON normalization.
 
-Messages independently paginate all current contacts, including old contacts, then page each contact's complete accessible message history with `skip/limit`. `inboxUserIds` scopes only conversations; messages cover all accessible contacts in the account. Every message request explicitly sets `markAsRead=false`. Readers issue only GET requests and do not mark conversations read or perform inbox actions. Message envelopes retain `source_id`, `contact_id`, and untouched `data`.
+Messages independently paginate all current contacts, including old contacts, then page each contact's complete accessible message history with `skip/limit`. `inboxUserIds` scopes only conversations; messages cover all accessible contacts in the account. Every message request explicitly sets `markAsRead=false`. Readers issue only GET requests and do not mark conversations read or perform inbox actions. Message envelopes contain `source_id`, `contact_id`, and provider fields under `data`, subject to native JSON normalization.
 
 ## Sync and recovery
 
@@ -57,7 +57,7 @@ Raw observations do not infer deletions. Removed contacts, companies, campaign l
 
 Version 0.2.0 adds five raw destinations to the two original tables. Generate and review additive migrations before running the new streams. Existing activities/campaigns stream IDs, timestamp state, raw fields and native `_id` row keys stay unchanged; those original tables belong to one installation/account.
 
-Contacts and companies preserve untouched provider records under `raw.data` with `source_id`; their row IDs encode `[sourceId, providerId]`. Campaign lead, conversation, and message row IDs encode `[sourceId, parentId, providerId]`. Conversation parent IDs are user IDs, preserving distinct user inbox observations even when the native conversation ID matches. Provider IDs remain unchanged inside `raw.data`. Changing the account requires new stream namespaces and destinations; changing the conversation user scope should use a new source namespace or explicitly reconcile its prior observations.
+Contacts and companies store provider fields under `raw.data` with `source_id`, subject to native JSON normalization; their row IDs encode `[sourceId, providerId]`. Campaign lead, conversation, and message row IDs encode `[sourceId, parentId, providerId]`. Conversation parent IDs are user IDs, preserving distinct user inbox observations even when the native conversation ID matches. Provider IDs remain unchanged inside `raw.data`. Changing the account requires new stream namespaces and destinations; changing the conversation user scope should use a new source namespace or explicitly reconcile its prior observations.
 
 ## Fixture tests
 
