@@ -55,6 +55,14 @@ Native JSON is [production-ready from ClickHouse 25.3](https://clickhouse.com/do
 
 </details>
 
+### Native JSON storage fidelity
+
+`rawTable()` stores payloads in a native `JSON` column. It retains queryable fields, not the original JSON representation: ClickHouse 26.3 drops explicit null-valued object fields and empty nested objects, and interprets dotted keys as nested paths by default. A `bigint` is encoded as decimal text and becomes a String path in native JSON. These storage semantics apply to every integration using `rawTable`, even when `rawRows` does not transform the provider object.
+
+Ingestion disables timestamp inference in JSON (`input_format_try_infer_datetimes=0`) while using best-effort parsing for explicitly typed DateTime columns. Raw ISO timestamps, offsets and space-separated timestamps remain strings. Space-separated raw timestamps previously inferred as DateTime now remain String; a JSON path may therefore contain mixed types across older and newer rows. Cast paths explicitly when querying across that transition.
+
+For shape-exact retention, define a custom table with `raw` of type `String` and map `raw: JSON.stringify(providerObject)` in the reader. This preserves explicit nulls, empty objects and literal dotted keys; queries can use ClickHouse JSON extraction functions. To retain the exact source bytes, save the original response text instead of parsing and reserializing it. Neither representation can recover a number already rounded by JavaScript's JSON parser; precision-sensitive providers need lossless parsing or string-valued identifiers.
+
 ## Map into a known schema
 
 Use a mapping function inside `read` to produce the destination columns. There is no separate mapping hook to register. This alternative is a complete source module; re-export its table and pipeline from the project entry.
@@ -179,6 +187,23 @@ export const demo = definePipeline({ id: 'demo', streams: [changes] })
 After both writes, `current_tickets` excludes ticket `1`. A late replay of version `1` cannot supersede its version `2` tombstone. If the source supports restoration, represent it with a greater version and `is_deleted: 0`. Retaining tombstones is a logical-delete policy, not physical data erasure. See [ClickHouse versioned replacement](https://clickhouse.com/docs/concepts/features/operations/update/replacing-merge-tree).
 
 </details>
+
+## Row values and schema compatibility
+
+Custom destinations must declare all `ingestionColumns`; the runtime rejects a missing declaration before reading the source. Apply the matching table migration before running ingestion. `_chkit_ingested_at` is assigned at the physical insert, not when the provider observation was made: a delayed older observation can replace a newer one in `rawTable`. Use a provider-owned version column when source revision order must win over insertion order.
+
+| Value or column | Input contract |
+|---|---|
+| `Int64`, `UInt64`, `Int128`, `UInt256`, and exact decimals | Use `bigint` or decimal strings for large integers and decimal strings for exact fractional values. JavaScript numbers lose precision before insertion; ClickHouse can wrap out-of-range integers and truncate excess decimal scale. Validate bounds in the reader. |
+| `Float32` / `Float64` | `NaN`, `Infinity`, and `-Infinity` encode as `nan`, `inf`, and `-inf` strings, which ClickHouse parses as non-finite floats. When aimed at an integer or String column, they now fail or land as text instead of becoming zero or null. Negative zero follows JSON number encoding and becomes zero. ClickHouse 26.3 can also underflow the smallest subnormal input (`5e-324`) to zero. |
+| `DateTime` / `DateTime64` | ISO 8601 strings, offsets and `Date` objects use `date_time_input_format=best_effort`. Explicit offsets are respected; offset-free strings use the column's timezone. Use strings to preserve precision finer than a JavaScript Date's milliseconds. |
+| `Date` / `Date32` | Supply `YYYY-MM-DD`, not a Date object or full timestamp. Validate bounds: ClickHouse may clamp out-of-range dates rather than rejecting them. |
+| `Map` | Supply a plain object or a JavaScript Map with string, number or bigint keys. Keys must remain distinct after conversion to strings. Nested bigint and non-finite values use the same encoding rules. |
+| `Array`, `Tuple`, `Nested` | Arrays use JSON arrays. Named tuples use objects; unnamed tuples use positional arrays. For `Nested`, supply flattened arrays such as `items.sku` and `items.qty`; a parent `items` field fails instead of being silently ignored. |
+| Omitted, null or extra fields | ClickHouse applies omitted-field defaults, including implicit zero/empty values. Its default `input_format_null_as_default=1` can also replace null in non-Nullable columns with a default. Unknown fields, including supplied MATERIALIZED or ALIAS values, follow the server's `input_format_skip_unknown_fields` setting (default `1` on 26.3). Validate row shapes to catch typos and unintended coercion. |
+| `EPHEMERAL`, `DEFAULT`, `MATERIALIZED`, `ALIAS` | The destination names insertable columns when EPHEMERAL inputs exist, so they reach default/materialized expressions. Omitted DEFAULT columns use their expressions; supply source columns rather than computed MATERIALIZED or ALIAS values. Object key order does not matter. |
+
+Wrong-type parsing errors fail the stream with ClickHouse's error and no checkpoint for the failed batch. Earlier acknowledged slices and already-written blocks within a failed INSERT can remain: neither a load batch nor an arbitrarily large INSERT is an all-or-nothing transaction. Replay still requires suitable destination keys. Validate provider values before yielding them; TypeScript's `Row` type is not runtime schema validation.
 
 ## Additional transformations
 
