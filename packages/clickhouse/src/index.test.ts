@@ -296,6 +296,46 @@ SETTINGS index_granularity = 8192;`
     })
   })
 
+  // A readonly = 1 user cannot change any setting, so reads send none on top
+  // of the client's wait_end_of_query; writes keep theirs (#402).
+  test('sends the write settings with command and insert only', async () => {
+    const sent: Record<string, unknown> = {}
+    const record = (method: string) => async (params: { clickhouse_settings?: unknown }) => {
+      sent[method] = params.clickhouse_settings
+      return {
+        query_id: method,
+        response_headers: {},
+        async text() {
+          return method === 'queryJson' ? '{"meta":[],"data":[],"rows":0}' : ''
+        },
+      }
+    }
+    const client = {
+      command: record('command'),
+      insert: record('insert'),
+      query: async (params: { clickhouse_settings?: unknown; format: string }) =>
+        record(params.format === 'JSON' ? 'queryJson' : 'query')(params),
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'default', secure: false },
+      client,
+    )
+
+    await executor.query('SELECT 1')
+    await executor.queryJson?.('SELECT 1')
+    await executor.command('CREATE TABLE t (a UInt8) ENGINE = Memory', { max_threads: 1 })
+    await executor.insert({ table: 't', values: [{ a: 1 }] })
+
+    expect(sent).toEqual({
+      query: undefined,
+      queryJson: undefined,
+      command: { async_insert: 0, send_progress_in_http_headers: 1, max_threads: 1 },
+      insert: { async_insert: 0, send_progress_in_http_headers: 1 },
+    })
+    await executor.close()
+  })
+
   test('executor.command throws when streamed exception is reported via headers', async () => {
     const calls: InsertCall[] = []
     const executor = createExecutorWithClient(

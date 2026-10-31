@@ -30,21 +30,14 @@ export const queryCommand: ChxPluginCommand = {
 			)
 		}
 
-		if (jsonMode) {
-			try {
-				const payload = pluginContext.executor.queryJson
-					? await pluginContext.executor.queryJson(sql)
-					: rowsToJsonResult(await pluginContext.executor.query<Record<string, unknown>>(sql))
-				printQueryJson(payload)
-				return 0
-			} catch (error) {
-				throw cleanQueryError(error)
-			}
-		}
-
 		try {
-			const rows = await pluginContext.executor.query<Record<string, unknown>>(sql)
-			printRows(rows)
+			// queryJson keeps every digit of 64-bit and wider integers and
+			// Decimals (#381), so the table reads through it too.
+			const payload = pluginContext.executor.queryJson
+				? await pluginContext.executor.queryJson(sql)
+				: rowsToJsonResult(await pluginContext.executor.query<Record<string, unknown>>(sql))
+			if (jsonMode) printQueryJson(payload)
+			else printRows(payload.data)
 			return 0
 		} catch (error) {
 			throw cleanQueryError(error)

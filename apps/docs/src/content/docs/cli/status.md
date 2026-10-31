@@ -28,7 +28,7 @@ No command-specific flags. See [global flags](/cli/overview/#global-flags).
 
 A migration that failed part-way counts as pending until a later run applies it. See [failed migrations](/cli/migrate/#failed-migrations).
 
-`chkit status` requires a ClickHouse connection and fails if no `clickhouse` connection is configured. It does not change your schema or migration history, but it is **not a pure read**: before reading the journal it ensures the `_chkit_migrations` table exists and has the current columns, issuing idempotent `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements. The connecting user therefore needs privileges to create and alter the journal table, not just `SELECT` — provision credentials accordingly rather than a read-only user.
+`chkit status` requires a ClickHouse connection and fails if no `clickhouse` connection is configured. It only reads: when the `_chkit_migrations` journal table does not exist, every migration is pending, and the table is not created (the first `chkit migrate --apply` creates it). A read-only user (`readonly = 1` or `readonly = 2`, with `SELECT` on the journal) can run it, as well as `chkit check`, `chkit drift`, `chkit migrate` without `--apply` and `chkit query`. The one exception is a journal created by a chkit version without per-operation tracking: the first command that reads it adds the missing columns with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, which needs a user that can alter the table.
 
 ## Examples
 

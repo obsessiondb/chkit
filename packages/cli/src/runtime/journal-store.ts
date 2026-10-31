@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { isUnknownDatabaseError, resolveReplicaFanout, waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { allReplicas, isUnknownDatabaseError, resolveReplicaFanout, waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
 import pRetry from 'p-retry'
 
@@ -78,6 +78,32 @@ interface OperationTupleRow {
 
 const OPERATIONS_TUPLE_TYPE =
   'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, \'UTC\'), finished_at Nullable(DateTime64(3, \'UTC\')), last_error String))'
+
+interface ClickHouseErrorKind {
+  code: string
+  name: string
+  /** The message, for the ObsessionDB console API, which sends neither code nor name. */
+  message: RegExp
+}
+
+const UNKNOWN_TABLE: ClickHouseErrorKind = {
+  code: '60',
+  name: 'UNKNOWN_TABLE',
+  message: /Unknown table expression identifier|Table \S+ does not exist/,
+}
+const UNKNOWN_IDENTIFIER: ClickHouseErrorKind = {
+  code: '47',
+  name: 'UNKNOWN_IDENTIFIER',
+  message: /Unknown expression identifier|Missing columns/,
+}
+const READONLY: ClickHouseErrorKind = { code: '164', name: 'READONLY', message: /in readonly mode/ }
+
+/** Whether `error` is the ClickHouse error `kind`. The native client sets `code`. */
+function isClickHouseError(error: unknown, kind: ClickHouseErrorKind): boolean {
+  if (!(error instanceof Error)) return false
+  if ('code' in error && String(error.code) === kind.code) return true
+  return error.message.includes(kind.name) || kind.message.test(error.message)
+}
 
 function isRetryableInsertRace(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -185,25 +211,51 @@ SETTINGS index_granularity = 1`
 
   let bootstrapped = false
   let _databaseMissing = false
+  // The database exists but the journal does not: reads see no rows, and the
+  // first write creates it.
+  let tableMissing = false
   let replicaSyncSupported: boolean | undefined
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
 
-  async function ensureTable(): Promise<void> {
-    if (bootstrapped) return
+  /**
+   * Makes sure the journal can be read or, with `create`, written. Only a
+   * write creates the journal or adds the columns an old one lacks, so
+   * status, check and migrate (plan) run as a read-only user (#402).
+   */
+  async function ensureTable(create: boolean): Promise<void> {
+    if (bootstrapped || (tableMissing && !create)) return
     debug('journal', `probing journal table "${journalTable}"`)
     try {
-      await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
-      debug('journal', 'journal table exists — checking schema')
-      await ensureSchemaUpgraded()
+      await db.query(`SELECT name, migration_completed, operations FROM ${journalTable} LIMIT 0`)
+      debug('journal', 'journal table exists')
       await waitForEveryReplica()
       bootstrapped = true
+      tableMissing = false
       return
     } catch (error) {
       if (isUnknownDatabaseError(error)) {
         debug('journal', 'database does not exist')
         _databaseMissing = true
         bootstrapped = true
+        return
+      }
+      if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
+        debug('journal', 'journal table predates per-operation tracking — upgrading')
+        await ensureSchemaUpgraded()
+        await waitForEveryReplica()
+        bootstrapped = true
+        return
+      }
+      if (!create) {
+        if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
+        if (await existsOnAnotherReplica()) {
+          await waitForEveryReplica()
+          bootstrapped = true
+          return
+        }
+        debug('journal', 'journal table does not exist — reading it as empty')
+        tableMissing = true
         return
       }
     }
@@ -225,6 +277,18 @@ SETTINGS index_granularity = 1`
     }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
     await waitForEveryReplica()
     bootstrapped = true
+    tableMissing = false
+  }
+
+  // On a multi-replica target, the replica that answered the probe may not
+  // have applied another process's CREATE yet.
+  async function existsOnAnotherReplica(): Promise<boolean> {
+    const fanout = await resolveReplicaFanout(db, cluster)
+    if (!fanout) return false
+    const [row] = await db.query<{ replicas: number | string }>(
+      `SELECT count() AS replicas FROM ${allReplicas(fanout, 'system.tables')} WHERE database = currentDatabase() AND name = '${journalTable}'`,
+    )
+    return Number(row?.replicas ?? 0) > 0
   }
 
   // A multi-replica target reads the journal from every replica (#265), which
@@ -241,12 +305,20 @@ SETTINGS index_granularity = 1`
     // columns idempotently so older deployments pick them up on first run
     // of the new chkit. ALTER ADD COLUMN IF NOT EXISTS is a metadata op,
     // no data rewrite.
-    await db.command(
-      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
-    )
-    await db.command(
-      `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
-    )
+    try {
+      await db.command(
+        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
+      )
+      await db.command(
+        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
+      )
+    } catch (error) {
+      // A read-only user cannot run the ALTER (#402).
+      throw new Error(
+        `The journal table ${journalTable} predates per-operation tracking and needs its new columns added. Run chkit once as a user that can ALTER it (as migrate --apply needs). ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      )
+    }
   }
 
   /**
@@ -257,14 +329,25 @@ SETTINGS index_granularity = 1`
    * write stamps applied_at in milliseconds as the row version, which is what
    * ReplacingMergeTree(applied_at) keeps too.
    */
-  async function journalRows(where: string, limit = ''): Promise<string> {
+  async function journalRows(where: string, limit = ''): Promise<MigrationRow[]> {
     const fanout = await resolveReplicaFanout(db, cluster)
     const columns = 'name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations'
     if (!fanout) {
-      return `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit} SETTINGS select_sequential_consistency = 1`
+      const sql = `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit}`
+      try {
+        return await db.query<MigrationRow>(`${sql} SETTINGS select_sequential_consistency = 1`)
+      } catch (error) {
+        // A readonly = 1 user cannot change any setting (#402). It only
+        // reads, so there is no write of its own to wait for.
+        if (!isClickHouseError(error, READONLY)) throw error
+        debug('journal', 'read-only user — reading the journal without select_sequential_consistency')
+        return await db.query<MigrationRow>(sql)
+      }
     }
     debug('journal', `reading the journal across ${fanout.replicas} replicas of cluster ${fanout.cluster}`)
-    return `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`
+    return await db.query<MigrationRow>(
+      `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
+    )
   }
 
   async function trySyncReplica(): Promise<void> {
@@ -295,13 +378,13 @@ SETTINGS index_granularity = 1`
 
     async readJournal(): Promise<MigrationJournal> {
       debug('journal', 'reading journal')
-      await ensureTable()
-      if (_databaseMissing) {
-        debug('journal', 'database missing — returning empty journal')
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) {
+        debug('journal', 'database or journal table missing — returning empty journal')
         return { version: 1, applied: [] }
       }
       await trySyncReplica()
-      const rows = await db.query<MigrationRow>(await journalRows('migration_completed = true'))
+      const rows = await journalRows('migration_completed = true')
       debug('journal', `journal has ${rows.length} applied entries`)
       return {
         version: 1,
@@ -314,12 +397,10 @@ SETTINGS index_granularity = 1`
     },
 
     async readMigrationState(migrationName: string): Promise<MigrationRowState | null> {
-      await ensureTable()
-      if (_databaseMissing) return null
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return null
       await trySyncReplica()
-      const rows = await db.query<MigrationRow>(
-        await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1'),
-      )
+      const rows = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
       const written = lastWritten.get(migrationName)
       const row = rows[0]
       if (!row) return written ?? null
@@ -348,7 +429,7 @@ SETTINGS index_granularity = 1`
         _databaseMissing = false
         bootstrapped = false
       }
-      await ensureTable()
+      await ensureTable(true)
       if (_databaseMissing) {
         // Nothing to journal until the migration creates the database; the
         // INSERT would otherwise fall back to the server's default database.
