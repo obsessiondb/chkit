@@ -41,7 +41,7 @@ Repeated tags use AND matching. The default `maxStreams: 1` executes selected st
 
 ## Stored data and joins
 
-Each table uses the provider record ID as its row identity and stores requested fields in the native ClickHouse JSON column `raw`. This is not an exact JSON archive: native JSON normalization can omit explicit null properties and empty objects. See [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity). Relationships remain provider-shaped references such as `project: { id }`, `cycle: { id }`, or `issue: { id }`. Join those IDs to other raw tables in ClickHouse.
+Each table uses the provider record ID as its row identity and stores requested fields in the native ClickHouse JSON column `raw`. This is not an exact JSON archive: native JSON normalization can omit explicit null properties and empty objects. See [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/). Relationships remain provider-shaped references such as `project: { id }`, `cycle: { id }`, or `issue: { id }`. Join those IDs to other raw tables in ClickHouse.
 
 Issues contain metadata, state details, relationship IDs, and a fully paginated `labels` string array. Comments, project updates, relations, and history are individual records in their own tables. Comments request nullable parent IDs and user references, including comments on project updates or other parent types; explicit null properties may be absent in stored JSON. Issue history retains native transition fields and its issue reference; cycle movement and status-duration calculations happen downstream.
 
