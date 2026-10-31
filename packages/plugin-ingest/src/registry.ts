@@ -63,12 +63,18 @@ export function defineStream(
   if (input.batchSize !== undefined && (!Number.isInteger(input.batchSize) || input.batchSize <= 0)) {
     throw new IngestConfigError(`Stream "${input.id}": batchSize must be a positive integer.`)
   }
+  const incremental = input.incremental ?? fullSync()
+  if (typeof incremental.id !== 'string' || incremental.id === '' || !Number.isSafeInteger(incremental.version) || incremental.version < 1) {
+    throw new IngestConfigError(
+      `Stream "${input.id}": incremental strategy must have a non-empty id and a safe integer version of at least 1, otherwise its checkpoints can never be read back.`
+    )
+  }
   return {
     kind: 'ingest_stream',
     id: input.id,
     destination: input.destination,
     tags: dedupe(input.tags ?? []),
-    incremental: input.incremental ?? fullSync(),
+    incremental,
     read: input.read,
     loader: input.loader,
     retry: input.retry,

@@ -25,6 +25,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     orderBy: ['id'],
     settings: { non_replicated_deduplication_window: '100' },
   })
+  const checkpointTable = { ...destinationTable, name: `${prefix}checkpoint` }
   const landing = {
     ...rawTable({ database, name: `${prefix}raw` }),
     settings: { non_replicated_deduplication_window: '100' },
@@ -62,6 +63,8 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     executor = createStatelessLiveExecutor(liveEnv)
     await executor.command(toCreateSQL(destinationTable))
     await waitForTable(executor, database, destinationTable.name)
+    await executor.command(toCreateSQL(checkpointTable))
+    await waitForTable(executor, database, checkpointTable.name)
     await executor.command(toCreateSQL(landing))
     await waitForTable(executor, database, landing.name)
     await executor.command(toCreateSQL(integers))
@@ -75,12 +78,54 @@ describe('@chkit/plugin-ingest live env e2e', () => {
 
   afterAll(async () => {
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(destinationTable.name)}`)
+    await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(checkpointTable.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(landing.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(integers.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(ephemeral.name)}`)
     await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
     await executor.close()
   }, 60_000)
+
+  test('a refused durable checkpoint is not retried or advanced', async () => {
+    let refuse = false
+    let parses = 0
+    let reads = 0
+    const stream = defineStream({
+      id: `${prefix}refused`,
+      destination: checkpointTable,
+      retry: { retries: 3, minTimeout: 1, randomize: false },
+      incremental: cursorState({
+        id: 'e2e.cursor', version: 1,
+        parse: (raw) => {
+          parses += 1
+          if (refuse) throw new Error('saved cursor rejected')
+          return Number(raw)
+        },
+      }),
+      async *read() {
+        reads += 1
+        yield { rows: [{ id: 987654, label: 'checkpoint guard' }], state: 1 }
+      },
+    })
+    const request = { selected: selectStreams([definePipeline({ id: `${prefix}guard`, streams: [stream] })], []), backfill: undefined }
+    const journal = () => createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable })
+    const destination = createClickHouseDestination(executor)
+    expect((await runIngestion(request, { journal: journal(), destination })).ok).toBe(true)
+    const before = await journal().readCheckpoint(stream.id)
+    refuse = true
+
+    const result = await runIngestion(request, { journal: journal(), destination })
+
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: expect.stringContaining('saved cursor rejected') })
+    expect(parses).toBe(1)
+    expect(reads).toBe(1)
+    expect((await journal().readCheckpoint(stream.id)).envelope).toEqual(before.envelope)
+    expect((await journal().readCheckpoint(stream.id)).version).toBe(before.version)
+    const facts = await executor.query<{ event_kind: string; error_class: string }>(
+      `SELECT event_kind, error_class FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} WHERE namespace_id = '${stream.id}' AND run_id = '${result.runId}' ORDER BY event_seq`
+    )
+    expect(facts).toEqual([{ event_kind: 'work_finished', error_class: 'config' }])
+  })
 
   test('a lost acknowledgement replays from the journaled checkpoint without skipping or duplicating rows', async () => {
     const source = Array.from({ length: 3 }, (_, page) => [0, 1].map((offset) => ({ id: page * 2 + offset, label: `row-${page * 2 + offset}` })))
