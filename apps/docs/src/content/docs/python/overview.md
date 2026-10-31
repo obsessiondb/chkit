@@ -54,6 +54,7 @@ The schema/migration CLI and backfill engine share the TypeScript workflow. The 
 - `chkit skills` proxy and the `create-chkit` scaffolder: use `chkit init` instead.
 - `deps.ts`-style dependency auto-install: install packages explicitly with `pip`.
 - The project `entry` module: use `schema` globs to select Python schema files.
+- Running without a project config: `chkit query` from the [user profile](/configuration/overview/#user-profile-config) alone, and the profile synthesized from an ObsessionDB login.
 
 ## These pages
 

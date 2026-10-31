@@ -254,8 +254,13 @@ def test_load_selected_service_ignores_user_global_selection(
     user_state = isolated_home / "chkit" / "obsessiondb.json"
     user_state.parent.mkdir(parents=True)
     user_state.write_text(
-        json.dumps({"selected": {"service_name": "prod", "service_slug": "prod"}}),
+        json.dumps({"service_name": "prod", "service_slug": "prod"}),
         encoding="utf-8",
+    )
+    # A valid selection: a config under the user config dir reads it.
+    user_config_path = isolated_home / "chkit" / "config.py"
+    assert load_selected_service(user_config_path) == SelectedService(
+        service_name="prod", service_slug="prod"
     )
     config_path = tmp_path / "clickhouse.config.py"
     config_path.write_text("# config\n", encoding="utf-8")
@@ -274,6 +279,9 @@ def test_save_and_load_service_alias(isolated_home: Path, tmp_path: Path) -> Non
     assert aliases.aliases["prod"].service_slug == "prod"
     assert remove_service_alias(config_path, "prod") is True
     assert load_service_aliases(config_path).aliases == {}
+    # As in TS, removing the last alias drops the key instead of writing {}.
+    service_file = tmp_path / ".chkit" / "obsessiondb.json"
+    assert "aliases" not in json.loads(service_file.read_text(encoding="utf-8"))
 
 
 def test_load_service_aliases_empty_when_no_file(

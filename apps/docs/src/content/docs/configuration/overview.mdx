@@ -134,7 +134,7 @@ When a project config is found, chkit layers the profile under it for every comm
 A machine without a profile, such as a CI runner, does not load the ObsessionDB plugin unless the project config registers `obsessiondb()`. Its checks (Distributed tables, [submitted backfill jobs](/obsessiondb/backfills/#submitted-jobs-in-chkit-check)), its `Shared` engine rewrite and its service executor then do not run. Register `obsessiondb()` in the project config to get the same behavior everywhere.
 :::
 
-The Python CLI has no profile config: it reads only the project config.
+The Python CLI reads its profile from `~/.config/chkit/config.py` (honoring `XDG_CONFIG_HOME`), a module that exports `config` like `clickhouse.config.py` and may leave out `schema`. It layers the profile under the project config with the same rules. It does not synthesize a profile from ObsessionDB credentials, and every command, `query` included, requires a project config.
 
 ## Related pages
 
