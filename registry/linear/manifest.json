@@ -94,8 +94,15 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Honor exhausted request, endpoint, and complexity reset headers on HTTP 429 responses while preserving Retry-After precedence.",
+            "Clarify that native ClickHouse JSON can omit explicit null properties and empty objects rather than retaining an exact JSON archive."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [
