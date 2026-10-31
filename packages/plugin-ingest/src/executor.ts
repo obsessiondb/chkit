@@ -5,7 +5,7 @@ import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
 import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
 
-import { toJsonRows } from './destination.js'
+import { ingestionColumns, toJsonRow } from './destination.js'
 import { BudgetExhausted, classifyFailure, describeError } from './errors.js'
 import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
@@ -233,6 +233,10 @@ async function executeStream(input: {
   let failure: unknown
 
   try {
+    const missing = ingestionColumns.filter((required) => !stream.destination.columns.some((column) => column.name === required.name))
+    if (missing.length > 0) {
+      throw new Error(`Stream "${stream.id}" destination ${stream.destination.database}.${stream.destination.name} is missing ${missing.map((column) => column.name).join(', ')}. Spread ingestionColumns into its columns.`)
+    }
     const state = restoreState(stream, progress.envelope, namespaceId)
     const selection: unknown = stream.incremental.plan({
       state,
@@ -372,7 +376,7 @@ async function readAndLoad(input: {
     // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(toJsonRows(batch.rows))}`
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${digest(rowContents(batch.rows))}`
       const batchId = digest([namespaceId, progress.successId, progress.checkpointId, String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       if (abandoned) return
@@ -603,6 +607,10 @@ function emptyBatch(): PendingBatch {
   return { rows: [], intervalIds: [], state: undefined }
 }
 
+function* rowContents(rows: readonly Row[]): Iterable<string> {
+  for (const row of rows) yield canonicalJson(toJsonRow(row))
+}
+
 /** Resolves a fixed grace period after the signal aborts; never resolves otherwise. */
 function graceAfterAbort(signal: AbortSignal, graceMs: number): Promise<void> {
   return new Promise((resolve) => {
@@ -671,4 +679,3 @@ function recordFailure(span: Span, error: unknown): void {
   span.setStatus({ code: SpanStatusCode.ERROR, message: describeError(error) })
   if (error instanceof Error) span.recordException(error)
 }
-

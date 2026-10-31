@@ -26,9 +26,9 @@ export type RawRow = {
 }
 
 /**
- * Landing table for provider objects exactly as received: a stable id plus the
- * untouched object in a native JSON column. Typed shapes are derived from it
- * inside ClickHouse (views or materialized views), so changing a transform
+ * Landing table for provider objects: a stable id plus their JSON-compatible
+ * fields in a native JSON column, subject to ClickHouse JSON semantics. Typed
+ * shapes are derived inside ClickHouse (views or materialized views), so changing a transform
  * never requires re-fetching the source. Replays and overlapping windows
  * collapse to the latest ingested version of each id.
  */
@@ -58,21 +58,54 @@ export function createClickHouseDestination(executor: ClickHouseExecutor): Desti
   return {
     async insert({ table, rows, token }) {
       if (rows.length === 0) return
+      for (const column of table.columns) {
+        if (/^Nested\s*\(/i.test(column.type.trim()) && rows.some((row) => column.name in row)) {
+          throw new Error(`Destination ${table.database}.${table.name}: supply Nested column "${column.name}" as flattened "${column.name}.field" arrays, not a parent field.`)
+        }
+      }
       const columns = insertColumnList(table)
       await executor.insert({
         table: `${table.database}.${table.name}`,
         values: toJsonRows(rows),
+        stream: true,
         ...(columns ? { columns } : {}),
         settings: {
           insert_deduplication_token: token,
           wait_for_async_insert: 1,
+          date_time_input_format: 'best_effort',
+          input_format_try_infer_datetimes: 0,
         },
       })
     },
   }
 }
 
-/** JSONEachRow encodes big integers as exact decimal strings, including nested values. */
+/** - Encode rows individually, including nested bigint, non-finite floats and Maps. */
 export function toJsonRows(rows: readonly Row[]): Row[] {
-  return JSON.parse(JSON.stringify(rows, (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value)) as Row[]
+  return rows.map(toJsonRow)
+}
+
+/** - One shared JSON representation for row transport and content hashing. */
+export function toJsonRow(row: Row): Row {
+  return JSON.parse(JSON.stringify(row, encodeJsonValue)) as Row
+}
+
+function encodeJsonValue(_key: string, value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString()
+  if (typeof value === 'number' && !Number.isFinite(value)) return Number.isNaN(value) ? 'nan' : value > 0 ? 'inf' : '-inf'
+  if (value instanceof Map) {
+    const entries: Array<[string, unknown]> = []
+    const keys = new Set<string>()
+    for (const [key, entry] of value) {
+      if (typeof key !== 'string' && typeof key !== 'number' && typeof key !== 'bigint') {
+        throw new Error('Map keys must be strings, numbers or bigint for JSONEachRow.')
+      }
+      const encoded = String(key)
+      if (keys.has(encoded)) throw new Error(`Map keys collide after JSON encoding: "${encoded}".`)
+      keys.add(encoded)
+      entries.push([encoded, entry])
+    }
+    return Object.fromEntries(entries)
+  }
+  return value
 }
