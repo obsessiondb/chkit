@@ -95,8 +95,15 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Validate pageSize before resolving a configured object or list, so an invalid value never sends a request.",
+            "Clarify native JSON normalization of explicit null paths and empty objects."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [

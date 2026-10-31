@@ -50,6 +50,8 @@ Replies are individual Message objects with their own `ts` and a `thread_ts` par
 
 The default config selects public channels, includes replies, uses metadata pages of 200, and uses history/reply pages of 15. `requestIntervalMs` defaults to 3000; `messageIntervalMs` defaults to 60000.
 
+Page sizes must be integers from 1 to 999. Request intervals must be integers from 0 to 2147483647 milliseconds. Readers reject invalid applicable settings before making requests; message selections whose lower bound exceeds their cutoff also fail before discovery.
+
 Set `channels` to an array of Slack conversation IDs to restrict channels and messages. `undefined` selects all discovered conversations; `[]` selects none. Selection uses IDs, not names. A configured ID absent from discovery fails visibly. Users remain workspace-wide.
 
 `conversationTypes` defaults to `['public_channel']`. Additional types require these read scopes and history scopes:
@@ -80,6 +82,8 @@ bunx chkit ingest run --tag provider:slack --tag resource:messages --max-duratio
 ## Stored data and identities
 
 Every raw table contains stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time columns. `raw` contains `source_id`, authenticated `team_id`, and the complete provider object under `data`. Messages also contain `channel_id`.
+
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
 
 The row IDs are JSON-encoded arrays:
 

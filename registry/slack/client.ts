@@ -33,6 +33,23 @@ export const defaultSlackClientDeps: SlackClientDeps = {
   wait: async (milliseconds, signal) => { await sleep(milliseconds, undefined, { signal }) },
 }
 
+export function assertSlackReaderConfig(config: SlackReaderConfig, resource: 'channels' | 'users' | 'messages'): void {
+  for (const size of resource === 'messages' ? [config.pageSize, config.messagePageSize] : [config.pageSize]) {
+    if (!Number.isSafeInteger(size) || size <= 0 || size >= 1_000) throw new IngestConfigError('Slack page sizes must be safe integers between 1 and 999.')
+  }
+  for (const interval of resource === 'messages' ? [config.requestIntervalMs, config.messageIntervalMs] : [config.requestIntervalMs]) {
+    if (!Number.isSafeInteger(interval) || interval < 0 || interval > 2_147_483_647) {
+      throw new IngestConfigError('Slack request intervals must be non-negative safe integers within the timer range.')
+    }
+  }
+  if (resource !== 'users') {
+    const allowedTypes = ['public_channel', 'private_channel', 'im', 'mpim']
+    if (config.conversationTypes.length === 0 || !config.conversationTypes.every((type) => allowedTypes.includes(type))) {
+      throw new IngestConfigError('Slack conversationTypes must select public_channel, private_channel, im, or mpim.')
+    }
+  }
+}
+
 /** Each page is validated inside attempt, so executor retry/cancellation owns every request. */
 export function readCollection(
   context: FetchContext,
@@ -65,10 +82,7 @@ export async function discoverChannels(context: FetchContext, deps: SlackClientD
 /** Yield selected metadata pages directly; configured IDs must all be accessible. */
 export async function* readChannelPages(context: FetchContext, deps: SlackClientDeps = defaultSlackClientDeps) {
   const config = deps.config
-  const allowedTypes = ['public_channel', 'private_channel', 'im', 'mpim']
-  if (config.conversationTypes.length === 0 || !config.conversationTypes.every((type) => allowedTypes.includes(type))) {
-    throw new IngestConfigError('Slack conversationTypes must select public_channel, private_channel, im, or mpim.')
-  }
+  assertSlackReaderConfig(config, 'channels')
   const selected = config.channels
   const missing = new Set(selected)
   for await (const page of readCollection(context, {
@@ -171,16 +185,22 @@ async function requestSlack(
     if (code === 'ratelimited' || code === 'rate_limited') {
       const headers = new Headers(response.headers)
       if (!headers.has('Retry-After')) headers.set('Retry-After', '60')
-      throw await HttpError.fromResponse(new Response(JSON.stringify({ error: code }), { status: 429, headers }))
+      throw await synthesizeHttpError(method, code, 429, headers)
     }
     if (['internal_error', 'fatal_error', 'service_unavailable', 'request_timeout'].includes(code)) {
-      throw await HttpError.fromResponse(new Response(JSON.stringify({ error: code }), { status: 503 }))
+      throw await synthesizeHttpError(method, code, 503)
     }
     const needed = typeof payload.needed === 'string' ? ` Required scopes: ${payload.needed}.` : ''
     const repliesHint = method === 'conversations.replies' ? ' Disable includeReplies explicitly for history-only reads.' : ''
     throw new IngestConfigError(`Slack ${method} failed (${code}).${needed} Check SLACK_API_TOKEN, resource scopes, and conversation access.${repliesHint}`)
   }
   return payload
+}
+
+async function synthesizeHttpError(method: string, code: string, status: number, headers?: Headers): Promise<HttpError> {
+  const error = await HttpError.fromResponse(new Response(JSON.stringify({ error: code }), { status, headers }))
+  error.message = `Slack ${method} failed (${code}); treated as HTTP ${status}.`
+  return error
 }
 
 function parsePage(payload: Record<string, unknown>, request: CollectionRequest) {

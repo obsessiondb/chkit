@@ -9,7 +9,9 @@ import * as definitions from '../index.js'
 import { attio, createAttioPipeline } from '../pipeline.js'
 import { readEntries } from '../sources/entries.js'
 import { readMembers } from '../sources/members.js'
+import { readListAttributes } from '../sources/list-attributes.js'
 import { readNotes } from '../sources/notes.js'
+import { readObjectAttributes } from '../sources/object-attributes.js'
 import { readRecords } from '../sources/records.js'
 import { readTasks } from '../sources/tasks.js'
 import { fixtureDeps, fixtureResponse, peopleObject, person } from './fixtures.js'
@@ -205,6 +207,20 @@ describe('Attio template', () => {
     const http = await HttpError.fromResponse(new Response(null, { status: 429, headers: { 'Retry-After': '2' } }))
     expect(http.retryAfterMs).toBe(2_000)
     expect(classifyAttioError(http, { kind: 'rate_limited', retryAfterMs: 2_000 })).toBeUndefined()
+  })
+
+  test('an invalid pageSize fails paginated readers before any request, including parent resolution', async () => {
+    let calls = 0
+    const deps = fixtureDeps(() => { calls += 1; throw new Error('must not fetch') })
+    for (const pageSize of [0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const invalid = { ...deps, config: { ...attioConfig, pageSize } }
+      await expect(collect(readRecords(context(), 'people', invalid))).rejects.toThrow('Attio pageSize must be a positive safe integer')
+      await expect(collect(readEntries(context(), 'sales', invalid))).rejects.toThrow('Attio pageSize must be a positive safe integer')
+      await expect(collect(readObjectAttributes(context(), 'people', invalid))).rejects.toThrow('Attio pageSize must be a positive safe integer')
+      await expect(collect(readListAttributes(context(), 'sales', invalid))).rejects.toThrow('Attio pageSize must be a positive safe integer')
+      await expect(collect(readTasks(context(), invalid))).rejects.toThrow('Attio pageSize must be a positive safe integer')
+    }
+    expect(calls).toBe(0)
   })
 
   test('a missing token fails only when a reader runs', async () => {
