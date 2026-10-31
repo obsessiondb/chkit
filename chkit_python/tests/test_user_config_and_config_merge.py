@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
-from chkit.cli.config_loader import load_config
+from chkit.cli.config_loader import (
+    ProjectConfigRequiredError,
+    load_config,
+    loaded_config_path,
+)
 from chkit.cli.config_merge import merge_user_config, plugin_name_of
+from chkit.cli.json_output import _reset_for_testing
+from chkit.cli.main import app
 from chkit.cli.user_config import (
     USER_CREDENTIALS_FILE,
     USER_PROFILE_CONFIG_FILE,
@@ -15,6 +24,7 @@ from chkit.cli.user_config import (
     get_user_credentials_path,
     get_user_profile_config_path,
 )
+from chkit.core import SYNTHESIZED_CONFIG_PATH
 from chkit.core.model import (
     ChxCheckConfig,
     ChxConfigEnv,
@@ -23,6 +33,7 @@ from chkit.core.model import (
     ChxUserConfig,
 )
 from chkit.plugins import ChxPlugin, ChxPluginManifest
+from chkit_plugin_obsessiondb.storage import load_selected_service
 
 # ---------- user_config ----------
 
@@ -261,6 +272,196 @@ def test_load_config_invalid_profile_fails(
 
     with pytest.raises(AttributeError, match="must export a `config` attribute"):
         load_config(config_file)
+
+
+# ---------- load_config: profile synthesized from ObsessionDB credentials ----------
+
+
+def _write_credentials(xdg: Path) -> None:
+    credentials = xdg / "chkit" / USER_CREDENTIALS_FILE
+    credentials.parent.mkdir(parents=True)
+    credentials.write_text('{"access_token": "fake-token"}', encoding="utf-8")
+
+
+def _plugin_names(plugins: list[object]) -> list[str | None]:
+    return [plugin_name_of(plugin) for plugin in plugins]
+
+
+def test_load_config_credentials_register_obsessiondb_under_the_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TS parity (readProfileLayer): no config.py but a login synthesizes a
+    profile with only obsessiondb(), layered under the project."""
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    resolved = load_config(config_file, ChxConfigEnv(command="status"))
+
+    assert resolved.schema_ == ["./schema/**/*.py"]
+    assert _plugin_names(resolved.plugins) == ["obsessiondb"]
+
+
+def test_load_config_project_obsessiondb_wins_over_the_credentials_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+    config_file = _write_project(
+        tmp_path,
+        "from chkit_plugin_obsessiondb import obsessiondb\n"
+        "PROJECT_PLUGIN = obsessiondb()\n"
+        'config = {"schema": "./schema/**/*.py", "plugins": [PROJECT_PLUGIN]}\n',
+    )
+
+    resolved = load_config(config_file)
+
+    assert _plugin_names(resolved.plugins) == ["obsessiondb"]
+    assert resolved.plugins[0] is sys.modules["chkit_user_config"].PROJECT_PLUGIN
+
+
+def test_load_config_without_credentials_registers_no_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    assert load_config(config_file, ChxConfigEnv(command="status")).plugins == []
+
+
+def test_load_config_profile_file_takes_precedence_over_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_profile(xdg, 'config = {"outDir": "./profile-out"}\n')
+    (xdg / "chkit" / USER_CREDENTIALS_FILE).write_text("{}", encoding="utf-8")
+    config_file = _write_project(tmp_path, 'config = {"schema": "./schema/**/*.py"}\n')
+
+    resolved = load_config(config_file)
+
+    assert resolved.out_dir == "./profile-out"
+    assert resolved.plugins == []
+
+
+# ---------- load_config: no project config ----------
+
+
+def test_load_config_without_project_runs_query_from_the_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+    monkeypatch.chdir(tmp_path)
+
+    resolved = load_config(None, ChxConfigEnv(command="query"))
+
+    assert resolved.schema_ == []
+    assert _plugin_names(resolved.plugins) == ["obsessiondb"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["generate", "migrate", "status", "drift", "check", "snapshot", "codegen", "pull"],
+)
+def test_load_config_without_project_blocks_project_only_commands(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(
+        ProjectConfigRequiredError, match=f'Command "{command}" requires a project config'
+    ):
+        load_config(None, ChxConfigEnv(command=command))
+
+
+def test_cli_project_only_command_without_project_reports_the_ts_error_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+    monkeypatch.chdir(tmp_path)
+    _reset_for_testing()
+
+    result = CliRunner().invoke(app, ["status", "--json"])
+    _reset_for_testing()
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["code"] == "project_config_required"
+
+
+def test_load_config_without_project_or_profile_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="no ObsessionDB profile is available"):
+        load_config(None, ChxConfigEnv(command="query"))
+    with pytest.raises(FileNotFoundError, match="Config file not found"):
+        load_config(None, ChxConfigEnv(command="plugin"))
+
+
+def test_load_config_explicit_missing_path_does_not_fall_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+
+    with pytest.raises(FileNotFoundError, match="Config file not found"):
+        load_config(tmp_path / "missing.config.py", ChxConfigEnv(command="query"))
+
+
+def test_cli_plugin_obsessiondb_runs_without_project_or_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TS allowsConfiglessObsessionDBBootstrap: `plugin obsessiondb` (and the
+    `obsessiondb` shortcut) synthesize the profile so `login` can run."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    listed = CliRunner().invoke(app, ["plugin", "obsessiondb"])
+    assert listed.exit_code == 0, listed.output
+    assert "Plugin: obsessiondb" in listed.stdout
+
+    # Plain `chkit plugin` does not synthesize it, as in TS.
+    listed_all = CliRunner().invoke(app, ["plugin"])
+    assert listed_all.exit_code == 1
+    assert isinstance(listed_all.exception, FileNotFoundError)
+
+
+def test_loaded_config_path_reports_the_source_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TS LoadedConfig.path: project, else profile file, else the synthesized
+    path, so the profile's selected service lives in the user config dir."""
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    _write_credentials(xdg)
+    (xdg / "chkit" / "obsessiondb.json").write_text(
+        '{"service_slug": "svc", "service_name": "svc"}', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert loaded_config_path() == SYNTHESIZED_CONFIG_PATH
+    selected = load_selected_service(loaded_config_path())
+    assert selected is not None
+    assert selected.service_slug == "svc"
+    assert loaded_config_path(Path("other.config.py")) == "other.config.py"
+
+    (xdg / "chkit" / USER_PROFILE_CONFIG_FILE).write_text("config = {}\n", encoding="utf-8")
+    assert loaded_config_path() == str(xdg / "chkit" / USER_PROFILE_CONFIG_FILE)
+
+    (tmp_path / "clickhouse.config.py").write_text("config = {}\n", encoding="utf-8")
+    assert loaded_config_path() == "clickhouse.config.py"
 
 
 @pytest.mark.parametrize(

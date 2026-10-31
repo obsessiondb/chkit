@@ -24,7 +24,7 @@ from chkit.cli.command_target import (
     open_client,
     resolve_plugin_executor,
 )
-from chkit.cli.config_loader import load_config
+from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.clickhouse.client import ClickHouseJsonQueryResult
@@ -152,7 +152,7 @@ def run(
         load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
         config,
         command="query",
-        config_path=str(config_path or "clickhouse.config.py"),
+        config_path=loaded_config_path(config_path),
         json_mode=output_json,
         service=service,
     )

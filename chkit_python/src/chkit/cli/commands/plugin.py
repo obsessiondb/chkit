@@ -16,7 +16,7 @@ from typing import Annotated, Any, cast
 
 import typer
 
-from chkit.cli.config_loader import load_config
+from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
@@ -132,7 +132,13 @@ def dispatch_plugin_command(
     Shared by ``chkit plugin <name> <cmd>`` and the top-level shortcuts
     (``chkit codegen``, ``chkit obsessiondb ...``), mirroring the TS CLI.
     """
-    config = load_config(config_path, ChxConfigEnv(command=invoking_command))
+    # As in TS, `obsessiondb` / `plugin obsessiondb` may load the ObsessionDB
+    # profile without a project config or credentials (to run `login`).
+    config = load_config(
+        config_path,
+        ChxConfigEnv(command=invoking_command),
+        allow_synthesized_profile=plugin_name == "obsessiondb",
+    )
     runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
@@ -182,7 +188,7 @@ def dispatch_plugin_command(
         ctx = ChxPluginCommandContext(
             plugin_name=plugin_name,
             config=config,
-            config_path=str(config_path or "clickhouse.config.py"),
+            config_path=loaded_config_path(config_path),
             json_mode=output_json,
             args=positionals,
             flags=dict(flags),
@@ -235,7 +241,11 @@ def run(
     ] = False,
 ) -> None:
     if plugin_name is None or command_name is None:
-        config = load_config(config_path, ChxConfigEnv(command="plugin"))
+        config = load_config(
+            config_path,
+            ChxConfigEnv(command="plugin"),
+            allow_synthesized_profile=plugin_name == "obsessiondb",
+        )
         runtime = load_plugin_runtime(
             [p for p in config.plugins if isinstance(p, ChxPlugin)]
         )
