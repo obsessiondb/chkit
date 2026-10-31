@@ -42,7 +42,7 @@ Raw payloads use `{ repository, data }`. Issue comments add `issue_number`; PR c
 
 Join resources in ClickHouse through repository and issue/PR number. PR metadata lives in its own destination, and comments, reviews, and commits are separate rows. Conversation comments and diff-review comments remain distinct collections. Existing issue/stargazer provider-ID formats are preserved.
 
-Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing. See [native JSON storage fidelity](/api-sync/destinations/#native-json-storage-fidelity).
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing. See [native JSON storage fidelity](/api-sync/destinations/).
 
 ## Sync behavior
 
