@@ -53,7 +53,7 @@ Checkpoint strategy version 2 rejects incompatible state rather than reinterpret
 
 ## Raw updates and relationships
 
-Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. This is not byte- or shape-exact archival storage; see [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity). Join resources and assemble transcripts later in ClickHouse.
+Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. This is not byte- or shape-exact archival storage; see [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/). Join resources and assemble transcripts later in ClickHouse.
 
 Participants represent attendance; sessions represent individual joins/leaves. Recordings preserve metadata and Drive references without downloading files. Transcripts preserve metadata and document references; entry rows preserve individual speech segments. API entries do not reflect later edits to the separate Google Docs document.
 

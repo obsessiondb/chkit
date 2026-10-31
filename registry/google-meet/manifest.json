@@ -54,7 +54,7 @@
         {
           "version": "0.2.1",
           "changes": [
-            "Reject lookbackHours beyond the Date range when the pipeline is created and report invalid calculated dates and explicit backfill dates as configuration errors before requesting data.",
+            "Report invalid calculated dates and explicit backfill dates as configuration errors before requesting data, while allowing explicit ranges that do not use lookbackHours.",
             "Clarify token-recovery recognition, organizer-scoped conference discovery, and native JSON normalization of null paths and empty objects."
           ]
         },

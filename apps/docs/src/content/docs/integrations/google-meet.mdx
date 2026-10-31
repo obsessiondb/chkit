@@ -53,7 +53,7 @@ A `400` or `410` on a continuation request restarts its collection once only whe
 
 Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. Join native resource names and derive attendance/transcript views later in ClickHouse.
 
-Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. The tables are not byte- or shape-exact archives of the original response. See [native JSON storage fidelity](/api-sync/destinations/#native-json-storage-fidelity).
+Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. The tables are not byte- or shape-exact archives of the original response. See [native JSON storage fidelity](/api-sync/destinations/).
 
 Participants and sessions preserve attendance identities and join/leave records. Recordings preserve metadata and Drive references without downloading media. Transcripts preserve metadata/document references, and entries preserve speech segments. API entries do not capture later edits to the separate Google Docs transcript.
 
