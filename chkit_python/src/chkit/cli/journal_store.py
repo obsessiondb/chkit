@@ -7,7 +7,7 @@ column-for-column so reading the same table from either implementation works.
 
 This Python port focuses on the synchronous, applied-only subset:
 
-- ``ensure_table`` creates ``_chkit_migrations`` if missing.
+- the first write creates ``_chkit_migrations`` if missing; reads never write.
 - ``read_journal`` returns the applied entries sorted by name.
 - ``append_entry`` inserts a single applied row.
 - ``find_checksum_mismatches`` compares journaled checksums against disk.
@@ -39,7 +39,7 @@ from chkit.cli.migration_store import (
 )
 from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
 from chkit.clickhouse.ddl_propagation import wait_for_table
-from chkit.clickhouse.replicas import resolve_replica_fanout
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
 
 OperationStatus = Literal["started", "completed", "failed"]
@@ -187,6 +187,28 @@ def _operations_array_literal(operations: list[OperationState]) -> str:
     return f"[{','.join(_operation_to_tuple_literal(op) for op in operations)}]"
 
 
+# ClickHouse errors by code, name and message. clickhouse-connect gives the code
+# and the name in the message; the ObsessionDB console API only the message.
+# Same as TS ``isClickHouseError``.
+_UNKNOWN_TABLE = (
+    60,
+    "UNKNOWN_TABLE",
+    re.compile(r"Unknown table expression identifier|Table \S+ does not exist"),
+)
+_UNKNOWN_IDENTIFIER = (
+    47,
+    "UNKNOWN_IDENTIFIER",
+    re.compile(r"Unknown expression identifier|Missing columns"),
+)
+_READONLY = (164, "READONLY", re.compile(r"in readonly mode"))
+
+
+def _is_clickhouse_error(error: BaseException, kind: tuple[int, str, re.Pattern[str]]) -> bool:
+    code, name, message = kind
+    text = str(error)
+    return f"Code: {code}." in text or name in text or message.search(text) is not None
+
+
 def _is_retryable_insert_race(error: BaseException) -> bool:
     message = str(error)
     return "INSERT race condition" in message or "Please retry the INSERT" in message
@@ -210,6 +232,7 @@ class JournalStore:
         "_last_written",
         "_on_cluster",
         "_table",
+        "_table_missing",
     )
 
     def __init__(
@@ -221,6 +244,9 @@ class JournalStore:
         self._on_cluster: str = on_cluster_clause(cluster)
         self._bootstrapped: bool = False
         self._database_missing: bool = False
+        # The database exists but the journal does not: reads see no rows, and
+        # the first write creates it.
+        self._table_missing: bool = False
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
 
@@ -265,19 +291,41 @@ class JournalStore:
             f"SETTINGS index_granularity = 1"
         )
 
-    def _ensure_table(self) -> None:
-        if self._bootstrapped:
+    def _ensure_table(self, *, create: bool) -> None:  # noqa: PLR0911
+        """Make sure the journal can be read or, with ``create``, written.
+
+        Only a write creates the journal or adds the columns an old one lacks,
+        so status, check and migrate (plan) run as a read-only user (#402).
+        """
+        if self._bootstrapped or (self._table_missing and not create):
             return
         try:
-            self._client.query(f"SELECT name FROM {self._table} LIMIT 0")
-            self._ensure_schema_upgraded()
+            self._client.query(
+                f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
+            )
             self._wait_for_every_replica()
             self._bootstrapped = True
+            self._table_missing = False
             return
         except Exception as exc:
             if is_unknown_database_error(exc):
                 self._database_missing = True
                 self._bootstrapped = True
+                return
+            if _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
+                # The journal predates per-operation tracking.
+                self._ensure_schema_upgraded()
+                self._wait_for_every_replica()
+                self._bootstrapped = True
+                return
+            if not create:
+                if not _is_clickhouse_error(exc, _UNKNOWN_TABLE):
+                    raise
+                if self._exists_on_another_replica():
+                    self._wait_for_every_replica()
+                    self._bootstrapped = True
+                    return
+                self._table_missing = True
                 return
         try:
             self._client.execute(self._create_table_sql())
@@ -289,6 +337,19 @@ class JournalStore:
             raise
         self._wait_for_every_replica()
         self._bootstrapped = True
+        self._table_missing = False
+
+    def _exists_on_another_replica(self) -> bool:
+        # On a multi-replica target, the replica that answered the probe may
+        # not have applied another process's CREATE yet.
+        fanout = resolve_replica_fanout(self._client, self._cluster)
+        if fanout is None:
+            return False
+        rows = self._client.query(
+            f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.tables')} "
+            f"WHERE database = currentDatabase() AND name = '{self._table}'"
+        ).rows
+        return bool(rows) and int(rows[0]["replicas"]) > 0
 
     def _wait_for_every_replica(self) -> None:
         """Wait until every replica has the journal table (#265).
@@ -308,16 +369,24 @@ class JournalStore:
         # idempotently. ``ADD COLUMN IF NOT EXISTS`` is a metadata-only op.
         # In cluster mode both ALTERs carry ``ON CLUSTER '<name>'`` so every
         # replica converges on the new column set in the same DDL round-trip.
-        self._client.execute(
-            f"ALTER TABLE {self._table}{self._on_cluster} "
-            f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
-        )
-        self._client.execute(
-            f"ALTER TABLE {self._table}{self._on_cluster} "
-            f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
-        )
+        try:
+            self._client.execute(
+                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
+            )
+            self._client.execute(
+                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
+            )
+        except Exception as exc:
+            # A read-only user cannot run the ALTER (#402). Same message as TS.
+            raise RuntimeError(
+                f"The journal table {self._table} predates per-operation tracking and needs "
+                "its new columns added. Run chkit once as a user that can ALTER it "
+                f"(as migrate --apply needs). {exc}"
+            ) from exc
 
-    def _journal_rows(self, where: str, *, limit: str = "") -> str:
+    def _journal_rows(self, where: str, *, limit: str = "") -> list[dict[str, Any]]:
         """The rows to read the journal from.
 
         A single replica reads the table with FINAL. With several replicas
@@ -329,13 +398,22 @@ class JournalStore:
         """
         fanout = resolve_replica_fanout(self._client, self._cluster)
         if fanout is None:
-            return (
+            sql = (
                 f"SELECT name, applied_at, checksum, chkit_version, "
                 f"migration_completed, toJSONString(operations) AS operations "
-                f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit} "
-                f"SETTINGS select_sequential_consistency = 1"
+                f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit}"
             )
-        return (
+            try:
+                return self._client.query(
+                    f"{sql} SETTINGS select_sequential_consistency = 1"
+                ).rows
+            except Exception as exc:
+                # A readonly = 1 user cannot change any setting (#402). It only
+                # reads, so there is no write of its own to wait for.
+                if not _is_clickhouse_error(exc, _READONLY):
+                    raise
+                return self._client.query(sql).rows
+        return self._client.query(
             "SELECT name, latest.1 AS applied_at, latest.2 AS checksum, "
             "latest.3 AS chkit_version, latest.4 AS migration_completed, "
             "latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, "
@@ -343,7 +421,7 @@ class JournalStore:
             "applied_at) AS latest FROM clusterAllReplicas("
             f"'{_escape_sql_string(fanout.cluster)}', currentDatabase(), '{self._table}') "
             f"GROUP BY name) WHERE {where} ORDER BY name{limit}"
-        )
+        ).rows
 
     def _try_sync_replica(self) -> None:
         # Non-replicated/single-node setups don't support SYSTEM SYNC REPLICA.
@@ -361,8 +439,8 @@ class JournalStore:
         bug. Pass the list of filenames in the project's migrations dir to
         filter the query to just this project.
         """
-        self._ensure_table()
-        if self._database_missing:
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
             return MigrationJournal()
         self._try_sync_replica()
         where = "migration_completed = true"
@@ -371,14 +449,13 @@ class JournalStore:
                 f"'{_escape_sql_string(name)}'" for name in project_files
             )
             where = f"{where} AND name IN ({quoted})"
-        result = self._client.query(self._journal_rows(where))
         applied = [
             MigrationJournalEntry(
                 name=str(row["name"]),
                 applied_at=str(row["applied_at"]),
                 checksum=str(row["checksum"]),
             )
-            for row in result.rows
+            for row in self._journal_rows(where)
         ]
         return MigrationJournal(applied=applied)
 
@@ -398,17 +475,17 @@ class JournalStore:
 
     def read_migration_state(self, migration_name: str) -> MigrationRowState | None:
         """Return the latest row for ``migration_name`` (including in-progress)."""
-        self._ensure_table()
-        if self._database_missing:
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
             return None
         self._try_sync_replica()
-        result = self._client.query(
-            self._journal_rows(f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1")
+        rows = self._journal_rows(
+            f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1"
         )
         written = self._last_written.get(migration_name)
-        if not result.rows:
+        if not rows:
             return written
-        row = result.rows[0]
+        row = rows[0]
         state = MigrationRowState(
             name=str(row["name"]),
             applied_at=str(row["applied_at"]),
@@ -432,7 +509,7 @@ class JournalStore:
         if self._database_missing:
             self._database_missing = False
             self._bootstrapped = False
-        self._ensure_table()
+        self._ensure_table(create=True)
         if self._database_missing:
             # Nothing to journal until the migration creates the database; the
             # INSERT would otherwise fall back to the server's default database.

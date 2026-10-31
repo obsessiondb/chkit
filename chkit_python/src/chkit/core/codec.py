@@ -16,6 +16,7 @@ from chkit.core.model import (
     PreprocessingColumnCodec,
     RawColumnCodec,
 )
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN
 
 CodecSpecInput: TypeAlias = ColumnCodecSpec | Mapping[str, Any] | list[ColumnCodec | Mapping[str, Any]]
 """Loose input accepted by public entry points: dicts or models, single or list."""
@@ -88,6 +89,7 @@ def render_codec(spec: CodecSpecInput) -> str:
 
 
 _ATOM_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(\w+)(?:\(([^)]*)\))?$")
+_FINGERPRINT_STEP_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(\w+)(?:\((.*)\))?$")
 _CODEC_WRAPPER_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^CODEC\s*\(([\s\S]*)\)\s*$", re.IGNORECASE
 )
@@ -126,7 +128,7 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _GENERAL_ADAPTER.validate_python({"kind": "LZ4HC"})
         if len(args) != 1:
             return None
-        level = _as_finite(args[0])
+        level = _parse_level(args[0])
         if level is None:
             return None
         return _GENERAL_ADAPTER.validate_python({"kind": "LZ4HC", "level": int(level)})
@@ -135,7 +137,7 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _GENERAL_ADAPTER.validate_python({"kind": "ZSTD"})
         if len(args) != 1:
             return None
-        level = _as_finite(args[0])
+        level = _parse_level(args[0])
         if level is None:
             return None
         return _GENERAL_ADAPTER.validate_python({"kind": "ZSTD", "level": int(level)})
@@ -165,6 +167,21 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             {"kind": "FPC", "level": int(level), "floatSize": float_size_int}
         )
     return None
+
+
+_UINT64_SIGN: Final[int] = 2**63
+_UINT64_RANGE: Final[int] = 2**64
+
+
+def _parse_level(raw: str) -> float | None:
+    """ClickHouse prints a negative level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`."""
+    if re.fullmatch(r"[0-9]+", raw) and int(raw) >= _UINT64_SIGN:
+        return int(raw) - _UINT64_RANGE
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _split_top_level_commas(text: str) -> list[str]:
@@ -247,6 +264,44 @@ def _canonicalize_step(step: ColumnCodec) -> ColumnCodec:
 def canonicalize_codec(spec: CodecSpecInput) -> list[ColumnCodec]:
     """Normalize spec to array form with ClickHouse defaults filled in."""
     return [_canonicalize_step(s) for s in _to_list(spec)]
+
+
+def codec_fingerprint(spec: CodecSpecInput | None) -> str:
+    """The codec in the form `system.columns.compression_codec` reports it (#383).
+
+    A schema codec and the live one compare equal however either is spelled.
+    ClickHouse stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as
+    `LZ4HC(0)`, which like any level below 1 means the default 9; it keeps no
+    `DoubleDelta` width and no `FPC` float size. Raw steps get the same
+    treatment, without whitespace. No codec is the empty string.
+    """
+    if spec is None:
+        return ""
+    rendered = ",".join(_render_step(step) for step in canonicalize_codec(spec))
+    return ",".join(_codec_step_fingerprint(step) for step in _split_top_level_commas(rendered))
+
+
+def _format_level(level: float) -> str:
+    return str(int(level)) if float(level).is_integer() else str(level)
+
+
+def _codec_step_fingerprint(step: str) -> str:
+    compact = JS_WHITESPACE_RUN.sub("", step)
+    match = _FINGERPRINT_STEP_PATTERN.match(compact)
+    name = match.group(1) if match else None
+    args = match.group(2) if match else None
+    first_arg = None if args is None else args.split(",")[0]
+    if name == "ZSTD":
+        level = 1 if first_arg is None else _parse_level(first_arg)
+        return f"ZSTD({first_arg if level is None else _format_level(level)})"
+    if name == "LZ4HC":
+        level = 0 if first_arg is None else _parse_level(first_arg)
+        return f"LZ4HC({_format_level(level) if level is not None and level >= 1 else 9})"
+    if name == "DoubleDelta":
+        return "DoubleDelta"
+    if name == "FPC":
+        return f"FPC({12 if first_arg is None else first_arg})"
+    return compact
 
 
 def codecs_equal(a: CodecSpecInput | None, b: CodecSpecInput | None) -> bool:

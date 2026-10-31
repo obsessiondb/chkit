@@ -75,15 +75,15 @@ function parseAtom(raw: string): ColumnCodec | undefined {
       return { kind: name }
     case 'LZ4HC': {
       if (args === undefined) return { kind: 'LZ4HC' }
-      if (args.length !== 1) return undefined
-      const level = Number(args[0])
+      if (args.length !== 1 || args[0] === undefined) return undefined
+      const level = parseLevel(args[0])
       if (!Number.isFinite(level)) return undefined
       return { kind: 'LZ4HC', level }
     }
     case 'ZSTD': {
       if (args === undefined) return { kind: 'ZSTD' }
-      if (args.length !== 1) return undefined
-      const level = Number(args[0])
+      if (args.length !== 1 || args[0] === undefined) return undefined
+      const level = parseLevel(args[0])
       if (!Number.isFinite(level)) return undefined
       return { kind: 'ZSTD', level }
     }
@@ -107,6 +107,15 @@ function parseAtom(raw: string): ColumnCodec | undefined {
     default:
       return undefined
   }
+}
+
+const UINT64_SIGN = 9223372036854775808n
+const UINT64_RANGE = 18446744073709551616n
+
+/** ClickHouse prints a negative level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`. */
+function parseLevel(raw: string): number {
+  if (/^\d+$/.test(raw) && BigInt(raw) >= UINT64_SIGN) return Number(BigInt(raw) - UINT64_RANGE)
+  return Number(raw)
 }
 
 function splitTopLevelCommas(input: string): string[] {
@@ -179,6 +188,45 @@ function canonicalizeStep(step: ColumnCodec): ColumnCodec {
  */
 export function canonicalizeCodec(spec: ColumnCodecSpec): ColumnCodec[] {
   return toArray(spec).map(canonicalizeStep)
+}
+
+/**
+ * The codec in the form `system.columns.compression_codec` reports it, so a
+ * schema codec and the live one compare equal however either is spelled (#383).
+ * ClickHouse stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as
+ * `LZ4HC(0)`, which like any level below 1 means the default 9; it keeps no
+ * `DoubleDelta` width and no `FPC` float size. Raw steps get the same treatment,
+ * without whitespace. No codec is the empty string.
+ */
+export function codecFingerprint(spec: ColumnCodecSpec | undefined): string {
+  if (spec === undefined) return ''
+  const rendered = canonicalizeCodec(spec).map(renderStep).join(',')
+  return splitTopLevelCommas(rendered).map(codecStepFingerprint).join(',')
+}
+
+function codecStepFingerprint(step: string): string {
+  const compact = step.replace(/\s+/g, '')
+  const match = compact.match(/^(\w+)(?:\((.*)\))?$/)
+  const firstArg = match?.[2]?.split(',')[0]
+  switch (match?.[1]) {
+    case 'ZSTD':
+      return `ZSTD(${firstArg === undefined ? 1 : formatLevel(firstArg)})`
+    case 'LZ4HC': {
+      const level = firstArg === undefined ? 0 : parseLevel(firstArg)
+      return `LZ4HC(${level >= 1 ? level : 9})`
+    }
+    case 'DoubleDelta':
+      return 'DoubleDelta'
+    case 'FPC':
+      return `FPC(${firstArg ?? 12})`
+    default:
+      return compact
+  }
+}
+
+function formatLevel(raw: string): string {
+  const level = parseLevel(raw)
+  return Number.isNaN(level) ? raw : String(level)
 }
 
 export function codecsEqual(a?: ColumnCodecSpec, b?: ColumnCodecSpec): boolean {

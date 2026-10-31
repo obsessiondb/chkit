@@ -126,6 +126,108 @@ export default schema(table({
     }
   }, 240_000)
 
+  test('every codec form migrates without drift, and server codec changes drift (#383)', async () => {
+    const executor = createLiveExecutor(liveEnv)
+    const database = liveEnv.clickhouseDatabase
+    const codecTable = `${createPrefix('drift_codec')}metrics`
+    const journalTable = createJournalTableName('drift_codec')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const fixture = await createFixture({ database, usersTableName: codecTable })
+    const object = `${quoteIdent(database)}.${quoteIdent(codecTable)}`
+    const args = ['--config', fixture.configPath, '--table', `${database}.${codecTable}`, '--json']
+    const codecsSql = `SELECT name, compression_codec FROM system.columns WHERE database = '${database}' AND table = '${codecTable}' ORDER BY name`
+
+    try {
+      await writeFile(fixture.schemaPath, `import { codec, schema, table } from '${CORE_ENTRY}'
+export default schema(table({
+  database: '${database}', name: '${codecTable}', engine: 'MergeTree()', orderBy: ['id'],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'none', type: 'String', codec: { kind: 'NONE' } },
+    { name: 'lz4', type: 'String', codec: { kind: 'LZ4' } },
+    { name: 'zstd', type: 'String', codec: { kind: 'ZSTD' } },
+    { name: 'zstd3', type: 'String', codec: { kind: 'ZSTD', level: 3 } },
+    { name: 'zstd_negative', type: 'String', codec: { kind: 'ZSTD', level: -1 } },
+    { name: 'lz4hc', type: 'String', codec: { kind: 'LZ4HC' } },
+    { name: 'lz4hc0', type: 'String', codec: { kind: 'LZ4HC', level: 0 } },
+    { name: 'lz4hc12', type: 'String', codec: { kind: 'LZ4HC', level: 12 } },
+    { name: 't64', type: 'UInt64', codec: { kind: 'T64' } },
+    // ClickHouse rejects a lone GCD, and the DSL types it as a general codec, so only raw reaches it.
+    { name: 'gcd', type: 'UInt64', codec: codec.raw('GCD, LZ4') },
+    { name: 'delta', type: 'Int64', codec: [{ kind: 'Delta' }, { kind: 'ZSTD' }] },
+    { name: 'delta8', type: 'Int64', codec: [{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }] },
+    { name: 'delta_t64', type: 'UInt32', codec: [{ kind: 'Delta', size: 4 }, { kind: 'T64' }] },
+    { name: 'double_delta', type: 'Int64', codec: [{ kind: 'DoubleDelta' }, { kind: 'LZ4' }] },
+    { name: 'double_delta4', type: 'DateTime', codec: [{ kind: 'DoubleDelta', size: 4 }, { kind: 'ZSTD', level: 2 }] },
+    { name: 'gorilla', type: 'Float64', codec: [{ kind: 'Gorilla' }, { kind: 'LZ4' }] },
+    { name: 'gorilla8', type: 'Float64', codec: [{ kind: 'Gorilla', size: 8 }, { kind: 'ZSTD', level: 2 }] },
+    { name: 'fpc', type: 'Float64', codec: [{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }] },
+    { name: 'fpc4', type: 'Float32', codec: [{ kind: 'FPC', level: 5, floatSize: 4 }, { kind: 'LZ4HC' }] },
+    { name: 'nullable_delta', type: 'Nullable(Int64)', codec: [{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }] },
+    { name: 'low_cardinality', type: 'LowCardinality(String)', codec: { kind: 'ZSTD' } },
+    { name: 'raw', type: 'String', codec: codec.raw('ZSTD') },
+    { name: 'raw_chain', type: 'Int64', codec: codec.raw('Delta(8),ZSTD(3)') },
+    { name: 'raw_fpc', type: 'Float64', codec: codec.raw('FPC, LZ4') },
+    { name: 'mixed', type: 'Int32', codec: [{ kind: 'Delta', size: 4 }, codec.raw('ZSTD(3)')] },
+    { name: 'plain', type: 'String' },
+  ],
+}))
+`, 'utf8')
+      const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('codec generate failed', generated))
+      const migrated = await runCliWithRetry(
+        fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'], { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('codec migrate failed', migrated))
+      await waitForTable(executor, database, codecTable)
+
+      const expectNoDrift = () => {
+        const drift = runCli(fixture.dir, ['drift', ...args], cliEnv)
+        expect(drift.exitCode).toBe(0)
+        expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+        const check = runCli(fixture.dir, ['check', '--strict', ...args], cliEnv)
+        expect(check.exitCode).toBe(0)
+        expect(JSON.parse(check.stdout)).toMatchObject({ ok: true, drifted: false, failedChecks: [] })
+      }
+      expectNoDrift()
+
+      // The same codecs, spelled the way ClickHouse fills in itself.
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN lz4hc CODEC(LZ4HC)`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN double_delta4 CODEC(DoubleDelta(8), ZSTD(2))`)
+      await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
+        (rows) => rows.find((row) => row.name === 'lz4hc')?.compression_codec === 'CODEC(LZ4HC(0))',
+        'equivalent codec respelling'
+      )
+      expectNoDrift()
+
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN zstd3 String CODEC(LZ4)`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN plain String CODEC(ZSTD(3))`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN lz4 REMOVE CODEC`)
+      await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
+        (rows) => {
+          const codecs = new Map(rows.map((row) => [row.name, row.compression_codec]))
+          return codecs.get('zstd3') === 'CODEC(LZ4)' && codecs.get('plain') === 'CODEC(ZSTD(3))' && codecs.get('lz4') === ''
+        },
+        'codec changes'
+      )
+      const changed = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(changed.exitCode).toBe(0)
+      const payload = JSON.parse(changed.stdout) as { drifted: boolean; tableDrift: Array<{ changedColumns: string[]; reasonCodes: string[] }> }
+      expect(payload.drifted).toBe(true)
+      expect(payload.tableDrift).toHaveLength(1)
+      expect(payload.tableDrift[0]?.reasonCodes).toEqual(['changed_column'])
+      expect([...(payload.tableDrift[0]?.changedColumns ?? [])].sort()).toEqual(['lz4', 'plain', 'zstd3'])
+      const strict = runCli(fixture.dir, ['check', '--strict', ...args], cliEnv)
+      expect(strict.exitCode).toBe(1)
+      expect(JSON.parse(strict.stdout)).toMatchObject({ ok: false, drifted: true, failedChecks: ['schema_drift'] })
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${object}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 240_000)
+
   test(
     'detects manual drift and exposes reason counts via drift/check JSON',
     async () => {

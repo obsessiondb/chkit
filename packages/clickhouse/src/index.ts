@@ -14,6 +14,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
+import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -609,8 +610,16 @@ function logProfiling(
 	})
 }
 
+// Sent with every request. wait_end_of_query is an HTTP parameter, not a
+// setting, so a readonly = 1 user, who cannot change any setting, can send it
+// too: reads carry nothing else (#402).
 const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 	wait_end_of_query: 1,
+}
+
+// Sent with writes only (command and insert): no asynchronous INSERTs, and
+// progress headers that keep a long migration's connection alive.
+const WRITE_SETTINGS: ClickHouseSettings = {
 	async_insert: 0,
 	send_progress_in_http_headers: 1,
 }
@@ -691,7 +700,7 @@ export function createExecutorWithClient(
 				const result = await client.command({
 					query: sql,
 					http_headers: { 'X-DDL': '1' },
-					...(settings ? { clickhouse_settings: settings } : {}),
+					clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -714,7 +723,7 @@ export function createExecutorWithClient(
 						const fallbackResult = await fallback.command({
 							query: sql,
 							http_headers: { 'X-DDL': '1' },
-							...(settings ? { clickhouse_settings: settings } : {}),
+							clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
 						})
 						assertStreamedQuerySucceeded({
 							response_headers: fallbackResult.response_headers,
@@ -780,7 +789,7 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 					sql,
 				})
-				const payload = (await result.json<T>()) as ClickHouseJsonQueryResult<T>
+				const payload = parseJsonResult<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -817,7 +826,7 @@ export function createExecutorWithClient(
 					values: params.values,
 					format: 'JSONEachRow',
 					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
-					...(params.settings ? { clickhouse_settings: params.settings } : {}),
+					clickhouse_settings: { ...WRITE_SETTINGS, ...params.settings },
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,

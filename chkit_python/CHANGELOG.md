@@ -137,13 +137,50 @@
   in `dictGet('users', …)`), so an unchanged view reads clean. A query the server can't
   format is not compared, nor is one in which ClickHouse hid a secret as `'[HIDDEN]'` (a
   table function's password), whose schema side is then never sent to the formatter.
+- `chkit drift` and `chkit check --live` compare column codecs, as in TS (#383): a codec
+  added, removed or changed on the server reports `changed_column`. Codecs are compared in
+  the form ClickHouse stores them, so `ZSTD` matches `ZSTD(1)`, `LZ4HC` matches `LZ4HC(0)`,
+  and `DoubleDelta(4)` and `FPC(12, 8)` match the `DoubleDelta` and `FPC(12)` ClickHouse
+  keeps. Introspection reads a negative codec level (`ZSTD(-1)`, stored as
+  `ZSTD(18446744073709551615)`) back as negative.
+- `chkit query` keeps every digit of 64-bit and wider integers and Decimals and prints the
+  same output as TS, in `--json` and in the table (#381). `query_json` parses ClickHouse's
+  `FORMAT JSON` body without losing digits (`parse_json_result`) and, in every column whose
+  type is or contains `Int64`/`UInt64`, a 128/256-bit integer, a `Decimal`, `JSON`, `Object`
+  or `Dynamic`, returns each number as a string of the digits ClickHouse sent, in `data` and
+  in the `totals` (`WITH TOTALS`) and `extremes` rows. A
+  `Decimal128(9)` such as `12345678901234567890.123456789` was printed as the float
+  `1.2345678901234567e+19`. It sends no settings, so it works for a `readonly = 1` user.
+  **Behaviour change:** in `--json`, `UInt64`, `Int64`, 128/256-bit integer and `Decimal`
+  values are JSON strings now (they were numbers), also inside arrays, maps and tuples;
+  `meta[].type` still gives the type. The table output now reads through `query_json` too,
+  so it prints the `--json` values as TS does: a Decimal without quotes (it printed
+  `"12.345"`), `true`/`false`, `DateTime` as ClickHouse formats it, and arrays, maps and
+  tuples as compact JSON (`[1,2,3]`). `--json` prints the envelope keys in the TS order
+  (`data`, `meta`, the rest as ClickHouse writes them, then `query_id`), also with `LIMIT`
+  (`rows_before_limit_at_least`) and `WITH TOTALS`. A statement without a result set
+  (`CREATE`, `DROP`, `OPTIMIZE`, `INSERT ... SELECT`) prints `(no rows)` and an envelope
+  with empty `data`. **Behaviour change:** `INSERT ... VALUES` with inline data is no longer
+  accepted, because `FORMAT JSON` is appended to the statement, as in TS; use
+  `INSERT ... SELECT`.
+- chkit-py works with a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted
+  `SELECT`) for `query`, `status`, `check`, `drift`, `pull` and `migrate` without `--apply`,
+  as in TS (#402). Reading the journal no longer writes: `status`, `check` and `migrate`
+  failed with `ACCESS_DENIED` on `CREATE TABLE ... _chkit_migrations`. A missing journal
+  now reads as no applied migrations and is created by the first journal write of
+  `migrate --apply`; the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` upgrade runs only for a
+  journal that lacks the per-operation columns, and a `readonly = 1` user reads the journal
+  without `select_sequential_consistency`. `migrate --apply` with a read-only user fails
+  with the ClickHouse error, as before. A journal created before per-operation tracking
+  needs that `ALTER` once: with a read-only user, `status`, `check` and `migrate` fail with
+  `The journal table ... predates per-operation tracking and needs its new columns added.
+  Run chkit once as a user that can ALTER it`, followed by the ClickHouse error, as in TS.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not
-  ISO with a `T`; `Decimal` as a number), and `statistics` holds ClickHouse's `elapsed`,
-  `rows_read` and `bytes_read` numbers instead of the HTTP summary strings. Non-ASCII text
-  is printed as is instead of `\u`-escaped. UInt64/Int64 values keep the exact digits
-  ClickHouse sends. The text output is unchanged.
+  ISO with a `T`; 64-bit and wider integers and `Decimal` as exact strings, see #381), and
+  `statistics` holds ClickHouse's `elapsed`, `rows_read` and `bytes_read` numbers instead
+  of the HTTP summary strings. Non-ASCII text is printed as is instead of `\u`-escaped.
 - `schema` is optional in `ChxUserConfig`, as in TS (#376), so a user profile written with
   `define_config()` or `ChxUserConfig(...)` may leave it out. It failed with `Field
   required` before; only a plain dict profile could leave it out. A project config without

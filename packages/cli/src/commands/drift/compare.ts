@@ -1,4 +1,5 @@
 import {
+  codecFingerprint,
   constraintExpression,
   constraintKind,
   identifierName,
@@ -252,6 +253,7 @@ function normalizeColumnShape(column: ColumnDefinition): string {
     `default=${normalizedDefault}`,
     `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,
+    `codec=${codecFingerprint(column.codec)}`,
   ]
   return parts.join('|')
 }

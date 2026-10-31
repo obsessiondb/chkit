@@ -79,6 +79,7 @@ export {
 export {
   canonicalizeCodec,
   codec,
+  codecFingerprint,
   codecsEqual,
   isGeneralCodec,
   isPreprocessorCodec,

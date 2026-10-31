@@ -118,7 +118,7 @@ def make_project(
         # chkit creates the journal and reads it right away; on a multi-replica
         # service the read can land on a replica that has not applied that
         # CREATE yet. Create it up front and wait until every replica lists it.
-        JournalStore(client)._ensure_table()
+        JournalStore(client)._ensure_table(create=True)
         wait_for_table_on_every_replica(client, project.database, journal_table)
         created.append((project, [], []))
         return project
