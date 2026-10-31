@@ -1,6 +1,6 @@
 # Lemlist raw ingestion
 
-Sync seven Lemlist resources into independent raw ClickHouse tables. Readers pass provider records without field transformations; campaign/contact joins and reporting belong in ClickHouse. The `raw` column uses ClickHouse native JSON, not an exact copy of the response text: storage normalization can omit explicit null properties and empty objects. See the [native JSON storage fidelity contract](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity).
+Sync seven Lemlist resources into independent raw ClickHouse tables. Readers pass provider records without field transformations; campaign/contact joins and reporting belong in ClickHouse. The `raw` column uses ClickHouse native JSON, not an exact copy of the response text: storage normalization can omit explicit null properties and empty objects. See the [native JSON storage fidelity contract](https://chkit.obsessiondb.com/api-sync/destinations/).
 
 Set `LEMLIST_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit `config.ts` for the account namespace, page size, initial date, overlap, and interval length. Native JSON requires ClickHouse 25.3 or later.
 
