@@ -19,9 +19,11 @@ bunx chkit ingest status --tag provider:google-calendar
 
 The first run reads canonical events with `singleEvents=false` and `showDeleted=true`: one-off events, recurring series masters, exceptions, and cancellation payloads. It does not expand every occurrence of a recurring series. Raw row IDs are `[sourceId, resolvedCalendarId, event.id]`; calendar metadata resolves `primary` to a stable calendar ID and prevents a different account from silently reusing its checkpoint.
 
-The raw destination keeps the latest observed payload per identity. A recurring master contains recurrence rules; applications needing occurrences should add a separate bounded instances reader or derive an occurrence projection. A cancelled payload can be sparse and remains unmodified.
+The raw destination keeps the latest observed payload per identity. A recurring master contains recurrence rules; applications needing occurrences should add a separate bounded instances reader or derive an occurrence projection. Sparse cancellation payloads are stored without hydrating fields from prior observations.
 
 Attendees, organizer, recurrence, reminders, attachments, and `conferenceData` remain native fields inside each event, as returned by Google. Calendar metadata is used only to resolve the calendar identity. This installation collects events only; it does not add attendee, calendar-directory, attachment, or Meet tables. Project fields and join other integrations later in ClickHouse, preserving source and calendar identity.
+
+Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. This is not byte- or shape-exact archival storage; see [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity).
 
 ## Pipeline and stream
 
@@ -33,7 +35,7 @@ One installation exports one `google_calendarPipeline` with the canonical `event
 
 Each acknowledged event page checkpoints its next page token while retaining the same input sync token. Only an acknowledged terminal page promotes `nextSyncToken`. Empty terminal pages also commit progress. A failed load leaves the preceding checkpoint, so rerunning resumes safely and may replay observations. Requests have a 30-second timeout. Each run permits 200 page chunks (`maxChunks`, a positive integer); budget exhaustion preserves progress for the next run. The executor owns retries, cancellation, and sink acknowledgements; run one ingestion process per ClickHouse target at a time.
 
-Google reports per-user and per-calendar rate limits as `403` with reason `rateLimitExceeded` or `userRateLimitExceeded` as well as `429`. Both are retried with backoff and any `Retry-After` header. Other `403` responses, `401` for an expired or invalid token, and other `4xx` responses fail the run without a retry; the journal keeps the preceding checkpoint.
+Google reports per-user and per-calendar rate limits as `403` with reason `rateLimitExceeded` or `userRateLimitExceeded` as well as `429`. Both are retried with backoff and any `Retry-After` header. Other `403` responses and `401` for an expired or invalid token fail the run without a retry; the journal keeps the preceding checkpoint. Rejected-token recovery is described below.
 
 `paginate()` carries each page's raw events and complete checkpoint candidate in metadata, including empty terminal pages. The reader yields `page.items` as rows and the metadata checkpoint as chunk state; the library checks repeated continuations before exposing that candidate. A rejected token produces an empty reset page with a fresh continuation and checkpointed recovery debt, so recovery uses the same pagination loop. The saved checkpoint format is unchanged.
 

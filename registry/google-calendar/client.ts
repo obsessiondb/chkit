@@ -18,7 +18,6 @@ export const defaultGoogleCalendarClientDeps: GoogleCalendarClientDeps = {
   token: () => process.env.GOOGLE_CALENDAR_ACCESS_TOKEN,
 }
 
-// Google reports per-user and per-calendar rate limits as 403 usageLimits errors as well as 429.
 const RATE_LIMIT_REASON = /"reason"\s*:\s*"(?:rateLimitExceeded|userRateLimitExceeded)"/
 
 export const classifyGoogleCalendarError: ErrorClassifier = (cause) => {

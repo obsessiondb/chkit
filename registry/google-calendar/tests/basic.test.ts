@@ -293,7 +293,7 @@ test('Calendar factory rejects source changes under an existing stream prefix be
 })
 
 test('Calendar retries Google 403 rate-limit reasons like 429 and keeps other 403 responses permanent', async () => {
-  for (const [reason, retried] of [['rateLimitExceeded', true], ['userRateLimitExceeded', true], ['forbidden', false]] as const) {
+  for (const [reason, retried] of [['rateLimitExceeded', true], ['userRateLimitExceeded', true], ['forbidden', false], ['quotaExceeded', false]] as const) {
     let rejected = false
     const requests: string[] = []
     const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, { config: googleCalendarConfig, token: () => 'fixture', fetch: async (input) => {
@@ -314,7 +314,7 @@ test('Calendar retries Google 403 rate-limit reasons like 429 and keeps other 40
 })
 
 test('Calendar factory rejects an invalid chunk budget before any request', () => {
-  for (const maxChunks of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+  for (const maxChunks of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
     expect(() => createGoogleCalendarPipeline({ ...googleCalendarConfig, maxChunks }, { config: googleCalendarConfig, token: () => 'fixture', fetch: async () => { throw new Error('must not fetch') } })).toThrow('maxChunks')
   }
 })
