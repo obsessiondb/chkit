@@ -62,7 +62,7 @@ def clean_query_error(error: BaseException) -> BaseException:
 
 
 def format_query_json(payload: ClickHouseJsonQueryResult) -> str:
-    return json.dumps(payload.model_dump(mode="json"), indent=2)
+    return json.dumps(payload.model_dump(mode="json"), indent=2, ensure_ascii=False)
 
 
 def _stringify_cell(value: Any) -> str:

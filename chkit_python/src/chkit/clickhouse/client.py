@@ -7,6 +7,7 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from typing import Any, Literal, Self
@@ -47,9 +48,10 @@ class ClickHouseJsonQueryResult(BaseModel):
 
     Mirrors `@chkit/clickhouse`'s ``ClickHouseJsonQueryResult`` shape so
     ``chkit query --json`` output is stable across the TS and Python ports.
+    Other keys of the server envelope (``rows_before_limit_at_least``) are kept.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="allow")
 
     data: list[dict[str, Any]]
     meta: list[ClickHouseColumnMeta]
@@ -167,29 +169,19 @@ class ClickHouseClient:
         return QueryResult(column_names=column_names, rows=rows)
 
     def query_json(self, statement: str) -> ClickHouseJsonQueryResult:
-        """Run a SELECT and return a full envelope with meta + statistics."""
-        result = self._client.query(statement)
-        column_names: list[str] = list(result.column_names)
-        column_types: list[Any] = list(result.column_types)
-        data = [
-            dict(zip(column_names, row, strict=True)) for row in result.result_rows
-        ]
-        meta = [
-            ClickHouseColumnMeta(name=name, type=str(typ))
-            for name, typ in zip(column_names, column_types, strict=True)
-        ]
-        summary = getattr(result, "summary", None)
-        statistics: dict[str, Any] | None = None
-        if isinstance(summary, dict):
-            statistics = dict(summary)
-        query_id_attr = getattr(result, "query_id", None)
-        query_id = str(query_id_attr) if query_id_attr is not None else None
-        return ClickHouseJsonQueryResult(
-            data=data,
-            meta=meta,
-            rows=len(data),
-            statistics=statistics,
-            query_id=query_id,
+        """Run a SELECT and return ClickHouse's ``JSON`` format envelope.
+
+        As in TS, the server's own ``FORMAT JSON`` output is returned as is
+        (type names in ``meta``, values and ``statistics`` as ClickHouse
+        formats them), plus the ``query_id``. Trailing semicolons are dropped
+        before ``FORMAT JSON`` is appended, as ``@clickhouse/client`` does.
+        """
+        query_id = str(uuid.uuid4())
+        body = self._client.raw_query(
+            statement.strip().rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+        )
+        return ClickHouseJsonQueryResult.model_validate(
+            {**json.loads(body), "query_id": query_id}
         )
 
     def submit(
