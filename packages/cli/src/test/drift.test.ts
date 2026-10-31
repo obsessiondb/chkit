@@ -12,6 +12,7 @@ import {
 
 import {
   collectTableSqlFragments,
+  collectViewSqlQueries,
   compareSchemaObjects,
   compareTableShape,
   compareViewShape,
@@ -1304,6 +1305,7 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
       as: "SELECT * FROM remote('127.0.0.1', system.one, 'default', 'chkit-ci')",
     })
     const live = { query: "SELECT * FROM remote('127.0.0.1', system.one, 'default', '[HIDDEN]')" }
+    expect(collectViewSqlQueries(remoteView, live)).toEqual([])
     expect(compareViewShape(remoteView, live, 'app', canonicalizer)).toEqual([])
   })
 
@@ -1318,5 +1320,17 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     const expected = view({ database: 'app', name: 'v', as: "SELECT app, 'app.x', t.app.c FROM `app`.t" })
     const live = { query: "SELECT app, 'app.x', t.app.c FROM t" }
     expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
+  })
+
+  test('the session database qualifier ClickHouse adds to a dictionary name is removed', () => {
+    const expected = view({
+      database: 'app',
+      name: 'v',
+      as: "SELECT id, dictGet('users', 'name', id) AS n, dictHas('users', id) AS h FROM t",
+    })
+    const live = { query: "SELECT id, dictGet('app.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM app.t" }
+    expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
+    const elsewhere = { query: "SELECT id, dictGet('other.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM t" }
+    expect(compareViewShape(expected, elsewhere, 'app', canonicalizer)).toMatchObject([{ code: 'query_mismatch' }])
   })
 })

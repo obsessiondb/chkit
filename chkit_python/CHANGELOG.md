@@ -133,9 +133,10 @@
   (also for a materialized view recreated with an inner table), with the compared values in
   `expected` and `actual`; before, a view recreated on the server with another query passed
   `check --strict`. Both queries go through ClickHouse's formatter and drop the qualifier
-  ClickHouse adds for the connection's database, so an unchanged view reads clean. A query
-  the server can't format is not compared, nor is one in which ClickHouse hid a secret as
-  `'[HIDDEN]'` (a table function's password).
+  ClickHouse adds for the connection's database (to table names and to the dictionary name
+  in `dictGet('users', …)`), so an unchanged view reads clean. A query the server can't
+  format is not compared, nor is one in which ClickHouse hid a secret as `'[HIDDEN]'` (a
+  table function's password), whose schema side is then never sent to the formatter.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not

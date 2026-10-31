@@ -539,7 +539,8 @@ def parse_materialized_view_target(
             depth -= 1
         if depth == 0 and token.kind == "identifier":
             keyword = token.text.upper()
-            if keyword == "AS":
+            # A materialized view with an inner table has an engine and no ``TO``.
+            if keyword in ("AS", "ENGINE"):
                 return None
             if keyword == "TO":
                 first = name_at(i + 1)

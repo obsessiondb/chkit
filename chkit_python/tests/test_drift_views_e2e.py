@@ -13,7 +13,13 @@ from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_view
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxResolvedClickHouseConfig, materialized_view, table, view
+from chkit.core.model import (
+    ChxResolvedClickHouseConfig,
+    dictionary,
+    materialized_view,
+    table,
+    view,
+)
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
 from tests.e2e_testkit import create_prefix, poll_until, resolve_live_env
@@ -38,6 +44,7 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
         prefix = create_prefix("drift_views")
         orders, by_day, by_day_alt = f"{prefix}orders", f"{prefix}by_day", f"{prefix}by_day_alt"
         report, orders_mv = f"{prefix}report", f"{prefix}orders_mv"
+        statuses = f"{prefix}statuses"
         mv_query = f"SELECT day, amount FROM {orders} WHERE status != 'Refunded'"
         target_columns = [{"name": "day", "type": "Date"}, {"name": "amount", "type": "UInt64"}]
         definitions = [
@@ -65,6 +72,18 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
                 )
                 for name in (by_day, by_day_alt)
             ),
+            dictionary(
+                database=database,
+                name=statuses,
+                primary_key=["id"],
+                attributes=[
+                    {"name": "id", "type": "UInt64"},
+                    {"name": "status", "type": "String", "default": ""},
+                ],
+                source=f"CLICKHOUSE(TABLE '{orders}' DB '{database}')",
+                layout="FLAT()",
+                lifetime="0",
+            ),
             view(
                 database=database,
                 name=report,
@@ -72,7 +91,9 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
                     f"WITH paid AS (SELECT id, day, amount FROM {orders} "
                     "WHERE status IN ('Paid','Shipped')) -- paid orders only\n"
                     "SELECT p.day AS day, sum(p.amount) AS revenue, "
-                    "arrayMap(x -> x*2, [1,2]) AS doubled, /* note */ count() AS n\n"
+                    "arrayMap(x -> x*2, [1,2]) AS doubled, /* note */ count() AS n,\n"
+                    f"  max(dictGet('{statuses}', 'status', p.id)) AS last_status, "
+                    f"countIf(dictHas('{statuses}', p.id)) AS known\n"
                     "FROM paid AS p\n"
                     f"JOIN (SELECT day, count() AS c FROM {orders} GROUP BY day) AS d "
                     "ON p.day = d.day\n"
@@ -132,5 +153,6 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
         finally:
             client.execute(f"DROP VIEW IF EXISTS {database}.{orders_mv}")
             client.execute(f"DROP VIEW IF EXISTS {database}.{report}")
+            client.execute(f"DROP DICTIONARY IF EXISTS {database}.{statuses}")
             for name in (orders, by_day, by_day_alt):
                 client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")

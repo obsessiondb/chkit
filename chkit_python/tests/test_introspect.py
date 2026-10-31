@@ -474,8 +474,9 @@ def test_parse_materialized_view_target_unqualified_falls_back_to_view_database(
 
 def test_parse_materialized_view_target_inner_table_has_none() -> None:
     query = (
-        "CREATE MATERIALIZED VIEW app.mv (`id` UInt64) ENGINE = MergeTree ORDER BY id "
-        "SETTINGS index_granularity = 8192 AS SELECT id FROM app.src WHERE x TO y"
+        "CREATE MATERIALIZED VIEW app.mv (`id` UInt64, `d` Date) ENGINE = MergeTree ORDER BY id "
+        "TTL d + toIntervalDay(1) TO DISK 'cold' SETTINGS index_granularity = 8192 "
+        "AS SELECT id, d FROM app.src WHERE x TO y"
     )
     assert parse_materialized_view_target(query, "app") is None
 

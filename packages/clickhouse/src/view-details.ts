@@ -79,7 +79,8 @@ export function parseMaterializedViewTarget(
     else if (token.text === ')') depth--
     if (depth !== 0 || token.kind !== 'identifier') continue
     const keyword = token.text.toUpperCase()
-    if (keyword === 'AS') return undefined
+    // A materialized view with an inner table has an engine and no `TO`.
+    if (keyword === 'AS' || keyword === 'ENGINE') return undefined
     if (keyword !== 'TO') continue
     const first = nameAt(i + 1)
     if (first === undefined) return undefined

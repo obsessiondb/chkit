@@ -31,7 +31,7 @@ describe('parseMaterializedViewTarget', () => {
   test('a materialized view with an inner table has no target', () => {
     expect(
       parseMaterializedViewTarget(
-        'CREATE MATERIALIZED VIEW app.mv (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id FROM app.src WHERE x TO y',
+        "CREATE MATERIALIZED VIEW app.mv (`id` UInt64, `d` Date) ENGINE = MergeTree ORDER BY id TTL d + toIntervalDay(1) TO DISK 'cold' SETTINGS index_granularity = 8192 AS SELECT id, d FROM app.src WHERE x TO y",
         'app'
       )
     ).toBeUndefined()

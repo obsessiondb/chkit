@@ -9,6 +9,7 @@ from chkit.cli.commands.drift_compare import (
     MapSqlCanonicalizer,
     ObjectDriftDetail,
     SchemaObjectShape,
+    collect_view_sql_queries,
     compare_schema_objects,
     compare_table_shape,
     compare_view_shape,
@@ -440,6 +441,7 @@ def test_view_query_in_which_clickhouse_hid_a_secret_is_not_compared() -> None:
         as_="SELECT * FROM remote('127.0.0.1', system.one, 'default', 'chkit-ci')",
     )
     live = _live_view("SELECT * FROM remote('127.0.0.1', system.one, 'default', '[HIDDEN]')")
+    assert collect_view_sql_queries(remote_view, live) == []
     assert compare_view_shape(remote_view, live, "app", _FormatCanonicalizer()) == []
 
 
@@ -463,3 +465,19 @@ def test_view_query_strips_only_a_database_qualifier_in_front_of_a_name() -> Non
     live = _live_view("SELECT app, 'app.x', t.app.c FROM t")
     assert compare_view_shape(expected, live, "app", _FormatCanonicalizer()) == []
 
+
+def test_view_query_strips_the_session_database_clickhouse_adds_to_a_dictionary_name() -> None:
+    expected = view(
+        database="app",
+        name="v",
+        as_="SELECT id, dictGet('users', 'name', id) AS n, dictHas('users', id) AS h FROM t",
+    )
+    live = _live_view(
+        "SELECT id, dictGet('app.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM app.t"
+    )
+    assert compare_view_shape(expected, live, "app", _FormatCanonicalizer()) == []
+    elsewhere = _live_view(
+        "SELECT id, dictGet('other.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM t"
+    )
+    drift = compare_view_shape(expected, elsewhere, "app", _FormatCanonicalizer())
+    assert [d.code for d in drift] == ["query_mismatch"]

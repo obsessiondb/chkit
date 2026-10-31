@@ -463,12 +463,13 @@ export default schema(table({
     const byDayAlt = `${prefix}by_day_alt`
     const report = `${prefix}report`
     const ordersMv = `${prefix}orders_mv`
+    const statuses = `${prefix}statuses`
     const fixture = await createFixture({ database, usersTableName: orders })
     const q = (name: string) => `${quoteIdent(database)}.${quoteIdent(name)}`
     const mvQuery = `SELECT day, amount FROM ${quoteIdent(orders)} WHERE status != 'Refunded'`
 
     try {
-      await writeFile(fixture.schemaPath, `import { materializedView, schema, table, view } from '${CORE_ENTRY}'
+      await writeFile(fixture.schemaPath, `import { dictionary, materializedView, schema, table, view } from '${CORE_ENTRY}'
 const orders = table({
   database: '${database}', name: '${orders}', engine: 'MergeTree()', orderBy: ['id'],
   columns: [
@@ -482,10 +483,16 @@ const byDay = (name) => table({
   database: '${database}', name, engine: 'MergeTree()', orderBy: ['day'],
   columns: [{ name: 'day', type: 'Date' }, { name: 'amount', type: 'UInt64' }],
 })
+const statuses = dictionary({
+  database: '${database}', name: '${statuses}', primaryKey: ['id'],
+  attributes: [{ name: 'id', type: 'UInt64' }, { name: 'status', type: 'String', default: '' }],
+  source: "CLICKHOUSE(TABLE '${orders}' DB '${database}')", layout: 'FLAT()', lifetime: '0',
+})
 const report = view({
   database: '${database}', name: '${report}',
   as: \`WITH paid AS (SELECT id, day, amount FROM ${orders} WHERE status IN ('Paid','Shipped')) -- paid orders only
-SELECT p.day AS day, sum(p.amount) AS revenue, arrayMap(x -> x*2, [1,2]) AS doubled, /* note */ count() AS n
+SELECT p.day AS day, sum(p.amount) AS revenue, arrayMap(x -> x*2, [1,2]) AS doubled, /* note */ count() AS n,
+  max(dictGet('${statuses}', 'status', p.id)) AS last_status, countIf(dictHas('${statuses}', p.id)) AS known
 FROM paid AS p
 JOIN (SELECT day, count() AS c FROM ${orders} GROUP BY day) AS d ON p.day = d.day
 WHERE p.id IN (SELECT id FROM ${database}.${orders} WHERE amount > 0)
@@ -496,7 +503,7 @@ const ordersMv = materializedView({
   database: '${database}', name: '${ordersMv}', to: { database: '${database}', name: '${byDay}' },
   as: "${mvQuery}",
 })
-export default schema(orders, byDay('${byDay}'), byDay('${byDayAlt}'), report, ordersMv)
+export default schema(orders, byDay('${byDay}'), byDay('${byDayAlt}'), statuses, report, ordersMv)
 `, 'utf8')
       const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
       if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('views generate failed', generated))
@@ -553,6 +560,7 @@ export default schema(orders, byDay('${byDay}'), byDay('${byDayAlt}'), report, o
     } finally {
       await executor.command(`DROP VIEW IF EXISTS ${q(ordersMv)}`)
       await executor.command(`DROP VIEW IF EXISTS ${q(report)}`)
+      await executor.command(`DROP DICTIONARY IF EXISTS ${q(statuses)}`)
       for (const name of [orders, byDay, byDayAlt, journalTable]) {
         await executor.command(`DROP TABLE IF EXISTS ${q(name)}`)
       }

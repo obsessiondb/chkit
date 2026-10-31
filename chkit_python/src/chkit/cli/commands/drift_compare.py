@@ -652,6 +652,9 @@ def collect_view_sql_queries(
     expected: ViewDefinition | MaterializedViewDefinition, actual: IntrospectedView
 ) -> list[str]:
     """The view and materialized view queries ``compare_view_shape`` will look up."""
+    # Formatting the schema's query would log its secret in ``system.query_log``.
+    if _HIDDEN_SECRET in actual.query:
+        return []
     return [normalize_sql_fragment(expected.as_), normalize_sql_fragment(actual.query)]
 
 
@@ -705,14 +708,27 @@ def _strip_database_qualifier(sql: str, database: str) -> str:
 
     ClickHouse qualifies every table name in a view's query with the database
     the view was created from, so a schema's ``FROM events`` is stored as
-    ``FROM analytics.events``. Both sides drop that qualifier, which names the
-    same table as no qualifier.
+    ``FROM analytics.events``, and the dictionary name in
+    ``dictGet('users', …)`` as ``'analytics.users'``. Both sides drop that
+    qualifier, which names the same object as no qualifier.
     """
     tokens = tokenize_sql(sql)
+    qualified_literal = f"'{database}."
     out: list[str] = []
     i = 0
     while i < len(tokens):
         token = tokens[i]
+        dictionary_name = (
+            token.kind == "string"
+            and token.text.startswith(qualified_literal)
+            and i > 1
+            and tokens[i - 1].text == "("
+            and (identifier_name(tokens[i - 2]) or "").lower().startswith("dict")
+        )
+        if dictionary_name:
+            out.append("'" + token.text[len(qualified_literal) :])
+            i += 1
+            continue
         qualifier = (
             identifier_name(token) == database
             and (i == 0 or tokens[i - 1].text != ".")
