@@ -124,7 +124,7 @@ def create_cutover_project(
     )
     # chkit creates the journal and reads it right away; on a multi-replica
     # service the read can land on a replica that has not applied that CREATE.
-    JournalStore(target.admin, target.cluster)._ensure_table()
+    JournalStore(target.admin, target.cluster)._ensure_table(create=True)
     if target.cluster is None:
         wait_for_table_on_every_replica(target.admin, target.database, project.journal_table)
     write_schema(target, project, ["id"])

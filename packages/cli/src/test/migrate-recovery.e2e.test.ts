@@ -328,8 +328,9 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
         `SELECT toString(count()) AS n FROM system.tables WHERE database = '${db}' AND name = '${t}'`,
       )
       expect(Number(tables[0]?.n)).toBe(0)
+      // A read does not create the journal (#402), so there is none yet.
       const journal = await executor.query<{ n: string }>(
-        `SELECT toString(count()) AS n FROM ${quoteIdent(db)}.${quoteIdent(project.journalTable)} FINAL`,
+        `SELECT toString(count()) AS n FROM system.tables WHERE database = '${db}' AND name = '${project.journalTable}'`,
       )
       expect(Number(journal[0]?.n)).toBe(0)
 
