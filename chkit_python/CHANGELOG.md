@@ -117,6 +117,13 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
+  in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
+  values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not
+  ISO with a `T`; `Decimal` as a number), and `statistics` holds ClickHouse's `elapsed`,
+  `rows_read` and `bytes_read` numbers instead of the HTTP summary strings. Non-ASCII text
+  is printed as is instead of `\u`-escaped. UInt64/Int64 values keep the exact digits
+  ClickHouse sends. The text output is unchanged.
 - `chkit obsessiondb service alias remove` drops the `aliases` key from
   `.chkit/obsessiondb.json` when it removes the last alias, as TS does, instead of writing
   `"aliases": {}` (#372).
