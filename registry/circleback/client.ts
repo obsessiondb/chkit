@@ -50,7 +50,11 @@ export async function requestCircleback(pathOrUrl: string, signal: AbortSignal, 
 }
 
 export function classifyCirclebackError(cause: unknown): ReturnType<ErrorClassifier> {
-  return cause instanceof SyntaxError ? { kind: 'permanent' } : undefined
+  if (cause instanceof SyntaxError) return { kind: 'permanent' }
+  if (!(cause instanceof HttpError) || cause.status !== 429) return undefined
+  const reset = cause.response.headers.get('ratelimit-reset')
+  const resetMs = reset?.trim() ? Number(reset) * 1000 : Number.NaN
+  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? (Number.isFinite(resetMs) && resetMs >= 0 ? resetMs : undefined) }
 }
 
 export function toCirclebackRows(items: readonly CirclebackObject[], id: (item: CirclebackObject) => string | number, sourceId: string) {
