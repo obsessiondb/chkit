@@ -110,6 +110,12 @@ test('rejects a page that is not shaped { items, next } before the reader sees i
   await expect(missing.next()).rejects.toThrow('got undefined')
 })
 
+test('tolerates an omitted continuation as a terminal page', async () => {
+  const iterator = paginate({ context: fetchContext(), fetchPage: async () => ({ items: [1] }) as never })
+  expect(await iterator.next()).toEqual({ done: false, value: { items: [1] } })
+  expect(await iterator.next()).toEqual({ done: true, value: undefined })
+})
+
 test('a continuation that cannot be serialized is a configuration error, not a TypeError', async () => {
   const initial = paginate({ context: fetchContext(), initial: 1n, fetchPage: async () => ({ items: [], next: undefined }) })
   await expect(initial.next()).rejects.toThrow(IngestConfigError)

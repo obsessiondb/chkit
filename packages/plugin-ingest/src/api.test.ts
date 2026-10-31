@@ -148,6 +148,13 @@ describe('exported pipeline discovery', () => {
     expect(() => definePipeline({ id: 'p', streams: [stream], maxLoads: 0 })).toThrow('maxLoads must be a positive integer')
   })
 
+  test('preserves unbounded retry timeout policies for streams and pipelines', () => {
+    const retry = { retries: 1, minTimeout: 0, maxTimeout: Number.POSITIVE_INFINITY }
+    const stream = defineStream({ id: 'rows', destination: rawTable({ database: 'test', name: 'rows' }), retry, async *read() {} })
+    expect(stream.retry).toEqual(retry)
+    expect(definePipeline({ id: 'p', streams: [stream], retry }).retry).toEqual(retry)
+  })
+
   test('declared tags cannot impersonate the derived stream: and pipeline: tags', () => {
     const destination = rawTable({ database: 'test', name: 'rows' })
     const read = async function* () { yield { rows: [] } }

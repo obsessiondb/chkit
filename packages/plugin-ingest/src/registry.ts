@@ -218,8 +218,6 @@ function assertPositiveInteger(scope: string, name: string, value: unknown): voi
   }
 }
 
-// p-retry rejects these at the first attempt; failing at definition time keeps
-// a typo from surfacing as a failed stream on the first scheduled run.
 function assertRetryOptions(scope: string, retry: RetryOptions | undefined): void {
   if (retry === undefined) return
   const retries: unknown = retry.retries
@@ -228,7 +226,7 @@ function assertRetryOptions(scope: string, retry: RetryOptions | undefined): voi
   }
   for (const name of ['factor', 'minTimeout', 'maxTimeout', 'maxRetryTime'] as const) {
     const value: unknown = retry[name]
-    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0) && !(name === 'maxRetryTime' && value === Number.POSITIVE_INFINITY)) {
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0) && !((name === 'maxTimeout' || name === 'maxRetryTime') && value === Number.POSITIVE_INFINITY)) {
       throw new IngestConfigError(`${scope}: retry.${name} must be a non-negative number.`)
     }
   }
