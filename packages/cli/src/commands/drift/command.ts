@@ -91,6 +91,12 @@ export const driftCommand: ChxPluginCommand = {
           )
           continue
         }
+        if (item.code === 'query_mismatch' || item.code === 'target_mismatch') {
+          console.log(`- ${item.code} ${item.object}`)
+          console.log(`  expected=${item.expected ?? ''}`)
+          console.log(`  actual=${item.actual ?? ''}`)
+          continue
+        }
         console.log(`- ${item.code} ${item.object}`)
       }
     }

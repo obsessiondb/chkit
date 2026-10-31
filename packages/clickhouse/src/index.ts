@@ -205,6 +205,7 @@ export {
 	parseUniqueKeyFromCreateTableQuery,
 } from './create-table-parser.js'
 export { canonicalizeSqlFragments } from './canonicalize.js'
+export { listViewDetails, parseMaterializedViewTarget, type IntrospectedView } from './view-details.js'
 export {
 	parseCommentFromCreateDictionaryQuery,
 	parseDictionaryAttributesFromCreateDictionaryQuery,

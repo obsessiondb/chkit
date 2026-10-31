@@ -22,6 +22,7 @@ from chkit.clickhouse.introspect import (
     list_table_details,
     normalize_column_from_system_row,
     normalize_index_from_system_row,
+    parse_materialized_view_target,
 )
 from chkit.core.model import (
     GeneralColumnCodec,
@@ -443,3 +444,39 @@ def test_schema_object_ref_is_frozen() -> None:
     except (AttributeError, TypeError):
         return
     raise AssertionError("SchemaObjectRef should be frozen")
+
+
+# ---------- parse_materialized_view_target (#382) ----------
+
+
+def test_parse_materialized_view_target_reads_stored_to() -> None:
+    query = (
+        "CREATE MATERIALIZED VIEW app.orders_mv TO app.orders_by_day "
+        "(`day` Date, `amount` UInt64) AS SELECT day, amount FROM app.orders "
+        "WHERE status != 'Refunded'"
+    )
+    assert parse_materialized_view_target(query, "app") == ("app", "orders_by_day")
+
+
+def test_parse_materialized_view_target_after_refresh_and_definer() -> None:
+    query = (
+        "CREATE MATERIALIZED VIEW `my-db`.mv REFRESH EVERY 1 HOUR SETTINGS refresh_retries = 2 "
+        "APPEND TO `my-db`.`to` (`n` UInt64) DEFINER = default SQL SECURITY DEFINER "
+        "AS SELECT 1 AS n"
+    )
+    assert parse_materialized_view_target(query, "my-db") == ("my-db", "to")
+
+
+def test_parse_materialized_view_target_unqualified_falls_back_to_view_database() -> None:
+    query = "CREATE MATERIALIZED VIEW mv TO target AS SELECT 1"
+    assert parse_materialized_view_target(query, "app") == ("app", "target")
+
+
+def test_parse_materialized_view_target_inner_table_has_none() -> None:
+    query = (
+        "CREATE MATERIALIZED VIEW app.mv (`id` UInt64, `d` Date) ENGINE = MergeTree ORDER BY id "
+        "TTL d + toIntervalDay(1) TO DISK 'cold' SETTINGS index_granularity = 8192 "
+        "AS SELECT id, d FROM app.src WHERE x TO y"
+    )
+    assert parse_materialized_view_target(query, "app") is None
+
