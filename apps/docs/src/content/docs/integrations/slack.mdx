@@ -179,6 +179,8 @@ For each channel, history advances newest first. Read every selected reply for o
 
 Channels and users remain full metadata reads. Messages initially read the recent 24 hours to a fixed cutoff; an explicit `historyFrom` expands that first bootstrap. Later runs select the completed watermark minus `overlapMs` (24 hours by default) through the new cutoff, preserving catch-up coverage between runs. Newly discovered channels use that same selected range. There is no periodic historical reconciliation. Old edits and late replies on roots outside the selected history range are outside normal coverage. Coverage depends on retention, API visibility, scopes, and access.
 
+A new message window whose lower bound exceeds its cutoff fails before any Slack request. An unfinished window resumes its saved bounds even if the new execution cutoff moves backward.
+
 Message checkpoints retain workspace/query scope, fixed bounds, channel position, and the exact completed history frontier. Child rows carry no advanced state. An empty progress marker flushes rows and advances history only after the entire page and its replies have destination acknowledgement. Failed or budget-limited runs keep the original bounds and replay the unfinished page, including previously loaded replies. The completed watermark moves only after all selected channels and their selected child work finish.
 
 Keep source identity, selection, reply policy, and time configuration stable. Changing them fails against saved state instead of reinterpreting progress. The message strategy uses version 2; incompatible checkpoints require explicit migration or a new stream identity. Earlier released templates had no message checkpoint: upgrading to version 0.2.0 bootstraps once while preserving raw tables and identities.
@@ -214,6 +216,8 @@ All three tables use these columns:
 | `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
 
 Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as the primary and ordering key. Later ingestion time wins during replacement; source edits are not ordered by a Slack version field. Use `FINAL` to query the latest observed row while physical tables still contain earlier versions awaiting merges.
+
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
 
 | Resource | Composite identity |
 |---|---|

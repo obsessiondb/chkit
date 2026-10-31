@@ -101,8 +101,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.0",
+      "version": "0.3.1",
       "changelog": [
+        {
+          "version": "0.3.1",
+          "changes": [
+            "Clarify native JSON normalization and numeric precision limits in stored provider data; runtime behavior is unchanged."
+          ]
+        },
         {
           "version": "0.3.0",
           "changes": [

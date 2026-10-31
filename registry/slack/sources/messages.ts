@@ -13,19 +13,20 @@ export async function* readMessages(
 ): AsyncGenerator<SourceChunk<RawRow, SlackMessageState>> {
   const client = createSlackClient(context, config)
   const settings = client.settings
+  const to = context.selection.to
+  const initialFrom = context.selection.from ?? settings.historyFrom ?? formatTimestamp(max(0n, timestampMicros(to) - BigInt(settings.overlapMs) * 1_000n))
+  const from = context.selection.from ?? (context.state ? formatTimestamp(max(settings.historyFrom === undefined ? 0n : timestampMicros(settings.historyFrom), timestampMicros(context.state.watermark) - BigInt(settings.overlapMs) * 1_000n)) : initialFrom)
+  if (!context.state?.active && timestampMicros(from) > timestampMicros(to)) throw new Error('Slack selection starts after its cutoff.')
   const teamId = await client.workspace()
   const scope = messageScope(teamId, settings)
   if (context.state && context.state.scope !== scope) throw new Error('Slack checkpoint belongs to a different workspace or query. Restore the configuration or use a distinct sourceId.')
-  const initialFrom = context.selection.from ?? settings.historyFrom ?? formatTimestamp(max(0n, timestampMicros(context.selection.to) - BigInt(settings.overlapMs) * 1_000n))
   let state: SlackMessageState = context.state ?? { scope, watermark: initialFrom }
   if (!state.active) {
-    const channels: string[] = []
-    for await (const page of client.conversations()) channels.push(...page.items.map((channel) => channel.id))
-    channels.sort()
-    const to = context.selection.to
-    const from = context.selection.from ?? (context.state ? formatTimestamp(max(settings.historyFrom === undefined ? 0n : timestampMicros(settings.historyFrom), timestampMicros(state.watermark) - BigInt(settings.overlapMs) * 1_000n)) : initialFrom)
-    if (timestampMicros(from) > timestampMicros(to)) throw new Error('Slack selection starts after its cutoff.')
-    state = { ...state, active: { from, to, channels, channelIndex: 0, latest: formatTimestamp(timestampMicros(to) + 1n),
+    const channels = new Set<string>()
+    for await (const page of client.conversations()) {
+      for (const channel of page.items) channels.add(channel.id)
+    }
+    state = { ...state, active: { from, to, channels: [...channels].sort(), channelIndex: 0, latest: formatTimestamp(timestampMicros(to) + 1n),
       requestedFrom: context.selection.from, requestedTo: context.selection.requestedTo } }
     yield marker(state, 'window-open')
   } else if (context.selection.backfill && (context.selection.from !== state.active.requestedFrom || context.selection.requestedTo !== state.active.requestedTo)) {

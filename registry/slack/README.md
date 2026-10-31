@@ -81,6 +81,8 @@ bunx chkit ingest run --tag provider:slack --tag resource:messages --max-duratio
 
 Every raw table contains stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time columns. `raw` contains `source_id`, authenticated `team_id`, and the complete provider object under `data`. Messages also contain `channel_id`.
 
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
+
 The row IDs are JSON-encoded arrays:
 
 | Resource | Identity |
@@ -110,6 +112,8 @@ There are no packaged typed views. Add SQL projections in the project's schema f
 ## Incremental messages and recovery
 
 The first messages run reads the recent 24 hours to a fixed execution cutoff. Set `historyFrom` to an exact timestamp string for a broader initial bootstrap; its default is `undefined`. Later runs begin at the completed watermark minus `overlapMs` (24 hours by default), so gaps between runs remain eligible. Newly discovered channels use the same selected range. There is no periodic historical reconciliation.
+
+A new message window whose lower bound exceeds its cutoff fails before any Slack request. An unfinished window resumes its saved bounds even if the new execution cutoff moves backward.
 
 Checkpoints retain exact timestamp strings, the authenticated workspace and query scope, fixed bounds, channel position, and the last completed history-page frontier. History progresses newest first; replies progress oldest first using temporary local boundaries. A history page and all of its selected replies must finish before an empty checkpoint marker advances history. Interrupted pages replay from their original boundary, including any child rows already loaded. Temporary API cursors never enter durable state; expiry replays that unfinished timestamp interval once. Empty terminal pages also commit progress.
 

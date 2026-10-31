@@ -240,6 +240,8 @@ Every raw table uses the same five columns:
 
 Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as both the primary key and ordering key. Later ingestion time wins during replacement; the integration does not order rows by an Attio source version. Physical rows can include earlier observations until merges occur. Use `FINAL` when directly querying raw tables for the reconciled result.
 
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
+
 Each ID is built as `JSON.stringify([sourceId, resource, ...entityIds])`. The resource names and entity ID fields are:
 
 | Resource | Entity ID fields, in order | Extra envelope field |

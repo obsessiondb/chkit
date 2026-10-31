@@ -86,6 +86,8 @@ Record streams carry `resource:records` and `object:<ref>`. Object-attribute str
 
 Each raw table contains a stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time metadata. The key includes source identity, resource kind, workspace ID, and every relevant object/list/entity ID. Names, emails, and domains are never keys.
 
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
+
 The complete returned entity is retained under `raw.data`. The envelope adds `source_id`; record and object-attribute rows also include `object_slug`, and list-entry/list-attribute rows include `list_slug`. No custom attributes or multivalued arrays are flattened away. For example:
 
 ```sql
