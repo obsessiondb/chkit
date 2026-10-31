@@ -5,13 +5,17 @@ import {
   type SkipIndexDefinition,
   type TableConstraintDefinition,
   type TableInput,
+  materializedView,
   table,
+  view,
 } from '@chkit/core'
 
 import {
   collectTableSqlFragments,
+  collectViewSqlQueries,
   compareSchemaObjects,
   compareTableShape,
+  compareViewShape,
   type SqlCanonicalizer,
   summarizeDriftReasons,
 } from '../commands/drift/compare.js'
@@ -1225,5 +1229,108 @@ describe('@chkit/cli drift: vector indexes, raw indexes and constraints (#278)',
   test('a structured index matches the same type written raw', () => {
     const raw = { name: 'e', expression: 'embedding', type: 'raw' as const, rawType: "vector_similarity('hnsw', 'cosineDistance', 4)", granularity: 100_000_000 }
     expect(compareTableShape(expected({ indexes: [raw, rawSparse] }), actual(), canonicalizer)).toBeNull()
+  })
+})
+
+describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
+  // Stand-in for ClickHouse's formatter: spaces after commas, `!=` spaced.
+  const format = (fragment: string): string =>
+    fragment.replace(/\s*,\s*/g, ', ').replace(/\s*!=\s*/g, ' != ').trim()
+  const canonicalizer: SqlCanonicalizer = { expression: format, query: format }
+  const dailyRevenue = view({
+    database: 'app',
+    name: 'daily_revenue',
+    as: 'SELECT day,sum(amount) AS revenue FROM orders GROUP BY day',
+  })
+  const ordersMv = materializedView({
+    database: 'app',
+    name: 'orders_mv',
+    to: { database: 'app', name: 'orders_by_day' },
+    as: "SELECT day, amount FROM orders WHERE status!='Refunded'",
+  })
+
+  test('a query ClickHouse reformatted and qualified with the session database reads clean', () => {
+    const live = { query: 'SELECT day, sum(amount) AS revenue FROM app.orders GROUP BY day' }
+    expect(compareViewShape(dailyRevenue, live, 'app', canonicalizer)).toEqual([])
+  })
+
+  test('a qualifier for another database is kept, so a changed source database drifts', () => {
+    const live = { query: 'SELECT day, sum(amount) AS revenue FROM other.orders GROUP BY day' }
+    expect(compareViewShape(dailyRevenue, live, 'app', canonicalizer)).toEqual([
+      {
+        code: 'query_mismatch',
+        object: 'app.daily_revenue',
+        expected: 'SELECT day, sum(amount) AS revenue FROM orders GROUP BY day',
+        actual: 'SELECT day, sum(amount) AS revenue FROM other.orders GROUP BY day',
+      },
+    ])
+  })
+
+  test('a materialized view with an extra WHERE condition drifts', () => {
+    const live = {
+      query: "SELECT day, amount FROM app.orders WHERE status != 'Refunded' AND amount > 0",
+      to: { database: 'app', name: 'orders_by_day' },
+    }
+    expect(compareViewShape(ordersMv, live, 'app', canonicalizer)).toMatchObject([
+      { code: 'query_mismatch', object: 'app.orders_mv' },
+    ])
+  })
+
+  test('a materialized view writing to another target drifts', () => {
+    const live = {
+      query: "SELECT day, amount FROM app.orders WHERE status != 'Refunded'",
+      to: { database: 'app', name: 'orders_by_week' },
+    }
+    expect(compareViewShape(ordersMv, live, 'app', canonicalizer)).toEqual([
+      {
+        code: 'target_mismatch',
+        object: 'app.orders_mv',
+        expected: 'app.orders_by_day',
+        actual: 'app.orders_by_week',
+      },
+    ])
+  })
+
+  test('a query that cannot be formatted is not compared', () => {
+    const live = { query: 'SELECT something else entirely' }
+    expect(compareViewShape(dailyRevenue, live, 'app')).toEqual([])
+    const unformattable: SqlCanonicalizer = { expression: format, query: () => null }
+    expect(compareViewShape(dailyRevenue, live, 'app', unformattable)).toEqual([])
+  })
+
+  test('a query in which ClickHouse hid a secret is not compared', () => {
+    const remoteView = view({
+      database: 'app',
+      name: 'remote_one',
+      as: "SELECT * FROM remote('127.0.0.1', system.one, 'default', 'chkit-ci')",
+    })
+    const live = { query: "SELECT * FROM remote('127.0.0.1', system.one, 'default', '[HIDDEN]')" }
+    expect(collectViewSqlQueries(remoteView, live)).toEqual([])
+    expect(compareViewShape(remoteView, live, 'app', canonicalizer)).toEqual([])
+  })
+
+  test('a materialized view recreated with an inner table drifts', () => {
+    const live = { query: "SELECT day, amount FROM app.orders WHERE status != 'Refunded'" }
+    expect(compareViewShape(ordersMv, live, 'app', canonicalizer)).toEqual([
+      { code: 'target_mismatch', object: 'app.orders_mv', expected: 'app.orders_by_day', actual: '' },
+    ])
+  })
+
+  test('only a database qualifier in front of a name is removed', () => {
+    const expected = view({ database: 'app', name: 'v', as: "SELECT app, 'app.x', t.app.c FROM `app`.t" })
+    const live = { query: "SELECT app, 'app.x', t.app.c FROM t" }
+    expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
+  })
+
+  test('the session database qualifier ClickHouse adds to a dictionary name is removed', () => {
+    const expected = view({
+      database: 'app',
+      name: 'v',
+      as: "SELECT id, dictGet('users', 'name', id) AS n, dictHas('users', id) AS h FROM t",
+    })
+    const live = { query: "SELECT id, dictGet('app.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM app.t" }
+    expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
+    const elsewhere = { query: "SELECT id, dictGet('other.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM t" }
+    expect(compareViewShape(expected, elsewhere, 'app', canonicalizer)).toMatchObject([{ code: 'query_mismatch' }])
   })
 })

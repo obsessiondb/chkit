@@ -166,6 +166,16 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             typer.echo("Kind mismatches:")
             for m in payload_obj.kind_mismatches:
                 typer.echo(f"- {m.object}: expected {m.expected}, got {m.actual}")
+        view_drift = [
+            d for d in payload_obj.object_drift if d.code in ("query_mismatch", "target_mismatch")
+        ]
+        if view_drift:
+            typer.echo("")
+            typer.echo("View drift:")
+            for d in view_drift:
+                typer.echo(f"- {d.code} {d.object}")
+                typer.echo(f"  expected={d.expected or ''}")
+                typer.echo(f"  actual={d.actual or ''}")
         if payload_obj.table_drift:
             typer.echo("")
             typer.echo("Table shape drift:")

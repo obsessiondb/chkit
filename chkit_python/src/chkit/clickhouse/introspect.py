@@ -18,6 +18,8 @@ live DB) and ``chkit pull`` (live DB → schema files):
   ``IntrospectedTable`` per (database, name). Sorts deterministically.
 - ``list_schema_objects`` / ``list_table_details`` — issue the SQL
   queries against a ``ClickHouseClient`` and decode the rows.
+- ``list_view_details`` — the stored query (and ``TO`` target) of each view
+  and materialized view (``packages/clickhouse/src/view-details.ts``).
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ from chkit.core.model import (
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
 )
+from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
 from chkit.core.text_index import parse_text_index_params
 from chkit.core.text_index_sql import normalize_text_index_sql
@@ -61,6 +64,7 @@ SchemaObjectKind: TypeAlias = Literal["table", "view", "materialized_view", "dic
 
 __all__ = [
     "IntrospectedTable",
+    "IntrospectedView",
     "SchemaObjectKind",
     "SchemaObjectRef",
     "SystemColumnRow",
@@ -70,8 +74,10 @@ __all__ = [
     "infer_schema_kind_from_engine",
     "list_schema_objects",
     "list_table_details",
+    "list_view_details",
     "normalize_column_from_system_row",
     "normalize_index_from_system_row",
+    "parse_materialized_view_target",
 ]
 
 
@@ -128,6 +134,17 @@ class IntrospectedTable:
     unique_key: str | None = None
     partition_by: str | None = None
     ttl: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IntrospectedView:
+    kind: Literal["view", "materialized_view"]
+    database: str
+    name: str
+    # The SELECT as ClickHouse stores it (``system.tables.as_select``).
+    query: str
+    # The ``TO`` target of a materialized view, when it has one.
+    to: tuple[str, str] | None = None
 
 
 _NULLABLE_RE = re.compile(r"^Nullable\((.+)\)$")
@@ -454,3 +471,85 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
     ]
 
     return build_introspected_tables(tables, columns, indexes)
+
+
+def list_view_details(client: Any, databases: list[str]) -> list[IntrospectedView]:
+    """The views and materialized views in ``databases``, with their stored query.
+
+    ClickHouse qualifies unqualified table names in that query with the
+    database the view was created from, so ``FROM events`` comes back as
+    ``FROM analytics.events``.
+    """
+    if not databases:
+        return []
+    rows = client.query(
+        f"SELECT database, name, engine, as_select, create_table_query "
+        f"FROM system.tables "
+        f"WHERE is_temporary = 0 AND database IN ({_quote_str_list(databases)}) "
+        f"AND engine IN ('View', 'MaterializedView')"
+    ).rows
+    out: list[IntrospectedView] = []
+    for r in rows:
+        database = str(r["database"])
+        query = str(r.get("as_select") or "")
+        if r.get("engine") == "View":
+            out.append(
+                IntrospectedView(kind="view", database=database, name=str(r["name"]), query=query)
+            )
+            continue
+        out.append(
+            IntrospectedView(
+                kind="materialized_view",
+                database=database,
+                name=str(r["name"]),
+                query=query,
+                to=parse_materialized_view_target(r.get("create_table_query"), database),
+            )
+        )
+    return out
+
+
+_MV_NAME_END = 4
+
+
+def parse_materialized_view_target(
+    create_query: str | None, fallback_database: str
+) -> tuple[str, str] | None:
+    """The ``TO [db.]name`` of a ``CREATE MATERIALIZED VIEW`` statement.
+
+    The first top-level ``TO`` after the view name and before ``AS``. A
+    materialized view with an inner table has none.
+    """
+    if not create_query:
+        return None
+    tokens = [t for t in tokenize_sql(create_query) if not is_trivia(t)]
+
+    def name_at(i: int) -> str | None:
+        return identifier_name(tokens[i]) if i < len(tokens) else None
+
+    # Skip ``CREATE MATERIALIZED VIEW <db>.<name>``.
+    qualified = len(tokens) > _MV_NAME_END and tokens[_MV_NAME_END].text == "."
+    i = _MV_NAME_END + 2 if qualified else _MV_NAME_END
+    depth = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.text == "(":
+            depth += 1
+        elif token.text == ")":
+            depth -= 1
+        if depth == 0 and token.kind == "identifier":
+            keyword = token.text.upper()
+            # A materialized view with an inner table has an engine and no ``TO``.
+            if keyword in ("AS", "ENGINE"):
+                return None
+            if keyword == "TO":
+                first = name_at(i + 1)
+                if first is None:
+                    return None
+                if i + 2 >= len(tokens) or tokens[i + 2].text != ".":
+                    return (fallback_database, first)
+                second = name_at(i + 3)
+                return None if second is None else (first, second)
+        i += 1
+    return None
+
