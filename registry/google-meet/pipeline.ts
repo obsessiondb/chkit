@@ -4,10 +4,13 @@ import { classifyGoogleMeetError, defaultGoogleMeetClientDeps, type GoogleMeetCl
 import { googleMeetConfig, type GoogleMeetReaderConfig } from './config.js'
 import { google_meet_conferencesRaw, google_meet_transcriptsRaw, google_meet_transcriptEntriesRaw, google_meet_participantsRaw, google_meet_participantSessionsRaw, google_meet_recordingsRaw, parseMeetState, readResource, type MeetSelection, type MeetState, type Resource } from './sources/resources.js'
 
+// The largest lookback that still subtracts to a representable Date (8.64e15 ms around the epoch).
+const MAX_LOOKBACK_HOURS = 8.64e15 / 3_600_000
+
 export function createGoogleMeetPipeline(config: GoogleMeetReaderConfig = googleMeetConfig, deps: GoogleMeetClientDeps = defaultGoogleMeetClientDeps) {
   const boundConfig = { ...config }
   if (!boundConfig.sourceId.trim() || !boundConfig.streamPrefix.trim()) throw new IngestConfigError('Meet sourceId and streamPrefix must be non-empty strings.')
-  if (!Number.isFinite(boundConfig.lookbackHours) || boundConfig.lookbackHours <= 0) throw new IngestConfigError('Meet lookbackHours must be positive.')
+  if (!Number.isFinite(boundConfig.lookbackHours) || boundConfig.lookbackHours <= 0 || boundConfig.lookbackHours > MAX_LOOKBACK_HOURS) throw new IngestConfigError(`Meet lookbackHours must be positive and at most ${MAX_LOOKBACK_HOURS}.`)
   if (!Number.isSafeInteger(boundConfig.pageSize) || boundConfig.pageSize <= 0 || boundConfig.pageSize > 100) throw new IngestConfigError('Meet pageSize must be an integer between one and 100.')
   if (!Number.isSafeInteger(boundConfig.maxChunks) || boundConfig.maxChunks <= 0) throw new IngestConfigError('Meet maxChunks must be a positive safe integer.')
   const client = { ...deps, config: boundConfig }

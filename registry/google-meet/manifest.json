@@ -49,8 +49,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Treat any 400 or 410 response to a continuation request as a rejected page token so Google's generic INVALID_ARGUMENT body no longer wedges a stream on the same token; a second rejection fails with the HTTP detail.",
+            "Reject a lookbackHours beyond the Date range when the pipeline is created and name inverted backfill bounds instead of reporting a cutoff error.",
+            "Document that Google lists conferences the authenticated user organized."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [

@@ -2,7 +2,7 @@
 
 This editable reader rereads recent conferences and their raw resources, using ordinary pagination and coarse discovery-page checkpoints.
 
-Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access and configure a direct ClickHouse connection. Review `sourceId`, `streamPrefix`, `lookbackHours`, `pageSize`, `maxChunks`, and `database` in `config.ts`. Keep source identity tied to one Google account; these list responses do not identify the authenticated account. Tokens are read at request time and are not refreshed by the reader. Meet requires user authentication and returns records accessible to that user. Native JSON requires ClickHouse 25.3 or later. See [authorization](https://developers.google.com/workspace/meet/api/guides/authenticate-authorize).
+Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access and configure a direct ClickHouse connection. Review `sourceId`, `streamPrefix`, `lookbackHours`, `pageSize`, `maxChunks`, and `database` in `config.ts`. Keep source identity tied to one Google account; these list responses do not identify the authenticated account. Tokens are read at request time and are not refreshed by the reader. Meet requires user authentication and returns records accessible to that user; Google documents `conferenceRecords.list` as filtered to conferences the authenticated user organized, so calls that user only attended can be absent. Native JSON requires ClickHouse 25.3 or later. See [authorization](https://developers.google.com/workspace/meet/api/guides/authenticate-authorize).
 
 ```sh
 bunx chkit check
@@ -47,7 +47,7 @@ A checkpoint contains source scope, completed watermark, optional historical bou
 
 A failed or interrupted page replays its child collections from their beginning under the original bounds. Completed discovery pages remain skipped. Child pages, indices and queues are not saved. The default discovery `pageSize` is one conference and `maxChunks` is 200. A page's children plus its completion marker must fit a run's chunk/time budget; increase `maxChunks` or `--max-duration` if one conference is too large. Requests have a 30-second timeout.
 
-A rejected page token restarts its collection once. Discovery reset debt is saved across executions and clears after the phase finishes. Child token recovery is bounded within its current read; a replayed parent starts fresh child collections. Repeated rejection and malformed/cyclic continuation fail visibly.
+A `400` or `410` response to a continuation request is treated as a rejected page token, whatever its body says, and restarts its collection once; a second rejection fails with the HTTP detail. Discovery reset debt is saved across executions and clears after the phase finishes. Child token recovery is bounded within its current read; a replayed parent starts fresh child collections. Repeated rejection and malformed/cyclic continuation fail visibly.
 
 Checkpoint strategy version 2 rejects incompatible state rather than reinterpreting it. Changing source or discovery settings requires deliberate state migration or a new `streamPrefix`. Run one ingestion process per target at a time.
 
