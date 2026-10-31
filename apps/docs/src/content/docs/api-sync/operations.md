@@ -91,7 +91,7 @@ chkit ingest run --tag stream:helpdesk.tickets \
   --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
 ```
 
-`--from` and `--to` require `--backfill`. The ID creates an isolated checkpoint namespace, preserving the ordinary scheduled bookmark. Reusing an ID reuses that namespace; actual resumption depends on the strategy. With explicit timestamp bounds, the same bounds take precedence over a stored watermark, so rerunning that command rereads the range. A checkpointed custom strategy can resume within it.
+`--from` and `--to` require `--backfill`, and a `--from` later than `--to` fails before any stream runs. Timestamps without a `Z` or UTC offset are read in the process's local time zone, so prefer explicit offsets in scheduled jobs. The ID creates an isolated checkpoint namespace, preserving the ordinary scheduled bookmark. Reusing an ID reuses that namespace; actual resumption depends on the strategy. With explicit timestamp bounds, the same bounds take precedence over a stored watermark, so rerunning that command rereads the range. A checkpointed custom strategy can resume within it.
 
 Isolation applies to checkpoints, not the destination table. Historical rows still use the stream's configured destination and version semantics. With `rawTable`, later ingestion time wins, so older source versions loaded later can replace newer objects. Use source-versioned destinations when that ordering matters.
 
@@ -112,8 +112,10 @@ chkit ingest status --tag pipeline:helpdesk --json
 | No pipeline / no matching streams | Entry exports and exact tag spelling |
 | No checkpoint after a successful run | The bundled `fullSync()` strategy has no checkpoint; custom full-scan strategies may record completion |
 | Window restarts from the beginning | Timestamp progress commits after the whole window; reduce work or use safe intermediate provider state |
+| Timestamp window never completes under `budget.maxChunks` | A window that needs at least as many chunks as the budget ends as `budget_exhausted` before completion is claimed, so the watermark never advances. Raise `maxChunks`, shrink the window, or use provider state |
+| `planned lower bound … is after upper bound` | The committed watermark or `start` is later than this run's cutoff: a host clock behind the one that committed the watermark, or a `start` in the future. Committed progress is unchanged; the stream succeeds once the cutoff passes the watermark |
 | Duplicated logical records | Destination keys/versioning, query reconciliation, deduplication settings, and volatile mapped fields |
-| Incompatible checkpoint | Strategy ID/version or state format changed |
+| Incompatible checkpoint | Strategy ID/version or state format changed; a saved state that `parse`/`parseState` rejects fails the stream as a configuration error, without retries |
 | Direct connection required | Configure `clickhouse`; workbench authentication alone is insufficient |
 | Authentication failure | Correct provider credentials/scopes before rerunning |
 | Overlapping runs use more requests than expected | Adjust scheduler concurrency or provider request limits |

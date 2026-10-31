@@ -39,8 +39,8 @@ chkit ingest repair [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--from <timestamp>` | string | — | Backfill range lower bound (ISO timestamp). Requires `--backfill` |
-| `--to <timestamp>` | string | — | Backfill range upper bound (ISO timestamp). Requires `--backfill` |
+| `--from <timestamp>` | string | — | Backfill range lower bound (ISO 8601; without a `Z` or UTC offset it is read in the process's local time zone). Requires `--backfill`; must not be after `--to` |
+| `--to <timestamp>` | string | — | Backfill range upper bound (ISO 8601; same time-zone rule as `--from`). Requires `--backfill` |
 | `--max-duration <seconds>` | string | `3600` | Execution budget. Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
@@ -79,7 +79,7 @@ Overlapping processes write independent run-scoped identities. A stale valid rea
 
 `--backfill <id>` runs the selected streams under the checkpoint namespace `<stream id>#backfill:<id>`, so it never moves the scheduled checkpoint. Reusing an ID resumes that backfill's state. The ID must start with a letter or digit and contain only letters, digits, `_`, `.`, and `-`.
 
-`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. The bundled `fullSync()` and `cursorState()` strategies do not interpret them. Custom provider strategies may honor or reject date bounds; see the source's documentation. Passing `--from` or `--to` without `--backfill` fails with exit code 2.
+`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. The bundled `fullSync()` and `cursorState()` strategies do not interpret them. Custom provider strategies may honor or reject date bounds; see the source's documentation. Passing `--from` or `--to` without `--backfill`, or a `--from` later than `--to`, fails with exit code 2 before any stream runs. Timestamps without a `Z` or UTC offset (`2026-01-01T00:00:00`) are read in the process's local time zone, while date-only values (`2026-01-01`) are UTC; pass an explicit `Z` or offset in scheduled jobs.
 
 ### `list`
 
@@ -151,7 +151,7 @@ chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
 |------|---------|
 | 0 | Success. For `run`, every selected stream succeeded; for `doctor`, every history is healthy; a repair preview completed or the reviewed replacement was materialized |
 | 1 | Error, including an unknown flag or missing flag value, an unhealthy `doctor` report, or a `run` with any stream that did not succeed |
-| 2 | Configuration error: no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
+| 2 | Configuration error: no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, a `--from` later than `--to`, or missing direct connection |
 
 ## JSON output
 

@@ -79,7 +79,7 @@ export function timestampWindow(
       const from = range?.from ?? (options.from
         ? options.from({ watermark, cutoff })
         : new Date(watermark ? watermark.getTime() - (options.overlapMs ?? 0) : options.start.getTime()))
-      if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+      if (!(from instanceof Date) || !Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
         throw new IngestConfigError('timestampWindow: planned bounds must be valid dates.')
       }
       if (from.getTime() > to.getTime()) {

@@ -63,7 +63,7 @@ Use `timestampWindow({ from })` when `start` and `overlapMs` do not express the 
 
 ## Provider cursors and compound state
 
-Choose `cursorState` when the provider guarantees resumption across runs. `parse` validates the saved state. `context.state` and `context.selection` expose it to the reader; neither contains uncommitted progress.
+Choose `cursorState` when the provider guarantees resumption across runs. `parse` validates the saved state; a state it rejects fails the stream as a configuration error, without retries. `context.state` and `context.selection` expose it to the reader; neither contains uncommitted progress.
 
 This standalone fixture demonstrates a provider with stable, increasing change sequence numbers. `paginate` owns each request attempt and exposes its candidate checkpoint in metadata. Replace the fixture body of `fetchPage` with a documented provider operation, forwarding its signal:
 
@@ -133,7 +133,7 @@ A pagination token may expire between runs. Confirm expiration, snapshot lifetim
 <details>
 <summary>Extend planning or change an existing checkpoint format</summary>
 
-Implement `IncrementalStrategy` only when `cursorState`'s opaque state or timestamp windows are insufficient. A custom strategy has a stable `id` and `version`, validates existing state with `parseState`, and plans selections from `{ state, cutoff, range }`. Its optional `complete` runs only after the whole selection is consumed.
+Implement `IncrementalStrategy` only when `cursorState`'s opaque state or timestamp windows are insufficient. A custom strategy has a stable non-empty `id` and an integer `version` of at least 1 (`defineStream` rejects anything else, because the journal never reads such a checkpoint back), validates existing state with `parseState`, and plans selections from `{ state, cutoff, range }`. Its optional `complete` runs only after the whole selection is consumed.
 
 Changing the strategy ID or version makes an existing checkpoint incompatible and fails the run. Plan an explicit state migration or a new stream identity; renaming a stream starts a separate checkpoint history. Moving it between pipelines does not reset state.
 

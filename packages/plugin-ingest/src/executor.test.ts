@@ -233,6 +233,42 @@ describe('runIngestion', () => {
     expect(result.streams[0]?.error).toContain('never silently reinterprets')
   })
 
+  test('a checkpoint the strategy refuses fails as a configuration error without source retries', async () => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    let parses = 0
+    let refuse = false
+    const stream = defineStream({
+      id: 'app.refused',
+      destination: events,
+      retry: { retries: 3, minTimeout: 1, randomize: false },
+      incremental: cursorState({
+        id: 'test.cursor',
+        version: 1,
+        parse: (raw) => {
+          parses += 1
+          if (refuse) throw new Error('saved cursor is corrupt')
+          return Number(raw)
+        },
+      }),
+      async *read({ selection }) {
+        yield { rows: [{ id: 1 }], state: (selection ?? 0) + 1 }
+      },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+    expect((await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })).ok).toBe(true)
+    refuse = true
+    parses = 0
+
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })
+
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: expect.stringContaining('saved cursor is corrupt') })
+    expect(parses).toBe(1)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toEqual([])
+    expect(journal.events.at(-2)).toMatchObject({ eventKind: 'work_finished', workState: 'failed', errorClass: 'config' })
+    expect((await journal.readCheckpoint('app.refused')).envelope?.state).toBe(1)
+  })
+
   test('budget exhaustion is incomplete but preserves committed progress', async () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()

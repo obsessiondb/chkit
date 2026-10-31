@@ -502,7 +502,16 @@ function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope 
         'ChKit never silently reinterprets a checkpoint: migrate the state explicitly, use a new stream id, or run a separately namespaced backfill.'
     )
   }
-  return stream.incremental.parseState(envelope.state)
+  try {
+    return stream.incremental.parseState(envelope.state)
+  } catch (error) {
+    if (error instanceof IngestConfigError) throw error
+    // A state the strategy refuses stays refused on every attempt.
+    throw new IngestConfigError(
+      `Checkpoint for "${namespaceId}" was rejected by strategy ${stream.incremental.id}@${stream.incremental.version}: ${messageOf(error)}. ` +
+        'ChKit never retries a refused checkpoint: migrate the state explicitly, use a new stream id, or run a separately namespaced backfill.'
+    )
+  }
 }
 
 function append(input: AppendInput, eventKind: JournalEvent['eventKind'], fields: FactFields): Promise<void> {
