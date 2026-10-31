@@ -10,7 +10,7 @@ import { type PluginRuntime, typedFlags } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
-import { printOutput, writeStdout } from './json-output.js'
+import { emitJsonError, printOutput, writeStdout } from './json-output.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 
@@ -87,12 +87,12 @@ export function parseCommandArgs(
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
-		const flags = parseFlagsOrReport(flagArgs, flagDefs)
+		const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 		if (!flags) return null
 		return { flags, positionals }
 	}
 
-	const flags = parseFlagsOrReport(argv, flagDefs)
+	const flags = parseFlagsOrReport(commandName, argv, flagDefs)
 	if (!flags) return null
 	return { flags, positionals: extractPositionals(argv, flagDefs) }
 }
@@ -134,7 +134,10 @@ function stripGlobalFlags(argv: string[]): {
 	return { jsonMode, tableSelector, rest }
 }
 
+// A flag error in --json mode still gets an envelope on stdout, so a piped
+// consumer sees the failure instead of an empty stream and a stderr line.
 function parseFlagsOrReport(
+	commandName: string,
 	args: string[],
 	defs: readonly FlagDef[],
 ): ParsedFlags | null {
@@ -146,6 +149,9 @@ function parseFlagsOrReport(
 			error instanceof MissingFlagValueError
 		) {
 			console.error(error.message)
+			if (args.includes('--json')) {
+				emitJsonError(commandName, { code: 'usage', message: error.message })
+			}
 			process.exitCode = 1
 			return null
 		}
@@ -180,7 +186,8 @@ export async function runResolvedCommand(input: {
 	config: Parameters<PluginRuntime['runOnConfigLoaded']>[0]['config']
 	configPath: string
 	pluginRuntime: PluginRuntime
-	onAmbiguousPluginSubcommand?: () => void
+	/** Called with the unmatched subcommand token, or `undefined` when none was given. */
+	onAmbiguousPluginSubcommand?: (token: string | undefined) => void
 }): Promise<void> {
 	debug('dispatch', `routing to plugin command "${input.commandName}"`)
 	const argsAfterCommand = input.argv.slice(1)
@@ -200,7 +207,7 @@ export async function runResolvedCommand(input: {
 		} else if (input.resolved.subcommands.length === 1) {
 			subcommandName = input.resolved.subcommands[0]?.name
 		} else {
-			input.onAmbiguousPluginSubcommand?.()
+			input.onAmbiguousPluginSubcommand?.(commandToken)
 			return
 		}
 	}
@@ -235,7 +242,7 @@ export async function runResolvedCommand(input: {
 			flags = parsed.flags
 			positionals = parsed.positionals
 		} else {
-			const parsedFlags = parseFlagsOrReport(argsAfterCommand, allFlags)
+			const parsedFlags = parseFlagsOrReport(input.commandName, argsAfterCommand, allFlags)
 			if (!parsedFlags) return
 			flags = parsedFlags
 			positionals = extractPositionals(argsAfterCommand, allFlags)

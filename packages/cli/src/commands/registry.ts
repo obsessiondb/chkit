@@ -36,7 +36,7 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
   }
   if (!action || !allowed[action]) throw new Error('Usage: chkit registry <list|inspect|build> [options]')
   for (const name of Object.keys(values)) {
-    if (!allowed[action]?.includes(name)) throw new Error(`--${name} is not supported by ${command} ${action === 'add' ? '' : action}`)
+    if (!allowed[action]?.includes(name)) throw new Error(`--${name} is not supported by chkit ${action === 'add' ? 'add' : `registry ${action}`}`)
   }
   if (action === 'add') {
     const reference = onePositional(positionals, 'chkit add <template>')
