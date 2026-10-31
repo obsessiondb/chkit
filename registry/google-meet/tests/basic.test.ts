@@ -370,3 +370,59 @@ function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
   journal.events.push(...previous.events.map((event) => ({ ...event, checkpoint: event.checkpoint === undefined ? undefined : JSON.parse(JSON.stringify(event.checkpoint)) })))
   return journal
 }
+
+test('Meet rejects an unrepresentable computed lower bound without requests or retries', async () => {
+  let requests = 0
+  const pipeline = createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 1e300 }, {
+    config: googleMeetConfig, token: () => 'fixture',
+    fetch: async () => { requests++; return Response.json({ conferenceRecords: [] }) },
+  })
+  const journal = createMemoryJournal()
+  const result = await runIngestion(request(pipeline, 'conferences'), { journal, destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('outside the Date range')
+  expect(requests).toBe(0)
+  expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+  expect((await journal.readCheckpoint('google-meet.conferences')).version).toBe(0)
+})
+
+test('Meet accepts an explicit valid range with a huge unused lookback', async () => {
+  const urls: URL[] = []
+  const pipeline = createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 1e300 }, {
+    config: googleMeetConfig, token: () => 'fixture',
+    fetch: async (input) => { urls.push(new URL(input)); return Response.json({ conferenceRecords: [] }) },
+  })
+  const backfill = { id: 'explicit', from: new Date('2026-09-01T00:00:00Z'), to: new Date('2026-10-01T00:00:00Z') }
+  const journal = createMemoryJournal()
+  const result = await runIngestion({ ...request(pipeline, 'conferences'), backfill }, { journal, destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.ok).toBe(true)
+  expect(urls.map((url) => url.searchParams.get('filter'))).toEqual(['end_time>="2026-09-01T00:00:00.000Z" AND end_time<="2026-10-01T00:00:00.000Z"'])
+  expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+  expect((await journal.readCheckpoint('google-meet.conferences#backfill:explicit')).envelope?.state).toMatchObject({
+    watermark: backfill.to.toISOString(), bounds: { from: backfill.from.toISOString(), to: backfill.to.toISOString() },
+  })
+  expect((await journal.readCheckpoint('google-meet.conferences')).version).toBe(0)
+})
+
+test('Meet rejects invalid backfill dates and a lookback outside the planned Date range without requests', async () => {
+  let requests = 0
+  const pipeline = createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 2_400_000_000 }, {
+    config: googleMeetConfig, token: () => 'fixture',
+    fetch: async () => { requests++; return Response.json({ conferenceRecords: [] }) },
+  })
+  for (const bounds of [
+    { from: new Date(Number.NaN), to: undefined },
+    { from: undefined, to: new Date(Number.NaN) },
+    { from: undefined, to: new Date('1900-01-01T00:00:00Z') },
+  ]) {
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ ...request(pipeline, 'conferences'), backfill: { id: 'invalid', ...bounds } }, {
+      journal, destination: createMemoryDestination(), now: () => cutoff,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.error).toMatch(/valid dates|outside the Date range/)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+    expect((await journal.readCheckpoint('google-meet.conferences#backfill:invalid')).version).toBe(0)
+  }
+  expect(requests).toBe(0)
+})
