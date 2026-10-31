@@ -23,7 +23,7 @@ The raw destination keeps the latest observed payload per identity. A recurring 
 
 Attendees, organizer, recurrence, reminders, attachments, and `conferenceData` remain native fields inside each event, as returned by Google. Calendar metadata is used only to resolve the calendar identity. This installation collects events only; it does not add attendee, calendar-directory, attachment, or Meet tables. Project fields and join other integrations later in ClickHouse, preserving source and calendar identity.
 
-Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. This is not byte- or shape-exact archival storage; see [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity).
+Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. This is not byte- or shape-exact archival storage; see [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/).
 
 ## Pipeline and stream
 

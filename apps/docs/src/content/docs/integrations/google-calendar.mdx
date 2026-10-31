@@ -34,7 +34,7 @@ One installation exports one pipeline with a canonical `events` stream. `pipelin
 
 The first run reads canonical events with recurring masters and exceptions, using `singleEvents=false` and `showDeleted=true`. Later runs request changes through Google's `syncToken`. Cancellation payloads are stored without hydrating fields from prior observations. Recurring occurrences require a separate bounded instances reader or application projection.
 
-Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. The tables are not byte- or shape-exact archives of the original response. See [native JSON storage fidelity](/api-sync/destinations/#native-json-storage-fidelity).
+Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. The tables are not byte- or shape-exact archives of the original response. See [native JSON storage fidelity](/api-sync/destinations/).
 
 Events are the only synced resource. Attendees, organizer, recurrence, reminders, attachments, and `conferenceData` stay inside the native [event payload](https://developers.google.com/workspace/calendar/api/v3/reference/events). Calendar metadata resolves identity without creating another raw table. Build projections and joins with other integrations in ClickHouse; retain source and calendar keys in those joins. A sparse cancellation replaces the previous observation of the same event without copying fields from its old payload or recurring master.
 

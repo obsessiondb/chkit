@@ -55,7 +55,7 @@
           "version": "0.2.1",
           "changes": [
             "Retry Google's 403 rateLimitExceeded and userRateLimitExceeded responses with backoff like 429 instead of failing the run after one attempt.",
-            "Reject a non-positive or non-integer maxChunks when the pipeline is created instead of silently exhausting the chunk budget before the first request.",
+            "Harden local maxChunks configuration validation by requiring a positive safe integer before pipeline construction.",
             "Clarify native JSON normalization of explicit null paths and empty objects in stored event observations."
           ]
         },
