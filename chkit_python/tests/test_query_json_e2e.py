@@ -16,7 +16,12 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
-from tests.e2e_testkit import format_test_diagnostic, resolve_live_env
+from tests.e2e_testkit import (
+    create_prefix,
+    format_test_diagnostic,
+    quote_ident,
+    resolve_live_env,
+)
 
 SQL = (
     "SELECT toUInt8(1) AS u8, toUInt64(18446744073709551615) AS u64, "
@@ -159,3 +164,38 @@ def test_query_table_prints_every_digit_like_ts(
         '["x",null]',
         "ñandú €",
     ]
+
+
+def test_a_statement_without_a_result_set_prints_no_rows_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = resolve_live_env()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": env.clickhouse_database,
+            },
+        })
+        + ")\n"
+    )
+    sql = (
+        f"DROP TABLE IF EXISTS {quote_ident(env.clickhouse_database)}."
+        f"{quote_ident(create_prefix('noresult_py') + 't')}"
+    )
+
+    table = CliRunner().invoke(app, ["query", sql])
+    as_json = CliRunner().invoke(app, ["query", sql, "--json"])
+
+    assert table.exit_code == 0, format_test_diagnostic("query failed", table)
+    assert table.stdout.strip() == "(no rows)"
+    assert as_json.exit_code == 0, format_test_diagnostic("query --json failed", as_json)
+    payload = json.loads(as_json.stdout)
+    assert list(payload) == ["data", "meta", "rows", "query_id"]
+    assert (payload["data"], payload["meta"], payload["rows"]) == ([], [], 0)

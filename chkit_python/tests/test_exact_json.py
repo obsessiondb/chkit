@@ -55,3 +55,8 @@ def test_keeps_the_rest_of_the_envelope_as_clickhouse_sent_it() -> None:
     assert result["rows"] == 2
     assert result["statistics"] == {"elapsed": 0.000613, "rows_read": 1, "bytes_read": 1}
     assert type(result["statistics"]["elapsed"]) is float
+
+
+def test_reads_an_empty_body_from_a_statement_without_a_result_set_as_no_rows() -> None:
+    assert parse_json_result("") == {"data": [], "meta": [], "rows": 0}
+    assert parse_json_result(b" \n") == {"data": [], "meta": [], "rows": 0}

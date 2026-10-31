@@ -210,6 +210,30 @@ def test_format_query_json_returns_indented_envelope() -> None:
     assert decoded["query_id"] == "abc-123"
 
 
+def test_format_query_json_orders_keys_as_ts() -> None:
+    payload = ClickHouseJsonQueryResult.model_validate(
+        {
+            "data": [{"id": 1}],
+            "meta": [{"name": "id", "type": "UInt64"}],
+            "totals": {"id": 1},
+            "rows": 1,
+            "rows_before_limit_at_least": 3,
+            "statistics": {"elapsed": 0.1},
+            "query_id": "abc-123",
+        }
+    )
+
+    assert list(json.loads(format_query_json(payload))) == [
+        "data",
+        "meta",
+        "totals",
+        "rows",
+        "rows_before_limit_at_least",
+        "statistics",
+        "query_id",
+    ]
+
+
 # ---------- CLI: rejection paths (no DB needed) ----------
 
 

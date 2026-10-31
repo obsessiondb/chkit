@@ -14,6 +14,10 @@ describe('query output formatting', () => {
 		expect(output).toContain('(27 rows, showing 25)')
 	})
 
+	test('prints (no rows) for a statement without a result set', () => {
+		expect(formatRows([])).toBe('(no rows)')
+	})
+
 	test('does not add truncation note for short results', () => {
 		const output = formatRows([{ value: 1 }, { value: 2 }])
 

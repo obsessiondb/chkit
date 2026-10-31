@@ -72,7 +72,7 @@ Use Python schema modules and `clickhouse.config.py`, then run the same `generat
 
 ## Requirements
 
-- **Node.js 20+ or Bun 1.3.5+** for TypeScript config and schemas. Python projects require **Python 3.11+** and `chkit-py`.
+- **Node.js 22+ or Bun 1.3.5+** for TypeScript config and schemas. Python projects require **Python 3.11+** and `chkit-py`.
 - **ClickHouse 24.x or newer**, self-hosted or managed. Some schema features are version-gated; see [ClickHouse compatibility](https://chkit.obsessiondb.com/guides/clickhouse-compatibility/).
 
 ## Plugins

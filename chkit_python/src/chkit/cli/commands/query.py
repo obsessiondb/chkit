@@ -61,8 +61,35 @@ def clean_query_error(error: BaseException) -> BaseException:
     return type(error)(message.strip()) if isinstance(error, Exception) else error
 
 
+# Keys in the order TS prints them: data, meta, the rest of the envelope as
+# ClickHouse writes it, then query_id. Pydantic dumps the extra keys
+# (``rows_before_limit_at_least``, ``totals``) after the declared ones.
+_ENVELOPE_KEY_ORDER = (
+    "data",
+    "meta",
+    "totals",
+    "extremes",
+    "rows",
+    "rows_before_limit_at_least",
+    "rows_before_aggregation",
+    "statistics",
+    "query_id",
+)
+
+
 def format_query_json(payload: ClickHouseJsonQueryResult) -> str:
-    return json.dumps(payload.model_dump(mode="json"), indent=2, ensure_ascii=False)
+    rank = {key: index for index, key in enumerate(_ENVELOPE_KEY_ORDER)}
+    # Unknown keys go just before statistics.
+    unknown = rank["statistics"] - 0.5
+    dumped = payload.model_dump(mode="json")
+    # An absent statistics or query_id is left out, as JSON.stringify leaves
+    # out an undefined key.
+    ordered = {
+        key: value
+        for key, value in sorted(dumped.items(), key=lambda item: rank.get(item[0], unknown))
+        if value is not None
+    }
+    return json.dumps(ordered, indent=2, ensure_ascii=False)
 
 
 def _stringify_cell(value: Any) -> str:

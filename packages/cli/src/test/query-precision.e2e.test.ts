@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import { formatTestDiagnostic, getLiveEnv, runCli } from './e2e-testkit.js'
+import { createPrefix, formatTestDiagnostic, getLiveEnv, quoteIdent, runCli } from './e2e-testkit.js'
 
 const SQL =
   "SELECT toUInt64(18446744073709551615) AS u64max, toInt64(-9223372036854775808) AS i64min, " +
@@ -82,6 +82,25 @@ describe('@chkit/cli query precision e2e', () => {
         ...Object.values(EXACT).map((value) => (typeof value === 'string' ? value : JSON.stringify(value))),
         '7',
       ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test('a statement without a result set prints no rows, as before queryJson read the table', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-query-precision-'))
+    try {
+      const configPath = await writeConfig(dir)
+      const sql = `DROP TABLE IF EXISTS ${quoteIdent(getLiveEnv().clickhouseDatabase)}.${quoteIdent(`${createPrefix('noresult')}t`)}`
+      const isolatedEnv = { HOME: dir, XDG_CONFIG_HOME: dir }
+
+      const table = runCli(dir, ['query', sql, '--config', configPath], isolatedEnv)
+      const json = runCli(dir, ['query', sql, '--json', '--config', configPath], isolatedEnv)
+
+      expect(table.exitCode, formatTestDiagnostic('query failed', table)).toBe(0)
+      expect(table.stdout.trim()).toBe('(no rows)')
+      expect(json.exitCode, formatTestDiagnostic('query --json failed', json)).toBe(0)
+      expect(JSON.parse(json.stdout)).toEqual({ data: [], meta: [], rows: 0, query_id: expect.any(String) })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

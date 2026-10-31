@@ -18,7 +18,8 @@ import {
 
 const env = getLiveEnv()
 // ObsessionDB users have no CREATE USER (or any access-management) grant, so
-// the read-only user tests run on the local stack only (#402).
+// the tests that create read-only users run in verify, against the local
+// stack, only.
 const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 
 const SQL =
@@ -110,7 +111,7 @@ describe('read-only commands (#402)', () => {
       `a readonly = ${readonly} user runs query, status, check, drift and migrate (plan); migrate --apply fails`,
       async () => {
         const executor = createLiveExecutor(env)
-        const user: User = { name: `${createPrefix(`ro${readonly}`)}user`, password: 'chkit-ro-pw' }
+        const user: User = { name: `${createPrefix(`ro${readonly}`)}user`, password: crypto.randomUUID() }
         const project = await createProject(`ro${readonly}`, [admin, user])
         const missingJournal = createJournalTableName(`ro${readonly}_missing`)
         try {

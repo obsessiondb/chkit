@@ -139,7 +139,13 @@
   `meta[].type` still gives the type. The table output now reads through `query_json` too,
   so it prints the `--json` values as TS does: a Decimal without quotes (it printed
   `"12.345"`), `true`/`false`, `DateTime` as ClickHouse formats it, and arrays, maps and
-  tuples as compact JSON (`[1,2,3]`).
+  tuples as compact JSON (`[1,2,3]`). `--json` prints the envelope keys in the TS order
+  (`data`, `meta`, the rest as ClickHouse writes them, then `query_id`), also with `LIMIT`
+  (`rows_before_limit_at_least`) and `WITH TOTALS`. A statement without a result set
+  (`CREATE`, `DROP`, `OPTIMIZE`, `INSERT ... SELECT`) prints `(no rows)` and an envelope
+  with empty `data`. **Behaviour change:** `INSERT ... VALUES` with inline data is no longer
+  accepted, because `FORMAT JSON` is appended to the statement, as in TS; use
+  `INSERT ... SELECT`.
 - chkit-py works with a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted
   `SELECT`) for `query`, `status`, `check`, `drift`, `pull` and `migrate` without `--apply`,
   as in TS (#402). Reading the journal no longer writes: `status`, `check` and `migrate`

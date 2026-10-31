@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import { parseJsonResult } from './exact-json.js'
 
@@ -37,5 +37,24 @@ describe('parseJsonResult (#381)', () => {
 		expect(Object.keys(result)).toEqual(['data', 'meta', 'rows', 'statistics'])
 		expect(result.rows).toBe(2)
 		expect(result.statistics).toEqual({ elapsed: 0.000613, rows_read: 1, bytes_read: 1 })
+	})
+
+	test('reads an empty body, from a statement without a result set, as no rows', () => {
+		expect(parseJsonResult('')).toEqual({ data: [], meta: [], rows: 0 })
+		expect(parseJsonResult(' \n')).toEqual({ data: [], meta: [], rows: 0 })
+	})
+
+	test('fails when the runtime gives the reviver no source text (Node 20) instead of printing rounded digits', () => {
+		const parse = JSON.parse
+		// Node 20 calls the reviver with (key, value) only.
+		const spy = spyOn(JSON, 'parse').mockImplementation((text: string, reviver?: (key: string, value: unknown) => unknown) =>
+			parse(text, reviver ? (key, value) => reviver(key, value) : undefined),
+		)
+
+		expect(() => parseJsonResult(BODY)).toThrow('needs Node.js 22 or later, or Bun')
+		expect(
+			parseJsonResult('{"meta": [{"name": "u32", "type": "UInt32"}], "data": [{"u32": 7}], "rows": 1}').data,
+		).toEqual([{ u32: 7 }])
+		spy.mockRestore()
 	})
 })

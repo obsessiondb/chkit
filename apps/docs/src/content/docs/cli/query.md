@@ -34,9 +34,13 @@ The command requires an executor — if no `clickhouse` config is present and no
 
 `chkit query` sends no ClickHouse settings with the query, so a read-only user (`readonly = 1` or `readonly = 2`) can run it.
 
+### Statements
+
+`chkit query` reads the result in ClickHouse's `JSON` format, appending `FORMAT JSON` to the statement. A statement without a result set, such as `CREATE`, `DROP`, `OPTIMIZE` or `INSERT ... SELECT`, prints `(no rows)`, and `--json` prints an envelope with empty `data` and `meta` and `rows` set to `0`. `INSERT ... VALUES` with inline data is not supported, because ClickHouse reads the appended `FORMAT JSON` as part of the values; use `INSERT ... SELECT` instead.
+
 ### Exact values
 
-The table and `--json` print the same values. A 64-bit or wider integer or a Decimal keeps every digit ClickHouse sent (see [large integers and Decimals](#large-integers-and-decimals-are-strings)). In the table, strings print without quotes, and arrays, maps and tuples print as compact JSON:
+The table and `--json` print the same values. A 64-bit or wider integer or a Decimal keeps every digit ClickHouse sent (see [large integers and Decimals](#large-integers-and-decimals-are-strings)). The TypeScript CLI needs Node.js 22 or later, or Bun, for this: on an older Node.js, a query that returns such a column fails with an error instead of printing rounded digits. In the table, strings print without quotes, and arrays, maps and tuples print as compact JSON:
 
 ```
 u64max               │ d128                           │ arr_u64

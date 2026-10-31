@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,8 @@ from tests.e2e_testkit import (
 )
 
 # ObsessionDB users have no CREATE USER (or any access-management) grant, so
-# the read-only user tests run on the local stack only (#402).
+# the tests that create read-only users run in verify, against the local
+# stack, only.
 _ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 
 SQL = (
@@ -144,7 +146,7 @@ def test_a_missing_journal_reads_as_empty_and_is_not_created(
     assert not _journal_exists(admin, journal_table)
 
 
-@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users cannot create users (#402)")
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant")
 @pytest.mark.parametrize("readonly", [1, 2])
 def test_a_read_only_user_runs_the_read_only_commands(
     admin: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readonly: int
@@ -152,7 +154,7 @@ def test_a_read_only_user_runs_the_read_only_commands(
     env = resolve_live_env()
     table, journal_table = _project(tmp_path, monkeypatch, f"ro{readonly}_py")
     missing_journal = create_journal_table_name(f"ro{readonly}_missing_py")
-    user, password = f"{create_prefix(f'ro{readonly}_py')}user", "chkit-ro-pw"
+    user, password = f"{create_prefix(f'ro{readonly}_py')}user", secrets.token_hex(16)
     as_admin = _cli(_write_config(tmp_path, env.clickhouse_user, env.clickhouse_password))
     as_user = _cli(_write_config(tmp_path, user, password))
     try:

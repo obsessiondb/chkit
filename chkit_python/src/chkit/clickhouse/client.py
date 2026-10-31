@@ -404,8 +404,11 @@ def parse_json_result(body: str | bytes) -> dict[str, Any]:
     ClickHouse sent, as ``output_format_json_quote_64bit_integers = 1`` and
     ``output_format_json_quote_decimals = 1`` would do. Sending those settings
     instead would fail for a ``readonly = 1`` user (#402). Other numbers stay
-    numbers. Same as TS ``parseJsonResult``.
+    numbers. A statement without a result set (DDL, ``OPTIMIZE``) has an empty
+    body, read as no rows. Same as TS ``parseJsonResult``.
     """
+    if not body.strip():
+        return {"data": [], "meta": [], "rows": 0}
     parsed: dict[str, Any] = json.loads(body, parse_int=_JsonInt, parse_float=_JsonFloat)
     exact = {
         column["name"]
