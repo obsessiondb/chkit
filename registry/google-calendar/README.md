@@ -31,7 +31,9 @@ One installation exports one `google_calendarPipeline` with the canonical `event
 
 ## Checkpoints and recovery
 
-Each acknowledged event page checkpoints its next page token while retaining the same input sync token. Only an acknowledged terminal page promotes `nextSyncToken`. Empty terminal pages also commit progress. A failed load leaves the preceding checkpoint, so rerunning resumes safely and may replay observations. Requests have a 30-second timeout. Each run permits 200 page chunks; budget exhaustion preserves progress for the next run. The executor owns retries, cancellation, and sink acknowledgements; run one ingestion process per ClickHouse target at a time.
+Each acknowledged event page checkpoints its next page token while retaining the same input sync token. Only an acknowledged terminal page promotes `nextSyncToken`. Empty terminal pages also commit progress. A failed load leaves the preceding checkpoint, so rerunning resumes safely and may replay observations. Requests have a 30-second timeout. Each run permits 200 page chunks (`maxChunks`, a positive integer); budget exhaustion preserves progress for the next run. The executor owns retries, cancellation, and sink acknowledgements; run one ingestion process per ClickHouse target at a time.
+
+Google reports per-user and per-calendar rate limits as `403` with reason `rateLimitExceeded` or `userRateLimitExceeded` as well as `429`. Both are retried with backoff and any `Retry-After` header. Other `403` responses, `401` for an expired or invalid token, and other `4xx` responses fail the run without a retry; the journal keeps the preceding checkpoint.
 
 `paginate()` carries each page's raw events and complete checkpoint candidate in metadata, including empty terminal pages. The reader yields `page.items` as rows and the metadata checkpoint as chunk state; the library checks repeated continuations before exposing that candidate. A rejected token produces an empty reset page with a fresh continuation and checkpointed recovery debt, so recovery uses the same pagination loop. The saved checkpoint format is unchanged.
 
