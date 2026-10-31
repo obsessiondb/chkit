@@ -9,7 +9,7 @@ chkit is designed to run unattended in CI pipelines. Every command supports a `-
 
 Three primary CI use cases:
 
-1. **Schema validation gate** — run `chkit check` and `chkit codegen --check` on every pull request to catch drift, stale types, and pending migrations before merge.
+1. **Schema validation gate** — run `chkit check` and `chkit codegen --check` on every pull request to catch drift, stale types, and pending migrations before merge. Some properties are not checked for drift; see [what drift does not compare](/cli/drift/#what-drift-does-not-compare).
 2. **Automated migration deployment** — run `chkit migrate --apply` on merge to main to apply pending migrations to staging or production ClickHouse.
 3. **JSON output scripting** — parse structured output with `jq` to build custom notifications, dashboards, or approval gates.
 
