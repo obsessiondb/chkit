@@ -3,10 +3,12 @@ import { describe, expect, test } from 'bun:test'
 import {
   canonicalizeCodec,
   codec,
+  codecFingerprint,
   codecsEqual,
   parseCodec,
   renderCodec,
 } from './codec.js'
+import type { ColumnCodecSpec } from './model-types.js'
 
 describe('renderCodec', () => {
   test('renders single general codec without level', () => {
@@ -118,6 +120,11 @@ describe('parseCodec', () => {
       { kind: 'raw', expression: 'LZ4(1)' },
     ])
   })
+
+  test('reads a negative level back from the unsigned form ClickHouse prints', () => {
+    expect(parseCodec('CODEC(ZSTD(18446744073709551615))')).toEqual([{ kind: 'ZSTD', level: -1 }])
+    expect(parseCodec('CODEC(LZ4HC(18446744073709551614))')).toEqual([{ kind: 'LZ4HC', level: -2 }])
+  })
 })
 
 describe('canonicalizeCodec', () => {
@@ -186,5 +193,80 @@ describe('codecsEqual', () => {
         [{ kind: 'ZSTD' }, { kind: 'Delta', size: 4 }]
       )
     ).toBe(false)
+  })
+})
+
+describe('codecFingerprint', () => {
+  // Each schema codec beside the compression_codec ClickHouse 26.3 and
+  // ObsessionDB 26.8 store for the CREATE TABLE chkit renders from it (#383).
+  const stored: Array<[ColumnCodecSpec, string]> = [
+    [{ kind: 'NONE' }, 'CODEC(NONE)'],
+    [{ kind: 'LZ4' }, 'CODEC(LZ4)'],
+    [{ kind: 'T64' }, 'CODEC(T64)'],
+    [{ kind: 'GCD' }, 'CODEC(GCD)'],
+    [{ kind: 'ALP' }, 'CODEC(ALP)'],
+    [{ kind: 'ZSTD' }, 'CODEC(ZSTD(1))'],
+    [{ kind: 'ZSTD', level: 3 }, 'CODEC(ZSTD(3))'],
+    [{ kind: 'ZSTD', level: -1 }, 'CODEC(ZSTD(18446744073709551615))'],
+    [{ kind: 'LZ4HC' }, 'CODEC(LZ4HC(9))'],
+    [{ kind: 'LZ4HC' }, 'CODEC(LZ4HC(0))'],
+    [{ kind: 'LZ4HC', level: 0 }, 'CODEC(LZ4HC(0))'],
+    [{ kind: 'LZ4HC', level: -1 }, 'CODEC(LZ4HC(18446744073709551615))'],
+    [{ kind: 'LZ4HC', level: 12 }, 'CODEC(LZ4HC(12))'],
+    [[{ kind: 'Delta' }, { kind: 'ZSTD' }], 'CODEC(Delta(1), ZSTD(1))'],
+    [[{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }], 'CODEC(Delta(8), LZ4)'],
+    [[{ kind: 'DoubleDelta' }, { kind: 'LZ4' }], 'CODEC(DoubleDelta, LZ4)'],
+    [[{ kind: 'DoubleDelta', size: 4 }, { kind: 'LZ4' }], 'CODEC(DoubleDelta, LZ4)'],
+    [[{ kind: 'Gorilla' }, { kind: 'LZ4' }], 'CODEC(Gorilla(1), LZ4)'],
+    [[{ kind: 'Gorilla', size: 8 }, { kind: 'ZSTD', level: 2 }], 'CODEC(Gorilla(8), ZSTD(2))'],
+    [[{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }], 'CODEC(FPC(12), LZ4)'],
+    [[{ kind: 'Delta', size: 8 }, { kind: 'T64' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), T64, ZSTD(1))'],
+    [codec.raw('ZSTD'), 'CODEC(ZSTD(1))'],
+    [codec.raw('Delta(4),ZSTD(3)'), 'CODEC(Delta(4), ZSTD(3))'],
+    [codec.raw('FPC, LZ4'), 'CODEC(FPC(12), LZ4)'],
+    [codec.raw('FPC(5, 4), LZ4HC'), 'CODEC(FPC(5), LZ4HC(0))'],
+    [codec.raw('AES_128_GCM_SIV'), 'CODEC(AES_128_GCM_SIV)'],
+    [[{ kind: 'Delta', size: 4 }, codec.raw('ZSTD(3)')], 'CODEC(Delta(4), ZSTD(3))'],
+  ]
+
+  for (const [spec, compressionCodec] of stored) {
+    test(`${JSON.stringify(spec)} matches the stored ${compressionCodec}`, () => {
+      expect(codecFingerprint(spec)).toBe(codecFingerprint(parseCodec(compressionCodec)))
+    })
+  }
+
+  test('no codec matches an empty compression_codec', () => {
+    expect(codecFingerprint(undefined)).toBe('')
+    expect(codecFingerprint(parseCodec(''))).toBe('')
+  })
+
+  test('tells apart codecs ClickHouse stores differently', () => {
+    const distinct: ColumnCodecSpec[] = [
+      { kind: 'LZ4' },
+      { kind: 'NONE' },
+      { kind: 'ZSTD' },
+      { kind: 'ZSTD', level: 3 },
+      { kind: 'ZSTD', level: 0 },
+      { kind: 'LZ4HC' },
+      { kind: 'LZ4HC', level: 12 },
+      [{ kind: 'Delta', size: 1 }, { kind: 'LZ4' }],
+      [{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }],
+      [{ kind: 'DoubleDelta' }, { kind: 'LZ4' }],
+      [{ kind: 'Gorilla', size: 8 }, { kind: 'LZ4' }],
+      [{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }],
+      [{ kind: 'FPC', level: 5, floatSize: 8 }, { kind: 'LZ4' }],
+      [{ kind: 'T64' }, { kind: 'LZ4' }],
+      [{ kind: 'LZ4' }, { kind: 'T64' }],
+    ]
+    const fingerprints = distinct.map(codecFingerprint)
+    expect(new Set([...fingerprints, '']).size).toBe(distinct.length + 1)
+  })
+
+  test('matches the strings chkit-py produces', () => {
+    expect(codecFingerprint({ kind: 'LZ4HC' })).toBe('LZ4HC(9)')
+    expect(codecFingerprint(parseCodec('CODEC(ZSTD(18446744073709551615))'))).toBe('ZSTD(-1)')
+    expect(codecFingerprint(parseCodec('CODEC(Delta(8), DoubleDelta, FPC(12), ZSTD(1))'))).toBe(
+      'Delta(8),DoubleDelta,FPC(12),ZSTD(1)'
+    )
   })
 })

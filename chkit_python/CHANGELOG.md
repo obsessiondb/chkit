@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit drift` and `chkit check --live` compare column codecs, as in TS (#383): a codec
+  added, removed or changed on the server reports `changed_column`. Codecs are compared in
+  the form ClickHouse stores them, so `ZSTD` matches `ZSTD(1)`, `LZ4HC` matches `LZ4HC(0)`,
+  and `DoubleDelta(4)` and `FPC(12, 8)` match the `DoubleDelta` and `FPC(12)` ClickHouse
+  keeps. Introspection reads a negative codec level (`ZSTD(-1)`, stored as
+  `ZSTD(18446744073709551615)`) back as negative.
 - `chkit query` keeps every digit of 64-bit and wider integers and Decimals and prints the
   same output as TS, in `--json` and in the table (#381). `query_json` parses ClickHouse's
   `FORMAT JSON` body without losing digits (`parse_json_result`) and, in every column whose

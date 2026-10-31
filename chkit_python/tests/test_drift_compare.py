@@ -15,6 +15,7 @@ from chkit.cli.commands.drift_diff import (
     diff_settings,
 )
 from chkit.clickhouse.introspect import IntrospectedTable
+from chkit.core.codec import parse_codec
 from chkit.core.model import (
     ColumnDefinition,
     ProjectionDefinition,
@@ -337,3 +338,41 @@ def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ep
     zero = ColumnDefinition(name="zero", type="Int64", default_kind="MATERIALIZED")
     materialized = zero.model_copy(update={"default": "fn:defaultValueOfTypeName('Int64')"})
     assert _changed_columns(materialized, zero) == ["zero"]
+
+
+# #383: a codec added, removed or changed on the server is drift, while the
+# forms ClickHouse fills in (ZSTD(1), LZ4HC(0), no DoubleDelta width, no FPC
+# float size) are not.
+def test_table_shape_compares_column_codecs_in_the_form_clickhouse_stores_them() -> None:
+    column = ColumnDefinition(name="value", type="Float64")
+
+    def schema(codec: object) -> ColumnDefinition:
+        return ColumnDefinition.model_validate({"name": "value", "type": "Float64", "codec": codec})
+
+    def live(compression_codec: str) -> ColumnDefinition:
+        return column.model_copy(update={"codec": parse_codec(compression_codec)})
+
+    assert _changed_columns(schema({"kind": "ZSTD"}), live("CODEC(ZSTD(1))")) is None
+    assert _changed_columns(schema({"kind": "LZ4HC"}), live("CODEC(LZ4HC(0))")) is None
+    assert _changed_columns(
+        schema([
+            {"kind": "DoubleDelta", "size": 8},
+            {"kind": "FPC", "level": 12, "floatSize": 8},
+            {"kind": "LZ4"},
+        ]),
+        live("CODEC(DoubleDelta, FPC(12), LZ4)"),
+    ) is None
+    assert _changed_columns(column, live("")) is None
+
+    differences = [
+        (schema({"kind": "ZSTD", "level": 3}), live("CODEC(LZ4)")),
+        (column, live("CODEC(ZSTD(3))")),
+        (schema({"kind": "ZSTD", "level": 3}), live("")),
+        (schema([{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]), live("CODEC(Delta(8), LZ4)")),
+        (
+            schema([{"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "LZ4"}]),
+            live("CODEC(FPC(5), LZ4)"),
+        ),
+    ]
+    for expected, actual in differences:
+        assert _changed_columns(expected, actual) == ["value"]
