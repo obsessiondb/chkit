@@ -3,7 +3,7 @@
   "extends": ["//"],
   "tasks": {
     "test": {
-      "dependsOn": ["$TURBO_EXTENDS$", "build"]
+      "dependsOn": ["$TURBO_EXTENDS$", "build", "@chkit/plugin-ingest#build"]
     }
   }
 }
