@@ -214,6 +214,8 @@ Successful syncs start a new batch identity cycle, recorded by the existing jour
 
 The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle. Terminal journal appends are bounded by the duration budget while the run is live. After cancellation or budget exhaustion, each one gets a separate five-second limit. Interrupted writes never count as successful ingestion.
 
+Stopping the wait does not cancel foreign code that ignores its signal. Such requests or loads retain their pipeline permits until they settle, so a sibling can exhaust its budget while waiting for capacity. Source request capabilities belong to their reader attempt: a retained `context.attempt` rejects after the attempt ends, and unfinished operations cannot schedule further retries after that point.
+
 Overlapping processes record independent histories. Scheduler concurrency controls limit resource use; a stale valid read may replay acknowledged work. ChKit validates journal facts before using their checkpoint.
 
 ## Options

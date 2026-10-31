@@ -44,8 +44,9 @@ export function runAttempt<T>(
 
   return pRetry(async (attemptNumber) => {
     // Backoff and Retry-After overlap: only wait out the remaining provider embargo.
-    const remaining = notBefore - performance.now()
-    if (remaining > 0) await sleep(remaining, undefined, { signal: env.signal })
+    for (let remaining = notBefore - performance.now(); remaining > 0; remaining = notBefore - performance.now()) {
+      await sleep(Math.min(remaining, 2_147_483_647), undefined, { signal: env.signal })
+    }
     env.signal.throwIfAborted()
     try {
       return await operation(attemptNumber)
@@ -67,6 +68,7 @@ export function runAttempt<T>(
       if (!(error instanceof FetchFailure)) return false
       const retryContext = { ...context, error }
       if (policy.shouldRetry && !(await policy.shouldRetry(retryContext))) return false
+      env.signal.throwIfAborted()
       const retryAfterMs = error.classification.kind === 'rate_limited' ? error.classification.retryAfterMs : undefined
       notBefore = performance.now() + (retryAfterMs ?? 0)
       if (notBefore > deadline) return false
