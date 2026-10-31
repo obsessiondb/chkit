@@ -115,9 +115,8 @@ Report each result and any failures.
 
 Use this verification script here instead of `bun run verify`. It runs one
 package task at a time and runs the complete CLI suite separately without Bun's
-parallel workers. This avoids the CLI timeout and Bun `epoll_ctl` errors observed
-in cloud verification; the latter matches this
-[upstream Bun issue](https://github.com/oven-sh/bun/issues/37968).
+parallel workers. This avoids the CLI test timeouts observed when the suite runs
+concurrently within the cloud container's resource limits.
 It runs all main CI checks with the existing tests, assertions, and time limits
 unchanged, including the CLI's 15-second timeout, except the Kafka suite: its
 broker runs in the Docker test stack, which the cloud container does not have. The replicated
@@ -128,6 +127,8 @@ After editing a setup script file, commit and push it. Reset the environment cac
 so setup reinstalls the helper and package versions from the updated script.
 
 ## Local validation
+
+These records predate the upgrade to Bun 1.4.4 and have not been repeated with it.
 
 Validated against commit `5317470` in an isolated ARM64 Debian Linux container with
 Node.js 22, Bun 1.3.13, and ClickHouse 26.3.34.136:
@@ -144,6 +145,8 @@ GitHub token authentication was not exercised: no personal credentials were
 copied into the test container.
 
 ## Cloud validation
+
+This record also predates the upgrade to Bun 1.4.4.
 
 Validated in the actual Codex Cloud environment on September 26, 2026, with
 Bun 1.3.13, Node.js 22.22.2, and ClickHouse 26.3.34.136:
