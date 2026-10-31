@@ -168,17 +168,22 @@ class ClickHouseClient:
         ]
         return QueryResult(column_names=column_names, rows=rows)
 
-    def query_json(self, statement: str) -> ClickHouseJsonQueryResult:
+    def query_json(
+        self, statement: str, settings: dict[str, Any] | None = None
+    ) -> ClickHouseJsonQueryResult:
         """Run a SELECT and return ClickHouse's ``JSON`` format envelope.
 
         As in TS, the server's own ``FORMAT JSON`` output is returned as is
         (type names in ``meta``, values and ``statistics`` as ClickHouse
         formats them), plus the ``query_id``. Trailing semicolons are dropped
         before ``FORMAT JSON`` is appended, as ``@clickhouse/client`` does.
+        ``settings`` are sent with the query (TS ``queryJson(sql, settings)``).
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            statement.strip().rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            statement.strip().rstrip(";"),
+            settings={**(settings or {}), "query_id": query_id},
+            fmt="JSON",
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**json.loads(body), "query_id": query_id}

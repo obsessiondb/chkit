@@ -94,6 +94,18 @@ chkit query "SELECT count() FROM users" --json
 
 There is no `rowCount`, `command`, or `schemaVersion` field; the row count lives in `rows`.
 
+### Large integers and Decimals are strings
+
+By default ClickHouse writes 64-bit and wider integers and Decimals as bare JSON numbers, which many JSON parsers read as 64-bit floats: `18446744073709551615` becomes `18446744073709552000`, and a `Decimal128` loses digits. `chkit query` sends `output_format_json_quote_64bit_integers = 1` and `output_format_json_quote_decimals = 1` with the query, so these values come back as exact strings:
+
+| ClickHouse type | JSON value |
+|-----------------|------------|
+| `UInt8`–`UInt32`, `Int8`–`Int32`, `Float32`, `Float64` | number |
+| `UInt64`, `Int64`, `UInt128`, `Int128`, `UInt256`, `Int256` | string, e.g. `"18446744073709551615"` |
+| `Decimal(P, S)` of any width | string, e.g. `"12345678901234567890.123456789"` |
+
+The same applies inside arrays, maps and tuples. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string. The table output prints the same exact digits.
+
 ## Related commands
 
 - [`chkit status`](/cli/status/) — show migration state

@@ -2,6 +2,7 @@
 
 Both print ClickHouse's own ``FORMAT JSON`` envelope plus the ``query_id``.
 The expected ``meta`` and ``data`` below are the TS output for ``SQL``.
+64-bit integers and Decimals are quoted, so they keep every digit (#381).
 """
 
 from __future__ import annotations
@@ -22,7 +23,9 @@ SQL = (
     "CAST(NULL AS Nullable(String)) AS ns, toNullable(toInt32(7)) AS ni, "
     "toDateTime('2026-10-31 00:32:27', 'UTC') AS dt, "
     "toDateTime64('2026-10-31 00:32:27.123', 3, 'UTC') AS dt64, "
-    "toDecimal64(12.345, 3) AS dec, [1, 2, 3] AS arr, ['x', NULL] AS arrn, "
+    "toDecimal64(12.345, 3) AS dec, "
+    "toDecimal128('12345678901234567890.123456789', 9) AS d128, "
+    "[1, 2, 3] AS arr, ['x', NULL] AS arrn, "
     "'ñandú €' AS utf8"
 )
 
@@ -36,6 +39,7 @@ EXPECTED_META = [
     {"name": "dt", "type": "DateTime('UTC')"},
     {"name": "dt64", "type": "DateTime64(3, 'UTC')"},
     {"name": "dec", "type": "Decimal(18, 3)"},
+    {"name": "d128", "type": "Decimal(38, 9)"},
     {"name": "arr", "type": "Array(UInt8)"},
     {"name": "arrn", "type": "Array(Nullable(String))"},
     {"name": "utf8", "type": "String"},
@@ -44,16 +48,18 @@ EXPECTED_META = [
 EXPECTED_DATA = [
     {
         "u8": 1,
-        # ClickHouse sends these digits. TS prints 18446744073709552000 and
-        # -9223372036854776000 because JSON.parse reads them as doubles.
-        "u64": 18446744073709551615,
-        "i64": -9223372036854775808,
+        # Unquoted, TS printed 18446744073709552000 and -9223372036854776000
+        # because JSON.parse reads them as doubles.
+        "u64": "18446744073709551615",
+        "i64": "-9223372036854775808",
         "s": 'a"b',
         "ns": None,
         "ni": 7,
         "dt": "2026-10-31 00:32:27",
         "dt64": "2026-10-31 00:32:27.123",
-        "dec": 12.345,
+        "dec": "12.345",
+        # Unquoted, json.loads read it as the float 1.2345678901234567e+19.
+        "d128": "12345678901234567890.123456789",
         "arr": [1, 2, 3],
         "arrn": ["x", None],
         "utf8": "ñandú €",

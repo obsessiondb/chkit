@@ -127,6 +127,14 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit query --json` keeps every digit of Decimals (#381): it sends
+  `output_format_json_quote_64bit_integers = 1` and `output_format_json_quote_decimals = 1`,
+  so ClickHouse writes 64-bit and wider integers and Decimals as strings, as in TS. A
+  `Decimal128(9)` such as `12345678901234567890.123456789` was printed as the float
+  `1.2345678901234567e+19`. **Behaviour change:** `UInt64`, `Int64`, 128/256-bit integers and
+  `Decimal` values are JSON strings now (they were numbers); `meta[].type` still gives the
+  type. Through an ObsessionDB service, which already returned every value as a string,
+  the settings are now sent too.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not

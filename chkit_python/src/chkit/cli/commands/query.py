@@ -34,6 +34,14 @@ from chkit.plugins import ChxPlugin
 DEFAULT_SHOWN_ROW_LIMIT = 25
 EXPECTED_TOKEN_CAP = 8
 
+# ClickHouse writes 64-bit and wider integers and Decimals as bare JSON
+# numbers; ``json.loads`` reads Decimals as floats, and TS rounds both to a
+# double. Quoted, they come back as exact strings in both ports (#381).
+EXACT_JSON_SETTINGS: dict[str, Any] = {
+    "output_format_json_quote_64bit_integers": 1,
+    "output_format_json_quote_decimals": 1,
+}
+
 _INJECTED_FORMAT_RE = re.compile(r"\s+FORMAT\s+JSON(?:EachRow)?\b", re.IGNORECASE)
 _EXPECTED_ONE_OF_RE = re.compile(r"Expected one of: ([^.]*)\.")
 
@@ -167,7 +175,7 @@ def run(
     try:
         with open_client(executor, config.clickhouse) as client:
             if output_json:
-                payload = client.query_json(statement)
+                payload = client.query_json(statement, EXACT_JSON_SETTINGS)
                 typer.echo(format_query_json(payload))
                 return
             result = client.query(statement)

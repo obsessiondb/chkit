@@ -250,9 +250,16 @@ def test_remote_client_query_json_returns_envelope(httpx_mock: HTTPXMock) -> Non
         },
     )
     client = create_remote_executor(_creds(), service_slug=SVC)
-    out = client.query_json("SELECT 1")
+    out = client.query_json("SELECT 1", {"output_format_json_quote_decimals": 1})
     assert out.rows == 1
     assert out.query_id == "q-1"
+    # The settings reach the API (#381), as in TS.
+    [request] = httpx_mock.get_requests()
+    assert json.loads(request.content)["json"] == {
+        "serviceSlug": SVC,
+        "query": "SELECT 1",
+        "settings": {"output_format_json_quote_decimals": 1},
+    }
 
 
 def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> None:

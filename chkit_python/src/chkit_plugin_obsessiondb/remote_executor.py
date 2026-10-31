@@ -167,9 +167,14 @@ class RemoteClickHouseClient:
             rows=normalize_query_data(result),
         )
 
-    def query_json(self, statement: str) -> ClickHouseJsonQueryResult:
+    def query_json(
+        self, statement: str, settings: dict[str, Any] | None = None
+    ) -> ClickHouseJsonQueryResult:
         result = workbench_query_execute(
-            self._credentials, service_slug=self._service_slug, query=statement
+            self._credentials,
+            service_slug=self._service_slug,
+            query=statement,
+            settings=_coerce_wire_settings(settings),
         )
         _raise_if_error(result)
         return normalize_query_json_result(result)

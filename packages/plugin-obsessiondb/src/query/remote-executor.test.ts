@@ -165,6 +165,24 @@ describe('createRemoteExecutor command', () => {
 	})
 })
 
+// chkit query --json asks for quoted 64-bit integers and Decimals (#381).
+describe('createRemoteExecutor queryJson', () => {
+	test('forwards settings to the API', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.queryJson?.('SELECT 1', { output_format_json_quote_decimals: 1 })
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'SELECT 1', settings: { output_format_json_quote_decimals: 1 } },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
 // #246: the query runs on the replica that received it, so on a multi-replica
 // service queryStatus reads processes and query_log on every replica.
 describe('createRemoteExecutor queryStatus', () => {
