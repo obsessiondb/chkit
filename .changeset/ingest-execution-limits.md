@@ -1,0 +1,5 @@
+---
+"@chkit/plugin-ingest": patch
+---
+
+Reject invalid execution limits instead of misbehaving silently. `runIngestion` fails with `IngestConfigError` when `maxDurationMs` is not a positive number of at most 2147483647 milliseconds (about 24.8 days) or `prefetchBatches` is not a positive integer: previously `NaN`, `Infinity`, or a budget above that bound exhausted the budget immediately, and an invalid prefetch made the fetch buffer unbounded. `--max-duration` and `ingest({ maxDurationSeconds })` reject values above 2147483 seconds, which used to end every run at once as `budget_exhausted`. `defineStream` validates `budget.maxChunks` and `budget.maxChunkRows` as positive integers, so `0`, `Infinity`, and `NaN` are rejected; omit `maxChunks` for an unlimited chunk budget. A `read()` that returns something other than an async iterable fails the stream with a configuration error instead of being retried under the stream policy, and a custom iterator whose `return()` throws synchronously no longer replaces the stream's outcome.

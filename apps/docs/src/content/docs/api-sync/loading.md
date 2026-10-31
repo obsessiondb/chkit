@@ -40,7 +40,7 @@ The stream's `budget.maxChunkRows` (default `100_000`) rejects an oversized yiel
 
 Separate pipelines have separate concurrency ceilings. If pipelines share a provider quota, account for the sum of their requests. These are concurrency limits, not rate limits measured in requests per second. Retry waits release fetch/load capacity for other work.
 
-Increase buffering only when it helps overlap fetching and writing without excessive memory. Larger rows can make a modest row count expensive.
+Increase buffering only when it helps overlap fetching and writing without excessive memory. Each active reader holds up to `prefetchBatches + 2` batches: the one being assembled from source chunks, the queued ones, and the one being loaded. Larger rows can make a modest row count expensive.
 
 ## Batch identity
 

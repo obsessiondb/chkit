@@ -33,6 +33,9 @@ const RUN_NAMESPACE_PREFIX = '@run:'
 const DEFAULT_BATCH_SIZE = 10_000
 const DEFAULT_PREFETCH_BATCHES = 1
 const DEFAULT_MAX_DURATION_MS = 60 * 60_000
+// A timer cannot wait longer than this: a budget beyond it would expire at once.
+const MAX_DURATION_MS = 2 ** 31 - 1
+export const MAX_DURATION_SECONDS = Math.floor(MAX_DURATION_MS / 1000)
 const LOAD_ATTEMPTS = 3
 const JOURNAL_APPEND_ATTEMPTS = 4
 // Terminal facts get a bounded chance to land even after the execution is interrupted.
@@ -58,9 +61,12 @@ export interface ExecutionEnv {
   journal: Journal
   destination: DestinationAdapter
   signal?: AbortSignal
-  /** Host-default execution budget. Exhaustion preserves committed progress. */
+  /**
+   * Host-default execution budget: a positive number of milliseconds, at most
+   * 2147483647 (about 24.8 days). Exhaustion preserves committed progress.
+   */
   maxDurationMs?: number
-  /** Finite number of mapped batches buffered between fetch and load. */
+  /** Positive integer of mapped batches buffered between fetch and load. */
   prefetchBatches?: number
   now?: () => Date
   log?: (message: string) => void
@@ -336,6 +342,7 @@ async function readAndLoad(input: {
         }),
     })
 
+    assertAsyncIterable(stream.id, reader)
     // Iterate by hand so a hung next() can be abandoned on abort; return() still
     // runs on every exit so the reader's finally blocks own cursor cleanup.
     const iterator = reader[Symbol.asyncIterator]()
@@ -367,8 +374,9 @@ async function readAndLoad(input: {
         if (progress.chunks >= maxChunks) budgetExhausted = true
       }
     } finally {
-      // Never await an uncooperative reader: cleanup is best effort once we leave.
-      void Promise.resolve(iterator.return?.()).catch(() => undefined)
+      // Never await an uncooperative reader: cleanup is best effort once we leave,
+      // and a failing return() never replaces the stream's own outcome.
+      void (async () => iterator.return?.())().catch(() => undefined)
     }
 
     // Only a fully consumed selection may claim the strategy's completion state.
@@ -616,6 +624,13 @@ function assertValidChunk(
   }
 }
 
+function assertAsyncIterable(streamId: string, reader: unknown): asserts reader is AsyncIterable<unknown> {
+  const factory = (typeof reader === 'object' || typeof reader === 'function') && reader !== null ? Reflect.get(reader, Symbol.asyncIterator) : undefined
+  if (typeof factory !== 'function') {
+    throw new IngestConfigError(`Stream "${streamId}": read() must return an async iterable such as an async generator.`)
+  }
+}
+
 function emptyBatch(): PendingBatch {
   return { rows: [], intervalIds: [], state: undefined }
 }
@@ -661,13 +676,20 @@ const NEVER_ABORTED = new AbortController().signal
 function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedEnv {
   const now = input.now ?? (() => new Date())
   const maxDurationMs = input.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
+  if (typeof maxDurationMs !== 'number' || !(maxDurationMs > 0 && maxDurationMs <= MAX_DURATION_MS)) {
+    throw new IngestConfigError(`maxDurationMs must be a positive number of at most ${MAX_DURATION_MS} milliseconds (about 24.8 days), got ${maxDurationMs}.`)
+  }
+  const prefetchBatches = input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES
+  if (!Number.isInteger(prefetchBatches) || prefetchBatches <= 0) {
+    throw new IngestConfigError(`prefetchBatches must be a positive integer, got ${prefetchBatches}.`)
+  }
   return {
     journal: input.journal,
     destination: input.destination,
     signal: AbortSignal.any([input.signal ?? NEVER_ABORTED, deadlineSignal]),
     hostSignal: input.signal ?? NEVER_ABORTED,
     maxDurationMs,
-    prefetchBatches: input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES,
+    prefetchBatches,
     now,
     log: input.log ?? (() => undefined),
   }

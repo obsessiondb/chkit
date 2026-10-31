@@ -13,7 +13,7 @@ import { z } from 'zod'
 
 import { BATCH_ID_COLUMN, createClickHouseDestination, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
 import { IngestConfigError } from './errors.js'
-import { runIngestion, type BackfillRequest } from './executor.js'
+import { MAX_DURATION_SECONDS, runIngestion, type BackfillRequest } from './executor.js'
 import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE } from './journal.js'
 import { collectPipelines, selectStreams, type SelectedStream } from './registry.js'
 import { doctorJournal, repairJournal } from './recovery.js'
@@ -23,8 +23,8 @@ const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
 
 const IngestOptionsSchema = z.object({
   journalTable: z.string().min(1).default(DEFAULT_JOURNAL_TABLE),
-  /** Host-default execution budget in seconds. */
-  maxDurationSeconds: z.number().positive().default(3600),
+  /** Host-default execution budget in seconds, bounded by what a timer can represent. */
+  maxDurationSeconds: z.number().positive().max(MAX_DURATION_SECONDS).default(3600),
   prefetchBatches: z.number().int().positive().default(1),
 })
 type IngestOptions = z.infer<typeof IngestOptionsSchema>
@@ -369,6 +369,7 @@ function parseMaxDuration(raw: string | string[] | boolean | undefined): number 
   if (typeof raw !== 'string') return undefined
   const seconds = Number(raw)
   if (!Number.isFinite(seconds) || seconds <= 0) throw new IngestConfigError(`Invalid value for --max-duration: ${raw}`)
+  if (seconds > MAX_DURATION_SECONDS) throw new IngestConfigError(`Invalid value for --max-duration: ${raw} (at most ${MAX_DURATION_SECONDS} seconds, about 24.8 days)`)
   return seconds
 }
 

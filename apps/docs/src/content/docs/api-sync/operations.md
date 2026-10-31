@@ -71,10 +71,10 @@ An exhausted request retry budget fails the stream; reader recovery does not mul
 
 | Control | Default | Behavior |
 |---|---|---|
-| `ingest({ maxDurationSeconds })` | `3600` seconds | Bounds execution, including journal operations |
+| `ingest({ maxDurationSeconds })` | `3600` seconds | Bounds execution, including journal operations; at most `2147483` seconds (about 24.8 days) |
 | `--max-duration <seconds>` | Plugin value | Overrides duration for one run |
-| Stream `budget.maxChunks` | Unlimited | Stops after a source chunk budget; the run is incomplete |
-| Stream `budget.maxChunkRows` | `100_000` | Fails a stream that yields a larger chunk |
+| Stream `budget.maxChunks` | Unlimited | Stops after a positive integer number of source chunks; the run is incomplete |
+| Stream `budget.maxChunkRows` | `100_000` | Fails a stream that yields a larger chunk; a positive integer |
 | `ingest({ journalTable })` | `_chkit_ingestion_journal` | Journal table in the configured database |
 
 A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. A configuration error exits `2` before any stream runs, for example a `--tag` that matches no stream, a missing ClickHouse connection, `--from`/`--to` without `--backfill`, or an invalid backfill id or `--max-duration` value. See [`chkit ingest` exit codes](/cli/ingest/#exit-codes). Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.

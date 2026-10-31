@@ -60,9 +60,9 @@ export function defineStream(
   input: StreamInput<Row, unknown, unknown> | FullSyncStreamInput<Row>
 ): AnyStreamDefinition {
   assertValidId('stream', input.id)
-  if (input.batchSize !== undefined && (!Number.isInteger(input.batchSize) || input.batchSize <= 0)) {
-    throw new IngestConfigError(`Stream "${input.id}": batchSize must be a positive integer.`)
-  }
+  assertPositiveInteger(`Stream "${input.id}"`, 'batchSize', input.batchSize)
+  assertPositiveInteger(`Stream "${input.id}"`, 'budget.maxChunks', input.budget?.maxChunks)
+  assertPositiveInteger(`Stream "${input.id}"`, 'budget.maxChunkRows', input.budget?.maxChunkRows)
   return {
     kind: 'ingest_stream',
     id: input.id,
@@ -170,11 +170,14 @@ function assertValidId(kind: 'stream' | 'pipeline', id: string): void {
 }
 
 function positiveCeiling(pipelineId: string, name: string, value: number | undefined, fallback: number): number {
-  if (value === undefined) return fallback
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new IngestConfigError(`Pipeline "${pipelineId}": ${name} must be a positive integer.`)
+  assertPositiveInteger(`Pipeline "${pipelineId}"`, name, value)
+  return value ?? fallback
+}
+
+function assertPositiveInteger(owner: string, name: string, value: number | undefined): void {
+  if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+    throw new IngestConfigError(`${owner}: ${name} must be a positive integer.`)
   }
-  return value
 }
 
 function dedupe(values: readonly string[]): string[] {

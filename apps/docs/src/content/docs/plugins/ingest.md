@@ -221,8 +221,8 @@ Overlapping processes record independent histories. Scheduler concurrency contro
 | Option | Default | Description |
 |---|---|---|
 | `journalTable` | `_chkit_ingestion_journal` | Append-only checkpoint journal in the configured database |
-| `maxDurationSeconds` | `3600` | Execution budget. Exhausting it ends the run as incomplete and keeps committed progress |
-| `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading |
+| `maxDurationSeconds` | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Exhausting it ends the run as incomplete and keeps committed progress |
+| `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading; a positive integer |
 
 ## Related pages
 
