@@ -29,6 +29,25 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 4. Compares expected (snapshot) vs actual (live) objects and table shapes
 5. Reports drift at both the object level and the table level
 
+### What drift compares
+
+- **Objects:** every table, view, materialized view and dictionary in the snapshot exists in ClickHouse with the same kind. An object in the schema's databases that the snapshot does not list reports `extra_object`.
+- **Tables:** columns matched by name, with their type, default, default kind and comment; the engine, `ORDER BY`, `PRIMARY KEY`, `PARTITION BY`, unique key and `TTL`; skip indexes, projections and constraints; and the settings the schema declares.
+
+### What drift does not compare
+
+A server-side change to any of these reports no drift, so neither `chkit drift` nor `chkit check --strict` fails on it:
+
+- View and materialized view queries, and the `TO` target of a materialized view.
+- The `REFRESH` clause of a refreshable materialized view.
+- Column codecs.
+- Column order: columns are matched by name.
+- Dictionary definitions: attributes, primary key, `SOURCE`, `LAYOUT`, `LIFETIME`, `RANGE` and settings.
+- Table comments.
+- Table settings the schema does not declare.
+
+Check these properties against `SHOW CREATE` output.
+
 ### Engine normalization
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
@@ -65,7 +84,7 @@ Column defaults are compared token by token with `default_expression` in `system
 |------|---------|
 | `missing_column` | Column in snapshot not found in live table |
 | `extra_column` | Column in live table not in snapshot |
-| `changed_column` | Column exists but type, default, or column kind differs |
+| `changed_column` | Column exists but type, default, column kind, or comment differs |
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |
