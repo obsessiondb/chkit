@@ -44,7 +44,7 @@ bunx chkit ingest status --tag provider:circleback --json
 
 Circleback exposes [paginated full collections](https://circleback.ai/docs/api) without a reliable modification feed. Every resource uses native `fullSync()` completion and `paginate()`. Each run exhausts its own provider pages; failed or interrupted reads restart from the first page, and empty successful reads still record completion. Progress never declares successful completion before destination acknowledgement. Loaded rows may remain visible after a later failure.
 
-Link pagination preserves ownership, assignee and completion filters even on cursor-only continuations. Conflicting filters, repeated/unsafe links and malformed provider responses fail visibly. Requests forward cancellation and time out after 30 seconds; executor retries honor HTTP 429 `Retry-After`, falling back to Circleback's `RateLimit-Reset` seconds when no valid `Retry-After` is supplied. Without either valid header, normal executor backoff applies.
+Link pagination preserves ownership, assignee and completion filters even on cursor-only continuations. Conflicting filters, repeated/unsafe links and malformed provider responses fail visibly. Requests forward cancellation and time out after 30 seconds; executor retries honor HTTP 429 `Retry-After`, falling back to Circleback's `RateLimit-Reset` seconds when `Retry-After` is absent or not parsed by the shared HTTP parser. Blank and negative `Retry-After` values currently parse as zero and bypass the fallback. Without either parsed delay, normal executor backoff applies. This fallback is fixture-tested hardening, not evidence of a live provider incident.
 
 Transcripts are rechecked for every listed meeting, including unchanged old meetings. A meeting's `updatedAt` is not treated as transcript readiness. The [action-item listing](https://circleback.ai/docs/api/action-items/list-action-items) explicitly uses `assigneeType=Anyone` and separately exhausts `PENDING` and `DONE`, the native statuses verified in the [official OpenAPI](https://circleback.ai/docs/api/openapi.json) and [update contract](https://circleback.ai/docs/api/action-items/update-action-item). Unexpected statuses fail instead of silently producing a partial export.
 
@@ -64,7 +64,7 @@ Each transcript has one stable full-content key `[sourceId, meetingId]` and one 
 
 HTTP 200 writes the complete raw segment array and an `available` outcome. HTTP 403 or 404 updates only the outcome to `forbidden` or `not_found`, preserving earlier successful text. A successful empty array replaces the prior content with `[]`. Malformed transcript data fails without marking availability successful. Segments have no synthetic IDs.
 
-Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried, including a segment's `speaker: null`. These tables are not byte- or shape-exact archives. See [native JSON storage fidelity](/api-sync/destinations/#native-json-storage-fidelity).
+Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried, including a segment's `speaker: null`. These tables are not byte- or shape-exact archives. See [native JSON storage fidelity](/api-sync/destinations/).
 
 Select successful snapshots with `raw.kind::String = 'transcript'`; join the latest outcome separately:
 

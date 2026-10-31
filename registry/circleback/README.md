@@ -45,7 +45,7 @@ Transcript discovery has its own full meeting listing. It rechecks old meetings 
 
 The [action-item listing](https://circleback.ai/docs/api/action-items/list-action-items) defaults to the authenticated assignee and incomplete items. The integration explicitly reads any assignee across both native completion statuses. `PENDING` and `DONE` are the exhaustive statuses in the [official OpenAPI](https://circleback.ai/docs/api/openapi.json), also documented by the [update endpoint](https://circleback.ai/docs/api/action-items/update-action-item). An unexpected status or ignored partition fails visibly. Mutable lists and status partitions are not atomic snapshots; a later full run reconciles edits and moves between partitions.
 
-Requests forward cancellation, time out after 30 seconds, and use one executor-owned retry wrapper. HTTP failures retain provider responses; `429` honors `Retry-After`, falling back to Circleback's `RateLimit-Reset` seconds when no valid `Retry-After` is supplied. Without either valid header the executor uses its normal retry backoff. Authentication and listing permission failures fail their resource. Run one ingestion process per ClickHouse target at a time and repeat runs with an external scheduler.
+Requests forward cancellation, time out after 30 seconds, and use one executor-owned retry wrapper. HTTP failures retain provider responses; `429` honors `Retry-After`, falling back to Circleback's `RateLimit-Reset` seconds when `Retry-After` is absent or not parsed by the shared HTTP parser. Blank and negative `Retry-After` values currently parse as zero and bypass the fallback. Without either parsed delay the executor uses its normal retry backoff. This fallback is fixture-tested hardening, not evidence of a live provider incident. Authentication and listing permission failures fail their resource. Run one ingestion process per ClickHouse target at a time and repeat runs with an external scheduler.
 
 ## Identities and company joins
 
@@ -77,7 +77,7 @@ The transcript table contains two explicitly distinguished observations per meet
 
 A 403/404 updates the outcome key and preserves earlier successful text. It proves neither deletion nor temporary processing. A valid HTTP 200 empty array replaces the prior snapshot with `[]`; malformed HTTP 200 content fails without publishing success. Segments retain their provider fields without synthetic segment IDs, subject to native JSON storage normalization.
 
-ClickHouse native JSON is not byte- or shape-exact archival storage: explicit null paths and empty objects may be absent when queried, including a transcript segment's `speaker: null`. See [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity).
+ClickHouse native JSON is not byte- or shape-exact archival storage: explicit null paths and empty objects may be absent when queried, including a transcript segment's `speaker: null`. See [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/).
 
 Use `FINAL` for latest observations and filter successful snapshots explicitly:
 

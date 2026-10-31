@@ -42,7 +42,7 @@
         {
           "version": "0.2.1",
           "changes": [
-            "Honor RateLimit-Reset seconds on HTTP 429 when Retry-After is missing or invalid, without changing permanent permission failures or transcript availability handling.",
+            "Add fixture-tested RateLimit-Reset seconds fallback on HTTP 429 when Retry-After is absent or not parsed by the shared HTTP parser, without changing permission failures or transcript availability handling.",
             "Clarify native JSON normalization of explicit null paths and empty objects, including nullable transcript speakers."
           ]
         },
