@@ -41,7 +41,7 @@ chkit ingest repair [flags]
 |------|------|---------|-------------|
 | `--from <timestamp>` | string | — | Backfill range lower bound (ISO timestamp). Requires `--backfill` |
 | `--to <timestamp>` | string | — | Backfill range upper bound (ISO timestamp). Requires `--backfill` |
-| `--max-duration <seconds>` | string | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Overrides the plugin's `maxDurationSeconds` option |
+| `--max-duration <seconds>` | string | `3600` | Execution budget. Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
 

@@ -51,6 +51,49 @@ describe('provider retry policy', () => {
     expect(scheduled).toBe(0)
   })
 
+  test('a Retry-After above the timer limit remains blocked until cancellation', async () => {
+    const controller = new AbortController()
+    const scheduled = Promise.withResolvers<void>()
+    const failure = await httpError(429, '2147484')
+    let calls = 0
+    const operation = runAttempt(async () => {
+      calls += 1
+      if (calls === 1) throw failure
+      return 'too early'
+    }, { ...immediate, retries: 1, maxRetryTime: Infinity }, {
+      ...env, signal: controller.signal, onRetry: () => scheduled.resolve(),
+    })
+    await scheduled.promise
+    const timer = setTimeout(() => controller.abort(new Error('host cancelled')), 40)
+    try {
+      await expect(operation).rejects.toThrow()
+      expect(calls).toBe(1)
+    } finally {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  })
+
+  test('cancellation while shouldRetry is pending prevents a retry fact', async () => {
+    const controller = new AbortController()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let scheduled = 0
+    const operation = runAttempt(async () => { throw new Error('source failed') }, {
+      ...immediate, retries: 1,
+      shouldRetry: async () => {
+        entered.resolve()
+        await release.promise
+        return true
+      },
+    }, { ...env, signal: controller.signal, onRetry: () => { scheduled += 1 } })
+    await entered.promise
+    controller.abort(new Error('reader ended'))
+    release.resolve()
+    await expect(operation).rejects.toThrow('reader ended')
+    expect(scheduled).toBe(0)
+  })
+
   test.each(['backoff', 'retry-after'] as const)('cancellation interrupts %s without calling the provider again', async (mode) => {
     const controller = new AbortController()
     const failure = await httpError(mode === 'backoff' ? 503 : 429, '60')

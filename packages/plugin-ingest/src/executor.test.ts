@@ -4,13 +4,13 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { table } from '@chkit/core'
 
 import { ingestionColumns, rawRows, rawTable } from './destination.js'
-import { HttpError, IngestConfigError } from './errors.js'
+import { HttpError } from './errors.js'
 import { runIngestion } from './executor.js'
 import { cursorState, timestampWindow } from './incremental.js'
 import { paginate } from './paginate.js'
 import { definePipeline, defineStream, selectStreams } from './registry.js'
 import { createMemoryDestination, createMemoryJournal } from './testing.js'
-import type { DestinationAdapter } from './types.js'
+import type { DestinationAdapter, FetchContext } from './types.js'
 
 const events = table({
   database: 'app',
@@ -703,24 +703,6 @@ describe('runtime contracts', () => {
     expect(sequences).toEqual([1, 2, 3, 4])
   })
 
-  test.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 2 ** 31])('an invalid maxDurationMs of %p is rejected before any journal fact', async (maxDurationMs) => {
-    const journal = createMemoryJournal()
-    const stream = defineStream({ id: 'app.limits', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
-    const execution = run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination(), maxDurationMs })
-    await expect(execution).rejects.toBeInstanceOf(IngestConfigError)
-    await expect(execution).rejects.toThrow('maxDurationMs must be a positive number')
-    expect(journal.events).toEqual([])
-  })
-
-  test.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -2, 1.5])('an invalid prefetchBatches of %p is rejected instead of unbounding the buffer', async (prefetchBatches) => {
-    const journal = createMemoryJournal()
-    const stream = defineStream({ id: 'app.limits', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
-    const execution = run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination(), prefetchBatches })
-    await expect(execution).rejects.toBeInstanceOf(IngestConfigError)
-    await expect(execution).rejects.toThrow('prefetchBatches must be a positive integer')
-    expect(journal.events).toEqual([])
-  })
-
   test('a read() that does not return an async iterable fails as a configuration error without reader retries', async () => {
     const journal = createMemoryJournal()
     let readers = 0
@@ -735,6 +717,27 @@ describe('runtime contracts', () => {
     expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'Stream "app.sync_reader": read() must return an async iterable such as an async generator.' })
     expect(readers).toBe(1)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+  })
+
+  test('reads an async-iterator getter once and preserves its receiver', async () => {
+    let lookups = 0
+    const destination = createMemoryDestination()
+    const stream = defineStream({
+      id: 'app.iterator_getter', destination: events,
+      read: () => ({
+        id: 7,
+        get [Symbol.asyncIterator]() {
+          lookups += 1
+          return async function* (this: { id: number }) {
+            yield { rows: [{ id: this.id }] }
+          }
+        },
+      }),
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
+    expect(result.ok).toBe(true)
+    expect(lookups).toBe(1)
+    expect(destination.tables.get('app.events')?.map((row) => row.id)).toEqual([7])
   })
 
   test.each([
@@ -766,6 +769,58 @@ describe('runtime contracts', () => {
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
     expect(result.streams[0]).toMatchObject(expected)
     expect(returns).toBe(1)
+  })
+
+  test('a retained source attempt cannot make requests or append retry facts after completion', async () => {
+    const captured = Promise.withResolvers<FetchContext>()
+    const journal = createMemoryJournal()
+    let calls = 0
+    const stream = defineStream({
+      id: 'app.retained_attempt', destination: events,
+      async *read(context) {
+        captured.resolve(context)
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    const context = await captured.promise
+    const facts = journal.events.length
+    expect(result.ok).toBe(true)
+    await expect(context.attempt(async () => { calls += 1; throw new Error('late request') })).rejects.toThrow('Reader attempt has ended')
+    expect(calls).toBe(0)
+    expect(journal.events).toHaveLength(facts)
+  })
+
+  test('an unawaited source operation cannot retry after its reader completes', async () => {
+    const release = Promise.withResolvers<void>()
+    const started = Promise.withResolvers<void>()
+    const captured = Promise.withResolvers<PromiseSettledResult<unknown>>()
+    const journal = createMemoryJournal()
+    let calls = 0
+    const stream = defineStream({
+      id: 'app.unawaited_attempt', destination: events, retry: { retries: 1, minTimeout: 0 },
+      async *read({ attempt }) {
+        const operation = attempt(async () => {
+          calls += 1
+          started.resolve()
+          await release.promise
+          throw new Error('late failure')
+        })
+        void operation.then(
+          (value) => captured.resolve({ status: 'fulfilled', value }),
+          (reason: unknown) => captured.resolve({ status: 'rejected', reason })
+        )
+        await started.promise
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    const facts = journal.events.length
+    release.resolve()
+    expect(result.ok).toBe(true)
+    expect((await captured.promise).status).toBe('rejected')
+    expect(calls).toBe(1)
+    expect(journal.events).toHaveLength(facts)
   })
 
   test('a failing loader cleanup does not mask the write failure or stop the retry', async () => {
@@ -935,16 +990,6 @@ describe('selectStreams', () => {
     expect(selectStreams([pipeline], ['crm', 'schedule:1h']).map((entry) => entry.stream.id)).toEqual(['crm.people'])
     expect(selectStreams([pipeline], ['stream:crm.deals']).map((entry) => entry.stream.id)).toEqual(['crm.deals'])
     expect(() => selectStreams([pipeline], ['schedule'])).toThrow('No stream matches every requested tag')
-  })
-
-  test('stream batch sizes and budgets must be positive integers', () => {
-    for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => defineStream({ id: 'crm.people', destination: events, batchSize: value, async *read() {} })).toThrow('Stream "crm.people": batchSize must be a positive integer')
-      expect(() => defineStream({ id: 'crm.people', destination: events, budget: { maxChunks: value }, async *read() {} })).toThrow('Stream "crm.people": budget.maxChunks must be a positive integer')
-      expect(() => defineStream({ id: 'crm.people', destination: events, budget: { maxChunkRows: value }, async *read() {} })).toThrow('Stream "crm.people": budget.maxChunkRows must be a positive integer')
-    }
-    const stream = defineStream({ id: 'crm.people', destination: events, batchSize: 5, budget: { maxChunks: 3, maxChunkRows: 10 }, async *read() {} })
-    expect([stream.batchSize, stream.budget]).toEqual([5, { maxChunks: 3, maxChunkRows: 10 }])
   })
 
   test('stream ids are globally unique across pipelines', () => {

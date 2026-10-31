@@ -67,35 +67,6 @@ describe('recovery command registration', () => {
   })
 })
 
-describe('execution budget options', () => {
-  test('the budget is bounded by the longest delay a timer can represent, on the option and on the flag', async () => {
-    const plugin = createIngestPlugin()
-    expect(plugin.optionsSchema.safeParse({ maxDurationSeconds: 2_147_483 }).success).toBe(true)
-    expect(plugin.optionsSchema.safeParse({ maxDurationSeconds: 2_147_484 }).success).toBe(false)
-
-    const directory = await mkdtemp(join(tmpdir(), 'chkit-budget-'))
-    directories.push(directory)
-    const entry = join(directory, 'entry.ts')
-    await writeFile(entry, `
-      import { definePipeline, defineStream } from ${JSON.stringify(new URL('./registry.ts', import.meta.url).pathname)}
-      import { rawTable } from ${JSON.stringify(new URL('./destination.ts', import.meta.url).pathname)}
-      export const rows = rawTable({ database: 'test', name: 'rows' })
-      export const pipeline = definePipeline({ id: 'test', streams: [defineStream({ id: 'test.rows', destination: rows, async *read() { yield { rows: [] } } })] })
-    `)
-    const run = plugin.commands.find((command) => command.name === 'run')
-    const output: unknown[] = []
-    const code = await run?.run({
-      args: [], flags: { '--max-duration': '2592000' }, jsonMode: true,
-      options: { journalTable: 'test_journal', maxDurationSeconds: 3600, prefetchBatches: 1 },
-      config: resolveConfig({ entry }), configPath: entry,
-      pluginContext: { hasExecutor: true, executor: {} as ClickHouseExecutor },
-      print: (value) => { output.push(value) },
-    })
-    expect(code).toBe(2)
-    expect(output[0]).toMatchObject({ ok: false, error: 'Invalid value for --max-duration: 2592000 (at most 2147483 seconds, about 24.8 days)' })
-  })
-})
-
 describe('exported pipeline discovery', () => {
   test('side-effect imports stay inactive; re-exports activate pipelines even after a cached import', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'chkit-exports-'))

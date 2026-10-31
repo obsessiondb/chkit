@@ -93,9 +93,9 @@ export type RetryOptions = Pick<PRetryOptions,
 }
 
 export interface StreamBudget {
-  /** Maximum source chunks pulled in one execution of this stream: a positive integer, unlimited when omitted. */
+  /** Maximum source chunks pulled in one execution of this stream. */
   maxChunks?: number
-  /** Largest chunk a reader may yield, a positive integer. A bigger chunk fails the stream instead of being buffered. */
+  /** Largest chunk a reader may yield. A bigger chunk fails the stream instead of being buffered. */
   maxChunkRows?: number
 }
 
