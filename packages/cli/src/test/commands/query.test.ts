@@ -23,6 +23,20 @@ describe('query output formatting', () => {
 		expect(output).toContain('(2 rows)')
 	})
 
+	test('prints the --json values: strings as they are, anything else as compact JSON (#381)', () => {
+		const output = formatRows([
+			{ d: '12345678901234567890.123456789', b: true, n: 7, a: ['18446744073709551615', 1] },
+		])
+
+		const body = output.split('\n')[2]
+		expect(body?.split('│').map((cell) => cell.trim())).toEqual([
+			'12345678901234567890.123456789',
+			'true',
+			'7',
+			'["18446744073709551615",1]',
+		])
+	})
+
 	test('formats json mode as ClickHouse JSON shape', () => {
 		const output = formatQueryJson({
 			data: [{ database: 'default', name: 'users' }],

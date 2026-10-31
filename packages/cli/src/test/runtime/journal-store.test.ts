@@ -76,7 +76,7 @@ describe('createJournalStore', () => {
     const { db } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
         // ensureTable probe: pretend the table exists with operations column already.
-        [/SELECT name FROM .* LIMIT 0/, []],
+        [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
         // The actual SELECT for readMigrationState — return JSONEachRow shape:
         [
           /FROM .* FINAL WHERE name = /,
@@ -131,7 +131,7 @@ describe('createJournalStore', () => {
     // ?? []).map` threw, and `Boolean("false")` is `true` — both must be parsed.
     const { db } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
-        [/SELECT name FROM .* LIMIT 0/, []],
+        [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
         [
           /FROM .* FINAL WHERE name = /,
           [
@@ -167,7 +167,7 @@ describe('createJournalStore', () => {
   test('readMigrationState handles operations column missing entirely (legacy row pre-ALTER)', async () => {
     const { db } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
-        [/SELECT name FROM .* LIMIT 0/, []],
+        [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
         [
           /FROM .* FINAL WHERE name = /,
           [
@@ -195,7 +195,7 @@ describe('createJournalStore', () => {
   test('readMigrationState returns null when no row exists', async () => {
     const { db } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
-        [/SELECT name FROM .* LIMIT 0/, []],
+        [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
         [/FROM .* FINAL WHERE name = /, []],
       ]),
     )
@@ -208,7 +208,7 @@ describe('createJournalStore', () => {
   test('writeMigrationState serializes operations as a tuple array literal in INSERT VALUES', async () => {
     const { db, commandCalls } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
-        [/SELECT name FROM .* LIMIT 0/, []],
+        [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
       ]),
     )
 
@@ -265,7 +265,7 @@ describe('createJournalStore', () => {
   test('writeMigrationState escapes single quotes inside lastError so SQL stays valid', async () => {
     const { db, commandCalls } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
-        [/SELECT name FROM .* LIMIT 0/, []],
+        [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
       ]),
     )
 
@@ -365,7 +365,7 @@ describe('createJournalStore', () => {
     function storeAnswering(rows: unknown[]) {
       const { db } = createScriptedExecutor(
         new Map<string | RegExp, unknown[]>([
-          [/SELECT name FROM .* LIMIT 0/, []],
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
           [/FROM .* FINAL WHERE name = /, rows],
         ]),
       )
@@ -399,7 +399,7 @@ describe('createJournalStore', () => {
     test('appendEntry keeps the completed operations of the last write', async () => {
       const { db, commandCalls } = createScriptedExecutor(
         new Map<string | RegExp, unknown[]>([
-          [/SELECT name FROM .* LIMIT 0/, []],
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
           [/FROM .* FINAL WHERE name = /, [staleRow('2026-10-09 12:00:00.100')]],
         ]),
       )
@@ -419,7 +419,7 @@ describe('createJournalStore', () => {
       let journalPolls = 0
       const { db } = createScriptedExecutor(
         new Map<string | RegExp, unknown[]>([
-          [/SELECT name FROM .* LIMIT 0/, []],
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
           [/system\.one/, [{ replicas }]],
           [/currentDatabase\(\) AS database/, [{ database: 'default' }]],
           [/SELECT engine FROM system.tables/, [{ engine: 'ReplicatedReplacingMergeTree' }]],
@@ -485,6 +485,109 @@ describe('createJournalStore', () => {
       const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
       expect(read).toContain('FINAL')
       expect(read).not.toContain('clusterAllReplicas(')
+    })
+  })
+
+  // A read-only user (readonly = 1 or 2, SELECT only) runs status, check and
+  // migrate (plan): reads must not create or alter the journal (#402).
+  describe('reads never write the journal (#402)', () => {
+    function clickHouseError(code: string, type: string): Error {
+      return Object.assign(new Error(`${type} error`), { code, type })
+    }
+
+    function storeFailing(fail: (sql: string) => Error | undefined) {
+      const commands: string[] = []
+      const queries: string[] = []
+      const db = {
+        async command(sql: string) {
+          commands.push(sql)
+        },
+        async query<T>(sql: string): Promise<T[]> {
+          queries.push(sql)
+          const error = fail(sql)
+          if (error) throw error
+          return []
+        },
+      } as unknown as ClickHouseExecutor
+      return { store: createJournalStore(db), commands, queries }
+    }
+
+    const probe = /SELECT name, migration_completed, operations FROM _chkit_migrations LIMIT 0/
+
+    test('a missing journal reads as no applied migrations and is not created', async () => {
+      const { store, commands } = storeFailing((sql) =>
+        probe.test(sql) ? clickHouseError('60', 'UNKNOWN_TABLE') : undefined)
+
+      expect(await store.readJournal()).toEqual({ version: 1, applied: [] })
+      expect(await store.readMigrationState('m.sql')).toBeNull()
+      expect(commands).toEqual([])
+    })
+
+    test('a missing journal behind the ObsessionDB console API reads as no applied migrations', async () => {
+      // The console API sends ClickHouse's message without the code or the name.
+      const { store, commands } = storeFailing((sql) =>
+        probe.test(sql)
+          ? new Error(`ClickHouse request failed: Unknown table expression identifier '_chkit_migrations' in scope ${sql}.`)
+          : undefined)
+
+      expect(await store.readJournal()).toEqual({ version: 1, applied: [] })
+      expect(commands).toEqual([])
+    })
+
+    test('the first write creates the journal that reads found missing', async () => {
+      const { store, commands } = storeFailing((sql) =>
+        probe.test(sql) && !commands.some((command) => command.startsWith('CREATE TABLE'))
+          ? clickHouseError('60', 'UNKNOWN_TABLE')
+          : undefined)
+      await store.readJournal()
+      expect(commands).toEqual([])
+
+      await store.writeMigrationState({
+        name: 'm.sql',
+        appliedAt: '2026-10-31T12:00:00.000Z',
+        checksum: 'abc',
+        chkitVersion: '0.0.0',
+        migrationCompleted: true,
+        operations: [],
+      })
+
+      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS _chkit_migrations')
+      expect(commands.some((sql) => sql.startsWith('INSERT INTO _chkit_migrations'))).toBe(true)
+    })
+
+    test('an up-to-date journal is read without ALTER', async () => {
+      const { store, commands } = storeFailing(() => undefined)
+
+      await store.readJournal()
+
+      expect(commands.filter((sql) => !sql.startsWith('SYSTEM SYNC REPLICA'))).toEqual([])
+    })
+
+    test('a journal without the per-operation columns is upgraded', async () => {
+      const { store, commands } = storeFailing((sql) =>
+        probe.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined)
+
+      await store.readJournal()
+
+      expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(2)
+    })
+
+    test('a read fails on an error other than a missing journal', async () => {
+      const { store } = storeFailing((sql) =>
+        probe.test(sql) ? clickHouseError('497', 'ACCESS_DENIED') : undefined)
+
+      await expect(store.readJournal()).rejects.toThrow('ACCESS_DENIED')
+    })
+
+    test('a readonly = 1 user reads without select_sequential_consistency', async () => {
+      const { store, queries } = storeFailing((sql) =>
+        sql.includes('select_sequential_consistency') ? clickHouseError('164', 'READONLY') : undefined)
+
+      await store.readJournal()
+
+      const reads = queries.filter((sql) => sql.includes('migration_completed = true'))
+      expect(reads).toHaveLength(2)
+      expect(reads[1]).not.toContain('SETTINGS')
     })
   })
 })

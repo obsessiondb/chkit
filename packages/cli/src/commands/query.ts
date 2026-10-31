@@ -1,18 +1,8 @@
-import type { ClickHouseJsonQueryResult, ClickHouseSettings } from '@chkit/clickhouse'
+import type { ClickHouseJsonQueryResult } from '@chkit/clickhouse'
 import type { ChxPluginCommand } from '../plugins.js'
 import { writeStdout } from '../runtime/json-output.js'
 
 const DEFAULT_SHOWN_ROW_LIMIT = 25
-
-/**
- * ClickHouse writes 64-bit and wider integers and Decimals as bare JSON
- * numbers, which JSON.parse rounds to a double. Quoted, they come back as
- * exact strings (#381).
- */
-const EXACT_JSON_SETTINGS: ClickHouseSettings = {
-	output_format_json_quote_64bit_integers: 1,
-	output_format_json_quote_decimals: 1,
-}
 
 export const queryCommand: ChxPluginCommand = {
 	name: 'query',
@@ -40,26 +30,14 @@ export const queryCommand: ChxPluginCommand = {
 			)
 		}
 
-		if (jsonMode) {
-			try {
-				const payload = pluginContext.executor.queryJson
-					? await pluginContext.executor.queryJson(sql, EXACT_JSON_SETTINGS)
-					: rowsToJsonResult(
-							await pluginContext.executor.query<Record<string, unknown>>(sql, EXACT_JSON_SETTINGS),
-						)
-				printQueryJson(payload)
-				return 0
-			} catch (error) {
-				throw cleanQueryError(error)
-			}
-		}
-
 		try {
-			const rows = await pluginContext.executor.query<Record<string, unknown>>(
-				sql,
-				EXACT_JSON_SETTINGS,
-			)
-			printRows(rows)
+			// queryJson keeps every digit of 64-bit and wider integers and
+			// Decimals (#381), so the table reads through it too.
+			const payload = pluginContext.executor.queryJson
+				? await pluginContext.executor.queryJson(sql)
+				: rowsToJsonResult(await pluginContext.executor.query<Record<string, unknown>>(sql))
+			if (jsonMode) printQueryJson(payload)
+			else printRows(payload.data)
 			return 0
 		} catch (error) {
 			throw cleanQueryError(error)

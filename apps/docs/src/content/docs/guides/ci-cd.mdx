@@ -34,6 +34,10 @@ chkit reads ClickHouse connection details from the environment. Set these as CI 
 | `CLICKHOUSE_PASSWORD` | Password |
 | `CLICKHOUSE_DB` | Target database |
 
+### Read-only credentials
+
+`chkit status`, `chkit check`, `chkit drift`, `chkit query` and `chkit migrate` without `--apply` only read, so a CI gate can run them as a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted `SELECT`). A journal that does not exist yet reads as no applied migrations; it is not created. `chkit migrate --apply` writes and needs a user with the privileges for the journal and the migrations: with a read-only user it fails with the ClickHouse error, such as `Not enough privileges` or `Cannot modify 'async_insert' setting in readonly mode`.
+
 ### Non-interactive detection
 
 The CLI detects CI environments automatically. A command is considered non-interactive when any of these are true:

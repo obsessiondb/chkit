@@ -32,6 +32,20 @@ this invocation (see [Per-command override](/obsessiondb/services/#per-command-o
 
 The command requires an executor — if no `clickhouse` config is present and no plugin supplies one, it exits with an error.
 
+`chkit query` sends no ClickHouse settings with the query, so a read-only user (`readonly = 1` or `readonly = 2`) can run it.
+
+### Exact values
+
+The table and `--json` print the same values. A 64-bit or wider integer or a Decimal keeps every digit ClickHouse sent (see [large integers and Decimals](#large-integers-and-decimals-are-strings)). In the table, strings print without quotes, and arrays, maps and tuples print as compact JSON:
+
+```
+u64max               │ d128                           │ arr_u64
+─────────────────────┼────────────────────────────────┼─────────────────────────────
+18446744073709551615 │ 12345678901234567890.123456789 │ ["18446744073709551615","1"]
+
+(1 row)
+```
+
 ## Examples
 
 ```sh
@@ -71,23 +85,24 @@ chkit query "SELECT count() FROM users" --json
 
 ```json
 {
-  "meta": [
-    { "name": "count()", "type": "UInt64" }
-  ],
   "data": [
     { "count()": "42" }
+  ],
+  "meta": [
+    { "name": "count()", "type": "UInt64" }
   ],
   "rows": 1,
   "statistics": {
     "elapsed": 0.000773,
     "rows_read": 1,
     "bytes_read": 1
-  }
+  },
+  "query_id": "6f1c0e8e-5d5a-4f0e-9c1b-2b8d7c3e9a41"
 }
 ```
 
-- `meta` — column names and ClickHouse types.
 - `data` — the result rows.
+- `meta` — column names and ClickHouse types.
 - `rows` — the row **count** (a number), not the rows array.
 - `statistics` — server-side timing and read counters.
 - `query_id` — present when the executor reports it.
@@ -96,15 +111,16 @@ There is no `rowCount`, `command`, or `schemaVersion` field; the row count lives
 
 ### Large integers and Decimals are strings
 
-By default ClickHouse writes 64-bit and wider integers and Decimals as bare JSON numbers, which many JSON parsers read as 64-bit floats: `18446744073709551615` becomes `18446744073709552000`, and a `Decimal128` loses digits. `chkit query` sends `output_format_json_quote_64bit_integers = 1` and `output_format_json_quote_decimals = 1` with the query, so these values come back as exact strings:
+ClickHouse writes 64-bit and wider integers and Decimals as bare JSON numbers, which many JSON parsers read as 64-bit floats: `18446744073709551615` becomes `18446744073709552000`, and a `Decimal128` loses digits. `chkit query` reads them without losing digits and prints them as strings of the digits ClickHouse sent, the same in the TypeScript CLI and chkit-py:
 
 | ClickHouse type | JSON value |
 |-----------------|------------|
 | `UInt8`–`UInt32`, `Int8`–`Int32`, `Float32`, `Float64` | number |
 | `UInt64`, `Int64`, `UInt128`, `Int128`, `UInt256`, `Int256` | string, e.g. `"18446744073709551615"` |
 | `Decimal(P, S)` of any width | string, e.g. `"12345678901234567890.123456789"` |
+| `JSON`, `Object`, `Dynamic` | every number inside is a string |
 
-The same applies inside arrays, maps and tuples. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string. The table output prints the same exact digits.
+Every number in a column whose type contains one of these types is a string, also inside arrays, maps, tuples and `Nullable`: `Array(UInt64)` prints `["18446744073709551615","1"]`, and `Tuple(UInt8, UInt64)` prints both numbers as strings. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string.
 
 ## Related commands
 

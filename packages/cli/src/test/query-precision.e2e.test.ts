@@ -11,7 +11,9 @@ const SQL =
   "toUInt64(9007199254740993) AS above_2_53, " +
   "toInt128('170141183460469231731687303715884105727') AS i128, " +
   "toUInt256('115792089237316195423570985008687907853269984665640564039457584007913129639935') AS u256, " +
-  "toDecimal128('12345678901234567890.123456789', 9) AS d128, toUInt32(7) AS u32"
+  "toDecimal128('12345678901234567890.123456789', 9) AS d128, " +
+  "[toUInt64(18446744073709551615), 1] AS arr_u64, toNullable(toDecimal64('-12.345', 3)) AS nd, " +
+  'toUInt32(7) AS u32'
 
 const EXACT = {
   u64max: '18446744073709551615',
@@ -20,6 +22,8 @@ const EXACT = {
   i128: '170141183460469231731687303715884105727',
   u256: '115792089237316195423570985008687907853269984665640564039457584007913129639935',
   d128: '12345678901234567890.123456789',
+  arr_u64: ['18446744073709551615', '1'],
+  nd: '-12.345',
 }
 
 async function writeConfig(dir: string): Promise<string> {
@@ -43,8 +47,8 @@ async function writeConfig(dir: string): Promise<string> {
   return configPath
 }
 
-// ClickHouse writes these as bare JSON numbers unless asked to quote them,
-// and JSON.parse rounds them to a double (#381).
+// ClickHouse writes these as bare JSON numbers, and JSON.parse rounds them to
+// a double (#381).
 describe('@chkit/cli query precision e2e', () => {
   test('--json prints 64-bit and wider integers and Decimals as exact strings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-query-precision-'))
@@ -73,7 +77,11 @@ describe('@chkit/cli query precision e2e', () => {
       })
       expect(result.exitCode, formatTestDiagnostic('query failed', result)).toBe(0)
       const [, , values] = result.stdout.split('\n')
-      expect(values?.split('│').map((cell) => cell.trim())).toEqual([...Object.values(EXACT), '7'])
+      // Every digit, without quotes; an array prints as compact JSON, as in --json.
+      expect(values?.split('│').map((cell) => cell.trim())).toEqual([
+        ...Object.values(EXACT).map((value) => (typeof value === 'string' ? value : JSON.stringify(value))),
+        '7',
+      ])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

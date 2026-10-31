@@ -24,6 +24,13 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 
+# Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
+# integers, Decimals, and the types that can contain them. The TS port
+# (``@chkit/clickhouse``, ``exact-json.ts``) uses the same pattern.
+_EXACT_TYPE_RE = re.compile(
+    r"\b(?:U?Int(?:64|128|256)|Decimal(?:32|64|128|256)?|JSON|Object|Dynamic)\b"
+)
+
 
 class QueryResult(BaseModel):
     """Container for a SELECT result."""
@@ -168,25 +175,21 @@ class ClickHouseClient:
         ]
         return QueryResult(column_names=column_names, rows=rows)
 
-    def query_json(
-        self, statement: str, settings: dict[str, Any] | None = None
-    ) -> ClickHouseJsonQueryResult:
+    def query_json(self, statement: str) -> ClickHouseJsonQueryResult:
         """Run a SELECT and return ClickHouse's ``JSON`` format envelope.
 
         As in TS, the server's own ``FORMAT JSON`` output is returned as is
         (type names in ``meta``, values and ``statistics`` as ClickHouse
-        formats them), plus the ``query_id``. Trailing semicolons are dropped
-        before ``FORMAT JSON`` is appended, as ``@clickhouse/client`` does.
-        ``settings`` are sent with the query (TS ``queryJson(sql, settings)``).
+        formats them, read by `parse_json_result`), plus the ``query_id``.
+        Trailing semicolons are dropped before ``FORMAT JSON`` is appended, as
+        ``@clickhouse/client`` does.
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            statement.strip().rstrip(";"),
-            settings={**(settings or {}), "query_id": query_id},
-            fmt="JSON",
+            statement.strip().rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
         )
         return ClickHouseJsonQueryResult.model_validate(
-            {**json.loads(body), "query_id": query_id}
+            {**parse_json_result(body), "query_id": query_id}
         )
 
     def submit(
@@ -382,6 +385,53 @@ class ClickHouseConnectionError(RuntimeError):
     exception, while the ``str(error)`` form gives a friendly message
     that differentiates auth vs network failures.
     """
+
+
+class _JsonInt(str):
+    """A JSON integer, with the digits ClickHouse wrote."""
+
+
+class _JsonFloat(str):
+    """A JSON number with a fraction or an exponent, as ClickHouse wrote it."""
+
+
+def parse_json_result(body: str | bytes) -> dict[str, Any]:
+    """Parse a ClickHouse ``FORMAT JSON`` body without losing digits (#381).
+
+    ClickHouse writes 64-bit and wider integers and Decimals as bare JSON
+    numbers, and a Decimal read as a float loses digits. In a column whose type
+    is or contains one of them, every number becomes a string of the digits
+    ClickHouse sent, as ``output_format_json_quote_64bit_integers = 1`` and
+    ``output_format_json_quote_decimals = 1`` would do. Sending those settings
+    instead would fail for a ``readonly = 1`` user (#402). Other numbers stay
+    numbers. Same as TS ``parseJsonResult``.
+    """
+    parsed: dict[str, Any] = json.loads(body, parse_int=_JsonInt, parse_float=_JsonFloat)
+    exact = {
+        column["name"]
+        for column in parsed.get("meta", [])
+        if _EXACT_TYPE_RE.search(column["type"])
+    }
+    return {
+        key: (
+            [{name: _restore(cell, name in exact) for name, cell in row.items()} for row in value]
+            if key == "data"
+            else _restore(value, exact=False)
+        )
+        for key, value in parsed.items()
+    }
+
+
+def _restore(value: Any, exact: bool) -> Any:
+    if isinstance(value, _JsonInt):
+        return str(value) if exact else int(value)
+    if isinstance(value, _JsonFloat):
+        return str(value) if exact else float(value)
+    if isinstance(value, list):
+        return [_restore(item, exact) for item in value]
+    if isinstance(value, dict):
+        return {key: _restore(item, exact) for key, item in value.items()}
+    return value
 
 
 def is_unknown_database_error(error: BaseException) -> bool:

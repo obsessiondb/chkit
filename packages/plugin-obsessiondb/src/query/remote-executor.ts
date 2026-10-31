@@ -136,13 +136,10 @@ export function createRemoteExecutor(deps: {
 
 		async queryJson<T extends Record<string, unknown>>(
 			sql: string,
-			settings?: ClickHouseSettings,
 		): Promise<ClickHouseJsonQueryResult<T>> {
-			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
-				...(apiSettings ? { settings: apiSettings } : {}),
 			})
 			throwIfError(res)
 			return normalizeQueryJsonResult<T>(res)

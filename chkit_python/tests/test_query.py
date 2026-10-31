@@ -163,7 +163,23 @@ def test_format_rows_handles_missing_keys_across_rows() -> None:
 def test_format_rows_serializes_complex_cells_as_json() -> None:
     rows: list[dict[str, object]] = [{"data": {"nested": True}}]
     out = format_rows(rows)
-    assert '"nested": true' in out
+    # Compact, as JSON.stringify in TS.
+    assert '{"nested":true}' in out
+
+
+def test_format_rows_prints_cells_as_ts_does() -> None:
+    # The table prints the --json values: strings as they are (exact digits,
+    # no quotes), anything else as compact JSON (#381).
+    rows: list[dict[str, object]] = [
+        {"d": "12345678901234567890.123456789", "b": True, "n": 7, "a": ["18446744073709551615", 1]}
+    ]
+    body = format_rows(rows).splitlines()[2]
+    assert [cell.strip() for cell in body.split("│")] == [
+        "12345678901234567890.123456789",
+        "true",
+        "7",
+        '["18446744073709551615",1]',
+    ]
 
 
 def test_format_rows_handles_none_as_empty() -> None:

@@ -2,7 +2,8 @@
 
 Both print ClickHouse's own ``FORMAT JSON`` envelope plus the ``query_id``.
 The expected ``meta`` and ``data`` below are the TS output for ``SQL``.
-64-bit integers and Decimals are quoted, so they keep every digit (#381).
+64-bit integers and Decimals are strings with every digit ClickHouse sent
+(#381), and the table prints the same values.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ SQL = (
     "toDateTime64('2026-10-31 00:32:27.123', 3, 'UTC') AS dt64, "
     "toDecimal64(12.345, 3) AS dec, "
     "toDecimal128('12345678901234567890.123456789', 9) AS d128, "
+    "[toUInt64(18446744073709551615), 1] AS arr_u64, "
+    "toNullable(toDecimal64('-12.345', 3)) AS nd, "
     "[1, 2, 3] AS arr, ['x', NULL] AS arrn, "
     "'ñandú €' AS utf8"
 )
@@ -40,6 +43,8 @@ EXPECTED_META = [
     {"name": "dt64", "type": "DateTime64(3, 'UTC')"},
     {"name": "dec", "type": "Decimal(18, 3)"},
     {"name": "d128", "type": "Decimal(38, 9)"},
+    {"name": "arr_u64", "type": "Array(UInt64)"},
+    {"name": "nd", "type": "Nullable(Decimal(18, 3))"},
     {"name": "arr", "type": "Array(UInt8)"},
     {"name": "arrn", "type": "Array(Nullable(String))"},
     {"name": "utf8", "type": "String"},
@@ -60,6 +65,8 @@ EXPECTED_DATA = [
         "dec": "12.345",
         # Unquoted, json.loads read it as the float 1.2345678901234567e+19.
         "d128": "12345678901234567890.123456789",
+        "arr_u64": ["18446744073709551615", "1"],
+        "nd": "-12.345",
         "arr": [1, 2, 3],
         "arrn": ["x", None],
         "utf8": "ñandú €",
@@ -107,3 +114,48 @@ def test_query_json_prints_the_clickhouse_json_envelope_like_ts(
     assert isinstance(statistics["bytes_read"], int)
     assert isinstance(payload["query_id"], str)
     assert payload["query_id"]
+
+
+def test_query_table_prints_every_digit_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = resolve_live_env()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": env.clickhouse_database,
+            },
+        })
+        + ")\n"
+    )
+
+    result = CliRunner().invoke(app, ["query", SQL])
+
+    assert result.exit_code == 0, format_test_diagnostic("query failed", result)
+    cells = [cell.strip() for cell in result.stdout.splitlines()[2].split("│")]
+    # The --json values: strings as they are (no quotes), anything else as
+    # compact JSON, as the TS table prints them.
+    assert cells == [
+        "1",
+        "18446744073709551615",
+        "-9223372036854775808",
+        'a"b',
+        "",
+        "7",
+        "2026-10-31 00:32:27",
+        "2026-10-31 00:32:27.123",
+        "12.345",
+        "12345678901234567890.123456789",
+        '["18446744073709551615","1"]',
+        "-12.345",
+        "[1,2,3]",
+        '["x",null]',
+        "ñandú €",
+    ]

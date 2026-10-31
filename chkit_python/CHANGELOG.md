@@ -127,21 +127,34 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
-- `chkit query --json` keeps every digit of Decimals (#381): it sends
-  `output_format_json_quote_64bit_integers = 1` and `output_format_json_quote_decimals = 1`,
-  so ClickHouse writes 64-bit and wider integers and Decimals as strings, as in TS. A
+- `chkit query` keeps every digit of 64-bit and wider integers and Decimals and prints the
+  same output as TS, in `--json` and in the table (#381). `query_json` parses ClickHouse's
+  `FORMAT JSON` body without losing digits (`parse_json_result`) and, in every column whose
+  type is or contains `Int64`/`UInt64`, a 128/256-bit integer, a `Decimal`, `JSON`, `Object`
+  or `Dynamic`, returns each number as a string of the digits ClickHouse sent. A
   `Decimal128(9)` such as `12345678901234567890.123456789` was printed as the float
-  `1.2345678901234567e+19`. **Behaviour change:** `UInt64`, `Int64`, 128/256-bit integers and
-  `Decimal` values are JSON strings now (they were numbers); `meta[].type` still gives the
-  type. Through an ObsessionDB service, which already returned every value as a string,
-  the settings are now sent too.
+  `1.2345678901234567e+19`. It sends no settings, so it works for a `readonly = 1` user.
+  **Behaviour change:** in `--json`, `UInt64`, `Int64`, 128/256-bit integer and `Decimal`
+  values are JSON strings now (they were numbers), also inside arrays, maps and tuples;
+  `meta[].type` still gives the type. The table output now reads through `query_json` too,
+  so it prints the `--json` values as TS does: a Decimal without quotes (it printed
+  `"12.345"`), `true`/`false`, `DateTime` as ClickHouse formats it, and arrays, maps and
+  tuples as compact JSON (`[1,2,3]`).
+- chkit-py works with a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted
+  `SELECT`) for `query`, `status`, `check`, `drift`, `pull` and `migrate` without `--apply`,
+  as in TS (#402). Reading the journal no longer writes: `status`, `check` and `migrate`
+  failed with `ACCESS_DENIED` on `CREATE TABLE ... _chkit_migrations`. A missing journal
+  now reads as no applied migrations and is created by the first journal write of
+  `migrate --apply`; the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` upgrade runs only for a
+  journal that lacks the per-operation columns, and a `readonly = 1` user reads the journal
+  without `select_sequential_consistency`. `migrate --apply` with a read-only user fails
+  with the ClickHouse error, as before.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not
-  ISO with a `T`; `Decimal` as a number), and `statistics` holds ClickHouse's `elapsed`,
-  `rows_read` and `bytes_read` numbers instead of the HTTP summary strings. Non-ASCII text
-  is printed as is instead of `\u`-escaped. UInt64/Int64 values keep the exact digits
-  ClickHouse sends. The text output is unchanged.
+  ISO with a `T`; 64-bit and wider integers and `Decimal` as exact strings, see #381), and
+  `statistics` holds ClickHouse's `elapsed`, `rows_read` and `bytes_read` numbers instead
+  of the HTTP summary strings. Non-ASCII text is printed as is instead of `\u`-escaped.
 - `schema` is optional in `ChxUserConfig`, as in TS (#376), so a user profile written with
   `define_config()` or `ChxUserConfig(...)` may leave it out. It failed with `Field
   required` before; only a plain dict profile could leave it out. A project config without
