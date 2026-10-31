@@ -48,7 +48,7 @@ This helper performs one request. Call it through `context.attempt` or from `pag
 
 ## Pages and checkpoint metadata
 
-`paginate` yields the complete `{ items, next, metadata? }` returned by `fetchPage`, including empty and terminal pages. Read rows from `page.items`. `initial` and `next` support offset, string-token, and compound-object continuations; `next: undefined` ends pagination. Repeated continuations, including a return to `initial`, fail with `IngestConfigError` before the invalid page reaches the reader.
+`paginate` yields the complete `{ items, next, metadata? }` returned by `fetchPage`, including empty and terminal pages. Read rows from `page.items`. `initial` and `next` support offset, string-token, and compound-object continuations, compared by their JSON serialization (a `bigint` continuation is rejected); `next: undefined` ends pagination. At runtime, an omitted or `null` continuation also ends pagination. Repeated continuations, including a return to `initial`, and a result that is not a page object with an `items` array fail with `IngestConfigError` before the invalid page reaches the reader.
 
 `next` controls the next request. `metadata` carries provider details such as a candidate checkpoint, replacement sync token, or page identity. The helper preserves metadata without interpreting or persisting it. With `cursorState`, explicitly map a safe, complete checkpoint from the page into `SourceChunk.state`; the executor commits it after the rows are saved. Empty pages can carry meaningful progress through the same path. See the complete [provider cursor example](/api-sync/incremental-syncs/#provider-cursors-and-compound-state).
 

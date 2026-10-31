@@ -41,7 +41,7 @@ chkit ingest repair [flags]
 |------|------|---------|-------------|
 | `--from <timestamp>` | string | — | Backfill range lower bound (ISO timestamp). Requires `--backfill` |
 | `--to <timestamp>` | string | — | Backfill range upper bound (ISO timestamp). Requires `--backfill` |
-| `--max-duration <seconds>` | string | `3600` | Execution budget. Overrides the plugin's `maxDurationSeconds` option |
+| `--max-duration <seconds>` | string | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
 
@@ -63,7 +63,7 @@ Create and apply destination schema migrations before ingestion. The journal use
 
 ### Stream selection
 
-Without `--tag`, a subcommand selects every stream in the loaded graph. Each `--tag` narrows the selection: a stream is selected only when it carries every requested tag. Every stream carries its declared pipeline and stream tags plus the derived tags `pipeline:<id>` and `stream:<id>`.
+Without `--tag`, a subcommand selects every stream in the loaded graph. Each `--tag` narrows the selection: a stream is selected only when it carries every requested tag. Every stream carries its declared pipeline and stream tags plus the derived tags `pipeline:<id>` and `stream:<id>`. Declared tags cannot start with `stream:` or `pipeline:`, so `--tag stream:<id>` always selects exactly that stream.
 
 A `--tag` filter that matches no stream fails with exit code 2 before any work runs.
 

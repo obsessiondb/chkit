@@ -33,6 +33,8 @@ const RUN_NAMESPACE_PREFIX = '@run:'
 const DEFAULT_BATCH_SIZE = 10_000
 const DEFAULT_PREFETCH_BATCHES = 1
 const DEFAULT_MAX_DURATION_MS = 60 * 60_000
+/** Largest delay a timer accepts: a signed 32-bit millisecond count. */
+export const MAX_DURATION_MS = 2_147_483_647
 const LOAD_ATTEMPTS = 3
 const JOURNAL_APPEND_ATTEMPTS = 4
 // Terminal facts get a bounded chance to land even after the execution is interrupted.
@@ -661,13 +663,22 @@ const NEVER_ABORTED = new AbortController().signal
 function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedEnv {
   const now = input.now ?? (() => new Date())
   const maxDurationMs = input.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
+  // setTimeout clamps a delay outside the signed 32-bit range (Infinity included) to 1 ms,
+  // which would expire the budget before the first fetch instead of never.
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0 || maxDurationMs > MAX_DURATION_MS) {
+    throw new IngestConfigError(`maxDurationMs must be a positive number of milliseconds up to ${MAX_DURATION_MS}.`)
+  }
+  const prefetchBatches = input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES
+  if (!Number.isInteger(prefetchBatches) || prefetchBatches <= 0) {
+    throw new IngestConfigError('prefetchBatches must be a positive integer.')
+  }
   return {
     journal: input.journal,
     destination: input.destination,
     signal: AbortSignal.any([input.signal ?? NEVER_ABORTED, deadlineSignal]),
     hostSignal: input.signal ?? NEVER_ABORTED,
     maxDurationMs,
-    prefetchBatches: input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES,
+    prefetchBatches,
     now,
     log: input.log ?? (() => undefined),
   }
