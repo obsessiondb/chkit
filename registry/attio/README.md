@@ -82,6 +82,8 @@ Record streams carry `resource:records` and `object:<ref>`. Object-attribute str
 
 `pageSize` defaults to 500. Notes have a separate `notesPageSize` of 50, the documented maximum. Requests go through the ingestion executor's retry/cancellation context, with a 30-second request timeout. The serial pipeline leaves a 25ms gap before each request and a 125ms gap for notes; raising concurrency requires revisiting rate control. `429` responses retain `Retry-After` for executor backoff. Attio also limits query complexity; a permanently expensive query may need simpler filters/sorts rather than repeated retries. See [rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
 
+Page sizes must be positive safe integers, with `notesPageSize` capped at 50. Readers reject invalid applicable page sizes before making requests, including the object or list lookup that precedes a child collection read.
+
 ## Stored data and editable views
 
 Each raw table contains a stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time metadata. The key includes source identity, resource kind, workspace ID, and every relevant object/list/entity ID. Names, emails, and domains are never keys.
@@ -92,6 +94,8 @@ The complete returned entity is retained under `raw.data`. The envelope adds `so
 SELECT id, raw.data, _chkit_ingested_at
 FROM default.attio_records_raw FINAL;
 ```
+
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
 
 `sources/records.ts` defines three ordinary `FINAL` views:
 

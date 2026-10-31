@@ -1,6 +1,6 @@
 import { IngestConfigError, rawTable, type ReadContext, type SourceChunk, type RawRow } from '@chkit/plugin-ingest'
 
-import { defaultSlackClientDeps, discoverChannels, entityId, getWorkspace, readCollection, SlackCursorExpiredError, toSlackRows, type SlackClientDeps, type SlackEntity } from '../client.js'
+import { assertSlackReaderConfig, defaultSlackClientDeps, discoverChannels, entityId, getWorkspace, readCollection, SlackCursorExpiredError, toSlackRows, type SlackClientDeps, type SlackEntity } from '../client.js'
 import { slackConfig } from '../config.js'
 import { formatTimestamp, messageScope, timestampMicros, type SlackMessageSelection, type SlackMessageState } from '../state.js'
 
@@ -12,16 +12,17 @@ export async function* readMessages(
   deps: SlackClientDeps = defaultSlackClientDeps,
 ): AsyncGenerator<SourceChunk<RawRow, SlackMessageState>> {
   const config = deps.config
+  assertSlackReaderConfig(config, 'messages')
+  const initialFrom = context.selection.from ?? config.historyFrom ?? formatTimestamp(max(0n, timestampMicros(context.selection.to) - BigInt(config.overlapMs) * 1_000n))
+  const to = context.selection.to
+  const from = context.selection.from ?? (context.state ? formatTimestamp(max(config.historyFrom === undefined ? 0n : timestampMicros(config.historyFrom), timestampMicros(context.state.watermark) - BigInt(config.overlapMs) * 1_000n)) : initialFrom)
+  if (!context.state?.active && timestampMicros(from) > timestampMicros(to)) throw new IngestConfigError('Slack selection starts after its cutoff.')
   const teamId = await getWorkspace(context, deps)
   const scope = messageScope(teamId, config)
   if (context.state && context.state.scope !== scope) throw new IngestConfigError('Slack checkpoint belongs to a different workspace or query. Restore the configuration or use a distinct sourceId.')
-  const initialFrom = context.selection.from ?? config.historyFrom ?? formatTimestamp(max(0n, timestampMicros(context.selection.to) - BigInt(config.overlapMs) * 1_000n))
   let state: SlackMessageState = context.state ?? { scope, watermark: initialFrom }
   if (!state.active) {
-    const channels = (await discoverChannels(context, deps)).map((channel) => entityId(channel, 'id')).sort()
-    const to = context.selection.to
-    const from = context.selection.from ?? (context.state ? formatTimestamp(max(config.historyFrom === undefined ? 0n : timestampMicros(config.historyFrom), timestampMicros(state.watermark) - BigInt(config.overlapMs) * 1_000n)) : initialFrom)
-    if (timestampMicros(from) > timestampMicros(to)) throw new IngestConfigError('Slack selection starts after its cutoff.')
+    const channels = [...new Set((await discoverChannels(context, deps)).map((channel) => entityId(channel, 'id')))].sort()
     state = { ...state, active: { from, to, channels, channelIndex: 0, latest: formatTimestamp(timestampMicros(to) + 1n),
       requestedFrom: context.selection.from, requestedTo: context.selection.requestedTo } }
     yield marker(state, 'window-open')

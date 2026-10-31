@@ -367,6 +367,7 @@ describe('Slack raw template', () => {
     expect(result.ok).toBe(false)
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(calls).toBe(2)
+    expect(result.streams[0]?.error).toBe(`Slack ${method} failed (internal_error); treated as HTTP 503.`)
   })
 
   test('HTTP 200 rate-limit errors retain Retry-After and retry under executor authority', async () => {
@@ -426,6 +427,42 @@ describe('Slack raw template', () => {
     const http = await HttpError.fromResponse(new Response(null, { status: 429, headers: { 'Retry-After': '2' } }))
     expect(http.retryAfterMs).toBe(2_000)
     expect(classifySlackError(http, { kind: 'rate_limited', retryAfterMs: 2_000 })).toBeUndefined()
+  })
+
+  test('invalid page sizes, pacing, and selection bounds fail before any Slack request', async () => {
+    let calls = 0
+    const deps = fixtureDeps(() => { calls += 1; throw new Error('must not fetch') })
+    for (const [key, value] of [['pageSize', 1000], ['requestIntervalMs', -1]] as const) {
+      const invalid = { ...deps, config: { ...slackConfig, [key]: value } }
+      for (const read of [readChannels, readUsers, readMessages]) await expect(collect<SourceChunk>(read(context(), invalid)), key).rejects.toThrow('Slack')
+    }
+    for (const [key, value] of [['messagePageSize', Number.NaN], ['messageIntervalMs', Number.POSITIVE_INFINITY]] as const) {
+      await expect(collect(readMessages(context(), { ...deps, config: { ...slackConfig, [key]: value } }))).rejects.toThrow('Slack')
+    }
+    for (const read of [readChannels, readMessages]) {
+      await expect(collect<SourceChunk>(read(context(), { ...deps, config: { ...slackConfig, conversationTypes: [] } }))).rejects.toThrow('Slack conversationTypes')
+    }
+    await expect(collect(readMessages(context(), { ...deps, config: { ...slackConfig, historyFrom: '1700006400.000001' } }))).rejects.toThrow('starts after its cutoff')
+    const reversed = { ...context(), selection: { from: '1700006400.000001', to: '1700006400.000000', backfill: true } }
+    await expect(collect(readMessages(reversed, deps))).rejects.toThrow('starts after its cutoff')
+    expect(calls).toBe(0)
+  })
+
+  test('metadata readers do not depend on message settings and users do not depend on conversation selection', async () => {
+    const deps = fixtureDeps()
+    const invalidMessages = { ...deps, config: { ...deps.config, messagePageSize: Number.NaN, messageIntervalMs: -1 } }
+    expect((await collect(readChannels(context(), invalidMessages))).flatMap((page) => page.rows)).toHaveLength(1)
+    expect((await collect(readUsers(context(), { ...invalidMessages, config: { ...invalidMessages.config, conversationTypes: [] } }))).flatMap((page) => page.rows)).toHaveLength(2)
+  })
+
+  test('exhausted HTTP 200 rate-limit errors name the Slack method and code', async () => {
+    const defaults = fixtureDeps()
+    const deps = fixtureDeps((url, init) => url.pathname === '/api/users.list'
+      ? Response.json({ ok: false, error: 'ratelimited' }, { headers: { 'Retry-After': '0' } })
+      : defaults.fetch(url.toString(), init))
+    const result = await runFixture(deps, ['users'])
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.error).toBe('Slack users.list failed (ratelimited); treated as HTTP 429.')
   })
 
   test('missing credentials fail only when a reader runs', async () => {

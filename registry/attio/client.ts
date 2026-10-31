@@ -42,6 +42,7 @@ export async function* readParentCollection(
   },
   deps: AttioClientDeps = defaultAttioClientDeps,
 ) {
+  assertPageSize(deps.config.pageSize)
   const idField = input.parent.kind === 'objects' ? 'object_id' : 'list_id'
   const path = `/${input.parent.kind}/${encodeURIComponent(input.parent.ref)}`
   const parent = await context.attempt(async (signal) => {
@@ -80,9 +81,7 @@ export function readCollection(
   request: CollectionRequest,
   deps: AttioClientDeps = defaultAttioClientDeps,
 ) {
-  if (request.pageSize !== undefined && (!Number.isSafeInteger(request.pageSize) || request.pageSize <= 0)) {
-    throw new IngestConfigError('Attio pageSize must be a positive safe integer.')
-  }
+  if (request.pageSize !== undefined) assertPageSize(request.pageSize)
   return paginate({
     context, initial: 0, label: `${request.method ?? 'GET'} /v2${request.path}`,
     fetchPage: async (offset = 0, signal) => {
@@ -99,6 +98,10 @@ export function readCollection(
       return { items, next }
     },
   })
+}
+
+function assertPageSize(value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new IngestConfigError('Attio pageSize must be a positive safe integer.')
 }
 
 /** Original provider fields stay under data; metadata does not overwrite custom attributes. */
