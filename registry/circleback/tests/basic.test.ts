@@ -427,10 +427,10 @@ function envelope(data: unknown, sourceId = 'circleback') { return { source_id: 
 
 test('Circleback honors RateLimit-Reset over HTTP, gives Retry-After precedence, and respects the retry deadline', async () => {
   for (const scenario of [
-    { headers: { 'RateLimit-Reset': '1' }, maxRetryTime: 5_000, succeeds: true, minimumDelay: 900 },
-    { headers: { 'RateLimit-Reset': '3600', 'Retry-After': '0' }, maxRetryTime: 5_000, succeeds: true, minimumDelay: 0 },
-    { headers: { 'RateLimit-Reset': '3600' }, maxRetryTime: 100, succeeds: false, minimumDelay: 0 },
-    { headers: { 'RateLimit-Reset': 'invalid' }, maxRetryTime: 5_000, succeeds: true, minimumDelay: 0 },
+    { headers: new Headers({ 'RateLimit-Reset': '1' }), maxRetryTime: 5_000, succeeds: true, minimumDelay: 900 },
+    { headers: new Headers({ 'RateLimit-Reset': '3600', 'Retry-After': '0' }), maxRetryTime: 5_000, succeeds: true, minimumDelay: 0 },
+    { headers: new Headers({ 'RateLimit-Reset': '3600' }), maxRetryTime: 100, succeeds: false, minimumDelay: 0 },
+    { headers: new Headers({ 'RateLimit-Reset': 'invalid' }), maxRetryTime: 5_000, succeeds: true, minimumDelay: 0 },
   ]) {
     const requestedAt: number[] = []
     const server = Bun.serve({
