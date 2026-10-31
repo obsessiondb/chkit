@@ -33,7 +33,9 @@ export async function* readResource(context: MeetContext, resource: Resource, de
   if (!state.window) {
     const to = state.bounds?.to ?? context.cutoff.toISOString()
     const anchor = state.watermark ?? to
-    const from = state.bounds?.from ?? new Date(Date.parse(anchor) - deps.config.lookbackHours * hourMs).toISOString()
+    const lowerBound = state.bounds?.from ? new Date(state.bounds.from) : new Date(Date.parse(anchor) - deps.config.lookbackHours * hourMs)
+    if (!Number.isFinite(lowerBound.getTime())) throw new IngestConfigError('Meet lookbackHours places the lower bound outside the Date range.')
+    const from = state.bounds?.from ?? lowerBound.toISOString()
     if (state.bounds && Date.parse(from) > Date.parse(to)) throw new IngestConfigError('Meet backfill bounds are inverted: from must not be after to or the cutoff.')
     if (Date.parse(from) > Date.parse(to) || state.watermark && Date.parse(state.watermark) > Date.parse(to)) throw new IngestConfigError('Meet cutoff precedes its committed range.')
     state = { ...state, window: { from, to, phase: 'ended' } }

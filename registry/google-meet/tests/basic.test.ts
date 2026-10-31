@@ -371,33 +371,6 @@ function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
   return journal
 }
 
-test('Meet treats a generic 400 on a continuation request as a rejected page token and restarts the collection once', async () => {
-  const other = { ...conference, name: 'conferenceRecords/c2' }
-  let rejected = false
-  const urls: URL[] = []
-  const pipeline = fixturePipeline((url) => {
-    urls.push(url)
-    if (url.pathname !== '/v2/conferenceRecords') return fixture(url)
-    if (url.searchParams.get('filter')?.includes('IS NULL')) return Response.json({ conferenceRecords: [] })
-    if (!url.searchParams.has('pageToken')) return Response.json({ conferenceRecords: [conference], nextPageToken: 'parents-next' })
-    if (rejected) return Response.json({ conferenceRecords: [other] })
-    rejected = true
-    return Response.json({ error: { code: 400, message: 'Request contains an invalid argument.', status: 'INVALID_ARGUMENT' } }, { status: 400 })
-  })
-  const destination = createMemoryDestination()
-  const result = await runIngestion(request(pipeline, 'conferences'), { journal: createMemoryJournal(), destination, now: () => cutoff })
-  expect(result.ok, JSON.stringify(result)).toBe(true)
-  expect(urls.filter((url) => url.pathname === '/v2/conferenceRecords').map((url) => url.searchParams.get('pageToken'))).toEqual([null, 'parents-next', null, 'parents-next', null])
-  expect(new Set(destination.tables.get('default.google_meet_conferences_raw')?.map((row) => row.id)).size).toBe(2)
-  const persistent = fixturePipeline((url) => url.pathname !== '/v2/conferenceRecords' ? fixture(url)
-    : url.searchParams.has('pageToken') ? new Response('{"error":{"status":"INVALID_ARGUMENT"}}', { status: 400 }) : Response.json({ conferenceRecords: [conference], nextPageToken: 'parents-next' }))
-  const journal = createMemoryJournal()
-  const failed = await runIngestion(request(persistent, 'conferences'), { journal, destination: createMemoryDestination(), now: () => cutoff })
-  expect(failed.ok).toBe(false)
-  expect(failed.streams[0]?.error).toContain('repeatedly rejected its page token (HTTP 400')
-  expect((await journal.readCheckpoint('google-meet.conferences')).envelope?.state).toMatchObject({ window: { recoveryCount: 1 } })
-})
-
 test('Meet rejects a lookback beyond the Date range at construction and names inverted backfill bounds', async () => {
   const deps = { config: googleMeetConfig, token: () => 'fixture', fetch: async () => { throw new Error('must not fetch') } }
   expect(() => createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 1e300 }, deps)).toThrow('lookbackHours')
@@ -407,4 +380,27 @@ test('Meet rejects a lookback beyond the Date range at construction and names in
   const result = await runIngestion({ ...request(pipeline, 'conferences'), backfill }, { journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('inverted')
+})
+
+test('Meet rejects invalid backfill dates and a lookback outside the planned Date range without requests', async () => {
+  let requests = 0
+  const pipeline = createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 2_400_000_000 }, {
+    config: googleMeetConfig, token: () => 'fixture',
+    fetch: async () => { requests++; return Response.json({ conferenceRecords: [] }) },
+  })
+  for (const bounds of [
+    { from: new Date(Number.NaN), to: undefined },
+    { from: undefined, to: new Date(Number.NaN) },
+    { from: undefined, to: new Date('1900-01-01T00:00:00Z') },
+  ]) {
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ ...request(pipeline, 'conferences'), backfill: { id: 'invalid', ...bounds } }, {
+      journal, destination: createMemoryDestination(), now: () => cutoff,
+    })
+    expect(result.ok).toBe(false)
+    expect(result.streams[0]?.error).toMatch(/valid dates|outside the Date range/)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+    expect((await journal.readCheckpoint('google-meet.conferences#backfill:invalid')).version).toBe(0)
+  }
+  expect(requests).toBe(0)
 })

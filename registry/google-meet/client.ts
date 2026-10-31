@@ -28,7 +28,7 @@ export function readCollection(context: FetchContext, path: string, field: strin
       const current = cursor ?? {}
       const page = await requestPage(path, field, current.pageToken, options.filter, options.pageSize ?? 100, signal, deps)
       if ('reset' in page) {
-        if (current.recoveryCount) throw new IngestConfigError(`Meet ${field} repeatedly rejected its page token (${page.detail}). Increase the execution budget or migrate the checkpoint after reviewing coverage.`)
+        if (current.recoveryCount) throw new IngestConfigError(`Meet ${field} repeatedly rejected its page token. Increase the execution budget or migrate the checkpoint after reviewing coverage.`)
         return { items: [], next: { recoveryCount: 1 }, metadata: { reset: true } }
       }
       return { items: page.items, next: page.nextPageToken ? { ...current, pageToken: page.nextPageToken } : undefined }
@@ -56,7 +56,7 @@ export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-async function requestPage(path: string, field: string, pageToken: string | undefined, filter: string | undefined, pageSize: number, signal: AbortSignal, deps: GoogleMeetClientDeps): Promise<{ items: Named[]; nextPageToken?: string } | { reset: true; detail: string }> {
+async function requestPage(path: string, field: string, pageToken: string | undefined, filter: string | undefined, pageSize: number, signal: AbortSignal, deps: GoogleMeetClientDeps): Promise<{ items: Named[]; nextPageToken?: string } | { reset: true }> {
   const token = deps.token()?.trim()
   if (!token) throw new IngestConfigError('Set GOOGLE_MEET_ACCESS_TOKEN.')
   const url = new URL(`https://meet.googleapis.com/v2/${path}`)
@@ -64,10 +64,9 @@ async function requestPage(path: string, field: string, pageToken: string | unde
   if (filter) url.searchParams.set('filter', filter)
   if (pageToken) url.searchParams.set('pageToken', pageToken)
   const response = await deps.fetch(url.toString(), { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), headers: { Authorization: `Bearer ${token}` }, redirect: 'error' })
-  // Only the page token changes between a collection's requests, so a 400/410 on a continuation is a rejected
-  // token whatever the body says; Google's generic INVALID_ARGUMENT message does not name the parameter.
   if (pageToken && (response.status === 400 || response.status === 410)) {
-    return { reset: true, detail: `HTTP ${response.status} ${(await response.clone().text()).slice(0, 200)}` }
+    const detail = await response.clone().text()
+    if (/page[_\s-]*token/i.test(detail) && /invalid|expir/i.test(detail)) return { reset: true }
   }
   if (!response.ok) throw await HttpError.fromResponse(response)
   const payload: unknown = await response.json()

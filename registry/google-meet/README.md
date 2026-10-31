@@ -47,13 +47,13 @@ A checkpoint contains source scope, completed watermark, optional historical bou
 
 A failed or interrupted page replays its child collections from their beginning under the original bounds. Completed discovery pages remain skipped. Child pages, indices and queues are not saved. The default discovery `pageSize` is one conference and `maxChunks` is 200. A page's children plus its completion marker must fit a run's chunk/time budget; increase `maxChunks` or `--max-duration` if one conference is too large. Requests have a 30-second timeout.
 
-A `400` or `410` response to a continuation request is treated as a rejected page token, whatever its body says, and restarts its collection once; a second rejection fails with the HTTP detail. Discovery reset debt is saved across executions and clears after the phase finishes. Child token recovery is bounded within its current read; a replayed parent starts fresh child collections. Repeated rejection and malformed/cyclic continuation fail visibly.
+A `400` or `410` on a continuation request restarts its collection once only when the response body identifies an invalid or expired page token. Generic errors without that detail remain permanent failures; they do not automatically reset progress. Discovery reset debt is saved across executions and clears after the phase finishes. Child token recovery is bounded within its current read; a replayed parent starts fresh child collections. Repeated rejection and malformed/cyclic continuation fail visibly.
 
 Checkpoint strategy version 2 rejects incompatible state rather than reinterpreting it. Changing source or discovery settings requires deliberate state migration or a new `streamPrefix`. Run one ingestion process per target at a time.
 
 ## Raw updates and relationships
 
-Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. All provider fields stay raw. Join resources and assemble transcripts later in ClickHouse.
+Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. This is not byte- or shape-exact archival storage; see [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/#native-json-storage-fidelity). Join resources and assemble transcripts later in ClickHouse.
 
 Participants represent attendance; sessions represent individual joins/leaves. Recordings preserve metadata and Drive references without downloading files. Transcripts preserve metadata and document references; entry rows preserve individual speech segments. API entries do not reflect later edits to the separate Google Docs document.
 

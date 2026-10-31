@@ -54,9 +54,8 @@
         {
           "version": "0.2.1",
           "changes": [
-            "Treat any 400 or 410 response to a continuation request as a rejected page token so Google's generic INVALID_ARGUMENT body no longer wedges a stream on the same token; a second rejection fails with the HTTP detail.",
-            "Reject a lookbackHours beyond the Date range when the pipeline is created and name inverted backfill bounds instead of reporting a cutoff error.",
-            "Document that Google lists conferences the authenticated user organized."
+            "Reject lookbackHours beyond the Date range when the pipeline is created and report invalid calculated dates and inverted backfill bounds as configuration errors before requesting data.",
+            "Clarify token-recovery recognition, organizer-scoped conference discovery, and native JSON normalization of null paths and empty objects."
           ]
         },
         {

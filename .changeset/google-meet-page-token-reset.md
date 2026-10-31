@@ -2,4 +2,4 @@
 "chkit": patch
 ---
 
-Google Meet template: treat any 400/410 on a continuation request as a rejected page token (bounded to one restart) instead of only bodies that mention the token, validate lookbackHours against the Date range, and name inverted backfill bounds.
+Google Meet template: validate lookbackHours and calculated dates against the Date range, reject invalid explicit bounds before requests, and name inverted backfill bounds. Clarify token-recovery recognition and native JSON storage normalization.

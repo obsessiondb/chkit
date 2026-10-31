@@ -47,11 +47,13 @@ The saved state contains scope, watermark, optional historical bounds, and the u
 
 An interrupted page repeats its child reads from the beginning under the same bounds; completed discovery pages remain skipped. No child cursor, cached page, or child completion index is persisted. Configure small discovery pages and enough budget to finish one page's children plus the checkpoint marker. Defaults are `pageSize: 1` and `maxChunks: 200`; increase the cap or `--max-duration` for unusually large conferences. Native JSON requires ClickHouse 25.3 or later.
 
-A `400` or `410` on a continuation request counts as a rejected page token and restarts its collection once. Discovery recovery debt persists across resumed executions until the phase finishes. Child collections restart naturally when their parent page replays. Repeated rejection and cyclic/malformed pagination fail visibly. Strategy version 2 rejects incompatible saved state; scope changes require deliberate migration or a new `streamPrefix`. Schedule externally; ChKit supports [overlapping runs with independent journal histories](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
+A `400` or `410` on a continuation request restarts its collection once only when the body identifies an invalid or expired page token. A generic error without that detail remains a permanent failure. Discovery recovery debt persists across resumed executions until the phase finishes. Child collections restart naturally when their parent page replays. Repeated rejection and cyclic/malformed pagination fail visibly. Strategy version 2 rejects incompatible saved state; scope changes require deliberate migration or a new `streamPrefix`. Schedule externally; ChKit supports [overlapping runs with independent journal histories](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
 
 ## Raw updates and historical ranges
 
 Raw identity is `[sourceId, provider.name]`. Children add `conference_name`; sessions add `participant_name`, and entries add `transcript_name`. Join native resource names and derive attendance/transcript views later in ClickHouse.
+
+Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried. The tables are not byte- or shape-exact archives of the original response. See [native JSON storage fidelity](/api-sync/destinations/#native-json-storage-fidelity).
 
 Participants and sessions preserve attendance identities and join/leave records. Recordings preserve metadata and Drive references without downloading media. Transcripts preserve metadata/document references, and entries preserve speech segments. API entries do not capture later edits to the separate Google Docs transcript.
 

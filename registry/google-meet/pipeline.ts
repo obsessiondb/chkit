@@ -4,7 +4,6 @@ import { classifyGoogleMeetError, defaultGoogleMeetClientDeps, type GoogleMeetCl
 import { googleMeetConfig, type GoogleMeetReaderConfig } from './config.js'
 import { google_meet_conferencesRaw, google_meet_transcriptsRaw, google_meet_transcriptEntriesRaw, google_meet_participantsRaw, google_meet_participantSessionsRaw, google_meet_recordingsRaw, parseMeetState, readResource, type MeetSelection, type MeetState, type Resource } from './sources/resources.js'
 
-// The largest lookback that still subtracts to a representable Date (8.64e15 ms around the epoch).
 const MAX_LOOKBACK_HOURS = 8.64e15 / 3_600_000
 
 export function createGoogleMeetPipeline(config: GoogleMeetReaderConfig = googleMeetConfig, deps: GoogleMeetClientDeps = defaultGoogleMeetClientDeps) {
@@ -36,7 +35,12 @@ function resourceStream(resource: Resource, destination: typeof google_meet_conf
     id: `${config.streamPrefix}.${resource}`, tags: [`resource:${resource}`], destination,
     incremental: {
       id: checkpoint.id, version: checkpoint.version, parseState: checkpoint.parseState,
-      plan: ({ range }) => range,
+      plan: ({ range }) => {
+        for (const bound of [range?.from, range?.to]) {
+          if (bound !== undefined && (!(bound instanceof Date) || !Number.isFinite(bound.getTime()))) throw new IngestConfigError('Meet backfill bounds must be valid dates.')
+        }
+        return range
+      },
     },
     batchSize: 1,
     budget: { maxChunks: config.maxChunks, maxChunkRows: 100 },
