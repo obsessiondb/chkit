@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { Readable } from 'node:stream'
 import {
 	type ChxConfig,
 	type ColumnDefinition,
@@ -53,6 +54,8 @@ export type { ClickHouseSettings }
 export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
 	table: string
 	values: T[]
+	/** Encode rows through a stream instead of joining an entire INSERT into one string. */
+	stream?: boolean
 	compressed?: boolean
 	/** Per-insert settings, e.g. a stable `insert_deduplication_token`. */
 	settings?: ClickHouseSettings
@@ -813,7 +816,7 @@ export function createExecutorWithClient(
 				}
 				const result = await insertClient.insert({
 					table: params.table,
-					values: params.values,
+					values: params.stream ? Readable.from(params.values) : params.values,
 					format: 'JSONEachRow',
 					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
 					...(params.settings ? { clickhouse_settings: params.settings } : {}),

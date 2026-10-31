@@ -5,8 +5,8 @@ import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
 import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
 
-import { toJsonRows } from './destination.js'
-import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError } from './errors.js'
+import { ingestionColumns, toJsonRow } from './destination.js'
+import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError, isPermanentInsertFailure } from './errors.js'
 import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
 import { createBoundedQueue } from './queue.js'
@@ -226,6 +226,10 @@ async function executeStream(input: {
   let failure: unknown
 
   try {
+    const missing = ingestionColumns.filter((required) => !stream.destination.columns.some((column) => column.name === required.name))
+    if (missing.length > 0) {
+      throw new IngestConfigError(`Stream "${stream.id}" destination ${stream.destination.database}.${stream.destination.name} is missing ${missing.map((column) => column.name).join(', ')}. Spread ingestionColumns into its columns.`)
+    }
     outcome = await runAttempt(async (attemptNo) => {
       // Re-plan from the latest durable boundary on every reader (re)creation.
       const state = restoreState(stream, progress.envelope, namespaceId)
@@ -389,7 +393,7 @@ async function readAndLoad(input: {
     // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(toJsonRows(batch.rows))}`
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${digest(rowContents(batch.rows))}`
       const batchId = digest([namespaceId, progress.successId, progress.checkpointId, String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       if (abandoned) return
@@ -478,6 +482,8 @@ async function loadBatch(
           await loader.abort(error).catch((cleanupError: unknown) => {
             span.recordException(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)))
           })
+          if (isPermanentInsertFailure(error)) throw new AbortError(new FetchFailure(error, { kind: 'permanent' }))
+          if (error instanceof IngestConfigError) throw new AbortError(error)
           throw error
         }
       }), {
@@ -618,6 +624,10 @@ function assertValidChunk(
 
 function emptyBatch(): PendingBatch {
   return { rows: [], intervalIds: [], state: undefined }
+}
+
+function* rowContents(rows: readonly Row[]): Iterable<string> {
+  for (const row of rows) yield canonicalJson(toJsonRow(row))
 }
 
 /** Resolves a fixed grace period after the signal aborts; never resolves otherwise. */

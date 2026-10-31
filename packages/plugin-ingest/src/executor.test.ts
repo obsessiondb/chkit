@@ -3,10 +3,11 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import { table } from '@chkit/core'
 
-import { ingestionColumns, rawRows, rawTable } from './destination.js'
-import { HttpError } from './errors.js'
+import { ingestionColumns, rawRows, rawTable, toJsonRow } from './destination.js'
+import { HttpError, IngestConfigError, isPermanentInsertFailure } from './errors.js'
 import { runIngestion } from './executor.js'
 import { cursorState, timestampWindow } from './incremental.js'
+import { simpleLoader } from './loader.js'
 import { paginate } from './paginate.js'
 import { definePipeline, defineStream, selectStreams } from './registry.js'
 import { createMemoryDestination, createMemoryJournal } from './testing.js'
@@ -577,6 +578,50 @@ describe('runtime contracts', () => {
     expect(result.ok).toBe(true)
     expect(failures).toBe(1)
     expect(journal.events.filter((event) => event.eventKind === stage)).toHaveLength(1)
+  })
+
+  test.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])('simpleLoader rejects maxRowsPerInsert %p', (maxRowsPerInsert) => {
+    expect(() => simpleLoader({ maxRowsPerInsert })).toThrow(IngestConfigError)
+  })
+
+  test('the load classifier distinguishes deterministic value errors from retryable server failures', () => {
+    for (const code of ['60', '81', '159', '209', '210', '241', '252', '254', '319', '369', 'ECONNRESET']) {
+      expect(isPermanentInsertFailure(Object.assign(new Error('retryable'), { code }))).toBe(false)
+    }
+    for (const code of ['27', '53', '117', '130', '131', '376', '467', '675', '676', '691']) {
+      expect(isPermanentInsertFailure(Object.assign(new Error('invalid value'), { code }))).toBe(true)
+    }
+    expect(isPermanentInsertFailure(new Error('unknown failure'))).toBe(false)
+    expect(isPermanentInsertFailure(new DOMException('request timed out', 'AbortError'))).toBe(false)
+  })
+
+  test('Map encoding rejects keys that would silently overwrite each other or lose their identity', () => {
+    expect(() => toJsonRow({ values: new Map<unknown, unknown>([[1, 'one'], ['1', 'another']]) })).toThrow('collide')
+    expect(() => toJsonRow({ values: new Map([[{ id: 1 }, 'object key']]) })).toThrow('Map keys must be')
+    expect(toJsonRow({ values: new Map([['__proto__', 1n]]) })).toEqual({ values: { ['__proto__']: '1' } })
+  })
+
+  test('write-unit tokens name the row range, so a replay sliced differently re-inserts instead of losing rows', async () => {
+    const destination = createMemoryDestination()
+    let acknowledgementLost = false
+    const lossy: DestinationAdapter = { async insert(input) {
+      if (acknowledgementLost) throw new Error('target unavailable')
+      await destination.insert(input)
+      acknowledgementLost = true
+      throw new Error('acknowledgement lost')
+    } }
+    const build = (maxRowsPerInsert: number) => definePipeline({ id: 'app', streams: [defineStream({
+      id: 'app.resliced', destination: events, retry: { retries: 0 }, loader: simpleLoader({ maxRowsPerInsert }),
+      async *read() { yield { rows: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }] } },
+    })] })
+    const journal = createMemoryJournal()
+
+    expect((await run(build(2), { journal, destination: lossy })).ok).toBe(false)
+    expect(destination.tokens).toEqual([expect.stringMatching(/:0-2$/)])
+    expect((await run(build(4), { journal, destination })).ok).toBe(true)
+    expect(destination.tokens.at(-1)).toMatch(/:0-4$/)
+    const ids = (destination.tables.get('app.events') ?? []).map((row) => Number(row.id))
+    expect([...new Set(ids)].sort((a, b) => a - b)).toEqual([1, 2, 3, 4])
   })
 
   test('a throwing loader factory releases its permit for sibling streams', async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { Readable } from 'node:stream'
 
 import {
   assertStreamedQuerySucceeded,
@@ -78,6 +79,20 @@ function createMockClient(
 }
 
 describe('@chkit/clickhouse smoke', () => {
+  test('streamed INSERTs send an object-mode stream without concatenating the rows', async () => {
+    const calls: InsertCall[] = []
+    const executor = createExecutorWithClient({
+      url: 'http://localhost:8123', username: 'default', password: '', database: 'default', secure: false,
+    }, createMockClient('plain', calls))
+    const rows = [{ id: 1 }, { id: 2 }]
+    await executor.insert({ table: 'items', values: rows, stream: true })
+    const supplied = calls[0]?.values
+    expect(supplied).toBeInstanceOf(Readable)
+    const received: unknown[] = []
+    for await (const row of supplied ?? []) received.push(row)
+    expect(received).toEqual(rows)
+    await executor.close()
+  })
   test('creates executor with command/query methods', () => {
     const executor = createClickHouseExecutor({
       url: 'http://localhost:8123',
