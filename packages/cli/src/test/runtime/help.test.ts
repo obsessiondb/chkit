@@ -38,6 +38,29 @@ describe('help formatting', () => {
 		)
 	})
 
+	test('subcommand help lists that subcommand\'s own flags', () => {
+		const ingest: RegisteredCommand = {
+			name: 'ingest',
+			description: 'Plugin: ingest',
+			flags: [],
+			pluginFlags: [],
+			pluginName: 'ingest',
+			subcommands: [
+				{ name: 'run', description: 'Execute streams', flags: [{ name: '--max-duration', type: 'string', description: 'Execution budget', placeholder: '<seconds>' }], pluginFlags: [], pluginName: 'ingest' },
+				{ name: 'list', description: 'List streams', flags: [], pluginFlags: [], pluginName: 'ingest' },
+			],
+		}
+		const help = formatCommandHelp(ingest, globalFlags, 'run')
+		expect(help).toContain('chkit ingest run [options]')
+		expect(help).toContain('--max-duration <seconds>')
+		expect(help).not.toContain('List streams')
+
+		const overview = formatCommandHelp(ingest, globalFlags, 'nope')
+		expect(overview).toContain('chkit ingest <command> [options]')
+		expect(overview).toContain('List streams')
+		expect(overview).not.toContain('--max-duration')
+	})
+
 	test('command help links to full documentation and markdown fetch hint', () => {
 		const help = formatCommandHelp(command, globalFlags)
 
