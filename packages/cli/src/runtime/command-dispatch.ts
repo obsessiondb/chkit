@@ -134,8 +134,6 @@ function stripGlobalFlags(argv: string[]): {
 	return { jsonMode, tableSelector, rest }
 }
 
-// A flag error in --json mode still gets an envelope on stdout, so a piped
-// consumer sees the failure instead of an empty stream and a stderr line.
 function parseFlagsOrReport(
 	commandName: string,
 	args: string[],
