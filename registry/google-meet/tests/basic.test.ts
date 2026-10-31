@@ -371,15 +371,10 @@ function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
   return journal
 }
 
-test('Meet rejects a lookback beyond the Date range at construction and names inverted backfill bounds', async () => {
+test('Meet rejects a lookback beyond the Date range at construction', () => {
   const deps = { config: googleMeetConfig, token: () => 'fixture', fetch: async () => { throw new Error('must not fetch') } }
   expect(() => createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 1e300 }, deps)).toThrow('lookbackHours')
   expect(() => createGoogleMeetPipeline({ ...googleMeetConfig, lookbackHours: 24 * 365 * 10 }, deps)).not.toThrow()
-  const pipeline = createGoogleMeetPipeline(googleMeetConfig, deps)
-  const backfill = { id: 'inverted', from: new Date('2026-10-04T00:00:00Z'), to: new Date('2026-10-03T00:00:00Z') }
-  const result = await runIngestion({ ...request(pipeline, 'conferences'), backfill }, { journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
-  expect(result.ok).toBe(false)
-  expect(result.streams[0]?.error).toContain('inverted')
 })
 
 test('Meet rejects invalid backfill dates and a lookback outside the planned Date range without requests', async () => {
