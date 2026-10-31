@@ -64,11 +64,9 @@ export function defineStream(
     throw new IngestConfigError(`Stream "${input.id}": batchSize must be a positive integer.`)
   }
   const incremental = input.incremental ?? fullSync()
-  // The journal only accepts checkpoint envelopes with a non-empty strategy id
-  // and a version of at least 1; anything else would commit but never read back.
   if (typeof incremental.id !== 'string' || incremental.id === '' || !Number.isSafeInteger(incremental.version) || incremental.version < 1) {
     throw new IngestConfigError(
-      `Stream "${input.id}": incremental strategy ${JSON.stringify(incremental.id)}@${String(incremental.version)} must have a non-empty id and an integer version of at least 1, otherwise its checkpoints can never be read back.`
+      `Stream "${input.id}": incremental strategy must have a non-empty id and a safe integer version of at least 1, otherwise its checkpoints can never be read back.`
     )
   }
   return {

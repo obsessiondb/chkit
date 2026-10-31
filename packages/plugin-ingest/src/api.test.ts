@@ -2,13 +2,15 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 
 import { resolveConfig } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { loadDefinitionModules, loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { rawTable } from './destination.js'
-import { cursorState, timestampWindow } from './incremental.js'
+import { IngestConfigError } from './errors.js'
+import { cursorState, fullSync, timestampWindow } from './incremental.js'
 import { createIngestPlugin } from './plugin.js'
 import { collectPipelines, definePipeline, defineStream, selectStreams } from './registry.js'
 
@@ -50,18 +52,40 @@ describe('timestampWindow options', () => {
     expect(() => timestampWindow({ start: cutoff }).plan({ state: undefined, cutoff: start, range: undefined })).toThrow('after upper bound')
     expect(() => timestampWindow({ from: () => new Date('invalid') }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
     expect(() => timestampWindow({ from: () => '2026-01-01' as unknown as Date }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
+    expect(() => timestampWindow({ start }).plan({ state: undefined, cutoff, range: { from: start, to: new Date('invalid') } })).toThrow(IngestConfigError)
+    expect(() => timestampWindow({ start }).plan({ state: undefined, cutoff, range: { from: start, to: 'invalid' as unknown as Date } })).toThrow(IngestConfigError)
+  })
+
+  test('accepts callback Dates from another realm and equal bounds', () => {
+    const foreignDate: Date = runInNewContext('new Date("2026-09-19T00:00:00Z")')
+    const window = timestampWindow({ from: () => foreignDate })
+    const selection = window.plan({ state: undefined, cutoff, range: undefined })
+    expect(selection.from.getTime()).toBe(cutoff.getTime())
+    expect(window.complete?.({ state: undefined, selection })).toEqual({ watermark: cutoff.toISOString() })
+  })
+
+  test('strategies that do not use ranges keep ignoring reversed bounds', () => {
+    const range = { from: cutoff, to: start }
+    expect(fullSync().plan({ state: undefined, cutoff, range })).toBeUndefined()
+    expect(cursorState({ id: 'cursor', version: 1, parse: Number }).plan({ state: 4, cutoff, range })).toBe(4)
   })
 })
 
 describe('strategy identity', () => {
   test('defineStream rejects a strategy whose checkpoints the journal would never read back', () => {
     const destination = rawTable({ database: 'test', name: 'rows' })
-    const define = (id: string, version: number) =>
-      defineStream({ id: 'test.identity', destination, incremental: cursorState({ id, version, parse: (raw) => raw }), async *read() { yield { rows: [] } } })
+    const define = (id: unknown, version: number) =>
+      defineStream({ id: 'test.identity', destination, incremental: cursorState({ id: id as string, version, parse: (raw) => raw }), async *read() { yield { rows: [] } } })
     expect(() => define('', 1)).toThrow('non-empty id')
     expect(() => define('test.cursor', 0)).toThrow('at least 1')
     expect(() => define('test.cursor', 1.5)).toThrow('at least 1')
+    for (const version of [NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => define('test.cursor', version)).toThrow(IngestConfigError)
+    }
+    expect(() => define(1n, 1)).toThrow(IngestConfigError)
+    expect(() => define(null, 1)).toThrow(IngestConfigError)
     expect(define('test.cursor', 1).incremental.version).toBe(1)
+    expect(define('test.cursor', Number.MAX_SAFE_INTEGER).incremental.version).toBe(Number.MAX_SAFE_INTEGER)
   })
 })
 
@@ -121,28 +145,6 @@ describe('exported pipeline discovery', () => {
       expect(code).toBe(2)
       expect(output[0]).toMatchObject({ ok: false, error: expect.stringContaining('direct ClickHouse connection') })
     }
-  })
-
-  test('a backfill whose --from is after --to is a configuration error before any stream runs', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'chkit-backfill-range-'))
-    directories.push(directory)
-    const entry = join(directory, 'entry.ts')
-    await writeFile(entry, `
-      import { definePipeline, defineStream } from ${JSON.stringify(new URL('./registry.ts', import.meta.url).pathname)}
-      import { rawTable } from ${JSON.stringify(new URL('./destination.ts', import.meta.url).pathname)}
-      export const rows = rawTable({ database: 'test', name: 'rows' })
-      export const pipeline = definePipeline({ id: 'test', streams: [defineStream({ id: 'test.rows', destination: rows, async *read() { yield { rows: [] } } })] })
-    `)
-    const run = createIngestPlugin().commands.find((command) => command.name === 'run')
-    const output: unknown[] = []
-    const code = await run?.run({
-      args: [], flags: { '--backfill': 'reversed', '--from': '2026-02-01T00:00:00Z', '--to': '2026-01-01T00:00:00Z' }, jsonMode: true,
-      options: { journalTable: 'test_journal', maxDurationSeconds: 1, prefetchBatches: 1 },
-      config: resolveConfig({ entry }), configPath: entry,
-      print: (value) => { output.push(value) },
-    })
-    expect(code).toBe(2)
-    expect(output[0]).toMatchObject({ ok: false, error: expect.stringContaining('is after --to') })
   })
 
   test('validates only the selected graph and rejects duplicate pipeline or stream IDs', () => {

@@ -355,9 +355,6 @@ function parseBackfill(flags: IngestPluginCommandContext['flags']): BackfillRequ
     return undefined
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(id)) throw new IngestConfigError(`Invalid --backfill id "${id}".`)
-  if (from && to && from.getTime() > to.getTime()) {
-    throw new IngestConfigError(`--from ${from.toISOString()} is after --to ${to.toISOString()}.`)
-  }
   return { id, from, to }
 }
 
