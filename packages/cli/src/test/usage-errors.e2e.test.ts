@@ -1,15 +1,19 @@
-import { rm } from 'node:fs/promises'
+import { rm, writeFile } from 'node:fs/promises'
 
 import { describe, expect, test } from 'bun:test'
 
-import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { createFixture, runCli, WORKSPACE_ROOT } from './testkit.test'
+import { spawnWithTimeout } from './spawn-cli.js'
+import { createFixture, WORKSPACE_ROOT } from './testkit.test'
 
 type Envelope = { ok: boolean; command: string; error: { code: string; message: string } }
 
 const INGEST_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-ingest/src/index.ts')
+
+function runCli(args: string[]) {
+  return spawnWithTimeout(['node', join(WORKSPACE_ROOT, 'packages/cli/dist/bin/chkit.js'), ...args], { cwd: WORKSPACE_ROOT })
+}
 
 async function createIngestFixture(): Promise<{ dir: string; configPath: string }> {
   const fixture = await createFixture()
@@ -25,6 +29,17 @@ export default { entry: ${JSON.stringify(entry)}, plugins: [ingest()] }
 }
 
 describe('@chkit/cli usage-error --json envelopes (#4)', () => {
+  test('the built Node CLI reports the underlying registry connection failure', async () => {
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
+    const url = new URL('registry.json', server.url).href
+    await server.stop(true)
+    const result = runCli(['registry', 'list', '--registry', url, '--json'])
+    expect(result.exitCode).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, command: 'registry', error: {
+      message: `Registry request failed for ${url}: ECONNREFUSED. Check the network connection or pass --registry with a reachable catalog.`,
+    } })
+  })
+
   test('unknown command emits a JSON envelope on stdout (not help text)', async () => {
     const fixture = await createFixture()
     try {

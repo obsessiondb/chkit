@@ -96,7 +96,6 @@ async function readJson(location: string): Promise<unknown> {
     signal: AbortSignal.timeout(15_000), redirect: 'error',
     ...(url.hostname === 'api.github.com' ? { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } } : {}),
   }).catch((error: unknown) => {
-    // Undici reports every network failure as "fetch failed"; name the request and the real cause.
     const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error
     const reason = cause instanceof Error ? ('code' in cause && typeof cause.code === 'string' ? cause.code : cause.message) : String(cause)
     throw new Error(`Registry request failed for ${url.origin}${url.pathname}: ${reason}. Check the network connection or pass --registry with a reachable catalog.`, { cause: error })

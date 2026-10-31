@@ -155,6 +155,8 @@ chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
 
 ## JSON output
 
+Errors before the ingestion command runs use the CLI envelope with `command: "ingest"`, `schemaVersion: 1`, `ok: false`, and an `error` object containing `code` and `message`. Unknown subcommands use `unknown_subcommand`; unknown flags and missing flag values use `usage`; an unregistered plugin uses `plugin_not_configured`. The forwarded `chkit plugin ingest ...` form retains its existing string-error output for subcommand and flag errors. Use `chkit ingest <command> --help` for command-specific flags; forwarded `chkit plugin ... --help` shows generic plugin help.
+
 **`run`:**
 
 ```json
