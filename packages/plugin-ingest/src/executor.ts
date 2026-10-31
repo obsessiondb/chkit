@@ -228,7 +228,7 @@ async function executeStream(input: {
   try {
     outcome = await runAttempt(async (attemptNo) => {
       // Re-plan from the latest durable boundary on every reader (re)creation.
-      const state = restoreState(stream, progress.envelope, namespaceId)
+      const state = restoreState(stream, progress.envelope, namespaceId, env.signal)
       const selection: unknown = stream.incremental.plan({
         state,
         cutoff: input.cutoff,
@@ -494,7 +494,7 @@ async function loadBatch(
   })
 }
 
-function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
+function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string, signal: AbortSignal): unknown {
   if (!envelope) return undefined
   if (envelope.strategy !== stream.incremental.id || envelope.version !== stream.incremental.version) {
     throw new IngestConfigError(
@@ -502,7 +502,16 @@ function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope 
         'ChKit never silently reinterprets a checkpoint: migrate the state explicitly, use a new stream id, or run a separately namespaced backfill.'
     )
   }
-  return stream.incremental.parseState(envelope.state)
+  try {
+    return stream.incremental.parseState(envelope.state)
+  } catch (error) {
+    signal.throwIfAborted()
+    if (error instanceof IngestConfigError) throw error
+    throw new IngestConfigError(
+      `Checkpoint for "${namespaceId}" was rejected by strategy ${stream.incremental.id}@${stream.incremental.version}: ${messageOf(error)}. ` +
+        'ChKit never retries a refused checkpoint: migrate the state explicitly, use a new stream id, or run a separately namespaced backfill.'
+    )
+  }
 }
 
 function append(input: AppendInput, eventKind: JournalEvent['eventKind'], fields: FactFields): Promise<void> {

@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { table } from '@chkit/core'
 
 import { ingestionColumns, rawRows, rawTable } from './destination.js'
-import { HttpError } from './errors.js'
+import { HttpError, IngestConfigError } from './errors.js'
 import { runIngestion } from './executor.js'
 import { cursorState, timestampWindow } from './incremental.js'
 import { paginate } from './paginate.js'
@@ -231,6 +231,71 @@ describe('runIngestion', () => {
 
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(result.streams[0]?.error).toContain('never silently reinterprets')
+  })
+
+  test('a checkpoint the strategy refuses fails as a configuration error without source retries', async () => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    let parses = 0
+    let refuse = false
+    const stream = defineStream({
+      id: 'app.refused',
+      destination: events,
+      retry: { retries: 3, minTimeout: 1, randomize: false },
+      incremental: cursorState({
+        id: 'test.cursor',
+        version: 1,
+        parse: (raw) => {
+          parses += 1
+          if (refuse) throw new Error('saved cursor is corrupt')
+          return Number(raw)
+        },
+      }),
+      async *read({ selection }) {
+        yield { rows: [{ id: 1 }], state: (selection ?? 0) + 1 }
+      },
+    })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
+    expect((await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })).ok).toBe(true)
+    refuse = true
+    parses = 0
+
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })
+
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: expect.stringContaining('saved cursor is corrupt') })
+    expect(parses).toBe(1)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toEqual([])
+    expect(journal.events.at(-2)).toMatchObject({ eventKind: 'work_finished', workState: 'failed', errorClass: 'config' })
+    expect((await journal.readCheckpoint('app.refused')).envelope?.state).toBe(1)
+  })
+
+  test.each([false, true])('preserves checkpoint parser configuration errors and host cancellation (cancel: %s)', async (cancel) => {
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    const controller = new AbortController()
+    const failure = cancel ? new DOMException('cancelled during parse', 'AbortError') : new IngestConfigError('custom parser rejection')
+    const stream = defineStream({
+      id: 'app.parse_failure',
+      destination: events,
+      retry: { retries: 3, minTimeout: 1, randomize: false },
+      incremental: cursorState<number>({
+        id: 'test.cursor', version: 1,
+        parse: () => {
+          if (cancel) controller.abort(failure)
+          throw failure
+        },
+      }),
+      async *read() { yield { rows: [{ id: 1 }], state: 1 } },
+    })
+    const request = { selected: selectStreams([definePipeline({ id: 'app', streams: [stream] })], []), backfill: undefined }
+    expect((await runIngestion(request, { journal, destination })).ok).toBe(true)
+
+    const result = await runIngestion(request, { journal, destination, signal: controller.signal })
+
+    expect(result.streams[0]).toMatchObject({ outcome: cancel ? 'cancelled' : 'failed', error: failure.message })
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toEqual([])
+    expect(journal.events.findLast((event) => event.eventKind === 'work_finished')).toMatchObject({ errorClass: cancel ? 'cancelled' : 'config' })
+    expect((await journal.readCheckpoint(stream.id)).envelope?.state).toBe(1)
   })
 
   test('budget exhaustion is incomplete but preserves committed progress', async () => {

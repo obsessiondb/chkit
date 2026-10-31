@@ -2,13 +2,15 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 
 import { resolveConfig } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { loadDefinitionModules, loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { rawTable } from './destination.js'
-import { timestampWindow } from './incremental.js'
+import { IngestConfigError } from './errors.js'
+import { cursorState, fullSync, timestampWindow } from './incremental.js'
 import { createIngestPlugin } from './plugin.js'
 import { collectPipelines, definePipeline, defineStream, selectStreams } from './registry.js'
 
@@ -49,6 +51,41 @@ describe('timestampWindow options', () => {
     }
     expect(() => timestampWindow({ start: cutoff }).plan({ state: undefined, cutoff: start, range: undefined })).toThrow('after upper bound')
     expect(() => timestampWindow({ from: () => new Date('invalid') }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
+    expect(() => timestampWindow({ from: () => '2026-01-01' as unknown as Date }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
+    expect(() => timestampWindow({ start }).plan({ state: undefined, cutoff, range: { from: start, to: new Date('invalid') } })).toThrow(IngestConfigError)
+    expect(() => timestampWindow({ start }).plan({ state: undefined, cutoff, range: { from: start, to: 'invalid' as unknown as Date } })).toThrow(IngestConfigError)
+  })
+
+  test('accepts callback Dates from another realm and equal bounds', () => {
+    const foreignDate: Date = runInNewContext('new Date("2026-09-19T00:00:00Z")')
+    const window = timestampWindow({ from: () => foreignDate })
+    const selection = window.plan({ state: undefined, cutoff, range: undefined })
+    expect(selection.from.getTime()).toBe(cutoff.getTime())
+    expect(window.complete?.({ state: undefined, selection })).toEqual({ watermark: cutoff.toISOString() })
+  })
+
+  test('strategies that do not use ranges keep ignoring reversed bounds', () => {
+    const range = { from: cutoff, to: start }
+    expect(fullSync().plan({ state: undefined, cutoff, range })).toBeUndefined()
+    expect(cursorState({ id: 'cursor', version: 1, parse: Number }).plan({ state: 4, cutoff, range })).toBe(4)
+  })
+})
+
+describe('strategy identity', () => {
+  test('defineStream rejects a strategy whose checkpoints the journal would never read back', () => {
+    const destination = rawTable({ database: 'test', name: 'rows' })
+    const define = (id: unknown, version: number) =>
+      defineStream({ id: 'test.identity', destination, incremental: cursorState({ id: id as string, version, parse: (raw) => raw }), async *read() { yield { rows: [] } } })
+    expect(() => define('', 1)).toThrow('non-empty id')
+    expect(() => define('test.cursor', 0)).toThrow('at least 1')
+    expect(() => define('test.cursor', 1.5)).toThrow('at least 1')
+    for (const version of [NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => define('test.cursor', version)).toThrow(IngestConfigError)
+    }
+    expect(() => define(1n, 1)).toThrow(IngestConfigError)
+    expect(() => define(null, 1)).toThrow(IngestConfigError)
+    expect(define('test.cursor', 1).incremental.version).toBe(1)
+    expect(define('test.cursor', Number.MAX_SAFE_INTEGER).incremental.version).toBe(Number.MAX_SAFE_INTEGER)
   })
 })
 

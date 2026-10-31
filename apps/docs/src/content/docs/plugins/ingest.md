@@ -175,7 +175,7 @@ Provider clients can accept the exported `FetchContext` type, containing `attemp
 
 With `cursorState`, `state` on a chunk must be the complete state that is safe to resume from once every row up to that chunk is saved. Omit it when you cannot make that claim; the run then restarts from the previous checkpoint after a failure.
 
-A checkpoint records its strategy id and version. Changing either makes the next run fail rather than reinterpret old state.
+A checkpoint records its strategy id and version; `defineStream` requires a non-empty id and a safe integer version of at least 1, because the journal never reads back any other envelope. Changing either makes the next run fail rather than reinterpret old state, and so does a saved state that `parse` rejects; neither is retried.
 
 ## Retry policy
 
