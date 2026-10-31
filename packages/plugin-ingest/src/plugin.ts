@@ -13,18 +13,20 @@ import { z } from 'zod'
 
 import { BATCH_ID_COLUMN, createClickHouseDestination, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
 import { IngestConfigError } from './errors.js'
-import { runIngestion, type BackfillRequest } from './executor.js'
+import { MAX_DURATION_MS, runIngestion, type BackfillRequest } from './executor.js'
 import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE } from './journal.js'
 import { collectPipelines, selectStreams, type SelectedStream } from './registry.js'
 import { doctorJournal, repairJournal } from './recovery.js'
 import type { PipelineDefinition } from './types.js'
 
 const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
+/** The budget arms a timer, whose delay cannot exceed a signed 32-bit millisecond count. */
+const MAX_DURATION_SECONDS = Math.floor(MAX_DURATION_MS / 1000)
 
 const IngestOptionsSchema = z.object({
   journalTable: z.string().min(1).default(DEFAULT_JOURNAL_TABLE),
   /** Host-default execution budget in seconds. */
-  maxDurationSeconds: z.number().positive().default(3600),
+  maxDurationSeconds: z.number().positive().max(MAX_DURATION_SECONDS).default(3600),
   prefetchBatches: z.number().int().positive().default(1),
 })
 type IngestOptions = z.infer<typeof IngestOptionsSchema>
@@ -368,7 +370,9 @@ function parseTimestamp(raw: string | string[] | boolean | undefined, flag: stri
 function parseMaxDuration(raw: string | string[] | boolean | undefined): number | undefined {
   if (typeof raw !== 'string') return undefined
   const seconds = Number(raw)
-  if (!Number.isFinite(seconds) || seconds <= 0) throw new IngestConfigError(`Invalid value for --max-duration: ${raw}`)
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_DURATION_SECONDS) {
+    throw new IngestConfigError(`Invalid value for --max-duration: ${raw}. Use a number of seconds between 0 and ${MAX_DURATION_SECONDS}.`)
+  }
   return seconds
 }
 

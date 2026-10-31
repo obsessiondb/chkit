@@ -100,6 +100,27 @@ test('rejects a later cursor cycle before yielding the page that would checkpoin
   expect(await iterator.next()).toEqual({ done: true, value: undefined })
 })
 
+
+test('rejects a page that is not shaped { items, next } before the reader sees it', async () => {
+  const legacy = paginate({ context: fetchContext(), fetchPage: async () => [{ id: 1 }] as never })
+  await expect(legacy.next()).rejects.toThrow('fetchPage must resolve to a page shaped { items, next, metadata? }, got an array')
+  const bare = paginate({ context: fetchContext(), fetchPage: async () => ({ next: undefined }) as never })
+  await expect(bare.next()).rejects.toThrow('got an object with keys ["next"]')
+  const missing = paginate({ context: fetchContext(), fetchPage: async () => undefined as never })
+  await expect(missing.next()).rejects.toThrow('got undefined')
+})
+
+test('a continuation that cannot be serialized is a configuration error, not a TypeError', async () => {
+  const initial = paginate({ context: fetchContext(), initial: 1n, fetchPage: async () => ({ items: [], next: undefined }) })
+  await expect(initial.next()).rejects.toThrow(IngestConfigError)
+  await expect(paginate({ context: fetchContext(), initial: 1n, fetchPage: async () => ({ items: [], next: undefined }) }).next())
+    .rejects.toThrow('continuation must be JSON-serializable')
+  let requests = 0
+  const later = paginate({ context: fetchContext(), fetchPage: async () => { requests += 1; return { items: [1], next: 2n } } })
+  await expect(later.next()).rejects.toThrow('continuation must be JSON-serializable')
+  expect(requests).toBe(1)
+})
+
 test('retains null terminal continuation tolerance and its empty page metadata', async () => {
   const iterator = paginate<number, string | null, string>({
     context: fetchContext(), fetchPage: async () => ({ items: [], next: null, metadata: 'completed' }),

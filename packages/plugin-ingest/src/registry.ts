@@ -17,6 +17,8 @@ import type {
 } from './types.js'
 
 const STREAM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/
+/** Prefixes of the tags every stream derives from its own and its pipeline's id. */
+const DERIVED_TAG_PREFIXES = ['stream:', 'pipeline:']
 
 export interface StreamInput<TRow extends Row, TState, TSelection> {
   id: string
@@ -60,14 +62,21 @@ export function defineStream(
   input: StreamInput<Row, unknown, unknown> | FullSyncStreamInput<Row>
 ): AnyStreamDefinition {
   assertValidId('stream', input.id)
-  if (input.batchSize !== undefined && (!Number.isInteger(input.batchSize) || input.batchSize <= 0)) {
-    throw new IngestConfigError(`Stream "${input.id}": batchSize must be a positive integer.`)
+  const scope = `Stream "${input.id}"`
+  const destination: unknown = input.destination
+  if (typeof destination !== 'object' || destination === null || !('kind' in destination) || destination.kind !== 'table') {
+    throw new IngestConfigError(`${scope}: destination must be a table definition.`)
   }
+  if (typeof input.read !== 'function') throw new IngestConfigError(`${scope}: read must be a function returning an async iterable.`)
+  assertPositiveInteger(scope, 'batchSize', input.batchSize)
+  assertPositiveInteger(scope, 'budget.maxChunks', input.budget?.maxChunks)
+  assertPositiveInteger(scope, 'budget.maxChunkRows', input.budget?.maxChunkRows)
+  assertRetryOptions(scope, input.retry)
   return {
     kind: 'ingest_stream',
     id: input.id,
     destination: input.destination,
-    tags: dedupe(input.tags ?? []),
+    tags: declaredTags(scope, input.tags),
     incremental: input.incremental ?? fullSync(),
     read: input.read,
     loader: input.loader,
@@ -85,10 +94,19 @@ export function defineStream(
  */
 export function definePipeline(input: PipelineInput): PipelineDefinition {
   assertValidId('pipeline', input.id)
+  const scope = `Pipeline "${input.id}"`
+  const streams: unknown = input.streams
+  if (!Array.isArray(streams)) throw new IngestConfigError(`${scope}: streams must be an array of defineStream(...) values.`)
+  for (const stream of streams) {
+    if (typeof stream !== 'object' || stream === null || !('kind' in stream) || stream.kind !== 'ingest_stream') {
+      throw new IngestConfigError(`${scope}: streams must contain only defineStream(...) values.`)
+    }
+  }
+  assertRetryOptions(scope, input.retry)
   const pipeline: PipelineDefinition = {
     kind: 'ingest_pipeline',
     id: input.id,
-    tags: dedupe(input.tags ?? []),
+    tags: declaredTags(scope, input.tags),
     streams: [...input.streams],
     maxStreams: positiveCeiling(input.id, 'maxStreams', input.maxStreams, 4),
     maxFetches: positiveCeiling(input.id, 'maxFetches', input.maxFetches, 4),
@@ -161,20 +179,59 @@ export function selectStreams(pipelines: readonly PipelineDefinition[], tags: re
   return selected
 }
 
-function assertValidId(kind: 'stream' | 'pipeline', id: string): void {
-  if (!STREAM_ID_PATTERN.test(id)) {
+function assertValidId(kind: 'stream' | 'pipeline', id: unknown): asserts id is string {
+  if (typeof id !== 'string' || !STREAM_ID_PATTERN.test(id)) {
     throw new IngestConfigError(
-      `Invalid ${kind} id "${id}". Use letters, digits, "_", ".", ":" or "-", starting with a letter or digit.`
+      `Invalid ${kind} id ${JSON.stringify(id)}. Use letters, digits, "_", ".", ":" or "-", starting with a letter or digit.`
     )
   }
 }
 
+/**
+ * Declared tags are exact strings. The `stream:` and `pipeline:` prefixes are
+ * derived from ids at selection time, so a declared one could make `--tag
+ * stream:<id>` select more than that stream.
+ */
+function declaredTags(scope: string, tags: unknown): string[] {
+  if (tags === undefined) return []
+  if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string' || tag.length === 0)) {
+    throw new IngestConfigError(`${scope}: tags must be an array of non-empty strings.`)
+  }
+  const reserved = tags.find((tag) => DERIVED_TAG_PREFIXES.some((prefix) => tag.startsWith(prefix)))
+  if (reserved !== undefined) {
+    throw new IngestConfigError(
+      `${scope}: tag "${reserved}" uses a reserved prefix; "stream:<id>" and "pipeline:<id>" are derived from the ids.`
+    )
+  }
+  return dedupe(tags)
+}
+
 function positiveCeiling(pipelineId: string, name: string, value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new IngestConfigError(`Pipeline "${pipelineId}": ${name} must be a positive integer.`)
-  }
+  assertPositiveInteger(`Pipeline "${pipelineId}"`, name, value)
   return value
+}
+
+function assertPositiveInteger(scope: string, name: string, value: unknown): void {
+  if (value !== undefined && (!Number.isInteger(value) || (value as number) <= 0)) {
+    throw new IngestConfigError(`${scope}: ${name} must be a positive integer.`)
+  }
+}
+
+// p-retry rejects these at the first attempt; failing at definition time keeps
+// a typo from surfacing as a failed stream on the first scheduled run.
+function assertRetryOptions(scope: string, retry: RetryOptions | undefined): void {
+  if (retry === undefined) return
+  const retries: unknown = retry.retries
+  if (retries !== undefined && retries !== Number.POSITIVE_INFINITY && (!Number.isInteger(retries) || (retries as number) < 0)) {
+    throw new IngestConfigError(`${scope}: retry.retries must be a non-negative integer or Infinity.`)
+  }
+  for (const name of ['factor', 'minTimeout', 'maxTimeout', 'maxRetryTime'] as const) {
+    const value: unknown = retry[name]
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0) && !(name === 'maxRetryTime' && value === Number.POSITIVE_INFINITY)) {
+      throw new IngestConfigError(`${scope}: retry.${name} must be a non-negative number.`)
+    }
+  }
 }
 
 function dedupe(values: readonly string[]): string[] {

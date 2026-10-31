@@ -30,7 +30,7 @@ export async function* paginate<TItem, TCursor, TMetadata = undefined>(
 ): AsyncGenerator<Page<TItem, TCursor, TMetadata>, void, void> {
   const seen = new Set<string>()
   let cursor = options.initial
-  if (cursor !== undefined) seen.add(canonicalJson(cursor))
+  if (cursor !== undefined) seen.add(continuationKey(cursor))
 
   while (true) {
     options.context.signal.throwIfAborted()
@@ -39,9 +39,14 @@ export async function* paginate<TItem, TCursor, TMetadata = undefined>(
       label: options.label,
     })
     options.context.signal.throwIfAborted()
+    if (typeof page !== 'object' || page === null || !Array.isArray(page.items)) {
+      throw new IngestConfigError(
+        `paginate: fetchPage must resolve to a page shaped { items, next, metadata? }, got ${describeValue(page)}.`
+      )
+    }
     const next = page.next
     if (next !== undefined && next !== null) {
-      const key = canonicalJson(next)
+      const key = continuationKey(next)
       if (seen.has(key)) {
         throw new IngestConfigError(`paginate: provider returned a repeated continuation ${key}; refusing to loop.`)
       }
@@ -51,4 +56,19 @@ export async function* paginate<TItem, TCursor, TMetadata = undefined>(
     if (next === undefined || next === null) return
     cursor = next
   }
+}
+
+function continuationKey(cursor: unknown): string {
+  try {
+    return canonicalJson(cursor)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new IngestConfigError(`paginate: a continuation must be JSON-serializable (${reason}).`)
+  }
+}
+
+function describeValue(value: unknown): string {
+  if (Array.isArray(value)) return 'an array (yield page.items from a { items, next } page instead)'
+  if (value === null) return 'null'
+  return typeof value === 'object' ? `an object with keys ${JSON.stringify(Object.keys(value))}` : typeof value
 }

@@ -25,7 +25,7 @@ Apply destination schema migrations first. The CLI uses the configured ClickHous
 | Shared cadence | `chkit ingest run --tag schedule:1h` |
 | Intersection of tags | `chkit ingest run --tag schedule:1h --tag account:42` |
 
-Tags are exact and case-sensitive. Effective tags combine pipeline tags, stream tags, and derived `pipeline:<id>` / `stream:<id>` tags. Repeated `--tag` uses AND semantics; an explicit filter matching nothing fails before execution.
+Tags are exact and case-sensitive. Effective tags combine pipeline tags, stream tags, and derived `pipeline:<id>` / `stream:<id>` tags; declared tags cannot start with those two prefixes. Repeated `--tag` uses AND semantics; an explicit filter matching nothing fails before execution.
 
 `schedule:1h` is only a naming convention. Choose cron for a simple host, CI for an existing automation environment, or a job scheduler for managed execution. None of these is built into chkit.
 
@@ -71,7 +71,7 @@ An exhausted request retry budget fails the stream; reader recovery does not mul
 
 | Control | Default | Behavior |
 |---|---|---|
-| `ingest({ maxDurationSeconds })` | `3600` seconds | Bounds execution, including journal operations |
+| `ingest({ maxDurationSeconds })` | `3600` seconds | Bounds execution, including journal operations; at most `2147483` seconds |
 | `--max-duration <seconds>` | Plugin value | Overrides duration for one run |
 | Stream `budget.maxChunks` | Unlimited | Stops after a source chunk budget; the run is incomplete |
 | Stream `budget.maxChunkRows` | `100_000` | Fails a stream that yields a larger chunk |
