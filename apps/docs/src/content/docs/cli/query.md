@@ -122,9 +122,9 @@ ClickHouse writes 64-bit and wider integers and Decimals as bare JSON numbers, w
 | `UInt8`–`UInt32`, `Int8`–`Int32`, `Float32`, `Float64` | number |
 | `UInt64`, `Int64`, `UInt128`, `Int128`, `UInt256`, `Int256` | string, e.g. `"18446744073709551615"` |
 | `Decimal(P, S)` of any width | string, e.g. `"12345678901234567890.123456789"` |
-| `JSON`, `Object`, `Dynamic` | every number inside is a string |
+| `JSON`, `Object`, `Dynamic` | number, or string when a 64-bit float cannot hold it |
 
-Every number in a column whose type contains one of these types is a string, in `data` and in the `totals` (`WITH TOTALS`) and `extremes` (`SETTINGS extremes = 1`) rows, also inside arrays, maps, tuples and `Nullable`: `Array(UInt64)` prints `["18446744073709551615","1"]`, and `Tuple(UInt8, UInt64)` prints both numbers as strings. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string.
+Every number in a column whose type contains a 64-bit or wider integer or a Decimal is a string, in `data` and in the `totals` (`WITH TOTALS`) and `extremes` (`SETTINGS extremes = 1`) rows, also inside arrays, maps, tuples and `Nullable`: `Array(UInt64)` prints `["18446744073709551615","1"]`, and `Tuple(UInt8, UInt64)` prints both numbers as strings. A column whose type contains `JSON`, `Object` or `Dynamic` holds numbers of any type, so a number in it is a string only when a 64-bit float would print other digits: `CAST('{"a": 2.5, "b": [1, 0.1], "u": 18446744073709551615}' AS JSON)` prints `{"a":2.5,"b":[1,0.1],"u":"18446744073709551615"}`. `meta[].type` gives each column's type. Through an ObsessionDB service the console API returns every value as a string.
 
 ## Related commands
 

@@ -2,12 +2,23 @@ import type { ClickHouseJsonQueryResult } from './index.js'
 
 /**
  * Column types whose JSON numbers a double cannot hold exactly: 64-bit and
- * wider integers, Decimals, and the types that can contain them. The
- * Python port uses the same pattern.
+ * wider integers and Decimals. The Python port uses the same patterns.
  */
-const EXACT_TYPE_RE = /\b(?:U?Int(?:64|128|256)|Decimal(?:32|64|128|256)?|JSON|Object|Dynamic)\b/
+const EXACT_TYPE_RE = /\b(?:U?Int(?:64|128|256)|Decimal(?:32|64|128|256)?)\b/
+
+/**
+ * Column types whose values can hold any number, from a Float64 to a UInt64
+ * (#438). Their numbers follow the rule of `parseJsonEachRowLine`.
+ */
+const DYNAMIC_TYPE_RE = /\b(?:JSON|Object|Dynamic)\b/
 
 const SIXTEEN_DIGITS_RE = /[\d.]{16}/
+
+/**
+ * How a column's numbers are read: as doubles, as the digits ClickHouse
+ * wrote, or as digits only when a double would change them.
+ */
+type NumberMode = 'double' | 'digits' | 'roundTrip'
 
 interface JsonEnvelope {
 	data: Array<Record<string, unknown>>
@@ -31,8 +42,10 @@ const JSON_NUMBER = Symbol('JsonNumber')
  * is or contains one of them, every number becomes a string of the digits
  * ClickHouse sent, as `output_format_json_quote_64bit_integers = 1` and
  * `output_format_json_quote_decimals = 1` would do. Sending those settings
- * instead would fail for a `readonly = 1` user (#402). Other numbers stay
- * numbers. A statement without a result set (DDL, `OPTIMIZE`) has an empty
+ * instead would fail for a `readonly = 1` user (#402). In a column whose type
+ * is or contains `JSON`, `Object` or `Dynamic`, only a number a double would
+ * change becomes a string, as in `parseJsonEachRowLine` (#438). Other numbers
+ * stay numbers. A statement without a result set (DDL, `OPTIMIZE`) has an empty
  * body, read as no rows.
  */
 export function parseJsonResult<T extends Record<string, unknown>>(
@@ -45,12 +58,12 @@ export function parseJsonResult<T extends Record<string, unknown>>(
 		(_key, value: unknown, context?: { source?: string }) =>
 			typeof value === 'number' ? jsonNumber(context?.source, value) : value,
 	)
-	const exactColumns = new Set(meta.filter((column) => EXACT_TYPE_RE.test(column.type)).map((column) => column.name))
+	const modes = new Map(meta.map((column) => [column.name, numberMode(column.type)]))
 	// Rows keyed by column name: data, totals (WITH TOTALS) and extremes.min/max.
 	const restoreRow = (row: unknown): unknown =>
 		isRecord(row)
-			? Object.fromEntries(Object.entries(row).map(([name, cell]) => [name, restore(cell, exactColumns.has(name))]))
-			: restore(row, false)
+			? Object.fromEntries(Object.entries(row).map(([name, cell]) => [name, restore(cell, modes.get(name) ?? 'double')]))
+			: restore(row, 'double')
 	// data first, as the ObsessionDB executor and the Python port print it.
 	return {
 		data: data.map(restoreRow),
@@ -61,7 +74,7 @@ export function parseJsonResult<T extends Record<string, unknown>>(
 				if (key === 'extremes' && isRecord(value)) {
 					return [key, Object.fromEntries(Object.entries(value).map(([bound, row]) => [bound, restoreRow(row)]))]
 				}
-				return [key, restore(value, false)]
+				return [key, restore(value, 'double')]
 			}),
 		),
 	} as ClickHouseJsonQueryResult<T>
@@ -88,13 +101,22 @@ export function parseJsonEachRowLine<T>(line: string): T {
 	// than 15 digits needs a run of 16 digits and points, so a line without
 	// one has nothing to restore.
 	if (!SIXTEEN_DIGITS_RE.test(line)) return JSON.parse(line)
-	return JSON.parse(line, (_key, value: unknown, context?: { source?: string }) => {
-		const source = context?.source
-		// Up to 15 significant digits always survive a double (DBL_DIG), and
-		// Node 20 gives the reviver no source text: both keep the number.
-		if (typeof value !== 'number' || source === undefined || source.length <= 15) return value
-		return canonicalDecimal(source) === canonicalDecimal(String(value)) ? value : source
-	})
+	return JSON.parse(line, (_key, value: unknown, context?: { source?: string }) =>
+		typeof value === 'number' ? roundTripNumber(context?.source, value) : value,
+	)
+}
+
+function numberMode(type: string): NumberMode {
+	if (DYNAMIC_TYPE_RE.test(type)) return 'roundTrip'
+	return EXACT_TYPE_RE.test(type) ? 'digits' : 'double'
+}
+
+/** The number, or the digits ClickHouse wrote when its double prints other digits. */
+function roundTripNumber(source: string | undefined, value: number): number | string {
+	// Up to 15 significant digits always survive a double (DBL_DIG), and
+	// Node 20 gives the reviver no source text: both keep the number.
+	if (source === undefined || source.length <= 15) return value
+	return canonicalDecimal(source) === canonicalDecimal(String(value)) ? value : source
 }
 
 function jsonNumber(source: string | undefined, value: number): JsonNumber {
@@ -123,9 +145,9 @@ function canonicalDecimal(text: string): string {
 	return `${sign}${digits.slice(first).replace(/0+$/, '')}e${integer.length - first + Number(exponent)}`
 }
 
-function restore(value: unknown, exact: boolean): unknown {
+function restore(value: unknown, mode: NumberMode): unknown {
 	if (isJsonNumber(value)) {
-		if (!exact) return value.value
+		if (mode === 'double') return value.value
 		// Node 20 gives the reviver no source text: the double would be printed
 		// as if it were exact.
 		if (value.source === undefined) {
@@ -133,11 +155,11 @@ function restore(value: unknown, exact: boolean): unknown {
 				'Reading 64-bit and wider integers and Decimals exactly needs Node.js 22 or later, or Bun. Upgrade Node.js or run chkit with Bun.',
 			)
 		}
-		return value.source
+		return mode === 'digits' ? value.source : roundTripNumber(value.source, value.value)
 	}
-	if (Array.isArray(value)) return value.map((item) => restore(item, exact))
+	if (Array.isArray(value)) return value.map((item) => restore(item, mode))
 	if (isRecord(value)) {
-		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, restore(item, exact)]))
+		return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, restore(item, mode)]))
 	}
 	return value
 }

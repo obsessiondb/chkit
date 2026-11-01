@@ -79,6 +79,43 @@ describe('parseJsonResult (#381)', () => {
 		).toEqual([{ u32: 7 }])
 		spy.mockRestore()
 	})
+
+	test('in JSON, Object and Dynamic columns, returns a number as a string only when a double would change it (#438)', () => {
+		// As ClickHouse 26.3 writes CAST(... AS JSON), Object('json') and Dynamic.
+		const result = parseJsonResult(`{
+			"meta": [
+				{"name": "j", "type": "JSON"},
+				{"name": "o", "type": "Object('json')"},
+				{"name": "d_f64", "type": "Dynamic"},
+				{"name": "d_u64", "type": "Dynamic"},
+				{"name": "d_dec", "type": "Dynamic"},
+				{"name": "d_str", "type": "Dynamic"},
+				{"name": "nd", "type": "Array(Nullable(Dynamic))"}
+			],
+			"data": [{
+				"j": {"a": 2.5, "b": [1, 0.1], "o": {"x": 1e300, "big": 123456789012345678.91}, "u": 18446744073709551615, "s": "18446744073709551615"},
+				"o": {"i": 7, "u": 9007199254740993},
+				"d_f64": 0.1,
+				"d_u64": 18446744073709551615,
+				"d_dec": 1.25,
+				"d_str": "x",
+				"nd": [null, 2.5, 18446744073709551615]
+			}],
+			"rows": 1
+		}`)
+
+		expect(result.data).toEqual([
+			{
+				j: { a: 2.5, b: [1, 0.1], o: { x: 1e300, big: '123456789012345678.91' }, u: '18446744073709551615', s: '18446744073709551615' },
+				o: { i: 7, u: '9007199254740993' },
+				d_f64: 0.1,
+				d_u64: '18446744073709551615',
+				d_dec: 1.25,
+				d_str: 'x',
+				nd: [null, 2.5, '18446744073709551615'],
+			},
+		])
+	})
 })
 
 describe('parseJsonEachRowLine (#415)', () => {
