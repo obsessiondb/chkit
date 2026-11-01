@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from typer.testing import CliRunner
 
 from chkit.cli.commands.query import (
@@ -108,6 +109,23 @@ def test_clean_error_preserves_short_expected_one_of() -> None:
     assert "more" not in str(cleaned)
 
 
+def test_clean_error_cleans_the_clickhouse_message_as_ts() -> None:
+    # TS cleans ClickHouseError.message and returns a plain Error, so --json
+    # reports the code "error".
+    original = DatabaseError(
+        "Received ClickHouse exception, code: 62, server response: Code: 62. "
+        "DB::Exception: Syntax error: failed at position 10 (end of query) "
+        "(line 1, col 10): SELECT 1 + FORMAT JSON. Expected one of: a, b. "
+        "(SYNTAX_ERROR) (for url http://localhost:8123)"
+    )
+    cleaned = clean_query_error(original)
+    assert type(cleaned) is RuntimeError
+    assert str(cleaned) == (
+        "Syntax error: failed at position 10 (end of query) (line 1, col 10): "
+        "SELECT 1 +. Expected one of: a, b."
+    )
+
+
 def test_clean_error_passes_through_non_exception() -> None:
     sentinel: BaseException = SystemExit(0)
     assert clean_query_error(sentinel) is sentinel
@@ -182,6 +200,35 @@ def test_format_rows_prints_cells_as_ts_does() -> None:
     ]
 
 
+def test_format_rows_prints_floats_as_ts_does() -> None:
+    # String(n) / JSON.stringify of a JS number, not Python's repr (#411).
+    floats = [1e-7, 1.5e-7, 1e-6, 0.000001234, 1e-5, 1e16, 1e20, 1e21, 1.5e21]
+    floats += [1.7976931348623157e308, 5e-324, -0.0, 0.1, 123456.789, 2.0**53 + 1]
+    rows: list[dict[str, object]] = [
+        {**{f"c{i}": value for i, value in enumerate(floats)}, "a": [1e-7, 0.1], "m": {"x": 1e-5}}
+    ]
+    body = format_rows(rows).splitlines()[2]
+    assert [cell.strip() for cell in body.split("│")] == [
+        "1e-7",
+        "1.5e-7",
+        "0.000001",
+        "0.000001234",
+        "0.00001",
+        "10000000000000000",
+        "100000000000000000000",
+        "1e+21",
+        "1.5e+21",
+        "1.7976931348623157e+308",
+        "5e-324",
+        "0",
+        "0.1",
+        "123456.789",
+        "9007199254740992",
+        "[1e-7,0.1]",
+        '{"x":0.00001}',
+    ]
+
+
 def test_format_rows_handles_none_as_empty() -> None:
     rows: list[dict[str, object]] = [{"id": 1, "name": None}]
     out = format_rows(rows)
@@ -232,6 +279,43 @@ def test_format_query_json_orders_keys_as_ts() -> None:
         "statistics",
         "query_id",
     ]
+
+
+def test_format_query_json_prints_floats_as_ts_does() -> None:
+    # JSON.stringify(payload, null, 2): floats as JS numbers (#411).
+    payload = ClickHouseJsonQueryResult.model_validate(
+        {
+            "data": [{"a": [1e-7, 0.1], "m": {"x": 1e-5}, "e": [], "o": {}}],
+            "meta": [],
+            "rows": 1,
+            "statistics": {"elapsed": 5e-05},
+        }
+    )
+
+    assert format_query_json(payload) == "\n".join(
+        [
+            "{",
+            '  "data": [',
+            "    {",
+            '      "a": [',
+            "        1e-7,",
+            "        0.1",
+            "      ],",
+            '      "m": {',
+            '        "x": 0.00001',
+            "      },",
+            '      "e": [],',
+            '      "o": {}',
+            "    }",
+            "  ],",
+            '  "meta": [],',
+            '  "rows": 1,',
+            '  "statistics": {',
+            '    "elapsed": 0.00005',
+            "  }",
+            "}",
+        ]
+    )
 
 
 # ---------- CLI: rejection paths (no DB needed) ----------

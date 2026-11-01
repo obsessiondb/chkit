@@ -437,7 +437,7 @@ def test_finding_7_check_json_payload_includes_policy_and_scope_keys() -> None:
     source = inspect.getsource(check_module)
     assert '"policy": policy_payload' in source
     assert '"driftEvaluated"' in source
-    assert '"scope": scope_payload' in source
+    assert '"scope": scope_to_payload(table_scope)' in source
     assert '"plugins"' in source  # plugins map (TS shape), not just pluginCheckResults
 
 

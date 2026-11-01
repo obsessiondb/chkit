@@ -161,20 +161,23 @@ def test_generate_table_scope_invalid_selector_rejected(
 
 
 def test_drift_table_scope_filters(runner: CliRunner, project: Path) -> None:
+    """drift compares the snapshot with the live server, scoped to the selector."""
     runner.invoke(app, ["generate", "--name", "init"])
-    (project / "schema_v1.py").write_text(
-        SCHEMA_TWO_TABLES_EVENTS_CHANGED, encoding="utf-8"
-    )
 
-    # No scope: drift detected for events
-    result = runner.invoke(app, ["drift", "--json"])
+    # Nothing is migrated: the scoped table is missing on the server.
+    result = runner.invoke(app, ["drift", "--json", "--table", "users"])
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["drifted"] is True
+    assert payload["missing"] == ["table:default.users"]
+    assert payload["scope"]["matchedTables"] == ["default.users"]
 
-    # --table users: events drift filtered out → no drift
-    result = runner.invoke(app, ["drift", "--json", "--table", "users"])
+    # A selector that matches no snapshot table is a no-op, as in TS.
+    result = runner.invoke(app, ["drift", "--json", "--table", "nonexistent"])
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["drifted"] is False
+    assert payload["warning"] == 'No tables matched selector "nonexistent".'
 
 
 # ---------- chkit check --table ----------
@@ -183,12 +186,19 @@ def test_drift_table_scope_filters(runner: CliRunner, project: Path) -> None:
 def test_check_table_scope_filters_drift(
     runner: CliRunner, project: Path
 ) -> None:
-    """check exercises drift filtering against the live ClickHouse."""
+    """check compares against the live ClickHouse by default, as in TS (#405)."""
     runner.invoke(app, ["generate", "--name", "init"])
-    (project / "schema_v1.py").write_text(
-        SCHEMA_TWO_TABLES_EVENTS_CHANGED, encoding="utf-8"
-    )
 
+    # The migration is not applied: the scoped table is missing on the server.
     result = runner.invoke(app, ["check", "--json", "--table", "users"])
+    assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
-    assert "drift" not in payload.get("failedChecks", [])
+    assert payload["failedChecks"] == ["pending_migrations", "schema_drift"]
+    assert payload["driftEvaluated"] is True
+    assert payload["driftReasonCounts"]["missing_object"] == 1
+
+    result = runner.invoke(app, ["check", "--json", "--table", "nonexistent"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["warning"] == 'No tables matched selector "nonexistent".'

@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
+from chkit.core.jsnum import parse_js_number
 from chkit_plugin_backfill.errors import BackfillConfigError
 
 _GiB = 1024**3

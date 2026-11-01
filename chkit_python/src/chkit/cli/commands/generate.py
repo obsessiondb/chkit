@@ -84,6 +84,7 @@ from chkit.cli.table_scope import (
     build_scoped_snapshot_definitions,
     filter_plan_by_table_scope,
     resolve_table_scope,
+    scope_to_payload,
     table_keys_from_definitions,
 )
 from chkit.core.canonical import canonicalize_definitions
@@ -210,17 +211,6 @@ def _exit_error(message: str, *, output_json: bool) -> NoReturn:
         emit_json_error("generate", {"code": "error", "message": message})
     typer.echo(message, err=True)
     raise typer.Exit(code=1)
-
-
-def _scope_to_payload(scope: TableScope) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "enabled": scope.enabled,
-        "matchedTables": list(scope.matched_tables),
-        "matchCount": scope.match_count,
-    }
-    if scope.selector is not None:
-        payload["selector"] = scope.selector
-    return payload
 
 
 def _apply_rename_mappings(
@@ -490,7 +480,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             emit_json(
                 "generate",
                 {
-                    "scope": _scope_to_payload(table_scope),
+                    "scope": scope_to_payload(table_scope),
                     "mode": "plan" if dryrun else "apply",
                     "operationCount": 0,
                     "riskSummary": {"safe": 0, "caution": 0, "danger": 0},
@@ -589,7 +579,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                     "renameSuggestions": [
                         s.model_dump(by_alias=True) for s in plan.rename_suggestions
                     ],
-                    "scope": _scope_to_payload(table_scope),
+                    "scope": scope_to_payload(table_scope),
                     "warnings": dictionary_password_warnings,
                     **cutover_payload,
                 },
@@ -653,7 +643,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         emit_json(
             "generate",
             {
-                "scope": _scope_to_payload(table_scope),
+                "scope": scope_to_payload(table_scope),
                 "migrationFile": migration_file,
                 "snapshotFile": str(snapshot_path),
                 "definitionCount": len(artifact_definitions),

@@ -48,7 +48,7 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import extract_migration_operation_summaries
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.async_insert_guard import assert_no_fire_and_forget_async_inserts
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.clickhouse.ddl_propagation import (
     parse_exchange_tables,
     wait_for_ddl_propagation,
@@ -218,7 +218,11 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 upsert_operation(
                     state_on_error,
                     _sync_operation_state(
-                        index, identity.type, identity.key, "failed", str(error)
+                        index,
+                        identity.type,
+                        identity.key,
+                        "failed",
+                        clickhouse_error_message(error),
                     ),
                     iso_without_zone(datetime.now(tz=UTC)),
                 )
@@ -293,7 +297,7 @@ def statement_error(
     return StatementError(
         f"Migration {file} failed at statement {index + 1} of {total}:\n"
         f"  {preview_statement(statement)}\n"
-        f"{error}"
+        f"{clickhouse_error_message(error)}"
     )
 
 
