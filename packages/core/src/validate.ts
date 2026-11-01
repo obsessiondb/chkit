@@ -87,12 +87,14 @@ function validateColumnCodec(
     return
   }
 
-  if (steps.length > 1 && generalCount === 1 && generalIndex !== steps.length - 1) {
+  // Delta and GCD only transform the data: ClickHouse rejects a chain of nothing else.
+  const onlyTransforms = steps.every((step) => step.kind === 'Delta' || step.kind === 'GCD')
+  if (onlyTransforms || (steps.length > 1 && generalCount === 1 && generalIndex !== steps.length - 1)) {
     pushValidationIssue(
       issues,
       def,
       'codec_chain_must_end_with_general',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, T64, GCD, ALP)`
+      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, T64, ALP)`
     )
   }
 }

@@ -810,12 +810,12 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
       await assertValidSQL(client, toCreateSQL(def))
     })
 
-    test('view with comment (not rendered, but SQL still valid)', async () => {
+    test('view with comment', async () => {
       const def = view({
         database: 'default',
         name: 'test_view_comment',
-        as: 'SELECT 1 AS x',
-        comment: 'A test view',
+        as: 'SELECT id FROM default.source',
+        comment: "A test view's comment",
       })
       await assertValidSQL(client, toCreateSQL(def))
     })
@@ -832,6 +832,29 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
         name: 'test_mv',
         to: { database: 'default', name: 'target_table' },
         as: 'SELECT id, count() AS cnt FROM default.source GROUP BY id',
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('MV with comment', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_mv_comment',
+        to: { database: 'default', name: 'target_table' },
+        as: 'SELECT id FROM default.source',
+        comment: "A test MV's comment",
+      })
+      await assertValidSQL(client, toCreateSQL(def))
+    })
+
+    test('refreshable MV with APPEND + EMPTY + comment', async () => {
+      const def = materializedView({
+        database: 'default',
+        name: 'test_rmv_comment',
+        to: { database: 'default', name: 'rmv_target' },
+        refresh: { every: '1 HOUR', append: true, empty: true },
+        as: 'SELECT id FROM default.source',
+        comment: 'A test refreshable MV',
       })
       await assertValidSQL(client, toCreateSQL(def))
     })
