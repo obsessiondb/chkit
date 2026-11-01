@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import math
 
+from chkit.core.jsnum import (
+    js_number_to_string,
+    parse_js_number,
+)
 from chkit_plugin_backfill.chunking.partition_slices import build_slice_from_rows
 from chkit_plugin_backfill.chunking.services.row_probe import estimate_rows
 from chkit_plugin_backfill.chunking.types import (
@@ -22,10 +26,6 @@ from chkit_plugin_backfill.chunking.types import (
 from chkit_plugin_backfill.chunking.utils.binary_string import (
     big_int_to_str,
     str_to_big_int,
-)
-from chkit_plugin_backfill.chunking.utils.jsnum import (
-    js_number_to_string,
-    parse_js_number,
 )
 from chkit_plugin_backfill.chunking.utils.ranges import (
     get_chunk_range,

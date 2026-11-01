@@ -5,13 +5,13 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+from chkit.core.jsnum import parse_js_number
 from chkit_plugin_backfill.chunking.types import (
     Partition,
     PlannerContext,
     SortKey,
     SortKeyCategory,
 )
-from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
 from chkit_plugin_backfill.time_utils import parse_planner_datetime_to_iso
 
 _NUMERIC_TYPES = re.compile(r"^(U?Int|Float|Decimal)")
