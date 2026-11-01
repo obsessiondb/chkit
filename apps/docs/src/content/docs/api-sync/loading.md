@@ -7,17 +7,15 @@ A loader writes the rows yielded by the reader, whether they contain raw objects
 
 ## Start with the default loader
 
-Omit `loader` from the stream definition, as in the [quickstart](/api-sync/quickstart/). chkit uses `simpleLoader()` to insert rows and attach ingestion metadata. Use this for both raw and shaped storage, including rows with embedded children.
-
-`simpleLoader` makes direct, at-least-once inserts, adds ingestion metadata, and splits a load batch into deterministic write units with stable deduplication tokens. Native suppression depends on engine settings and a finite token-retention window; it does not deduplicate logical records across arbitrary overlaps. Use the optional `stagedLoader` below when explicit row-key deduplication is needed and its publication contract fits. Neither loader replaces a whole destination snapshot atomically.
-
-Changing raw JSON to typed rows, changing a SQL view, using an SDK, or tuning concurrency does not require a custom loader.
+- Omit `loader`, as in the [quickstart](/api-sync/quickstart/), for `simpleLoader()`: cheap, direct, at-least-once inserts with ingestion metadata.
+- Each physical write unit gets a stable retry token. Native deduplication depends on engine settings and finite token retention, not logical row keys; keep insert sizing stable across retries.
+- Use it for raw or shaped rows when duplicates are acceptable or reconciled downstream. Mapping, embedded children, SDKs and concurrency tuning do not require another loader.
 
 ## Opt into staged deduplication
 
-`stagedLoader` writes a logical batch into a private scratch table, selects one winner per key, filters keys already present in the destination, and publishes the remaining rows with `INSERT SELECT`. Only then may the executor journal progress. Staging alone is never sink evidence. The policy is optional; the default remains `simpleLoader`.
-
-Choose it for immutable events or observations with stable identities, overlapping source windows, and retries that may outlast native INSERT-token retention. Choose direct append-only writes when duplicates are acceptable or reconciled downstream. Choose replacing/current-state storage and appropriate read semantics for mutable entities. Staged insert-if-absent is not an upsert or deletion reconciler.
+- Choose `stagedLoader` for immutable observations with stable keys, overlapping reads or retries beyond native token retention. Deduplication is opt-in, not required by the engine.
+- It stages a logical batch, selects one whole-row winner per key, then publishes only keys absent from the destination. Progress follows publication, never staging.
+- Do not use insert-if-absent for mutable current state or deletions; choose a replacing-table/read model or another update strategy. Neither bundled loader atomically replaces a snapshot.
 
 ### Identity and winners
 
@@ -27,19 +25,36 @@ Choose it for immutable events or observations with stable identities, overlappi
 | Version/content | `['account_id', 'id', 'version']` | Retain each distinct observation; a stable content hash can replace a source version. |
 | Transport | `SourceChunk.id`, batch ID, physical query ID | Identify replay or one SQL operation, not logical record equality. |
 
-`keys` must be nonempty, distinct, writable, non-null scalar column names. Supported key types are `String`, `FixedString`, signed/unsigned integers, `UUID`, `IPv4`/`IPv6`, `Date`/`Date32`, and `DateTime`/`DateTime64`, including compatible `LowCardinality` wrappers. `Nullable`, floating-point, decimal, array, tuple, map, JSON, computed and ingestion-metadata keys are rejected. Every input row must explicitly supply its keys; defaults cannot invent identity. Use exact strings or `bigint` for integers outside JavaScript's safe range. Equality follows stored ClickHouse types: `"01"` and `1` become the same `UInt64` key. Null payload fields are independent of key nullability.
+- `winner: 'first' | 'last'` chooses one **whole row by input position within the logical batch**, across physical inserts—not the globally newest timestamp. Keep replay order stable, or sort bounded source units.
+- Existing destination keys always win, even when payloads differ. Existing duplicates remain; TTL or deletion makes removed keys eligible again.
+- Keys must be nonempty, distinct, writable, non-null scalar columns, explicitly supplied in every row. Defaults cannot invent identity; null payload fields are allowed independently.
+- Supported types: `String`, `FixedString`, integers, `UUID`, `IPv4`/`IPv6`, `Date`/`Date32`, `DateTime`/`DateTime64`, and compatible `LowCardinality` wrappers. Nullable, float, decimal, compound, JSON, computed and ingestion-metadata keys are rejected.
+- Equality follows stored ClickHouse types: `"01"` and `1` become the same `UInt64` key. Use exact strings or `bigint` outside JavaScript's safe integer range.
 
-`winner: 'first' | 'last'` chooses by input position **within the logical batch**, across all physical staging inserts. Equal-key ties are deterministic for the same ordered input; this is not globally newest-by-timestamp. Keep reader ordering stable on replay, or sort a bounded source unit explicitly. Destination keys always win over staging, even when their payload differs. Include a version/hash in the key when that difference matters. The loader does not remove duplicates already stored in the destination, and deduplication lasts only while the keys remain there; TTL or manual deletion makes them eligible again.
+### Supported publication scope
+
+- Only **plain `MergeTree` in an `Atomic` database on one pinned server**, with read-your-writes visibility. No load balancer, Replicated, Shared, Distributed or replacing engines. EPHEMERAL and Nested/dotted columns are unsupported; retain `ingestionColumns` unchanged.
+- All writers must use the same staged gate, executor object and identity policy within **one loaded package/process**. Staging may overlap; publication is serialized per qualified destination. Direct/simple/custom writes bypass the gate, even on the same executor. Exclude competing processes, executor instances, external writes and schema changes, including scratch replacement.
+- The SQL user must see every destination key: restrictive row policies or stale reads defeat deduplication. The local gate is not a distributed lock or cross-process uniqueness constraint.
+- Publication is not a transaction over scratch, destination and journal. A multi-block/partition failure may leave rows; replay fills missing keys only after the query terminates. Failed materialized views may remain incomplete because accepted base-table keys suppress replay; recover derived tables separately. Server power-loss durability and managed/replicated consistency are not guaranteed.
+
+### Cost and default timing
+
+- Each batch adds schema reads, CREATE/DROP DDL, scratch writes/storage, sorting, a candidate-key set, a destination anti-join and publication. Candidate filtering reduces join memory, **not scan guarantees**: every batch may still scan all destination keys. A sorting key is not a uniqueness index.
+- Scratch preserves **all columns and their default/computed expressions**. Ordinary `DEFAULT` values resolve at staging; materialized/alias expressions and `_chkit_ingested_at` are evaluated again at publication. A separate default copying ingestion time retains its staging-time value; supply explicit stable values or suitable destination expressions when this matters.
+- Materialized columns are computed and stored in scratch even without dependent defaults: expensive expressions and storage can occur twice. Measure row width, destination size, duplicate ratio and replay cost before paying this overhead.
+- `maxRowsPerInsert` (default `50_000`) sizes scratch transport without changing winners. Stream `batchSize` controls logical publication: larger batches amortize DDL/scans but increase scratch/sort memory and checkpoint latency. Changing logical batch boundaries can change winners; pull-based buffering is not a hard RAM bound.
+- Resource limits remain active with strict overflow errors; truncated reads, sorts, sets or joins must not checkpoint incomplete results. Staging also disables JSONEachRow error skipping.
 
 ### Supply SQL capabilities explicitly
 
-The ordinary loader context remains insert-only. `stagedLoader` takes an explicitly supplied SQL executor; `createStagedLoaderExecutor` constructs a stateless one without installing an internal package. Reuse that exact object across every staged writer to the same server, and close it when its owner finishes. Custom implementations must honor synchronous submission settings and provide complete query results.
+- The ordinary loader context stays insert-only. `createStagedLoaderExecutor` supplies stateless SQL access; custom executors must honor synchronous settings and return complete results.
+- Its user needs destination SELECT/INSERT, scratch CREATE/INSERT/SELECT/DROP in the same database, metadata/query-log reads, and permission for synchronous, strict-result and logging settings. Permission failures are not bypassed.
+- The caller owns and closes the executor, wiring publication and journal to the same target. **CLI `--config` neither rebinds nor closes a captured loader executor**; there is no implicit connection injection.
 
-The SQL user needs destination SELECT/INSERT, scratch CREATE/INSERT/SELECT/DROP in the same database, metadata reads, and query-log reads for recovery. Its profile must permit the supplied synchronous, strict-result and logging settings; permission failures are not silently bypassed.
+### Minimal example
 
-The example below uses programmatic `runIngestion` so publication, destination and journal share one explicit connection. A loader captured in a CLI schema module still owns its own connection: `--config` does not rebind or close that executor. Do not mix a captured loader target with a different CLI journal target; the caller must wire and manage both consistently. There is no implicit connection lookup or host-capability injection.
-
-Define and migrate a plain MergeTree destination first, using the usual [schema migration workflow](/tutorials/first-schema/):
+Migrate this destination with the [schema migration workflow](/tutorials/first-schema/), then run `bun sync-events.ts`. The two files form one example; replace the fixture reader with bounded provider pages.
 
 ```ts
 // schema/events.ts
@@ -61,14 +76,12 @@ export const eventVersions = table({
 })
 ```
 
-This complete program demonstrates the loader and executor lifetime; replace the fixture reader with bounded provider pages:
-
 ```ts
 // sync-events.ts
 import {
   createClickHouseDestination, createClickHouseJournal,
   createStagedLoaderExecutor, definePipeline, defineStream,
-  fullSync, runIngestion, selectStreams, stagedLoader,
+  runIngestion, selectStreams, stagedLoader,
 } from '@chkit/plugin-ingest'
 import { eventVersions } from './schema/events.js'
 
@@ -82,13 +95,11 @@ const executor = createStagedLoaderExecutor({
 const events = defineStream({
   id: 'account-a.events',
   destination: eventVersions,
-  incremental: fullSync(),
   loader: stagedLoader({
     executor,
     keys: ['account_id', 'event_id', 'version'],
     winner: 'first',
     concurrency: 'single-process',
-    maxRowsPerInsert: 10_000,
   }),
   async *read() {
     yield { rows: [
@@ -113,41 +124,18 @@ try {
 }
 ```
 
-### Supported publication scope
-
-The destination must be a **plain `MergeTree` in an `Atomic` database on one pinned server**, with read-your-writes visibility. Replicated, Shared, Distributed, replacing and other engines are rejected. EPHEMERAL and Nested/dotted columns are unsupported. Keep `ingestionColumns` unchanged, including its publication-time default. This is intentionally narrower than the default loader's destination support.
-
-`concurrency: 'single-process'` acknowledges an operational contract, not a distributed lock. Publication is serialized per executor object and qualified destination within one loaded package/process. Different streams and factories sharing that object may stage concurrently, but publish in turn. All destination writers must use this staged-loader gate and the same identity policy: sharing an executor with `simpleLoader`, custom loaders or direct INSERTs does not serialize those writes. Exclude other processes, executor instances, external writes, and schema changes, including scratch-table replacement. The SQL user must see every destination key; restrictive row policies defeat the anti-join. A load-balanced endpoint or stale replica read can miss existing keys. Two independent anti-joins can both see a key as absent and both insert it.
-
-“Commit” means an acknowledged publication operation, **not a ClickHouse transaction over staging, destination and journal**. A multi-block or multi-partition publication may partially succeed. Replay after it has terminated filters the visible keys and fills the remainder. A failed materialized view can miss rows after the base table accepts them; the anti-join can then prevent replay from repairing that view. Use a separately recoverable derived-table strategy when downstream completeness matters. Server power-loss durability and replicated/managed-service consistency are not guaranteed by this loader.
-
 ### Recovery and cleanup
 
-Each attempt owns a random scratch table UUID; it never reuses a batch-named table or drops another attempt's scratch. A fresh replay restages the source. Staging insert size may change without changing winner order or losing rows to reused physical INSERT tokens. Publication disables native block deduplication because the anti-filtered result may differ on retry.
-
-Scratch retains the destination's computed-column dependencies so ordinary `DEFAULT` expressions can resolve. Defaults are evaluated during staging; materialized/alias columns are not explicitly published and are evaluated by the destination again. The staged `_chkit_ingested_at` is also excluded from publication, so the destination assigns publication time. A separate default that copies ingestion time therefore retains its staging-time value. Supply explicit stable values, or use a suitable destination expression, when nondeterministic defaults or derived timestamps must have different semantics.
-
-Preserving the full schema also computes and stores materialized columns in scratch, even when no default depends on them. Expensive materialized expressions can therefore run twice and add scratch storage; include that cost when comparing with direct writes.
-
-On a missing publication ACK, the loader waits for a terminal `system.query_log` event, including failures before execution. A finished query can establish sink evidence; a failed query permits replay. Unknown, still-running or unobservable work remains fenced within that executor, retains its scratch table, and does not advance progress. `reconciliationTimeoutMs` defaults to 30,000 per attempt and cannot exceed Node's 2,147,483,647 ms timer limit; it bounds reconciliation waiting, including a hanging status read, not the original SQL execution time. The loader requests unsampled terminal logging; server query-log configuration, access and sufficient retention are required for ambiguous-ACK recovery. A request that never reached the server has no terminal event and requires operator reconciliation rather than assuming it is safe to resubmit.
-
-Cancellation prevents a receipt after the signal is observed, but cannot roll back already published rows or assume an HTTP disconnect stopped the server. Before restarting in another process, quiesce the old process and wait for or terminate its server-side publication queries. A new process has no distributed fence against old work. Then replay from the journaled checkpoint.
-
-Cleanup checks the scratch UUID before dropping it. Cleanup errors fail the attempt instead of silently leaking tables; replay remains safe within the contract, but persistent cleanup errors block progress. A lost CREATE acknowledgement or a crash can leave `_chkit_stage_*` orphans. Inspect `system.tables` and active `chkit-stage-*` query IDs with writers stopped; delete only confirmed abandoned scratch tables. Never use prefix-wide deletion while writers might be active.
-
-An empty batch needs no SQL and returns `none_required`. A nonempty, entirely filtered batch still has acknowledged publication evidence. Receipt/journal `rows` counts accepted **input rows**, including duplicates filtered out; it is not the count newly inserted. `writeUnits` counts the publication operation, not scratch inserts.
-
-### Cost and tuning
-
-Staging adds schema reads, CREATE/DROP DDL, one or more scratch writes, a sort for winner selection, a candidate-key set, a destination-key anti-join, and a destination write. The destination side is filtered to this batch's keys before building the join, reducing the join's retained rows; constructing that set adds another scratch-key read. This is not a scan guarantee: the query can still read all destination keys per logical batch, even with a matching sorting key. The sorting key is not a uniqueness index. Scratch storage temporarily holds the full batch, and server memory/latency grows with the sort, candidate set and join. Source buffering remains pull-based, not a hard RAM bound. Resource limits remain active, but strict overflow modes force errors rather than accepting truncated reads/sorts/sets/joins. Staging also disables JSONEachRow error skipping; a partial acknowledgement must not masquerade as complete input coverage.
-
-Small batches amortize DDL poorly; large/wide batches cost more scratch space and sorting memory. Start with `simpleLoader` when these costs buy no needed guarantee. Measure the actual destination size, row width, duplicate ratio and replay cost before selecting staging. `maxRowsPerInsert` (default 50,000) changes scratch transport sizing; stream `batchSize` controls the logical publication boundary. Larger batches reduce repeated scans but delay checkpoints, and changing logical batch boundaries can change which payload wins. Repository contributors can reproduce local boundary tests with `bun run test:staged-loader`; they are also part of `bun run verify`. These tests use disposable local databases regardless of managed target environment variables.
+- A missing ACK requires terminal `system.query_log` evidence: finished means success; failed permits replay. **Unknown/running/unobservable publication retains scratch, fences later publication on that executor and cannot advance progress.** Unsampled terminal logging, access and sufficient retention are required. A request that never reached the server has no terminal event; operator reconciliation is required, not blind resubmission.
+- `reconciliationTimeoutMs` defaults to `30_000` per attempt, at most `2_147_483_647` ms. It bounds observation, including hung status reads, **not SQL execution**.
+- Cancellation prevents a receipt once observed but cannot undo published rows or stop server SQL by disconnecting. **Before restart, quiesce the old process and wait for or terminate its publication queries**, then replay the journaled checkpoint. The fence does not survive across processes.
+- Replay restages into a new random-UUID scratch table. Native block deduplication is disabled so reslicing and changed anti-join results cannot suppress needed rows.
+- Cleanup verifies UUID ownership; failures fail the attempt and may block progress. Crashes or lost CREATE ACKs can orphan `_chkit_stage_*` tables. Stop writers, inspect `system.tables` and active `chkit-stage-*` queries, then drop only confirmed abandoned tables—never delete by prefix while writers are active.
+- Empty batches need no SQL (`none_required`); nonempty, fully filtered batches still have publication evidence. Receipt/journal `rows` counts accepted **input rows**, not newly inserted rows; `writeUnits` counts publication, not scratch inserts.
 
 ## Tune insert size when needed
 
 Start with the defaults. If measured request size or memory use requires smaller physical inserts, import `simpleLoader` from `@chkit/plugin-ingest` and set `loader: simpleLoader({ maxRowsPerInsert: 20_000 })` on the stream. This configures the same loader; it does not change mapping or checkpoint behavior.
-
-Keep `simpleLoader`'s physical insert sizing stable while replaying interrupted work: its tokens identify write units, not row keys. Use staged publication when deduplication must survive physical reslicing, within the identity and concurrency contract above.
 
 ## Size the three boundaries
 

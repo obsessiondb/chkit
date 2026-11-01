@@ -9,24 +9,24 @@ import { IngestConfigError } from './errors.js'
 import type { LoaderFactory, Row, SinkReceipt } from './types.js'
 
 /**
- * SQL capabilities used by stagedLoader; the ordinary destination remains insert-only.
- * Methods must honor supplied settings. In particular submit with wait_end_of_query=1
- * and send_progress_in_http_headers=0 must await the final server response, not enqueue.
+ * - Explicit SQL access for stagedLoader; the ordinary destination stays insert-only.
+ * - Honor supplied settings and return complete results; synchronous submit must await
+ *   the final response (`wait_end_of_query=1`, `send_progress_in_http_headers=0`).
  */
 export type StagedLoaderExecutor = Pick<ClickHouseExecutor, 'command' | 'query' | 'insert' | 'submit'>
 
 export interface StagedLoaderOptions {
-  /** One shared, stateless executor pinned to one server. Do not use a load-balanced endpoint. */
+  /** - Shared stateless executor pinned to one server, never a load balancer. */
   executor: StagedLoaderExecutor
-  /** Nonempty identity of an immutable observation, e.g. ['account_id', 'id', 'version']. */
+  /** - Explicit immutable-observation identity, e.g. ['account_id', 'id', 'version']. */
   keys: readonly string[]
-  /** First/last row in the reader's ordered batch wins within staging. Existing destination keys always win. */
+  /** - First/last whole row in batch order wins; existing destination keys always win. */
   winner: 'first' | 'last'
-  /** Explicitly accept the single-process, single-executor publication contract described below. */
+  /** - Accept the single-process/shared-executor publication contract below. */
   concurrency: 'single-process'
-  /** Positive integer, default 50,000. Only changes physical staging INSERTs, not logical identity. */
+  /** - Positive integer; default 50,000. Sizes scratch INSERTs, not logical batches. */
   maxRowsPerInsert?: number
-  /** Maximum reconciliation wait per attempt; default 30,000 ms, at most 2,147,483,647 ms. */
+  /** - Per-attempt reconciliation wait, not SQL timeout; default 30,000 ms, max 2,147,483,647. */
   reconciliationTimeoutMs?: number
 }
 
@@ -50,8 +50,7 @@ interface PublicationGate {
 
 const ORDINAL = '_chkit_stage_ordinal'
 const gates = new WeakMap<StagedLoaderExecutor, Map<string, PublicationGate>>()
-// A successful truncated sort/read or incomplete join would turn resource limits
-// into checkpointed omissions or duplicates. Keep limits, but require failure.
+// Truncated results would checkpoint omissions or duplicates; resource limits must throw.
 const STRICT_RESULTS = {
   read_overflow_mode: 'throw',
   read_overflow_mode_leaf: 'throw',
@@ -64,47 +63,24 @@ const STRICT_RESULTS = {
 } satisfies ClickHouseSettings
 
 /**
- * Opt-in insert-if-absent publication of immutable observations into a plain
- * MergeTree table. Stages each logical batch, selects one ordered winner per
- * explicit key, then filters keys already present in the destination. Unlike
- * simpleLoader's finite native INSERT-token window, this policy uses retained
- * destination rows and survives physical insert resizing and overlapping reads.
- *
- * Identity is NOT an update policy: ['id'] keeps the first published entity
- * forever while it remains present. Include a version/content hash to retain
- * changes. `winner` only chooses within this batch; ties use reader order, which
- * must be stable on replay. Keys must be present, non-null scalar columns;
- * equality uses their stored ClickHouse types. No upserts or deletions occur.
- *
- * All writers must use stagedLoader with the same identity policy and share
- * this executor object in one loaded package/process,
- * pinned to one server with read-your-writes visibility. Publication is locally
- * serialized, but an anti-join is NOT cross-process atomic uniqueness. Do not
- * overlap processes, external writers or schema changes. Replicated, Shared,
- * Distributed and replacing engines are rejected. Before restarting after a
- * crash, stop/wait for old server queries; no distributed recovery fence exists.
- *
- * A receipt follows publication, never staging. A missing ACK is reconciled via
- * terminal query-log evidence; unresolved queries fence later publication and retain scratch.
- * Cancellation may leave published rows, but must not commit progress. Retrying
- * after a terminal partial failure fills missing keys, not a transactional batch.
- * Cleanup failures throw; crash orphans require operator cleanup after quiescence.
- *
- * Prefer simpleLoader for cheap append-only writes, or replacing/current-state
- * storage (and appropriate reads) for updates. This loader adds per-batch DDL,
- * scratch writes/storage, sorting and destination key reads (potentially a full
- * scan), another INSERT and cleanup: higher latency and server/client cost.
- * It does not repair preexisting duplicates or guarantee downstream view effects.
- * Ordinary defaults resolve in scratch; generated columns and ingestion time
- * are evaluated again at the destination. Supply explicit stable values when
- * nondeterministic defaults must not change on replay.
- *
- * @example
- * const loader = stagedLoader({
- *   executor, keys: ['account_id', 'event_id', 'version'],
- *   winner: 'first', concurrency: 'single-process', maxRowsPerInsert: 10_000,
- * })
- * // Reuse executor and loader across every stream targeting this server.
+ * - Opt-in insert-if-absent for immutable observations across overlaps/replays,
+ *   independent of native token retention. Prefer simpleLoader for cheap appends.
+ * - Explicit non-null scalar keys use stored ClickHouse equality. Include a version/hash
+ *   to retain changes; entity keys discard updates. Not an upsert or deletion reconciler.
+ * - First/last selects one whole row per key within the ordered batch; keep replay order
+ *   stable. Existing keys always win; existing duplicates are not repaired.
+ * - Only plain MergeTree/Atomic on one pinned server. All writers must share the executor,
+ *   identity policy and staged gate in one package/process; no external writes/schema changes.
+ *   No Shared, replicated, Distributed or replacing engines; no cross-process uniqueness.
+ * - Receipts follow publication, never staging. Unknown publication retains scratch and
+ *   fences later publication until terminal query-log evidence; cancellation cannot undo writes.
+ *   Before restart, quiesce old publishers and wait for/terminate their server queries.
+ * - Costs: per-batch DDL, scratch storage/writes, sorting, possible full destination-key scans.
+ *   Full scratch schema resolves DEFAULT dependencies at staging; generated columns and
+ *   ingestion time recompute at publication. Materialized work/storage can occur twice.
+ * - Partial failures replay missing keys, not a transaction or downstream-view repair.
+ *   Cleanup failures throw; remove crash orphans only after writer quiescence.
+ * - Setup, default timing and recovery: https://chkit.obsessiondb.com/api-sync/loading/
  */
 export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
   const { executor, winner } = options
@@ -157,12 +133,9 @@ export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
         const schema = await describeDestination(executor, ctx.table.database, ctx.table.name, keys)
         columns = schema.filter((column) => column.name !== INGESTED_AT_COLUMN && (!column.default_type || column.default_type === 'DEFAULT'))
         ctx.signal.throwIfAborted()
-        // DEFAULT expressions can reference aliases, materialized columns or
-        // ingestion time. Keep those dependencies in scratch, but never include
-        // generated columns or the staged ingestion time in the publication list.
+        // DEFAULT dependencies need the full schema; generated columns/time stay out of publication.
         const definitions = schema.map((column) => `${quoteIdentifier(column.name)} ${column.type}${column.default_type ? ` ${column.default_type} ${column.default_expression}` : ''}`)
-        // No IF NOT EXISTS or batch-derived name: another attempt's scratch must
-        // never become ours. A lost CREATE ACK can leave an orphan, not ownership.
+        // A lost CREATE ACK leaves an orphan, not ownership of a later attempt's scratch.
         await executor.command(`CREATE TABLE ${staging} UUID ${literal(scratch.uuid)} (${definitions.join(', ')}, ${quoteIdentifier(ORDINAL)} UInt64) ENGINE = MergeTree ORDER BY tuple()`)
         created = true
         for (let offset = 0; offset < batch.rows.length; offset += maxRows) {
@@ -171,8 +144,7 @@ export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
             const { [INGESTED_AT_COLUMN]: _ignored, ...authored } = row
             return { ...authored, [BATCH_ID_COLUMN]: batch.batchId, [RUN_ID_COLUMN]: ctx.runId, [ORDINAL]: offset + index }
           })
-          // Fresh scratch is discarded on any failed write. Native block tokens
-          // must not suppress different rows when retry slicing changes.
+          // Native tokens must not suppress rows when retry slicing changes.
           await executor.insert({ table: staging, values: toJsonRows(values), settings: {
             ...STRICT_RESULTS,
             async_insert: 0, wait_for_async_insert: 1, insert_deduplicate: 0,
@@ -198,11 +170,7 @@ export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
           }
           const projected = columns.map((column) => quoteIdentifier(column.name)).join(', ')
           const identity = keys.map(quoteIdentifier).join(', ')
-          // LIMIT BY follows a total input-ordinal ordering. Restrict the join
-          // build to keys from this batch, not the entire destination. Both
-          // sides have identical non-null native types; a truncated IN set would
-          // hide existing keys, so set_overflow_mode must remain throw. This can
-          // reduce join memory without avoiding a full destination-key scan.
+          // Ordinals select whole-row winners; candidate keys bound join memory, not scan work.
           const sql = `INSERT INTO ${destination} (${projected})`
             + ` SELECT ${columns.map((column) => `s.${quoteIdentifier(column.name)}`).join(', ')}`
             + ` FROM (SELECT ${projected} FROM ${staging} ORDER BY ${quoteIdentifier(ORDINAL)} ${winner === 'first' ? 'ASC' : 'DESC'} LIMIT 1 BY ${identity}) AS s`
@@ -211,9 +179,7 @@ export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
           const queryId = `chkit-stage-${randomUUID()}`
           gate.pending = { queryId, scratch }
           try {
-            // The query id identifies this physical operation, NOT the batch.
-            // Anti-filtered replay has different contents, so native INSERT
-            // deduplication must be off. Submission here waits for completion.
+            // Replayed anti-joins can change contents: use a fresh query id and no native dedup.
             await executor.submit(sql, queryId, {
               ...STRICT_RESULTS,
               wait_end_of_query: 1, send_progress_in_http_headers: 0, async_insert: 0, insert_deduplicate: 0,
@@ -236,8 +202,7 @@ export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
       },
       async abort() {
         aborted = true
-        // An HTTP error/abort does not stop server SQL. Keep its source table
-        // until terminal evidence exists; the next publication reconciles first.
+        // An HTTP abort may leave server SQL running; retain its scratch until terminal evidence.
         if (created && gate.pending?.scratch.uuid !== scratch.uuid) {
           await dropOwnedScratch(executor, scratch)
           created = false
@@ -291,8 +256,7 @@ async function reconcile(executor: StagedLoaderExecutor, gate: PublicationGate, 
       const timer = new AbortController()
       let events: { type: string }[]
       try {
-        // Bound observation, not server execution. Abandoning a hung status read
-        // leaves the fence intact. Unique ids need no client-clock time filter.
+        // A status-read timeout leaves the fence intact; it does not stop server SQL.
         events = await Promise.race([
           executor.query<{ type: string }>(`SELECT type FROM system.query_log WHERE query_id = ${literal(pending.queryId)} AND user = currentUser() AND is_initial_query = 1 AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart') LIMIT 1`, STRICT_RESULTS),
           sleep(Math.max(1, deadline - Date.now()), undefined, { signal: AbortSignal.any([signal, timer.signal]) }).then(() => { throw new Error('terminal observation timed out') }),
@@ -313,8 +277,7 @@ async function reconcile(executor: StagedLoaderExecutor, gate: PublicationGate, 
     throw new Error(`stagedLoader could not reconcile publication ${pending.queryId}; do not start another publisher until terminal evidence is available. Scratch: ${qualified(pending.scratch.database, pending.scratch.name)}`, { cause })
   }
   if (terminal) {
-    // Cleanup is not observation: a DROP failure must not misreport positively
-    // terminal publication as unknown, or claim that its cleared fence remains.
+    // Cleanup failure must not misreport terminal publication as unknown or still fenced.
     await dropOwnedScratch(executor, pending.scratch)
     return terminal
   }

@@ -17,28 +17,18 @@ const executor = createStagedLoaderExecutor({
   password: LOCAL_STACK_ENV.clickhousePassword,
   database: config.database,
 })
+const loaderExecutor = config.connection ? createStagedLoaderExecutor({ ...config.connection, database: config.database }) : executor
 try {
-  const insertSizes = []
   const wrapped = {
-    ...executor,
+    ...loaderExecutor,
     async insert(params) {
-      await executor.insert(params)
-      insertSizes.push(params.values.length)
-      if (config.mode === 'hold-after-stage') {
-        console.log(JSON.stringify({ status: 'staged', table: params.table }))
-        await new Promise(() => { setInterval(() => {}, 60_000) })
+      await loaderExecutor.insert(params)
+      if (config.mode === 'stop-after-stage') {
+        await new Promise((resolve) => process.stdout.write(`${JSON.stringify({ status: 'staged' })}\n`, () => {
+          process.kill(process.pid, 'SIGSTOP')
+          resolve()
+        }))
       }
-    },
-    async submit(sql, id, settings) {
-      const queryId = await executor.submit(sql, id, settings)
-      if (config.mode === 'lost-ack') {
-        console.log(JSON.stringify({ status: 'published', queryId }))
-        throw new Error('injected publication acknowledgement loss')
-      }
-      return queryId
-    },
-    async query(sql, settings) {
-      return config.mode === 'lost-ack' && sql.includes('system.query_log') ? [] : executor.query(sql, settings)
     },
   }
   const destination = table({
@@ -68,8 +58,9 @@ try {
     journal: createClickHouseJournal({ executor, database: config.database, targetId: config.targetId, table: config.journalTable }),
     destination: createClickHouseDestination(executor),
   })
-  console.log(JSON.stringify({ status: 'finished', ok: result.ok, runId: result.runId, error: result.streams[0]?.error, insertSizes }))
+  console.log(JSON.stringify({ status: 'finished', ok: result.ok, runId: result.runId, error: result.streams[0]?.error }))
 } finally {
+  if (loaderExecutor !== executor) await loaderExecutor.close()
   await executor.close()
   process.stdin.destroy()
 }
