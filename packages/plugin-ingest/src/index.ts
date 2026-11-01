@@ -3,6 +3,8 @@ export { defineStream, definePipeline, selectStreams, type SelectedStream } from
 export { fullSync, timestampWindow, cursorState, type TimestampRange, type TimestampWindowOptions, type TimestampWindowState } from './incremental.js'
 export { paginate, type Page } from './paginate.js'
 export { simpleLoader } from './loader.js'
+export { stagedLoader, type StagedLoaderOptions, type StagedLoaderExecutor } from './staged-loader.js'
+export { createStatelessClickHouseExecutor as createStagedLoaderExecutor } from '@chkit/clickhouse'
 export { ingestionColumns, rawTable, rawRows, createClickHouseDestination, type RawRow } from './destination.js'
 export { createClickHouseJournal, type ClickHouseJournalOptions } from './journal.js'
 export { doctorJournal, repairJournal, planJournalRepair, type JournalRecoveryOptions, type JournalRepairPlan, type JournalRepairResult } from './recovery.js'

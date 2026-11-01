@@ -4,6 +4,8 @@
 
 The executor records progress after writes succeed. Run-scoped journal identities keep overlapping executions independent. A retry resumes from a validated checkpoint and may reread rows.
 
+`simpleLoader()` remains the direct, at-least-once default. Opt into `stagedLoader()` when immutable observations need key-based deduplication across replay or overlapping reads, independent of a native INSERT-token window. It stages each batch, selects a deterministic first/last winner, and publishes only keys absent from the destination. It requires a plain MergeTree destination and one shared executor on one pinned server/process; it is not an upsert, snapshot transaction, or cross-process uniqueness constraint. See [loading and staged publication](https://chkit.obsessiondb.com/api-sync/loading/#opt-into-staged-deduplication) for identity, cost, concurrency and recovery requirements.
+
 `paginate()` yields complete `{ items, next, metadata? }` pages, including empty terminal pages. Read rows from `page.items`; use `next` for request continuation and explicitly map checkpoint metadata into a chunk's `state` with `cursorState`. The executor commits that state after the rows are saved. This replaces the previous item-array return type; existing readers must use `page.items`.
 
 ```ts

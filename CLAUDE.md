@@ -74,6 +74,8 @@ Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; t
 
 `bun run test:obsessiondb` runs the suite against ObsessionDB (set the variables above, e.g. through Doppler). It sets `CHKIT_E2E_TARGET=obsessiondb` and leaves out the Kafka suite, whose broker only exists in the local stack.
 
+`bun run test:staged-loader` runs the optional loader's destructive failure/recovery and concurrency boundaries in disposable local databases, including built Node consumers. It always starts/uses the local stack, ignoring remote ClickHouse target variables. This separate Turbo task is included in `verify`, not `test:obsessiondb`: staged publication currently supports only a pinned single-server plain MergeTree target. It honors `CHKIT_TEST_PORT` like the other local tests.
+
 `bun run test:workbench-api` (opt-in, not in `verify`) runs async migrate through the real ObsessionDB console API with the `chkit obsessiondb login` session and `CHKIT_E2E_OBSESSIONDB_SERVICE=<service slug>`; the Python port is `pytest tests_workbench_api`.
 
 Shared ClickHouse test utilities (target env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. Their Python port is `chkit_python/tests/e2e_testkit.py`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones. The Kafka suite is the private workspace `test/kafka` (`@chkit/kafka-e2e`). plugin-backfill's `test` script seeds its chunking fixtures before running.
@@ -89,7 +91,7 @@ Key conventions:
 
 Turbo orchestrates; GitHub Actions only checks out, installs and calls one script. Keep it that way: no version matrices and no extra jobs.
 
-**verify** runs on every pull request and push to `main`: `bun run verify`, the same command as locally (workspace deps check, `turbo run typecheck lint test build`, packed deps check). Pull requests also get a non-blocking Fallow report.
+**verify** runs on every pull request and push to `main`: `bun run verify`, the same command as locally (workspace deps check, `turbo run typecheck lint test build test:staged-loader`, packed deps check). Pull requests also get a non-blocking Fallow report.
 
 `test/infra/clickhouse.xml` configures a one-node `cluster` for the backfill status queries, a short query-log flush interval, and Kafka consumers that read topics from the start. `test/infra/clickhouse-port.xml`, mounted only by Compose, sets the HTTP port from `CHKIT_TEST_PORT`; `scripts/codex-cloud-setup.sh` installs `clickhouse.xml` alone, so its server keeps 8123. The replicated clusters in `test/cluster/` remain opt-in.
 

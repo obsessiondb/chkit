@@ -12,6 +12,15 @@ const DEFAULT_MAX_ROWS_PER_INSERT = 50_000
  * Direct at-least-once destination writes. Every write unit reuses one stable
  * token across retries: a batch written by one INSERT has one token, a
  * deterministically chunked batch has one distinct token per chunk.
+ *
+ * This remains the cheap append-only default, not logical-record deduplication:
+ * native tokens depend on engine settings and a finite retention window. Keep
+ * physical insert sizing stable within a retry cycle: tokens identify write
+ * units, not record keys. Choose
+ * {@link stagedLoader} for explicit key-based deduplication across overlaps or
+ * replays, independent of that token window, when its single-process/pinned-server
+ * identity and publication contract fits. For mutable current state, prefer an
+ * appropriate replacing table/read model rather than silently dropping updates.
  */
 export function simpleLoader(options: SimpleLoaderOptions = {}): LoaderFactory {
   const maxRows = options.maxRowsPerInsert ?? DEFAULT_MAX_ROWS_PER_INSERT
