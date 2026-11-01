@@ -136,6 +136,61 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
   })
 
+  test('preserves materialized and alias default dependencies separately from publication columns', async () => {
+    const definition = await destination([
+      { name: 'base', type: 'UInt64', defaultKind: 'MATERIALIZED', default: 'fn:id + 1' },
+      { name: 'derived', type: 'UInt64', defaultKind: 'ALIAS', default: 'fn:base + 10' },
+      { name: 'copy', type: 'UInt64', default: 'fn:derived' },
+    ])
+    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND name = '${definition.name}'`)).toEqual([{ name: definition.name }])
+    const observed: ClickHouseExecutor = {
+      ...executor,
+      submit(sql, id, settings) {
+        const insertColumns = sql.split(' SELECT ')[0]
+        expect(insertColumns).not.toContain('`base`')
+        expect(insertColumns).not.toContain('`derived`')
+        return executor.submit(sql, id, settings)
+      },
+    }
+    const loader = stagedLoader({ executor: observed, keys: ['id'], winner: 'first', concurrency: 'single-process' })({
+      table: definition, destination: createClickHouseDestination(executor), signal: new AbortController().signal, streamId: 'computed-default', runId: 'computed-default',
+    })
+    await loader.write({ batchId: 'computed-default', rows: [{ id: 1, payload: 'default' }, { id: 2, payload: 'explicit', copy: 99 }] })
+    await loader.finalize()
+    expect(await executor.query(`SELECT toString(id) AS id, toString(base) AS base, toString(derived) AS derived, toString(copy) AS copy FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)} ORDER BY id`)).toEqual([
+      { id: '1', base: '2', derived: '12', copy: '12' },
+      { id: '2', base: '3', derived: '13', copy: '99' },
+    ])
+  })
+
+  test('preserves publication-time metadata default dependencies without publishing the staged timestamp', async () => {
+    const definition = await destination([{ name: 'observed_at', type: "DateTime64(6, 'UTC')", default: 'fn:_chkit_ingested_at' }])
+    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND name = '${definition.name}'`)).toEqual([{ name: definition.name }])
+    let staging: string | undefined
+    const observed: ClickHouseExecutor = {
+      ...executor,
+      async insert(params) {
+        staging = params.table
+        await executor.insert(params)
+      },
+      submit(sql, id, settings) {
+        expect(sql.split(' SELECT ')[0]).not.toContain('`_chkit_ingested_at`')
+        return executor.submit(sql, id, settings)
+      },
+    }
+    const loader = stagedLoader({ executor: observed, keys: ['id'], winner: 'first', concurrency: 'single-process' })({
+      table: definition, destination: createClickHouseDestination(executor), signal: new AbortController().signal, streamId: 'metadata-default', runId: 'metadata-default',
+    })
+    await loader.write({ batchId: 'metadata-default', rows: [{ id: 1, payload: 'default', _chkit_ingested_at: '1900-01-01' }] })
+    expect(staging).toBeDefined()
+    const staged = await executor.query<{ observed: string }>(`SELECT toString(observed_at) AS observed FROM ${staging}`)
+    const receipt = await loader.finalize()
+    expect(receipt).toEqual({ evidence: 'clickhouse_ack', rows: 1, writeUnits: 1 })
+    expect(await executor.query(`SELECT toString(observed_at) AS observed, _chkit_ingested_at >= observed_at AS published_after_staging, _chkit_ingested_at > toDateTime('2020-01-01') AS fresh FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)}`)).toEqual([
+      { observed: staged[0]?.observed, published_after_staging: 1, fresh: 1 },
+    ])
+  })
+
   test('nullable and float identities, missing keys and replacing engines reject explicitly', async () => {
     const definition = await destination([{ name: 'nullable', type: 'Nullable(String)' }, { name: 'floating', type: 'Float64' }])
     for (const key of ['nullable', 'floating', 'missing']) {

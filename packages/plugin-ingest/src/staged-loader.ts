@@ -95,6 +95,9 @@ const STRICT_RESULTS = {
  * scratch writes/storage, sorting and destination key reads (potentially a full
  * scan), another INSERT and cleanup: higher latency and server/client cost.
  * It does not repair preexisting duplicates or guarantee downstream view effects.
+ * Ordinary defaults resolve in scratch; generated columns and ingestion time
+ * are evaluated again at the destination. Supply explicit stable values when
+ * nondeterministic defaults must not change on replay.
  *
  * @example
  * const loader = stagedLoader({
@@ -151,9 +154,13 @@ export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
           written = true
           return
         }
-        columns = await describeDestination(executor, ctx.table.database, ctx.table.name, keys)
+        const schema = await describeDestination(executor, ctx.table.database, ctx.table.name, keys)
+        columns = schema.filter((column) => column.name !== INGESTED_AT_COLUMN && (!column.default_type || column.default_type === 'DEFAULT'))
         ctx.signal.throwIfAborted()
-        const definitions = columns.map((column) => `${quoteIdentifier(column.name)} ${column.type}${column.default_type === 'DEFAULT' ? ` DEFAULT ${column.default_expression}` : ''}`)
+        // DEFAULT expressions can reference aliases, materialized columns or
+        // ingestion time. Keep those dependencies in scratch, but never include
+        // generated columns or the staged ingestion time in the publication list.
+        const definitions = schema.map((column) => `${quoteIdentifier(column.name)} ${column.type}${column.default_type ? ` ${column.default_type} ${column.default_expression}` : ''}`)
         // No IF NOT EXISTS or batch-derived name: another attempt's scratch must
         // never become ours. A lost CREATE ACK can leave an orphan, not ownership.
         await executor.command(`CREATE TABLE ${staging} UUID ${literal(scratch.uuid)} (${definitions.join(', ')}, ${quoteIdentifier(ORDINAL)} UInt64) ENGINE = MergeTree ORDER BY tuple()`)
@@ -270,7 +277,7 @@ async function describeDestination(executor: StagedLoaderExecutor, database: str
   if (ingestedAt?.type !== "DateTime64(6, 'UTC')" || ingestedAt.default_type !== 'DEFAULT' || !["now64(6)", "now64(6,'UTC')"].includes(ingestedAt.default_expression.replaceAll(' ', ''))) {
     throw new IngestConfigError(`stagedLoader ${INGESTED_AT_COLUMN} must retain its publication-time default; include ingestionColumns unchanged`)
   }
-  return columns.filter((column) => column.name !== INGESTED_AT_COLUMN && (!column.default_type || column.default_type === 'DEFAULT'))
+  return columns
 }
 
 async function reconcile(executor: StagedLoaderExecutor, gate: PublicationGate, timeoutMs: number, signal: AbortSignal): Promise<'finished' | 'failed'> {
