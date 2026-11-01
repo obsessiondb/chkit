@@ -33,10 +33,11 @@ export async function graphql(document: string, variables: Record<string, unknow
   return requireLinearObject(body.data, 'GraphQL data')
 }
 
-/** Linear documents HTTP 400 rate errors; preserve GraphQL 200 rate errors too. */
+/** Preserve GraphQL rate errors as well as HTTP 429 rate limits. */
 export function classifyLinearError(cause: unknown): ReturnType<ErrorClassifier> {
   if (cause instanceof SyntaxError) return { kind: 'permanent' }
-  if (!(cause instanceof HttpError) || ![200, 400].includes(cause.status) || !/"code"\s*:\s*"RATELIMITED"/.test(cause.body)) return undefined
+  if (!(cause instanceof HttpError)) return undefined
+  if (cause.status !== 429 && !([200, 400].includes(cause.status) && /"code"\s*:\s*"RATELIMITED"/.test(cause.body))) return undefined
   const headers = cause.response.headers
   const resets = ['requests', 'endpoint-requests', 'complexity'].flatMap((kind) => {
     if (headers.get(`x-ratelimit-${kind}-remaining`) !== '0') return []

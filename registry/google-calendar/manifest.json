@@ -49,8 +49,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Retry Google's 403 rateLimitExceeded and userRateLimitExceeded responses with backoff like 429 instead of failing the run after one attempt.",
+            "Harden local maxChunks configuration validation by requiring a positive safe integer before pipeline construction.",
+            "Clarify native JSON normalization of explicit null paths and empty objects in stored event observations."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [

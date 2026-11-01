@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from chkit.core.jsnum import parse_js_number
 from chkit_plugin_backfill.chunking.sql import (
     build_count_sql,
     build_estimate_sql,
@@ -16,7 +17,6 @@ from chkit_plugin_backfill.chunking.types import (
     RowProbeStrategy,
     SortKey,
 )
-from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
 from chkit_plugin_backfill.time_utils import parse_planner_datetime
 
 

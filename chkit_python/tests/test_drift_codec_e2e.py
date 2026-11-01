@@ -171,8 +171,8 @@ def test_every_codec_form_migrates_without_drift_and_server_codec_changes_drift(
         payload = drift()
         assert payload["drifted"] is True
         [detail] = payload["tableDrift"]
-        assert detail["reason_codes"] == ["changed_column"]
-        assert sorted(detail["changed_columns"]) == ["lz4", "plain", "zstd3"]
+        assert detail["reasonCodes"] == ["changed_column"]
+        assert sorted(detail["changedColumns"]) == ["lz4", "plain", "zstd3"]
         assert check(1)["failedChecks"] == ["schema_drift"]
     finally:
         client.command(f"DROP TABLE IF EXISTS {obj}")

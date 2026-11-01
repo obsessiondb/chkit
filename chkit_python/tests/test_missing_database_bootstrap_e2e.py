@@ -105,7 +105,8 @@ def test_migrate_apply_creates_a_missing_database(
         assert check["database"] == database
         check_text = chkit("check")
         assert f'Database "{database}" does not exist' in check_text.stdout
-        assert check["failedChecks"] == ["pending_migrations"]
+        # As in TS, check reads the live server: every snapshot object is missing.
+        assert check["failedChecks"] == ["pending_migrations", "schema_drift"]
 
         plan = chkit_json("migrate")
         assert plan["pending"] == [migration.name]

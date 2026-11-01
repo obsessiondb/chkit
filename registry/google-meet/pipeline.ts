@@ -33,7 +33,12 @@ function resourceStream(resource: Resource, destination: typeof google_meet_conf
     id: `${config.streamPrefix}.${resource}`, tags: [`resource:${resource}`], destination,
     incremental: {
       id: checkpoint.id, version: checkpoint.version, parseState: checkpoint.parseState,
-      plan: ({ range }) => range,
+      plan: ({ range }) => {
+        for (const bound of [range?.from, range?.to]) {
+          if (bound !== undefined && (!(bound instanceof Date) || !Number.isFinite(bound.getTime()))) throw new IngestConfigError('Meet backfill bounds must be valid dates.')
+        }
+        return range
+      },
     },
     batchSize: 1,
     budget: { maxChunks: config.maxChunks, maxChunkRows: 100 },

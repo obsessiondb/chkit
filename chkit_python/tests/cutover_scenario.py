@@ -313,16 +313,13 @@ def sorting_keys(target: CutoverTarget, project: CutoverProject) -> dict[str, st
 
 
 def assert_chkit_clean() -> None:
-    """status, drift (schema and live), check (schema and live) and generate
-    --dryrun report nothing to do."""
+    """status, drift, check and generate --dryrun report nothing to do."""
     status = json_of(cli(["status", "--json"]), "status")
-    drift = json_of(cli(["drift", "--json"]), "drift")
-    live = json_of(cli(["drift", "--live", "--json"]), "drift --live")
-    check = cli(["check", "--live", "--json"])
+    live = json_of(cli(["drift", "--json"]), "drift")
+    check = cli(["check", "--json"])
     plan = json_of(cli(["generate", "--dryrun", "--json"]), "generate --dryrun")
     summary = {
         "pending": status["pending"],
-        "drifted": drift["drifted"],
         "live_drifted": live["drifted"],
         "live_missing": live["missing"],
         "check": check.exit_code,
@@ -330,7 +327,6 @@ def assert_chkit_clean() -> None:
     }
     assert summary == {
         "pending": 0,
-        "drifted": False,
         "live_drifted": False,
         "live_missing": [],
         "check": 0,

@@ -37,8 +37,15 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Add fixture-tested RateLimit-Reset seconds fallback on HTTP 429 when Retry-After is absent or not parsed by the shared HTTP parser, without changing permission failures or transcript availability handling.",
+            "Clarify native JSON normalization of explicit null paths and empty objects, including nullable transcript speakers."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [
