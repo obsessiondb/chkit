@@ -49,8 +49,15 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Report invalid calculated dates and explicit backfill dates as configuration errors before requesting data, while allowing explicit ranges that do not use lookbackHours.",
+            "Clarify token-recovery recognition, organizer-scoped conference discovery, and native JSON normalization of null paths and empty objects."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [
