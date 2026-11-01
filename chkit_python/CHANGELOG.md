@@ -132,6 +132,12 @@
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured
   ones. "Authentication failed for user ..." names the URL's user, and the invalid-URL errors
   no longer print the credentials (the protocol error prints the scheme only, as in TS).
+- `chkit query` keeps numbers in `JSON`, `Object` and `Dynamic` columns as numbers, as in TS
+  (#438). Every number in a column whose type is or contains one of them was a string,
+  floats and small integers included: `CAST('{"a": 2.5, "b": [1, 0.1]}' AS JSON)` printed
+  `{"a":"2.5","b":["1","0.1"]}`. Inside these columns a number now becomes a string of the
+  digits ClickHouse sent only when a float cannot hold it: `2.5`, `1` and `0.1` stay
+  numbers, `18446744073709551615` stays a string, in the table and in `--json`.
 - `chkit check` prints the same JSON and text as TS and judges the same way (#435).
   **Behaviour change** for `--json` readers: the payload no longer has `issues`,
   `pendingMigrations`, `checksumMismatches` or `pluginCheckResults` (use `chkit status

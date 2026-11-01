@@ -166,6 +166,44 @@ def test_query_table_prints_every_digit_like_ts(
     ]
 
 
+def test_query_json_keeps_numbers_in_json_and_dynamic_columns_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #438: a number becomes a string only when a float would change it.
+    env = resolve_live_env()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": env.clickhouse_database,
+            },
+        })
+        + ")\n"
+    )
+    sql = (
+        """SELECT CAST('{"a": 2.5, "b": [1, 0.1], "u": 18446744073709551615}' AS JSON) AS j, """
+        "CAST(toFloat64(0.1) AS Dynamic) AS d_f64, "
+        "CAST(toUInt64(18446744073709551615) AS Dynamic) AS d_u64"
+    )
+
+    result = CliRunner().invoke(app, ["query", sql, "--json"])
+
+    assert result.exit_code == 0, format_test_diagnostic("query --json failed", result)
+    assert json.loads(result.stdout)["data"] == [
+        {
+            "j": {"a": 2.5, "b": [1, 0.1], "u": "18446744073709551615"},
+            "d_f64": 0.1,
+            "d_u64": "18446744073709551615",
+        }
+    ]
+
+
 def test_a_statement_without_a_result_set_prints_no_rows_like_ts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

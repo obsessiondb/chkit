@@ -32,11 +32,19 @@ logging.getLogger("clickhouse_connect").addHandler(logging.NullHandler())
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
-# integers, Decimals, and the types that can contain them. The TS port
-# (``@chkit/clickhouse``, ``exact-json.ts``) uses the same pattern.
-_EXACT_TYPE_RE = re.compile(
-    r"\b(?:U?Int(?:64|128|256)|Decimal(?:32|64|128|256)?|JSON|Object|Dynamic)\b"
-)
+# integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
+# uses the same patterns.
+_EXACT_TYPE_RE = re.compile(r"\b(?:U?Int(?:64|128|256)|Decimal(?:32|64|128|256)?)\b")
+# Column types whose values can hold any number, from a Float64 to a UInt64
+# (#438). A number in them becomes a string only when a float would change it.
+_DYNAMIC_TYPE_RE = re.compile(r"\b(?:JSON|Object|Dynamic)\b")
+# Up to 15 significant digits always survive a float (DBL_DIG).
+_DBL_DIG = 15
+_DECIMAL_RE = re.compile(r"(-?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?")
+
+# How a column's numbers are read: as numbers, as the digits ClickHouse wrote,
+# or as digits only when a float would change them.
+_NumberMode = Literal["number", "digits", "round_trip"]
 
 
 class QueryResult(BaseModel):
@@ -418,24 +426,24 @@ def parse_json_result(body: str | bytes) -> dict[str, Any]:
     is or contains one of them, every number becomes a string of the digits
     ClickHouse sent, as ``output_format_json_quote_64bit_integers = 1`` and
     ``output_format_json_quote_decimals = 1`` would do. Sending those settings
-    instead would fail for a ``readonly = 1`` user (#402). Other numbers stay
-    numbers. A statement without a result set (DDL, ``OPTIMIZE``) has an empty
-    body, read as no rows. Same as TS ``parseJsonResult``.
+    instead would fail for a ``readonly = 1`` user (#402). In a column whose
+    type is or contains ``JSON``, ``Object`` or ``Dynamic``, only a number a
+    float would change becomes a string, as TS ``parseJsonEachRowLine`` does
+    (#438). Other numbers stay numbers. A statement without a result set (DDL,
+    ``OPTIMIZE``) has an empty body, read as no rows. Same as TS ``parseJsonResult``.
     """
     if not body.strip():
         return {"data": [], "meta": [], "rows": 0}
     parsed: dict[str, Any] = json.loads(body, parse_int=_JsonInt, parse_float=_JsonFloat)
-    exact = {
-        column["name"]
-        for column in parsed.get("meta", [])
-        if _EXACT_TYPE_RE.search(column["type"])
+    modes = {
+        column["name"]: _number_mode(column["type"]) for column in parsed.get("meta", [])
     }
 
     # Rows keyed by column name: data, totals (WITH TOTALS) and extremes.min/max.
     def restore_row(row: Any) -> Any:
         if not isinstance(row, dict):
-            return _restore(row, exact=False)
-        return {name: _restore(cell, name in exact) for name, cell in row.items()}
+            return _restore(row, "number")
+        return {name: _restore(cell, modes.get(name, "number")) for name, cell in row.items()}
 
     def restore_entry(key: str, value: Any) -> Any:
         if key == "data":
@@ -444,21 +452,55 @@ def parse_json_result(body: str | bytes) -> dict[str, Any]:
             return restore_row(value)
         if key == "extremes" and isinstance(value, dict):
             return {bound: restore_row(row) for bound, row in value.items()}
-        return _restore(value, exact=False)
+        return _restore(value, "number")
 
     return {key: restore_entry(key, value) for key, value in parsed.items()}
 
 
-def _restore(value: Any, exact: bool) -> Any:
-    if isinstance(value, _JsonInt):
-        return str(value) if exact else int(value)
-    if isinstance(value, _JsonFloat):
-        return str(value) if exact else float(value)
+def _number_mode(column_type: str) -> _NumberMode:
+    if _DYNAMIC_TYPE_RE.search(column_type):
+        return "round_trip"
+    return "digits" if _EXACT_TYPE_RE.search(column_type) else "number"
+
+
+def _restore(value: Any, mode: _NumberMode) -> Any:
+    if isinstance(value, (_JsonInt, _JsonFloat)):
+        number = int(value) if isinstance(value, _JsonInt) else float(value)
+        if mode == "number":
+            return number
+        if mode == "digits" or not _float_keeps_digits(value):
+            return str(value)
+        return number
     if isinstance(value, list):
-        return [_restore(item, exact) for item in value]
+        return [_restore(item, mode) for item in value]
     if isinstance(value, dict):
-        return {key: _restore(item, exact) for key, item in value.items()}
+        return {key: _restore(item, mode) for key, item in value.items()}
     return value
+
+
+def _float_keeps_digits(text: str) -> bool:
+    """Whether a float prints back to these digits, as TS ``roundTripNumber`` checks."""
+    if len(text) <= _DBL_DIG:
+        return True
+    return _canonical_decimal(text) == _canonical_decimal(repr(float(text)))
+
+
+def _canonical_decimal(text: str) -> str:
+    """A JSON number's value as ``<sign><significant digits>e<exponent>``.
+
+    ``100000000000000000000`` and ``1e+20``, or ``0.10`` and ``0.1``, compare
+    equal. Same as TS ``canonicalDecimal``.
+    """
+    match = _DECIMAL_RE.fullmatch(text)
+    if match is None:
+        return text
+    sign, integer = match.group(1), match.group(2)
+    fraction, exponent = match.group(3) or "", match.group(4) or "0"
+    digits = integer + fraction
+    first = next((index for index, digit in enumerate(digits) if digit != "0"), -1)
+    if first == -1:
+        return "0"
+    return f"{sign}{digits[first:].rstrip('0')}e{len(integer) - first + int(exponent)}"
 
 
 def is_unknown_database_error(error: BaseException) -> bool:
