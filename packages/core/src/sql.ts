@@ -125,8 +125,14 @@ function renderTableSQL(def: TableDefinition): string {
   return `CREATE TABLE IF NOT EXISTS ${renderQualifiedName(def.database, def.name)}\n(\n  ${body}\n) ENGINE = ${def.engine}\n${clauses.join('\n')};`
 }
 
+// Before `AS`, where ClickHouse itself stores it: after the query, the parser
+// would read `COMMENT` as an alias of a trailing `FROM <table>`.
+function renderViewComment(comment: string | undefined): string {
+  return comment ? ` COMMENT '${comment.replace(/'/g, "''")}'` : ''
+}
+
 function renderViewSQL(def: ViewDefinition): string {
-  return `CREATE VIEW IF NOT EXISTS ${renderQualifiedName(def.database, def.name)} AS\n${def.as};`
+  return `CREATE VIEW IF NOT EXISTS ${renderQualifiedName(def.database, def.name)}${renderViewComment(def.comment)} AS\n${def.as};`
 }
 
 function renderRefreshSettings(settings: Record<string, string | number>): string {
@@ -166,7 +172,7 @@ function renderMaterializedViewSQL(def: MaterializedViewDefinition): string {
   const refreshBlock = def.refresh ? `\n${renderRefreshClause(def.refresh)}` : ''
   const toClause = ` TO ${renderQualifiedName(def.to.database, def.to.name)}`
   const emptyClause = def.refresh?.empty ? ' EMPTY' : ''
-  return `${header}${refreshBlock}${toClause}${emptyClause} AS\n${def.as};`
+  return `${header}${refreshBlock}${toClause}${emptyClause}${renderViewComment(def.comment)} AS\n${def.as};`
 }
 
 /**

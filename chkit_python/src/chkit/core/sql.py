@@ -190,10 +190,19 @@ def _render_table_sql(definition: TableDefinition) -> str:
     )
 
 
+# Before `AS`, where ClickHouse itself stores it: after the query, the parser
+# would read `COMMENT` as an alias of a trailing `FROM <table>`.
+def _render_view_comment(comment: str | None) -> str:
+    if comment is None or len(comment) == 0:
+        return ""
+    escaped = comment.replace("'", "''")
+    return f" COMMENT '{escaped}'"
+
+
 def _render_view_sql(definition: ViewDefinition) -> str:
     return (
-        f"CREATE VIEW IF NOT EXISTS {definition.database}.{definition.name} AS\n"
-        f"{definition.as_};"
+        f"CREATE VIEW IF NOT EXISTS {definition.database}.{definition.name}"
+        f"{_render_view_comment(definition.comment)} AS\n{definition.as_};"
     )
 
 
@@ -244,7 +253,8 @@ def _render_materialized_view_sql(definition: MaterializedViewDefinition) -> str
     to_clause = f" TO {definition.to.database}.{definition.to.name}"
     empty_clause = " EMPTY" if (definition.refresh is not None and definition.refresh.empty) else ""
     return (
-        f"{header}{refresh_block}{to_clause}{empty_clause} AS\n{definition.as_};"
+        f"{header}{refresh_block}{to_clause}{empty_clause}"
+        f"{_render_view_comment(definition.comment)} AS\n{definition.as_};"
     )
 
 

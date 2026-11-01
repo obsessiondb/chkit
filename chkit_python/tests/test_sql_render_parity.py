@@ -35,6 +35,7 @@ from chkit import (
     table,
     view,
 )
+from chkit.core.planner import plan_diff
 from chkit.core.sql import (
     render_alter_add_column,
     render_alter_add_index,
@@ -854,16 +855,32 @@ def test_view_simple() -> None:
     assert "SELECT 1 AS x" in sql
 
 
-def test_view_with_comment_still_valid() -> None:
+def test_view_with_comment() -> None:
     v = view(
         database="default",
         name="test_view_comment",
-        as_="SELECT 1 AS x",
-        comment="A test view",
+        as_="SELECT x FROM default.t",
+        comment="it's a view",
     )
     sql = to_create_sql(v)
-    # Comment is not rendered for plain views (matches TS).
-    assert "CREATE VIEW IF NOT EXISTS default.test_view_comment AS" in sql
+    assert sql == (
+        "CREATE VIEW IF NOT EXISTS default.test_view_comment COMMENT 'it''s a view' AS\n"
+        "SELECT x FROM default.t;"
+    )
+
+
+def test_view_with_empty_comment_renders_no_comment() -> None:
+    v = view(database="default", name="v", as_="SELECT 1 AS x", comment="")
+    assert to_create_sql(v) == "CREATE VIEW IF NOT EXISTS default.v AS\nSELECT 1 AS x;"
+
+
+def test_view_comment_change_recreates_with_the_new_comment() -> None:
+    plan = plan_diff(
+        [view(database="default", name="v", as_="SELECT 1 AS x", comment="old")],
+        [view(database="default", name="v", as_="SELECT 1 AS x", comment="new")],
+    )
+    assert [op.type for op in plan.operations] == ["drop_view", "create_view"]
+    assert "COMMENT 'new'" in plan.operations[1].sql
 
 
 # ---------- CREATE MATERIALIZED VIEW ----------
@@ -880,6 +897,36 @@ def test_materialized_view_to_target() -> None:
     assert "CREATE MATERIALIZED VIEW IF NOT EXISTS default.test_mv" in sql
     assert "TO default.target_table" in sql
     assert "SELECT id, count() AS cnt FROM default.source GROUP BY id" in sql
+
+
+def test_materialized_view_with_comment() -> None:
+    mv = materialized_view(
+        database="default",
+        name="mv",
+        to=TableRef(database="default", name="t"),
+        as_="SELECT 1 AS x",
+        comment="mv",
+    )
+    assert to_create_sql(mv) == (
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS default.mv TO default.t COMMENT 'mv' AS\n"
+        "SELECT 1 AS x;"
+    )
+
+
+def test_refreshable_mv_with_comment() -> None:
+    mv = materialized_view(
+        database="default",
+        name="rmv",
+        to=TableRef(database="default", name="t"),
+        refresh=MaterializedViewRefresh(every="1 HOUR", append=True, empty=True),
+        as_="SELECT 1 AS x",
+        comment="rmv",
+    )
+    assert to_create_sql(mv) == (
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS default.rmv\n"
+        "REFRESH EVERY 1 HOUR APPEND TO default.t EMPTY COMMENT 'rmv' AS\n"
+        "SELECT 1 AS x;"
+    )
 
 
 def test_refreshable_mv_every() -> None:

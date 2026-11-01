@@ -1876,6 +1876,59 @@ describe('@chkit/core refreshable materialized views', () => {
   })
 })
 
+describe('@chkit/core view comments', () => {
+  test('renders a view comment before AS, escaped like a table comment', () => {
+    const sql = toCreateSQL(
+      view({ database: 'app', name: 'v', as: 'SELECT a FROM app.t', comment: "it's a view" })
+    )
+    expect(sql).toBe("CREATE VIEW IF NOT EXISTS app.v COMMENT 'it''s a view' AS\nSELECT a FROM app.t;")
+  })
+
+  test('renders a materialized view comment after TO', () => {
+    const sql = toCreateSQL(
+      materializedView({
+        database: 'app',
+        name: 'mv',
+        to: { database: 'app', name: 't' },
+        as: 'SELECT 1 AS x',
+        comment: 'mv',
+      })
+    )
+    expect(sql).toBe("CREATE MATERIALIZED VIEW IF NOT EXISTS app.mv TO app.t COMMENT 'mv' AS\nSELECT 1 AS x;")
+  })
+
+  test('renders a refreshable materialized view comment after EMPTY', () => {
+    const sql = toCreateSQL(
+      materializedView({
+        database: 'app',
+        name: 'rmv',
+        to: { database: 'app', name: 't' },
+        refresh: { every: '1 HOUR', append: true, empty: true },
+        as: 'SELECT 1 AS x',
+        comment: 'rmv',
+      })
+    )
+    expect(sql).toBe(
+      "CREATE MATERIALIZED VIEW IF NOT EXISTS app.rmv\nREFRESH EVERY 1 HOUR APPEND TO app.t EMPTY COMMENT 'rmv' AS\nSELECT 1 AS x;"
+    )
+  })
+
+  test('a view without a comment renders no COMMENT clause', () => {
+    expect(toCreateSQL(view({ database: 'app', name: 'v', as: 'SELECT 1 AS a', comment: '' }))).toBe(
+      'CREATE VIEW IF NOT EXISTS app.v AS\nSELECT 1 AS a;'
+    )
+  })
+
+  test('a comment change recreates the view with the new comment', () => {
+    const plan = planDiff(
+      [view({ database: 'app', name: 'v', as: 'SELECT 1 AS a', comment: 'old' })],
+      [view({ database: 'app', name: 'v', as: 'SELECT 1 AS a', comment: 'new' })]
+    )
+    expect(plan.operations.map((op) => op.type)).toEqual(['drop_view', 'create_view'])
+    expect(plan.operations[1]?.sql).toContain("COMMENT 'new'")
+  })
+})
+
 describe('@chkit/core dictionaries', () => {
   const baseDictionary = {
     database: 'app',
