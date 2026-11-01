@@ -43,7 +43,7 @@ chkit generate --name init           # diff schema vs snapshot -> writes migrati
 chkit migrate --apply                # apply pending, journal in ClickHouse _chkit_migrations
 chkit status                         # show applied / pending counts
 chkit check --strict                 # CI gate (pending, drift, checksum)
-chkit drift                          # snapshot vs current schema diff
+chkit drift                          # snapshot vs live database diff
 ```
 
 `clickhouse.config.py` reads its credentials from `os.environ.get(...)` by

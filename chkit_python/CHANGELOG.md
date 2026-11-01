@@ -67,7 +67,7 @@
   (#278). Constraints render in `CREATE TABLE`, plan `ADD`/`DROP CONSTRAINT` (risk
   `caution`, with a warning; a changed one is dropped and re-added), get `ON CLUSTER`, and
   migrate waits until every replica shows them. `pull` and `drift --live` read both;
-  drift reports `constraint_mismatch` with `constraint_diffs`.
+  drift reports `constraint_mismatch` with `constraintDiffs`.
 - `chkit snapshot rebuild [--dryrun] [--json]` rewrites `snapshot.json` from the schema
   definitions after a merge or rebase conflict, reports added, removed and changed
   entries, and prints git review and restore commands.
@@ -139,6 +139,32 @@
   Exception` warning. Unlike TS, these messages leave out credentials written in the URL.
   `format_connection_error` now returns `None` for an error it does not recognize, and
   `wrap_connection_error` raises instead of returning the error.
+- `chkit drift` and `chkit check` compare the snapshot with the live server by default, as
+  in TS (#405). **Behaviour change:** without `--live`, `check` now reports `schema_drift`
+  (e.g. `missing_object` for a migration not yet applied) and `drift` prints the live
+  comparison (`missing`, `extra`, `objectDrift`, `tableDrift`, now with `scope`). `--live`
+  is still accepted and does nothing. Both now need a `clickhouse` block or a selected
+  ObsessionDB service; `drift` without a snapshot still exits 1. The offline comparison of
+  the schema files with the snapshot is removed, as TS has none: `drift --json` no longer
+  returns `operations` / `renameSuggestions` / `issues`, `check --json` no longer returns
+  `driftOperations` / `liveDrifted`, and a schema change that `generate` has not written
+  yet (including a Kafka change that requires replacement) is no longer drift; run
+  `chkit generate --dryrun` to see it. `check --json` always includes `driftReasonCounts`
+  and `driftReasonTotals` (whose `object` / `table` counts were always 0 before). A
+  `--table` selector that matches no snapshot table makes both commands a no-op with a
+  `warning`, as in TS, instead of comparing every table.
+- `chkit drift --live` prints the same JSON and text as TS (#410). **Behaviour change** for
+  `--json` readers: `objectDrift` entries use `expectedKind` / `actualKind` and leave out
+  unset fields instead of writing `null`, `tableDrift` entries use camelCase keys
+  (`reasonCodes`, `missingColumns`, `constraintDiffs`, ...), the payload starts with the
+  `scope` object, `snapshotFile` is an absolute path, and `databaseMissing` / `database`
+  come right after `drifted`. The text output has the TS sections and wording: `Missing
+  objects:`, `Unexpected objects:`, `Kind mismatches:` with `expected=... actual=...`,
+  `Object drift reasons:` for every object code (it was `View drift:`, with only
+  `query_mismatch` / `target_mismatch`), a `Table shape drift:` block with one line per
+  difference, and the `Table scope:` lines; it no longer prints `Snapshot file:`. A
+  `--table` selector that matches no table is a no-op that says so (with `warning` under
+  `--json`), as in TS; before, it compared every table.
 - `chkit drift` and `chkit check --live` compare a column's type as rendered, as in TS
   (#409, port of #275), so `type="Nullable(Int64)"` and `type="Int64", nullable=True` both
   match a live `Nullable(Int64)` column. Before, a column spelled `Nullable(...)` inline
