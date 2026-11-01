@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit generate` compares a column's type as rendered, as in TS (#433, port of #275), so
+  switching between `type="Nullable(Int64)"` and `type="Int64", nullable=True` plans
+  nothing. Before, it wrote a `MODIFY COLUMN` migration that changed nothing. A change to
+  nullability, to the underlying type or to a nested `Nullable` wrapper (such as
+  `LowCardinality(Nullable(String))`) still plans `MODIFY COLUMN`. Column rename
+  suggestions and codec removals match across both spellings too.
 - The typed `GCD` codec is a preprocessing codec, as in TS (#408). ClickHouse rejects a lone
   `CODEC(GCD)` because GCD does not compress, and chkit-py classed it as a general codec, so
   no typed GCD chain was valid: `[{"kind": "GCD"}, {"kind": "LZ4"}]` now validates and
