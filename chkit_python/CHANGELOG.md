@@ -67,7 +67,7 @@
   (#278). Constraints render in `CREATE TABLE`, plan `ADD`/`DROP CONSTRAINT` (risk
   `caution`, with a warning; a changed one is dropped and re-added), get `ON CLUSTER`, and
   migrate waits until every replica shows them. `pull` and `drift --live` read both;
-  drift reports `constraint_mismatch` with `constraint_diffs`.
+  drift reports `constraint_mismatch` with `constraintDiffs`.
 - `chkit snapshot rebuild [--dryrun] [--json]` rewrites `snapshot.json` from the schema
   definitions after a merge or rebase conflict, reports added, removed and changed
   entries, and prints git review and restore commands.
@@ -127,6 +127,18 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit drift --live` prints the same JSON and text as TS (#410). **Behaviour change** for
+  `--json` readers: `objectDrift` entries use `expectedKind` / `actualKind` and leave out
+  unset fields instead of writing `null`, `tableDrift` entries use camelCase keys
+  (`reasonCodes`, `missingColumns`, `constraintDiffs`, ...), the payload starts with the
+  `scope` object, `snapshotFile` is an absolute path, and `databaseMissing` / `database`
+  come right after `drifted`. The text output has the TS sections and wording: `Missing
+  objects:`, `Unexpected objects:`, `Kind mismatches:` with `expected=... actual=...`,
+  `Object drift reasons:` for every object code (it was `View drift:`, with only
+  `query_mismatch` / `target_mismatch`), a `Table shape drift:` block with one line per
+  difference, and the `Table scope:` lines; it no longer prints `Snapshot file:`. A
+  `--table` selector that matches no table is a no-op that says so (with `warning` under
+  `--json`), as in TS; before, it compared every table.
 - `chkit drift` and `chkit check --live` compare a column's type as rendered, as in TS
   (#409, port of #275), so `type="Nullable(Int64)"` and `type="Int64", nullable=True` both
   match a live `Nullable(Int64)` column. Before, a column spelled `Nullable(...)` inline
