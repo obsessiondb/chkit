@@ -291,3 +291,30 @@ test('Calendar factory rejects source changes under an existing stream prefix be
   expect(result.streams[0]?.error).toContain('scope changed')
   expect(requests).toBe(2)
 })
+
+test('Calendar retries Google 403 rate-limit reasons like 429 and keeps other 403 responses permanent', async () => {
+  for (const [reason, retried] of [['rateLimitExceeded', true], ['userRateLimitExceeded', true], ['forbidden', false], ['quotaExceeded', false]] as const) {
+    let rejected = false
+    const requests: string[] = []
+    const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, { config: googleCalendarConfig, token: () => 'fixture', fetch: async (input) => {
+      const url = new URL(input)
+      if (!url.pathname.endsWith('/events')) return Response.json({ id: 'calendar@example.com' })
+      requests.push(url.pathname)
+      if (rejected) return Response.json({ items: [{ id: 'after-limit' }], nextSyncToken: 'sync-1' })
+      rejected = true
+      return Response.json({ error: { errors: [{ domain: 'usageLimits', reason, message: reason }], code: 403, message: reason } }, { status: 403, headers: { 'Retry-After': '0' } })
+    } })
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    const result = await runIngestion({ selected: selectStreams([{ ...pipeline, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } }], []), backfill: undefined }, { journal, destination })
+    expect(result.ok, reason).toBe(retried)
+    expect(requests, reason).toHaveLength(retried ? 2 : 1)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass), reason).toEqual(retried ? ['rate_limited'] : [])
+    expect(destination.tables.get('default.google_calendar_events_raw')?.length ?? 0, reason).toBe(retried ? 1 : 0)
+  }
+})
+
+test('Calendar factory rejects an invalid chunk budget before any request', () => {
+  for (const maxChunks of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+    expect(() => createGoogleCalendarPipeline({ ...googleCalendarConfig, maxChunks }, { config: googleCalendarConfig, token: () => 'fixture', fetch: async () => { throw new Error('must not fetch') } })).toThrow('maxChunks')
+  }
+})

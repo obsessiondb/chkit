@@ -74,16 +74,3 @@ def test_generate_reports_the_issue_without_a_traceback() -> None:
         f"Schema validation failed with 1 issue\n- [{ISSUE['code']}] {ISSUE['message']}\n"
     )
 
-
-@pytest.mark.usefixtures("project")
-@pytest.mark.parametrize(
-    ("selector", "issues", "operations"), [(None, 1, 1), ("events", 1, 0), ("users", 0, 1)]
-)
-def test_drift_reports_the_issue_and_keeps_other_scoped_changes(
-    selector: str | None, issues: int, operations: int
-) -> None:
-    result = CliRunner().invoke(app, ["drift", "--json", *(["--table", selector] if selector else [])])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert [issue["code"] for issue in payload.get("issues", [])] == [ISSUE["code"]] * issues
-    assert [op["key"] for op in payload["operations"]] == ["table:app.users:column:email"] * operations

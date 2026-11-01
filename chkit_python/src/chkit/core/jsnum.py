@@ -1,7 +1,8 @@
-"""JS number semantics for boundary math.
+"""JS number semantics for boundary math and query output.
 
 The chunking planner does its numeric/datetime boundary arithmetic with JS
-``Number`` (float64) + ``String(n)`` round-trips. Python floats are the same
+``Number`` (float64) + ``String(n)`` round-trips, and ``chkit query`` prints
+floats as TS prints a JS number. Python floats are the same
 IEEE-754 doubles, but ``str(float)`` formats differently (``43.0`` vs ``43``,
 e-notation thresholds, shortest-digits vs exact-integer digits above 2^53).
 These helpers pin the JS behaviour so boundary strings emitted by the Python

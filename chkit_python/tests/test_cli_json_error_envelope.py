@@ -55,7 +55,7 @@ def _raise_connection_refused(*_args: Any, **_kwargs: Any) -> Any:
     [
         ("status", status, ["status", "--json"]),
         ("check", check, ["check", "--json"]),
-        ("drift", drift, ["drift", "--live", "--json"]),
+        ("drift", drift, ["drift", "--json"]),
         ("pull", pull, ["pull", "--json"]),
     ],
 )
@@ -204,7 +204,8 @@ def test_drift_payload_is_wrapped_and_marks_json_emitted(
     assert CliRunner().invoke(app, ["generate"]).exit_code == 0
     _reset_for_testing()
 
-    result = CliRunner().invoke(app, ["drift", "--json"])
+    # A selector matching no snapshot table returns before reading the server.
+    result = CliRunner().invoke(app, ["drift", "--json", "--table", "missing"])
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
