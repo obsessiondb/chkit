@@ -98,6 +98,23 @@ test.serial('build, list and inspect roundtrip through the CLI without importing
   expect(inspectText.stdout).not.toContain('Guide:')
   expect(inspectText.stdout).not.toContain('Logo:')
   expect(inspectText.stdout).not.toContain('Changelog:')
+
+  const closedServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
+  const unavailableUrl = new URL('registry.json', closedServer.url).href
+  await closedServer.stop(true)
+  const [missing, unsupported, unreachable] = await Promise.all([
+    runCli(fixture.project, ['add', 'nope', '--registry', output, '--json']),
+    runCli(fixture.project, ['add', 'fixture', '--registry', output, '--output', 'x', '--json']),
+    runCli(fixture.project, ['registry', 'list', '--registry', unavailableUrl, '--json']),
+  ])
+  expect(missing.exitCode).toBe(1)
+  expect(JSON.parse(missing.stdout).error.message).toBe(
+    `Template nope is not in registry ${output}: ${join(output, 'nope.json')} does not exist. Run chkit registry list --registry ${output} to see its templates.`,
+  )
+  expect(unsupported.exitCode).toBe(1)
+  expect(JSON.parse(unsupported.stdout).error.message).toBe('--output is not supported by chkit add')
+  expect(unreachable.exitCode).toBe(1)
+  expect(JSON.parse(unreachable.stdout).error.message).toBe(`Registry request failed for ${unavailableUrl}: ECONNREFUSED. Check the network connection or pass --registry with a reachable catalog.`)
 })
 
 test.serial('inspect shows the integration changelog in human and JSON output', async () => {

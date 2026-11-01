@@ -254,4 +254,33 @@ describe('runResolvedCommand', () => {
 			args: ['service', 'alias', 'set', 'login', 'production'],
 		})
 	})
+
+	test('reports the unmatched subcommand token instead of silently showing help', async () => {
+		const { runtime } = makeRuntime()
+		let ran = 0
+		runtime.runPluginCommand = async () => { ran += 1; return 0 }
+		const tokens: Array<string | undefined> = []
+		const resolved: RegisteredCommand = {
+			name: 'ingest',
+			description: '',
+			flags: [],
+			pluginFlags: [],
+			pluginName: 'ingest',
+			subcommands: ['run', 'list'].map((name) => ({ name, description: '', flags: [], pluginFlags: [], pluginName: 'ingest' })),
+		}
+		for (const argv of [['ingest', 'statsu', '--json'], ['ingest', '--json'], ['ingest']]) {
+			await runResolvedCommand({
+				argv,
+				commandName: 'ingest',
+				resolved,
+				registry: makeRegistry(),
+				config: TEST_CONFIG,
+				configPath: '/tmp/clickhouse.config.ts',
+				pluginRuntime: runtime,
+				onAmbiguousPluginSubcommand: (token) => { tokens.push(token) },
+			})
+		}
+		expect(tokens).toEqual(['statsu', undefined, undefined])
+		expect(ran).toBe(0)
+	})
 })
