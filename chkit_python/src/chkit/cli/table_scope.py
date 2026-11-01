@@ -194,14 +194,12 @@ def resolve_table_scope(
 
 
 def scope_to_payload(scope: TableScope) -> dict[str, object]:
-    """The TS ``TableScope`` JSON shape (``selector`` only when set)."""
-    payload: dict[str, object] = {
-        "enabled": scope.enabled,
-        "matchedTables": list(scope.matched_tables),
-        "matchCount": scope.match_count,
-    }
+    """The TS ``TableScope`` JSON shape and key order (``selector`` only when set)."""
+    payload: dict[str, object] = {"enabled": scope.enabled}
     if scope.selector is not None:
         payload["selector"] = scope.selector
+    payload["matchedTables"] = list(scope.matched_tables)
+    payload["matchCount"] = scope.match_count
     return payload
 
 

@@ -7,6 +7,7 @@ is accepted for scripts written when it was required.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -19,6 +20,7 @@ from chkit.cli.command_target import (
     open_client,
     resolve_plugin_executor,
 )
+from chkit.cli.commands.drift_compare import ObjectDriftDetail, TableDriftDetail
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json, emit_json_error
@@ -64,7 +66,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="drift"))
-    meta_dir = Path(config.meta_dir)
+    # Absolute, as TS resolves it, so ``snapshotFile`` reads the same in both CLIs.
+    meta_dir = Path(os.path.abspath(config.meta_dir))
     snapshot = read_snapshot(meta_dir)
     if snapshot is None:
         msg = "Snapshot not found. Run `chkit generate` before drift checks."
@@ -79,26 +82,22 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     if table_scope.enabled and table_scope.match_count == 0:
         warning = f'No tables matched selector "{table_scope.selector or ""}".'
         if output_json:
-            emit_json(
-                "drift",
-                {
-                    "scope": scope_to_payload(table_scope),
-                    "snapshotFile": str(meta_dir / "snapshot.json"),
-                    "expectedCount": 0,
-                    "actualCount": 0,
-                    "drifted": False,
-                    "missing": [],
-                    "extra": [],
-                    "kindMismatches": [],
-                    "objectDrift": [],
-                    "tableDrift": [],
-                    "warning": warning,
-                },
-            )
+            emit_json("drift", {
+                "scope": scope_to_payload(table_scope),
+                "snapshotFile": str(meta_dir / "snapshot.json"),
+                "expectedCount": 0,
+                "actualCount": 0,
+                "drifted": False,
+                "missing": [],
+                "extra": [],
+                "kindMismatches": [],
+                "objectDrift": [],
+                "tableDrift": [],
+                "warning": warning,
+            })
             return
         typer.echo(f"{warning} Drift check is a no-op.")
         return
-
     executor = resolve_plugin_executor(
         load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
         config,
@@ -129,15 +128,18 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         "expectedCount": payload_obj.expected_count,
         "actualCount": payload_obj.actual_count,
         "drifted": payload_obj.drifted,
-        "missing": payload_obj.missing,
-        "extra": payload_obj.extra,
-        "kindMismatches": [asdict(m) for m in payload_obj.kind_mismatches],
-        "objectDrift": [asdict(d) for d in payload_obj.object_drift],
-        "tableDrift": [asdict(d) for d in payload_obj.table_drift],
     }
     if payload_obj.database_missing:
         payload_dict["databaseMissing"] = True
-        payload_dict["database"] = payload_obj.database
+        if payload_obj.database is not None:
+            payload_dict["database"] = payload_obj.database
+    payload_dict.update({
+        "missing": payload_obj.missing,
+        "extra": payload_obj.extra,
+        "kindMismatches": [asdict(m) for m in payload_obj.kind_mismatches],
+        "objectDrift": [_object_drift_json(d) for d in payload_obj.object_drift],
+        "tableDrift": [_table_drift_json(d) for d in payload_obj.table_drift],
+    })
     if output_json:
         emit_json("drift", payload_dict)
         return
@@ -145,37 +147,112 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         typer.echo(
             f'⚠ Database "{payload_obj.database or ""}" does not exist on the target server.'
         )
-    typer.echo(f"Snapshot file:       {payload_obj.snapshot_file}")
-    typer.echo(f"Expected objects:    {payload_obj.expected_count}")
-    typer.echo(f"Actual objects:      {payload_obj.actual_count}")
-    typer.echo(f"Drifted:             {'yes' if payload_obj.drifted else 'no'}")
+        typer.echo("  It will be created when you run: chkit migrate --apply\n")
+    typer.echo(f"Expected objects: {payload_obj.expected_count}")
+    typer.echo(f"Actual objects:   {payload_obj.actual_count}")
+    typer.echo(f"Drifted:          {'yes' if payload_obj.drifted else 'no'}")
+    if table_scope.enabled:
+        typer.echo(
+            f"Table scope:      {table_scope.selector or ''} "
+            f"({table_scope.match_count} matched)"
+        )
+        for matched in table_scope.matched_tables:
+            typer.echo(f"- {matched}")
     if payload_obj.missing:
         typer.echo("")
-        typer.echo("Missing (in snapshot, not in DB):")
+        typer.echo("Missing objects:")
         for item in payload_obj.missing:
             typer.echo(f"- {item}")
     if payload_obj.extra:
         typer.echo("")
-        typer.echo("Extra (in DB, not in snapshot):")
+        typer.echo("Unexpected objects:")
         for item in payload_obj.extra:
             typer.echo(f"- {item}")
     if payload_obj.kind_mismatches:
         typer.echo("")
         typer.echo("Kind mismatches:")
         for m in payload_obj.kind_mismatches:
-            typer.echo(f"- {m.object}: expected {m.expected}, got {m.actual}")
-    view_drift = [
-        d for d in payload_obj.object_drift if d.code in ("query_mismatch", "target_mismatch")
-    ]
-    if view_drift:
+            typer.echo(f"- {m.object}: expected={m.expected} actual={m.actual}")
+    if payload_obj.object_drift:
         typer.echo("")
-        typer.echo("View drift:")
-        for d in view_drift:
+        typer.echo("Object drift reasons:")
+        for d in payload_obj.object_drift:
+            if d.code == "kind_mismatch":
+                typer.echo(
+                    f"- {d.code} {d.object}: expected={d.expected_kind or ''} "
+                    f"actual={d.actual_kind or ''}"
+                )
+                continue
             typer.echo(f"- {d.code} {d.object}")
-            typer.echo(f"  expected={d.expected or ''}")
-            typer.echo(f"  actual={d.actual or ''}")
+            if d.code in ("query_mismatch", "target_mismatch"):
+                typer.echo(f"  expected={d.expected or ''}")
+                typer.echo(f"  actual={d.actual or ''}")
     if payload_obj.table_drift:
         typer.echo("")
         typer.echo("Table shape drift:")
         for detail in payload_obj.table_drift:
-            typer.echo(f"- {detail.table}: {', '.join(detail.reason_codes)}")
+            _echo_table_drift(detail)
+
+
+def _object_drift_json(detail: ObjectDriftDetail) -> dict[str, object]:
+    """camelCase keys; unset fields are left out, as TS does, not written as null."""
+    fields: dict[str, object] = {
+        "code": detail.code,
+        "object": detail.object,
+        "expectedKind": detail.expected_kind,
+        "actualKind": detail.actual_kind,
+        "expected": detail.expected,
+        "actual": detail.actual,
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _table_drift_json(detail: TableDriftDetail) -> dict[str, object]:
+    """camelCase keys in the TS ``TableDriftDetail`` order."""
+    return {
+        "table": detail.table,
+        "reasonCodes": detail.reason_codes,
+        "missingColumns": detail.missing_columns,
+        "extraColumns": detail.extra_columns,
+        "changedColumns": detail.changed_columns,
+        "settingDiffs": detail.setting_diffs,
+        "indexDiffs": detail.index_diffs,
+        "ttlMismatch": detail.ttl_mismatch,
+        "engineMismatch": detail.engine_mismatch,
+        "primaryKeyMismatch": detail.primary_key_mismatch,
+        "orderByMismatch": detail.order_by_mismatch,
+        "uniqueKeyMismatch": detail.unique_key_mismatch,
+        "partitionByMismatch": detail.partition_by_mismatch,
+        "projectionDiffs": detail.projection_diffs,
+        "constraintDiffs": detail.constraint_diffs,
+    }
+
+
+def _echo_table_drift(detail: TableDriftDetail) -> None:
+    typer.echo(f"- {detail.table}")
+    lists = {
+        "missingColumns": detail.missing_columns,
+        "extraColumns": detail.extra_columns,
+        "changedColumns": detail.changed_columns,
+        "settingDiffs": detail.setting_diffs,
+        "indexDiffs": detail.index_diffs,
+    }
+    for name, values in lists.items():
+        if values:
+            typer.echo(f"  {name}={','.join(values)}")
+    flags = {
+        "ttlMismatch": detail.ttl_mismatch,
+        "engineMismatch": detail.engine_mismatch,
+        "primaryKeyMismatch": detail.primary_key_mismatch,
+        "orderByMismatch": detail.order_by_mismatch,
+        "uniqueKeyMismatch": detail.unique_key_mismatch,
+        "partitionByMismatch": detail.partition_by_mismatch,
+    }
+    for name, flag in flags.items():
+        if flag:
+            typer.echo(f"  {name}=true")
+    if detail.projection_diffs:
+        typer.echo(f"  projectionDiffs={','.join(detail.projection_diffs)}")
+    if detail.constraint_diffs:
+        typer.echo(f"  constraintDiffs={','.join(detail.constraint_diffs)}")
+    typer.echo(f"  reasonCodes={','.join(detail.reason_codes)}")

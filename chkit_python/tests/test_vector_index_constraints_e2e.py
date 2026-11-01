@@ -189,13 +189,13 @@ def test_vector_index_and_constraints_round_trip(  # noqa: PLR0915
         client.command(f"ALTER TABLE {full_name} DROP INDEX embedding_hnsw")
         out_of_band = drift_until(
             lambda p: bool(p["tableDrift"])
-            and len(p["tableDrift"][0]["constraint_diffs"]) == 2
-            and len(p["tableDrift"][0]["index_diffs"]) == 1
+            and len(p["tableDrift"][0]["constraintDiffs"]) == 2
+            and len(p["tableDrift"][0]["indexDiffs"]) == 1
         )
         detail = out_of_band["tableDrift"][0]
-        assert detail["reason_codes"] == ["index_mismatch", "constraint_mismatch"]
-        assert detail["constraint_diffs"] == ["dimension", "extra"]
-        assert detail["index_diffs"] == ["embedding_hnsw"]
+        assert detail["reasonCodes"] == ["index_mismatch", "constraint_mismatch"]
+        assert detail["constraintDiffs"] == ["dimension", "extra"]
+        assert detail["indexDiffs"] == ["embedding_hnsw"]
         client.command(f"ALTER TABLE {full_name} DROP CONSTRAINT extra")
         client.command(f"ALTER TABLE {full_name} ADD CONSTRAINT dimension CHECK length(embedding) = 4")
         client.command(
