@@ -32,7 +32,7 @@ this invocation (see [Per-command override](/obsessiondb/services/#per-command-o
 
 The command requires an executor — if no `clickhouse` config is present and no plugin supplies one, it exits with an error.
 
-`chkit query` sends no ClickHouse settings with the query, so a read-only user (`readonly = 1` or `readonly = 2`) can run it.
+Over the `clickhouse` connection, `chkit query` asks ClickHouse for progress headers every 30 seconds (`send_progress_in_http_headers`, `http_headers_progress_interval_ms`), which keep a long query's connection open through a proxy or load balancer with an idle timeout. A `readonly = 1` user cannot change any setting, so chkit checks the user's `readonly` level once and sends that user no settings. A read-only user (`readonly = 1` or `readonly = 2`) can run `chkit query`.
 
 ### Statements
 

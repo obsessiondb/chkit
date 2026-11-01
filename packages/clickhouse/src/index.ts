@@ -612,16 +612,36 @@ function logProfiling(
 
 // Sent with every request. wait_end_of_query is an HTTP parameter, not a
 // setting, so a readonly = 1 user, who cannot change any setting, can send it
-// too: reads carry nothing else (#402).
+// too (#402).
 const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 	wait_end_of_query: 1,
+}
+
+// Progress headers keep a long query's connection alive through proxies with
+// an idle timeout (often 60 s), since wait_end_of_query holds back the body.
+// Node and Bun reject a response once its headers pass ~16 KB, which the
+// default 100 ms interval reaches after about 10 s, so send one every 30 s.
+const PROGRESS_SETTINGS: ClickHouseSettings = {
+	send_progress_in_http_headers: 1,
+	http_headers_progress_interval_ms: '30000',
 }
 
 // Sent with writes only (command and insert): no asynchronous INSERTs, and
 // progress headers that keep a long migration's connection alive.
 const WRITE_SETTINGS: ClickHouseSettings = {
 	async_insert: 0,
-	send_progress_in_http_headers: 1,
+	...PROGRESS_SETTINGS,
+}
+
+// A readonly = 1 user cannot change any setting: ClickHouse rejects a query
+// that carries one with READONLY (164). readonly = 2 allows them.
+async function canChangeSettings(client: ClickHouseClient): Promise<boolean> {
+	const result = await client.query({
+		query: "SELECT getSetting('readonly') AS readonly",
+		format: 'JSONEachRow',
+	})
+	const row: { readonly: string | number } = JSON.parse((await result.text()).trim())
+	return Number(row.readonly) !== 1
 }
 
 // chkit emits its own clean, one-line connection errors (see wrapConnectionError).
@@ -694,6 +714,20 @@ export function createExecutorWithClient(
 	})
 	let compressedClient: ClickHouseClient | undefined
 
+	// Reads add the progress settings unless the user cannot change settings,
+	// looked up once per executor. A failed lookup is not cached: the database
+	// may not exist yet (#370).
+	let settingsChangeable: Promise<boolean> | undefined
+	async function readSettings(
+		settings?: ClickHouseSettings,
+	): Promise<ClickHouseSettings | undefined> {
+		settingsChangeable ??= canChangeSettings(client).catch((error: unknown) => {
+			settingsChangeable = undefined
+			throw error
+		})
+		return (await settingsChangeable) ? { ...PROGRESS_SETTINGS, ...settings } : settings
+	}
+
 	return {
 		async command(sql: string, settings?: ClickHouseSettings): Promise<void> {
 			try {
@@ -740,11 +774,12 @@ export function createExecutorWithClient(
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
+				const clickhouseSettings = await readSettings(settings)
 				const result = await client.query({
 					query: sql,
 					format: 'JSONEachRow',
 					http_headers: { 'X-DDL': '1' },
-					...(settings ? { clickhouse_settings: settings } : {}),
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 				// Check headers before decoding the body. With
 				// send_progress_in_http_headers=1, ClickHouse can return HTTP 200
@@ -778,11 +813,12 @@ export function createExecutorWithClient(
 			settings?: ClickHouseSettings,
 		): Promise<ClickHouseJsonQueryResult<T>> {
 			try {
+				const clickhouseSettings = await readSettings(settings)
 				const result = await client.query({
 					query: sql,
 					format: 'JSON',
 					http_headers: { 'X-DDL': '1' },
-					...(settings ? { clickhouse_settings: settings } : {}),
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
