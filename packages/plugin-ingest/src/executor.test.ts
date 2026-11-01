@@ -10,7 +10,7 @@ import { cursorState, timestampWindow } from './incremental.js'
 import { paginate } from './paginate.js'
 import { definePipeline, defineStream, selectStreams } from './registry.js'
 import { createMemoryDestination, createMemoryJournal } from './testing.js'
-import type { DestinationAdapter } from './types.js'
+import type { DestinationAdapter, FetchContext } from './types.js'
 
 const events = table({
   database: 'app',
@@ -716,6 +716,126 @@ describe('runtime contracts', () => {
     expect(inserts).toEqual([['work_planned', 'attempt_started'], ['batch_committed'], ['work_finished']])
     const sequences = journal.events.filter((event) => event.namespaceId === 'app.events').map((event) => event.eventSeq)
     expect(sequences).toEqual([1, 2, 3, 4])
+  })
+
+  test('a read() that does not return an async iterable fails as a configuration error without reader retries', async () => {
+    const journal = createMemoryJournal()
+    let readers = 0
+    const stream = defineStream({
+      id: 'app.sync_reader', destination: events, retry: { retries: 2, minTimeout: 0, randomize: false },
+      read: () => {
+        readers += 1
+        return [{ rows: [{ id: 1 }] }] as unknown as AsyncIterable<{ rows: Array<{ id: number }> }>
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'Stream "app.sync_reader": read() must return an async iterable such as an async generator.' })
+    expect(readers).toBe(1)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+  })
+
+  test('reads an async-iterator getter once and preserves its receiver', async () => {
+    let lookups = 0
+    const destination = createMemoryDestination()
+    const stream = defineStream({
+      id: 'app.iterator_getter', destination: events,
+      read: () => ({
+        id: 7,
+        get [Symbol.asyncIterator]() {
+          lookups += 1
+          return async function* (this: { id: number }) {
+            yield { rows: [{ id: this.id }] }
+          }
+        },
+      }),
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
+    expect(result.ok).toBe(true)
+    expect(lookups).toBe(1)
+    expect(destination.tables.get('app.events')?.map((row) => row.id)).toEqual([7])
+  })
+
+  test.each([
+    ['completes', { outcome: 'succeeded', rows: 1, error: undefined }],
+    ['fails', { outcome: 'failed', rows: 0, error: 'reader exploded' }],
+  ] as const)('a custom iterator whose return() throws synchronously keeps the outcome of a reader that %s', async (mode, expected) => {
+    const destination = createMemoryDestination()
+    let returns = 0
+    const stream = defineStream({
+      id: 'app.custom_iterator', destination: events, retry: { retries: 0 },
+      read: () => ({
+        [Symbol.asyncIterator]() {
+          let pulled = false
+          return {
+            async next() {
+              if (pulled && mode === 'fails') throw new Error('reader exploded')
+              if (pulled) return { value: undefined, done: true as const }
+              pulled = true
+              return { value: { rows: [{ id: 1 }] }, done: false as const }
+            },
+            return(): Promise<IteratorResult<{ rows: Array<{ id: number }> }>> {
+              returns += 1
+              throw new Error('cleanup exploded')
+            },
+          }
+        },
+      }),
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
+    expect(result.streams[0]).toMatchObject(expected)
+    expect(returns).toBe(1)
+  })
+
+  test('a retained source attempt cannot make requests or append retry facts after completion', async () => {
+    const captured = Promise.withResolvers<FetchContext>()
+    const journal = createMemoryJournal()
+    let calls = 0
+    const stream = defineStream({
+      id: 'app.retained_attempt', destination: events,
+      async *read(context) {
+        captured.resolve(context)
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    const context = await captured.promise
+    const facts = journal.events.length
+    expect(result.ok).toBe(true)
+    await expect(context.attempt(async () => { calls += 1; throw new Error('late request') })).rejects.toThrow('Reader attempt has ended')
+    expect(calls).toBe(0)
+    expect(journal.events).toHaveLength(facts)
+  })
+
+  test('an unawaited source operation cannot retry after its reader completes', async () => {
+    const release = Promise.withResolvers<void>()
+    const started = Promise.withResolvers<void>()
+    const captured = Promise.withResolvers<PromiseSettledResult<unknown>>()
+    const journal = createMemoryJournal()
+    let calls = 0
+    const stream = defineStream({
+      id: 'app.unawaited_attempt', destination: events, retry: { retries: 1, minTimeout: 0 },
+      async *read({ attempt }) {
+        const operation = attempt(async () => {
+          calls += 1
+          started.resolve()
+          await release.promise
+          throw new Error('late failure')
+        })
+        void operation.then(
+          (value) => captured.resolve({ status: 'fulfilled', value }),
+          (reason: unknown) => captured.resolve({ status: 'rejected', reason })
+        )
+        await started.promise
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
+    const facts = journal.events.length
+    release.resolve()
+    expect(result.ok).toBe(true)
+    expect((await captured.promise).status).toBe('rejected')
+    expect(calls).toBe(1)
+    expect(journal.events).toHaveLength(facts)
   })
 
   test('a failing loader cleanup does not mask the write failure or stop the retry', async () => {
