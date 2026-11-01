@@ -721,8 +721,8 @@ def test_create_view_with_comment(assert_valid_sql) -> None:
     def_ = view(
         database="default",
         name="test_view_comment",
-        as_="SELECT 1 AS x",
-        comment="A test view",
+        as_="SELECT id FROM default.source",
+        comment="A test view's comment",
     )
     assert_valid_sql(to_create_sql(def_))
 
@@ -738,6 +738,29 @@ def test_create_mv_with_target_table(assert_valid_sql) -> None:
         name="test_mv",
         to={"database": "default", "name": "target_table"},
         as_="SELECT id, count() AS cnt FROM default.source GROUP BY id",
+    )
+    assert_valid_sql(to_create_sql(def_))
+
+
+def test_create_mv_with_comment(assert_valid_sql) -> None:
+    def_ = materialized_view(
+        database="default",
+        name="test_mv_comment",
+        to={"database": "default", "name": "target_table"},
+        as_="SELECT id FROM default.source",
+        comment="A test MV's comment",
+    )
+    assert_valid_sql(to_create_sql(def_))
+
+
+def test_create_refreshable_mv_with_append_empty_and_comment(assert_valid_sql) -> None:
+    def_ = materialized_view(
+        database="default",
+        name="test_rmv_comment",
+        to={"database": "default", "name": "rmv_target"},
+        refresh={"every": "1 HOUR", "append": True, "empty": True},
+        as_="SELECT id FROM default.source",
+        comment="A test refreshable MV",
     )
     assert_valid_sql(to_create_sql(def_))
 

@@ -134,6 +134,10 @@
   `PreprocessingColumnCodec`. A chain made only of `Delta` and `GCD` steps, such as a lone
   `GCD` or `Delta`, which ClickHouse rejects for the same reason, now fails validation with
   `codec_chain_must_end_with_general` before reaching the server.
+- A view or materialized view `comment` reaches ClickHouse, as in TS (#406): the generated
+  `CREATE VIEW` / `CREATE MATERIALIZED VIEW` carries `COMMENT '...'` before `AS`, so
+  `system.tables.comment` is set. Before, the comment was dropped, and a comment change
+  recreated the view still without it.
 - ClickHouse errors print ClickHouse's message, as in TS (#413): `chkit query` (text and
   `--json`'s `error.message`), `chkit migrate` (including a failed statement and the error
   it journals) and every command's `--json` error envelope drop clickhouse-connect's
