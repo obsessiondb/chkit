@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import process from 'node:process'
 
+import { urlWithoutCredentials } from '@chkit/clickhouse'
 import {
   importModuleFile,
   resolveConfig,
@@ -214,7 +215,7 @@ function finalize(
     outDir: config.outDir,
     migrationsDir: config.migrationsDir,
     clickhouse: config.clickhouse
-      ? `${config.clickhouse.url} (db: ${config.clickhouse.database ?? 'default'})`
+      ? `${urlWithoutCredentials(config.clickhouse.url)} (db: ${config.clickhouse.database ?? 'default'})`
       : 'not configured',
     plugins: (config.plugins ?? []).length,
   })

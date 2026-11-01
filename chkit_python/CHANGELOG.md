@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
+  (#432): each one the URL sets, percent-decoded, takes precedence over the configured
+  `username` / `password`. Before, chkit-py ignored them and signed in with the configured
+  ones. "Authentication failed for user ..." names the URL's user, and the invalid-URL errors
+  no longer print the credentials (the protocol error prints the scheme only, as in TS).
 - `chkit query` keeps numbers in `JSON`, `Object` and `Dynamic` columns as numbers, as in TS
   (#438). Every number in a column whose type is or contains one of them was a string,
   floats and small integers included: `CAST('{"a": 2.5, "b": [1, 0.1]}' AS JSON)` printed
