@@ -492,7 +492,14 @@ export function urlWithoutCredentials(url: string): string {
 
 /** The user set in the URL, decoded as `@clickhouse/client` does, or '' when it sets none. */
 function urlUsername(url: string): string {
-	return URL.canParse(url) ? decodeURIComponent(new URL(url).username) : ''
+	if (!URL.canParse(url)) return ''
+	const username = new URL(url).username
+	try {
+		return decodeURIComponent(username)
+	} catch {
+		// Malformed escapes: keep them as written, as Python's unquote does.
+		return username
+	}
 }
 
 export function wrapConnectionError(error: unknown, url: string, username?: string): never {

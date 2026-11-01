@@ -102,15 +102,17 @@ class ClickHouseClient:
     def connect(cls, config: ChxResolvedClickHouseConfig) -> Self:
         """Connect using a resolved config block."""
         parsed = urlparse(config.url)
+        # Like the TS client (``@clickhouse/client``): the URL scheme sets the
+        # protocol, a URL without a port uses the scheme's default port, and
+        # credentials in the URL take precedence over the configured ones. The
+        # scheme is checked first, so a URL without one (``user:pw@host``)
+        # names only what it read as the scheme.
+        if parsed.scheme not in ("http", "https"):
+            msg = f"ClickHouse URL protocol must be either http or https. Got: {parsed.scheme}:"
+            raise ValueError(msg)
         host = parsed.hostname
         if host is None:
             msg = f"Invalid ClickHouse URL (missing host): {_url_without_credentials(config.url)}"
-            raise ValueError(msg)
-        # Like the TS client (``@clickhouse/client``): the URL scheme sets the
-        # protocol, a URL without a port uses the scheme's default port, and
-        # credentials in the URL take precedence over the configured ones.
-        if parsed.scheme not in ("http", "https"):
-            msg = f"ClickHouse URL protocol must be either http or https. Got: {parsed.scheme}:"
             raise ValueError(msg)
         secure = parsed.scheme == "https"
         port = parsed.port

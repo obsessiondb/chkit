@@ -133,16 +133,31 @@ def test_credentials_in_the_url_take_precedence(monkeypatch: pytest.MonkeyPatch)
     both = _connect_kwargs("http://al%40ice:SeC%40rEtPw@host", monkeypatch)
     assert (both["username"], both["password"]) == ("al@ice", "SeC@rEtPw")
 
-    user_only = _connect_kwargs("http://alice@host", monkeypatch)
-    assert (user_only["username"], user_only["password"]) == ("alice", "")
-
     neither = _connect_kwargs("http://host", monkeypatch)
     assert (neither["username"], neither["password"]) == ("default", "")
+
+
+def test_a_url_with_only_a_user_keeps_the_configured_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_get_client(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    config = ChxResolvedClickHouseConfig(
+        url="http://alice@host", username="default", password="cfg-pw", database="default", secure=False
+    )
+    ClickHouseClient.connect(config)
+    assert (captured["username"], captured["password"]) == ("alice", "cfg-pw")
 
 
 def test_invalid_url_errors_leave_out_credentials() -> None:
     for url, match in [
         ("ftp://u:SeCrEtPw@host", "Got: ftp:$"),
+        ("user:SeCrEtPw@localhost:8123", "Got: user:$"),
         ("http://u:SeCrEtPw@", r"missing host\): http://$"),
     ]:
         config = ChxResolvedClickHouseConfig(

@@ -742,6 +742,9 @@ describe('formatConnectionError', () => {
     expect(formatConnectionError(auth, 'http://al%40ice:SeCrEtPw@localhost:8199', 'default')).toBe(
       'Authentication failed for user "al@ice" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
     )
+    expect(formatConnectionError(auth, 'http://a%zz:SeCrEtPw@localhost:8199', 'default')).toBe(
+      'Authentication failed for user "a%zz" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
   })
 })
 
