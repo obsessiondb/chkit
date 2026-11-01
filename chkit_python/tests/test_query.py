@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from typer.testing import CliRunner
 
 from chkit.cli.commands.query import (
@@ -106,6 +107,23 @@ def test_clean_error_preserves_short_expected_one_of() -> None:
     cleaned = clean_query_error(original)
     assert "a, b, c" in str(cleaned)
     assert "more" not in str(cleaned)
+
+
+def test_clean_error_cleans_the_clickhouse_message_as_ts() -> None:
+    # TS cleans ClickHouseError.message and returns a plain Error, so --json
+    # reports the code "error".
+    original = DatabaseError(
+        "Received ClickHouse exception, code: 62, server response: Code: 62. "
+        "DB::Exception: Syntax error: failed at position 10 (end of query) "
+        "(line 1, col 10): SELECT 1 + FORMAT JSON. Expected one of: a, b. "
+        "(SYNTAX_ERROR) (for url http://localhost:8123)"
+    )
+    cleaned = clean_query_error(original)
+    assert type(cleaned) is RuntimeError
+    assert str(cleaned) == (
+        "Syntax error: failed at position 10 (end of query) (line 1, col 10): "
+        "SELECT 1 +. Expected one of: a, b."
+    )
 
 
 def test_clean_error_passes_through_non_exception() -> None:

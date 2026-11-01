@@ -23,6 +23,7 @@ from chkit.cli.commands import (
     status,
 )
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
+from chkit.clickhouse.client import clickhouse_error_message
 
 
 class _ChkitGroup(TyperGroup):
@@ -47,7 +48,7 @@ class _ChkitGroup(TyperGroup):
                     ctx.invoked_subcommand or "chkit",
                     {
                         "code": json_error_code(error),
-                        "message": str(error) or type(error).__name__,
+                        "message": clickhouse_error_message(error) or type(error).__name__,
                     },
                 )
             raise
