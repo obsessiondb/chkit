@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 
+from chkit.core.jsnum import js_number_to_string
 from chkit_plugin_backfill.chunking.types import (
     Chunk,
     ChunkRange,
@@ -21,7 +22,6 @@ from chkit_plugin_backfill.chunking.types import (
     TableProfile,
 )
 from chkit_plugin_backfill.chunking.utils.binary_string import latin1_bytes
-from chkit_plugin_backfill.chunking.utils.jsnum import js_number_to_string
 
 # Top-level clause keywords, in the order they may legally follow a
 # projection. `inject_where_condition` uses this both to detect an existing

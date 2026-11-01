@@ -13,8 +13,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from chkit.core.jsnum import parse_js_number
 from chkit_plugin_backfill.chunking.types import QuerySettings
-from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
 from chkit_plugin_backfill.options import PlanOptions, PluginConfig, parse_byte_size
 from chkit_plugin_backfill.sdk import (
     BackfillPlanState,
