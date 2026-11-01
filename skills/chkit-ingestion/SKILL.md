@@ -51,10 +51,20 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 - Support historical bounds or state explicitly that a full-sync reader ignores them and does not provide date-range backfills. When supported, enforce both bounds and freeze unfinished selections across restarts. Persist complete validated resume state; the executor commits it after writes.
 - Separate the completed watermark from unfinished traversal state. Newest-first pages cannot alone advance a completed timestamp watermark; documented fixed-window timestamp frontiers or scoped page positions can still resume unfinished reads. Preserve timestamp precision and equal-timestamp coverage.
 - Choose overlap from indexing/arrival behavior, volume, and requested freshness. Use reliable child update filters independently of parent update times. For child changes without parent updates, reread parents within the chosen lookback; document that changes on older parents are excluded. Use broader rereads, retained parents, or reconciliation only when broader coverage is required.
-- Custom tables need `ingestionColumns`. Prefer `simpleLoader`; custom loaders must preserve write identity and acknowledge publication before returning receipts.
+- Custom tables need `ingestionColumns`. Custom loaders must preserve write identity and acknowledge publication before returning receipts; choose the policy below.
 - Delivery is at-least-once: choose reconciliation keys/versioning. Leave explicit chunk `id` unset for mutable observations. A stable page, cursor, or window label is insufficient: explicit data-bearing IDs require replay-immutable content. State-only markers can flush progress.
 - Fetch deletion signals explicitly and retain raw cancellation/tombstone payloads. Full sync does not reconcile missing IDs; never infer deletions from partial or inaccessible scans. Each raw resource stream completes independently. If an embedded document model is explicitly required, finish its required children before publishing it as complete, or retain durable pending work with explicit completion semantics.
 - Use an external scheduler and run one process per project/target, including backfills.
+
+## Choose a loader deliberately
+
+- Keep `simpleLoader` as the cheap at-least-once default. Offer staged deduplication for immutable observations across overlaps/replays beyond native token retention; it is a user-selected policy, not mandatory engine behavior.
+- Establish row identity: entity keys discard later updates; version/content-hash keys retain changes. Transport IDs/tokens are not row keys. For mutable current state or deletions, choose a replacing-table/read model or another update strategy.
+- Staging selects the first/last **whole row in logical batch order**, not the globally newest timestamp. Keep replay order stable. Existing destination keys always win; existing duplicates remain. Use explicit supported non-null scalar keys with stored ClickHouse equality.
+- Confirm plain MergeTree/Atomic on one pinned server and all writers sharing the staged gate, executor object and identity policy in one package/process. No Shared/replicated/Distributed/replacing targets, load balancers, restrictive row policies or competing writes/schema changes. Sharing an executor does not gate direct/simple/custom writes.
+- Explain DDL, scratch storage, sorting and potentially full destination-key scans. Full scratch schema preserves DEFAULT dependencies: defaults resolve at staging; generated columns and ingestion time recompute at publication, with materialized compute/storage potentially paid twice.
+- Follow the [loading example and safety contract](https://chkit.obsessiondb.com/api-sync/loading.md) for wiring and recovery. The caller closes its executor and aligns publication/journal targets; CLI `--config` does not rebind it. Unknown publication stays fenced with scratch retained. Quiesce old publishers and their server queries before restart; never delete scratch by prefix while writers are active.
+- Validate with `bun run test:staged-loader` (also in `bun run verify`): disposable local databases, deliberately independent of managed target variables. Report local evidence, not managed/replicated coverage.
 
 ## Deliver and verify
 

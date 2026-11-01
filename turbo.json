@@ -42,6 +42,11 @@
         "CLICKHOUSE_USER"
       ]
     },
+    "@chkit/plugin-ingest#test:staged-loader": {
+      "dependsOn": ["build", "chkit#build", "//#infra:up"],
+      "cache": false,
+      "passThroughEnv": ["CHKIT_TEST_PORT"]
+    },
     "deploy": {
       "dependsOn": ["build"],
       "cache": false,

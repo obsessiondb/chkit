@@ -41,8 +41,9 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome lint src",
+    "lint": "biome lint src test",
     "test": "bun test src",
+    "test:staged-loader": "env -u CLICKHOUSE_URL -u CLICKHOUSE_HOST bun run ../../scripts/infra-up.ts && bun test test/staged-loader*.test.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

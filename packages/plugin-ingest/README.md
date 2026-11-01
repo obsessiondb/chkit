@@ -4,6 +4,10 @@
 
 The executor records progress after writes succeed. Run-scoped journal identities keep overlapping executions independent. A retry resumes from a validated checkpoint and may reread rows.
 
+- `simpleLoader()` is the cheap, direct, at-least-once default; native retry tokens have finite retention.
+- `stagedLoader()` opts into immutable-key deduplication across overlaps/replays: first/last whole-row winners within a batch, existing destination keys always win. It adds DDL, scratch storage and potentially full destination-key scans—not upserts or snapshot transactions.
+- Staging requires plain MergeTree/Atomic on one pinned server and cooperating writers sharing an executor/package/process; no Shared/replicated targets or cross-process uniqueness. Read the [setup and safety contract](https://chkit.obsessiondb.com/api-sync/loading/#opt-into-staged-deduplication) before use, especially ambiguous publication and restart recovery.
+
 `paginate()` yields complete `{ items, next, metadata? }` pages, including empty terminal pages. Read rows from `page.items`; use `next` for request continuation and explicitly map checkpoint metadata into a chunk's `state` with `cursorState`. The executor commits that state after the rows are saved. This replaces the previous item-array return type; existing readers must use `page.items`.
 
 ```ts
