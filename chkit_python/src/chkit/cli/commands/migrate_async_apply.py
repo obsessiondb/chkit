@@ -43,7 +43,7 @@ from chkit.cli.journal_store import (
     MigrationRowState,
     OperationState,
 )
-from chkit.clickhouse.client import ClickHouseClient, QueryStatus
+from chkit.clickhouse.client import ClickHouseClient, QueryStatus, clickhouse_error_message
 
 POLL_INTERVAL_SECONDS = 5.0
 # query_status compares whole seconds, so the margin stays more than a second
@@ -160,7 +160,7 @@ def _progress_line(label: str, status: QueryStatus, elapsed_sec: int) -> str:
 
 
 def _describe_error(error: BaseException) -> str:
-    return str(error)
+    return clickhouse_error_message(error)
 
 
 def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:

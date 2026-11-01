@@ -85,8 +85,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Clarify that raw records use ClickHouse native JSON normalization, which can omit explicit null properties and empty objects rather than preserving exact response text."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [

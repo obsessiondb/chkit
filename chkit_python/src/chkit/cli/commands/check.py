@@ -6,9 +6,10 @@ Mirrors the TS ``checkCommand`` policy contract:
   ``failOnDrift``) regardless of config.
 - Returns exit code 1 when any failing policy fires.
 
-The Python version evaluates ``failOnDrift`` against the local snapshot vs.
-current schema (i.e. snapshot drift), matching the pre-plan check used in CI.
-The live-DB drift comparison from the TS port lives in ``chkit drift``.
+As in TS, ``failOnDrift`` is evaluated against the live database: the drift
+payload of ``chkit drift`` (snapshot vs. ClickHouse). Without a snapshot, drift
+is not evaluated. ``--live`` is accepted for scripts written when it was
+required.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
-from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
@@ -40,7 +40,9 @@ from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.schema_loader import load_schema
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
+    TableScope,
     resolve_table_scope,
+    scope_to_payload,
     table_keys_from_definitions,
 )
 from chkit.core.canonical import canonicalize_definitions
@@ -58,14 +60,11 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         bool,
         typer.Option("--strict", help="Enable all policy checks."),
     ] = False,
-    live: Annotated[
+    live: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--live",
-            help=(
-                "Evaluate failOnDrift against the live ClickHouse database instead of "
-                "the on-disk snapshot. Mirrors the TS default behaviour."
-            ),
+            help="No-op, kept for existing scripts: check always reads the live server.",
         ),
     ] = False,
     output_json: Annotated[
@@ -115,24 +114,13 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     issues = [i.model_dump(mode="json") for i in validate_definitions(schema_defs)]
     files = list_migration_filenames(migrations_dir)
     snapshot = read_snapshot(meta_dir)
-    snapshot_defs = list(snapshot.definitions) if snapshot is not None else []
-
-    available_keys = sorted(
-        set(table_keys_from_definitions(snapshot_defs))
-        | set(table_keys_from_definitions(schema_defs))
+    table_scope = resolve_table_scope(
+        table_selector,
+        table_keys_from_definitions(snapshot.definitions if snapshot is not None else []),
     )
-    table_scope = resolve_table_scope(table_selector, available_keys)
 
-    drift_ops: list[str] = []
-    drift_reason_counts: dict[str, int] = {}
-    replacement_drift = False
-    if snapshot is not None:
-        plan, replacement_issues = plan_snapshot_drift(snapshot_defs, schema_defs, table_scope)
-        replacement_drift = bool(replacement_issues)
-        issues.extend(issue.model_dump(mode="json") for issue in replacement_issues)
-        drift_ops = [op.key for op in plan.operations]
-
-    live_drifted = False
+    drifted = False
+    drift_reasons = summarize_drift_reasons([], [])
     with open_client(executor, config.clickhouse) as client:
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
@@ -142,7 +130,10 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         applied_names = {entry.name for entry in journal.applied}
         pending_all = [f for f in files if f not in applied_names]
         mismatches = find_checksum_mismatches(migrations_dir, journal)
-        if live and snapshot is not None:
+        if table_scope.enabled and table_scope.match_count == 0:
+            _emit_scope_no_op(strict, table_scope, output_json=output_json)
+            return
+        if snapshot is not None:
             payload = build_drift_payload(
                 client=client,
                 meta_dir=meta_dir,
@@ -151,11 +142,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
             )
-            live_drifted = payload.drifted
-            reasons_summary = summarize_drift_reasons(
-                payload.object_drift, payload.table_drift
-            )
-            drift_reason_counts = dict(reasons_summary.counts.items())
+            drifted = payload.drifted
+            drift_reasons = summarize_drift_reasons(payload.object_drift, payload.table_drift)
 
     if table_scope.enabled:
         pending = filter_pending_by_scope(
@@ -175,8 +163,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         failed_checks.append("pending_migrations")
     if fail_on_mismatch and mismatches:
         failed_checks.append("checksum_mismatch")
-    drift_fired = bool(drift_ops) or replacement_drift or (live and live_drifted)
-    if fail_on_drift and drift_fired:
+    if fail_on_drift and drifted:
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")
 
@@ -203,14 +190,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         "failOnChecksumMismatch": fail_on_mismatch,
         "failOnDrift": fail_on_drift,
     }
-    scope_payload: dict[str, object] = {
-        "enabled": table_scope.enabled,
-        "matchedTables": list(table_scope.matched_tables),
-        "matchCount": table_scope.match_count,
-    }
-    if table_scope.selector is not None:
-        scope_payload["selector"] = table_scope.selector
-
     summary: dict[str, object] = {
         "strict": strict,
         "policy": policy_payload,
@@ -221,23 +200,18 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         "pendingMigrations": pending,
         "checksumMismatchCount": len(mismatches),
         "checksumMismatches": [m.model_dump() for m in mismatches],
-        "drifted": drift_fired,
+        "drifted": drifted,
         # TS exposes ``driftEvaluated`` so callers can distinguish "no snapshot
         # → drift unchecked" from "snapshot present → drift evaluated, none".
         "driftEvaluated": snapshot is not None,
-        "driftOperations": drift_ops,
-        "scope": scope_payload,
+        "driftReasonCounts": dict(drift_reasons.counts),
+        "driftReasonTotals": {
+            "total": drift_reasons.total,
+            "object": drift_reasons.object,
+            "table": drift_reasons.table,
+        },
+        "scope": scope_to_payload(table_scope),
     }
-    if live:
-        summary["liveDrifted"] = live_drifted
-        summary["driftReasonCounts"] = drift_reason_counts
-        # Match TS shape: object with ``total`` / ``object`` / ``table`` keys
-        # rather than a single integer sum.
-        summary["driftReasonTotals"] = {
-            "total": sum(drift_reason_counts.values()),
-            "object": drift_reason_counts.get("object", 0),
-            "table": drift_reason_counts.get("table", 0),
-        }
     if plugin_results:
         # TS uses a ``plugins`` object map keyed by plugin name (the older
         # Python ``pluginCheckResults`` array is kept for back-compat).
@@ -279,9 +253,41 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         typer.echo(f"Validation issues:    {len(issues)}")
         typer.echo(f"Pending migrations:   {len(pending)}")
         typer.echo(f"Checksum mismatches:  {len(mismatches)}")
-        typer.echo(f"Drift operations:     {len(drift_ops)}")
+        if snapshot is None:
+            typer.echo("Schema drift: not evaluated (missing snapshot or clickhouse config)")
+        else:
+            typer.echo(f"Schema drift: {'yes' if drifted else 'no'}")
+            typer.echo(
+                f"Drift reasons: total={drift_reasons.total}, "
+                f"object={drift_reasons.object}, table={drift_reasons.table}"
+            )
         if failed_checks:
             typer.echo("")
             typer.echo(f"Failed checks: {', '.join(failed_checks)}")
     if not ok:
         raise typer.Exit(code=1)
+
+
+def _emit_scope_no_op(strict: bool, table_scope: TableScope, *, output_json: bool) -> None:
+    """TS: a ``--table`` selector that matches no snapshot table makes check a no-op."""
+    warning = f'No tables matched selector "{table_scope.selector or ""}".'
+    if not output_json:
+        typer.echo(f"{warning} Check is a no-op.")
+        return
+    emit_json(
+        "check",
+        {
+            "strict": strict,
+            "ok": True,
+            "failedChecks": [],
+            "pendingCount": 0,
+            "checksumMismatchCount": 0,
+            "drifted": False,
+            "driftEvaluated": False,
+            "driftReasonCounts": {},
+            "driftReasonTotals": {"total": 0, "object": 0, "table": 0},
+            "plugins": {},
+            "scope": scope_to_payload(table_scope),
+            "warning": warning,
+        },
+    )

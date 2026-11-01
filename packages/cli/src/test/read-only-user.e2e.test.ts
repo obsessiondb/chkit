@@ -18,7 +18,7 @@ import {
 
 const env = getLiveEnv()
 // ObsessionDB users have no CREATE USER (or any access-management) grant
-// (#403), so the tests that create read-only users run in verify, against the
+// (#430), so the tests that create read-only users run in verify, against the
 // local stack, only.
 const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 
