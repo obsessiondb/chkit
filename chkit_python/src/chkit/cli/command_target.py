@@ -2,7 +2,7 @@
 
 As in TS (``runtime.resolveContext``), a plugin's ``get_context`` executor
 (ObsessionDB with a selected service) takes precedence over the
-``clickhouse`` block, so ``check``, ``status``, ``migrate``, ``drift --live``,
+``clickhouse`` block, so ``check``, ``status``, ``migrate``, ``drift``,
 ``query`` and ``pull`` all run against the same server.
 """
 
