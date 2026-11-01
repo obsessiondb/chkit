@@ -89,6 +89,14 @@ export function parseJsonEachRowLine<T>(line: string): T {
 	})
 }
 
+/** Parses a `JSONEachRow` body, every nonempty line as `parseJsonEachRowLine`. */
+export function parseJsonEachRow<T>(body: string): T[] {
+	return body
+		.split('\n')
+		.filter((line) => line.trim().length > 0)
+		.map((line) => parseJsonEachRowLine<T>(line))
+}
+
 function jsonNumber(source: string | undefined, value: number): JsonNumber {
 	return { [JSON_NUMBER]: true, source, value }
 }
