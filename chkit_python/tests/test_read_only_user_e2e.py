@@ -33,7 +33,7 @@ from tests.e2e_testkit import (
 )
 
 # ObsessionDB users have no CREATE USER (or any access-management) grant
-# (#403), so the tests that create read-only users run in verify, against the
+# (#430), so the tests that create read-only users run in verify, against the
 # local stack, only.
 _ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 
@@ -148,7 +148,7 @@ def test_a_missing_journal_reads_as_empty_and_is_not_created(
     assert not _journal_exists(admin, journal_table)
 
 
-@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#403)")
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
 @pytest.mark.parametrize("readonly", [1, 2])
 def test_a_read_only_user_runs_the_read_only_commands(
     admin: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readonly: int
