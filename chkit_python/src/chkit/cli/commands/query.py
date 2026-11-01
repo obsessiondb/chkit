@@ -27,7 +27,7 @@ from chkit.cli.command_target import (
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
-from chkit.clickhouse.client import ClickHouseJsonQueryResult
+from chkit.clickhouse.client import ClickHouseJsonQueryResult, clickhouse_error_message
 from chkit.core.jsnum import js_number_to_string
 from chkit.core.model import ChxConfigEnv
 from chkit.plugins import ChxPlugin
@@ -43,7 +43,7 @@ def clean_query_error(error: BaseException) -> BaseException:
     """Strip injected FORMAT JSON + truncate "Expected one of" lists."""
     if not isinstance(error, Exception):
         return error
-    original = str(error)
+    original = clickhouse_error_message(error)
     message = _INJECTED_FORMAT_RE.sub("", original)
 
     def _truncate_expected(match: re.Match[str]) -> str:
@@ -59,7 +59,8 @@ def clean_query_error(error: BaseException) -> BaseException:
     message = _EXPECTED_ONE_OF_RE.sub(_truncate_expected, message)
     if message == original:
         return error
-    return type(error)(message.strip()) if isinstance(error, Exception) else error
+    # As TS, a plain error: --json reports its code as "error".
+    return RuntimeError(message.strip())
 
 
 # Keys in the order TS prints them: data, meta, the rest of the envelope as
@@ -229,9 +230,8 @@ def run(
         # A failed query is not a usage error: like the TS CLI, print the
         # message (plus the --json error envelope) and exit 1.
         cleaned = clean_query_error(error)
+        message = clickhouse_error_message(cleaned)
         if output_json:
-            emit_json_error(
-                "query", {"code": json_error_code(cleaned), "message": str(cleaned)}
-            )
-        typer.secho(str(cleaned), fg=typer.colors.RED, err=True)
+            emit_json_error("query", {"code": json_error_code(cleaned), "message": message})
+        typer.secho(message, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from cleaned

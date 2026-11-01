@@ -127,6 +127,18 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- ClickHouse errors print ClickHouse's message, as in TS (#413): `chkit query` (text and
+  `--json`'s `error.message`), `chkit migrate` (including a failed statement and the error
+  it journals) and every command's `--json` error envelope drop clickhouse-connect's
+  `Received ClickHouse exception, code: N, server response: Code: N. DB::Exception:` prefix
+  and the `(NAME) (for url ...)` suffix; `error.code` is still the ClickHouse code. A wrong
+  password reads `Authentication failed for user "<user>" at <url>. Check CLICKHOUSE_USER /
+  CLICKHOUSE_PASSWORD.` instead of the server's reset instructions, and an unreachable
+  server `Could not connect to ClickHouse at <url> (connection refused)` (or `host not
+  found`, `connection timed out`, ...) without the driver's `Unexpected Http Driver
+  Exception` warning. Unlike TS, these messages leave out credentials written in the URL.
+  `format_connection_error` now returns `None` for an error it does not recognize, and
+  `wrap_connection_error` raises instead of returning the error.
 - `chkit drift` and `chkit check` compare the snapshot with the live server by default, as
   in TS (#405). **Behaviour change:** without `--live`, `check` now reports `schema_drift`
   (e.g. `missing_object` for a migration not yet applied) and `drift` prints the live

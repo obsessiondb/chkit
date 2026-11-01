@@ -199,3 +199,39 @@ def test_a_statement_without_a_result_set_prints_no_rows_like_ts(
     payload = json.loads(as_json.stdout)
     assert list(payload) == ["data", "meta", "rows", "query_id"]
     assert (payload["data"], payload["meta"], payload["rows"]) == ([], [], 0)
+
+
+def test_a_failing_query_prints_the_clickhouse_message_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #413: without clickhouse-connect's "Received ClickHouse exception, code:
+    # N, server response: Code: N. DB::Exception:" prefix and its "(NAME) (for
+    # url ...)" suffix, in the text output and in --json's error.message.
+    env = resolve_live_env()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": env.clickhouse_database,
+            },
+        })
+        + ")\n"
+    )
+    sql = "SELECT throwIf(1, 'boom')"
+
+    table = CliRunner().invoke(app, ["query", sql])
+    as_json = CliRunner().invoke(app, ["query", sql, "--json"])
+
+    assert table.exit_code == 1, format_test_diagnostic("query did not fail", table)
+    assert table.stdout == ""
+    assert table.stderr.startswith("boom: while executing 'FUNCTION throwIf(")
+    assert table.stderr.endswith("'. \n")
+    assert as_json.exit_code == 1, format_test_diagnostic("query --json did not fail", as_json)
+    payload = json.loads(as_json.stdout)
+    assert payload["error"] == {"code": "395", "message": table.stderr.removesuffix("\n")}

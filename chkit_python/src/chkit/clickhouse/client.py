@@ -8,9 +8,11 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import uuid
-from typing import Any, Literal, Self
+from typing import Any, Literal, NoReturn, Self
 from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -21,6 +23,11 @@ from pydantic import BaseModel, ConfigDict
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.model import ChxResolvedClickHouseConfig
+
+# chkit prints its own one-line error, as TS silences @clickhouse/client's
+# logger: without a handler, the driver's warnings (``Unexpected Http Driver
+# Exception``) would reach stderr through logging's last-resort handler.
+logging.getLogger("clickhouse_connect").addHandler(logging.NullHandler())
 
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 
@@ -115,13 +122,16 @@ class ClickHouseClient:
         # afterwards sends it with each request instead, as the TS client does,
         # so commands report a missing database and ``migrate --apply`` can
         # create it (#351).
-        client = clickhouse_connect.get_client(
-            host=host,
-            port=port,
-            username=config.username,
-            password=config.password,
-            secure=secure,
-        )
+        try:
+            client = clickhouse_connect.get_client(
+                host=host,
+                port=port,
+                username=config.username,
+                password=config.password,
+                secure=secure,
+            )
+        except Exception as error:
+            wrap_connection_error(error, config.url, config.username)
         client.database = config.database
         return cls(client, config)
 
@@ -477,52 +487,105 @@ def clickhouse_error_code(error: BaseException) -> str | None:
     return match.group(1)
 
 
-_AUTH_HINTS = (
-    "authentication",
-    "auth failed",
-    "wrong password",
-    "user not allowed",
-    "Code: 192",  # AUTHENTICATION_FAILED
-    "Code: 193",  # WRONG_PASSWORD
-    "Code: 516",  # AUTHENTICATION_FAILED (newer CH versions)
+# ``errorRe`` of ``@clickhouse/client``'s ``parseError``, which gives the TS
+# ``ClickHouseError`` its message: the innermost exception's text, up to its
+# ``(TYPE)`` marker.
+_CLICKHOUSE_ERROR_RE = re.compile(
+    r"(Code|Error): (?P<code>\d+).*Exception: (?P<message>.+?)"
+    r"\((?P<type>(?=[A-Z0-9_]*[A-Z]{3})[A-Z0-9_]+)\)",
+    re.DOTALL,
 )
+
+
+def clickhouse_error_message(error: BaseException) -> str:
+    """The message of ``error``, as the TS CLI prints it.
+
+    For a server error that is ClickHouse's own message, without
+    ``clickhouse-connect``'s ``Received ClickHouse exception, code: N, server
+    response: Code: N. DB::Exception:`` prefix and the ``(NAME) (for url ...)``
+    suffix; for any other error ``str(error)``.
+    """
+    text = str(error)
+    if isinstance(error, DatabaseError):
+        match = _CLICKHOUSE_ERROR_RE.search(text)
+        if match is not None:
+            return match.group("message")
+    return text
+
+
+# NETWORK_MESSAGE_PATTERNS of the TS client, plus the texts Python's socket
+# layer uses for the same failures.
+_NETWORK_ERROR_PATTERNS = (
+    (
+        re.compile(
+            r"ENOTFOUND|getaddrinfo|EAI_AGAIN|Was there a typo|Failed to resolve"
+            r"|Name or service not known|nodename nor servname",
+            re.IGNORECASE,
+        ),
+        "host not found",
+    ),
+    (re.compile(r"ECONNREFUSED|Connection refused", re.IGNORECASE), "connection refused"),
+    (re.compile(r"ETIMEDOUT|timed out", re.IGNORECASE), "connection timed out"),
+    (re.compile(r"ECONNRESET|Connection reset", re.IGNORECASE), "connection reset"),
+    (re.compile(r"EHOSTUNREACH|No route to host", re.IGNORECASE), "host unreachable"),
+)
+_LOCALHOST_DEFAULT_URL_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1):8123/?$")
+
+
+def _is_auth_error(text: str) -> bool:
+    match = _CLICKHOUSE_CODE_RE.search(text)
+    if match is not None and match.group(1) in _AUTH_ERROR_CODES:
+        return True
+    if "REQUIRED_PASSWORD" in text or "AUTHENTICATION_FAILED" in text:
+        return True
+    return re.search(r"authentication failed", text, re.IGNORECASE) is not None
+
+
+def _url_without_credentials(url: str) -> str:
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    return parsed._replace(netloc=parsed.netloc.rpartition("@")[2]).geturl()
 
 
 def format_connection_error(
     error: BaseException, url: str, username: str | None = None
-) -> str:
-    """Build a human-readable message differentiating auth vs network failures.
+) -> str | None:
+    """The message for an authentication or network failure, else None.
 
-    Used to wrap raw driver exceptions before re-raising, so the CLI surfaces
-    a clear "wrong password vs. server unreachable" hint instead of a stack
-    trace.
+    Port of TS ``formatConnectionError``: a wrong password reads as one line
+    instead of the server's reset instructions, an unreachable server names
+    the cause. Unlike TS, credentials in ``url`` are left out.
     """
     text = str(error)
-    user_part = f" as user '{username}'" if username else ""
-    if any(hint in text for hint in _AUTH_HINTS):
+    shown_url = _url_without_credentials(url)
+    if _is_auth_error(text):
+        who = f'user "{username}"' if username else "the configured user"
         return (
-            f"Authentication failed against {url}{user_part}: {text}. "
+            f"Authentication failed for {who} at {shown_url}. "
             "Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD."
         )
-    return (
-        f"Could not connect to ClickHouse at {url}{user_part}: {text}. "
-        "Verify the URL and that the server is reachable."
+    label = next(
+        (label for pattern, label in _NETWORK_ERROR_PATTERNS if pattern.search(text)), None
     )
+    if label is None:
+        return None
+    hint = (
+        "\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost "
+        "endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance."
+        if _LOCALHOST_DEFAULT_URL_RE.match(url) and not os.environ.get("CLICKHOUSE_URL")
+        else ""
+    )
+    return f"Could not connect to ClickHouse at {shown_url} ({label}){hint}"
 
 
 def wrap_connection_error(
     error: BaseException, url: str, username: str | None = None
-) -> ClickHouseConnectionError:
-    """Raise a ``ClickHouseConnectionError`` with a formatted, friendly message.
-
-    Use at the call site that wraps ``ClickHouseClient.connect(...)``::
-
-        try:
-            client = ClickHouseClient.connect(config)
-        except Exception as cause:
-            raise wrap_connection_error(cause, config.url, config.username)
-            # noqa: TRY301
-    """
-    return ClickHouseConnectionError(
-        format_connection_error(error, url, username)
-    )
+) -> NoReturn:
+    """Raise a ``ClickHouseConnectionError`` with the `format_connection_error`
+    message, or ``error`` itself when that does not recognize it (TS
+    ``wrapConnectionError``)."""
+    message = format_connection_error(error, url, username)
+    if message is None:
+        raise error
+    raise ClickHouseConnectionError(message) from error
