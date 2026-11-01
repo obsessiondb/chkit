@@ -133,6 +133,19 @@
   `{"a":"2.5","b":["1","0.1"]}`. Inside these columns a number now becomes a string of the
   digits ClickHouse sent only when a float cannot hold it: `2.5`, `1` and `0.1` stay
   numbers, `18446744073709551615` stays a string, in the table and in `--json`.
+- `chkit check` prints the same JSON and text as TS and judges the same way (#435).
+  **Behaviour change** for `--json` readers: the payload no longer has `issues`,
+  `pendingMigrations`, `checksumMismatches` or `pluginCheckResults` (use `chkit status
+  --json` for the migration names), and always has `plugins` (`{}` without plugin checks),
+  written before `scope` as in TS. The text starts with `Check status:` and `Policy:`, uses
+  `Pending migrations: N` / `Checksum mismatches: N`, lists the `--table` scope and the
+  plugin checks, and prints each plugin's `on_check_report` lines, without the
+  `Validation issues:` line or the blank line before `Failed checks:`. **Behaviour change:**
+  check no longer validates the schema files (no `validation` failed check; `generate` and
+  `snapshot rebuild` still fail on an invalid schema), a plugin fails the check only with an
+  evaluated, not-ok result that has an `error` finding (a `warn`-only or unevaluated result
+  no longer fails it), and `--table` scopes only the drift and plugin checks: pending
+  migrations of other tables count again, as documented.
 - The typed `T64` codec is accepted before a general codec, as in TS (#434). ClickHouse accepts
   `CODEC(T64, LZ4)`, `CODEC(T64, ZSTD(3))` and `CODEC(Delta, T64, LZ4)`, but chkit-py classed
   `T64` as a general codec, so those chains failed validation with
