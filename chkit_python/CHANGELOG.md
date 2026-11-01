@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit drift` and `chkit check --live` compare a column's type as rendered, as in TS
+  (#409, port of #275), so `type="Nullable(Int64)"` and `type="Int64", nullable=True` both
+  match a live `Nullable(Int64)` column. Before, a column spelled `Nullable(...)` inline
+  reported `changed_column` on a table that matched. A change to nullability or to the
+  underlying type still reports `changed_column`.
 - `chkit drift --live` and `chkit check` compare the query of each managed view and
   materialized view, and a materialized view's `TO` target, with the live ones, as in TS
   (#382). A changed query reports `query_mismatch` and a changed target `target_mismatch`
