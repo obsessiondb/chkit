@@ -138,10 +138,8 @@ settings into literal values. `drift` and `check` compare the engine, columns, a
 settings declared in the snapshot. Numeric/boolean metadata and SQL string quoting
 are normalized without removing meaningful whitespace from strings.
 
-In Python, use `chkit pull --database analytics --out-file schema.py`,
-`chkit drift --live`, and `chkit check --live`. Python's default drift/check also
-inspect local schema changes against the snapshot and report Kafka changes that
-require replacement, including when scoped with `--table`.
+In Python, use `chkit pull --database analytics --out-file schema.py`, `chkit drift`,
+and `chkit check`. As in TypeScript, they compare the snapshot with the live server.
 
 Consumer offsets, lag, assignments, topic contents, and server configuration or
 named-collection contents are runtime/external state, outside schema drift. Server

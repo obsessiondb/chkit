@@ -127,6 +127,20 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit drift` and `chkit check` compare the snapshot with the live server by default, as
+  in TS (#405). **Behaviour change:** without `--live`, `check` now reports `schema_drift`
+  (e.g. `missing_object` for a migration not yet applied) and `drift` prints the live
+  comparison (`missing`, `extra`, `objectDrift`, `tableDrift`, now with `scope`). `--live`
+  is still accepted and does nothing. Both now need a `clickhouse` block or a selected
+  ObsessionDB service; `drift` without a snapshot still exits 1. The offline comparison of
+  the schema files with the snapshot is removed, as TS has none: `drift --json` no longer
+  returns `operations` / `renameSuggestions` / `issues`, `check --json` no longer returns
+  `driftOperations` / `liveDrifted`, and a schema change that `generate` has not written
+  yet (including a Kafka change that requires replacement) is no longer drift; run
+  `chkit generate --dryrun` to see it. `check --json` always includes `driftReasonCounts`
+  and `driftReasonTotals` (whose `object` / `table` counts were always 0 before). A
+  `--table` selector that matches no snapshot table makes both commands a no-op with a
+  `warning`, as in TS, instead of comparing every table.
 - `chkit drift --live` prints the same JSON and text as TS (#410). **Behaviour change** for
   `--json` readers: `objectDrift` entries use `expectedKind` / `actualKind` and leave out
   unset fields instead of writing `null`, `tableDrift` entries use camelCase keys
