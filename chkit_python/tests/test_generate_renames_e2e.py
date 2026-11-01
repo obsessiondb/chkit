@@ -169,10 +169,7 @@ def test_rename_table_with_invalid_mapping_fails(
         ],
     )
     assert result.exit_code != 0
-    assert (
-        "source table is missing" in result.output
-        or "source table is missing" in str(result.exception)
-    )
+    assert "source table is missing" in result.stderr
 
 
 def test_rename_table_with_malformed_mapping_fails(

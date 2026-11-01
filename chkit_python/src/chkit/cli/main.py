@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import typer
 from typer.core import TyperGroup
+from typer.exceptions import TyperException
 
 from chkit import __version__
 from chkit.cli.commands import (
@@ -23,14 +25,16 @@ from chkit.cli.commands import (
     status,
 )
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
+from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
 
 
 class _ChkitGroup(TyperGroup):
     """Port of the TS CLI's top-level catch (``packages/cli/src/bin/chkit.ts``):
     a command that fails under ``--json`` without having written JSON yet still
-    leaves stdout a parseable error envelope. The error is then re-raised, so
-    stderr and the exit code stay as they were.
+    leaves stdout a parseable error envelope. An unhandled error then prints
+    its message as one line on stderr and exits 1; ``CHKIT_DEBUG=1`` also logs
+    the traceback. Usage errors are re-raised, so click still reports them.
     """
 
     # Any: typer vendors click privately (typer._click), and the public
@@ -40,18 +44,22 @@ class _ChkitGroup(TyperGroup):
         json_mode = "--json" in ctx.args
         try:
             return super().invoke(ctx)
-        except (typer.Exit, typer.Abort):
+        except (typer.Exit, typer.Abort, BrokenPipeError):
             raise
         except Exception as error:
+            if is_debug_enabled():
+                configure_cli_logging()
+                logging.getLogger("chkit.cli").debug("fatal error", exc_info=error)
+            message = clickhouse_error_message(error) or type(error).__name__
             if json_mode and not has_emitted_json():
                 emit_json_error(
                     ctx.invoked_subcommand or "chkit",
-                    {
-                        "code": json_error_code(error),
-                        "message": clickhouse_error_message(error) or type(error).__name__,
-                    },
+                    {"code": json_error_code(error), "message": message},
                 )
-            raise
+            if isinstance(error, TyperException):
+                raise
+            typer.echo(message, err=True)
+            raise typer.Exit(code=1) from error
 
 
 app = typer.Typer(

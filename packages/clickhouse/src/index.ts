@@ -14,7 +14,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonEachRowLine, parseJsonResult } from './exact-json.js'
+import { parseJsonEachRow, parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -121,6 +121,10 @@ export interface ClickHouseExecutor {
 	 *  Native executors return `clusterAllReplicas(...)` when `clickhouse.cluster` is set.
 	 *  Remote / ObsessionDB executors may omit this and keep local `system.*` tables. */
 	systemTableSource?(table: ObservableSystemTable): string
+
+	/** Optional capability: whether the user may change settings, which a readonly = 1
+	 *  user may not. Native executors look it up once, with their first read. */
+	canChangeSettings?(): Promise<boolean>
 
 	close(): Promise<void>
 }
@@ -721,14 +725,17 @@ export function createExecutorWithClient(
 	// looked up once per executor. A failed lookup is not cached: the database
 	// may not exist yet (#370).
 	let settingsChangeable: Promise<boolean> | undefined
-	async function readSettings(
-		settings?: ClickHouseSettings,
-	): Promise<ClickHouseSettings | undefined> {
+	function settingsChangeableOnce(): Promise<boolean> {
 		settingsChangeable ??= canChangeSettings(client).catch((error: unknown) => {
 			settingsChangeable = undefined
 			throw error
 		})
-		return (await settingsChangeable) ? { ...PROGRESS_SETTINGS, ...settings } : settings
+		return settingsChangeable
+	}
+	async function readSettings(
+		settings?: ClickHouseSettings,
+	): Promise<ClickHouseSettings | undefined> {
+		return (await settingsChangeableOnce()) ? { ...PROGRESS_SETTINGS, ...settings } : settings
 	}
 
 	return {
@@ -797,10 +804,7 @@ export function createExecutorWithClient(
 				// The client's JSONEachRow decoder drops the final row when the
 				// response ends without a newline. Decode every nonempty line,
 				// without rounding 64-bit integers and Decimals (#415).
-				const rows = (await result.text())
-					.split('\n')
-					.filter((line) => line.trim().length > 0)
-					.map((line) => parseJsonEachRowLine<T>(line))
+				const rows = parseJsonEachRow<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -908,6 +912,7 @@ export function createExecutorWithClient(
 			}
 			return `system.${table}`
 		},
+		canChangeSettings: settingsChangeableOnce,
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).
@@ -922,13 +927,16 @@ export function createExecutorWithClient(
 					query_params: { qid: queryId },
 					format: 'JSONEachRow',
 				})
-				const runningRows = await running.json<{
-					read_rows: string
-					read_bytes: string
-					written_rows: string
-					written_bytes: string
-					elapsed: string
-				}>()
+				// Decoded as executor.query() does (#436). A UInt64 count arrives as a
+				// number, or as a string of its digits beyond 2^53 or when the
+				// profile sets output_format_json_quote_64bit_integers.
+				const runningRows = parseJsonEachRow<{
+					read_rows: number | string
+					read_bytes: number | string
+					written_rows: number | string
+					written_bytes: number | string
+					elapsed: number
+				}>(await running.text())
 				const [proc] = runningRows
 				if (proc) {
 					return {
@@ -957,13 +965,13 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
 					format: 'JSONEachRow',
 				})
-				const logRows = await log.json<{
+				const logRows = parseJsonEachRow<{
 					type: string
-					written_rows: string
-					written_bytes: string
-					query_duration_ms: string
+					written_rows: number | string
+					written_bytes: number | string
+					query_duration_ms: number | string
 					exception: string
-				}>()
+				}>(await log.text())
 
 				if (logRows.length === 0) {
 					return { status: 'unknown' }
