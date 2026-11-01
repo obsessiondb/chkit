@@ -127,6 +127,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- An unhandled error prints one line and exits 1, as in TS (#437): ClickHouse's own message
+  for a server error, the error's message otherwise. Before, it printed a full traceback,
+  under `--json` after the error envelope too. `CHKIT_DEBUG=1` logs the traceback to stderr.
+  Usage errors (exit 2), `Ctrl-C` (exit 130) and the commands' own exits are unchanged.
 - The typed `GCD` codec is a preprocessing codec, as in TS (#408). ClickHouse rejects a lone
   `CODEC(GCD)` because GCD does not compress, and chkit-py classed it as a general codec, so
   no typed GCD chain was valid: `[{"kind": "GCD"}, {"kind": "LZ4"}]` now validates and
