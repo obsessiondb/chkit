@@ -63,6 +63,15 @@ def test_render_gcd_as_preprocessor_before_general_codec() -> None:
     assert render_codec([{"kind": "GCD"}, {"kind": "LZ4"}]) == "CODEC(GCD, LZ4)"
 
 
+def test_render_t64_as_preprocessor_before_general_codec() -> None:
+    # #434: T64 compresses alone and also precedes a general codec.
+    t64 = parse_codec("CODEC(T64)")
+    assert t64 is not None
+    assert is_preprocessor_codec(t64[0])
+    assert not is_general_codec(t64[0])
+    assert render_codec([{"kind": "T64"}, {"kind": "ZSTD", "level": 3}]) == "CODEC(T64, ZSTD(3))"
+
+
 def test_render_none_t64_gcd_alp_bare() -> None:
     assert render_codec({"kind": "NONE"}) == "CODEC(NONE)"
     assert render_codec({"kind": "T64"}) == "CODEC(T64)"
@@ -277,6 +286,9 @@ _STORED: list[tuple[CodecSpecInput, str]] = [
         [{"kind": "Delta", "size": 8}, {"kind": "T64"}, {"kind": "ZSTD"}],
         "CODEC(Delta(8), T64, ZSTD(1))",
     ),
+    ([{"kind": "T64"}, {"kind": "LZ4"}], "CODEC(T64, LZ4)"),
+    ([{"kind": "T64"}, {"kind": "ZSTD", "level": 3}], "CODEC(T64, ZSTD(3))"),
+    ([{"kind": "Delta", "size": 8}, {"kind": "T64"}, {"kind": "LZ4"}], "CODEC(Delta(8), T64, LZ4)"),
     (
         [{"kind": "Delta", "size": 8}, {"kind": "GCD"}, {"kind": "ZSTD"}],
         "CODEC(Delta(8), GCD, ZSTD(1))",
