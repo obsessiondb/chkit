@@ -1,22 +1,8 @@
-"""`chkit drift` — compare the snapshot against the current schema or live DB.
+"""`chkit drift` — compare the snapshot against the live ClickHouse database.
 
-The default inspects local schema changes; ``--live`` compares the snapshot
-against ClickHouse, matching the TypeScript command's default behavior.
-
-Output (human):
-
-    Expected operations: <N>
-    Drifted:             <yes|no>
-    <plan operations>
-
-Output (``--json``):
-
-    {
-      "snapshotFile": "...",
-      "drifted": true,
-      "operations": [...],
-      "renameSuggestions": [...]
-    }
+Mirrors ``packages/cli/src/commands/drift/command.ts``: it needs a snapshot and
+a target (a ``clickhouse`` block or a selected ObsessionDB service). ``--live``
+is accepted for scripts written when it was required.
 """
 
 from __future__ import annotations
@@ -34,18 +20,16 @@ from chkit.cli.command_target import (
     resolve_plugin_executor,
 )
 from chkit.cli.commands.drift_payload import build_drift_payload
-from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
 from chkit.cli.config_loader import load_config
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import read_snapshot
 from chkit.cli.plugin_runtime import load_plugin_runtime
-from chkit.cli.schema_loader import load_schema
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     resolve_table_scope,
+    scope_to_payload,
     table_keys_from_definitions,
 )
-from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxConfigEnv
 from chkit.plugins import ChxPlugin
 
@@ -66,15 +50,11 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             help="Scope drift detection to tables matching the selector.",
         ),
     ] = None,
-    live: Annotated[
+    live: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--live",
-            help=(
-                "Compare snapshot against live ClickHouse instead of the local "
-                "schema. Requires a clickhouse block in the config or a selected "
-                "ObsessionDB service."
-            ),
+            help="No-op, kept for existing scripts: drift always reads the live server.",
         ),
     ] = False,
     # Accepted so existing scripts keep working; only generate and snapshot
@@ -93,127 +73,109 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         typer.echo(msg, err=True)
         raise typer.Exit(code=1)
 
-    schema_defs = canonicalize_definitions(load_schema(config.schema_))
-    snapshot_defs = list(snapshot.definitions)
-    available_keys = sorted(
-        set(table_keys_from_definitions(snapshot_defs))
-        | set(table_keys_from_definitions(schema_defs))
+    table_scope = resolve_table_scope(
+        table_selector, table_keys_from_definitions(snapshot.definitions)
     )
-    table_scope = resolve_table_scope(table_selector, available_keys)
-
-    if live:
-        executor = resolve_plugin_executor(
-            load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
-            config,
-            command="drift",
-            config_path=str(config_path or "clickhouse.config.py"),
-            json_mode=output_json,
-            service=service,
-        )
-        if executor is None and config.clickhouse is None:
-            msg = (
-                "clickhouse.config.py must include a `clickhouse` block or select an "
-                "ObsessionDB service for --live drift."
-            )
-            exit_no_target("drift", msg, json_mode=output_json)
-        with open_client(executor, config.clickhouse) as client:
-            payload_obj = build_drift_payload(
-                client=client,
-                meta_dir=meta_dir,
-                snapshot=snapshot,
-                database=config.clickhouse.database if config.clickhouse else None,
-                fail_on_extra_objects=config.check.fail_on_extra_objects,
-                scope=table_scope if table_scope.enabled else None,
-            )
-
-        payload_dict: dict[str, object] = {
-            "snapshotFile": payload_obj.snapshot_file,
-            "expectedCount": payload_obj.expected_count,
-            "actualCount": payload_obj.actual_count,
-            "drifted": payload_obj.drifted,
-            "missing": payload_obj.missing,
-            "extra": payload_obj.extra,
-            "kindMismatches": [asdict(m) for m in payload_obj.kind_mismatches],
-            "objectDrift": [asdict(d) for d in payload_obj.object_drift],
-            "tableDrift": [asdict(d) for d in payload_obj.table_drift],
-        }
-        if payload_obj.database_missing:
-            payload_dict["databaseMissing"] = True
-            payload_dict["database"] = payload_obj.database
+    if table_scope.enabled and table_scope.match_count == 0:
+        warning = f'No tables matched selector "{table_scope.selector or ""}".'
         if output_json:
-            emit_json("drift", payload_dict)
+            emit_json(
+                "drift",
+                {
+                    "scope": scope_to_payload(table_scope),
+                    "snapshotFile": str(meta_dir / "snapshot.json"),
+                    "expectedCount": 0,
+                    "actualCount": 0,
+                    "drifted": False,
+                    "missing": [],
+                    "extra": [],
+                    "kindMismatches": [],
+                    "objectDrift": [],
+                    "tableDrift": [],
+                    "warning": warning,
+                },
+            )
             return
-        if payload_obj.database_missing:
-            typer.echo(
-                f'⚠ Database "{payload_obj.database or ""}" does not exist on the target server.'
-            )
-        typer.echo(f"Snapshot file:       {payload_obj.snapshot_file}")
-        typer.echo(f"Expected objects:    {payload_obj.expected_count}")
-        typer.echo(f"Actual objects:      {payload_obj.actual_count}")
-        typer.echo(f"Drifted:             {'yes' if payload_obj.drifted else 'no'}")
-        if payload_obj.missing:
-            typer.echo("")
-            typer.echo("Missing (in snapshot, not in DB):")
-            for item in payload_obj.missing:
-                typer.echo(f"- {item}")
-        if payload_obj.extra:
-            typer.echo("")
-            typer.echo("Extra (in DB, not in snapshot):")
-            for item in payload_obj.extra:
-                typer.echo(f"- {item}")
-        if payload_obj.kind_mismatches:
-            typer.echo("")
-            typer.echo("Kind mismatches:")
-            for m in payload_obj.kind_mismatches:
-                typer.echo(f"- {m.object}: expected {m.expected}, got {m.actual}")
-        view_drift = [
-            d for d in payload_obj.object_drift if d.code in ("query_mismatch", "target_mismatch")
-        ]
-        if view_drift:
-            typer.echo("")
-            typer.echo("View drift:")
-            for d in view_drift:
-                typer.echo(f"- {d.code} {d.object}")
-                typer.echo(f"  expected={d.expected or ''}")
-                typer.echo(f"  actual={d.actual or ''}")
-        if payload_obj.table_drift:
-            typer.echo("")
-            typer.echo("Table shape drift:")
-            for detail in payload_obj.table_drift:
-                typer.echo(f"- {detail.table}: {', '.join(detail.reason_codes)}")
+        typer.echo(f"{warning} Drift check is a no-op.")
         return
 
-    plan, issues = plan_snapshot_drift(snapshot_defs, schema_defs, table_scope)
-    drifted = bool(plan.operations or issues)
-    snapshot_file = meta_dir / "snapshot.json"
+    executor = resolve_plugin_executor(
+        load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)]),
+        config,
+        command="drift",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+        service=service,
+    )
+    if executor is None and config.clickhouse is None:
+        msg = (
+            "clickhouse.config.py must include a `clickhouse` block or select an "
+            "ObsessionDB service for drift checks."
+        )
+        exit_no_target("drift", msg, json_mode=output_json)
+    with open_client(executor, config.clickhouse) as client:
+        payload_obj = build_drift_payload(
+            client=client,
+            meta_dir=meta_dir,
+            snapshot=snapshot,
+            database=config.clickhouse.database if config.clickhouse else None,
+            fail_on_extra_objects=config.check.fail_on_extra_objects,
+            scope=table_scope if table_scope.enabled else None,
+        )
 
-    payload = {
-        "snapshotFile": str(snapshot_file),
-        "drifted": drifted,
-        "operations": [op.model_dump(by_alias=True) for op in plan.operations],
-        "renameSuggestions": [s.model_dump(by_alias=True) for s in plan.rename_suggestions],
+    payload_dict: dict[str, object] = {
+        "scope": scope_to_payload(table_scope),
+        "snapshotFile": payload_obj.snapshot_file,
+        "expectedCount": payload_obj.expected_count,
+        "actualCount": payload_obj.actual_count,
+        "drifted": payload_obj.drifted,
+        "missing": payload_obj.missing,
+        "extra": payload_obj.extra,
+        "kindMismatches": [asdict(m) for m in payload_obj.kind_mismatches],
+        "objectDrift": [asdict(d) for d in payload_obj.object_drift],
+        "tableDrift": [asdict(d) for d in payload_obj.table_drift],
     }
-    if issues:
-        payload["issues"] = [issue.model_dump(mode="json") for issue in issues]
-
+    if payload_obj.database_missing:
+        payload_dict["databaseMissing"] = True
+        payload_dict["database"] = payload_obj.database
     if output_json:
-        emit_json("drift", payload)
+        emit_json("drift", payload_dict)
         return
-
-    typer.echo(f"Snapshot file:       {snapshot_file}")
-    typer.echo(f"Expected operations: {len(plan.operations)}")
-    typer.echo(f"Drifted:             {'yes' if drifted else 'no'}")
-    for issue in issues:
-        typer.echo(f"- [{issue.code}] {issue.message}")
-    if plan.operations:
+    if payload_obj.database_missing:
+        typer.echo(
+            f'⚠ Database "{payload_obj.database or ""}" does not exist on the target server.'
+        )
+    typer.echo(f"Snapshot file:       {payload_obj.snapshot_file}")
+    typer.echo(f"Expected objects:    {payload_obj.expected_count}")
+    typer.echo(f"Actual objects:      {payload_obj.actual_count}")
+    typer.echo(f"Drifted:             {'yes' if payload_obj.drifted else 'no'}")
+    if payload_obj.missing:
         typer.echo("")
-        typer.echo("Operations:")
-        for op in plan.operations:
-            typer.echo(f"- [{op.risk}] {op.type} {op.key}")
-    if plan.rename_suggestions:
+        typer.echo("Missing (in snapshot, not in DB):")
+        for item in payload_obj.missing:
+            typer.echo(f"- {item}")
+    if payload_obj.extra:
         typer.echo("")
-        typer.echo("Rename suggestions:")
-        for s in plan.rename_suggestions:
-            typer.echo(
-                f"- {s.database}.{s.table} {s.from_} -> {s.to} ({s.confidence})"
-            )
+        typer.echo("Extra (in DB, not in snapshot):")
+        for item in payload_obj.extra:
+            typer.echo(f"- {item}")
+    if payload_obj.kind_mismatches:
+        typer.echo("")
+        typer.echo("Kind mismatches:")
+        for m in payload_obj.kind_mismatches:
+            typer.echo(f"- {m.object}: expected {m.expected}, got {m.actual}")
+    view_drift = [
+        d for d in payload_obj.object_drift if d.code in ("query_mismatch", "target_mismatch")
+    ]
+    if view_drift:
+        typer.echo("")
+        typer.echo("View drift:")
+        for d in view_drift:
+            typer.echo(f"- {d.code} {d.object}")
+            typer.echo(f"  expected={d.expected or ''}")
+            typer.echo(f"  actual={d.actual or ''}")
+    if payload_obj.table_drift:
+        typer.echo("")
+        typer.echo("Table shape drift:")
+        for detail in payload_obj.table_drift:
+            typer.echo(f"- {detail.table}: {', '.join(detail.reason_codes)}")

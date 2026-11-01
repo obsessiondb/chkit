@@ -193,6 +193,18 @@ def resolve_table_scope(
     )
 
 
+def scope_to_payload(scope: TableScope) -> dict[str, object]:
+    """The TS ``TableScope`` JSON shape (``selector`` only when set)."""
+    payload: dict[str, object] = {
+        "enabled": scope.enabled,
+        "matchedTables": list(scope.matched_tables),
+        "matchCount": scope.match_count,
+    }
+    if scope.selector is not None:
+        payload["selector"] = scope.selector
+    return payload
+
+
 def table_key_from_operation_key(operation_key: str) -> str | None:
     """``table:db.t:rest`` → ``db.t``. Returns None for non-table operations."""
     prefix = "table:"
