@@ -618,6 +618,21 @@ describe('runtime contracts', () => {
     expect(undeclared.tables.get('app.events')).toHaveLength(2)
   })
 
+
+  test('rejects host limits the runtime cannot honour instead of silently degrading them', async () => {
+    const stream = defineStream({ id: 'app.limits', destination: events, async *read() { yield { rows: [{ id: 1 }] } } })
+    const selected = selectStreams([definePipeline({ id: 'app', streams: [stream] })], [])
+    const env = () => ({ journal: createMemoryJournal(), destination: createMemoryDestination() })
+    for (const maxDurationMs of [Number.POSITIVE_INFINITY, Number.NaN, 0, -1, 2 ** 31]) {
+      await expect(runIngestion({ selected, backfill: undefined }, { ...env(), maxDurationMs })).rejects.toThrow('maxDurationMs must be a positive number of milliseconds up to 2147483647')
+    }
+    for (const prefetchBatches of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(runIngestion({ selected, backfill: undefined }, { ...env(), prefetchBatches })).rejects.toThrow('prefetchBatches must be a positive integer')
+    }
+    const result = await runIngestion({ selected, backfill: undefined }, { ...env(), maxDurationMs: 2 ** 31 - 1, prefetchBatches: 3 })
+    expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', rows: 1 })
+  })
+
   test('the execution budget interrupts a hung reader and preserves committed progress', async () => {
     const journal = createMemoryJournal()
     const stream = defineStream({

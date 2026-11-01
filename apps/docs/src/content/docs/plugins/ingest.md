@@ -107,7 +107,7 @@ export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream]
 
 Add `ingestionColumns` to custom destination tables. The loader fills `_chkit_batch_id` and `_chkit_run_id`; ClickHouse sets `_chkit_ingested_at` at the physical insert.
 
-`paginate` returns complete pages shaped as `{ items, next, metadata? }`, including empty and terminal pages. Use `page.items` for rows. Pass checkpoint candidates from metadata explicitly to a yielded chunk's `state` when using `cursorState`; metadata itself is not persisted. See [Readers and pagination](/api-sync/readers/#pages-and-checkpoint-metadata).
+`paginate` returns complete pages shaped as `{ items, next, metadata? }`, including empty and terminal pages; a `fetchPage` result without an `items` array fails the stream with `IngestConfigError`. Use `page.items` for rows. Pass checkpoint candidates from metadata explicitly to a yielded chunk's `state` when using `cursorState`; metadata itself is not persisted. See [Readers and pagination](/api-sync/readers/#pages-and-checkpoint-metadata).
 
 Batch identity decides whether a retry is deduplicated. By default it includes a content hash of the rows, which prefers a possible duplicate over suppressing rows that changed between attempts; a field like `synced_at: new Date()` therefore defeats retry deduplication. When a chunk covers a stable source interval, declare it with `id` (for example `yield { rows, id: \`page:${cursor}\` }`): the chunk then becomes its own write unit and its identity ignores row content.
 
@@ -198,7 +198,7 @@ chkit ingest repair --tag stream:helpdesk.tickets
 chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
 ```
 
-Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
+Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`; declared tags cannot use those prefixes. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
 
 A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. The bundled `fullSync()` and `cursorState()` strategies do not interpret date bounds; custom provider strategies may honor or reject them. See the source's documentation and [Backfill source data](/api-sync/operations/#backfill-source-data).
 
@@ -221,7 +221,7 @@ Overlapping processes record independent histories. Scheduler concurrency contro
 | Option | Default | Description |
 |---|---|---|
 | `journalTable` | `_chkit_ingestion_journal` | Append-only checkpoint journal in the configured database |
-| `maxDurationSeconds` | `3600` | Execution budget. Exhausting it ends the run as incomplete and keeps committed progress |
+| `maxDurationSeconds` | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Exhausting it ends the run as incomplete and keeps committed progress |
 | `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading |
 
 ## Related pages
