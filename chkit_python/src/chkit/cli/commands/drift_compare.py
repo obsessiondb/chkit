@@ -295,9 +295,10 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         else sql_expression_fingerprint(rendered)
     )
 
+    # Introspection unwraps Nullable(T) into type=T plus nullable=True.
+    type_ = str(column.type).strip()
     parts = [
-        f"type={str(column.type).strip()}",
-        f"nullable={'1' if column.nullable else '0'}",
+        f"type={f'Nullable({type_})' if column.nullable else type_}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
