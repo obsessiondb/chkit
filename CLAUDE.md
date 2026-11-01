@@ -103,9 +103,11 @@ A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known Obsess
 
 ## Release
 
-Uses changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump versions.
+User-facing npm package changes use changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump package versions. Registry templates have independent versions and changelogs; template-only updates must not add package changesets or bump `chkit` or the fixed npm package group.
 
 ### Registry integration releases
+
+For template-only changes, release only the affected integration through its `manifest.json` (`meta.chkit.version` and `meta.chkit.changelog`) and generated artifact below. Changes to distributed source, dependencies, or metadata require a template release. Shared runtime, CLI, plugin, or library behavior changes still require ordinary package changesets. In a mixed PR, release each affected surface separately; the presence of registry files never exempts package changes.
 
 Keep at most one new release artifact per integration in a PR. Versions already on the merged base are immutable; artifacts added by the unmerged PR are drafts. Further edits refresh that same draft version and its current `meta.chkit.changelog` entry, without adding intermediate versions. Preserve earlier released changelog entries.
 

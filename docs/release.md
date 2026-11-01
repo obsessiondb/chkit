@@ -1,6 +1,14 @@
 # Release Process
 
-All 10 published packages share one semver version (a changesets `fixed` group) and publish together. While in beta, versions carry a `-beta.N` suffix.
+All 10 published npm packages share one semver version (a changesets `fixed` group) and publish together. While in beta, versions carry a `-beta.N` suffix. Registry templates are released independently, without an npm package bump.
+
+## Registry template releases
+
+Template-only updates must not add package changesets or bump `chkit`. Advance the affected provider's `meta.chkit.version` and current `meta.chkit.changelog` entry in `registry/<provider>/manifest.json`, then regenerate its artifact with `bun run registry:release -- --base origin/main <provider>` and validate with `bun run check:registry-releases -- --base origin/main`. Use the actual PR base if different. Keep one new draft artifact per integration per PR; subsequent edits refresh that same version. Preserve artifacts and changelog entries already present in the merged base.
+
+Merging makes the committed `registry/<provider>/releases/<version>.json` available to the official GitHub-backed CLI. The docs build separately generates the static catalog, latest aliases, and integration pages; production deployment requires both CI test jobs to pass. No npm prepare or publish step is needed for a template release. See the [registry authoring guide](../apps/docs/src/content/docs/api-sync/registry-authoring.md) for the full workflow.
+
+Shared runtime, CLI, plugin, and library behavior changes still need package changesets. A mixed PR releases templates and packages separately; touching registry files does not exempt package changes.
 
 ## Releasing
 
@@ -43,7 +51,7 @@ Sibling `@chkit/*` dependencies resolve to the same commit's previews.
 
 ## Adding a Changeset
 
-Every user-facing change needs a changeset. Without one, prepare has nothing to release.
+Every user-facing npm package change needs a changeset. Template-only changes use the independent workflow above, not a changeset. Preparing another beta requires pending package changesets; graduating an existing beta line to stable does not.
 
 ```bash
 bun run changeset

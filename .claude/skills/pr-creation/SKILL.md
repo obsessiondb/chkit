@@ -1,6 +1,6 @@
 ---
 name: pr-creation
-description: Use when creating a pull request. Ensures changesets are created for user-facing changes, verification passes, and PR metadata is correct. Invoke this skill BEFORE committing or pushing PR code.
+description: Use when creating a pull request. Ensures package changesets and independent registry template releases match the changed surfaces, verification passes, and PR metadata is correct. Invoke this skill BEFORE committing or pushing PR code.
 allowed-tools: [Read, Edit, Write, Bash, Glob, Grep, mcp__conductor__GetWorkspaceDiff]
 metadata:
   internal: true
@@ -54,9 +54,29 @@ If docs updates are needed, make them in this PR — do not defer to a follow-up
 
 If the diff already includes appropriate docs changes, or the changes are purely internal with no docs impact, continue to the next step.
 
-## 4. Create Changesets (if needed)
+## 4. Release Each Changed Surface
 
-If the PR introduces **any user-facing change** (new feature, bug fix, API change, behavior change):
+Review the whole diff before choosing a release path:
+
+- **Template-only:** Changes to distributed registry source, dependencies, or metadata use the integration's independent version, changelog, and generated release artifact. Do not create a package changeset or bump `chkit` or the fixed npm package group.
+- **Package behavior:** User-facing shared-runtime, CLI, plugin, or library changes require ordinary package changesets, even when they support registry templates.
+- **Mixed:** Release the affected templates and packages separately. Registry files in a PR never exempt package changes.
+- **Docs or tooling only:** No release is needed unless the changed files are distributed as part of a template or change published package behavior.
+
+### Registry template releases
+
+Update `registry/<provider>/manifest.json`: advance `meta.chkit.version` beyond the merged release and add the current `meta.chkit.changelog` entry. Keep at most one new artifact per integration per PR; later edits refresh that same unmerged draft and its changelog entry. Preserve released artifacts and earlier changelog entries.
+
+```bash
+bun run registry:release -- --base origin/main <provider>
+bun run check:registry-releases -- --base origin/main
+```
+
+Use the actual PR base if different. Commit the generated `registry/<provider>/releases/<version>.json` with its source and manifest; never hand-edit generated artifacts. See `CLAUDE.md#registry-integration-releases` and the registry authoring guide for the full workflow.
+
+### Package changesets
+
+If the PR introduces a **user-facing npm package change** (new feature, bug fix, API change, behavior change):
 
 1. Create a changeset file manually at `.changeset/<descriptive-name>.md`
 2. The interactive `bun run changeset` CLI does not work in this environment — create the file directly
@@ -82,17 +102,18 @@ If the PR is purely internal (CI, docs, refactoring with no user-facing effect),
 
 ### How to decide: user-facing or internal?
 
-**When in doubt, create a changeset.** The cost of an unnecessary changeset is near zero; a missing one delays the release.
+**When in doubt, inspect the changed distribution surface.** An unnecessary package changeset bumps the entire fixed npm group; a missing package changeset delays a real package release.
 
-A change is **user-facing** if it affects what users experience when they install or run chkit. Ask yourself: "If a user upgrades chkit, could they notice this change?" If yes, it needs a changeset.
+A package change is **user-facing** if it affects what users experience when they install or run that package. Template code downloaded independently from the registry follows the template release workflow above, not the npm package release.
 
 Examples that **require** a changeset:
-- Bug fixes — even if the fix is in internal/plugin code, if it corrects wrong behavior users can hit, it's user-facing
+- Package bug fixes — even if the fix is in internal/plugin code, if it corrects wrong behavior users can hit, it's user-facing
 - New CLI flags, commands, or options
 - Changed output format, error messages, or default behavior
 - Performance improvements users would notice
 
 Examples that **do NOT require** a changeset:
+- Registry template-only changes (use the independent template release workflow instead)
 - CI/CD pipeline changes
 - Documentation-only changes (docs site, README)
 - Dev tooling (linter config, test infra)
@@ -123,7 +144,7 @@ EOF
 
 ## Common Mistakes to Avoid
 
-- **Forgetting changesets**: This is the #1 mistake. Always check if changes are user-facing. A bug fix in internal code is still user-facing if it changes behavior users can observe.
-- **Calling bug fixes "internal"**: If the code change fixes something that was broken for users (e.g., wrong file paths, incorrect defaults, broken commands), it needs a changeset — even if only internal files were modified.
+- **Releasing the wrong surface**: Template-only changes need template releases, not package changesets. Package behavior changes need changesets, including in mixed registry/package PRs.
+- **Calling package bug fixes "internal"**: If the code change fixes something that was broken for package users (e.g., wrong file paths, incorrect defaults, broken commands), it needs a changeset — even if only internal files were modified.
 - **Describing only the latest commit**: The PR description should cover the entire branch diff.
 - **Skipping docs updates**: If a change is user-facing enough to need a changeset, it almost certainly needs a docs update too. New flags, options, commands, and plugin features must be reflected in the corresponding docs page.
