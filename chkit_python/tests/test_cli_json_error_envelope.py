@@ -111,8 +111,10 @@ def test_failing_command_logs_the_traceback_under_chkit_debug(tmp_path: Path) ->
         check=False,
     )
 
-    quiet = run(env={**os.environ, "CHKIT_DEBUG": ""})
-    debug = run(env={**os.environ, "CHKIT_DEBUG": "1"})
+    # An empty config home, so a user profile config cannot change the output.
+    env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    quiet = run(env={**env, "CHKIT_DEBUG": ""})
+    debug = run(env={**env, "CHKIT_DEBUG": "1"})
 
     assert (quiet.returncode, quiet.stdout, quiet.stderr) == (1, "", "boom\n")
     assert debug.returncode == 1
