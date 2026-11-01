@@ -1062,10 +1062,6 @@ function createStatusCapturingClient(
       return {
         query_id: 'q',
         response_headers: {},
-        // What the client's own JSONEachRow decoder does.
-        async json() {
-          return text.split('\n').filter((line) => line.trim().length > 0).map((line) => JSON.parse(line))
-        },
         async text() {
           return text
         },

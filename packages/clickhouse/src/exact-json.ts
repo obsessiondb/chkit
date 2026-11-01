@@ -67,6 +67,14 @@ export function parseJsonResult<T extends Record<string, unknown>>(
 	} as ClickHouseJsonQueryResult<T>
 }
 
+/** Parses a `JSONEachRow` body, every nonempty line as `parseJsonEachRowLine`. */
+export function parseJsonEachRow<T>(body: string): T[] {
+	return body
+		.split('\n')
+		.filter((line) => line.trim().length > 0)
+		.map((line) => parseJsonEachRowLine<T>(line))
+}
+
 /**
  * Parses one `JSONEachRow` line without rounding (#415). A number whose
  * double does not print back to the digits ClickHouse wrote (a 64-bit or
@@ -87,14 +95,6 @@ export function parseJsonEachRowLine<T>(line: string): T {
 		if (typeof value !== 'number' || source === undefined || source.length <= 15) return value
 		return canonicalDecimal(source) === canonicalDecimal(String(value)) ? value : source
 	})
-}
-
-/** Parses a `JSONEachRow` body, every nonempty line as `parseJsonEachRowLine`. */
-export function parseJsonEachRow<T>(body: string): T[] {
-	return body
-		.split('\n')
-		.filter((line) => line.trim().length > 0)
-		.map((line) => parseJsonEachRowLine<T>(line))
 }
 
 function jsonNumber(source: string | undefined, value: number): JsonNumber {
