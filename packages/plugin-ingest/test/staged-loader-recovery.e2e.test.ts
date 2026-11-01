@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:http'
+import { createServer, request as sendRequest, type IncomingHttpHeaders } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -775,34 +775,46 @@ export const pipeline = definePipeline({
   }
 
   async function transport(options: TransportOptions) {
+    const target = new URL(LOCAL_STACK_ENV.clickhouseUrl)
     const server = createServer(async (request, response) => {
       try {
         const chunks: Buffer[] = []
         for await (const chunk of request) chunks.push(Buffer.from(chunk))
         const body = Buffer.concat(chunks)
-        const url = new URL(request.url ?? '/', LOCAL_STACK_ENV.clickhouseUrl)
+        const incoming = new URL(request.url ?? '/', 'http://localhost')
         let disconnected = false
         const query: HttpQuery = {
-          sql: url.searchParams.get('query') ?? body.toString('utf8'),
-          queryId: url.searchParams.get('query_id') ?? '',
+          sql: incoming.searchParams.get('query') ?? body.toString('utf8'),
+          queryId: incoming.searchParams.get('query_id') ?? '',
           disconnect() { disconnected = true; request.socket.destroy() },
         }
         await options.before?.(query)
-        const headers = new Headers()
+        const headers: IncomingHttpHeaders = {}
         for (const [key, value] of Object.entries(request.headers)) {
           if (value !== undefined && !['host', 'connection', 'content-length', 'transfer-encoding'].includes(key)) {
-            headers.set(key, Array.isArray(value) ? value.join(',') : value)
+            headers[key] = value
           }
         }
-        const upstream = await fetch(url, { method: 'POST', headers, body })
-        const result = Buffer.from(await upstream.arrayBuffer())
+        const upstream = await new Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+          // Incoming URLs may supply query parameters, never the upstream origin.
+          const outgoing = sendRequest({
+            hostname: target.hostname, port: target.port, method: 'POST', path: `/${incoming.search}`, headers,
+          }, (result) => {
+            const chunks: Buffer[] = []
+            result.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+            result.once('error', reject)
+            result.once('end', () => resolve({ status: result.statusCode ?? 502, headers: result.headers, body: Buffer.concat(chunks) }))
+          })
+          outgoing.once('error', reject)
+          outgoing.end(body)
+        })
         await options.after?.(query)
         if (!disconnected && !response.destroyed) {
           response.statusCode = upstream.status
-          for (const [key, value] of upstream.headers) {
-            if (!['connection', 'content-length', 'transfer-encoding', 'content-encoding'].includes(key)) response.setHeader(key, value)
+          for (const [key, value] of Object.entries(upstream.headers)) {
+            if (value !== undefined && !['connection', 'content-length', 'transfer-encoding'].includes(key)) response.setHeader(key, value)
           }
-          response.end(result)
+          response.end(upstream.body)
         }
       } catch (error) {
         response.destroy(error instanceof Error ? error : new Error(String(error)))
