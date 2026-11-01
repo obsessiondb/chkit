@@ -127,6 +127,19 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit check` prints the same JSON and text as TS and judges the same way (#435).
+  **Behaviour change** for `--json` readers: the payload no longer has `issues`,
+  `pendingMigrations`, `checksumMismatches` or `pluginCheckResults` (use `chkit status
+  --json` for the migration names), and always has `plugins` (`{}` without plugin checks),
+  written before `scope` as in TS. The text starts with `Check status:` and `Policy:`, uses
+  `Pending migrations: N` / `Checksum mismatches: N`, lists the `--table` scope and the
+  plugin checks, and prints each plugin's `on_check_report` lines, without the
+  `Validation issues:` line or the blank line before `Failed checks:`. **Behaviour change:**
+  check no longer validates the schema files (no `validation` failed check; `generate` and
+  `snapshot rebuild` still fail on an invalid schema), a plugin fails the check only with an
+  evaluated, not-ok result that has an `error` finding (a `warn`-only or unevaluated result
+  no longer fails it), and `--table` scopes only the drift and plugin checks: pending
+  migrations of other tables count again, as documented.
 - The typed `GCD` codec is a preprocessing codec, as in TS (#408). ClickHouse rejects a lone
   `CODEC(GCD)` because GCD does not compress, and chkit-py classed it as a general codec, so
   no typed GCD chain was valid: `[{"kind": "GCD"}, {"kind": "LZ4"}]` now validates and
