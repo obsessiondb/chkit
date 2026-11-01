@@ -459,6 +459,12 @@
   engine arguments, `EPHEMERAL` columns in skip indexes or projections, and codecs on
   `ALIAS` or bare `EPHEMERAL` columns. Removing a default while changing the type runs
   `REMOVE` first as its own operation.
+- `chkit query` prints `Float32`/`Float64` values as TS does, in the table and in `--json`
+  (#411). It printed Python's `repr`: `1e-07`, `1e-06` and `1e-05` where TS prints `1e-7`,
+  `0.000001` and `0.00001`, also inside arrays, maps and tuples (and in `statistics`), and
+  the wider cell widened the table column. Values now print as JavaScript prints a number:
+  the shortest digits that read back as the same double, in exponent form (`1e-7`,
+  `1.5e+21`) only below `1e-6` and from `1e21`.
 
 ## 0.2.0 — 2026-08-10
 

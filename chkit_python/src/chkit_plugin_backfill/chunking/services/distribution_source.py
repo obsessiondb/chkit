@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chkit.core.jsnum import parse_js_number
 from chkit_plugin_backfill.chunking.sql import build_where_clause_from_ranges
 from chkit_plugin_backfill.chunking.types import (
     ChunkRange,
@@ -18,7 +19,6 @@ from chkit_plugin_backfill.chunking.types import (
     TemporalBucket,
 )
 from chkit_plugin_backfill.chunking.utils.binary_string import latin1_bytes
-from chkit_plugin_backfill.chunking.utils.jsnum import parse_js_number
 
 
 def _find_range(
