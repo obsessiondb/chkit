@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
+  (#432): each one the URL sets, percent-decoded, takes precedence over the configured
+  `username` / `password`. Before, chkit-py ignored them and signed in with the configured
+  ones. "Authentication failed for user ..." names the URL's user, and the invalid-URL errors
+  no longer print the credentials (the protocol error prints the scheme only, as in TS).
 - The typed `T64` codec is accepted before a general codec, as in TS (#434). ClickHouse accepts
   `CODEC(T64, LZ4)`, `CODEC(T64, ZSTD(3))` and `CODEC(Delta, T64, LZ4)`, but chkit-py classed
   `T64` as a general codec, so those chains failed validation with

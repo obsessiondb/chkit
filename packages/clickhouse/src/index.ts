@@ -466,7 +466,9 @@ export function formatConnectionError(
 	if (!(error instanceof Error)) return undefined
 	const shownUrl = urlWithoutCredentials(url)
 	if (isAuthError(error)) {
-		const who = username ? `user "${username}"` : 'the configured user'
+		// A user in the URL is the one the client signs in as (see credentialOptions).
+		const user = urlUsername(url) || username
+		const who = user ? `user "${user}"` : 'the configured user'
 		return `Authentication failed for ${who} at ${shownUrl}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
 	}
 	const label = networkLabelFromError(error)
@@ -486,6 +488,11 @@ export function formatConnectionError(
 /** The URL without its `user:password@` part, for messages and logs. */
 export function urlWithoutCredentials(url: string): string {
 	return url.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/?#]*@/i, '$1')
+}
+
+/** The user set in the URL, decoded as `@clickhouse/client` does, or '' when it sets none. */
+function urlUsername(url: string): string {
+	return URL.canParse(url) ? decodeURIComponent(new URL(url).username) : ''
 }
 
 export function wrapConnectionError(error: unknown, url: string, username?: string): never {

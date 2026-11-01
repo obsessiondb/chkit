@@ -13,7 +13,7 @@ import os
 import re
 import uuid
 from typing import Any, Literal, NoReturn, Self
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
@@ -104,17 +104,20 @@ class ClickHouseClient:
         parsed = urlparse(config.url)
         host = parsed.hostname
         if host is None:
-            msg = f"Invalid ClickHouse URL (missing host): {config.url}"
+            msg = f"Invalid ClickHouse URL (missing host): {_url_without_credentials(config.url)}"
             raise ValueError(msg)
         # Like the TS client (``@clickhouse/client``): the URL scheme sets the
-        # protocol, and a URL without a port uses the scheme's default port.
+        # protocol, a URL without a port uses the scheme's default port, and
+        # credentials in the URL take precedence over the configured ones.
         if parsed.scheme not in ("http", "https"):
-            msg = f"ClickHouse URL protocol must be either http or https. Got: {config.url}"
+            msg = f"ClickHouse URL protocol must be either http or https. Got: {parsed.scheme}:"
             raise ValueError(msg)
         secure = parsed.scheme == "https"
         port = parsed.port
         if port is None:
             port = 443 if secure else 80
+        username = unquote(parsed.username) if parsed.username else config.username
+        password = unquote(parsed.password) if parsed.password else config.password
 
         # Connect without the database: clickhouse-connect's connect-time
         # probes would send it, and ClickHouse rejects every request for a
@@ -126,8 +129,8 @@ class ClickHouseClient:
             client = clickhouse_connect.get_client(
                 host=host,
                 port=port,
-                username=config.username,
-                password=config.password,
+                username=username,
+                password=password,
                 secure=secure,
             )
         except Exception as error:
@@ -560,7 +563,9 @@ def format_connection_error(
     text = str(error)
     shown_url = _url_without_credentials(url)
     if _is_auth_error(text):
-        who = f'user "{username}"' if username else "the configured user"
+        # A user in the URL is the one the client signs in as (see ``connect``).
+        user = unquote(urlparse(url).username or "") or username
+        who = f'user "{user}"' if user else "the configured user"
         return (
             f"Authentication failed for {who} at {shown_url}. "
             "Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD."

@@ -736,6 +736,13 @@ describe('formatConnectionError', () => {
       'Authentication failed for user "default" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
     )
   })
+
+  test('names the user set in the URL, which the client signs in as', () => {
+    const auth = Object.assign(new Error(rawAuthBlurb), { code: '516' })
+    expect(formatConnectionError(auth, 'http://al%40ice:SeCrEtPw@localhost:8199', 'default')).toBe(
+      'Authentication failed for user "al@ice" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+  })
 })
 
 describe('urlWithoutCredentials', () => {
