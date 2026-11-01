@@ -18,8 +18,13 @@ export const defaultGoogleCalendarClientDeps: GoogleCalendarClientDeps = {
   token: () => process.env.GOOGLE_CALENDAR_ACCESS_TOKEN,
 }
 
-export const classifyGoogleCalendarError: ErrorClassifier = (cause) =>
-  cause instanceof IngestConfigError || cause instanceof SyntaxError ? { kind: 'permanent' } : undefined
+const RATE_LIMIT_REASON = /"reason"\s*:\s*"(?:rateLimitExceeded|userRateLimitExceeded)"/
+
+export const classifyGoogleCalendarError: ErrorClassifier = (cause) => {
+  if (cause instanceof IngestConfigError || cause instanceof SyntaxError) return { kind: 'permanent' }
+  if (cause instanceof HttpError && cause.status === 403 && RATE_LIMIT_REASON.test(cause.body)) return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs }
+  return undefined
+}
 
 export async function resolveCalendar(context: FetchContext, deps: GoogleCalendarClientDeps): Promise<string> {
   return context.attempt(async (signal) => {

@@ -22,6 +22,10 @@ const stargazer = { starred_at: '2026-01-01T00:00:00Z', user: { id: 501, login: 
 type Responder = (url: URL, init: RequestInit) => Response | Promise<Response>
 type Pipeline = ReturnType<typeof createGitHubPipeline>
 
+test.each(['owner/.', 'owner/..', './repo', '../repo'])('repository selection rejects dot-only URL segments: %s', (repo) => {
+  expect(() => createGitHubPipeline({ ...githubConfig, repositories: [repo] })).toThrow('GitHub repositories must use owner/repository names.')
+})
+
 test('GitHub resource streams retain flat provider payloads and parent join identities', async () => {
   const requests: URL[] = []
   const pipeline = fixturePipeline((url, init) => { requests.push(url); return fixtureResponse(url, init) })
@@ -95,6 +99,55 @@ test('short issue pages follow Link continuations while excluding PRs and update
   expect(requests.every((url) => url.searchParams.get('since') === '2008-01-01T00:00:00.000Z')).toBe(true)
   expect(destination.tables.get('default.github_issues_raw')?.map((row) => row.raw)).toEqual([{ repository, data: issue }, { repository, data: nextIssue }])
   expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
+})
+
+test.each([
+  ['comma in target', '?labels=a,b&page=2', 'rel="next"'],
+  ['multiple relations', '?page=2', 'rel="alternate next"'],
+  ['quoted comma', '?page=2', 'title="page, two"; rel="next"'],
+  ['quoted semicolon', '?page=2', 'title="; rel=prev"; rel=next'],
+])('REST pagination follows next links with %s', async (_label, target, parameters) => {
+  const requests: URL[] = []
+  const pipeline = fixturePipeline((url) => {
+    requests.push(url)
+    if (url.searchParams.has('page')) return Response.json([{ ...issue, number: 2 }])
+    return Response.json([issue], { headers: { Link: `<${target}>; ${parameters}` } })
+  })
+  const destination = createMemoryDestination(), journal = createMemoryJournal()
+  const result = await runIngestion(request(pipeline, 'issues'), { journal, destination, now: () => cutoff })
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  expect(requests).toHaveLength(2)
+  expect(requests[1]?.search).toBe(target)
+  expect(destination.tables.get('default.github_issues_raw')?.map((row) => row.raw)).toEqual([
+    { repository, data: issue }, { repository, data: { ...issue, number: 2 } },
+  ])
+  expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
+})
+
+test.each(['rel="next-archive"', 'title="rel=next"; rel="prev"', 'rel="prev"; rel="next"', 'xrel=next; rel=prev'])('REST pagination ignores non-next relation parameters: %s', async (parameters) => {
+  let requests = 0
+  const pipeline = fixturePipeline(() => {
+    requests++
+    return Response.json([issue], { headers: { Link: `<?page=2>; ${parameters}` } })
+  })
+  const result = await runIngestion(request(pipeline, 'issues'), { journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.ok, JSON.stringify(result)).toBe(true)
+  expect(requests).toBe(1)
+})
+
+test.each(['', 'https://[invalid]'])('REST pagination rejects invalid or cyclic next targets without retrying: %s', async (target) => {
+  let requests = 0
+  const pipeline = fixturePipeline(() => {
+    requests++
+    return Response.json([issue], { headers: { Link: `<${target}>; rel="next"` } })
+  })
+  const selected = request(pipeline, 'issues').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0, maxTimeout: 0 } } }))
+  const journal = createMemoryJournal()
+  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.ok).toBe(false)
+  expect(requests).toBe(1)
+  expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+  expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope).toBeUndefined()
 })
 
 test('issue page filtering preserves continuations and empty terminal pages', async () => {

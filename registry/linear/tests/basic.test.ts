@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test'
-import { IngestConfigError, runIngestion, selectStreams, type FetchContext, type Page } from '@chkit/plugin-ingest'
+import { HttpError, IngestConfigError, runIngestion, selectStreams, type FetchContext, type Page } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { createLinearPipeline, linearPipeline } from '../index.js'
 import { linearConfig, type LinearConfig } from '../config.js'
-import type { LinearObject } from '../client.js'
+import { classifyLinearError, type LinearObject } from '../client.js'
 import { readLinearPages } from '../sources/common.js'
 
 const cutoff = new Date('2026-01-02T00:00:00Z')
@@ -459,6 +459,78 @@ test('malformed connections or provider identities cannot silently complete an e
     expect((await runIngestion(request(pipeline, 'comments'), { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
     expect(attempts).toBe(1)
     expect((await journal.readCheckpoint('linear.comments')).envelope).toBeUndefined()
+  }
+})
+
+test('Linear rate limits honor exhausted reset headers across HTTP and GraphQL responses', async () => {
+  for (const status of [200, 400, 429]) {
+    for (const kind of ['requests', 'endpoint-requests', 'complexity']) {
+      const reset = Date.now() + 60_000
+      const error = await HttpError.fromResponse(Response.json({ errors: [{ extensions: { code: 'RATELIMITED' } }] }, {
+        status, headers: { [`x-ratelimit-${kind}-remaining`]: '0', [`x-ratelimit-${kind}-reset`]: String(reset) },
+      }))
+      const classified = classifyLinearError(error)
+      expect(classified?.kind).toBe('rate_limited')
+      const delay = classified?.kind === 'rate_limited' ? classified.retryAfterMs : undefined
+      expect(delay).toBeGreaterThanOrEqual(reset - Date.now())
+      expect(delay).toBeLessThanOrEqual(60_000)
+    }
+  }
+})
+
+test('Linear HTTP429 chooses the latest exhausted reset and lets Retry-After take precedence', async () => {
+  const reset = Date.now() + 60_000
+  const headers = {
+    'x-ratelimit-requests-remaining': '0', 'x-ratelimit-requests-reset': String(reset - 30_000),
+    'x-ratelimit-endpoint-requests-remaining': '0', 'x-ratelimit-endpoint-requests-reset': String(reset),
+    'x-ratelimit-complexity-remaining': '1', 'x-ratelimit-complexity-reset': String(reset + 60_000),
+  }
+  const latest = classifyLinearError(await HttpError.fromResponse(new Response('Too many requests', { status: 429, headers })))
+  const delay = latest?.kind === 'rate_limited' ? latest.retryAfterMs : undefined
+  expect(delay).toBeGreaterThanOrEqual(reset - Date.now())
+  expect(delay).toBeLessThanOrEqual(60_000)
+  expect(classifyLinearError(await HttpError.fromResponse(new Response('', {
+    status: 429, headers: { ...headers, 'Retry-After': '0' },
+  })))).toEqual({ kind: 'rate_limited', retryAfterMs: 0 })
+  for (const resetHeader of ['', 'garbage', '0', '-1']) {
+    expect(classifyLinearError(await HttpError.fromResponse(new Response('', {
+      status: 429, headers: { 'x-ratelimit-requests-remaining': '0', 'x-ratelimit-requests-reset': resetHeader },
+    })))).toEqual({ kind: 'rate_limited', retryAfterMs: undefined })
+  }
+  expect(classifyLinearError(await HttpError.fromResponse(Response.json({ errors: [{ extensions: { code: 'FORBIDDEN' } }] }, {
+    status: 400, headers,
+  })))).toBeUndefined()
+})
+
+test('Linear HTTP429 reset delay is applied by the executor to exactly one page retry', async () => {
+  let requests = 0, reset = 0, retriedAt = 0
+  const server = Bun.serve({ port: 0, fetch: () => {
+    requests++
+    if (requests === 1) {
+      reset = Date.now() + 100
+      return new Response('Too many requests', { status: 429, headers: {
+        'x-ratelimit-requests-remaining': '0', 'x-ratelimit-requests-reset': String(reset),
+      } })
+    }
+    retriedAt = Date.now()
+    return response('comments', [comment])
+  } })
+  try {
+    const pipeline = createLinearPipeline(linearConfig, {
+      token: () => 'fixture', fetch: (_url, init) => fetch(`http://127.0.0.1:${server.port}/graphql`, init),
+    })
+    const selected = request(pipeline, 'comments').selected.map((entry) => ({
+      ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } },
+    }))
+    const journal = createMemoryJournal(), destination = createMemoryDestination()
+    expect((await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(true)
+    expect(requests).toBe(2)
+    expect(retriedAt).toBeGreaterThanOrEqual(reset - 5)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
+    expect(destination.tables.get('default.linear_comments_raw')).toHaveLength(1)
+    expect((await journal.readCheckpoint('linear.comments')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
+  } finally {
+    await server.stop(true)
   }
 })
 

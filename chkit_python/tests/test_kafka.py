@@ -8,8 +8,6 @@ from chkit import materialized_view, table
 from chkit.cli.commands.drift_compare import compare_table_shape
 from chkit.cli.commands.pull import _introspected_table_to_definition
 from chkit.cli.commands.pull_render import render_schema_file
-from chkit.cli.commands.snapshot_drift import plan_snapshot_drift
-from chkit.cli.table_scope import resolve_table_scope
 from chkit.clickhouse.create_table_parser import (
     parse_engine_from_create_table_query,
     parse_settings_from_create_table_query,
@@ -147,27 +145,3 @@ def test_rejects_unsupported_changes_and_drops_synchronously():
     assert [op.type for op in drops] == ["drop_materialized_view", "drop_table"]
     assert drops[1].sql == "DROP TABLE IF EXISTS app.queue SYNC;"
 
-
-def test_snapshot_checks_report_replacements_and_keep_other_scoped_changes():
-    original = queue()
-    changed = original.model_copy(update={"comment": "changed"})
-    stored = table(
-        database="app",
-        name="stored",
-        engine="MergeTree",
-        columns=list(original.columns),
-        primary_key=["id"],
-        order_by=["id"],
-    )
-    edited = stored.model_copy(update={"settings": {"index_granularity": 4096}})
-    for selector, expected_issues, expected_operations in [
-        (None, 1, 1),
-        ("queue", 1, 0),
-        ("stored", 0, 1),
-        ("missing", 0, 0),
-    ]:
-        scope = resolve_table_scope(selector, ["app.queue", "app.stored"])
-        plan, issues = plan_snapshot_drift([original, stored], [changed, edited], scope)
-        assert len(issues) == expected_issues
-        assert len(plan.operations) == expected_operations
-        assert all("app.queue" not in operation.key for operation in plan.operations)

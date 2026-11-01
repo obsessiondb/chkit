@@ -95,7 +95,7 @@ from chkit.cli.table_scope import (
     resolve_table_scope,
     table_keys_from_definitions,
 )
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
 from chkit.plugins import ChxPlugin
 
@@ -242,11 +242,10 @@ def run(  # noqa: PLR0917
         # Like the TS CLI's top-level handler: in --json mode stdout carries a
         # parseable error envelope (with the error's stable code, if it has
         # one); the message always goes to stderr.
+        message = clickhouse_error_message(error)
         if output_json:
-            emit_json_error(
-                "migrate", {"code": json_error_code(error), "message": str(error)}
-            )
-        typer.secho(str(error), fg=typer.colors.RED, err=True)
+            emit_json_error("migrate", {"code": json_error_code(error), "message": message})
+        typer.secho(message, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from error
 
 

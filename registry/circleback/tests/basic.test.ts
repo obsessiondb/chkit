@@ -424,3 +424,43 @@ function fixtureResponse(url: URL, _init: RequestInit): Response {
 
 function rowId(id: string | number, sourceId = 'circleback'): string { return JSON.stringify([sourceId, id]) }
 function envelope(data: unknown, sourceId = 'circleback') { return { source_id: sourceId, data } }
+
+test('Circleback honors RateLimit-Reset over HTTP, gives Retry-After precedence, and respects the retry deadline', async () => {
+  for (const scenario of [
+    { headers: new Headers({ 'RateLimit-Reset': '1' }), maxRetryTime: 5_000, succeeds: true, minimumDelay: 900 },
+    { headers: new Headers({ 'RateLimit-Reset': '3600', 'Retry-After': '0' }), maxRetryTime: 5_000, succeeds: true, minimumDelay: 0 },
+    { headers: new Headers({ 'RateLimit-Reset': '3600' }), maxRetryTime: 100, succeeds: false, minimumDelay: 0 },
+    { headers: new Headers({ 'RateLimit-Reset': 'invalid' }), maxRetryTime: 5_000, succeeds: true, minimumDelay: 0 },
+  ]) {
+    const requestedAt: number[] = []
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requestedAt.push(Date.now())
+        return requestedAt.length === 1
+          ? new Response('{"error":"Rate limited","code":"RATE_LIMITED"}', { status: 429, headers: scenario.headers })
+          : Response.json([meeting])
+      },
+    })
+    try {
+      const source = createCirclebackPipeline(circlebackConfig, {
+        config: circlebackConfig, token: () => 'fixture',
+        fetch: (input, init) => {
+          const url = new URL(input)
+          return fetch(`http://127.0.0.1:${server.port}${url.pathname}${url.search}`, init)
+        },
+      })
+      const pipeline = { ...source, retry: { retries: 1, minTimeout: 0, maxTimeout: 0, maxRetryTime: scenario.maxRetryTime } }
+      const journal = createMemoryJournal(), destination = createMemoryDestination()
+      const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:meetings']), backfill: undefined }, { journal, destination })
+      expect(result.ok).toBe(scenario.succeeds)
+      expect(requestedAt).toHaveLength(scenario.succeeds ? 2 : 1)
+      expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass))
+        .toEqual(scenario.succeeds ? ['rate_limited'] : [])
+      if (scenario.minimumDelay > 0) expect((requestedAt[1] ?? 0) - (requestedAt[0] ?? 0)).toBeGreaterThanOrEqual(scenario.minimumDelay)
+      expect(destination.tables.get('default.circleback_meetings_raw')?.length ?? 0).toBe(scenario.succeeds ? 1 : 0)
+    } finally {
+      server.stop(true)
+    }
+  }
+})

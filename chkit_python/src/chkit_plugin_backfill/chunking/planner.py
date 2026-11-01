@@ -15,6 +15,10 @@ import time
 from dataclasses import replace
 from threading import Timer
 
+from chkit.core.jsnum import (
+    js_number_to_string,
+    parse_js_number,
+)
 from chkit_plugin_backfill.chunking.partition_slices import (
     build_root_slice,
     merge_adjacent_slices,
@@ -69,10 +73,6 @@ from chkit_plugin_backfill.chunking.types import (
 from chkit_plugin_backfill.chunking.utils.ids import (
     generate_chunk_id,
     generate_plan_id,
-)
-from chkit_plugin_backfill.chunking.utils.jsnum import (
-    js_number_to_string,
-    parse_js_number,
 )
 from chkit_plugin_backfill.chunking.utils.ranges import (
     get_chunk_range,

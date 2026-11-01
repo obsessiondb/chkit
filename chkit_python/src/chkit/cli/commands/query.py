@@ -27,7 +27,8 @@ from chkit.cli.command_target import (
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
-from chkit.clickhouse.client import ClickHouseJsonQueryResult
+from chkit.clickhouse.client import ClickHouseJsonQueryResult, clickhouse_error_message
+from chkit.core.jsnum import js_number_to_string
 from chkit.core.model import ChxConfigEnv
 from chkit.plugins import ChxPlugin
 
@@ -42,7 +43,7 @@ def clean_query_error(error: BaseException) -> BaseException:
     """Strip injected FORMAT JSON + truncate "Expected one of" lists."""
     if not isinstance(error, Exception):
         return error
-    original = str(error)
+    original = clickhouse_error_message(error)
     message = _INJECTED_FORMAT_RE.sub("", original)
 
     def _truncate_expected(match: re.Match[str]) -> str:
@@ -58,7 +59,8 @@ def clean_query_error(error: BaseException) -> BaseException:
     message = _EXPECTED_ONE_OF_RE.sub(_truncate_expected, message)
     if message == original:
         return error
-    return type(error)(message.strip()) if isinstance(error, Exception) else error
+    # As TS, a plain error: --json reports its code as "error".
+    return RuntimeError(message.strip())
 
 
 # Keys in the order TS prints them: data, meta, the rest of the envelope as
@@ -89,7 +91,32 @@ def format_query_json(payload: ClickHouseJsonQueryResult) -> str:
         for key, value in sorted(dumped.items(), key=lambda item: rank.get(item[0], unknown))
         if value is not None
     }
-    return json.dumps(ordered, indent=2, ensure_ascii=False)
+    return _to_js_json(ordered, indent="  ")
+
+
+def _to_js_json(value: Any, indent: str = "", prefix: str = "") -> str:
+    """``JSON.stringify(value, null, indent)``: ``json.dumps`` output, except
+    that floats print as JavaScript prints a number (``1e-7`` and
+    ``0.000001``, not ``1e-07`` and ``1e-06``) (#411).
+    """
+    if isinstance(value, float):
+        return js_number_to_string(value)
+    if not isinstance(value, (dict, list)) or not value:
+        return json.dumps(value, ensure_ascii=False)
+    inner = prefix + indent
+    if isinstance(value, dict):
+        colon = ": " if indent else ":"
+        items = [
+            json.dumps(key, ensure_ascii=False) + colon + _to_js_json(item, indent, inner)
+            for key, item in value.items()
+        ]
+        start, end = "{", "}"
+    else:
+        items = [_to_js_json(item, indent, inner) for item in value]
+        start, end = "[", "]"
+    if not indent:
+        return start + ",".join(items) + end
+    return f"{start}\n{inner}" + f",\n{inner}".join(items) + f"\n{prefix}{end}"
 
 
 def _stringify_cell(value: Any) -> str:
@@ -99,7 +126,7 @@ def _stringify_cell(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return _to_js_json(value)
 
 
 def format_rows(
@@ -203,9 +230,8 @@ def run(
         # A failed query is not a usage error: like the TS CLI, print the
         # message (plus the --json error envelope) and exit 1.
         cleaned = clean_query_error(error)
+        message = clickhouse_error_message(cleaned)
         if output_json:
-            emit_json_error(
-                "query", {"code": json_error_code(cleaned), "message": str(cleaned)}
-            )
-        typer.secho(str(cleaned), fg=typer.colors.RED, err=True)
+            emit_json_error("query", {"code": json_error_code(cleaned), "message": message})
+        typer.secho(message, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from cleaned
