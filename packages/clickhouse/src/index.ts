@@ -122,6 +122,10 @@ export interface ClickHouseExecutor {
 	 *  Remote / ObsessionDB executors may omit this and keep local `system.*` tables. */
 	systemTableSource?(table: ObservableSystemTable): string
 
+	/** Optional capability: whether the user may change settings, which a readonly = 1
+	 *  user may not. Native executors look it up once, with their first read. */
+	canChangeSettings?(): Promise<boolean>
+
 	close(): Promise<void>
 }
 
@@ -721,14 +725,17 @@ export function createExecutorWithClient(
 	// looked up once per executor. A failed lookup is not cached: the database
 	// may not exist yet (#370).
 	let settingsChangeable: Promise<boolean> | undefined
-	async function readSettings(
-		settings?: ClickHouseSettings,
-	): Promise<ClickHouseSettings | undefined> {
+	function settingsChangeableOnce(): Promise<boolean> {
 		settingsChangeable ??= canChangeSettings(client).catch((error: unknown) => {
 			settingsChangeable = undefined
 			throw error
 		})
-		return (await settingsChangeable) ? { ...PROGRESS_SETTINGS, ...settings } : settings
+		return settingsChangeable
+	}
+	async function readSettings(
+		settings?: ClickHouseSettings,
+	): Promise<ClickHouseSettings | undefined> {
+		return (await settingsChangeableOnce()) ? { ...PROGRESS_SETTINGS, ...settings } : settings
 	}
 
 	return {
@@ -905,6 +912,7 @@ export function createExecutorWithClient(
 			}
 			return `system.${table}`
 		},
+		canChangeSettings: settingsChangeableOnce,
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).

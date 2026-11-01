@@ -356,6 +356,8 @@ SETTINGS index_granularity = 8192;`
     await executor.queryJson?.('SELECT 1')
     await executor.command('CREATE TABLE t (a UInt8) ENGINE = Memory', { max_threads: 1 })
     await executor.insert({ table: 't', values: [{ a: 1 }] })
+    // Callers that choose their own read settings reuse the same lookup (#414).
+    expect(await executor.canChangeSettings?.()).toBe(readonly !== 1)
 
     expect(lookups).toBe(1)
     expect(sent).toEqual([

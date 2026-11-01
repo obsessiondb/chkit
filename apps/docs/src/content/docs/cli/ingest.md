@@ -89,7 +89,7 @@ Prints each selected stream with its destination table and effective tags.
 
 Prints the committed checkpoint of each selected stream's scheduled namespace. Streams that have never committed progress show `(no checkpoint)`.
 
-`status` ensures the journal table exists before reading, so the connection needs CREATE permission. Its checkpoint read validates the complete namespace snapshot and selects valid progress.
+`status` only reads, so any user that can `SELECT` the journal table can run it, including a `readonly` user. It does not create the journal: when the journal table (or the database) does not exist, every selected stream shows `v0 (no checkpoint)`, since nothing has run yet. Its checkpoint read validates the complete namespace snapshot and selects valid progress. A `readonly = 1` user cannot change settings, so its read omits `select_sequential_consistency` and may show a slightly stale checkpoint on a replicated journal; `run` always reads with it.
 
 ### `doctor`
 
