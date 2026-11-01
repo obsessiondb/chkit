@@ -464,9 +464,10 @@ export function formatConnectionError(
 	username?: string,
 ): string | undefined {
 	if (!(error instanceof Error)) return undefined
+	const shownUrl = urlWithoutCredentials(url)
 	if (isAuthError(error)) {
 		const who = username ? `user "${username}"` : 'the configured user'
-		return `Authentication failed for ${who} at ${url}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
+		return `Authentication failed for ${who} at ${shownUrl}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
 	}
 	const label = networkLabelFromError(error)
 	if (label) {
@@ -477,9 +478,14 @@ export function formatConnectionError(
 			isLocalhostDefault && envUnset
 				? '\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance.'
 				: ''
-		return `Could not connect to ClickHouse at ${url} (${label})${hint}`
+		return `Could not connect to ClickHouse at ${shownUrl} (${label})${hint}`
 	}
 	return undefined
+}
+
+/** The URL without its `user:password@` part, for messages and logs. */
+export function urlWithoutCredentials(url: string): string {
+	return url.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/?#]*@/i, '$1')
 }
 
 export function wrapConnectionError(error: unknown, url: string, username?: string): never {
@@ -665,6 +671,17 @@ const SILENT_CLIENT_LOG = { level: ClickHouseLogLevel.OFF }
 // timeout entirely — TCP keepalive still detects dead connections.
 const NO_REQUEST_TIMEOUT = 0
 
+// @clickhouse/client takes credentials in the URL over username/password and logs
+// a warning for each override, whatever the log level. Leaving out what the URL
+// sets keeps the same credentials without the warnings.
+function credentialOptions(config: ClickHouseConfig): { username?: string; password?: string } {
+	const url = URL.canParse(config.url) ? new URL(config.url) : undefined
+	return {
+		...(url?.username ? {} : { username: config.username }),
+		...(url?.password ? {} : { password: config.password }),
+	}
+}
+
 export function createStatelessClickHouseClient(
 	config: ClickHouseConfig,
 	clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
@@ -672,8 +689,7 @@ export function createStatelessClickHouseClient(
 ): ClickHouseClient {
 	return createClient({
 		url: config.url,
-		username: config.username,
-		password: config.password,
+		...credentialOptions(config),
 		database: config.database,
 		application: CHKIT_APPLICATION_ID,
 		request_timeout: NO_REQUEST_TIMEOUT,
@@ -697,8 +713,7 @@ export function createSessionClickHouseClient(
 ): ClickHouseClient {
 	return createClient({
 		url: config.url,
-		username: config.username,
-		password: config.password,
+		...credentialOptions(config),
 		database: config.database,
 		session_id: sessionId,
 		application: CHKIT_APPLICATION_ID,
@@ -756,8 +771,7 @@ export function createExecutorWithClient(
 				if (isUnknownDatabaseError(error)) {
 					const fallback = createClient({
 						url: config.url,
-						username: config.username,
-						password: config.password,
+						...credentialOptions(config),
 						application: CHKIT_APPLICATION_ID,
 						request_timeout: NO_REQUEST_TIMEOUT,
 						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },

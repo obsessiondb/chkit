@@ -555,7 +555,7 @@ def format_connection_error(
 
     Port of TS ``formatConnectionError``: a wrong password reads as one line
     instead of the server's reset instructions, an unreachable server names
-    the cause. Unlike TS, credentials in ``url`` are left out.
+    the cause. Credentials in ``url`` are left out, as in TS.
     """
     text = str(error)
     shown_url = _url_without_credentials(url)

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import {
   assertStreamedQuerySucceeded,
@@ -9,6 +9,7 @@ import {
   createStatelessClickHouseExecutor,
   createStatelessClickHouseClient,
   formatConnectionError,
+  urlWithoutCredentials,
   inferSchemaKindFromEngine,
   observableSystemTable,
   parseCommentFromCreateDictionaryQuery,
@@ -127,6 +128,23 @@ describe('@chkit/clickhouse smoke', () => {
     expect(typeof stateless.query).toBe('function')
     expect(typeof session.query).toBe('function')
 
+    await Promise.all([stateless.close(), session.close()])
+  })
+
+  test('credentials in the URL raise no client override warnings (#432)', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    const config = {
+      url: 'http://default:SeCrEtPw@localhost:8123',
+      username: 'default',
+      password: '',
+      database: 'default',
+    }
+    const stateless = createStatelessClickHouseClient(config)
+    const session = createSessionClickHouseClient(config)
+    const warnings = warn.mock.calls.map((args) => args.join(' '))
+    warn.mockRestore()
+
+    expect(warnings).toEqual([])
     await Promise.all([stateless.close(), session.close()])
   })
 
@@ -705,6 +723,36 @@ describe('formatConnectionError', () => {
 
   test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
     expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
+  })
+
+  test('leaves out credentials in the URL (#432)', () => {
+    const url = 'http://default:SeCrEtPw@localhost:8199'
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+    const auth = Object.assign(new Error(rawAuthBlurb), { code: '516' })
+    expect(formatConnectionError(refused, url)).toBe(
+      'Could not connect to ClickHouse at http://localhost:8199 (connection refused)',
+    )
+    expect(formatConnectionError(auth, url, 'default')).toBe(
+      'Authentication failed for user "default" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+  })
+})
+
+describe('urlWithoutCredentials', () => {
+  test('drops the userinfo and keeps the rest of the URL as written', () => {
+    expect(urlWithoutCredentials('https://lucas:SeCrEtPw@ch.example.com:8443/db?x=1')).toBe(
+      'https://ch.example.com:8443/db?x=1',
+    )
+    expect(urlWithoutCredentials('http://lucas@localhost:8123')).toBe('http://localhost:8123')
+  })
+
+  test('drops a password that contains an unencoded @', () => {
+    expect(urlWithoutCredentials('http://default:SeC@rEtPw@localhost:8123')).toBe('http://localhost:8123')
+  })
+
+  test('leaves a URL without credentials unchanged, including an @ after the host', () => {
+    expect(urlWithoutCredentials('https://db.example.com:443')).toBe('https://db.example.com:443')
+    expect(urlWithoutCredentials('http://localhost:8123/?user=a@b')).toBe('http://localhost:8123/?user=a@b')
   })
 })
 
