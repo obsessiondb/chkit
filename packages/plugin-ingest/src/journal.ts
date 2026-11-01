@@ -1,4 +1,4 @@
-import { waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { isUnknownDatabaseError, waitForTable, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
 
 import { IngestConfigError } from './errors.js'
 import { validateJournalHistory } from './journal-history.js'
@@ -9,6 +9,10 @@ export { canonicalJson, digest, emptyCheckpoint, toJournalRow, type JournalRow }
 
 export const DEFAULT_JOURNAL_TABLE = '_chkit_ingestion_journal'
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+const READ_SETTINGS: ClickHouseSettings = { select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1 }
+// Without output_format_json_quote_64bit_integers, ClickHouse sends UInt64 as
+// JSON numbers, which lose precision, so the query casts them itself.
+const UINT64_AS_STRINGS = `* REPLACE (${['event_seq', 'payload_hash', 'expected_checkpoint_version', 'checkpoint_version'].map((column) => `toString(${column}) AS ${column}`).join(', ')})`
 
 export interface ClickHouseJournalOptions {
   /** Must allow concurrent queries: use a stateless executor, not a session-bound one. */
@@ -42,14 +46,24 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
       })
     },
     async readCheckpoint(namespaceId) {
+      // A readonly = 1 user cannot change any setting, so only status, which
+      // does not write, can run as one (#414). It reads without the settings:
+      // its checkpoint may lag a write to a replicated journal.
+      const changeable = await options.executor.canChangeSettings?.() ?? true
       const rows = await options.executor.query<JournalRow>(
-        `SELECT * FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
-        { select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1 })
+        `SELECT ${changeable ? '*' : UINT64_AS_STRINGS} FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
+        changeable ? READ_SETTINGS : undefined)
       // A stale snapshot can cause replay, but its runs cannot overwrite the
       // identities or checkpoint lineage of another run.
       return validateJournalHistory(rows, namespaceId).checkpoint
     },
   }
+}
+
+/** A missing journal table (or database) means no stream has run on the target. */
+export function isMissingJournalError(error: unknown): boolean {
+  if (isUnknownDatabaseError(error)) return true
+  return error instanceof Error && 'code' in error && String(error.code) === '60'
 }
 
 function validateTableName(name: string): void {
