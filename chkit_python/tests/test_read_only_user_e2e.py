@@ -184,10 +184,9 @@ def test_a_read_only_user_runs_the_read_only_commands(
 
         status = as_user("status")
         assert (status["applied"], status["pending"]) == (1, 0)
-        # chkit-py reads the server for drift only with --live.
-        check = as_user("check", "--live")
-        assert (check["ok"], check["failedChecks"], check["liveDrifted"]) == (True, [], False)
-        assert as_user("drift", "--live")["drifted"] is False
+        check = as_user("check")
+        assert (check["ok"], check["failedChecks"], check["driftEvaluated"]) == (True, [], True)
+        assert as_user("drift")["drifted"] is False
         plan = as_user("migrate")
         assert (plan["mode"], plan["pending"]) == ("plan", [])
 
