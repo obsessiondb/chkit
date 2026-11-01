@@ -127,6 +127,13 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- The typed `GCD` codec is a preprocessing codec, as in TS (#408). ClickHouse rejects a lone
+  `CODEC(GCD)` because GCD does not compress, and chkit-py classed it as a general codec, so
+  no typed GCD chain was valid: `[{"kind": "GCD"}, {"kind": "LZ4"}]` now validates and
+  renders `CODEC(GCD, LZ4)`, and `GCD` moved from `GeneralColumnCodec` to
+  `PreprocessingColumnCodec`. A chain made only of `Delta` and `GCD` steps, such as a lone
+  `GCD` or `Delta`, which ClickHouse rejects for the same reason, now fails validation with
+  `codec_chain_must_end_with_general` before reaching the server.
 - `chkit drift --live` and `chkit check` compare the query of each managed view and
   materialized view, and a materialized view's `TO` target, with the live ones, as in TS
   (#382). A changed query reports `query_mismatch` and a changed target `target_mismatch`

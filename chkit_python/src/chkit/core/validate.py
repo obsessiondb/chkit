@@ -104,14 +104,18 @@ def _validate_column_codec(
         )
         return
 
-    if len(steps) > 1 and general_count == 1 and general_index != len(steps) - 1:
+    # Delta and GCD only transform the data: ClickHouse rejects a chain of nothing else.
+    only_transforms = all(step.kind in {"Delta", "GCD"} for step in steps)
+    if only_transforms or (
+        len(steps) > 1 and general_count == 1 and general_index != len(steps) - 1
+    ):
         _push(
             issues,
             definition,
             "codec_chain_must_end_with_general",
             f'Table {definition.database}.{definition.name} column "{column.name}" '
             f"codec chain must end with a general codec "
-            f"(NONE, LZ4, LZ4HC, ZSTD, T64, GCD, ALP)",
+            f"(NONE, LZ4, LZ4HC, ZSTD, T64, ALP)",
         )
 
 
