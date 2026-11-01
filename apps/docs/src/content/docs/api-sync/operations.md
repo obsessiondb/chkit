@@ -63,7 +63,7 @@ Set `retry` on a pipeline for shared defaults, then override individual fields o
 
 Callbacks receive `attemptNumber`, `retriesLeft`, `retriesConsumed`, and a `FetchFailure` with its original `cause` and normalized `classification`. Returning false from `shouldConsumeRetry` skips consumption and exponential backoff; provider `Retry-After` still applies. Permanent failures and cancellation stop before policy callbacks can turn them into retries.
 
-An exhausted request retry budget fails the stream; reader recovery does not multiply that budget. Other reader failures can restart from the last committed state. Insert retries are separate from this source retry policy.
+An exhausted source-request retry budget fails the stream; reader recovery does not multiply that budget. Other reader failures can restart from the last committed state. Loads make up to three attempts per invocation; a retryable load failure can then trigger reader recovery and another invocation. Deterministic ClickHouse parse, type and column errors fail without either retry layer; `UNKNOWN_TABLE`, capacity, network and replica errors remain retryable. See [loading](/api-sync/loading/#custom-loader-contract).
 
 </details>
 

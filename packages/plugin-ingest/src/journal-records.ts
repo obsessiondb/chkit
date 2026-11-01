@@ -73,7 +73,7 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortKeys(value)) ?? 'null'
 }
 
-export function digest(parts: readonly string[]): string {
+export function digest(parts: Iterable<string>): string {
   const hash = createHash('sha256')
   for (const part of parts) {
     hash.update(String(part.length))

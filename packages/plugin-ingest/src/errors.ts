@@ -1,6 +1,10 @@
 import type { ErrorClassifier, FailureClass } from './types.js'
 
 const DIAGNOSTIC_BODY_LIMIT = 2048
+const PERMANENT_INSERT_CODES = new Set([
+  '6', '7', '8', '13', '16', '19', '20', '25', '26', '27', '38', '41', '43', '44', '47', '53',
+  '69', '70', '72', '117', '120', '122', '130', '131', '190', '321', '349', '366', '376', '407', '467', '675', '676', '691',
+])
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET',
   'ECONNREFUSED',
@@ -83,6 +87,11 @@ export function classifyFailure(
   if (signal.aborted) return { kind: 'cancelled' }
   const fallback = classifyCommon(cause)
   return classifier?.(cause, fallback) ?? fallback
+}
+
+/** Deterministic ClickHouse INSERT parse, type and column errors; not source errors. */
+export function isPermanentInsertFailure(cause: unknown): boolean {
+  return cause instanceof Error && 'code' in cause && typeof cause.code === 'string' && PERMANENT_INSERT_CODES.has(cause.code)
 }
 
 function classifyCommon(cause: unknown): FailureClass {
