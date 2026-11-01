@@ -35,8 +35,9 @@ COLUMNS = [
     "{'name': 'lz4hc0', 'type': 'String', 'codec': {'kind': 'LZ4HC', 'level': 0}}",
     "{'name': 'lz4hc12', 'type': 'String', 'codec': {'kind': 'LZ4HC', 'level': 12}}",
     "{'name': 't64', 'type': 'UInt64', 'codec': {'kind': 'T64'}}",
-    # ClickHouse rejects a lone GCD, and the DSL types it as a general codec, so only raw reaches it.
-    "{'name': 'gcd', 'type': 'UInt64', 'codec': {'kind': 'raw', 'expression': 'GCD, LZ4'}}",
+    "{'name': 'gcd', 'type': 'UInt64', 'codec': [{'kind': 'GCD'}, {'kind': 'LZ4'}]}",
+    "{'name': 'delta_gcd', 'type': 'UInt64', "
+    "'codec': [{'kind': 'Delta'}, {'kind': 'GCD'}, {'kind': 'ZSTD'}]}",
     "{'name': 'delta', 'type': 'Int64', 'codec': [{'kind': 'Delta'}, {'kind': 'ZSTD'}]}",
     "{'name': 'delta8', 'type': 'Int64', 'codec': [{'kind': 'Delta', 'size': 8}, {'kind': 'LZ4'}]}",
     "{'name': 'delta_t64', 'type': 'UInt32', 'codec': [{'kind': 'Delta', 'size': 4}, {'kind': 'T64'}]}",

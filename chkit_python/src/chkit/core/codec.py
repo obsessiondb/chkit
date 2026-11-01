@@ -22,10 +22,10 @@ CodecSpecInput: TypeAlias = ColumnCodecSpec | Mapping[str, Any] | list[ColumnCod
 """Loose input accepted by public entry points: dicts or models, single or list."""
 
 _GENERAL_KINDS: Final[frozenset[str]] = frozenset(
-    {"NONE", "LZ4", "LZ4HC", "ZSTD", "T64", "GCD", "ALP"}
+    {"NONE", "LZ4", "LZ4HC", "ZSTD", "T64", "ALP"}
 )
 _PREPROCESSOR_KINDS: Final[frozenset[str]] = frozenset(
-    {"Delta", "DoubleDelta", "Gorilla", "FPC"}
+    {"Delta", "DoubleDelta", "Gorilla", "GCD", "FPC"}
 )
 
 
@@ -122,7 +122,7 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
     if name in {"NONE", "LZ4", "T64", "GCD", "ALP"}:
         if args is not None:
             return None
-        return _GENERAL_ADAPTER.validate_python({"kind": name})
+        return _CODEC_ADAPTER.validate_python({"kind": name})
     if name == "LZ4HC":
         if args is None:
             return _GENERAL_ADAPTER.validate_python({"kind": "LZ4HC"})
@@ -258,7 +258,7 @@ def _canonicalize_step(step: ColumnCodec) -> ColumnCodec:
         )
     if kind == "raw":
         return RawColumnCodec(expression=str(data["expression"]).strip())
-    return _GENERAL_ADAPTER.validate_python({"kind": kind})
+    return _CODEC_ADAPTER.validate_python({"kind": kind})
 
 
 def canonicalize_codec(spec: CodecSpecInput) -> list[ColumnCodec]:

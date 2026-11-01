@@ -1025,14 +1025,20 @@ def test_validates_chain_ending_in_preprocessor() -> None:
     assert "codec_chain_must_end_with_general" in {i.code for i in issues}
 
 
-def test_allows_standalone_preprocessor_codec() -> None:
+def test_allows_standalone_preprocessor_that_compresses() -> None:
     defs = [
         table(
             database="app",
             name="events",
             columns=[
                 {"name": "id", "type": "UInt64"},
-                {"name": "delta", "type": "Int64", "codec": {"kind": "Delta", "size": 4}},
+                {"name": "double_delta", "type": "Int64", "codec": {"kind": "DoubleDelta"}},
+                {"name": "gorilla", "type": "Float64", "codec": {"kind": "Gorilla", "size": 8}},
+                {
+                    "name": "fpc",
+                    "type": "Float64",
+                    "codec": {"kind": "FPC", "level": 12, "floatSize": 8},
+                },
             ],
             engine="MergeTree()",
             primaryKey=["id"],
@@ -1042,6 +1048,63 @@ def test_allows_standalone_preprocessor_codec() -> None:
     codes = {i.code for i in validate_definitions(defs)}
     assert "codec_chain_must_end_with_general" not in codes
     assert "codec_chain_multiple_general" not in codes
+
+
+def test_flags_chain_of_only_delta_and_gcd() -> None:
+    # #408: ClickHouse rejects a chain whose steps only transform the data.
+    defs = [
+        table(
+            database="app",
+            name="events",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "gcd", "type": "UInt64", "codec": {"kind": "GCD"}},
+                {"name": "delta", "type": "Int64", "codec": {"kind": "Delta", "size": 4}},
+                {
+                    "name": "delta_gcd",
+                    "type": "UInt64",
+                    "codec": [{"kind": "Delta"}, {"kind": "GCD"}],
+                },
+            ],
+            engine="MergeTree()",
+            primaryKey=["id"],
+            orderBy=["id"],
+        )
+    ]
+    flagged = [
+        i.message.split('"')[1]
+        for i in validate_definitions(defs)
+        if i.code == "codec_chain_must_end_with_general"
+    ]
+    assert flagged == ["gcd", "delta", "delta_gcd"]
+
+
+def test_allows_gcd_as_preprocessor_before_general_codec() -> None:
+    defs = [
+        table(
+            database="app",
+            name="events",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "gcd", "type": "UInt64", "codec": [{"kind": "GCD"}, {"kind": "LZ4"}]},
+                {
+                    "name": "delta_gcd",
+                    "type": "UInt64",
+                    "codec": [{"kind": "Delta"}, {"kind": "GCD"}, {"kind": "ZSTD"}],
+                },
+                {
+                    "name": "gcd_double_delta",
+                    "type": "UInt64",
+                    "codec": [{"kind": "GCD"}, {"kind": "DoubleDelta"}],
+                },
+            ],
+            engine="MergeTree()",
+            primaryKey=["id"],
+            orderBy=["id"],
+        )
+    ]
+    assert validate_definitions(defs) == []
+    assert "`delta_gcd` UInt64 CODEC(Delta, GCD, ZSTD)" in to_create_sql(defs[0])
 
 
 def test_flags_empty_codec_chain() -> None:
