@@ -22,10 +22,10 @@ CodecSpecInput: TypeAlias = ColumnCodecSpec | Mapping[str, Any] | list[ColumnCod
 """Loose input accepted by public entry points: dicts or models, single or list."""
 
 _GENERAL_KINDS: Final[frozenset[str]] = frozenset(
-    {"NONE", "LZ4", "LZ4HC", "ZSTD", "T64", "ALP"}
+    {"NONE", "LZ4", "LZ4HC", "ZSTD", "ALP"}
 )
 _PREPROCESSOR_KINDS: Final[frozenset[str]] = frozenset(
-    {"Delta", "DoubleDelta", "Gorilla", "GCD", "FPC"}
+    {"Delta", "DoubleDelta", "Gorilla", "GCD", "T64", "FPC"}
 )
 
 

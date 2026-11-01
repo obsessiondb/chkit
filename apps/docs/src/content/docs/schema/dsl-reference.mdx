@@ -506,7 +506,7 @@ Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is
 
 | `kind` | Args | Renders |
 |--------|------|---------|
-| `NONE`, `LZ4`, `T64`, `ALP` | — | `CODEC(LZ4)` |
+| `NONE`, `LZ4`, `ALP` | — | `CODEC(LZ4)` |
 | `LZ4HC` | `level?: number` | `CODEC(LZ4HC(9))` |
 | `ZSTD` | `level?: number` | `CODEC(ZSTD(3))` |
 
@@ -516,6 +516,7 @@ Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is
 |--------|------|---------|
 | `Delta`, `DoubleDelta`, `Gorilla` | `size?: 1 \| 2 \| 4 \| 8` (bytes, defaults to 1) | `CODEC(Delta(4))` |
 | `GCD` | — | `CODEC(GCD, LZ4)` |
+| `T64` | — | `CODEC(T64)`, `CODEC(T64, ZSTD(3))` |
 | `FPC` | `level: number`, `floatSize: 4 \| 8` | `CODEC(FPC(...))` |
 
 **Raw escape hatch** — for codecs not yet typed (new ClickHouse versions, unusual arg shapes), pass the inner expression through verbatim:
@@ -523,14 +524,14 @@ Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
-    { name: 'blob', type: 'String', codec: { kind: 'raw', expression: 'T64, LZ4' } }
-    // → CODEC(T64, LZ4)
+    { name: 'blob', type: 'String', codec: { kind: 'raw', expression: 'ZSTD_QAT(1)' } }
+    // → CODEC(ZSTD_QAT(1))
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    {"name": "blob", "type": "String", "codec": {"kind": "raw", "expression": "T64, LZ4"}}
-    # → CODEC(T64, LZ4)
+    {"name": "blob", "type": "String", "codec": {"kind": "raw", "expression": "ZSTD_QAT(1)"}}
+    # → CODEC(ZSTD_QAT(1))
     ```
   </TabItem>
 </Tabs>
@@ -1250,7 +1251,7 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Order by references missing column** -- `orderBy` includes a bare column name not in `columns` (function expressions like `toStartOfHour(ts)` are passed through to ClickHouse unchecked)
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
-- **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `T64`, `ALP`), and a chain of only `Delta` and `GCD` steps needs a codec that compresses after them, as ClickHouse requires
+- **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `ALP`), and a chain of only `Delta` and `GCD` steps needs a codec that compresses after them, as ClickHouse requires
 - **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` expression is empty: `{ expression: '' }`, an expression made only of comments, or a bare `'fn:'`
 - **Invalid column kind** (`column_default_kind_invalid`) -- `defaultKind` is not `DEFAULT`, `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` (Python rejects it when the column is constructed)
 - **Default looks like an expression** (`column_default_looks_like_expression`) -- the plain string default of a `DEFAULT` or `EPHEMERAL` column starts with a function call, such as `'now64(3)'`, and the column type cannot hold a string; use `{ expression: 'now64(3)' }` (see [`default`](#default-string--number--boolean--sqlexpression-optional))

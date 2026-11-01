@@ -115,7 +115,7 @@ def _validate_column_codec(
             "codec_chain_must_end_with_general",
             f'Table {definition.database}.{definition.name} column "{column.name}" '
             f"codec chain must end with a general codec "
-            f"(NONE, LZ4, LZ4HC, ZSTD, T64, ALP)",
+            f"(NONE, LZ4, LZ4HC, ZSTD, ALP)",
         )
 
 

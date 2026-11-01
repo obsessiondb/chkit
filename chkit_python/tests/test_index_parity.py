@@ -1107,6 +1107,54 @@ def test_allows_gcd_as_preprocessor_before_general_codec() -> None:
     assert "`delta_gcd` UInt64 CODEC(Delta, GCD, ZSTD)" in to_create_sql(defs[0])
 
 
+def test_allows_t64_alone_and_before_general_codec() -> None:
+    # #434: T64 compresses alone, and ClickHouse also accepts it before a general codec.
+    defs = [
+        table(
+            database="app",
+            name="events",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "t64", "type": "UInt64", "codec": {"kind": "T64"}},
+                {"name": "t64_lz4", "type": "UInt64", "codec": [{"kind": "T64"}, {"kind": "LZ4"}]},
+                {
+                    "name": "t64_zstd",
+                    "type": "UInt64",
+                    "codec": [{"kind": "T64"}, {"kind": "ZSTD", "level": 3}],
+                },
+                {
+                    "name": "delta_t64_lz4",
+                    "type": "UInt64",
+                    "codec": [{"kind": "Delta"}, {"kind": "T64"}, {"kind": "LZ4"}],
+                },
+            ],
+            engine="MergeTree()",
+            primaryKey=["id"],
+            orderBy=["id"],
+        )
+    ]
+    assert validate_definitions(defs) == []
+    assert "`delta_t64_lz4` UInt64 CODEC(Delta, T64, LZ4)" in to_create_sql(defs[0])
+
+
+def test_flags_t64_after_general_codec() -> None:
+    defs = [
+        table(
+            database="app",
+            name="events",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "lz4_t64", "type": "UInt64", "codec": [{"kind": "LZ4"}, {"kind": "T64"}]},
+            ],
+            engine="MergeTree()",
+            primaryKey=["id"],
+            orderBy=["id"],
+        )
+    ]
+    codes = [i.code for i in validate_definitions(defs)]
+    assert codes == ["codec_chain_must_end_with_general"]
+
+
 def test_flags_empty_codec_chain() -> None:
     defs = [
         table(

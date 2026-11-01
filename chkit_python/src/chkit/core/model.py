@@ -61,7 +61,7 @@ PrimitiveColumnType: TypeAlias = Literal[
 
 
 class _GeneralCodecSimple(_StrictModel):
-    kind: Literal["NONE", "LZ4", "T64", "ALP"]
+    kind: Literal["NONE", "LZ4", "ALP"]
 
 
 class _CodecLZ4HC(_StrictModel):
@@ -89,6 +89,10 @@ class _CodecGCD(_StrictModel):
     kind: Literal["GCD"] = "GCD"
 
 
+class _CodecT64(_StrictModel):
+    kind: Literal["T64"] = "T64"
+
+
 class _CodecFPC(_StrictModel):
     kind: Literal["FPC"] = "FPC"
     level: int
@@ -103,7 +107,7 @@ class _CodecFPC(_StrictModel):
     )
 
 
-PreprocessingColumnCodec: TypeAlias = _CodecDeltaLike | _CodecGCD | _CodecFPC
+PreprocessingColumnCodec: TypeAlias = _CodecDeltaLike | _CodecGCD | _CodecT64 | _CodecFPC
 
 
 class RawColumnCodec(_StrictModel):
