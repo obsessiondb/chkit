@@ -356,7 +356,7 @@ async function readAndLoad(input: {
           await queue.push(pending, signal)
           pending = emptyBatch()
         }
-        pending.rows.push(...chunk.rows)
+        for (const row of chunk.rows) pending.rows.push(row)
         if (pending.intervalIds) {
           if (chunk.id === undefined) pending.intervalIds = undefined
           else pending.intervalIds.push(chunk.id)
