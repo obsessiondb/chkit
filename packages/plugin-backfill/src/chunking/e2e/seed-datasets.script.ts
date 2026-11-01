@@ -142,7 +142,7 @@ async function seed() {
       }
 
       // Verify
-      const [result] = await executor.query<{ cnt: string }>(
+      const [result] = await executor.query<{ cnt: number | string }>(
         `SELECT count() AS cnt FROM ${fqn} SETTINGS select_sequential_consistency = 1`,
       )
       console.log(`  Verified: ${result?.cnt} rows`)

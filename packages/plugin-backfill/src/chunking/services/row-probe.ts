@@ -49,7 +49,7 @@ export async function countRowsExact(
   filter: EstimateFilter,
   sortKeys: SortKey[],
 ): Promise<number> {
-  const rows = await context.query<{ cnt: string }>(buildCountSql(filter, sortKeys, context), context.querySettings)
+  const rows = await context.query<{ cnt: number | string }>(buildCountSql(filter, sortKeys, context), context.querySettings)
   return Number(rows[0]?.cnt ?? 0)
 }
 
