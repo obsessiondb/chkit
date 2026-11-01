@@ -5,6 +5,8 @@ import {
   codec,
   codecFingerprint,
   codecsEqual,
+  isGeneralCodec,
+  isPreprocessorCodec,
   parseCodec,
   renderCodec,
 } from './codec.js'
@@ -31,6 +33,12 @@ describe('renderCodec', () => {
     expect(renderCodec([{ kind: 'Delta', size: 4 }, { kind: 'ZSTD', level: 3 }])).toBe(
       'CODEC(Delta(4), ZSTD(3))'
     )
+  })
+
+  test('renders GCD as a preprocessor before the general codec (#408)', () => {
+    expect(isPreprocessorCodec({ kind: 'GCD' })).toBe(true)
+    expect(isGeneralCodec({ kind: 'GCD' })).toBe(false)
+    expect(renderCodec([{ kind: 'GCD' }, { kind: 'LZ4' }])).toBe('CODEC(GCD, LZ4)')
   })
 
   test('renders FPC with both args', () => {
@@ -87,7 +95,7 @@ describe('parseCodec', () => {
     ])
   })
 
-  test('parses general codecs NONE/T64/GCD/ALP bare', () => {
+  test('parses bare NONE/T64/GCD/ALP', () => {
     expect(parseCodec('CODEC(NONE)')).toEqual([{ kind: 'NONE' }])
     expect(parseCodec('CODEC(T64)')).toEqual([{ kind: 'T64' }])
     expect(parseCodec('CODEC(GCD)')).toEqual([{ kind: 'GCD' }])
@@ -203,7 +211,7 @@ describe('codecFingerprint', () => {
     [{ kind: 'NONE' }, 'CODEC(NONE)'],
     [{ kind: 'LZ4' }, 'CODEC(LZ4)'],
     [{ kind: 'T64' }, 'CODEC(T64)'],
-    [{ kind: 'GCD' }, 'CODEC(GCD)'],
+    [[{ kind: 'GCD' }, { kind: 'LZ4' }], 'CODEC(GCD, LZ4)'],
     [{ kind: 'ALP' }, 'CODEC(ALP)'],
     [{ kind: 'ZSTD' }, 'CODEC(ZSTD(1))'],
     [{ kind: 'ZSTD', level: 3 }, 'CODEC(ZSTD(3))'],
@@ -221,6 +229,7 @@ describe('codecFingerprint', () => {
     [[{ kind: 'Gorilla', size: 8 }, { kind: 'ZSTD', level: 2 }], 'CODEC(Gorilla(8), ZSTD(2))'],
     [[{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }], 'CODEC(FPC(12), LZ4)'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'T64' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), T64, ZSTD(1))'],
+    [[{ kind: 'Delta', size: 8 }, { kind: 'GCD' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), GCD, ZSTD(1))'],
     [codec.raw('ZSTD'), 'CODEC(ZSTD(1))'],
     [codec.raw('Delta(4),ZSTD(3)'), 'CODEC(Delta(4), ZSTD(3))'],
     [codec.raw('FPC, LZ4'), 'CODEC(FPC(12), LZ4)'],

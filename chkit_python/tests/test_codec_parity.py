@@ -15,6 +15,8 @@ from chkit.core.codec import (
     codec_fingerprint,
     codec_raw,
     codecs_equal,
+    is_general_codec,
+    is_preprocessor_codec,
     parse_codec,
     render_codec,
 )
@@ -50,6 +52,15 @@ def test_render_fpc_with_both_args() -> None:
         render_codec({"kind": "FPC", "level": 10, "floatSize": 4})
         == "CODEC(FPC(10, 4))"
     )
+
+
+def test_render_gcd_as_preprocessor_before_general_codec() -> None:
+    # #408: GCD only transforms, so it precedes the general codec.
+    gcd = parse_codec("CODEC(GCD)")
+    assert gcd is not None
+    assert is_preprocessor_codec(gcd[0])
+    assert not is_general_codec(gcd[0])
+    assert render_codec([{"kind": "GCD"}, {"kind": "LZ4"}]) == "CODEC(GCD, LZ4)"
 
 
 def test_render_none_t64_gcd_alp_bare() -> None:
@@ -115,7 +126,7 @@ def test_parse_fpc_with_both_args() -> None:
     ]
 
 
-def test_parse_general_codecs_bare() -> None:
+def test_parse_bare_codecs() -> None:
     for name in ["NONE", "T64", "GCD", "ALP"]:
         parsed = parse_codec(f"CODEC({name})")
         assert parsed is not None
@@ -245,7 +256,7 @@ _STORED: list[tuple[CodecSpecInput, str]] = [
     ({"kind": "NONE"}, "CODEC(NONE)"),
     ({"kind": "LZ4"}, "CODEC(LZ4)"),
     ({"kind": "T64"}, "CODEC(T64)"),
-    ({"kind": "GCD"}, "CODEC(GCD)"),
+    ([{"kind": "GCD"}, {"kind": "LZ4"}], "CODEC(GCD, LZ4)"),
     ({"kind": "ALP"}, "CODEC(ALP)"),
     ({"kind": "ZSTD"}, "CODEC(ZSTD(1))"),
     ({"kind": "ZSTD", "level": 3}, "CODEC(ZSTD(3))"),
@@ -265,6 +276,10 @@ _STORED: list[tuple[CodecSpecInput, str]] = [
     (
         [{"kind": "Delta", "size": 8}, {"kind": "T64"}, {"kind": "ZSTD"}],
         "CODEC(Delta(8), T64, ZSTD(1))",
+    ),
+    (
+        [{"kind": "Delta", "size": 8}, {"kind": "GCD"}, {"kind": "ZSTD"}],
+        "CODEC(Delta(8), GCD, ZSTD(1))",
     ),
     (codec_raw("ZSTD"), "CODEC(ZSTD(1))"),
     (codec_raw("Delta(4),ZSTD(3)"), "CODEC(Delta(4), ZSTD(3))"),

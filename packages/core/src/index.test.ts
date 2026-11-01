@@ -1510,14 +1510,16 @@ describe('@chkit/core column codec', () => {
     expect(issues.map((i) => i.code)).toContain('codec_chain_must_end_with_general')
   })
 
-  test('allows standalone preprocessor codec (CH auto-appends default general)', () => {
+  test('allows a standalone preprocessor that compresses', () => {
     const defs = [
       table({
         database: 'app',
         name: 'events',
         columns: [
           { name: 'id', type: 'UInt64' },
-          { name: 'delta', type: 'Int64', codec: { kind: 'Delta', size: 4 } },
+          { name: 'double_delta', type: 'Int64', codec: { kind: 'DoubleDelta' } },
+          { name: 'gorilla', type: 'Float64', codec: { kind: 'Gorilla', size: 8 } },
+          { name: 'fpc', type: 'Float64', codec: { kind: 'FPC', level: 12, floatSize: 8 } },
         ],
         engine: 'MergeTree()',
         primaryKey: ['id'],
@@ -1527,6 +1529,48 @@ describe('@chkit/core column codec', () => {
     const issues = validateDefinitions(defs)
     expect(issues.some((i) => i.code === 'codec_chain_must_end_with_general')).toBe(false)
     expect(issues.some((i) => i.code === 'codec_chain_multiple_general')).toBe(false)
+  })
+
+  test('flags a chain of only Delta and GCD, which ClickHouse rejects (#408)', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'gcd', type: 'UInt64', codec: { kind: 'GCD' } },
+          { name: 'delta', type: 'Int64', codec: { kind: 'Delta', size: 4 } },
+          { name: 'delta_gcd', type: 'UInt64', codec: [{ kind: 'Delta' }, { kind: 'GCD' }] },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    const flagged = validateDefinitions(defs)
+      .filter((i) => i.code === 'codec_chain_must_end_with_general')
+      .map((i) => i.message.match(/column "(\w+)"/)?.[1])
+    expect(flagged).toEqual(['gcd', 'delta', 'delta_gcd'])
+  })
+
+  test('allows GCD as a preprocessor before a general codec (#408)', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'gcd', type: 'UInt64', codec: [{ kind: 'GCD' }, { kind: 'LZ4' }] },
+          { name: 'delta_gcd', type: 'UInt64', codec: [{ kind: 'Delta' }, { kind: 'GCD' }, { kind: 'ZSTD' }] },
+          { name: 'gcd_double_delta', type: 'UInt64', codec: [{ kind: 'GCD' }, { kind: 'DoubleDelta' }] },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    expect(validateDefinitions(defs)).toEqual([])
+    expect(toCreateSQL(defs[0])).toContain('`delta_gcd` UInt64 CODEC(Delta, GCD, ZSTD)')
   })
 
   test('flags empty codec chain', () => {
