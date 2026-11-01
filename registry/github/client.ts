@@ -150,9 +150,18 @@ function isGitHubObject(value: unknown): value is GitHubObject {
 }
 
 function nextLink(header: string | null, current: string): string | undefined {
-  const value = header?.split(',').map((part) => /<([^>]+)>\s*;.*rel="?next"?/.exec(part)?.[1]).find(Boolean)
-  if (!value) return undefined
-  const next = new URL(value, current)
-  if (next.origin !== 'https://api.github.com') throw new IngestConfigError('GitHub next page has an unexpected origin.')
-  return next.toString()
+  for (const link of header?.matchAll(/<([^>]*)>((?:[^",]|"(?:\\.|[^"\\])*")*)/g) ?? []) {
+    const value = link[1]
+    const parameters = link[2] ?? ''
+    const relation = [...parameters.matchAll(/;\s*([^=;\s]+)\s*(?:=\s*("(?:\\.|[^"\\])*"|[^;\s]+))?/g)]
+      .find((parameter) => parameter[1]?.toLowerCase() === 'rel')?.[2]
+    if (value === undefined || !relation) continue
+    const relations = relation.startsWith('"') ? relation.slice(1, -1).replace(/\\(.)/g, '$1') : relation
+    if (!relations.toLowerCase().split(/\s+/).includes('next')) continue
+    if (!URL.canParse(value, current)) throw new IngestConfigError('GitHub next page has an invalid URL.')
+    const next = new URL(value, current)
+    if (next.origin !== 'https://api.github.com') throw new IngestConfigError('GitHub next page has an unexpected origin.')
+    return next.toString()
+  }
+  return undefined
 }

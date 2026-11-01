@@ -16,7 +16,7 @@ export function createGitHubPipeline(config: GitHubConfig = githubConfig, deps: 
   if (!Number.isSafeInteger(config.pageSize) || config.pageSize < 1 || config.pageSize > 100) {
     throw new IngestConfigError('GitHub pageSize must be an integer between 1 and 100.')
   }
-  if (config.repositories.some((repo) => !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))) {
+  if (config.repositories.some((repo) => !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split('/').some((part) => part === '.' || part === '..'))) {
     throw new IngestConfigError('GitHub repositories must use owner/repository names.')
   }
   return definePipeline({

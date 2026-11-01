@@ -84,8 +84,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Follow REST next-page links containing commas or multiple relation types without truncating a read, and ignore non-next relation parameters.",
+            "Reject dot-only repository path segments before URL normalization can change the requested resource.",
+            "Clarify native JSON normalization of explicit null paths and empty objects."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [
