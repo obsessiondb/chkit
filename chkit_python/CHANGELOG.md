@@ -127,6 +127,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- A view or materialized view `comment` reaches ClickHouse, as in TS (#406): the generated
+  `CREATE VIEW` / `CREATE MATERIALIZED VIEW` carries `COMMENT '...'` before `AS`, so
+  `system.tables.comment` is set. Before, the comment was dropped, and a comment change
+  recreated the view still without it.
 - `chkit drift --live` and `chkit check` compare the query of each managed view and
   materialized view, and a materialized view's `TO` target, with the live ones, as in TS
   (#382). A changed query reports `query_mismatch` and a changed target `target_mismatch`
