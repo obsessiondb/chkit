@@ -14,7 +14,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonResult } from './exact-json.js'
+import { parseJsonEachRowLine, parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -83,6 +83,9 @@ export type ObservableSystemTable = 'processes' | 'query_log'
 
 export interface ClickHouseExecutor {
 	command(sql: string, settings?: ClickHouseSettings): Promise<void>
+	/** Rows as JSON objects. A number a double cannot hold exactly (an integer
+	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
+	 *  its digits; the ObsessionDB console API returns every value as a string. */
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
@@ -757,11 +760,12 @@ export function createExecutorWithClient(
 					sql,
 				})
 				// The client's JSONEachRow decoder drops the final row when the
-				// response ends without a newline. Decode every nonempty line.
+				// response ends without a newline. Decode every nonempty line,
+				// without rounding 64-bit integers and Decimals (#415).
 				const rows = (await result.text())
 					.split('\n')
 					.filter((line) => line.trim().length > 0)
-					.map((line): T => JSON.parse(line))
+					.map((line) => parseJsonEachRowLine<T>(line))
 				logProfiling(
 					profiler,
 					sql,
