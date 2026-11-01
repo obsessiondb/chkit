@@ -435,7 +435,7 @@ def test_cli_plugin_obsessiondb_runs_without_project_or_credentials(
     # Plain `chkit plugin` does not synthesize it, as in TS.
     listed_all = CliRunner().invoke(app, ["plugin"])
     assert listed_all.exit_code == 1
-    assert isinstance(listed_all.exception, FileNotFoundError)
+    assert listed_all.stderr.startswith("Config file not found: clickhouse.config.py\n")
 
 
 def test_loaded_config_path_reports_the_source_like_ts(

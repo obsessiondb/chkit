@@ -127,6 +127,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- An unhandled error prints one line and exits 1, as in TS (#437): ClickHouse's own message
+  for a server error, the error's message otherwise. Before, it printed a full traceback,
+  under `--json` after the error envelope too. `CHKIT_DEBUG=1` logs the traceback to stderr.
+  Usage errors (exit 2), `Ctrl-C` (exit 130) and the commands' own exits are unchanged.
 - `chkit generate` compares a column's type as rendered, as in TS (#433, port of #275), so
   switching between `type="Nullable(Int64)"` and `type="Int64", nullable=True` plans
   nothing. Before, it wrote a `MODIFY COLUMN` migration that changed nothing. A change to
