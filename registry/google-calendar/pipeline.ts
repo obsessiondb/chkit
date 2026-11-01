@@ -7,6 +7,7 @@ import { google_calendar_eventsRaw, parseCalendarState, readEvents, type Calenda
 export function createGoogleCalendarPipeline(config: GoogleCalendarReaderConfig = googleCalendarConfig, deps: GoogleCalendarClientDeps = defaultGoogleCalendarClientDeps) {
   const boundConfig = { ...config }
   if (!boundConfig.sourceId.trim() || !boundConfig.streamPrefix.trim() || !boundConfig.calendarId.trim()) throw new IngestConfigError('Calendar sourceId, streamPrefix and calendarId must be non-empty strings.')
+  if (!Number.isSafeInteger(boundConfig.maxChunks) || boundConfig.maxChunks <= 0) throw new IngestConfigError('Calendar maxChunks must be a positive safe integer.')
   const client = { ...deps, config: boundConfig }
   return definePipeline({
     id: boundConfig.streamPrefix, tags: ['provider:google-calendar'], maxStreams: 1, maxFetches: 1,
