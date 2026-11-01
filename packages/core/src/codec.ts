@@ -6,8 +6,8 @@ import type {
   RawColumnCodec,
 } from './model-types.js'
 
-const GENERAL_KINDS = new Set<string>(['NONE', 'LZ4', 'LZ4HC', 'ZSTD', 'T64', 'GCD', 'ALP'])
-const PREPROCESSOR_KINDS = new Set<string>(['Delta', 'DoubleDelta', 'Gorilla', 'FPC'])
+const GENERAL_KINDS = new Set<string>(['NONE', 'LZ4', 'LZ4HC', 'ZSTD', 'T64', 'ALP'])
+const PREPROCESSOR_KINDS = new Set<string>(['Delta', 'DoubleDelta', 'Gorilla', 'GCD', 'FPC'])
 
 function toArray(spec: ColumnCodecSpec): ColumnCodec[] {
   return Array.isArray(spec) ? spec : [spec]

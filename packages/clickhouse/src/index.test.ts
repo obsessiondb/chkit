@@ -42,6 +42,21 @@ type MockClientOptions = {
   insertHeaders?: Record<string, string>
 }
 
+// Reads look up the user's readonly level once per executor (#412).
+function isReadonlyLookup(sql: string): boolean {
+  return sql.includes("getSetting('readonly')")
+}
+
+function readonlyLookupResult(readonly: number) {
+  return {
+    query_id: 'readonly-lookup',
+    response_headers: {},
+    async text() {
+      return `{"readonly":"${readonly}"}\n`
+    },
+  }
+}
+
 function createMockClient(
   name: string,
   calls: InsertCall[],
@@ -54,7 +69,8 @@ function createMockClient(
         response_headers: opts.commandHeaders ?? {},
       }
     },
-    async query() {
+    async query(params: { query: string }) {
+      if (isReadonlyLookup(params.query)) return readonlyLookupResult(0)
       return {
         query_id: `${name}-query`,
         response_headers: opts.queryHeaders ?? {},
@@ -297,11 +313,18 @@ SETTINGS index_granularity = 8192;`
   })
 
   // A readonly = 1 user cannot change any setting, so reads send none on top
-  // of the client's wait_end_of_query; writes keep theirs (#402).
-  test('sends the write settings with command and insert only', async () => {
-    const sent: Record<string, unknown> = {}
+  // of the client's wait_end_of_query; writes keep theirs (#402). Other users
+  // get progress headers on reads too (#412).
+  const progress = { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: '30000' }
+  test.each([
+    [0, progress, { ...progress, max_result_rows: 3 }],
+    [2, progress, { ...progress, max_result_rows: 3 }],
+    [1, undefined, { max_result_rows: 3 }],
+  ])('a readonly = %p user sends the progress settings with reads accordingly', async (readonly, read, readWithSettings) => {
+    const sent: Array<[string, unknown]> = []
+    let lookups = 0
     const record = (method: string) => async (params: { clickhouse_settings?: unknown }) => {
-      sent[method] = params.clickhouse_settings
+      sent.push([method, params.clickhouse_settings])
       return {
         query_id: method,
         response_headers: {},
@@ -313,8 +336,14 @@ SETTINGS index_granularity = 8192;`
     const client = {
       command: record('command'),
       insert: record('insert'),
-      query: async (params: { clickhouse_settings?: unknown; format: string }) =>
-        record(params.format === 'JSON' ? 'queryJson' : 'query')(params),
+      query: async (params: { query: string; clickhouse_settings?: unknown; format: string }) => {
+        if (isReadonlyLookup(params.query)) {
+          lookups += 1
+          expect(params.clickhouse_settings).toBeUndefined()
+          return readonlyLookupResult(readonly)
+        }
+        return record(params.format === 'JSON' ? 'queryJson' : 'query')(params)
+      },
       async close() {},
     } as unknown as ReturnType<typeof createStatelessClickHouseClient>
     const executor = createExecutorWithClient(
@@ -323,16 +352,43 @@ SETTINGS index_granularity = 8192;`
     )
 
     await executor.query('SELECT 1')
+    await executor.query('SELECT 1', { max_result_rows: 3 })
     await executor.queryJson?.('SELECT 1')
     await executor.command('CREATE TABLE t (a UInt8) ENGINE = Memory', { max_threads: 1 })
     await executor.insert({ table: 't', values: [{ a: 1 }] })
 
-    expect(sent).toEqual({
-      query: undefined,
-      queryJson: undefined,
-      command: { async_insert: 0, send_progress_in_http_headers: 1, max_threads: 1 },
-      insert: { async_insert: 0, send_progress_in_http_headers: 1 },
-    })
+    expect(lookups).toBe(1)
+    expect(sent).toEqual([
+      ['query', read],
+      ['query', readWithSettings],
+      ['queryJson', read],
+      ['command', { async_insert: 0, ...progress, max_threads: 1 }],
+      ['insert', { async_insert: 0, ...progress }],
+    ])
+    await executor.close()
+  })
+
+  test('a failed readonly lookup fails the read and is looked up again on the next one', async () => {
+    let lookups = 0
+    const client = {
+      async query(params: { query: string }) {
+        if (isReadonlyLookup(params.query)) {
+          lookups += 1
+          if (lookups === 1) throw new Error('Code: 81. DB::Exception: Database app does not exist. (UNKNOWN_DATABASE)')
+          return readonlyLookupResult(0)
+        }
+        return { query_id: 'q', response_headers: {}, async text() { return '{"id":1}' } }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'app', secure: false },
+      client,
+    )
+
+    await expect(executor.query('SELECT 1 AS id')).rejects.toThrow(/UNKNOWN_DATABASE/)
+    expect(await executor.query('SELECT 1 AS id')).toEqual([{ id: 1 }])
+    expect(lookups).toBe(2)
     await executor.close()
   })
 
@@ -392,7 +448,8 @@ SETTINGS index_granularity = 8192;`
     // silently bypassed.
     let textCalled = false
     const failingBodyClient = {
-      async query() {
+      async query(params: { query: string }) {
+        if (isReadonlyLookup(params.query)) return readonlyLookupResult(0)
         return {
           query_id: 'q-1',
           response_headers: {
@@ -947,6 +1004,7 @@ function createStatusCapturingClient(
       return { query_id: 'cmd', response_headers: {} }
     },
     async query(params: { query: string }) {
+      if (isReadonlyLookup(params.query)) return readonlyLookupResult(0)
       queries.push(params.query)
       if (options.failProcesses && params.query.includes('system.processes')) {
         throw options.failProcesses
