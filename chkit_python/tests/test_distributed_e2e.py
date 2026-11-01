@@ -133,11 +133,11 @@ def _assert_obsessiondb_rejects(project: _Project) -> None:
     project.write_schema([])
     generate = project.invoke(["generate", "--name", "init", "--json"])
     assert generate.exit_code != 0, format_test_diagnostic("generate should fail", generate)
-    # A failing plugin hook surfaces as PluginExecutionError, as for every hook.
+    # A failing plugin hook prints its message as one stderr line, as for every hook.
     assert (
         f"Table {project.database}.{project.distributed} uses the Distributed engine, "
         "which ObsessionDB does not support: ObsessionDB has no shards"
-    ) in str(generate.exception)
+    ) in generate.stderr
 
 
 def _assert_distributed_lifecycle(project: _Project, client: Any) -> None:

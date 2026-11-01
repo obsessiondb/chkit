@@ -127,6 +127,24 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- The typed `T64` codec is accepted before a general codec, as in TS (#434). ClickHouse accepts
+  `CODEC(T64, LZ4)`, `CODEC(T64, ZSTD(3))` and `CODEC(Delta, T64, LZ4)`, but chkit-py classed
+  `T64` as a general codec, so those chains failed validation with
+  `codec_chain_multiple_general`. `T64` compresses on its own, like `DoubleDelta`, so it moved
+  from `GeneralColumnCodec` to `PreprocessingColumnCodec`: a lone `T64` still validates,
+  `[{"kind": "T64"}, {"kind": "LZ4"}]` now validates and renders `CODEC(T64, LZ4)`, and `T64`
+  after a general codec, which ClickHouse rejects, fails with
+  `codec_chain_must_end_with_general`. A migrated `T64` chain reports no drift.
+- An unhandled error prints one line and exits 1, as in TS (#437): ClickHouse's own message
+  for a server error, the error's message otherwise. Before, it printed a full traceback,
+  under `--json` after the error envelope too. `CHKIT_DEBUG=1` logs the traceback to stderr.
+  Usage errors (exit 2), `Ctrl-C` (exit 130) and the commands' own exits are unchanged.
+- `chkit generate` compares a column's type as rendered, as in TS (#433, port of #275), so
+  switching between `type="Nullable(Int64)"` and `type="Int64", nullable=True` plans
+  nothing. Before, it wrote a `MODIFY COLUMN` migration that changed nothing. A change to
+  nullability, to the underlying type or to a nested `Nullable` wrapper (such as
+  `LowCardinality(Nullable(String))`) still plans `MODIFY COLUMN`. Column rename
+  suggestions and codec removals match across both spellings too.
 - The typed `GCD` codec is a preprocessing codec, as in TS (#408). ClickHouse rejects a lone
   `CODEC(GCD)` because GCD does not compress, and chkit-py classed it as a general codec, so
   no typed GCD chain was valid: `[{"kind": "GCD"}, {"kind": "LZ4"}]` now validates and

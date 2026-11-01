@@ -1040,13 +1040,54 @@ describe('systemTableSource / observableSystemTable', () => {
       /ALL_CONNECTION_TRIES_FAILED/,
     )
   })
+
+  // #436: the status reads decode as executor.query() does. ClickHouse 26.3
+  // sends UInt64 counts as JSON numbers; a profile with
+  // output_format_json_quote_64bit_integers = 1 sends them as strings.
+  test('queryStatus reads counts sent as numbers or as strings of digits', async () => {
+    const running = createStatusCapturingClient(0, {
+      bodies: {
+        processes:
+          '{"read_rows":10,"read_bytes":"18446744073709551615","written_rows":"3","written_bytes":24,"elapsed":1.5}',
+      },
+    })
+    const runningExecutor = createExecutorWithClient(
+      { url: 'http://localhost:8123', database: 'default' },
+      running.client,
+    )
+    expect(await runningExecutor.queryStatus('qid-1')).toEqual({
+      status: 'running',
+      readRows: 10,
+      readBytes: Number('18446744073709551615'),
+      writtenRows: 3,
+      writtenBytes: 24,
+      elapsedMs: 1500,
+    })
+
+    const finished = createStatusCapturingClient(0, {
+      bodies: {
+        query_log:
+          '{"type":"QueryFinish","written_rows":5,"written_bytes":"40","query_duration_ms":7,"exception":""}\n',
+      },
+    })
+    const finishedExecutor = createExecutorWithClient(
+      { url: 'http://localhost:8123', database: 'default' },
+      finished.client,
+    )
+    expect(await finishedExecutor.queryStatus('qid-2')).toEqual({
+      status: 'finished',
+      writtenRows: 5,
+      writtenBytes: 40,
+      durationMs: 7,
+    })
+  })
 })
 
 // A client that answers the replica probe with `replicas` and every status
-// read with no rows, recording each query.
+// read with no rows (or the JSONEachRow body in `bodies`), recording each query.
 function createStatusCapturingClient(
   replicas: number,
-  options: { failProcesses?: Error } = {},
+  options: { failProcesses?: Error; bodies?: { processes?: string; query_log?: string } } = {},
 ) {
   const queries: string[] = []
   const client = {
@@ -1060,14 +1101,17 @@ function createStatusCapturingClient(
         throw options.failProcesses
       }
       const rows = params.query.includes('system.one') && replicas > 0 ? [{ replicas: String(replicas) }] : []
+      const body = params.query.includes('system.processes')
+        ? options.bodies?.processes
+        : params.query.includes('system.query_log')
+          ? options.bodies?.query_log
+          : undefined
+      const text = body ?? rows.map((row) => JSON.stringify(row)).join('\n')
       return {
         query_id: 'q',
         response_headers: {},
-        async json() {
-          return rows
-        },
         async text() {
-          return rows.map((row) => JSON.stringify(row)).join('\n')
+          return text
         },
       }
     },

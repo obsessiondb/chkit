@@ -94,7 +94,7 @@ function validateColumnCodec(
       issues,
       def,
       'codec_chain_must_end_with_general',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, T64, ALP)`
+      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, ALP)`
     )
   }
 }

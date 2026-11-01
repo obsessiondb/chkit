@@ -1573,6 +1573,44 @@ describe('@chkit/core column codec', () => {
     expect(toCreateSQL(defs[0])).toContain('`delta_gcd` UInt64 CODEC(Delta, GCD, ZSTD)')
   })
 
+  test('allows T64 alone and before a general codec (#434)', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 't64', type: 'UInt64', codec: { kind: 'T64' } },
+          { name: 't64_lz4', type: 'UInt64', codec: [{ kind: 'T64' }, { kind: 'LZ4' }] },
+          { name: 't64_zstd', type: 'UInt64', codec: [{ kind: 'T64' }, { kind: 'ZSTD', level: 3 }] },
+          { name: 'delta_t64_lz4', type: 'UInt64', codec: [{ kind: 'Delta' }, { kind: 'T64' }, { kind: 'LZ4' }] },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    expect(validateDefinitions(defs)).toEqual([])
+    expect(toCreateSQL(defs[0])).toContain('`delta_t64_lz4` UInt64 CODEC(Delta, T64, LZ4)')
+  })
+
+  test('flags T64 after a general codec, which ClickHouse rejects (#434)', () => {
+    const defs = [
+      table({
+        database: 'app',
+        name: 'events',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'lz4_t64', type: 'UInt64', codec: [{ kind: 'LZ4' }, { kind: 'T64' }] },
+        ],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+    ]
+    expect(validateDefinitions(defs).map((i) => i.code)).toEqual(['codec_chain_must_end_with_general'])
+  })
+
   test('flags empty codec chain', () => {
     const defs = [
       table({
