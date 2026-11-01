@@ -79,8 +79,17 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.2.1",
       "changelog": [
+        {
+          "version": "0.2.1",
+          "changes": [
+            "Collapse conversations repeated across discovery pages so interrupted message work restores instead of failing with an invalid-checkpoint error.",
+            "Name the Slack method and error code when rate-limit or transient ok:false responses exhaust their retries.",
+            "Validate applicable page sizes, request pacing, conversation types, and new-window bounds before the first Slack request without coupling independent readers or changing frozen-window recovery.",
+            "Clarify native JSON normalization of explicit null paths and empty objects."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [

@@ -5,7 +5,7 @@ import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-inge
 import { slackConfig } from '../config.js'
 import { readMessages, slackMessagesRaw } from '../sources/messages.js'
 import { createSlackMessageStrategy, dateTimestamp, parseMessageState, timestampMicros } from '../state.js'
-import { fixtureDeps, parentMessage, replyMessage, standaloneMessage } from './fixtures.js'
+import { channel, fixtureDeps, parentMessage, replyMessage, standaloneMessage } from './fixtures.js'
 import type { SlackClientDeps } from '../client.js'
 
 const originalConfig = { ...slackConfig }
@@ -36,6 +36,20 @@ test('an incomplete history page replays its replies under the original frozen b
   expect(completed.active).toBeUndefined()
   expect(completed.watermark).toBe(dateTimestamp(cutoff))
   expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage })
+})
+
+test('an unfinished window keeps its frozen bounds when the execution clock moves backwards', async () => {
+  const defaults = fixtureDeps()
+  const deps = { ...defaults, config: { ...defaults.config, historyFrom: '1699920000.000000' } }
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const first = await runIngestion(request(pipeline(deps, { maxChunks: 2 })), { journal, destination, now: () => cutoff })
+  expect(first.streams[0]?.outcome).toBe('budget_exhausted')
+  const resumed = await runIngestion(request(pipeline(deps)), { journal, destination, now: () => new Date('2023-11-13T00:00:00Z') })
+  expect(resumed.ok, JSON.stringify(resumed)).toBe(true)
+  const saved = parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state)
+  expect(saved.active).toBeUndefined()
+  expect(saved.watermark).toBe(dateTimestamp(cutoff))
+  expect(new Set(destination.tables.get('default.slack_messages_raw')?.map((row) => row.id)).size).toBe(3)
 })
 
 test('lost child acknowledgement replays the whole history page without advancing it', async () => {
@@ -244,6 +258,21 @@ test('a backfill without an explicit upper bound resumes its original cutoff', a
   expect((await runIngestion({ selected: selectStreams([pipeline(fixtureDeps())], []), backfill }, { journal, destination, now: () => new Date('2023-11-16T00:00:00Z') })).ok).toBe(true)
   expect((await journal.readCheckpoint('slack.primary.messages')).envelope).toBeUndefined()
   expect(parseMessageState((await journal.readCheckpoint('slack.primary.messages#backfill:open-ended')).envelope?.state).watermark).toBe(dateTimestamp(cutoff))
+})
+
+test('a conversation repeated across discovery pages is saved once, so interrupted work still restores', async () => {
+  const defaults = fixtureDeps()
+  const deps = fixtureDeps((url, init) => {
+    if (url.pathname !== '/api/conversations.list') return defaults.fetch(url.toString(), init)
+    const first = !url.searchParams.has('cursor')
+    return Response.json({ ok: true, channels: first ? [channel] : [channel, { ...channel, id: 'C2' }], response_metadata: { next_cursor: first ? 'second-page' : '' } })
+  })
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  expect((await runIngestion(request(pipeline(deps, { maxChunks: 2 })), { journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect(parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state).active?.channels).toEqual(['C1', 'C2'])
+  const resumed = await runIngestion(request(pipeline(deps)), { journal, destination, now: () => cutoff })
+  expect(resumed.ok, JSON.stringify(resumed)).toBe(true)
+  expect(new Set(destination.tables.get('default.slack_messages_raw')?.map((row) => row.id)).size).toBe(6)
 })
 
 test('strategy version 2 rejects old envelopes before making requests', async () => {

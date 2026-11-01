@@ -119,6 +119,8 @@ export const attioConfig: AttioConfig = {
 | `pageSize` | Positive integer, default `500`, for attributes, records, entries, and tasks |
 | `notesPageSize` | Positive integer up to `50`, default `50`, for notes |
 
+Page sizes must be safe integers. Readers reject invalid applicable page sizes before making requests, including the object or list lookup that precedes a child collection read.
+
 Add `deals` or a custom slug to `objects` to collect that type, and add list slugs or IDs to `lists` to collect their entries. Empty arrays disable the corresponding child streams. The objects and lists catalog streams retain all accessible metadata independently of these selections. An unknown or inaccessible configured slug or ID fails its stream visibly. Notes, tasks, and members remain workspace-wide; their readers need separate changes to narrow their coverage.
 
 The pipeline creates its stream graph from these explicit arrays without API discovery. People and Companies have independent readers and journal progress, while both write to `attio_records_raw`. An object stream's ID ends in `.records.<ref>` or `.object_attributes.<ref>`; a list stream's ID ends in `.entries.<ref>` or `.list_attributes.<ref>`. Keep each configured reference stable: switching a slug to an equivalent UUID changes the stream ID.
@@ -228,6 +230,8 @@ Every raw table uses the same five columns:
 | `_chkit_batch_id` | `String` | Runtime batch identity |
 | `_chkit_run_id` | `String` | Ingestion run identity |
 | `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
+
+Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
 
 Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as both the primary key and ordering key. Later ingestion time wins during replacement; the integration does not order rows by an Attio source version. Physical rows can include earlier observations until merges occur. Use `FINAL` when directly querying raw tables for the reconciled result.
 
