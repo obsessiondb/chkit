@@ -42,10 +42,16 @@ def resolve_plugin_executor(
     config_path: str,
     json_mode: bool,
     service: str | None,
+    flags: dict[str, Any] | None = None,
 ) -> ClickHouseClient | None:
-    """Run the on_init hooks, then return the first plugin executor, or None."""
+    """Run the on_init hooks, then return the first plugin executor, or None.
+
+    ``flags`` is the command's parsed-flag dict (``hook_flags.passed_flags``)
+    for both hooks; without it they get only ``--service``.
+    """
     # The hooks read --service under the key the TS flag parser produces.
-    flags: dict[str, Any] = {"--service": service} if service is not None else {}
+    if flags is None:
+        flags = {"--service": service} if service is not None else {}
     # TS onInit: ObsessionDB names the selected service (text mode only).
     plugin_runtime.run_on_init(
         ChxOnInitContext(
