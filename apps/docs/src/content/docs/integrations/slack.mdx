@@ -90,7 +90,7 @@ SLACK_API_TOKEN=replace-with-the-slack-access-token
 
 Bun loads the project's `.env`. A scheduler must supply `SLACK_API_TOKEN` and the ClickHouse connection variables through its own environment or secret configuration. `.env.example` lists variable names and does not load credentials. Keep real tokens out of source control.
 
-The reader obtains the token when a request runs and sends it as an `Authorization: Bearer` header. Schema imports, migration generation, and `ingest list` need no Slack token. This integration does not issue or refresh OAuth tokens; manage that lifecycle separately using [Slack authentication](https://docs.slack.dev/authentication/).
+`token` in the copied `config.ts` defaults to `SLACK_API_TOKEN`; set it to use another token, for example for a second installation. Each stream reads its settings and token when it runs and sends the token as an `Authorization: Bearer` header. Invalid settings or a missing token fail that stream before any Slack request. Schema imports, `check`, migration generation, and `ingest list` need no Slack token. This integration does not issue or refresh OAuth tokens; manage that lifecycle separately using [Slack authentication](https://docs.slack.dev/authentication/).
 
 ## Choose conversations and destination names
 
@@ -106,10 +106,9 @@ export const slackConfig: SlackConfig = {
   includeReplies: true,
   pageSize: 200,
   messagePageSize: 15,
-  requestIntervalMs: 3000,
-  messageIntervalMs: 60000,
   historyFrom: undefined,
   overlapMs: 86400000,
+  token: process.env.SLACK_API_TOKEN,
 }
 ```
 
@@ -123,10 +122,9 @@ export const slackConfig: SlackConfig = {
 | `includeReplies` | Fetch complete threads for discovered roots with replies; default `true` |
 | `pageSize` | Channel and user page size, integer `1`–`999`; default `200` |
 | `messagePageSize` | History and reply page size, integer `1`–`999` subject to Slack's app-specific limit; conservative default `15` |
-| `requestIntervalMs` | Delay before each authentication, conversation, and user request; default `3000` ms |
-| `messageIntervalMs` | Delay before each history and reply request; default `60000` ms |
 | `historyFrom` | Optional exact bootstrap lower bound; default `undefined` selects the recent overlap window |
 | `overlapMs` | Recent root overlap after the completed watermark; default one day |
+| `token` | Slack OAuth token sent with every request; defaults to `SLACK_API_TOKEN` |
 
 Set `channels: ['C012EXAMPLE', 'C034EXAMPLE']` to restrict conversation metadata and messages. Selection uses Slack IDs, not channel names. Unknown IDs, inaccessible conversations, or IDs excluded by `conversationTypes` fail visibly. User collection remains workspace-wide.
 
@@ -187,19 +185,19 @@ Keep source identity, selection, reply policy, and time configuration stable. Ch
 
 ### Rate limits and scan duration
 
-The default pipeline runs one stream, one fetch, and one load at a time. Metadata batches use a 500-row threshold; messages publish source pages individually and commit history progress after the page and all its replies finish. Requests wait before each attempt: metadata uses `requestIntervalMs: 3000`; history and replies use `messageIntervalMs: 60000` with pages of `15` messages.
+The default pipeline runs one stream, one fetch, and one load at a time. Metadata batches use a 500-row threshold; messages publish source pages individually and commit history progress after the page and all its replies finish. Requests are not paced. A `429` or `ratelimited` response pauses the pipeline's requests until its `Retry-After`, and these waits do not use up retries, so each app runs at its own limit. History and replies use pages of `15` messages.
 
 Slack documents a one-request-per-minute limit and a 15-object page limit for new commercially distributed applications outside the Slack Marketplace. Marketplace and internal customer-built apps retain Tier 3 limits. See the current [`conversations.history` reference](https://docs.slack.dev/reference/methods/conversations.history/), [`conversations.replies` reference](https://docs.slack.dev/reference/methods/conversations.replies/), and [rate-limit clarification](https://docs.slack.dev/changelog/2025/06/03/rate-limits-clarity/).
 
-For an internal app entitled to Tier 3, edit the copied config to use `messagePageSize: 200` and `messageIntervalMs: 1200`. Confirm the app's actual limits before changing these settings. Slack may still return fewer objects than requested or apply `429` responses.
+For an internal app entitled to Tier 3, edit the copied config to use `messagePageSize: 200`. Confirm the app's actual limits before changing it. Slack may still return fewer objects than requested.
 
 A full history read with many threads can take hours or days at the conservative defaults. Restrict conversation IDs and select only the necessary streams before scheduling runs. The CLI's default duration is `3600` seconds; set `--max-duration` for the expected scan. An interrupted message read resumes the completed history timestamp frontier and replays its incomplete page with its replies. That complete unit, including its checkpoint marker, must fit the duration and chunk budget. Otherwise every run can replay the same unit without moving its checkpoint. Reduce `messagePageSize`, increase the execution budget, or narrow the workload.
 
 ### Retries and failures
 
-Requests have a 30-second timeout and run through the ingestion executor's cancellation and retry context. The pipeline allows five retries after the initial attempt, with exponential backoff starting at one second and capped at 60 seconds. HTTP `429` responses honor `Retry-After`. Slack `ratelimited` and `rate_limited` responses also retry, with a 60-second fallback when no header is present. Network and server failures, including Slack `internal_error`, `fatal_error`, `service_unavailable`, and `request_timeout`, use the same retry budget.
+Requests have a 30-second timeout and run through the ingestion executor's cancellation and retry context. The runtime allows five retries after the initial attempt, with exponential backoff starting at one second and capped at 60 seconds. HTTP `429` responses honor `Retry-After`. Slack `ratelimited` and `rate_limited` responses also retry, with a 60-second fallback when no header is present. Network and server failures, including Slack `internal_error`, `fatal_error`, `service_unavailable`, and `request_timeout`, use the same retry budget.
 
-Slack often reports errors in a successful HTTP response with `ok: false`. Authentication, permission, missing-scope, and unsupported-token errors fail with the Slack code and required scopes when supplied. Invalid payloads and identity fields also fail visibly. A failed request exhausts its budget before the stream fails; restarting the reader does not multiply its request retries.
+Slack often reports errors in a successful HTTP response with `ok: false`. Authentication, permission, missing-scope, and unsupported-token errors fail with the Slack code and required scopes when supplied. Invalid payloads, identity fields, and checkpoints fail at once without a retry. A request that keeps failing transiently exhausts its budget before the stream fails; restarting the reader does not multiply its request retries.
 
 Writes become visible batch by batch. A failed or interrupted run leaves already loaded rows in place. Repeated IDs reconcile in ClickHouse; this does not provide an atomic workspace snapshot or exactly-once delivery. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed.
 
@@ -275,19 +273,19 @@ Slack retention and access restrictions limit historical coverage. Changes durin
 
 | File | Responsibility |
 |---|---|
-| `config.ts` | Source identity, destination names, conversation selection, replies, page sizes, pacing |
-| `client.ts` | Authentication, payload validation, pagination, request pacing, and row identity |
+| `config.ts` | Source identity, destination names, conversation selection, replies, page sizes, pacing, token |
+| `client.ts` | Configuration parsing, authentication, request pacing, Slack URLs, pagination, payload validation, and Slack error codes |
 | `state.ts` | Validated message windows, exact timestamp arithmetic, and source binding |
-| `sources/channels.ts` | Conversation reader and raw table |
-| `sources/users.ts` | User reader and raw table |
-| `sources/messages.ts` | History and thread reader and raw messages table |
-| `pipeline.ts` | Enabled streams, tags, batching, retries, and concurrency |
+| `sources/channels.ts` | Conversation reader, row identity, and raw table |
+| `sources/users.ts` | User reader, row identity, and raw table |
+| `sources/messages.ts` | History and thread reader, row identity, and raw messages table |
+| `pipeline.ts` | Enabled streams, tags, batching, and concurrency |
 | `index.ts` | Discoverable pipeline and schema exports |
 | `tests/slack.test.ts`, `tests/checkpoints.test.ts`, `tests/fixtures.ts` | Portable payload, page replay, boundary, scope, and recent-coverage tests |
 
 Remove a stream from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve the existing table under migration management. Removing a schema export can generate a drop operation; review that migration. Revisit pacing when changing concurrency or page sizes and run fixture tests for customized readers.
 
-`createSlackPipeline` binds source identity, conversation selection, page sizes, pacing, and message checkpoint settings when it creates the pipeline. Later config edits do not change an existing pipeline. Its runtime settings exclude `database` and `tablePrefix`: those names belong to the raw schemas declared from the installed `config.ts` during module loading. Change destination names before loading schemas and generating migrations.
+`createSlackPipeline` binds source identity, conversation selection, page sizes, pacing, message checkpoint settings, and the token when it creates the pipeline. Later config edits do not change an existing pipeline. Its runtime settings exclude `database` and `tablePrefix`: those names belong to the raw schemas declared from the installed `config.ts` during module loading. Change destination names before loading schemas and generating migrations.
 
 ### Install and run fixture tests
 

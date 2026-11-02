@@ -30,7 +30,6 @@ import typer
 
 from chkit.cli.command_target import (
     ServiceOption,
-    exit_no_target,
     open_client,
     resolve_plugin_executor,
 )
@@ -42,6 +41,7 @@ from chkit.cli.commands.pull_view_parser import (
     parse_to_clause,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
@@ -471,19 +471,19 @@ def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None
     tmp_file.replace(out_file)
 
 
-def run(  # noqa: PLR0917
+def run(  # noqa: PLR0912, PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
     out_file: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--out-file",
             "-o",
-            help="Where to write the pulled Python schema.",
+            help="Where to write the pulled Python schema [default: src/db/schema/pulled.py].",
         ),
-    ] = Path("src/db/schema/pulled.py"),
+    ] = None,
     database: Annotated[
         list[str] | None,
         typer.Option(
@@ -492,14 +492,17 @@ def run(  # noqa: PLR0917
             help="Restrict pull to these database names. Repeatable.",
         ),
     ] = None,
-    overwrite: Annotated[
+    force: Annotated[
         bool,
         typer.Option(
-            "--overwrite",
             "--force",
             "-f",
             help="Overwrite the output file if it already exists.",
         ),
+    ] = False,
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Alias for --force."),
     ] = False,
     dryrun: Annotated[
         bool,
@@ -512,6 +515,22 @@ def run(  # noqa: PLR0917
     ] = False,
     service: ServiceOption = None,
 ) -> None:
+    # As in TS, the hooks get the flags that were passed, keyed by long name.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--out-file": str(out_file) if out_file is not None else None,
+            "--database": database,
+            "--force": force,
+            "--overwrite": overwrite,
+            "--dryrun": dryrun,
+            "--json": output_json,
+            "--service": service,
+        }
+    )
+    overwrite = overwrite or force
+    if out_file is None:
+        out_file = Path("src/db/schema/pulled.py")
     config = load_config(config_path, ChxConfigEnv(command="pull"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -523,13 +542,20 @@ def run(  # noqa: PLR0917
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
         service=service,
+        flags=hook_flags,
     )
     if executor is None and config.clickhouse is None:
+        # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
+        # a config error on stdout and exits 2.
         msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service (pull connects to ClickHouse to read the live schema)."
+            "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
+            "(chkit obsessiondb service select)"
         )
-        exit_no_target("pull", msg, json_mode=output_json)
+        if output_json:
+            print_output({"ok": False, "command": "schema", "error": msg}, json_mode=True)
+        else:
+            typer.echo(f"Pull schema failed: {msg}")
+        raise typer.Exit(code=2)
 
     selected = sorted({d.strip() for d in (database or []) if d.strip()})
 
@@ -541,7 +567,7 @@ def run(  # noqa: PLR0917
             command="pull",
             config=config,
             table_scope=TableScope(enabled=False),
-            flags={},
+            flags=hook_flags,
             clickhouse=config.clickhouse,
             databases=selected,
         )

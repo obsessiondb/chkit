@@ -5,8 +5,9 @@
   "title": "Circleback",
   "description": "Five independent Circleback raw resource streams with complete full reads, transcript availability evidence, and native relationships.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.10",
-    "@chkit/plugin-ingest@^0.2.0-beta.10"
+    "@chkit/core@^0.2.0-beta.12",
+    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "zod@^4.3.6"
   ],
   "files": [
     {
@@ -37,8 +38,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.1",
+      "version": "0.3.0",
       "changelog": [
+        {
+          "version": "0.3.0",
+          "changes": [
+            "Read configuration and the API key when a stream runs, so `generate`, `migrate`, and `chkit check` never depend on them; invalid settings or a missing API key fail that run before any request. Requires zod 4 and chkit 0.2.0-beta.12.",
+            "Send requests through the ingestion runtime, which retries only network failures, timeouts, retryable HTTP statuses, and HTTP 429 rate limits; malformed payloads and invalid Link continuations fail at once.",
+            "Set `apiKey` in the configuration to use another API key, for example for a second installation; it defaults to `CIRCLEBACK_API_KEY`."
+          ]
+        },
         {
           "version": "0.2.1",
           "changes": [
@@ -69,8 +78,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.10",
-      "ingest": "^0.2.0-beta.10",
+      "chkit": "^0.2.0-beta.12",
+      "ingest": "^0.2.0-beta.12",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/circleback",
       "entry": "index.ts",

@@ -11,6 +11,7 @@ from chkit.core.column_default import parse_column_default, render_default
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
+from chkit.core.identifier import quote_identifier, render_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
 from chkit.core.model import (
     ChxValidationError,
@@ -53,6 +54,7 @@ from chkit.core.sql import (
     render_alter_remove_codec,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
+    render_column_type,
     render_dictionary_sql,
     to_create_sql,
 )
@@ -69,13 +71,14 @@ def _push_drop(
     definition: SchemaDefinition,
     risk: RiskLevel = "danger",
 ) -> None:
+    name = render_qualified_name(definition.database, definition.name)
     if isinstance(definition, TableDefinition):
         operations.append(
             MigrationOperation(
                 type="drop_table",
                 key=definition_key(definition),
                 risk=risk,
-                sql=f"DROP TABLE IF EXISTS {definition.database}.{definition.name}"
+                sql=f"DROP TABLE IF EXISTS {name}"
                 + (" SYNC;" if is_kafka_engine(definition.engine) else ";"),
             )
         )
@@ -86,7 +89,7 @@ def _push_drop(
                 type="drop_view",
                 key=definition_key(definition),
                 risk=risk,
-                sql=f"DROP VIEW IF EXISTS {definition.database}.{definition.name};",
+                sql=f"DROP VIEW IF EXISTS {name};",
             )
         )
         return
@@ -96,10 +99,7 @@ def _push_drop(
                 type="drop_dictionary",
                 key=definition_key(definition),
                 risk=risk,
-                sql=(
-                    f"DROP DICTIONARY IF EXISTS "
-                    f"{definition.database}.{definition.name};"
-                ),
+                sql=f"DROP DICTIONARY IF EXISTS {name};",
             )
         )
         return
@@ -108,7 +108,7 @@ def _push_drop(
             type="drop_materialized_view",
             key=definition_key(definition),
             risk=risk,
-            sql=f"DROP TABLE IF EXISTS {definition.database}.{definition.name} SYNC;",
+            sql=f"DROP TABLE IF EXISTS {name} SYNC;",
         )
     )
 
@@ -167,7 +167,7 @@ def _push_create_database(
             type="create_database",
             key=f"database:{database}",
             risk=risk,
-            sql=f"CREATE DATABASE IF NOT EXISTS {database};",
+            sql=f"CREATE DATABASE IF NOT EXISTS {render_identifier(database)};",
         )
     )
 
@@ -240,8 +240,7 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
     data.pop("name", None)
     data.pop("renamed_from", None)
     data.pop("nullable", None)
-    type_ = str(column.type).strip()
-    data["type"] = f"Nullable({type_})" if column.nullable else type_
+    data["type"] = render_column_type(column)
     if column.default is not None:
         parsed = parse_column_default(column.default)
         data["default"] = parsed.sql if parsed.kind == "expression" else render_default(
@@ -290,8 +289,8 @@ def _render_rename_column_suggestion_sql(
     table: TableDefinition, from_: str, to: str
 ) -> str:
     return (
-        f"ALTER TABLE {table.database}.{table.name} "
-        f"RENAME COLUMN `{from_}` TO `{to}`;"
+        f"ALTER TABLE {render_qualified_name(table.database, table.name)} "
+        f"RENAME COLUMN IF EXISTS {quote_identifier(from_)} TO {quote_identifier(to)};"
     )
 
 
@@ -380,7 +379,7 @@ def _diff_materialized_view(
                 type="drop_materialized_view",
                 key=definition_key(new),
                 risk="caution",
-                sql=f"DROP TABLE IF EXISTS {new.database}.{new.name} SYNC;",
+                sql=f"DROP TABLE IF EXISTS {render_qualified_name(new.database, new.name)} SYNC;",
             ),
             MigrationOperation(
                 type="create_materialized_view",
@@ -460,7 +459,7 @@ def _diff_tables(
                     type="drop_table",
                     key=definition_key(new),
                     risk=_recreate_drop_risk(old),
-                    sql=f"DROP TABLE IF EXISTS {new.database}.{new.name};",
+                    sql=f"DROP TABLE IF EXISTS {render_qualified_name(new.database, new.name)};",
                 ),
                 MigrationOperation(
                     type="create_table",

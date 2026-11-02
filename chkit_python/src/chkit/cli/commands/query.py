@@ -212,8 +212,8 @@ def run(
     )
     if executor is None and config.clickhouse is None:
         msg = (
-            "No target configured. Provide a `clickhouse` block in "
-            "clickhouse.config.py or select an ObsessionDB service to run queries."
+            "No target configured. Provide clickhouse settings in your config or "
+            "install a plugin (e.g. obsessiondb) that supplies one."
         )
         exit_no_target("query", msg, json_mode=output_json)
 

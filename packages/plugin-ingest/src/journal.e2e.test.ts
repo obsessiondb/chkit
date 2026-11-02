@@ -74,7 +74,7 @@ describe('independent run histories with live ClickHouse', () => {
   test('a missing checkpoint insert replays uncertain sink work without poisoning other run histories', async () => {
     const starts: unknown[] = []
     const stream = defineStream({
-      id: `${table}.unconfirmed`, destination, retry: { retries: 0 },
+      id: `${table}.unconfirmed`, destination,
       incremental: cursorState({ id: 'test.cursor', version: 1, parse: Number }),
       async *read({ selection }) { starts.push(selection); yield { rows: [{ id: 1 }], state: (selection ?? 0) + 1 } },
     })
@@ -140,7 +140,7 @@ describe('independent run histories with live ClickHouse', () => {
   test('a persisted checkpoint remains resumable when every acknowledgement for its insert is lost', async () => {
     const starts: unknown[] = []
     const stream = defineStream({
-      id: `${table}.lost_all`, destination, retry: { retries: 0 },
+      id: `${table}.lost_all`, destination,
       incremental: cursorState({ id: 'test.cursor', version: 1, parse: Number }),
       async *read({ selection }) { starts.push(selection); yield { rows: [], state: (selection ?? 0) + 1 } },
     })

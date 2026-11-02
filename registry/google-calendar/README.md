@@ -2,7 +2,7 @@
 
 This editable reader stores canonical Google Calendar responses as native JSON and checkpoints provider sync tokens in the chkit ingestion journal. It follows the recoverable ingestion patterns in [obsessiondb/brain](https://github.com/obsessiondb/brain/tree/main/scripts/brain-sync), using Google's change-token protocol for canonical events.
 
-Set `GOOGLE_CALENDAR_ACCESS_TOKEN` in the runtime environment and configure a direct ClickHouse connection. Review `sourceId`, `streamPrefix`, `calendarId`, `database`, and `maxChunks` in `config.ts`. Native JSON requires ClickHouse 25.3 or later. Keep `sourceId` tied to one OAuth installation. Schema imports do not need credentials; requests read the token at runtime and do not refresh it.
+Set `GOOGLE_CALENDAR_ACCESS_TOKEN` in the runtime environment, or set `accessToken` in `config.ts`, and configure a direct ClickHouse connection. Review `sourceId`, `streamPrefix`, `calendarId`, `database`, and `maxChunks` in `config.ts`. Native JSON requires ClickHouse 25.3 or later. Keep `sourceId` tied to one OAuth installation. Configuration and the token are checked when a stream runs, so schema commands do not need them; invalid settings or a missing token fail the stream before any request. The reader does not refresh the token.
 
 ```sh
 bunx chkit check
@@ -27,9 +27,9 @@ Provider fields are retained subject to ClickHouse native JSON normalization: ex
 
 ## Pipeline and stream
 
-One installation exports one `google_calendarPipeline` with the canonical `events` stream. `pipeline.ts` wires the stream to its destination and sync-token strategy; `sources/events.ts` owns provider progress, and `client.ts` owns validated requests. The ingestion library owns retries, cancellation, budgets, and load acknowledgements.
+One installation exports one `google_calendarPipeline` with the canonical `events` stream. `pipeline.ts` wires the stream to its destination and sync-token strategy; `sources/events.ts` owns provider progress, and `client.ts` parses the configuration, authorizes requests, and owns Google URLs, pagination, payload validation, and rejected-token handling. The ingestion library owns request retries, timeouts, cancellation, budgets, and load acknowledgements.
 
-`sourceId` scopes raw identities and checkpoint query state. `streamPrefix` scopes pipeline and journal IDs; the defaults keep `google-calendar.events` and its existing checkpoint. Use a separate source label and stream prefix for another installation. `createGoogleCalendarPipeline` in `pipeline.ts` snapshots reader settings and binds injectable fetch/token dependencies. It uses the exported raw destination; edit `database` in the installation's `config.ts` before schema imports to change its placement. Database placement is a setup-time schema setting, excluded from runtime reader configuration.
+`sourceId` scopes raw identities and checkpoint query state. `streamPrefix` scopes pipeline and journal IDs; the defaults keep `google-calendar.events` and its existing checkpoint. Use a separate source label and stream prefix for another installation. `createGoogleCalendarPipeline` in `pipeline.ts` snapshots reader settings, including `accessToken`; pass another token there for a separate installation. It uses the exported raw destination; edit `database` in the installation's `config.ts` before schema imports to change its placement. Database placement is a setup-time schema setting, excluded from runtime reader configuration.
 
 ## Checkpoints and recovery
 
@@ -58,6 +58,6 @@ bunx chkit add google-calendar --with-tests
 bun test src/integrations/google-calendar/tests/basic.test.ts
 ```
 
-Fixtures verify page resumption, empty deltas, terminal token promotion after loads, cancellation payloads, token expiry, scope changes, malformed pagination, isolated factory configuration, and request-time token rotation without live credentials.
+Fixtures verify page resumption, empty deltas, terminal token promotion after loads, cancellation payloads, token expiry, scope changes, malformed pagination, isolated factory configuration and tokens, and run-time configuration checks without live credentials.
 
 The [Google Calendar integration guide](https://chkit.obsessiondb.com/integrations/google-calendar/) covers installation and sync behavior.

@@ -49,7 +49,7 @@ Create `src/chkit.ts`:
 
 ```ts
 import { view } from '@chkit/core'
-import { definePipeline, defineStream, HttpError, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
 
 type Post = { id: number; userId: number; title: string; body: string }
 
@@ -66,11 +66,8 @@ const postStream = defineStream({
   id: 'jsonplaceholder.posts',
   destination: postsRaw,
   async *read(context) {
-    const items = await context.attempt(async (signal) => {
-      const response = await fetch('https://jsonplaceholder.typicode.com/posts', { signal })
-      if (!response.ok) throw await HttpError.fromResponse(response)
-      return await response.json() as Post[]
-    }, { label: 'GET /posts' })
+    const response = await context.fetch('https://jsonplaceholder.typicode.com/posts')
+    const items = await response.json() as Post[]
     yield { rows: rawRows(items, (post) => String(post.id)) }
   },
 })
