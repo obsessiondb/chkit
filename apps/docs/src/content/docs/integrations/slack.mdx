@@ -195,7 +195,7 @@ A full history read with many threads can take hours or days at the conservative
 
 ### Retries and failures
 
-Requests have a 30-second timeout and run through the ingestion executor's cancellation and retry context. The pipeline allows five retries after the initial attempt, with exponential backoff starting at one second and capped at 60 seconds. HTTP `429` responses honor `Retry-After`. Slack `ratelimited` and `rate_limited` responses also retry, with a 60-second fallback when no header is present. Network and server failures, including Slack `internal_error`, `fatal_error`, `service_unavailable`, and `request_timeout`, use the same retry budget.
+Requests have a 30-second timeout and run through the ingestion executor's cancellation and retry context. The runtime allows five retries after the initial attempt, with exponential backoff starting at one second and capped at 60 seconds. HTTP `429` responses honor `Retry-After`. Slack `ratelimited` and `rate_limited` responses also retry, with a 60-second fallback when no header is present. Network and server failures, including Slack `internal_error`, `fatal_error`, `service_unavailable`, and `request_timeout`, use the same retry budget.
 
 Slack often reports errors in a successful HTTP response with `ok: false`. Authentication, permission, missing-scope, and unsupported-token errors fail with the Slack code and required scopes when supplied. Invalid payloads, identity fields, and checkpoints fail at once without a retry. A request that keeps failing transiently exhausts its budget before the stream fails; restarting the reader does not multiply its request retries.
 
@@ -279,7 +279,7 @@ Slack retention and access restrictions limit historical coverage. Changes durin
 | `sources/channels.ts` | Conversation reader, row identity, and raw table |
 | `sources/users.ts` | User reader, row identity, and raw table |
 | `sources/messages.ts` | History and thread reader, row identity, and raw messages table |
-| `pipeline.ts` | Enabled streams, tags, batching, retries, and concurrency |
+| `pipeline.ts` | Enabled streams, tags, batching, and concurrency |
 | `index.ts` | Discoverable pipeline and schema exports |
 | `tests/slack.test.ts`, `tests/checkpoints.test.ts`, `tests/fixtures.ts` | Portable payload, page replay, boundary, scope, and recent-coverage tests |
 

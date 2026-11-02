@@ -2,7 +2,7 @@ import { validateJournalHistory } from './journal-history.js'
 import { toJournalRow, type JournalRow } from './journal.js'
 import { createRequestQueue } from './request-queue.js'
 import { createSourceServices } from './source-context.js'
-import type { CommittedCheckpoint, DestinationAdapter, ErrorClassifier, Fetch, Journal, JournalEvent, ReadContext, RetryOptions, Row, SourceContext } from './types.js'
+import type { CommittedCheckpoint, DestinationAdapter, Fetch, Journal, JournalEvent, ReadContext, RetryOptions, Row, SourceContext } from './types.js'
 
 export interface MemoryJournal extends Journal {
   readonly events: JournalEvent[]
@@ -70,7 +70,6 @@ export interface TestSourceOptions {
   signal?: AbortSignal
   /** Defaults to no retries, so a test sees the first failure. */
   retry?: RetryOptions
-  classifyError?: ErrorClassifier
 }
 
 /** A source context with the runtime's request handling, for calling a client or reader directly. */
@@ -79,7 +78,6 @@ export function createSourceContext(options: TestSourceOptions): SourceContext {
     signal: options.signal ?? new AbortController().signal,
     fetch: options.fetch,
     retry: options.retry ?? { retries: 0 },
-    classifier: options.classifyError,
     queue: createRequestQueue(Number.POSITIVE_INFINITY),
     onRetry: () => undefined,
   })

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import type { ErrorClassifier, FailureClass } from './types.js'
+import type { FailureClass } from './types.js'
 
 const DIAGNOSTIC_BODY_LIMIT = 2048
 const MAX_CAUSE_DEPTH = 16
@@ -91,21 +91,9 @@ export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/**
- * Cancellation is authoritative, then the common HTTP/network fallback is
- * derived, then an optional provider classifier may enrich or override it.
- */
-export function classifyFailure(
-  cause: unknown,
-  signal: AbortSignal,
-  classifier: ErrorClassifier | undefined
-): FailureClass {
+/** Cancellation is authoritative over whatever the failure looks like. */
+export function classifyFailure(cause: unknown, signal: AbortSignal): FailureClass {
   if (signal.aborted) return { kind: 'cancelled' }
-  const fallback = classifyCommon(cause)
-  return classifier?.(cause, fallback) ?? fallback
-}
-
-function classifyCommon(cause: unknown): FailureClass {
   for (const error of causeChain(cause)) {
     if (error instanceof HttpError) return classifyStatus(error)
     if ('code' in error && typeof error.code === 'string' && TRANSIENT_NETWORK_CODES.has(error.code)) return { kind: 'transient' }

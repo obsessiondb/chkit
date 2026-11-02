@@ -1,11 +1,10 @@
 import pRetry, { AbortError } from 'p-retry'
 
 import { classifyFailure, FetchFailure } from './errors.js'
-import type { ErrorClassifier, FailureClass, RetryContext, RetryOptions } from './types.js'
+import type { FailureClass, RetryContext, RetryOptions } from './types.js'
 
 const DEFAULT_RETRY = {
   retries: 5,
-  factor: 2,
   minTimeout: 1000,
   maxTimeout: 60_000,
   randomize: true,
@@ -14,24 +13,11 @@ const DEFAULT_RETRY = {
 
 interface AttemptEnv {
   signal: AbortSignal
-  classifier: ErrorClassifier | undefined
   onRetry: (context: RetryContext, retryAfterMs: number | undefined) => Promise<void> | void
 }
 
-/** Pipeline default, partially overridden by the stream. */
-export function mergeRetry(...layers: Array<RetryOptions | undefined>): RetryOptions {
-  const merged: RetryOptions = {}
-  for (const layer of layers) {
-    if (!layer) continue
-    for (const [key, value] of Object.entries(layer)) {
-      if (value !== undefined) Object.assign(merged, { [key]: value })
-    }
-  }
-  return merged
-}
-
 /**
- * p-retry owns retry budgets and backoff; this adapter adds provider classification.
+ * p-retry owns retry budgets and backoff; this adapter adds failure classification.
  * The caller waits out a provider's Retry-After, which `onRetry` reports.
  */
 export function runAttempt<T>(
@@ -39,7 +25,7 @@ export function runAttempt<T>(
   policy: RetryOptions,
   env: AttemptEnv
 ): Promise<T> {
-  const options = { ...DEFAULT_RETRY, ...mergeRetry(policy) }
+  const options = { ...DEFAULT_RETRY, ...definedOptions(policy) }
   const deadline = performance.now() + options.maxRetryTime
 
   return pRetry(async (attemptNumber) => {
@@ -47,28 +33,29 @@ export function runAttempt<T>(
     try {
       return await operation(attemptNumber)
     } catch (cause) {
-      const failure = new FetchFailure(cause, classifyFailure(cause, env.signal, env.classifier))
+      const failure = new FetchFailure(cause, classifyFailure(cause, env.signal))
       if (!isTransient(failure.classification)) throw new AbortError(failure)
       throw failure
     }
   }, {
     ...options,
     signal: env.signal,
-    shouldConsumeRetry: ({ error, ...context }) =>
-      error instanceof FetchFailure ? (policy.shouldConsumeRetry?.({ ...context, error }) ?? !isScheduledByProvider(error.classification, options.minTimeout)) : true,
+    shouldConsumeRetry: ({ error }) => !(error instanceof FetchFailure && isScheduledByProvider(error.classification, options.minTimeout)),
     shouldRetry: async ({ error, ...context }) => {
       env.signal.throwIfAborted()
       if (!(error instanceof FetchFailure)) return false
-      const retryContext = { ...context, error }
-      if (policy.shouldRetry && !(await policy.shouldRetry(retryContext))) return false
       const retryAfterMs = error.classification.kind === 'rate_limited' ? error.classification.retryAfterMs : undefined
       if (performance.now() + (retryAfterMs ?? 0) > deadline) return false
-      await env.onRetry(retryContext, retryAfterMs)
+      await env.onRetry({ ...context, error }, retryAfterMs)
       return true
     },
   }).catch((error: unknown) => {
     throw error instanceof FetchFailure ? error.cause : error
   })
+}
+
+function definedOptions(policy: RetryOptions): RetryOptions {
+  return Object.fromEntries(Object.entries(policy).filter(([, value]) => value !== undefined))
 }
 
 function isScheduledByProvider(classification: FailureClass, minTimeout: number): boolean {

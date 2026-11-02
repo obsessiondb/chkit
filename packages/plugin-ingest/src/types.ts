@@ -88,12 +88,7 @@ export interface PlanInput<TState> {
 /** p-retry context with the original provider failure and its classification. */
 export type RetryContext = Omit<PRetryContext, 'error'> & { error: FetchFailure }
 
-export type RetryOptions = Pick<PRetryOptions,
-  'retries' | 'factor' | 'minTimeout' | 'maxTimeout' | 'randomize' | 'maxRetryTime'
-> & {
-  shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>
-  shouldConsumeRetry?: (context: RetryContext) => boolean | Promise<boolean>
-}
+export type RetryOptions = Pick<PRetryOptions, 'retries' | 'minTimeout' | 'maxTimeout' | 'randomize' | 'maxRetryTime'>
 
 export interface StreamBudget {
   /** Maximum source chunks pulled in one execution of this stream. */
@@ -111,10 +106,8 @@ export interface StreamDefinition<TRow extends Row = Row, TState = unknown, TSel
   readonly incremental: IncrementalStrategy<TState, TSelection>
   readonly read: (context: ReadContext<TSelection, TState>) => AsyncIterable<SourceChunk<TRow, TState>>
   readonly loader: LoaderFactory | undefined
-  readonly retry: RetryOptions | undefined
   readonly batchSize: number | undefined
   readonly budget: StreamBudget | undefined
-  readonly classifyError: ErrorClassifier | undefined
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: a heterogeneous stream list cannot share row/state generics
@@ -128,7 +121,6 @@ export interface PipelineDefinition {
   readonly maxStreams: number
   readonly maxFetches: number
   readonly maxLoads: number
-  readonly retry: RetryOptions | undefined
 }
 
 // ───── Failure classification ─────
@@ -139,8 +131,6 @@ export type FailureClass =
   | { kind: 'transient' }
   | { kind: 'permanent' }
   | { kind: 'unknown' }
-
-export type ErrorClassifier = (cause: unknown, fallback: FailureClass) => FailureClass | undefined
 
 // ───── Loading ─────
 

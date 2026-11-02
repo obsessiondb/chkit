@@ -1,4 +1,4 @@
-import { HttpError, paginate, type ErrorClassifier, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
 import { z } from 'zod'
 
 import { linearConfigSchema, type LinearConfig } from './config.js'
@@ -61,17 +61,6 @@ export function createLinearClient(context: SourceContext, config: LinearConfig)
   }
 }
 
-export function classifyLinearError(cause: unknown): ReturnType<ErrorClassifier> {
-  if (!(cause instanceof HttpError) || cause.status !== 429) return undefined
-  const headers = cause.response.headers
-  const resets = ['requests', 'endpoint-requests', 'complexity'].flatMap((kind) => {
-    if (headers.get(`x-ratelimit-${kind}-remaining`) !== '0') return []
-    const reset = Number(headers.get(`x-ratelimit-${kind}-reset`))
-    return Number.isFinite(reset) && reset > 0 ? [Math.max(0, reset - Date.now())] : []
-  })
-  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? (resets.length ? Math.max(...resets) : undefined) }
-}
-
 async function post(context: SourceContext, apiKey: string, body: string): Promise<GraphqlReply> {
   try {
     const response = await context.fetch('https://api.linear.app/graphql', {
@@ -80,7 +69,9 @@ async function post(context: SourceContext, apiKey: string, body: string): Promi
     })
     return { body: await response.json(), response }
   } catch (error) {
-    if (!(error instanceof HttpError) || error.status !== 400) throw error
+    if (!(error instanceof HttpError)) throw error
+    if (error.status === 429) throw rateLimited(error.response, error.body)
+    if (error.status !== 400) throw error
     const reply: unknown = await error.response.json().catch(() => undefined)
     if (!graphqlErrors.safeParse(reply).success) throw error
     return { body: reply, response: error.response }
@@ -90,11 +81,21 @@ async function post(context: SourceContext, apiKey: string, body: string): Promi
 async function graphqlData(reply: GraphqlReply): Promise<Record<string, unknown>> {
   const { data, errors } = graphqlResponse.parse(reply.body)
   if (errors?.some((error) => error.extensions?.code === 'RATELIMITED')) {
-    throw HttpError.withStatus(reply.response, 429, { body: JSON.stringify(reply.body) })
+    throw rateLimited(reply.response, JSON.stringify(reply.body))
   }
   if (errors?.length) throw new Error(`Linear GraphQL returned errors: ${JSON.stringify(errors)}`)
   if (!data) throw new Error('Linear GraphQL returned no data.')
   return data
+}
+
+/** Linear puts the wait in per-budget reset headers (epoch milliseconds). */
+function rateLimited(response: Response, body: string): HttpError {
+  const resets = ['requests', 'endpoint-requests', 'complexity'].flatMap((kind) => {
+    if (response.headers.get(`x-ratelimit-${kind}-remaining`) !== '0') return []
+    const reset = Number(response.headers.get(`x-ratelimit-${kind}-reset`))
+    return Number.isFinite(reset) && reset > 0 ? [Math.max(0, reset - Date.now())] : []
+  })
+  return HttpError.withStatus(response, 429, { body, retryAfterMs: resets.length ? Math.max(...resets) : undefined })
 }
 
 function linearConnection(value: unknown, label: string): Page<LinearNode, string> {

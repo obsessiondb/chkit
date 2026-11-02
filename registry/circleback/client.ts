@@ -1,4 +1,4 @@
-import { HttpError, paginate, rawRows, type ErrorClassifier, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, rawRows, type Page, type SourceContext } from '@chkit/plugin-ingest'
 import { z } from 'zod'
 
 import { circlebackReaderConfigSchema, type CirclebackReaderConfig } from './config.js'
@@ -27,7 +27,11 @@ const unavailable = new Map<number, 'forbidden' | 'not_found'>([[403, 'forbidden
 
 export function createCirclebackClient(context: SourceContext, config: CirclebackReaderConfig): CirclebackClient {
   const { apiKey, ...settings } = circlebackReaderConfigSchema.parse(config)
-  const get = (url: string) => context.fetch(url, { redirect: 'error', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } })
+  const get = (url: string) => context.attempt(
+    () => context.fetch(url, { redirect: 'error', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } })
+      .catch((error: unknown) => { throw withResetDelay(error) }),
+    { label: `GET ${new URL(url).pathname}` },
+  )
   return {
     settings,
     pages<T extends CirclebackObject>(path: CirclebackCollection, item: z.ZodType<T>, query: Record<string, string> = {}) {
@@ -60,11 +64,12 @@ export function createCirclebackClient(context: SourceContext, config: Circlebac
   }
 }
 
-export function classifyCirclebackError(cause: unknown): ReturnType<ErrorClassifier> {
-  if (!(cause instanceof HttpError) || cause.status !== 429) return undefined
-  const reset = cause.response.headers.get('ratelimit-reset')
+/** Circleback sends the wait as RateLimit-Reset seconds, without Retry-After. */
+function withResetDelay(error: unknown): unknown {
+  if (!(error instanceof HttpError) || error.status !== 429 || error.retryAfterMs !== undefined) return error
+  const reset = error.response.headers.get('ratelimit-reset')
   const resetMs = reset?.trim() ? Number(reset) * 1000 : Number.NaN
-  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? (Number.isFinite(resetMs) && resetMs >= 0 ? resetMs : undefined) }
+  return Number.isFinite(resetMs) && resetMs >= 0 ? HttpError.withStatus(error.response, 429, { body: error.body, retryAfterMs: resetMs }) : error
 }
 
 export function toCirclebackRows<T extends CirclebackObject>(items: readonly T[], id: (item: T) => string | number, sourceId: string) {

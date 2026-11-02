@@ -1,4 +1,4 @@
-import { HttpError, paginate, rawRows, type ErrorClassifier, type Page, type RawRow, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { HttpError, paginate, rawRows, type Page, type RawRow, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
 import { z } from 'zod'
 
 import { githubConfigSchema, type GitHubConfig } from './config.js'
@@ -32,6 +32,7 @@ export function createGitHubClient(context: SourceContext, config: GitHubConfig)
   const { token, ...settings } = githubConfigSchema.parse(config)
   const request = (url: string, accept: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}) =>
     context.fetch(url, { ...init, redirect: 'error', headers: { ...init.headers, Authorization: `Bearer ${token}`, Accept: accept } })
+      .catch((error: unknown) => { throw error instanceof HttpError && isRateLimit(error) ? rateLimited(error.response, error.body) : error })
   const pages = <T extends GitHubObject>(path: string, item: z.ZodType<T>, options: PageOptions = {}) => {
     const first = new URL(`${apiUrl}${path}`)
     for (const [key, value] of Object.entries({ ...options.params, per_page: String(settings.pageSize) })) first.searchParams.set(key, value)
@@ -62,23 +63,26 @@ export function createGitHubClient(context: SourceContext, config: GitHubConfig)
       })
       const body = graphqlResponse.parse(await response.clone().json())
       if (!body.errors?.length) return body.data
-      const rateLimited = response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after') ||
+      const limited = response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after') ||
         body.errors.some((error) => error.type === 'RATE_LIMITED' || /secondary rate limit/i.test(error.message ?? ''))
-      if (rateLimited) throw HttpError.withStatus(response, 429, { body: await response.clone().text() })
+      if (limited) throw rateLimited(response, await response.clone().text())
       throw new Error(`GitHub GraphQL returned errors: ${JSON.stringify(body.errors)}`)
     },
   }
 }
 
 /** GitHub signals rate exhaustion with 403 as well as 429. */
-export function classifyGitHubError(cause: unknown): ReturnType<ErrorClassifier> {
-  if (!(cause instanceof HttpError) || ![403, 429].includes(cause.status)) return undefined
-  const headers = cause.response.headers
-  const reportedRateLimit = /secondary rate limit/i.test(cause.body) || /"type"\s*:\s*"RATE_LIMITED"/.test(cause.body)
-  if (headers.get('x-ratelimit-remaining') !== '0' && !headers.has('retry-after') && !reportedRateLimit) return undefined
-  const resetSeconds = Number(headers.get('x-ratelimit-reset'))
+function isRateLimit(error: HttpError): boolean {
+  if (error.status !== 403 && error.status !== 429) return false
+  const reported = /secondary rate limit/i.test(error.body) || /"type"\s*:\s*"RATE_LIMITED"/.test(error.body)
+  return reported || error.response.headers.get('x-ratelimit-remaining') === '0' || error.response.headers.has('retry-after')
+}
+
+/** Without Retry-After, GitHub's reset header (epoch seconds) says when the budget refills. */
+function rateLimited(response: Response, body: string): HttpError {
+  const resetSeconds = Number(response.headers.get('x-ratelimit-reset'))
   const untilReset = Number.isFinite(resetSeconds) && resetSeconds > 0 ? Math.max(0, resetSeconds * 1000 - Date.now()) : undefined
-  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? untilReset ?? 60_000 }
+  return HttpError.withStatus(response, 429, { body, retryAfterMs: untilReset ?? 60_000 })
 }
 
 /** Provider data stays intact; repository and parent keys live outside it for warehouse joins. */

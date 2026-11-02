@@ -22,7 +22,7 @@ test('Meet replays an unfinished discovery page and its entries under the origin
   const pipeline = fixturePipeline()
   const initial = createMemoryJournal()
   const destination = createMemoryDestination()
-  const first = await runIngestion(request(pipeline, 'transcript-entries', 2), { ...env, journal: initial, destination, now: () => cutoff })
+  const first = await runIngestion(request(pipeline, 'transcript-entries', 2), { ...env, journal: initial, destination, now: () => cutoff, retry: { retries: 0 } })
   expect(first.streams[0]?.outcome).toBe('budget_exhausted')
   const checkpoint = await initial.readCheckpoint('google-meet.transcript-entries')
   expect(checkpoint.envelope?.state).toMatchObject({ window: { from: '2026-10-04T00:00:00.000Z', to: cutoff.toISOString(), phase: 'ended' } })
@@ -30,7 +30,7 @@ test('Meet replays an unfinished discovery page and its entries under the origin
   expect(checkpoint.envelope?.state).not.toHaveProperty('active')
   const previous = urls.length
   const journal = restoredJournal(initial)
-  const resumed = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => new Date('2026-10-06T00:00:00Z') })
+  const resumed = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => new Date('2026-10-06T00:00:00Z'), retry: { retries: 0 } })
   expect(resumed.ok, JSON.stringify(resumed)).toBe(true)
   expect(urls[previous]?.pathname).toBe('/v2/conferenceRecords')
   expect(urls[previous]?.searchParams.get('filter')).toBe(urls[0]?.searchParams.get('filter'))
@@ -51,10 +51,10 @@ test('Meet completes every parent on a discovery page before saving its continua
   const pipeline = fixturePipeline({ ...fixtureConfig, pageSize: 2 })
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'transcript-entries', 3), { ...env, journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'transcript-entries', 3), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   expect((await journal.readCheckpoint('google-meet.transcript-entries')).envelope?.state).toHaveProperty('window')
   const previous = urls.length
-  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   expect(urls.slice(previous).some((url) => url.pathname === `/v2/${other.name}/transcripts`)).toBe(true)
   expect(new Set(destination.tables.get('default.google_meet_transcript_entries_raw')?.map((row) => row.id)).size).toBe(4)
 })
@@ -71,10 +71,10 @@ test('Meet resumes at the next discovery page after completing an earlier parent
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'transcript-entries', 4), { ...env, journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'transcript-entries', 4), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   expect((await journal.readCheckpoint('google-meet.transcript-entries')).envelope?.state).toMatchObject({ window: { pageToken: 'parents-next' } })
   const previous = urls.length
-  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   expect(urls[previous]?.searchParams.get('pageToken')).toBe('parents-next')
   expect(urls.slice(previous).some((url) => url.pathname.startsWith(`/v2/${conference.name}/`))).toBe(false)
   expect(new Set(destination.tables.get('default.google_meet_transcript_entries_raw')?.map((row) => row.id)).size).toBe(4)
@@ -90,11 +90,11 @@ test('Meet replays child rows after lost destination acknowledgement without adv
       await destination.insert(input)
       if (input.rows.some((row) => JSON.stringify(row.raw).includes('second'))) throw new Error('lost acknowledgement')
     },
-  }, now: () => cutoff })
+  }, now: () => cutoff, retry: { retries: 0 } })
   expect(failed.ok).toBe(false)
   expect((await journal.readCheckpoint('google-meet.transcript-entries')).envelope?.state).toHaveProperty('window')
   expect((await journal.readCheckpoint('google-meet.transcript-entries')).envelope?.state).not.toHaveProperty('watermark')
-  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   expect(new Set(destination.tables.get('default.google_meet_transcript_entries_raw')?.map((row) => row.id)).size).toBe(2)
 })
 
@@ -106,9 +106,9 @@ test('Meet replay publishes changed child content under the same raw identity', 
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'transcript-entries', 2), { ...env, journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'transcript-entries', 2), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   changed = true
-  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   const versions = destination.tables.get('default.google_meet_transcript_entries_raw')?.filter((row) => row.id === JSON.stringify([googleMeetConfig.sourceId, entry.name]))
   expect(versions?.map((row) => row.raw)).toEqual([
     { ...entry, conference_name: conference.name, transcript_name: transcript.name },
@@ -125,7 +125,7 @@ test('Meet discovers the preceding 24 hours by end time and also includes ongoin
   })
   const pipeline = fixturePipeline()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   expect(urls.map((url) => url.searchParams.get('filter'))).toEqual([
     'end_time>="2026-10-04T00:00:00.000Z" AND end_time<="2026-10-05T00:00:00.000Z"',
     'end_time IS NULL AND start_time<="2026-10-05T00:00:00.000Z"',
@@ -140,8 +140,8 @@ test('Meet catches up from its completed watermark while rereading a 24-hour ove
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
-  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal, destination, now: () => new Date('2026-10-07T00:00:00Z') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal, destination, now: () => new Date('2026-10-07T00:00:00Z'), retry: { retries: 0 } })).ok).toBe(true)
   expect(filters[2]).toBe('end_time>="2026-10-04T00:00:00.000Z" AND end_time<="2026-10-07T00:00:00.000Z"')
 })
 
@@ -151,10 +151,10 @@ test('Meet discovers a late transcript within the lookback without a not-ready p
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   expect(destination.tables.size).toBe(0)
   ready = true
-  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => new Date('2026-10-05T06:00:00Z') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => new Date('2026-10-05T06:00:00Z'), retry: { retries: 0 } })).ok).toBe(true)
   expect(new Set(destination.tables.get('default.google_meet_transcript_entries_raw')?.map((row) => row.id)).size).toBe(2)
 })
 
@@ -169,10 +169,10 @@ test('Meet does not retain old conference IDs after they leave discovery', async
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   const previous = children
   visible = false
-  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => new Date('2026-10-06T06:00:00Z') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => new Date('2026-10-06T06:00:00Z'), retry: { retries: 0 } })).ok).toBe(true)
   expect(children).toBe(previous)
   expect((await journal.readCheckpoint('google-meet.transcripts')).envelope?.state).not.toHaveProperty('pending')
 })
@@ -185,9 +185,9 @@ test('Meet writes changed transcript state under one identity on later completed
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   ready = true
-  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => new Date('2026-10-05T01:00:00Z') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => new Date('2026-10-05T01:00:00Z'), retry: { retries: 0 } })).ok).toBe(true)
   const rows = destination.tables.get('default.google_meet_transcripts_raw')
   expect(rows?.map((row) => row.id)).toEqual([JSON.stringify([googleMeetConfig.sourceId, transcript.name]), JSON.stringify([googleMeetConfig.sourceId, transcript.name])])
   expect(rows?.map((row) => row.raw)).toEqual([
@@ -205,9 +205,9 @@ test('Meet commits empty discovery pages and resumes their token with unchanged 
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'conferences', 2), { ...env, journal, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'conferences', 2), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   expect((await journal.readCheckpoint('google-meet.conferences')).envelope?.state).toMatchObject({ window: { pageToken: 'discover-next', to: cutoff.toISOString() } })
-  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal, destination, now: () => new Date('2026-10-06T00:00:00Z') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'conferences'), { ...env, journal, destination, now: () => new Date('2026-10-06T00:00:00Z'), retry: { retries: 0 } })).ok).toBe(true)
   expect(urls[1]?.searchParams.get('pageToken')).toBe('discover-next')
   expect(urls[1]?.searchParams.get('filter')).toBe(urls[0]?.searchParams.get('filter'))
   expect((await journal.readCheckpoint('google-meet.conferences')).envelope?.state).toMatchObject({ watermark: cutoff.toISOString() })
@@ -221,18 +221,18 @@ test('Meet discovery reset clears the rejected token and keeps recovery debt acr
   const pipeline = fixturePipeline()
   const initial = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'conferences', 2), { ...env, journal: initial, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'conferences', 2), { ...env, journal: initial, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   const reset = restoredJournal(initial)
-  expect((await runIngestion(request(pipeline, 'conferences', 1), { ...env, journal: reset, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'conferences', 1), { ...env, journal: reset, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   const state = (await reset.readCheckpoint('google-meet.conferences')).envelope?.state
   expect(state).toMatchObject({ window: { recoveryCount: 1 } })
   expect(state).not.toHaveProperty('window.pageToken')
   const replay = restoredJournal(reset)
-  expect((await runIngestion(request(pipeline, 'conferences', 1), { ...env, journal: replay, destination, now: () => cutoff })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(pipeline, 'conferences', 1), { ...env, journal: replay, destination, now: () => cutoff, retry: { retries: 0 } })).streams[0]?.outcome).toBe('budget_exhausted')
   expect((await replay.readCheckpoint('google-meet.conferences')).envelope?.state).toMatchObject({ window: { pageToken: 'discover-next', recoveryCount: 1 } })
   const fresh = restoredJournal(replay)
   const before = await fresh.readCheckpoint('google-meet.conferences')
-  const stopped = await runIngestion(request(pipeline, 'conferences'), { ...env, journal: fresh, destination, now: () => cutoff })
+  const stopped = await runIngestion(request(pipeline, 'conferences'), { ...env, journal: fresh, destination, now: () => cutoff, retry: { retries: 0 } })
   expect(stopped.ok).toBe(false)
   expect(stopped.streams[0]?.error).toContain('repeatedly rejected')
   expect((await fresh.readCheckpoint('google-meet.conferences')).version).toBe(before.version)
@@ -249,7 +249,7 @@ test('Meet can replay an expired child cursor within its unfinished parent page'
   })
   const pipeline = fixturePipeline()
   const destination = createMemoryDestination()
-  const result = await runIngestion(request(pipeline), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff, retry: { retries: 0 } })
   expect(result.ok, JSON.stringify(result)).toBe(true)
   expect(rejected).toBe(true)
   expect(new Set(destination.tables.get('default.google_meet_transcript_entries_raw')?.map((row) => row.id)).size).toBe(2)
@@ -259,7 +259,7 @@ test('Meet rejects repeated child continuations without completing the parent pa
   const env = meetEnv((url) => url.pathname.endsWith('/entries') ? Response.json({ transcriptEntries: [entry], nextPageToken: 'same' }) : fixture(url))
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
+  const result = await runIngestion(request(pipeline), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff, retry: { retries: 0 } })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('repeated')
   expect((await journal.readCheckpoint('google-meet.transcript-entries')).envelope?.state).not.toHaveProperty('watermark')
@@ -272,10 +272,10 @@ test('Meet bounded backfills are isolated, skip ongoing calls, and reject change
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   const backfill = { id: 'october', from: new Date('2026-10-01T00:00:00Z'), to: new Date('2026-10-03T00:00:00Z') }
-  expect((await runIngestion({ ...request(pipeline, 'conferences'), backfill }, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion({ ...request(pipeline, 'conferences'), backfill }, { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   expect(filters).toEqual(['end_time>="2026-10-01T00:00:00.000Z" AND end_time<="2026-10-03T00:00:00.000Z"'])
   expect((await journal.readCheckpoint('google-meet.conferences')).version).toBe(0)
-  const changed = await runIngestion({ ...request(pipeline, 'conferences'), backfill: { ...backfill, to: new Date('2026-10-04T00:00:00Z') } }, { ...env, journal, destination, now: () => cutoff })
+  const changed = await runIngestion({ ...request(pipeline, 'conferences'), backfill: { ...backfill, to: new Date('2026-10-04T00:00:00Z') } }, { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })
   expect(changed.ok).toBe(false)
   expect(changed.streams[0]?.error).toContain('backfill bounds changed')
 })
@@ -304,9 +304,9 @@ test('Meet changed source settings fail instead of reinterpreting an existing ch
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'transcripts'), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })).ok).toBe(true)
   const changed = fixturePipeline({ ...fixtureConfig, lookbackHours: 12 })
-  const result = await runIngestion(request(changed, 'transcripts'), { ...env, journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(changed, 'transcripts'), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('scope or format changed')
   const state = JSON.parse(JSON.stringify((await journal.readCheckpoint('google-meet.transcripts')).envelope?.state))
@@ -319,7 +319,7 @@ test('Meet failure in one resource leaves the other independent streams able to 
   const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  const result = await runIngestion(request(pipeline, 'all'), { ...env, journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'all'), { ...env, journal, destination, now: () => cutoff, retry: { retries: 0 } })
   expect(result.ok).toBe(false)
   expect(result.streams.filter((stream) => stream.outcome === 'succeeded')).toHaveLength(5)
   expect(result.streams.find((stream) => stream.streamId.endsWith('.transcript-entries'))?.error).toContain('403')
@@ -330,7 +330,7 @@ for (const resource of resources) {
   const env = meetEnv()
   test(`Meet independently reads raw ${resource}`, async () => {
     const destination = createMemoryDestination()
-    const result = await runIngestion(request(fixturePipeline(), resource), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })
+    const result = await runIngestion(request(fixturePipeline(), resource), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff, retry: { retries: 0 } })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(result.streams).toHaveLength(1)
     expect(destination.tables.size).toBe(1)
@@ -343,12 +343,12 @@ for (const resource of resources) {
 }
 
 test('Meet validates its credential and native parent paths before publishing data', async () => {
-  const absent = await runIngestion(request(fixturePipeline({ ...fixtureConfig, accessToken: undefined })), { fetch: async () => { throw new Error('must not fetch') }, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  const absent = await runIngestion(request(fixturePipeline({ ...fixtureConfig, accessToken: undefined })), { fetch: async () => { throw new Error('must not fetch') }, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff, retry: { retries: 0 } })
   expect(absent.ok).toBe(false)
   expect(absent.streams[0]?.error).toContain('Set GOOGLE_MEET_ACCESS_TOKEN or pass accessToken.')
   const env = meetEnv((url) => url.pathname.endsWith('/transcripts') ? Response.json({ transcripts: [{ name: 'conferenceRecords/other/transcripts/t1' }] }) : fixture(url))
   const destination = createMemoryDestination()
-  const result = await runIngestion(request(fixturePipeline(), 'transcripts'), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })
+  const result = await runIngestion(request(fixturePipeline(), 'transcripts'), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff, retry: { retries: 0 } })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('outside its requested parent')
   expect(destination.tables.size).toBe(0)
@@ -365,11 +365,11 @@ test('Meet checks its configuration when a stream runs, not when the module load
 })
 
 test('Meet fails a malformed provider payload at once and retries only a transient response', async () => {
-  const pipeline = { ...fixturePipeline(), retry: { retries: 2, minTimeout: 0 } }
+  const pipeline = fixturePipeline()
   let calls = 0
   const malformed = meetEnv((url) => { calls += 1; return url.pathname === '/v2/conferenceRecords' ? Response.json({ conferenceRecords: 'not-a-list' }) : fixture(url) })
   const journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline, 'conferences'), { ...malformed, journal, destination: createMemoryDestination(), now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'conferences'), { ...malformed, journal, destination: createMemoryDestination(), now: () => cutoff, retry: { retries: 2, minTimeout: 0 } })
   expect(result.streams[0]?.outcome).toBe('failed')
   expect(result.streams[0]?.error).toContain('Invalid input: expected array, received string')
   expect(calls).toBe(1)
@@ -381,12 +381,12 @@ test('Meet fails a malformed provider payload at once and retries only a transie
     return fixture(url)
   })
   const recovered = createMemoryJournal()
-  expect((await runIngestion(request(pipeline, 'conferences'), { ...flaky, journal: recovered, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'conferences'), { ...flaky, journal: recovered, destination: createMemoryDestination(), now: () => cutoff, retry: { retries: 2, minTimeout: 0 } })).ok).toBe(true)
   expect(recovered.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass)).toEqual(['transient'])
 })
 
 function fixturePipeline(config: GoogleMeetReaderConfig = fixtureConfig) {
-  return { ...createGoogleMeetPipeline(config), retry: { retries: 0 } }
+  return createGoogleMeetPipeline(config)
 }
 
 function meetEnv(handler: (url: URL) => Response = fixture) {

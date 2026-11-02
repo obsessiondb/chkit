@@ -1,4 +1,4 @@
-import { HttpError, paginate, type ErrorClassifier, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext } from '@chkit/plugin-ingest'
 import { z } from 'zod'
 
 import { googleCalendarReaderConfigSchema, type GoogleCalendarReaderConfig } from './config.js'
@@ -31,7 +31,11 @@ const eventsPage = z.looseObject({ items: z.array(calendarEvent).optional(), nex
 
 export function createGoogleCalendarClient(context: SourceContext, config: GoogleCalendarReaderConfig): GoogleCalendarClient {
   const { accessToken, ...settings } = googleCalendarReaderConfigSchema.parse(config)
-  const get: Get = (url) => context.fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: 'error' })
+  const get: Get = (url) => context.attempt(
+    () => context.fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: 'error' })
+      .catch((error: unknown) => { throw asRateLimit(error) }),
+    { label: `GET ${url.pathname}` },
+  )
   return {
     settings,
     resolveCalendar: async () => {
@@ -55,8 +59,10 @@ export function createGoogleCalendarClient(context: SourceContext, config: Googl
   }
 }
 
-export const classifyGoogleCalendarError: ErrorClassifier = (cause) =>
-  cause instanceof HttpError && cause.status === 403 && RATE_LIMIT_REASON.test(cause.body) ? { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs } : undefined
+/** Calendar reports exhausted quota as 403 with a rate-limit reason. */
+function asRateLimit(error: unknown): unknown {
+  return error instanceof HttpError && error.status === 403 && RATE_LIMIT_REASON.test(error.body) ? HttpError.withStatus(error.response, 429, { body: error.body }) : error
+}
 
 async function requestEvents(get: Get, calendarId: string, cursor: SyncCursor): Promise<EventsResponse | { reset: 'sync' | 'page' }> {
   const url = new URL(`${API}/calendars/${encodeURIComponent(calendarId)}/events`)

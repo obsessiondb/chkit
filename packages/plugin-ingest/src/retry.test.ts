@@ -7,13 +7,13 @@ import { createSourceContext } from './testing.js'
 import type { RetryContext } from './types.js'
 
 const signal = new AbortController().signal
-const env = { signal, classifier: undefined, onRetry: () => undefined }
+const env = { signal, onRetry: () => undefined }
 const immediate = { minTimeout: 0, randomize: false }
 const httpError = (status: number, retryAfter = '0') =>
   HttpError.fromResponse(new Response('', { status, headers: { 'retry-after': retryAfter } }))
 
 describe('provider retry policy', () => {
-  test('reports the provider Retry-After to the caller and lets the policy decide what counts', async () => {
+  test('reports the provider Retry-After to the caller', async () => {
     const limited = await httpError(429, '0.03')
     const transient = await httpError(503)
     const retries: Array<{ context: RetryContext; retryAfterMs: number | undefined }> = []
@@ -21,11 +21,7 @@ describe('provider retry policy', () => {
       if (attempt === 1) throw limited
       if (attempt === 2) throw transient
       return 'ok'
-    }, {
-      ...immediate,
-      retries: 1,
-      shouldConsumeRetry: ({ error }) => error.classification.kind !== 'rate_limited',
-    }, { ...env, onRetry: (context, retryAfterMs) => { retries.push({ context, retryAfterMs }) } })
+    }, { ...immediate, retries: 1 }, { ...env, onRetry: (context, retryAfterMs) => { retries.push({ context, retryAfterMs }) } })
 
     expect(value).toBe('ok')
     expect(retries.map(({ context, retryAfterMs }) => ({ attemptNumber: context.attemptNumber, retriesConsumed: context.retriesConsumed, retryAfterMs }))).toEqual([
@@ -82,31 +78,24 @@ describe('provider retry policy', () => {
     }
   })
 
-  test('rejects with exactly the thrown value and lets the policy veto a retry', async () => {
-    for (const cause of [{ providerCode: 'NO_ACCESS' }, Object.assign(connectionReset(), { providerCode: 'NO_ACCESS' })]) {
-      let calls = 0
-      await expect(runAttempt(async () => {
-        calls += 1
-        throw cause
-      }, { ...immediate, shouldRetry: ({ error }) => error.cause !== cause }, env)).rejects.toBe(cause)
-      expect(calls).toBe(1)
-    }
+  test('rejects with exactly the thrown value, also once retries are exhausted', async () => {
+    const plain = { providerCode: 'NO_ACCESS' }
+    await expect(runAttempt(async () => { throw plain }, immediate, env)).rejects.toBe(plain)
+    const reset = connectionReset()
+    let calls = 0
+    await expect(runAttempt(async () => { calls += 1; throw reset }, { ...immediate, retries: 1 }, env)).rejects.toBe(reset)
+    expect(calls).toBe(2)
   })
 
-  test('execution cancellation stays authoritative over the provider classifier', async () => {
+  test('a failure after execution cancellation is not retried, even when it looks transient', async () => {
     const controller = new AbortController()
-    let classifications = 0
     let calls = 0
     await expect(runAttempt(async () => {
       calls += 1
       controller.abort(new Error('host cancelled'))
       throw new DOMException('request aborted', 'AbortError')
-    }, immediate, {
-      ...env, signal: controller.signal,
-      classifier: () => { classifications += 1; return { kind: 'transient' } },
-    })).rejects.toThrow()
+    }, immediate, { ...env, signal: controller.signal })).rejects.toThrow()
     expect(calls).toBe(1)
-    expect(classifications).toBe(0)
   })
 
   test('retries only transient failures; anything else rejects at once', async () => {

@@ -7,12 +7,10 @@ export { ingestionColumns, rawTable, rawRows, createClickHouseDestination, type 
 export { createClickHouseJournal, type ClickHouseJournalOptions } from './journal.js'
 export { doctorJournal, repairJournal, planJournalRepair, type JournalRecoveryOptions, type JournalRepairPlan, type JournalRepairResult } from './recovery.js'
 export { runIngestion, type BackfillRequest, type ExecutionEnv, type ExecutionRequest } from './executor.js'
-export { HttpError, FetchFailure } from './errors.js'
+export { HttpError } from './errors.js'
 export type {
   DestinationAdapter,
-  ErrorClassifier,
   ExecutionResult,
-  FailureClass,
   Fetch,
   IncrementalStrategy,
   Journal,

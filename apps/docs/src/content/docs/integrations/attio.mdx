@@ -214,13 +214,13 @@ The destination stores the latest **observed** entity. New observations replace 
 | HTTP request timeout | `30` seconds |
 | Rate limits | A `429` pauses the pipeline's requests until its `Retry-After`; these waits do not use up retries |
 | Source retry budget | Five retries after the initial attempt |
-| Backoff | Exponential, starting at `1` second, capped at `30` seconds, with jitter |
+| Backoff | Exponential, starting at `1` second, capped at `60` seconds, with jitter |
 | Retry time budget | `10` minutes per retry boundary, subject to the overall execution budget |
 | Default run duration | `3600` seconds; override with `--max-duration` |
 
 HTTP `429` responses honor `Retry-After`. Network failures and HTTP `408`, `425`, and `5xx` responses are retried within the budget. Other `4xx` responses, invalid configuration, invalid JSON, and invalid entity shapes fail without retries. Exhausting a page request's retries fails the stream; restarting the reader does not multiply that request's retry budget.
 
-The request delays keep the default serial pipeline below 40 requests per second and notes below 8 requests per second, before network time. Attio can apply lower limits, including query-complexity limits; repeatedly expensive record or entry queries may require simpler filters or sorts after customization. See [Attio rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
+Requests run without fixed delays. Attio can apply lower limits, including query-complexity limits; repeatedly expensive record or entry queries may require simpler filters or sorts after customization. See [Attio rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
 
 Destination writes have a separate retry policy and reuse an insert deduplication token. Physical duplicate suppression depends on ClickHouse's deduplication settings and window. The logical row identity and `FINAL` queries reconcile repeated observations; this is not an exactly-once delivery guarantee.
 
@@ -427,7 +427,7 @@ Deleting or deselecting a source entity does not remove it from a view. Applicat
 | `sources/lists.ts`, `sources/list-attributes.ts`, `sources/entries.ts` | List resource readers with their raw table schemas |
 | `sources/notes.ts`, `sources/tasks.ts`, `sources/members.ts` | One reader and raw table schema per resource |
 | `tests/attio.test.ts`, `tests/fixtures.ts` | Optional installed tests and mocked API responses |
-| `pipeline.ts` | Per-type/per-list streams, resource tags, retries, batching, concurrency |
+| `pipeline.ts` | Per-type/per-list streams, resource tags, batching, concurrency |
 | `index.ts` | Exports that make the pipeline and schema objects discoverable |
 
 Remove a stream entry from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve existing tables under migration management. Removing a schema export changes the desired database schema and can generate a drop operation; review that migration separately.

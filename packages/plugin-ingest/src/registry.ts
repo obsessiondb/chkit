@@ -3,12 +3,10 @@ import type { TableDefinition } from '@chkit/core'
 import { fullSync } from './incremental.js'
 import type {
   AnyStreamDefinition,
-  ErrorClassifier,
   IncrementalStrategy,
   LoaderFactory,
   PipelineDefinition,
   ReadContext,
-  RetryOptions,
   Row,
   SourceChunk,
   StreamBudget,
@@ -27,10 +25,8 @@ export interface StreamInput<TRow extends Row, TState, TSelection> {
   incremental: IncrementalStrategy<TState, TSelection>
   read: (context: ReadContext<TSelection, TState>) => AsyncIterable<SourceChunk<TRow, TState>>
   loader?: LoaderFactory
-  retry?: RetryOptions
   batchSize?: number
   budget?: StreamBudget
-  classifyError?: ErrorClassifier
 }
 
 export interface FullSyncStreamInput<TRow extends Row>
@@ -45,7 +41,6 @@ export interface PipelineInput {
   maxStreams?: number
   maxFetches?: number
   maxLoads?: number
-  retry?: RetryOptions
 }
 
 export interface SelectedStream {
@@ -69,10 +64,8 @@ export function defineStream(
     incremental: input.incremental ?? fullSync(),
     read: input.read,
     loader: input.loader,
-    retry: input.retry,
     batchSize: input.batchSize,
     budget: input.budget,
-    classifyError: input.classifyError,
   }
 }
 
@@ -90,7 +83,6 @@ export function definePipeline(input: PipelineInput): PipelineDefinition {
     maxStreams: input.maxStreams ?? DEFAULT_LIMITS.maxStreams,
     maxFetches: input.maxFetches ?? DEFAULT_LIMITS.maxFetches,
     maxLoads: input.maxLoads ?? DEFAULT_LIMITS.maxLoads,
-    retry: input.retry,
   }
 }
 
@@ -152,7 +144,6 @@ export function selectStreams(pipelines: readonly PipelineDefinition[], tags: re
 export function assertRunnable(pipeline: PipelineDefinition): void {
   assertSelectable(pipeline)
   const scope = `Pipeline "${pipeline.id}"`
-  assertRetryOptions(scope, pipeline.retry)
   for (const name of ['maxStreams', 'maxFetches', 'maxLoads'] as const) assertPositiveInteger(scope, name, pipeline[name])
   for (const stream of pipeline.streams) assertRunnableStream(stream)
 }
@@ -183,7 +174,6 @@ function assertRunnableStream(stream: AnyStreamDefinition): void {
   assertPositiveInteger(scope, 'batchSize', stream.batchSize)
   assertPositiveInteger(scope, 'budget.maxChunks', stream.budget?.maxChunks)
   assertPositiveInteger(scope, 'budget.maxChunkRows', stream.budget?.maxChunkRows)
-  assertRetryOptions(scope, stream.retry)
 }
 
 function assertValidId(kind: 'stream' | 'pipeline', id: unknown): asserts id is string {
@@ -218,20 +208,6 @@ function isStreamDefinition(value: unknown): value is AnyStreamDefinition {
 function assertPositiveInteger(scope: string, name: string, value: unknown): void {
   if (value !== undefined && (!Number.isInteger(value) || (value as number) <= 0)) {
     throw new Error(`${scope}: ${name} must be a positive integer.`)
-  }
-}
-
-function assertRetryOptions(scope: string, retry: RetryOptions | undefined): void {
-  if (retry === undefined) return
-  const retries: unknown = retry.retries
-  if (retries !== undefined && retries !== Number.POSITIVE_INFINITY && (!Number.isInteger(retries) || (retries as number) < 0)) {
-    throw new Error(`${scope}: retry.retries must be a non-negative integer or Infinity.`)
-  }
-  for (const name of ['factor', 'minTimeout', 'maxTimeout', 'maxRetryTime'] as const) {
-    const value: unknown = retry[name]
-    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0) && !((name === 'maxTimeout' || name === 'maxRetryTime') && value === Number.POSITIVE_INFINITY)) {
-      throw new Error(`${scope}: retry.${name} must be a non-negative number.`)
-    }
   }
 }
 

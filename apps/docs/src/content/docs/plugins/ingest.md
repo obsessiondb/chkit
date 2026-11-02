@@ -104,7 +104,7 @@ const ticketStream = defineStream({
 export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream], maxFetches: 4 })
 ```
 
-`context.fetch` takes a fetch permit, retries only transient failures, aborts on cancellation or after 30 seconds, and throws `HttpError` for unsuccessful responses. Larger sources keep requests, credentials, and response parsing in a provider client built at the start of `read`; see [Readers and pagination](/api-sync/readers/#requests-and-provider-clients).
+`context.fetch` goes through the pipeline's request queue, retries only transient failures, aborts on cancellation or after 30 seconds, and throws `HttpError` for unsuccessful responses. Larger sources keep requests, credentials, and response parsing in a provider client built at the start of `read`; see [Readers and pagination](/api-sync/readers/#requests-and-provider-clients).
 
 Importing a definition never throws, so schema commands such as `generate` and `migrate` keep working while an ingestion definition is invalid. An invalid stream or pipeline definition fails when an ingest command selects it, with exit code `2`, and `chkit check` reports it. Source configuration and credentials are checked by the reader when its stream runs.
 
@@ -180,11 +180,9 @@ A checkpoint records its strategy id and version. Changing either makes the next
 
 ## Retry policy
 
-Pipeline `retry` settings are defaults; a stream can override individual settings. Requests use [`p-retry`](https://github.com/sindresorhus/p-retry) for exponential backoff, jitter, retry counts, and `maxRetryTime`. The supported options are `retries`, `factor`, `minTimeout`, `maxTimeout`, `randomize`, `maxRetryTime`, `shouldRetry`, and `shouldConsumeRetry`.
+Retries need no configuration. Requests use [`p-retry`](https://github.com/sindresorhus/p-retry): up to 5 retries with exponential backoff and jitter from 1 second, within 10 minutes. A provider's `Retry-After` pauses every request of the pipeline until then and does not count against the 5 retries. Retry waits release fetch and load capacity for other streams.
 
-The policy callbacks receive p-retry's `attemptNumber`, `retriesLeft`, and `retriesConsumed`, plus a `FetchFailure` preserving the original `cause` and normalized `classification`. Returning `false` from `shouldConsumeRetry` follows p-retry's behavior: it skips consuming a retry and skips its backoff. A provider's `Retry-After` still applies, including for those unconsumed retries. Retry waits release fetch and load capacity for other streams.
-
-Only transient failures are retried: network error codes, timeouts, and retryable HTTP statuses. Only requests made with `context.fetch` or `context.attempt` are retried. Any other failure fails the stream, whatever its type, and the next run resumes from the latest committed checkpoint. See [retry boundaries](/api-sync/operations/#retry-boundaries).
+Only transient failures are retried: network error codes, timeouts, and retryable HTTP statuses. Only requests made with `context.fetch`, `context.attempt`, or a `paginate` page are retried. Any other failure fails the stream, whatever its type, and the next run resumes from the latest committed checkpoint. See [retry boundaries](/api-sync/operations/#retry-boundaries).
 
 ## Commands
 

@@ -4,7 +4,7 @@ import { createMemoryDestination, createMemoryJournal, createSourceContext } fro
 
 import { createGitHubPipeline, githubPipeline } from '../index.js'
 import { githubConfig, type GitHubConfig } from '../config.js'
-import { classifyGitHubError, createGitHubClient, type GitHubParent } from '../client.js'
+import { createGitHubClient, type GitHubParent } from '../client.js'
 
 const repository = 'obsessiondb/chkit'
 const cutoff = new Date('2026-01-02T00:00:00Z')
@@ -154,9 +154,8 @@ test.each(['', 'https://[invalid]'])('REST pagination rejects invalid or cyclic 
     return Response.json([issue], { headers: { Link: `<${target}>; rel="next"` } })
   })
   const pipeline = fixturePipeline()
-  const selected = request(pipeline, 'issues').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0, maxTimeout: 0 } } }))
   const journal = createMemoryJournal()
-  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'issues'), { ...env, retry: { retries: 2, minTimeout: 0, maxTimeout: 0 }, journal, destination: createMemoryDestination(), now: () => cutoff })
   expect(result.ok).toBe(false)
   expect(requests).toBe(1)
   expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
@@ -407,9 +406,8 @@ test('GitHub paginated HTTP rate limits consume exactly one request retry budget
   const env = githubEnv(() => ++attempts === 1
     ? new Response('rate limited', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'retry-after': '0' } }) : Response.json([]))
   const pipeline = fixturePipeline()
-  const selected = request(pipeline, 'stargazers').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
   const journal = createMemoryJournal()
-  expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'stargazers'), { ...env, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 }, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
   expect(attempts).toBe(2)
   expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
 })
@@ -425,9 +423,8 @@ test('GraphQL HTTP200 rate errors honor Retry-After while partial data fails per
         { headers: retryable ? { 'Retry-After': '0', 'x-ratelimit-remaining': '0' } : {} })
     })
     const pipeline = fixturePipeline()
-    const selected = request(pipeline, 'pull_request_commits').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { ...env, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 }, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok).toBe(retryable)
     expect(attempts).toBe(retryable ? 2 : 1)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(retryable ? 1 : 0)
@@ -435,17 +432,16 @@ test('GraphQL HTTP200 rate errors honor Retry-After while partial data fails per
 })
 
 test('secondary REST rate limits and headerless GraphQL rate errors retain provider diagnostics', async () => {
-  const rest = await HttpError.fromResponse(Response.json({ message: 'You have exceeded a secondary rate limit.' },
-    { status: 403, headers: { 'x-ratelimit-remaining': '19' } }))
-  expect(rest.status).toBe(403)
-  expect(rest.body).toContain('secondary rate limit')
-  expect(classifyGitHubError(rest)).toEqual({ kind: 'rate_limited', retryAfterMs: 60_000 })
+  const restClient = createGitHubClient(sourceContext(() => Response.json({ message: 'You have exceeded a secondary rate limit.' },
+    { status: 403, headers: { 'x-ratelimit-remaining': '19' } })), fixtureConfig)
+  const rest: unknown = await restClient.issues(repository).next().catch((cause: unknown) => cause)
+  expect(rest).toBeInstanceOf(HttpError)
+  expect(rest).toMatchObject({ status: 429, retryAfterMs: 60_000, body: expect.stringContaining('secondary rate limit'), response: { status: 403 } })
   const payload = { data: { repository: null }, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] }
   const client = createGitHubClient(sourceContext(() => Response.json(payload)), fixtureConfig)
   const failure: unknown = await client.graphql('query { viewer { login } }', {}).catch((cause: unknown) => cause)
   expect(failure).toBeInstanceOf(HttpError)
-  expect(failure).toMatchObject({ status: 429, body: JSON.stringify(payload) })
-  expect(classifyGitHubError(failure)).toEqual({ kind: 'rate_limited', retryAfterMs: 60_000 })
+  expect(failure).toMatchObject({ status: 429, body: JSON.stringify(payload), retryAfterMs: 60_000 })
 })
 
 test('invalid REST continuations and payloads fail without completing or replaying the resource', async () => {
@@ -521,9 +517,8 @@ test('GitHub fails every stream before any request without a token', async () =>
 
 test('GitHub fails a malformed provider payload at once and retries only a transient response', async () => {
   const run = async (respond: Responder) => {
-    const selected = request(fixturePipeline(), 'stargazers').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0 } } }))
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected, backfill: undefined }, { ...githubEnv(respond), journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(fixturePipeline(), 'stargazers'), { ...githubEnv(respond), retry: { retries: 2, minTimeout: 0 }, journal, destination: createMemoryDestination(), now: () => cutoff })
     return { result, retries: journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass) }
   }
   let calls = 0
@@ -547,7 +542,7 @@ function fixturePipeline(config: GitHubConfig = fixtureConfig): Pipeline {
 }
 
 function githubEnv(respond: Responder = fixtureResponse) {
-  return { fetch: async (input: string | URL, init?: RequestInit) => respond(new URL(input), init ?? {}) }
+  return { fetch: async (input: string | URL, init?: RequestInit) => respond(new URL(input), init ?? {}), retry: { retries: 0 } }
 }
 
 function sourceContext(respond: Responder): SourceContext {
@@ -556,7 +551,7 @@ function sourceContext(respond: Responder): SourceContext {
 
 function request(pipeline: Pipeline, resource?: string) {
   return { selected: selectStreams([pipeline], resource ? [`resource:${resource}`] : []).map((entry) => ({
-    ...entry, stream: { ...entry.stream, batchSize: 1, retry: { retries: 0 } },
+    ...entry, stream: { ...entry.stream, batchSize: 1 },
   })), backfill: undefined }
 }
 

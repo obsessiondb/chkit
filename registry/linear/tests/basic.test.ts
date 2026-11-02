@@ -1,13 +1,13 @@
 import { expect, test } from 'bun:test'
-import { HttpError, runIngestion, selectStreams, type FailureClass, type RetryOptions } from '@chkit/plugin-ingest'
+import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { createLinearPipeline, linearPipeline } from '../index.js'
 import { linearConfig, type LinearConfig } from '../config.js'
-import { classifyLinearError } from '../client.js'
 
 const fixtureConfig = { ...linearConfig, apiKey: 'fixture' }
 const cutoff = new Date('2026-01-02T00:00:00Z')
+const oneRetry = { retries: 1, minTimeout: 0, maxTimeout: 0 }
 const updatedAt = '2026-01-01T12:00:00Z'
 const resources = ['issues', 'comments', 'projects', 'project_updates', 'cycles', 'users', 'teams', 'issue_relations', 'issue_history']
 const timestampResources = resources.slice(0, 7)
@@ -339,8 +339,8 @@ test('Linear binds custom date selection and isolates each installation and reso
   expect(pipeline.streams.map((stream) => stream.id).sort()).toEqual(resources.map((resource) => `linear.fixture.${resource}`).sort())
   const failing = createLinearPipeline({ ...fixtureConfig, sourceId: 'linear.denied', apiKey: 'denied' })
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const selected = selectStreams([failing, pipeline], ['resource:comments']).map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 0 } } }))
-  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => cutoff })
+  const selected = selectStreams([failing, pipeline], ['resource:comments'])
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, retry: { retries: 0 }, journal, destination, now: () => cutoff })
   expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed', 'succeeded'])
   expect(requests[0]?.variables).toEqual({ after: null, from: '2025-01-01T00:00:00.000Z', to: cutoff.toISOString() })
   expect((await journal.readCheckpoint('linear.denied.comments')).envelope).toBeUndefined()
@@ -369,9 +369,8 @@ test('GraphQL HTTP400 and HTTP200 rate exhaustion each consume exactly one page 
       ? Response.json({ errors: [{ message: 'rate limit', extensions: { code: 'RATELIMITED' } }] }, { status, headers: { 'Retry-After': '0' } })
       : response('comments', []))
     const pipeline = fixturePipeline()
-    const selected = request(pipeline, 'comments').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const journal = createMemoryJournal()
-    expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline, 'comments'), { ...env, retry: oneRetry, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
     expect(attempts).toBe(2)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
   }
@@ -387,9 +386,8 @@ test('partial GraphQL data with errors cannot write rows, retry, or complete a r
       errors: [{ message: 'Some fields were denied', extensions: { code: 'FORBIDDEN' } }] })
     })
     const pipeline = fixturePipeline()
-    const selected = request(pipeline, resource).selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, resource), { ...env, retry: oneRetry, journal, destination, now: () => cutoff })).ok).toBe(false)
     expect(attempts).toBe(1)
     expect(destination.tables.size).toBe(0)
     expect((await journal.readCheckpoint(`linear.${resource}`)).lastSuccessSeq).toBe(0)
@@ -427,8 +425,7 @@ test('cyclic root and nested pagination fails permanently without replaying a wh
     })
     const pipeline = fixturePipeline()
     const resource = resourceFor(name), journal = createMemoryJournal()
-    const selected = request(pipeline, resource).selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
-    const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(pipeline, resource), { ...env, retry: oneRetry, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok, name).toBe(false)
     expect(afters).toEqual(name === 'IssueLabels' ? ['a', 'b'] : [null, 'a', 'b'])
     expect((await journal.readCheckpoint(`linear.${resource}`)).lastSuccessSeq).toBe(0)
@@ -444,11 +441,8 @@ test('a repeated initial label cursor cannot publish the issue or retry its labe
     return connectionFor(body, connection([{ id: 'label-cyclic', name: 'Incomplete' }], 'a'))
   })
   const pipeline = fixturePipeline()
-  const selected = request(pipeline, 'issues').selected.map((entry) => ({
-    ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } },
-  }))
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'issues'), { ...env, retry: oneRetry, journal, destination, now: () => cutoff })
 
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('repeated continuation')
@@ -480,21 +474,13 @@ test('Linear rate limits honor exhausted reset headers across HTTP and GraphQL r
   for (const status of [200, 400, 429]) {
     for (const kind of ['requests', 'endpoint-requests', 'complexity']) {
       const reset = Date.now() + 60_000
-      const failures: Array<{ status: number | undefined; classification: FailureClass }> = []
-      const retry: RetryOptions = { retries: 1, shouldRetry: ({ error }) => {
-        failures.push({ status: error.cause instanceof HttpError ? error.cause.status : undefined, classification: error.classification })
-        return false
-      } }
-      const env = linearEnv(() => Response.json({ errors: [{ extensions: { code: 'RATELIMITED' } }] }, {
+      const run = await runUntilFirstRetry(() => Response.json({ errors: [{ extensions: { code: 'RATELIMITED' } }] }, {
         status, headers: { [`x-ratelimit-${kind}-remaining`]: '0', [`x-ratelimit-${kind}-reset`]: String(reset) },
       }))
-      const selected = request(fixturePipeline(), 'comments').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry } }))
-      const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
-      expect(result.streams[0]?.outcome).toBe('failed')
-      expect(failures.map((failure) => [failure.status, failure.classification.kind])).toEqual([[429, 'rate_limited']])
-      const delay = failures[0]?.classification.kind === 'rate_limited' ? failures[0].classification.retryAfterMs : undefined
-      expect(delay).toBeGreaterThanOrEqual(reset - Date.now())
-      expect(delay).toBeLessThanOrEqual(60_000)
+      expect(run.requests).toBe(1)
+      expect(run.retries.map((retry) => retry.errorClass)).toEqual(['rate_limited'])
+      expect(run.retries[0]?.delay).toBeGreaterThanOrEqual(reset - Date.now())
+      expect(run.retries[0]?.delay).toBeLessThanOrEqual(60_000)
     }
   }
 })
@@ -506,21 +492,21 @@ test('Linear HTTP429 chooses the latest exhausted reset and lets Retry-After tak
     'x-ratelimit-endpoint-requests-remaining': '0', 'x-ratelimit-endpoint-requests-reset': String(reset),
     'x-ratelimit-complexity-remaining': '1', 'x-ratelimit-complexity-reset': String(reset + 60_000),
   }
-  const latest = classifyLinearError(await HttpError.fromResponse(new Response('Too many requests', { status: 429, headers })))
-  const delay = latest?.kind === 'rate_limited' ? latest.retryAfterMs : undefined
-  expect(delay).toBeGreaterThanOrEqual(reset - Date.now())
-  expect(delay).toBeLessThanOrEqual(60_000)
-  expect(classifyLinearError(await HttpError.fromResponse(new Response('', {
+  const latest = await runUntilFirstRetry(() => new Response('Too many requests', { status: 429, headers }))
+  expect(latest.retries.map((retry) => retry.errorClass)).toEqual(['rate_limited'])
+  expect(latest.retries[0]?.delay).toBeGreaterThanOrEqual(reset - Date.now())
+  expect(latest.retries[0]?.delay).toBeLessThanOrEqual(60_000)
+  expect((await runUntilFirstRetry(() => new Response('', {
     status: 429, headers: { ...headers, 'Retry-After': '0' },
-  })))).toEqual({ kind: 'rate_limited', retryAfterMs: 0 })
+  }))).retries).toEqual([{ errorClass: 'rate_limited', delay: 0 }])
   for (const resetHeader of ['', 'garbage', '0', '-1']) {
-    expect(classifyLinearError(await HttpError.fromResponse(new Response('', {
+    expect((await runUntilFirstRetry(() => new Response('', {
       status: 429, headers: { 'x-ratelimit-requests-remaining': '0', 'x-ratelimit-requests-reset': resetHeader },
-    })))).toEqual({ kind: 'rate_limited', retryAfterMs: undefined })
+    }))).retries).toEqual([{ errorClass: 'rate_limited', delay: undefined }])
   }
-  expect(classifyLinearError(await HttpError.fromResponse(Response.json({ errors: [{ extensions: { code: 'FORBIDDEN' } }] }, {
+  expect(await runUntilFirstRetry(() => Response.json({ errors: [{ extensions: { code: 'FORBIDDEN' } }] }, {
     status: 400, headers,
-  })))).toBeUndefined()
+  }))).toEqual({ outcome: 'failed', requests: 1, retries: [] })
 })
 
 test('Linear HTTP429 reset delay is applied by the executor to exactly one page retry', async () => {
@@ -538,11 +524,8 @@ test('Linear HTTP429 reset delay is applied by the executor to exactly one page 
   } })
   try {
     const env = { fetch: (_input: string | URL, init?: RequestInit) => fetch(`http://127.0.0.1:${server.port}/graphql`, init) }
-    const selected = request(fixturePipeline(), 'comments').selected.map((entry) => ({
-      ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } },
-    }))
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(request(fixturePipeline(), 'comments'), { ...env, retry: oneRetry, journal, destination, now: () => cutoff })).ok).toBe(true)
     expect(requests).toBe(2)
     expect(retriedAt).toBeGreaterThanOrEqual(reset - 5)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
@@ -575,16 +558,14 @@ test('Linear fails every stream before any request when the API key is missing',
 })
 
 test('Linear fails a malformed provider payload at once and retries only a transient response', async () => {
-  const retrying = (pipeline: Pipeline) => ({ backfill: undefined, selected: request(pipeline, 'comments').selected.map((entry) => ({
-    ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0, maxTimeout: 0 } },
-  })) })
+  const retry = { retries: 2, minTimeout: 0, maxTimeout: 0 }
   let calls = 0
   const malformed = linearEnv(() => {
     calls += 1
     return Response.json({ data: { comments: { nodes: 'not-a-list', pageInfo: { hasNextPage: false, endCursor: null } } } })
   })
   const journal = createMemoryJournal()
-  const result = await runIngestion(retrying(fixturePipeline()), { ...malformed, journal, destination: createMemoryDestination(), now: () => cutoff })
+  const result = await runIngestion(request(fixturePipeline(), 'comments'), { ...malformed, retry, journal, destination: createMemoryDestination(), now: () => cutoff })
   expect(result.streams[0]?.outcome).toBe('failed')
   expect(result.streams[0]?.error).toContain('Invalid input: expected array, received string')
   expect(calls).toBe(1)
@@ -596,7 +577,7 @@ test('Linear fails a malformed provider payload at once and retries only a trans
     return fixtureResponse(body)
   })
   const recovered = createMemoryJournal()
-  expect((await runIngestion(retrying(fixturePipeline()), { ...flaky, journal: recovered, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(fixturePipeline(), 'comments'), { ...flaky, retry, journal: recovered, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
   expect(recovered.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass)).toEqual(['transient'])
 })
 
@@ -605,13 +586,30 @@ function fixturePipeline(config: LinearConfig = fixtureConfig): Pipeline {
 }
 
 function linearEnv(respond: Responder = fixtureResponse) {
-  return { fetch: async (_input: string | URL, init?: RequestInit) => respond(JSON.parse(String(init?.body))) }
+  return { fetch: async (_input: string | URL, init?: RequestInit) => respond(JSON.parse(String(init?.body))), retry: { retries: 0 } }
 }
 
 function request(pipeline: Pipeline, resource?: string) {
   return { selected: selectStreams([pipeline], resource ? [`resource:${resource}`] : []).map((entry) => ({
-    ...entry, stream: { ...entry.stream, batchSize: 1, retry: { retries: 0 } },
+    ...entry, stream: { ...entry.stream, batchSize: 1 },
   })), backfill: undefined }
+}
+
+async function runUntilFirstRetry(respond: Responder) {
+  let requests = 0
+  const journal = createMemoryJournal(), cancel = new AbortController()
+  const result = await runIngestion(request(fixturePipeline(), 'comments'), {
+    ...linearEnv((body) => { requests++; return respond(body) }), retry: { retries: 1 }, signal: cancel.signal,
+    journal: { ...journal, append: async (events) => {
+      await journal.append(events)
+      if (events.some((event) => event.eventKind === 'retry_scheduled')) setTimeout(() => cancel.abort())
+    } },
+    destination: createMemoryDestination(), now: () => cutoff,
+  })
+  const retries = journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => ({
+    errorClass: event.errorClass, delay: event.retryAt && event.retryAt.getTime() - cutoff.getTime(),
+  }))
+  return { outcome: result.streams[0]?.outcome, requests, retries }
 }
 
 function operation(body: GraphqlRequest): string {

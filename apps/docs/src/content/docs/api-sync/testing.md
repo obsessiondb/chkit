@@ -30,7 +30,7 @@ const result = await runIngestion({ selected: selectStreams([pipeline], []), bac
 })
 ```
 
-Return a `503` to exercise a retried request, and a malformed body to check that validation fails the stream without retries.
+Return a `503` to exercise a retried request, and a malformed body to check that validation fails the stream without retries. Pass `retry: { retries: 1, minTimeout: 0 }` to `runIngestion` so a retried request does not wait for the backoff.
 
 To call a client or reader directly, for example to inspect chunks one at a time, build its context with `createSourceContext({ fetch })` or `createReadContext({ fetch, selection })` from `@chkit/plugin-ingest/testing`. Requests behave as they do in a run, including `HttpError` for unsuccessful responses, but are not retried unless the options pass a `retry` policy.
 
@@ -65,7 +65,7 @@ test('replays an acknowledged write whose response was lost', async () => {
       }
     },
   })
-  const pipeline = definePipeline({ id: 'fixture', streams: [stream], retry: { retries: 0 } })
+  const pipeline = definePipeline({ id: 'fixture', streams: [stream] })
   const selected = selectStreams([pipeline], [])
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()

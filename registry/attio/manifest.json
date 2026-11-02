@@ -109,7 +109,8 @@
             "Read configuration and the API token when a stream runs, so `generate`, `migrate`, and `chkit check` never depend on them; invalid settings or a missing token fail that run before any request. Requires zod 4 and chkit 0.2.0-beta.12.",
             "Send requests through the ingestion runtime, which retries only network failures, timeouts, and retryable HTTP statuses; malformed payloads and missing identities fail at once.",
             "Set `apiToken` in the configuration to use another token, for example for a second installation; it defaults to `ATTIO_API_TOKEN`.",
-            "Send requests without fixed pauses; a `429` pauses the pipeline until its `Retry-After`."
+            "Send requests without fixed pauses; a `429` pauses the pipeline until its `Retry-After`.",
+            "Remove the pipeline's `retry` settings; requests use the runtime's retry policy, whose backoff caps at 60 seconds instead of 30."
           ]
         },
         {

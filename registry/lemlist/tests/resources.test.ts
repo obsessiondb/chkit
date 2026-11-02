@@ -7,6 +7,7 @@ import { createLemlistPipeline } from '../index.js'
 
 const resources = ['activities', 'campaigns', 'contacts', 'companies', 'campaign_leads', 'inbox_conversations', 'inbox_messages']
 const now = () => new Date('2026-01-02T00:00:00Z')
+const retry = { retries: 0 }
 const fixtureConfig = { ...lemlistConfig, sourceId: 'lemlist.fixture', start: new Date('2026-01-01'), apiKey: 'fixture' }
 
 function pipeline(options: { pageSize?: number; inboxUserIds?: readonly string[] } = {}) {
@@ -19,7 +20,6 @@ function lemlistFetch(handler: (url: URL, init: RequestInit | undefined) => Resp
 
 function selected(value: PipelineDefinition, resource?: string) {
   return selectStreams([value], resource ? [`resource:${resource}`] : [])
-    .map((item) => ({ ...item, stream: { ...item.stream, retry: { retries: 0 } } }))
 }
 
 function listing(data: { _id: string; [key: string]: unknown }[], url: URL, total = data.length) {
@@ -61,7 +61,7 @@ test('Lemlist has seven independently selectable resources with raw provider IDs
   expect(value.streams.map((stream) => stream.id)).toEqual(resources.map((resource) => `lemlist.fixture.${resource}`))
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion({ selected: selected(value).reverse(), backfill: undefined }, { fetch, journal, destination, now })).ok).toBe(true)
+  expect((await runIngestion({ selected: selected(value).reverse(), backfill: undefined }, { fetch, journal, destination, now, retry })).ok).toBe(true)
   expect(paths.filter((path) => path === '/api/contacts')).toHaveLength(3)
   expect(destination.tables.get('default.lemlist_contacts_raw')?.[0]).toMatchObject({
     id: '["lemlist.fixture","ctc"]', raw: { source_id: 'lemlist.fixture', data: { companyId: 'cpn', fields: { custom: 'kept' }, campaigns: [{ campaignId: 'cam', leadId: 'lea' }] } },
@@ -80,7 +80,7 @@ for (const resource of resources) {
     const fetch = lemlistFetch()
     const value = pipeline()
     const journal = createMemoryJournal()
-    expect((await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })).ok).toBe(true)
+    expect((await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry })).ok).toBe(true)
     expect(journal.events.filter((event) => event.namespaceId.startsWith('lemlist.fixture.'))
       .every((event) => event.namespaceId === `lemlist.fixture.${resource}`)).toBe(true)
   })
@@ -99,7 +99,7 @@ test('Lemlist exports more than 500 campaign leads without calling the capped li
   })
   const value = pipeline()
   const destination = createMemoryDestination()
-  expect((await runIngestion({ selected: selected(value, 'campaign_leads'), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now })).ok).toBe(true)
+  expect((await runIngestion({ selected: selected(value, 'campaign_leads'), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now, retry })).ok).toBe(true)
   expect(destination.tables.get('default.lemlist_campaign_leads_raw')).toHaveLength(501)
   expect(paths.map((url) => url.pathname)).toEqual(['/api/campaigns', '/api/v2/campaigns/cam/export/leads'])
 })
@@ -108,7 +108,7 @@ test('Lemlist full-contact hydration fails visibly when a discovered contact is 
   const fetch = lemlistFetch((url) => url.searchParams.has('idsOrEmails') ? Response.json([]) : fixture(url))
   const value = pipeline()
   const journal = createMemoryJournal()
-  const result = await runIngestion({ selected: selected(value, 'contacts'), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })
+  const result = await runIngestion({ selected: selected(value, 'contacts'), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('every discovered contact')
   expect((await journal.readCheckpoint('lemlist.fixture.contacts')).lastSuccessSeq).toBe(0)
@@ -129,7 +129,7 @@ test('Lemlist scoped conversation users are snapshotted and pagination follows p
   userIds[0] = 'changed'
   config.pageSize = 100
   const destination = createMemoryDestination()
-  expect((await runIngestion({ selected: selected(value, 'inbox_conversations'), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now })).ok).toBe(true)
+  expect((await runIngestion({ selected: selected(value, 'inbox_conversations'), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now, retry })).ok).toBe(true)
   expect(urls.map((url) => [url.searchParams.get('page'), url.searchParams.get('limit')])).toEqual([['1', '2'], ['2', '2']])
   expect(destination.tables.get('default.lemlist_inbox_conversations_raw')?.map((row) => row.id)).toEqual([
     '["lemlist.fixture","usr-selected","conversation-1"]', '["lemlist.fixture","usr-selected","conversation-2"]',
@@ -154,9 +154,9 @@ test('Lemlist messages revisit old contacts and use skip pagination without mark
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   const request = { selected: selected(value, 'inbox_messages'), backfill: undefined }
-  expect((await runIngestion(request, { fetch, journal, destination, now })).ok).toBe(true)
+  expect((await runIngestion(request, { fetch, journal, destination, now, retry })).ok).toBe(true)
   body = 'edited reply'
-  expect((await runIngestion(request, { fetch, journal, destination, now })).ok).toBe(true)
+  expect((await runIngestion(request, { fetch, journal, destination, now, retry })).ok).toBe(true)
   expect(skips).toEqual(['0', '2', '0', '2'])
   expect(destination.tables.get('default.lemlist_inbox_messages_raw')?.map((row) => row.raw)).toContainEqual({
     source_id: 'lemlist.fixture', contact_id: 'ctc', data: { _id: 'message-1', createdAt: '2000-01-01', message: 'edited reply' },
@@ -170,11 +170,11 @@ for (const resource of ['contacts', 'companies', 'campaign_leads', 'inbox_conver
     const value = pipeline()
     const journal = createMemoryJournal()
     const request = { selected: selected(value, resource), backfill: undefined }
-    expect((await runIngestion(request, { fetch, journal, destination: { insert: async () => { throw new Error('sink denied') } }, now })).ok).toBe(false)
+    expect((await runIngestion(request, { fetch, journal, destination: { insert: async () => { throw new Error('sink denied') } }, now, retry })).ok).toBe(false)
     expect((await journal.readCheckpoint(`lemlist.fixture.${resource}`)).lastSuccessSeq).toBe(0)
     const first = [...paths]
     paths.length = 0
-    expect((await runIngestion(request, { fetch, journal, destination: createMemoryDestination(), now })).ok).toBe(true)
+    expect((await runIngestion(request, { fetch, journal, destination: createMemoryDestination(), now, retry })).ok).toBe(true)
     expect(paths).toEqual(first)
   })
 }
@@ -191,7 +191,7 @@ test('Lemlist empty full collections record completion without custom scan state
   })
   const value = pipeline()
   const journal = createMemoryJournal()
-  expect((await runIngestion({ selected: selected(value), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })).ok).toBe(true)
+  expect((await runIngestion({ selected: selected(value), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry })).ok).toBe(true)
   for (const resource of resources) expect((await journal.readCheckpoint(`lemlist.fixture.${resource}`)).lastSuccessSeq).toBeGreaterThan(0)
 })
 
@@ -209,7 +209,7 @@ for (const malformed of ['missing', 'repeated', 'truncated', 'invalid-export']) 
     })
     const value = pipeline()
     const journal = createMemoryJournal()
-    expect((await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })).ok).toBe(false)
+    expect((await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry })).ok).toBe(false)
     expect((await journal.readCheckpoint(`lemlist.fixture.${resource}`)).lastSuccessSeq).toBe(0)
   })
 }
@@ -228,7 +228,7 @@ for (const resource of ['contacts', 'companies']) {
     })
     const value = pipeline({ pageSize: 2 })
     const destination = createMemoryDestination()
-    expect((await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now })).ok).toBe(true)
+    expect((await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now, retry })).ok).toBe(true)
     expect(offsets).toEqual(['0', '2'])
     expect(destination.tables.get(`default.lemlist_${resource}_raw`)?.map((row) => row.id)).toEqual(
       ['first', 'second', 'last'].map((id) => JSON.stringify(['lemlist.fixture', id])))
@@ -239,7 +239,7 @@ test('Lemlist keeps distinct user inbox observations when native conversation ID
   const fetch = lemlistFetch((url) => inbox([{ _id: 'shared', unread: url.searchParams.get('userId') === 'usr-a' }]))
   const value = pipeline({ inboxUserIds: ['usr-a', 'usr-b'] })
   const destination = createMemoryDestination()
-  expect((await runIngestion({ selected: selected(value, 'inbox_conversations'), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now })).ok).toBe(true)
+  expect((await runIngestion({ selected: selected(value, 'inbox_conversations'), backfill: undefined }, { fetch, journal: createMemoryJournal(), destination, now, retry })).ok).toBe(true)
   expect(destination.tables.get('default.lemlist_inbox_conversations_raw')?.map((row) => [row.id, row.raw])).toEqual([
     ['["lemlist.fixture","usr-a","shared"]', { source_id: 'lemlist.fixture', user_id: 'usr-a', data: { _id: 'shared', unread: true } }],
     ['["lemlist.fixture","usr-b","shared"]', { source_id: 'lemlist.fixture', user_id: 'usr-b', data: { _id: 'shared', unread: false } }],
@@ -262,10 +262,10 @@ test('Lemlist interrupted message traversal restarts contact discovery and skip 
   const journal = createMemoryJournal()
   const request = { selected: selected(value, 'inbox_messages'), backfill: undefined }
   const destination = createMemoryDestination()
-  expect((await runIngestion(request, { fetch, journal, destination, now })).ok).toBe(false)
+  expect((await runIngestion(request, { fetch, journal, destination, now, retry })).ok).toBe(false)
   expect((await journal.readCheckpoint('lemlist.fixture.inbox_messages')).lastSuccessSeq).toBe(0)
   fail = false
-  expect((await runIngestion(request, { fetch, journal, destination, now })).ok).toBe(true)
+  expect((await runIngestion(request, { fetch, journal, destination, now, retry })).ok).toBe(true)
   expect(paths).toEqual(['/api/contacts', '/api/inbox/ctc:0', '/api/inbox/ctc:2', '/api/contacts', '/api/inbox/ctc:0', '/api/inbox/ctc:2'])
 })
 
@@ -273,7 +273,7 @@ test('Lemlist refuses a shortened contact listing that still advertises more rec
   const fetch = lemlistFetch((url) => listing([{ _id: 'first' }], url, 3))
   const value = pipeline({ pageSize: 2 })
   const journal = createMemoryJournal()
-  expect((await runIngestion({ selected: selected(value, 'contacts'), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })).ok).toBe(false)
+  expect((await runIngestion({ selected: selected(value, 'contacts'), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry })).ok).toBe(false)
   expect((await journal.readCheckpoint('lemlist.fixture.contacts')).lastSuccessSeq).toBe(0)
 })
 
@@ -289,7 +289,7 @@ for (const resource of ['contacts', 'companies', 'inbox_conversations']) {
     })
     const value = pipeline({ pageSize: 2, inboxUserIds: ['usr'] })
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })
+    const result = await runIngestion({ selected: selected(value, resource), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry })
     expect(result.ok).toBe(false)
     expect(result.streams[0]?.error).toContain('object ID')
     expect((await journal.readCheckpoint(`lemlist.fixture.${resource}`)).lastSuccessSeq).toBe(0)
@@ -327,7 +327,7 @@ test('Lemlist fails a malformed provider payload at once and retries only a tran
     const fetch = lemlistFetch((url) => url.pathname === '/api/companies' ? companies(url) : fixture(url))
     const value = pipeline()
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected: selectStreams([{ ...value, retry: { retries: 2, minTimeout: 0 } }], ['resource:companies']), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now })
+    const result = await runIngestion({ selected: selectStreams([value], ['resource:companies']), backfill: undefined }, { fetch, journal, destination: createMemoryDestination(), now, retry: { retries: 2, minTimeout: 0 } })
     return { result, retries: journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass) }
   }
 

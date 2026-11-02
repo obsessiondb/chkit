@@ -267,7 +267,7 @@ test('Calendar retries Google 403 rate-limit reasons like 429 and keeps other 40
     })
     const pipeline = createGoogleCalendarPipeline(fixtureConfig)
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    const result = await runIngestion({ selected: selectStreams([{ ...pipeline, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } }], []), backfill: undefined }, { ...env, journal, destination })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...env, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 }, journal, destination })
     expect(result.ok, reason).toBe(retried)
     expect(requests, reason).toHaveLength(retried ? 2 : 1)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass), reason).toEqual(retried ? ['rate_limited'] : [])
@@ -281,7 +281,7 @@ test('Calendar rejects an invalid chunk budget before any request', async () => 
   }
   let requests = 0
   const unsafe = fixturePipeline({ ...fixtureConfig, maxChunks: Number.MAX_SAFE_INTEGER + 1 })
-  const result = await runIngestion(request(undefined, unsafe), { fetch: async () => { requests += 1; return Response.json({}) }, journal: createMemoryJournal(), destination: createMemoryDestination() })
+  const result = await runIngestion(request(undefined, unsafe), { fetch: async () => { requests += 1; return Response.json({}) }, retry: { retries: 0 }, journal: createMemoryJournal(), destination: createMemoryDestination() })
   expect(result.streams[0]?.outcome).toBe('failed')
   expect(result.streams[0]?.error).toContain('at maxChunks')
   expect(requests).toBe(0)
@@ -314,7 +314,7 @@ test('Calendar fails a malformed provider payload at once and retries only a tra
   const run = async (events: () => Response) => {
     const pipeline = createGoogleCalendarPipeline(fixtureConfig)
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected: selectStreams([{ ...pipeline, retry: { retries: 2, minTimeout: 0 } }], []), backfill: undefined }, { ...calendarEnv(events), journal, destination: createMemoryDestination() })
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...calendarEnv(events), retry: { retries: 2, minTimeout: 0 }, journal, destination: createMemoryDestination() })
     return { result, retries: journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass) }
   }
 
@@ -335,7 +335,7 @@ test('Calendar fails a malformed provider payload at once and retries only a tra
 })
 
 function fixturePipeline(config: GoogleCalendarReaderConfig = fixtureConfig) {
-  return { ...createGoogleCalendarPipeline(config), retry: { retries: 0 } }
+  return createGoogleCalendarPipeline(config)
 }
 
 function calendarEnv(events: (url: URL) => Response | Promise<Response>, calendar = () => 'calendar@example.com') {
@@ -344,6 +344,7 @@ function calendarEnv(events: (url: URL) => Response | Promise<Response>, calenda
       const url = new URL(input)
       return url.pathname.endsWith('/events') ? events(url) : Response.json({ id: calendar() })
     },
+    retry: { retries: 0 },
   }
 }
 

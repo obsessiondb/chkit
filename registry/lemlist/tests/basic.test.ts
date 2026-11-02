@@ -7,6 +7,7 @@ import { createLemlistPipeline } from '../index.js'
 
 const fixtureConfig = { ...lemlistConfig, apiKey: 'fixture' }
 const cutoff = new Date('2000-03-01T00:00:00Z')
+const retry = { retries: 0 }
 
 test('Lemlist commits only exhausted date intervals and replays the unfinished interval with overlap', async () => {
   let fail = true
@@ -30,11 +31,11 @@ test('Lemlist commits only exhausted date intervals and replays the unfinished i
   })
   const destination = createMemoryDestination()
   const request = { selected: selected(), backfill: undefined }
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => cutoff, retry })).ok).toBe(false)
   expect((await journal.readCheckpoint('lemlist.activities')).envelope?.state).toEqual({ watermark: '2000-01-31T00:00:00.000Z' })
   expect(destination.tables.get('default.lemlist_activities_raw')?.[0]?.raw).toMatchObject({ custom: { retained: true } })
   fail = false
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => cutoff, retry })).ok).toBe(true)
   expect(windows[2]).toEqual({ from: '2000-01-30T00:00:00.000Z', to: '2000-02-29T00:00:00.000Z', offset: '0' })
   expect((await journal.readCheckpoint('lemlist.activities')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
 })
@@ -51,10 +52,10 @@ test('Lemlist resumes isolated explicit backfills from the completed interval fr
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   const request = { selected: selected(), backfill: { id: 'history', from: new Date('2025-01-01T00:00:00Z'), to: new Date('2025-03-01T00:00:00Z') } }
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2026-01-01') })).ok).toBe(false)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2026-01-01'), retry })).ok).toBe(false)
   expect((await journal.readCheckpoint('lemlist.activities#backfill:history')).envelope?.state).toEqual({ watermark: '2025-01-31T00:00:00.000Z' })
   fail = false
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2026-01-01') })).ok).toBe(true)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2026-01-01'), retry })).ok).toBe(true)
   expect(starts[2]).toBe('2025-01-30T00:00:00.000Z')
   expect((await journal.readCheckpoint('lemlist.activities')).envelope).toBeUndefined()
 })
@@ -66,11 +67,11 @@ test('Lemlist rejects a narrowed completed backfill upper bound without regressi
   const destination = createMemoryDestination()
   const backfill = { id: 'narrowed', from: new Date('2025-01-01T00:00:00Z'), to: new Date('2025-03-01T00:00:00Z') }
   const request = { selected: selected(), backfill }
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2026-01-01') })).ok).toBe(true)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2026-01-01'), retry })).ok).toBe(true)
   const completedRequests = requests
   // This upper bound is still after the overlap's lower bound, but must not move the watermark backwards.
   const result = await runIngestion({ ...request, backfill: { ...backfill, to: new Date('2025-02-28T12:00:00Z') } }, {
-    ...env, journal, destination, now: () => new Date('2026-01-01'),
+    ...env, journal, destination, now: () => new Date('2026-01-01'), retry,
   })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('use a new backfill ID')
@@ -88,7 +89,7 @@ test('Lemlist paginates a whole date interval and a rejected sink cannot advance
   })
   const journal = createMemoryJournal()
   const request = { selected: selected(), backfill: undefined }
-  const result = await runIngestion(request, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => new Date('2000-01-02') })
+  const result = await runIngestion(request, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => new Date('2000-01-02'), retry })
   expect(result.ok).toBe(false)
   expect((await journal.readCheckpoint('lemlist.activities')).envelope).toBeUndefined()
   expect(offsets).toEqual(['0', '100'])
@@ -100,14 +101,14 @@ test('Lemlist empty activity intervals commit and campaigns always scan from zer
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   const request = { selected: selected('campaigns'), backfill: undefined }
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
-  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2000-03-02') })).ok).toBe(true)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => cutoff, retry })).ok).toBe(true)
+  expect((await runIngestion(request, { ...env, journal, destination, now: () => new Date('2000-03-02'), retry })).ok).toBe(true)
   expect(paths.map((url) => url.searchParams.get('offset'))).toEqual(['0', '0'])
   expect(paths.every((url) => url.searchParams.get('sortBy') === 'createdAt' && url.searchParams.get('sortOrder') === 'asc')).toBe(true)
   expect((await journal.readCheckpoint('lemlist.campaigns')).lastSuccessSeq).toBeGreaterThan(0)
   expect(journal.events.filter((event) => event.namespaceId === 'lemlist.campaigns' && event.eventKind === 'work_finished' && event.workState === 'succeeded')).toHaveLength(2)
   const empty = lemlistEnv(async () => Response.json([]))
-  expect((await runIngestion({ selected: selected(), backfill: undefined }, { ...empty, journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion({ selected: selected(), backfill: undefined }, { ...empty, journal, destination, now: () => cutoff, retry })).ok).toBe(true)
   expect((await journal.readCheckpoint('lemlist.activities')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
 })
 
@@ -128,8 +129,7 @@ test('Lemlist binds account configuration and its API key to independent resourc
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   const selected = selectStreams([pipeline], []).filter((item) => ['lemlist.sales.activities', 'lemlist.sales.campaigns'].includes(item.stream.id))
-    .map((item) => ({ ...item, stream: { ...item.stream, retry: { retries: 0 } } }))
-  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => new Date('2026-01-02') })
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => new Date('2026-01-02'), retry })
   expect(result.streams.map((stream) => [stream.streamId, stream.outcome])).toEqual([
     ['lemlist.sales.activities', 'succeeded'], ['lemlist.sales.campaigns', 'failed'],
   ])
@@ -178,7 +178,7 @@ test('Lemlist full-sync campaigns publish changed observations on the next run',
 })
 
 function selected(resource = 'activities', pipeline: PipelineDefinition = createLemlistPipeline(fixtureConfig)) {
-  return selectStreams([pipeline], [`resource:${resource}`]).map((item) => ({ ...item, stream: { ...item.stream, retry: { retries: 0 } } }))
+  return selectStreams([pipeline], [`resource:${resource}`])
 }
 
 function lemlistEnv(handler: (url: URL, init: RequestInit | undefined) => Response | Promise<Response>) {

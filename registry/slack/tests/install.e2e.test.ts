@@ -90,11 +90,11 @@ describe.serial('built Slack template installed into a consumer', () => {
       return fixture(url)
     })
     const fixtureConfig = { ...installedConfig.slackConfig, token: 'fixture' }
-    const pipeline = { ...installed.createSlackPipeline(fixtureConfig), retry: { retries: 0 } }
+    const pipeline = installed.createSlackPipeline(fixtureConfig)
     const journal = createMemoryJournal()
     for (const next of [1, 2]) {
       revision = next
-      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...responses, journal, destination: createClickHouseDestination(executor), now: () => new Date('2023-11-15T00:00:00Z') })
+      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...responses, journal, destination: createClickHouseDestination(executor), now: () => new Date('2023-11-15T00:00:00Z'), retry: { retries: 0 } })
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const table = (resource: string) => `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}_raw`)}`

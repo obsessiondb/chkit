@@ -161,16 +161,11 @@ describe('exported pipeline discovery', () => {
       expect(selecting({ budget: { maxChunks } })).toThrow('budget.maxChunks must be a positive integer')
     }
     expect(selecting({ budget: { maxChunkRows: -5 } })).toThrow('budget.maxChunkRows must be a positive integer')
-    expect(selecting({ retry: { retries: -1 } })).toThrow('retry.retries must be a non-negative integer or Infinity')
-    expect(selecting({ retry: { retries: 1.5 } })).toThrow('retry.retries must be a non-negative integer or Infinity')
-    expect(selecting({ retry: { minTimeout: Number.NaN } })).toThrow('retry.minTimeout must be a non-negative number')
-    expect(defineStream({ id: 'x', destination, read, retry: { retries: Number.POSITIVE_INFINITY, maxRetryTime: Number.POSITIVE_INFINITY } }).retry).toEqual({ retries: Number.POSITIVE_INFINITY, maxRetryTime: Number.POSITIVE_INFINITY })
 
     const stream = defineStream({ id: 'test.rows', destination, read })
     const pipeline = (input: Partial<Parameters<typeof definePipeline>[0]>) => () => selectStreams([definePipeline({ id: 'p', streams: [stream], ...input })], [])
     expect(pipeline({ streams: undefined as never })).toThrow('streams must be an array')
     expect(pipeline({ streams: [{ id: 'q' } as never] })).toThrow('streams must contain only defineStream(...) values')
-    expect(pipeline({ retry: { retries: Number.NaN } })).toThrow('retry.retries must be a non-negative integer or Infinity')
     expect(pipeline({ maxLoads: 0 })).toThrow('maxLoads must be a positive integer')
 
     const spread = { ...definePipeline({ id: 'p', streams: [{ ...defineStream({ id: 'x', destination, read }), budget: { maxChunks: 0 } }] }) }
@@ -190,13 +185,6 @@ describe('exported pipeline discovery', () => {
     expect(checkGraph([meet, slack])).toEqual([
       { code: 'ingest_invalid_pipeline', message: 'Stream "meet.rows": budget.maxChunks must be a positive integer.', severity: 'error' },
     ])
-  })
-
-  test('preserves unbounded retry timeout policies for streams and pipelines', () => {
-    const retry = { retries: 1, minTimeout: 0, maxTimeout: Number.POSITIVE_INFINITY }
-    const stream = defineStream({ id: 'rows', destination: rawTable({ database: 'test', name: 'rows' }), retry, async *read() {} })
-    expect(stream.retry).toEqual(retry)
-    expect(definePipeline({ id: 'p', streams: [stream], retry }).retry).toEqual(retry)
   })
 
   test('declared tags cannot impersonate the derived stream: and pipeline: tags', () => {

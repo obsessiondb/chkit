@@ -93,7 +93,7 @@ describe('runIngestion', () => {
         }
       },
     })
-    const pipeline = definePipeline({ id: 'app', streams: [stream], retry: { retries: 0 } })
+    const pipeline = definePipeline({ id: 'app', streams: [stream] })
     let firstWrite = true
     let acknowledgementLost = false
     const crashing: DestinationAdapter = {
@@ -159,7 +159,6 @@ describe('runIngestion', () => {
     const stream = defineStream({
       id: 'app.window',
       destination: events,
-      retry: { retries: 0 },
       incremental: timestampWindow({ start: new Date(0) }),
       async *read() {
         yield { rows: [{ id: 1 }] }
@@ -182,7 +181,6 @@ describe('runIngestion', () => {
     const flaky = defineStream({
       id: 'app.flaky',
       destination: events,
-      retry: { randomize: false, minTimeout: 10 },
       async *read(context) {
         const rows = await context.attempt(async () => {
           calls += 1
@@ -204,7 +202,7 @@ describe('runIngestion', () => {
 
     const result = await runIngestion(
       { selected: selectStreams([pipeline], []), backfill: undefined },
-      { journal, destination }
+      { journal, destination, retry: { randomize: false, minTimeout: 10 } }
     )
 
     expect(calls).toBe(3)
@@ -291,7 +289,7 @@ describe('runtime contracts', () => {
     const tokens: string[] = []
     let loseAcknowledgement = true
     const stream = defineStream({
-      id: 'app.bigint', destination: events, retry: { retries: 0 },
+      id: 'app.bigint', destination: events,
       async *read() { yield { rows: [row] } },
     })
     const pipeline = definePipeline({ id: 'app', streams: [stream] })
@@ -315,40 +313,35 @@ describe('runtime contracts', () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
     let calls = 0
-    let classifications = 0
     const operation = async () => {
       if (++calls === 1) throw new DOMException('request timed out', 'AbortError')
       return [{ id: 1 }]
     }
     const stream = defineStream({
       id: 'app.local_abort', destination: events,
-      retry: { retries: 1, minTimeout: 0, randomize: false },
-      classifyError: () => { classifications += 1; return { kind: 'transient' } },
       async *read({ attempt }) {
         yield { rows: boundary === 'sink' ? [{ id: 1 }] : await attempt(operation) }
       },
     })
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
-      journal,
+      journal, retry: { retries: 1, minTimeout: 0 },
       destination: boundary === 'sink' ? { async insert(input) { await operation(); await destination.insert(input) } } : destination,
     })
 
     expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', rows: 1, error: undefined })
     expect(calls).toBe(2)
-    expect(classifications).toBe(boundary === 'sink' ? 0 : 1)
   })
 
   test('exhausted request-local abort retries report failure, not budget exhaustion', async () => {
     let calls = 0
     const stream = defineStream({
       id: 'app.local_abort', destination: events,
-      retry: { retries: 1, minTimeout: 0, randomize: false },
       async *read({ attempt }) {
         yield { rows: await attempt(async () => { calls += 1; throw new DOMException('request timed out', 'AbortError') }) }
       },
     })
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
-      journal: createMemoryJournal(), destination: createMemoryDestination(),
+      journal: createMemoryJournal(), destination: createMemoryDestination(), retry: { retries: 1, minTimeout: 0 },
     })
     expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'request timed out' })
     expect(calls).toBe(2)
@@ -360,7 +353,6 @@ describe('runtime contracts', () => {
     let pulled = 0
     const stream = defineStream({
       id: 'app.bounded', destination: events, batchSize: 1, budget: { maxChunks: 1 },
-      retry: { retries: 2, minTimeout: 0, randomize: false },
       incremental: timestampWindow({ start: new Date(0) }),
       async *read() {
         readers += 1
@@ -389,7 +381,6 @@ describe('runtime contracts', () => {
     let readers = 0
     const stream = defineStream({
       id: 'app.disconnects', destination: events, batchSize: 1,
-      retry: { retries: 2, minTimeout: 0, randomize: false },
       incremental: cursorState({ id: 'page', version: 1, parse: (raw) => Number(raw) }),
       async *read({ selection }) {
         readers += 1
@@ -414,7 +405,7 @@ describe('runtime contracts', () => {
     const destination = createMemoryDestination()
     let label = 'A'
     const stream = defineStream({
-      id: 'app.full', destination: events, retry: { retries: 0 },
+      id: 'app.full', destination: events,
       async *read() { yield { rows: [{ id: 1, label }], ...(withId ? { id: 'page:1' } : {}) } },
     })
     const pipeline = definePipeline({ id: 'app', streams: [stream] })
@@ -468,7 +459,6 @@ describe('runtime contracts', () => {
     const stream = defineStream({
       id: 'app.lost_checkpoint', destination: events, batchSize: 1,
       incremental: cursorState({ id: 'test.cursor', version: 1, parse: (value) => Number(value) }),
-      retry: { retries: 0 },
       async *read({ state }) {
         for (let id = state ?? 0; id < 2; id += 1) yield { rows: [{ id }], state: id + 1 }
       },
@@ -589,7 +579,7 @@ describe('runtime contracts', () => {
 
   test('a throwing loader factory releases its permit for sibling streams', async () => {
     const failed = defineStream({
-      id: 'app.factory', destination: events, retry: { retries: 0 },
+      id: 'app.factory', destination: events,
       loader() { throw new Error('loader construction failed') },
       async *read() { yield { rows: [{ id: 1 }] } },
     })
@@ -765,7 +755,7 @@ describe('source services', () => {
     const calls: string[] = []
     const rows: Array<{ id: number }> = []
     const stream = defineStream({
-      id: 'app.fetch', destination: events, retry: { retries: 2, minTimeout: 0 },
+      id: 'app.fetch', destination: events,
       async *read(context) {
         const page = await context.fetch('https://api.example.com/items')
         rows.push(...(await page.json() as Array<{ id: number }>))
@@ -774,6 +764,7 @@ describe('source services', () => {
       },
     })
     const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      retry: { retries: 2, minTimeout: 0 },
       fetch: async (url) => {
         calls.push(new URL(url).pathname)
         const status = statuses.shift() ?? 500
@@ -790,13 +781,14 @@ describe('source services', () => {
     const requested = new Map<string, number>()
     let limited = false
     const stream = (name: string, delayMs: number) => defineStream({
-      id: `app.${name}`, destination: events, retry: { retries: 2, minTimeout: 0 },
+      id: `app.${name}`, destination: events,
       async *read(context) {
         await sleep(delayMs)
         yield { rows: await (await context.fetch(`https://api.example.com/${name}`)).json() as Array<{ id: number }> }
       },
     })
     const result = await run(definePipeline({ id: 'app', maxStreams: 2, maxFetches: 2, streams: [stream('first', 0), stream('second', 50)] }), {
+      retry: { retries: 2, minTimeout: 0 },
       fetch: async (url) => {
         const name = new URL(url).pathname
         if (name === '/first' && !limited) {
@@ -822,7 +814,7 @@ describe('source services', () => {
   test('a request inside a paginated page shares its attempt, permit, and retries', async () => {
     let calls = 0
     const stream = defineStream({
-      id: 'app.paged', destination: events, retry: { retries: 1, minTimeout: 0 },
+      id: 'app.paged', destination: events,
       async *read(context) {
         for await (const page of paginate({
           context,
@@ -832,7 +824,7 @@ describe('source services', () => {
     })
     const journal = createMemoryJournal()
     const result = await runIngestion({ selected: selectStreams([definePipeline({ id: 'app', maxFetches: 1, streams: [stream] })], []), backfill: undefined }, {
-      journal, destination: createMemoryDestination(),
+      journal, destination: createMemoryDestination(), retry: { retries: 1, minTimeout: 0 },
       fetch: async () => {
         calls += 1
         return calls === 1 ? new Response('busy', { status: 503 }) : Response.json([{ id: 1 }])
@@ -872,8 +864,7 @@ describe('pipeline concurrency and retries', () => {
     }
     const result = await run(definePipeline({
       id: 'app', streams, maxStreams: 2, maxFetches: 1, maxLoads: 1,
-      retry: { retries: 1, minTimeout: 10, randomize: false },
-    }), { journal: createMemoryJournal(), destination })
+    }), { journal: createMemoryJournal(), destination, retry: { retries: 1, minTimeout: 10, randomize: false } })
 
     expect(result.ok).toBe(true)
     expect(order).toEqual([1, 2, 1])
@@ -917,8 +908,8 @@ describe('pipeline concurrency and retries', () => {
         await attempt(async () => { sourceCalls += 1; throw connectionReset('source unavailable') })
       },
     })
-    const result = await run(definePipeline({ id: 'app', streams: [exhausted], retry: { retries: 1, minTimeout: 0 } }), {
-      journal: createMemoryJournal(), destination: createMemoryDestination(),
+    const result = await run(definePipeline({ id: 'app', streams: [exhausted] }), {
+      journal: createMemoryJournal(), destination: createMemoryDestination(), retry: { retries: 1, minTimeout: 0 },
     })
 
     expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'source unavailable' })
@@ -933,7 +924,6 @@ describe('pipeline concurrency and retries', () => {
     let readers = 0
     const stream = defineStream({
       id: 'app.deterministic', destination: events,
-      retry: { retries: 3, minTimeout: 0 },
       incremental: {
         id: 'test.deterministic', version: 1,
         parseState: (raw: unknown) => { if (failing && source === 'checkpoint') throw failure; return raw },
@@ -964,7 +954,6 @@ describe('pipeline concurrency and retries', () => {
     let calls = 0
     const stream = defineStream({
       id: 'app.wrapped', destination: events,
-      retry: { retries: 1, minTimeout: 0 },
       async *read({ attempt }) {
         readers += 1
         const rows = await attempt(async () => { calls += 1; throw connectionReset('source unavailable') })
@@ -973,7 +962,9 @@ describe('pipeline concurrency and retries', () => {
       },
     })
 
-    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination: createMemoryDestination() })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal: createMemoryJournal(), destination: createMemoryDestination(), retry: { retries: 1, minTimeout: 0 },
+    })
 
     expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'provider request failed' })
     expect(readers).toBe(1)
@@ -986,7 +977,6 @@ describe('pipeline concurrency and retries', () => {
     let inserts = 0
     const stream = defineStream({
       id: 'app.sink_down', destination: events,
-      retry: { retries: 2, minTimeout: 0 },
       async *read() { readers += 1; yield { rows: [{ id: 1 }] } },
     })
 
@@ -1056,7 +1046,6 @@ describe('paginate', () => {
     const cursors: Array<string | undefined> = []
     const stream = defineStream({
       id: 'app.cyclic', destination: events,
-      retry: { retries: 2, minTimeout: 1, maxTimeout: 1, randomize: false },
       async *read(context) {
         for await (const page of paginate({
           context,

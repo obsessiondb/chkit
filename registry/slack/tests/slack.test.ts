@@ -13,6 +13,7 @@ import { messageScope, parseMessageState, slackMessageStrategy, type SlackMessag
 import { channel, fixture, fixtureConfig, parentMessage, replyMessage, slackEnv, standaloneMessage, user } from './fixtures.js'
 
 const fixtureNow = () => new Date('2023-11-15T00:00:00Z')
+const retry = { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false }
 
 describe('Slack raw template', () => {
   test('exports three raw destinations and checkpointed messages without credentials', () => {
@@ -103,7 +104,7 @@ describe('Slack raw template', () => {
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
     const selected = request(fixturePipeline())
-    const first = await runIngestion(selected, { ...env, now: fixtureNow, journal, destination })
+    const first = await runIngestion(selected, { ...env, now: fixtureNow, journal, destination, retry })
     expect(first.ok, JSON.stringify(first)).toBe(true)
     expect(first.streams.map((stream) => stream.rows)).toEqual([1, 2, 4])
     expect(destination.tables.size).toBe(3)
@@ -114,7 +115,7 @@ describe('Slack raw template', () => {
     expect(new Set(messages.map((row) => row.id)).size).toBe(3)
     expect(messages.find((row) => JSON.stringify(row.raw).includes('Edited discussion'))).toBeUndefined()
     changed = true
-    const second = await runIngestion(selected, { ...env, now: fixtureNow, journal, destination })
+    const second = await runIngestion(selected, { ...env, now: fixtureNow, journal, destination, retry })
     expect(second.ok, JSON.stringify(second)).toBe(true)
     const repeated = destination.tables.get('default.slack_messages_raw') ?? []
     const edited = repeated.find((row) => JSON.stringify(row.raw).includes('Edited discussion'))
@@ -348,7 +349,7 @@ describe('Slack raw template', () => {
         : Response.json({ ok: true, members: [user], response_metadata: { next_cursor: '' } })
     })
     const journal = createMemoryJournal()
-    const result = await runIngestion(request(fixturePipeline(['users'])), { ...env, now: fixtureNow, journal, destination: createMemoryDestination() })
+    const result = await runIngestion(request(fixturePipeline(['users'])), { ...env, now: fixtureNow, journal, destination: createMemoryDestination(), retry })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
@@ -381,7 +382,7 @@ describe('Slack raw template', () => {
         : Response.json({ ok: true, members: [user], response_metadata: { next_cursor: '' } })
     })
     const journal = createMemoryJournal()
-    const result = await runIngestion(request(fixturePipeline(['users'])), { ...env, now: fixtureNow, journal, destination: createMemoryDestination() })
+    const result = await runIngestion(request(fixturePipeline(['users'])), { ...env, now: fixtureNow, journal, destination: createMemoryDestination(), retry })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
@@ -395,7 +396,7 @@ describe('Slack raw template', () => {
       let requests = 0
       const result = await runIngestion(request(fixturePipeline(undefined, { ...fixtureConfig, token })), {
         fetch: async () => { requests += 1; throw new Error('must not fetch') },
-        now: fixtureNow, journal: createMemoryJournal(), destination: createMemoryDestination(),
+        now: fixtureNow, journal: createMemoryJournal(), destination: createMemoryDestination(), retry,
       })
       expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed', 'failed', 'failed'])
       expect(result.streams.every((stream) => stream.error?.includes('Set SLACK_API_TOKEN or pass token.'))).toBe(true)
@@ -423,7 +424,7 @@ describe('Slack raw template', () => {
       return Response.json({ ok: true, members: 'not-a-list' })
     })
     const journal = createMemoryJournal()
-    const result = await runIngestion(request(fixturePipeline(['users'])), { ...malformed, now: fixtureNow, journal, destination: createMemoryDestination() })
+    const result = await runIngestion(request(fixturePipeline(['users'])), { ...malformed, now: fixtureNow, journal, destination: createMemoryDestination(), retry })
     expect(result.streams[0]?.outcome).toBe('failed')
     expect(result.streams[0]?.error).toContain('Invalid input: expected array, received string')
     expect(calls).toBe(1)
@@ -438,7 +439,7 @@ describe('Slack raw template', () => {
       return fixture(url)
     })
     const recovered = createMemoryJournal()
-    const retried = await runIngestion(request(fixturePipeline(['users'])), { ...flaky, now: fixtureNow, journal: recovered, destination: createMemoryDestination() })
+    const retried = await runIngestion(request(fixturePipeline(['users'])), { ...flaky, now: fixtureNow, journal: recovered, destination: createMemoryDestination(), retry })
     expect(retried.ok, JSON.stringify(retried)).toBe(true)
     expect(recovered.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass)).toEqual(['transient'])
   })
@@ -448,13 +449,12 @@ function fixturePipeline(resources?: readonly string[], config: SlackReaderConfi
   const pipeline = createSlackPipeline(config)
   return definePipeline({
     ...pipeline,
-    retry: { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false },
     streams: pipeline.streams.filter((stream) => resources === undefined || resources.includes(stream.id.split('.').at(-1) ?? '')),
   })
 }
 
 function runFixture(env: ReturnType<typeof slackEnv>, resources: readonly string[], destination = createMemoryDestination(), config?: SlackReaderConfig) {
-  return runIngestion(request(fixturePipeline(resources, config)), { ...env, now: fixtureNow, journal: createMemoryJournal(), destination })
+  return runIngestion(request(fixturePipeline(resources, config)), { ...env, now: fixtureNow, journal: createMemoryJournal(), destination, retry })
 }
 
 function request(pipeline: PipelineDefinition) {

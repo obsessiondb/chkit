@@ -7,7 +7,7 @@ A reader is an async generator that fetches provider data and yields bounded chu
 
 ## Requests and provider clients
 
-Send requests with `context.fetch`. It takes a fetch permit, retries only transient failures with backoff and `Retry-After`, aborts when the run is cancelled or after 30 seconds, and throws `HttpError` for unsuccessful responses. For a paginated endpoint, use `paginate({ context, fetchPage })`; a `context.fetch` inside `fetchPage` shares that page's attempt, so it is retried once per page, never twice.
+Send requests with `context.fetch`. It goes through the pipeline's request queue, retries only transient failures with backoff and `Retry-After`, aborts when the run is cancelled or after 30 seconds, and throws `HttpError` for unsuccessful responses. For a paginated endpoint, use `paginate({ context, fetchPage })`; a `context.fetch` inside `fetchPage` shares that page's attempt, so it is retried once per page, never twice.
 
 Keep everything that touches HTTP in one provider client: configuration, credentials, URLs, authentication headers, pagination, and response parsing. Build the client at the start of `read`. Schema commands such as `generate` and `migrate` import the same module, but never run a reader, so they need neither credentials nor valid sync settings. A missing credential or an invalid setting fails that stream before its first request and is not retried. Readers then only call client methods and turn provider objects into chunks.
 
@@ -96,7 +96,7 @@ If editing or deleting a comment does not update the ticket's timestamp, an incr
 <details>
 <summary>Wrap a provider SDK or reusable client</summary>
 
-Use a provider SDK when it handles signing, authentication, or protocol details the integration needs. Call it inside `context.attempt`, forward cancellation where supported, and classify SDK-specific errors through the stream's `classifyError`. Avoid nested retries in the SDK and chkit unless their combined behavior is deliberate.
+Use a provider SDK when it handles signing, authentication, or protocol details the integration needs. Call it inside `context.attempt`, forward cancellation where supported, and disable the SDK's own retries. Errors with a network code or a timeout are retried as they are; rethrow an SDK error that carries an HTTP status as `await HttpError.fromResponse(new Response(null, { status, headers }))` so it is classified like a response.
 
 Pass `SourceContext` to reusable clients; it carries `fetch`, `attempt`, and `signal`, without checkpoint types.
 

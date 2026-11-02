@@ -23,7 +23,6 @@ export function createAttioPipeline(config: AttioReaderConfig = attioConfig) {
     maxStreams: 1,
     maxFetches: 1,
     maxLoads: 1,
-    retry: { retries: 5, minTimeout: 1_000, maxTimeout: 30_000, randomize: true },
     streams: [
       defineStream({ ...streamOptions, id: `${boundConfig.sourceId}.objects`, tags: ['resource:objects'], destination: attioObjectsRaw, read: (context) => readObjects(context, boundConfig) }),
       ...boundConfig.objects.flatMap((object) => [

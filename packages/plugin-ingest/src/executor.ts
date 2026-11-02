@@ -12,7 +12,6 @@ import { simpleLoader } from './loader.js'
 import { createBoundedQueue } from './queue.js'
 import type { SelectedStream } from './registry.js'
 import { createRequestQueue, type RequestQueue } from './request-queue.js'
-import { mergeRetry } from './retry.js'
 import { createSourceServices } from './source-context.js'
 import type {
   AnyStreamDefinition,
@@ -24,6 +23,7 @@ import type {
   Journal,
   JournalEvent,
   PipelineDefinition,
+  RetryOptions,
   Row,
   SinkReceipt,
   StreamOutcome,
@@ -70,6 +70,8 @@ export interface ExecutionEnv {
   now?: () => Date
   log?: (message: string) => void
   fetch?: Fetch
+  /** Request retries; defaults to 5 with exponential backoff from 1 second. */
+  retry?: RetryOptions
 }
 
 interface ResolvedEnv extends Required<Omit<ExecutionEnv, 'signal'>> {
@@ -226,7 +228,6 @@ async function executeStream(input: {
   progress.successId = committed.successId
   progress.envelope = committed.envelope
 
-  const retry = mergeRetry(pipeline.retry, stream.retry)
   let workId = ''
   let outcome: StreamOutcome = 'failed'
   let failure: unknown
@@ -244,7 +245,7 @@ async function executeStream(input: {
       { eventKind: 'work_planned', fields: { workId, workState: 'planned', detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } } },
       { eventKind: 'attempt_started', fields: { workId, attemptNo: 1, workState: 'running' } },
     ])
-    outcome = await readAndLoad({ ...input, workId, attemptNo: 1, state, selection, retry })
+    outcome = await readAndLoad({ ...input, workId, attemptNo: 1, state, selection })
   } catch (error) {
     failure = error
     if (env.signal.aborted) {
@@ -257,7 +258,7 @@ async function executeStream(input: {
   await append(input, 'work_finished', {
     workId,
     workState: failure === undefined ? outcome : outcome === 'cancelled' ? 'cancelled' : 'failed',
-    errorClass: failure === undefined ? '' : failureKind(failure, env.signal, stream),
+    errorClass: failure === undefined ? '' : classifyFailure(failure, env.signal).kind,
     detail: { rows: progress.rows, batches: progress.batches, chunks: progress.chunks, error: failure === undefined ? undefined : describeError(failure) },
   })
   if (failure !== undefined) throw failure
@@ -281,7 +282,6 @@ async function readAndLoad(input: {
   attemptNo: number
   state: unknown
   selection: unknown
-  retry: ReturnType<typeof mergeRetry>
 }): Promise<StreamOutcome> {
   const { stream, namespaceId, progress, env } = input
   const maxChunks = stream.budget?.maxChunks ?? Infinity
@@ -305,8 +305,7 @@ async function readAndLoad(input: {
       ...createSourceServices({
         signal,
         fetch: env.fetch,
-        retry: input.retry,
-        classifier: stream.classifyError,
+        retry: env.retry,
         queue: input.permits.requests,
         onRetry: (context, retryAfterMs, options) =>
           append(input, 'retry_scheduled', {
@@ -664,11 +663,8 @@ function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedE
     now,
     log: input.log ?? (() => undefined),
     fetch: input.fetch ?? ((url, init) => fetch(url, init)),
+    retry: input.retry ?? {},
   }
-}
-
-function failureKind(error: unknown, signal: AbortSignal, stream: AnyStreamDefinition): string {
-  return classifyFailure(error, signal, stream.classifyError).kind
 }
 
 function recordFailure(span: Span, error: unknown): void {

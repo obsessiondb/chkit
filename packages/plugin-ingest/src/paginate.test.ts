@@ -179,7 +179,7 @@ test('cursorState resumes pages and commits an empty terminal bookmark only afte
   const target = rawTable({ database: 'test', name: 'changes' })
   const pipeline = (maxChunks?: number) => definePipeline({
     id: 'test', streams: [defineStream({
-      id: 'test.changes', destination: target, batchSize: 2, retry: { retries: 0 },
+      id: 'test.changes', destination: target, batchSize: 2,
       budget: maxChunks === undefined ? undefined : { maxChunks },
       incremental: cursorState({ id: 'test.changes.progress', version: 1, parse: parseProgress }),
       async *read(context) {

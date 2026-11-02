@@ -109,11 +109,11 @@ describe.serial('built Attio template installed into a consumer', () => {
       throw new Error(`Unexpected provider fixture request: ${url.pathname}`)
     })
     const configured = factory.createAttioPipeline({ ...installedConfig.attioConfig, apiToken: 'fixture' })
-    const pipeline = definePipeline({ id: 'fixture', streams: configured.streams.filter((stream) => stream.tags.includes('resource:records')), retry: { retries: 0 } })
+    const pipeline = definePipeline({ id: 'fixture', streams: configured.streams.filter((stream) => stream.tags.includes('resource:records')) })
     const journal = createMemoryJournal()
     for (const next of [1, 2]) {
       revision = next
-      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...provider, journal, destination: createClickHouseDestination(executor) })
+      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...provider, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const people = await executor.query<{ record_id: string; name: string; email_addresses: string[]; company_record_ids: string[] }>(

@@ -70,7 +70,7 @@ The executor constructs a loader for each batch attempt. Its context supplies `s
 
 Use `context.destination.insert({ table, rows, token })` for direct ClickHouse writes. If a loader uses another publication mechanism, it must still establish the required write evidence before returning success. Do not claim durability for queued, fire-and-forget, or staged data.
 
-The stream's `retry` policy controls requests. Load attempts have a separate fixed retry budget; setting stream `retry.retries` does not configure insert retries. An insert that exhausts its budget fails the stream without restarting the reader.
+Load attempts have their own fixed retry budget, separate from request retries. An insert that exhausts its budget fails the stream without restarting the reader.
 
 </details>
 

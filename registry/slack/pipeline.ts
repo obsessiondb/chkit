@@ -16,7 +16,6 @@ export function createSlackPipeline(config: SlackReaderConfig = slackConfig) {
     maxStreams: 1,
     maxFetches: 1,
     maxLoads: 1,
-    retry: { retries: 5, minTimeout: 1_000, maxTimeout: 60_000, randomize: true },
     streams: [
       defineStream({ batchSize: 500, id: `${boundConfig.sourceId}.channels`, tags: ['resource:channels'], destination: slackChannelsRaw, read: (context) => readChannels(context, boundConfig) }),
       defineStream({ batchSize: 500, id: `${boundConfig.sourceId}.users`, tags: ['resource:users'], destination: slackUsersRaw, read: (context) => readUsers(context, boundConfig) }),

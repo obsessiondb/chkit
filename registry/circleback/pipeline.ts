@@ -1,6 +1,5 @@
 import { definePipeline, defineStream, fullSync } from '@chkit/plugin-ingest'
 
-import { classifyCirclebackError } from './client.js'
 import { circlebackConfig, type CirclebackReaderConfig } from './config.js'
 import { circleback_meetingsRaw, readMeetings } from './sources/meetings.js'
 import { circleback_meetingTranscriptsRaw, readMeetingTranscripts } from './sources/meeting-transcripts.js'
@@ -10,7 +9,7 @@ import { circleback_companiesRaw, readCompanies } from './sources/companies.js'
 
 export function createCirclebackPipeline(config: CirclebackReaderConfig = circlebackConfig) {
   const source = { ...config }
-  const options = { incremental: fullSync(), classifyError: classifyCirclebackError }
+  const options = { incremental: fullSync() }
   return definePipeline({
     id: source.sourceId, tags: ['provider:circleback'], maxStreams: 1, maxFetches: 1,
     streams: [

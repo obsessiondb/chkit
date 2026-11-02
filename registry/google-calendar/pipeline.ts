@@ -1,6 +1,5 @@
 import { cursorState, definePipeline, defineStream } from '@chkit/plugin-ingest'
 
-import { classifyGoogleCalendarError } from './client.js'
 import { googleCalendarConfig, type GoogleCalendarReaderConfig } from './config.js'
 import { google_calendar_eventsRaw, parseCalendarState, readEvents, type CalendarState } from './sources/events.js'
 
@@ -19,7 +18,6 @@ export function createGoogleCalendarPipeline(config: GoogleCalendarReaderConfig 
       },
       batchSize: 1,
       budget: { maxChunks: boundConfig.maxChunks, maxChunkRows: 250 },
-      classifyError: classifyGoogleCalendarError,
       read: (context) => readEvents(context, boundConfig),
     })],
   })
