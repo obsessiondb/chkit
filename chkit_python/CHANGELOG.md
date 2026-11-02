@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit check` runs the plugins' `on_config_loaded` hooks, as in TS (#449): with command
+  `check` and the resolved `--table` scope, right before `on_check`. Before, chkit-py
+  never called them, so state a plugin set up there was missing in `on_check`. A hook
+  error fails the check with exit 1 and `Plugin "<name>" failed in onConfigLoaded: ...`
+  (plus the `--json` error envelope). A `--table` selector that matches no table still
+  skips every plugin hook.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

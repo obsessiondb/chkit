@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from chkit.cli.commands import check
 from chkit.cli.commands.drift_payload import DriftPayload
+from chkit.cli.json_output import _reset_for_testing
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournal, MigrationJournalEntry
 
@@ -45,6 +46,25 @@ class _Hooks:
 
 def _plugin(name, evaluated, severity):
     return ChxPlugin(manifest=ChxPluginManifest(name=name), hooks=_Hooks(name, evaluated, severity))
+
+
+class _ConfigLoadedHooks:
+    def __init__(self, fail):
+        self.fail, self.calls = fail, []
+
+    def on_config_loaded(self, ctx):
+        scope = ctx.table_scope
+        self.calls.append(["on_config_loaded", ctx.command, scope.selector, scope.matched_tables])
+        if self.fail:
+            raise RuntimeError("boom")
+
+    def on_check(self, ctx):
+        self.calls.append(["on_check", ctx.command])
+        return ChxOnCheckResult(plugin="probe", evaluated=True, ok=True, findings=[], metadata={"calls": self.calls})
+
+
+def _config_loaded_probe(fail):
+    return ChxPlugin(manifest=ChxPluginManifest(name="probe"), hooks=_ConfigLoadedHooks(fail))
 
 
 config = define_config(
@@ -232,6 +252,38 @@ def test_only_an_evaluated_result_with_an_error_finding_fails(project: Path) -> 
         "warnp report\n"
         "unevalp report\n"
     )
+
+
+def test_on_config_loaded_runs_before_on_check_with_the_table_scope(project: Path) -> None:
+    """TS check runs ``onConfigLoaded`` (command, table scope) right before ``onCheck`` (#449)."""
+    _write_config(project, "[_config_loaded_probe(False)]")
+
+    result = _check("--json", "--table", "events")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["plugins"]["probe"]["calls"] == [
+        ["on_config_loaded", "check", "events", ["app.events"]],
+        ["on_check", "check"],
+    ]
+
+
+def test_an_on_config_loaded_error_fails_check_as_in_ts(project: Path) -> None:
+    _write_config(project, "[_config_loaded_probe(True)]")
+    _reset_for_testing()  # an earlier --json run in this process marks JSON as written
+
+    result = _check("--json")
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "command": "check",
+        "schemaVersion": 1,
+        "ok": False,
+        "error": {
+            "code": "error",
+            "message": 'Plugin "probe" failed in onConfigLoaded: boom',
+        },
+    }
+    assert result.stderr == 'Plugin "probe" failed in onConfigLoaded: boom\n'
 
 
 def test_schema_validation_is_left_to_generate(project: Path) -> None:

@@ -46,7 +46,12 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.core.model import ChxConfigEnv
-from chkit.plugins import ChxOnCheckContext, ChxOnCheckResult, ChxPlugin
+from chkit.plugins import (
+    ChxOnCheckContext,
+    ChxOnCheckResult,
+    ChxOnConfigLoadedContext,
+    ChxPlugin,
+)
 
 
 def run(  # noqa: PLR0912, PLR0915, PLR0917
@@ -156,6 +161,17 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")
 
+    # As in TS, the on_config_loaded hooks run right before on_check.
+    plugin_runtime.run_on_config_loaded(
+        ChxOnConfigLoadedContext(
+            command="check",
+            config=config,
+            table_scope=table_scope,
+            flags={},
+            config_path=resolved_config_path,
+            options={},
+        )
+    )
     # Plugin-driven findings (e.g. codegen, backfill).
     plugin_results = plugin_runtime.run_on_check(
         ChxOnCheckContext(
