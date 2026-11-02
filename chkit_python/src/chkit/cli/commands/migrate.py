@@ -21,7 +21,6 @@ Flags mirror the TypeScript ``migrateCommand``:
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +37,7 @@ from chkit.cli.command_target import (
     resolve_plugin_executor,
 )
 from chkit.cli.commands.migrate_abandon import (
+    AbandonReport,
     JournalStateStore,
     abandon_migration_state,
     abandon_report,
@@ -74,7 +74,7 @@ from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
-from chkit.cli.json_output import emit_json_error, json_error_code
+from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
 from chkit.cli.migration_metadata import extract_migration_metadata
 from chkit.cli.migration_store import (
     MigrationJournal,
@@ -93,6 +93,7 @@ from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEngi
 from chkit.cli.table_scope import (
     TableScope,
     resolve_table_scope,
+    scope_to_payload,
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
@@ -130,6 +131,7 @@ class AbandonContext:
     json_mode: bool
     execute_requested: bool
     journal_store: JournalStateStore
+    table_scope: TableScope
     applied_names: set[str]
     files: list[str]
     meta_dir: Path
@@ -342,6 +344,7 @@ def _run(
                     json_mode=output_json,
                     execute_requested=execute_requested,
                     journal_store=journal_store,
+                    table_scope=table_scope,
                     applied_names=applied_names,
                     files=files,
                     meta_dir=meta_dir,
@@ -388,7 +391,7 @@ def run_abandon(
 
     if not ctx.execute_requested:
         if ctx.json_mode:
-            _echo_json({"mode": "plan", "abandon": report.to_payload()})
+            _emit_abandon_json("plan", ctx.table_scope, report)
             return
         render_abandon_text(
             report, performed=False, file_exists=file_exists, snapshot_file=snapshot_file
@@ -405,7 +408,7 @@ def run_abandon(
 
     abandon_migration_state(state, journal_store=ctx.journal_store)
     if ctx.json_mode:
-        _echo_json({"mode": "execute", "abandon": report.to_payload()})
+        _emit_abandon_json("execute", ctx.table_scope, report)
         return
     render_abandon_text(
         report, performed=True, file_exists=file_exists, snapshot_file=snapshot_file
@@ -418,9 +421,11 @@ def _run_checksum_gate(ctx: _MigrateContext, journal: MigrationJournal) -> None:
     if not checksum_mismatches:
         return
     if ctx.json_mode:
-        _echo_json(
+        emit_json(
+            "migrate",
             {
                 "mode": ctx.mode,
+                "scope": scope_to_payload(ctx.table_scope),
                 "error": "Checksum mismatch detected on applied migrations",
                 "checksumMismatches": [m.model_dump() for m in checksum_mismatches],
             }
@@ -481,9 +486,11 @@ def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     if plan.no_scope_match:
         selector = ctx.table_scope.selector or ""
         if ctx.json_mode:
-            _echo_json(
+            emit_json(
+                "migrate",
                 {
                     "mode": ctx.mode,
+                    "scope": scope_to_payload(ctx.table_scope),
                     "pending": [],
                     "applied": [],
                     "warning": f'No tables matched selector "{selector}".',
@@ -495,8 +502,15 @@ def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
         render_retry_notice(plan.retry)
         return
     if ctx.json_mode:
-        _echo_json(
-            {"mode": ctx.mode, "pending": [], "applied": [], **_retry_field(plan.retry)}
+        emit_json(
+            "migrate",
+            {
+                "mode": ctx.mode,
+                "scope": scope_to_payload(ctx.table_scope),
+                "pending": [],
+                "applied": [],
+                **_retry_field(plan.retry),
+            },
         )
         return
     typer.echo("No pending migrations.")
@@ -506,13 +520,17 @@ def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
 def _render_plan(ctx: _MigrateContext, plan: _PendingPlan) -> bool:
     """Render the pending plan. True when the JSON plan ended the run."""
     if ctx.json_mode and not ctx.execute_requested:
-        payload: dict[str, object] = {"mode": ctx.mode, "pending": plan.pending}
+        payload: dict[str, object] = {
+            "mode": ctx.mode,
+            "scope": scope_to_payload(ctx.table_scope),
+            "pending": plan.pending,
+        }
         if plan.undetermined:
             payload["undeterminedMigrations"] = plan.undetermined
         if plan.empty_migrations:
             payload["emptyMigrations"] = plan.empty_migrations
         payload.update(_retry_field(plan.retry))
-        _echo_json(payload)
+        emit_json("migrate", payload)
         return True
     if ctx.json_mode:
         return False
@@ -559,9 +577,11 @@ def _run_empty_migration_gate(ctx: _MigrateContext, empty_migrations: list[str])
     if not apply_possible:
         return
     if ctx.json_mode:
-        _echo_json(
+        emit_json(
+            "migrate",
             {
                 "mode": ctx.mode,
+                "scope": scope_to_payload(ctx.table_scope),
                 "error": EMPTY_MIGRATIONS_SUMMARY,
                 "emptyMigrations": empty_migrations,
             }
@@ -605,9 +625,11 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
         "after review."
     )
     if ctx.json_mode:
-        _echo_json(
+        emit_json(
+            "migrate",
             {
                 "mode": "execute",
+                "scope": scope_to_payload(ctx.table_scope),
                 "error": error,
                 "destructiveMigrations": destructive_files,
                 "destructiveOperations": [
@@ -694,12 +716,16 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     if ctx.json_mode:
         payload: dict[str, object] = {
             "mode": "execute",
-            "applied": [e.model_dump() for e in applied_now],
+            "scope": scope_to_payload(ctx.table_scope),
+            "applied": [
+                {"name": e.name, "appliedAt": e.applied_at, "checksum": e.checksum}
+                for e in applied_now
+            ],
         }
         if plan.undetermined:
             payload["undeterminedMigrations"] = plan.undetermined
         payload.update(_retry_field(retry))
-        _echo_json(payload)
+        emit_json("migrate", payload)
         return
     typer.echo("")
     typer.echo(
@@ -723,5 +749,7 @@ def _retry_field(retry: RetryResolution | None) -> dict[str, object]:
     return {} if retry is None else {"retry": retry_payload(retry)}
 
 
-def _echo_json(payload: dict[str, object]) -> None:
-    typer.echo(json.dumps(payload, indent=2))
+def _emit_abandon_json(mode: str, scope: TableScope, report: AbandonReport) -> None:
+    emit_json(
+        "migrate", {"mode": mode, "scope": scope_to_payload(scope), "abandon": report.to_payload()}
+    )
