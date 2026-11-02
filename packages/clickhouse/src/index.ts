@@ -145,7 +145,7 @@ export interface SchemaObjectRef {
 	database: string
 	name: string
 	/** `system.tables.comment`, as ClickHouse decoded it; `''` when there is none. */
-	comment?: string
+	comment: string
 }
 
 export interface SystemTableRow {

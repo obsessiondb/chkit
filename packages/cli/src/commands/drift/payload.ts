@@ -206,21 +206,21 @@ export async function buildDriftPayload(
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.table.localeCompare(b.table))
-  const viewDrift = [
+  const objectShapeDrift = [
     ...viewPairs.flatMap(({ expected, actual }) =>
       compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
     ),
     ...compareObjectComments(expectedObjects, actualInScope),
   ].sort((a, b) => a.object.localeCompare(b.object))
-  const objectDriftWithViews = [...objectDrift, ...viewDrift]
+  const objectDriftWithViews = [...objectDrift, ...objectShapeDrift]
 
-  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${viewDrift.length}`)
+  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${objectShapeDrift.length}`)
 
   const drifted = computeDrifted({
     missingCount: missing.length,
     kindMismatchCount: kindMismatches.length,
     tableDriftCount: tableDrift.length,
-    viewDriftCount: viewDrift.length,
+    viewDriftCount: objectShapeDrift.length,
     extraCount: extra.length,
     failOnExtraObjects: config.check?.failOnExtraObjects === true,
   })
