@@ -166,8 +166,9 @@ Creates a table definition.
 | `primaryKey` | `string[]` | Primary key columns or expressions, e.g. `['toDate(ts)', 'id']` |
 | `orderBy` | `string[]` | ORDER BY columns or expressions, e.g. `['toStartOfHour(ts)', 'id']` |
 
-`primaryKey` and `orderBy` are required only on engines that support sort order. Omit
-them for [Distributed tables](#distributed-tables) and other engines without keys.
+`orderBy` is required only on engines that support sort order. An omitted `primaryKey`
+defaults to `orderBy`, as in ClickHouse MergeTree. Omit both for
+[Distributed tables](#distributed-tables) and other engines without keys.
 
 ### Optional fields
 

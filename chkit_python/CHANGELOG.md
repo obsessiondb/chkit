@@ -127,6 +127,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `table()` defaults an omitted `primary_key` / `primaryKey` to `order_by`, as in TS (#453):
+  a table with only `order_by=["id"]` gets ``PRIMARY KEY (`id`) ORDER BY (`id`)`` instead of
+  raising. A sort-order engine without `order_by` still raises, now with
+  "table() requires order_by/orderBy".
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

@@ -30,6 +30,22 @@ def test_render_table_minimal() -> None:
     assert "ENGINE = MergeTree()" in sql
 
 
+def test_table_without_primary_key_inherits_order_by() -> None:
+    # TS model.ts: an omitted primaryKey defaults to orderBy (#271, #453).
+    for keys in ({"order_by": ["id"]}, {"orderBy": ["id"]}):
+        definition = table(
+            database="app",
+            name="events",
+            engine="MergeTree()",
+            columns=[{"name": "id", "type": "UInt64"}],
+            **keys,
+        )
+        assert definition.primary_key == ["id"]
+        assert definition.order_by == ["id"]
+    sql = to_create_sql(canonicalize_definitions([definition])[0])
+    assert "PRIMARY KEY (`id`)\nORDER BY (`id`)" in sql
+
+
 def test_render_view() -> None:
     definition = canonicalize_definitions(
         [view(database="default", name="agg", as_="SELECT 1")]
