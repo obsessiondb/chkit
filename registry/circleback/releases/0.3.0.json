@@ -29,7 +29,7 @@
       "path": "circleback/config.ts",
       "type": "registry:file",
       "target": "src/integrations/circleback/config.ts",
-      "content": "import { z } from 'zod'\n\nconst missingApiKey = 'Set CIRCLEBACK_API_KEY or pass apiKey.'\nconst apiKey = z.string().optional().pipe(z.string({ error: missingApiKey }).trim().min(1, missingApiKey))\n\nexport const circlebackConfigSchema = z.object({\n  /** Stable account/installation namespace. Use a new sourceId when changing accounts or filters. */\n  sourceId: z.string().refine((value) => value.trim() !== '', 'must not be blank'),\n  /** Schema setup only; runtime pipeline factories do not change raw tables. */\n  database: z.string(),\n  ownership: z.enum(['All', 'Mine', 'Shared']),\n  /** Circleback API key; read when a stream runs, never by schema commands. */\n  apiKey,\n})\n\nexport type CirclebackConfig = z.input<typeof circlebackConfigSchema>\n\nexport const circlebackReaderConfigSchema = circlebackConfigSchema.omit({ database: true })\nexport type CirclebackReaderConfig = z.input<typeof circlebackReaderConfigSchema>\n\n// Collections are fully revisited on every run.\nexport const circlebackConfig: CirclebackConfig = {\n  sourceId: 'circleback',\n  database: 'default',\n  ownership: 'All',\n  apiKey: process.env.CIRCLEBACK_API_KEY,\n}\n"
+      "content": "import { z } from 'zod'\n\nconst missingApiKey = 'Set CIRCLEBACK_API_KEY or pass apiKey.'\nconst apiKey = z.string().optional().pipe(z.string({ error: missingApiKey }).trim().min(1, missingApiKey))\n\nconst circlebackConfigSchema = z.object({\n  /** Stable account/installation namespace. Use a new sourceId when changing accounts or filters. */\n  sourceId: z.string().refine((value) => value.trim() !== '', 'must not be blank'),\n  /** Schema setup only; runtime pipeline factories do not change raw tables. */\n  database: z.string(),\n  ownership: z.enum(['All', 'Mine', 'Shared']),\n  /** Circleback API key; read when a stream runs, never by schema commands. */\n  apiKey,\n})\n\nexport type CirclebackConfig = z.input<typeof circlebackConfigSchema>\n\nexport const circlebackReaderConfigSchema = circlebackConfigSchema.omit({ database: true })\nexport type CirclebackReaderConfig = z.input<typeof circlebackReaderConfigSchema>\n\n// Collections are fully revisited on every run.\nexport const circlebackConfig: CirclebackConfig = {\n  sourceId: 'circleback',\n  database: 'default',\n  ownership: 'All',\n  apiKey: process.env.CIRCLEBACK_API_KEY,\n}\n"
     },
     {
       "path": "circleback/client.ts",
@@ -253,7 +253,7 @@
       "fileHashes": {
         "src/integrations/circleback/README.md": "5edcea8669a93fd6b9eb8c4c18eabf8bbc7ccf60443d0d848b0c28b115b5b833",
         "src/integrations/circleback/index.ts": "dbab97785e5fb11775ad7062076237e2e6af2c8bbdafd8c7e71e92b957b81a5c",
-        "src/integrations/circleback/config.ts": "fc8f4585e8808c12614e4c9503d3f4448c94fa7628d1cb8943a7fccc017447fa",
+        "src/integrations/circleback/config.ts": "c923a7791e99e556eaa7afebd9724719c2f24b9de7fa9be9fd990f6e19bf23a8",
         "src/integrations/circleback/client.ts": "cd3f9b3a2cf8a1dda91da43d2c4dfd5d87cea48c10ef80dc48f3e13b96860fdb",
         "src/integrations/circleback/pipeline.ts": "59fb2de3e42de24a2f75ba4cb0f8e5ebf3feb4680d9663ef1d1960b13d855315",
         "src/integrations/circleback/sources/meetings.ts": "7f33567650b19db2588c34f184c22f093e1a5ec66170346af6a22ba11279e489",

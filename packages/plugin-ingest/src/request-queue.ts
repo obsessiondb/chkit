@@ -12,8 +12,9 @@ export function createRequestQueue(concurrency: number): RequestQueue {
   let resumeAt = 0
   return {
     run: (operation, signal) => limit(async () => {
-      const remaining = resumeAt - performance.now()
-      if (remaining > 0) await sleep(remaining, undefined, { signal })
+      for (let remaining = resumeAt - performance.now(); remaining > 0; remaining = resumeAt - performance.now()) {
+        await sleep(remaining, undefined, { signal })
+      }
       signal.throwIfAborted()
       return operation()
     }),

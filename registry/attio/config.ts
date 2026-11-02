@@ -4,7 +4,7 @@ const name = z.string().refine((value) => value.trim() !== '', 'must not be blan
 const missingToken = 'Set ATTIO_API_TOKEN or pass apiToken.'
 const apiToken = z.string().optional().pipe(z.string({ error: missingToken }).trim().min(1, missingToken))
 
-export const attioConfigSchema = z.object({
+const attioConfigSchema = z.object({
   /** Stable, non-secret name for this installation. Changing it creates new stream identities. */
   sourceId: name,
   database: name,

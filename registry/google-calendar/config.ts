@@ -4,7 +4,7 @@ const name = z.string().refine((value) => value.trim() !== '', 'must not be blan
 const missingToken = 'Set GOOGLE_CALENDAR_ACCESS_TOKEN or pass accessToken.'
 const accessToken = z.string().optional().pipe(z.string({ error: missingToken }).trim().min(1, missingToken))
 
-export const googleCalendarConfigSchema = z.object({
+const googleCalendarConfigSchema = z.object({
   /** Stable, non-secret label for one OAuth installation. */
   sourceId: name,
   /** Journal identities use this prefix; change it for a separate installation. */

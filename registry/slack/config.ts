@@ -4,7 +4,7 @@ const pageSize = z.int().min(1).max(999)
 const missingToken = 'Set SLACK_API_TOKEN or pass token.'
 const token = z.string().optional().pipe(z.string({ error: missingToken }).trim().min(1, missingToken))
 
-export const slackConfigSchema = z.object({
+const slackConfigSchema = z.object({
   /** Stable, non-secret installation identity. Changing it creates new stream identities. */
   sourceId: z.string(),
   database: z.string(),

@@ -19,7 +19,6 @@ const messageWorkSchema = z.strictObject({
 })
 const messageStateSchema = z.strictObject({ scope: z.string(), watermark: timestamp, active: messageWorkSchema.optional() })
 
-export type MessageWork = z.infer<typeof messageWorkSchema>
 export type SlackMessageState = z.infer<typeof messageStateSchema>
 export interface SlackMessageSelection { from?: string; to: string; requestedTo?: string; backfill: boolean }
 

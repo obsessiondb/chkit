@@ -4,7 +4,7 @@ const name = z.string().refine((value) => value.trim() !== '', 'must not be blan
 const missingKey = 'Set LEMLIST_API_KEY or pass apiKey.'
 const apiKey = z.string().optional().pipe(z.string({ error: missingKey }).trim().min(1, missingKey))
 
-export const lemlistConfigSchema = z.object({
+const lemlistConfigSchema = z.object({
   /** Stable checkpoint namespace for one account; use a new value when switching accounts. */
   sourceId: name,
   database: name,

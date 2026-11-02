@@ -19,7 +19,7 @@ export interface GitHubClient {
 }
 
 export const githubId = z.int().positive()
-export const githubParent = z.looseObject({ number: githubId })
+const githubParent = z.looseObject({ number: githubId })
 export const githubRecord = z.looseObject({ id: githubId })
 const apiUrl = 'https://api.github.com'
 const updated = z.looseObject({ updated_at: z.string().refine((value) => Number.isFinite(Date.parse(value)), 'must be a timestamp') })

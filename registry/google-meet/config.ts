@@ -4,7 +4,7 @@ const name = z.string().refine((value) => value.trim() !== '', 'must not be blan
 const missingToken = 'Set GOOGLE_MEET_ACCESS_TOKEN or pass accessToken.'
 const accessToken = z.string().optional().pipe(z.string({ error: missingToken }).trim().min(1, missingToken))
 
-export const googleMeetConfigSchema = z.object({
+const googleMeetConfigSchema = z.object({
   /** Stable, non-secret label for one authenticated Google account. */
   sourceId: name,
   /** Journal identities use this prefix; change it for a separate installation. */
