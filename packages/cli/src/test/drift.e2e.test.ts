@@ -126,7 +126,7 @@ export default schema(table({
     }
   }, 240_000)
 
-  test('every codec form migrates without drift, and server codec changes drift (#383)', async () => {
+  test('every codec form migrates without drift, and server codec changes drift (#383, #465)', async () => {
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
     const codecTable = `${createPrefix('drift_codec')}metrics`
@@ -172,6 +172,22 @@ export default schema(table({
     { name: 'raw_chain', type: 'Int64', codec: codec.raw('Delta(8),ZSTD(3)') },
     { name: 'raw_fpc', type: 'Float64', codec: codec.raw('FPC, LZ4') },
     { name: 'mixed', type: 'Int32', codec: [{ kind: 'Delta', size: 4 }, codec.raw('ZSTD(3)')] },
+    // #465: a bare Delta/Gorilla renders bare and ClickHouse fills in the value width.
+    { name: 'delta_u32', type: 'UInt32', codec: [{ kind: 'Delta' }, { kind: 'ZSTD' }] },
+    { name: 'delta_date', type: 'Date', codec: [{ kind: 'Delta' }, { kind: 'ZSTD' }] },
+    { name: 'delta_dt64', type: 'DateTime64(3)', codec: [{ kind: 'Delta' }, { kind: 'ZSTD' }] },
+    { name: 'delta_tuple', type: 'Tuple(a UInt8, b UInt64)', codec: [{ kind: 'Delta' }, { kind: 'LZ4' }] },
+    { name: 'delta_mat', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'id * 2' }, codec: [{ kind: 'Delta' }, { kind: 'ZSTD' }] },
+    { name: 'gorilla32', type: 'Float32', codec: { kind: 'Gorilla' } },
+    { name: 'gorilla_arr', type: 'Array(Float64)', codec: [{ kind: 'Gorilla' }, { kind: 'ZSTD' }] },
+    { name: 'zstd_window', type: 'String', codec: { kind: 'ZSTD', level: 3, windowLog: 24 } },
+    { name: 't64_bit', type: 'UInt64', codec: { kind: 'T64', mode: 'bit' } },
+    { name: 'fpc_bare', type: 'Float64', codec: { kind: 'FPC' } },
+    { name: 'fpc12', type: 'Float64', codec: { kind: 'FPC', level: 12 } },
+    { name: 'default_codec', type: 'UInt64', codec: { kind: 'Default' } },
+    { name: 'delta_default', type: 'UInt64', codec: [{ kind: 'Delta' }, { kind: 'Default' }] },
+    { name: 'raw_delta_default', type: 'UInt64', codec: codec.raw('Delta, Default') },
+    { name: 'raw_aes', type: 'String', codec: codec.raw('ZSTD, AES_128_GCM_SIV') },
     { name: 'plain', type: 'String' },
   ],
 }))
@@ -183,6 +199,30 @@ export default schema(table({
       )
       if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('codec migrate failed', migrated))
       await waitForTable(executor, database, codecTable)
+      const stored = await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
+        (rows) => rows.some((row) => row.name === 'raw_aes'),
+        'codec columns'
+      )
+      const storedCodecs = new Map(stored.map((row) => [row.name, row.compression_codec]))
+      expect(Object.fromEntries(['delta', 'delta_u32', 'delta_date', 'delta_dt64', 'delta_tuple', 'delta_mat', 'gorilla',
+        'gorilla32', 'gorilla_arr', 'zstd_window', 't64_bit', 'fpc_bare', 'delta_default', 'raw_delta_default', 'raw_aes']
+        .map((name) => [name, storedCodecs.get(name)]))).toEqual({
+        delta: 'CODEC(Delta(8), ZSTD(1))',
+        delta_u32: 'CODEC(Delta(4), ZSTD(1))',
+        delta_date: 'CODEC(Delta(2), ZSTD(1))',
+        delta_dt64: 'CODEC(Delta(8), ZSTD(1))',
+        delta_tuple: 'CODEC(Delta, LZ4)',
+        delta_mat: 'CODEC(Delta(8), ZSTD(1))',
+        gorilla: 'CODEC(Gorilla(8), LZ4)',
+        gorilla32: 'CODEC(Gorilla(4))',
+        gorilla_arr: 'CODEC(Gorilla(8), ZSTD(1))',
+        zstd_window: 'CODEC(ZSTD(3, 24))',
+        t64_bit: "CODEC(T64('bit'))",
+        fpc_bare: 'CODEC(FPC(12))',
+        delta_default: 'CODEC(Delta(8), Default)',
+        raw_delta_default: 'CODEC(Delta(8), Default)',
+        raw_aes: 'CODEC(ZSTD(1), AES_128_GCM_SIV)',
+      })
 
       const expectNoDrift = () => {
         const drift = runCli(fixture.dir, ['drift', ...args], cliEnv)
@@ -197,6 +237,7 @@ export default schema(table({
       // The same codecs, spelled the way ClickHouse fills in itself.
       await executor.command(`ALTER TABLE ${object} MODIFY COLUMN lz4hc CODEC(LZ4HC)`)
       await executor.command(`ALTER TABLE ${object} MODIFY COLUMN double_delta4 CODEC(DoubleDelta(8), ZSTD(2))`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN gorilla8 CODEC(Gorilla, ZSTD(2))`)
       await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
         (rows) => rows.find((row) => row.name === 'lz4hc')?.compression_codec === 'CODEC(LZ4HC(0))',
         'equivalent codec respelling'
@@ -206,10 +247,16 @@ export default schema(table({
       await executor.command(`ALTER TABLE ${object} MODIFY COLUMN zstd3 String CODEC(LZ4)`)
       await executor.command(`ALTER TABLE ${object} MODIFY COLUMN plain String CODEC(ZSTD(3))`)
       await executor.command(`ALTER TABLE ${object} MODIFY COLUMN lz4 REMOVE CODEC`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN zstd_window CODEC(ZSTD(3))`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN delta8 CODEC(Delta(4), LZ4)`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN fpc12 CODEC(FPC(5))`)
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN t64 CODEC(T64('bit'))`)
       await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
         (rows) => {
           const codecs = new Map(rows.map((row) => [row.name, row.compression_codec]))
-          return codecs.get('zstd3') === 'CODEC(LZ4)' && codecs.get('plain') === 'CODEC(ZSTD(3))' && codecs.get('lz4') === ''
+          return codecs.get('zstd3') === 'CODEC(LZ4)' && codecs.get('plain') === 'CODEC(ZSTD(3))' && codecs.get('lz4') === '' &&
+            codecs.get('t64') === "CODEC(T64('bit'))" && codecs.get('fpc12') === 'CODEC(FPC(5))' &&
+            codecs.get('delta8') === 'CODEC(Delta(4), LZ4)' && codecs.get('zstd_window') === 'CODEC(ZSTD(3))'
         },
         'codec changes'
       )
@@ -219,7 +266,7 @@ export default schema(table({
       expect(payload.drifted).toBe(true)
       expect(payload.tableDrift).toHaveLength(1)
       expect(payload.tableDrift[0]?.reasonCodes).toEqual(['changed_column'])
-      expect([...(payload.tableDrift[0]?.changedColumns ?? [])].sort()).toEqual(['lz4', 'plain', 'zstd3'])
+      expect([...(payload.tableDrift[0]?.changedColumns ?? [])].sort()).toEqual(['delta8', 'fpc12', 'lz4', 'plain', 't64', 'zstd3', 'zstd_window'])
       const strict = runCli(fixture.dir, ['check', '--strict', ...args], cliEnv)
       expect(strict.exitCode).toBe(1)
       expect(JSON.parse(strict.stdout)).toMatchObject({ ok: false, drifted: true, failedChecks: ['schema_drift'] })

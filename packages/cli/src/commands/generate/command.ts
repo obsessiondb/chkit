@@ -14,6 +14,7 @@ import {
   resolveTableScope,
   tableKeysFromDefinitions,
 } from '../../runtime/table-scope.js'
+import { detectExperimentalCodecWarnings } from './codec-warnings.js'
 import { detectDictionaryPasswordWarnings } from './dictionary-password-warnings.js'
 import {
   applyExplicitDictionaryRenames,
@@ -219,6 +220,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
 
   const dictionaryPasswordWarnings = [
     ...detectDictionaryPasswordWarnings(plan),
+    ...detectExperimentalCodecWarnings(plan),
     ...plan.operations.flatMap((operation) => operation.warning ? [operation.warning] : []),
   ]
 

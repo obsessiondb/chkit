@@ -121,8 +121,8 @@ describe('parseCodec', () => {
   })
 
   test('falls back to raw when known codec has unexpected extra args', () => {
-    expect(parseCodec('CODEC(ZSTD(3, 1))')).toEqual([
-      { kind: 'raw', expression: 'ZSTD(3, 1)' },
+    expect(parseCodec('CODEC(ZSTD(3, 24, 1))')).toEqual([
+      { kind: 'raw', expression: 'ZSTD(3, 24, 1)' },
     ])
     expect(parseCodec('CODEC(LZ4HC(9, 1))')).toEqual([
       { kind: 'raw', expression: 'LZ4HC(9, 1)' },
@@ -150,12 +150,15 @@ describe('canonicalizeCodec', () => {
     expect(canonicalizeCodec({ kind: 'LZ4HC' })).toEqual([{ kind: 'LZ4HC', level: 9 }])
   })
 
-  test('fills in Delta/DoubleDelta/Gorilla default size', () => {
-    expect(canonicalizeCodec({ kind: 'Delta' })).toEqual([{ kind: 'Delta', size: 1 }])
-    expect(canonicalizeCodec({ kind: 'DoubleDelta' })).toEqual([
-      { kind: 'DoubleDelta', size: 1 },
-    ])
-    expect(canonicalizeCodec({ kind: 'Gorilla' })).toEqual([{ kind: 'Gorilla', size: 1 }])
+  test('keeps a bare Delta/Gorilla bare and drops the DoubleDelta size ClickHouse ignores (#465)', () => {
+    expect(canonicalizeCodec({ kind: 'Delta' })).toEqual([{ kind: 'Delta' }])
+    expect(canonicalizeCodec({ kind: 'Delta', size: 1 })).toEqual([{ kind: 'Delta', size: 1 }])
+    expect(canonicalizeCodec({ kind: 'DoubleDelta', size: 4 })).toEqual([{ kind: 'DoubleDelta' }])
+    expect(canonicalizeCodec({ kind: 'Gorilla' })).toEqual([{ kind: 'Gorilla' }])
+  })
+
+  test('keeps a malformed atom as written, for validation to report', () => {
+    expect(canonicalizeCodec({ kind: 'ZSTD', level: 1.5 })).toEqual([{ kind: 'ZSTD', level: 1.5 }])
   })
 
   test('trims raw expression whitespace', () => {
@@ -227,11 +230,9 @@ describe('codecFingerprint', () => {
     [{ kind: 'LZ4HC', level: 0 }, 'CODEC(LZ4HC(0))'],
     [{ kind: 'LZ4HC', level: -1 }, 'CODEC(LZ4HC(18446744073709551615))'],
     [{ kind: 'LZ4HC', level: 12 }, 'CODEC(LZ4HC(12))'],
-    [[{ kind: 'Delta' }, { kind: 'ZSTD' }], 'CODEC(Delta(1), ZSTD(1))'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }], 'CODEC(Delta(8), LZ4)'],
     [[{ kind: 'DoubleDelta' }, { kind: 'LZ4' }], 'CODEC(DoubleDelta, LZ4)'],
     [[{ kind: 'DoubleDelta', size: 4 }, { kind: 'LZ4' }], 'CODEC(DoubleDelta, LZ4)'],
-    [[{ kind: 'Gorilla' }, { kind: 'LZ4' }], 'CODEC(Gorilla(1), LZ4)'],
     [[{ kind: 'Gorilla', size: 8 }, { kind: 'ZSTD', level: 2 }], 'CODEC(Gorilla(8), ZSTD(2))'],
     [[{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }], 'CODEC(FPC(12), LZ4)'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'T64' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), T64, ZSTD(1))'],
@@ -276,7 +277,7 @@ describe('codecFingerprint', () => {
       [{ kind: 'T64' }, { kind: 'LZ4' }],
       [{ kind: 'LZ4' }, { kind: 'T64' }],
     ]
-    const fingerprints = distinct.map(codecFingerprint)
+    const fingerprints = distinct.map((spec) => codecFingerprint(spec))
     expect(new Set([...fingerprints, '']).size).toBe(distinct.length + 1)
   })
 
@@ -286,5 +287,71 @@ describe('codecFingerprint', () => {
     expect(codecFingerprint(parseCodec('CODEC(Delta(8), DoubleDelta, FPC(12), ZSTD(1))'))).toBe(
       'Delta(8),DoubleDelta,FPC(12),ZSTD(1)'
     )
+  })
+})
+
+describe('codec forms ClickHouse stores (#465)', () => {
+  test('renders a bare Delta/Gorilla and never a DoubleDelta size', () => {
+    expect(renderCodec([{ kind: 'Delta' }, { kind: 'ZSTD' }])).toBe('CODEC(Delta, ZSTD)')
+    expect(renderCodec({ kind: 'Gorilla' })).toBe('CODEC(Gorilla)')
+    expect(renderCodec({ kind: 'DoubleDelta', size: 8 })).toBe('CODEC(DoubleDelta)')
+  })
+
+  test('renders and parses ZSTD windowLog, T64 mode, FPC level and Default', () => {
+    const forms: Array<[ColumnCodecSpec, string]> = [
+      [{ kind: 'ZSTD', level: 3, windowLog: 24 }, 'CODEC(ZSTD(3, 24))'],
+      [{ kind: 'T64', mode: 'bit' }, "CODEC(T64('bit'))"],
+      [{ kind: 'FPC' }, 'CODEC(FPC)'],
+      [{ kind: 'FPC', level: 12 }, 'CODEC(FPC(12))'],
+      [[{ kind: 'Delta' }, { kind: 'Default' }], 'CODEC(Delta, Default)'],
+    ]
+    for (const [spec, sql] of forms) {
+      expect(renderCodec(spec)).toBe(sql)
+      expect(parseCodec(sql)).toEqual(Array.isArray(spec) ? spec : [spec])
+    }
+    expect(parseCodec("CODEC(T64('byte'))")).toEqual([{ kind: 'T64', mode: 'byte' }])
+  })
+
+  test('fills in the value width ClickHouse uses for a bare Delta or Gorilla', () => {
+    const widths: Array<[string, ColumnCodecSpec, string]> = [
+      ['UInt64', [{ kind: 'Delta' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), ZSTD(1))'],
+      ['UInt32', [{ kind: 'Delta' }, { kind: 'ZSTD' }], 'CODEC(Delta(4), ZSTD(1))'],
+      ['Date', [{ kind: 'Delta' }, { kind: 'ZSTD' }], 'CODEC(Delta(2), ZSTD(1))'],
+      ["DateTime64(3, 'UTC')", [{ kind: 'Delta' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), ZSTD(1))'],
+      ['Nullable(UInt64)', [{ kind: 'Delta' }, { kind: 'LZ4' }], 'CODEC(Delta(8), LZ4)'],
+      ['Array(Float64)', { kind: 'Gorilla' }, 'CODEC(Gorilla(8))'],
+      ['Float32', { kind: 'Gorilla' }, 'CODEC(Gorilla(4))'],
+      ['Tuple(a UInt8, b UInt64)', [{ kind: 'Delta' }, { kind: 'LZ4' }], 'CODEC(Delta, LZ4)'],
+      ['Map(UInt32, UInt32)', [{ kind: 'Delta' }, { kind: 'LZ4' }], 'CODEC(Delta(4), LZ4)'],
+      ['UInt64', codec.raw('Delta, Default'), 'CODEC(Delta(8), Default)'],
+      ['UInt64', [{ kind: 'Delta', size: 4 }, { kind: 'ZSTD' }], 'CODEC(Delta(4), ZSTD(1))'],
+    ]
+    for (const [type, spec, stored] of widths) {
+      expect(codecFingerprint(spec, type)).toBe(codecFingerprint(parseCodec(stored), type))
+    }
+    // An explicit size is compared as written: no equivalence with the bare form.
+    expect(codecsEqual({ kind: 'Delta', size: 1 }, { kind: 'Delta' }, 'UInt64')).toBe(false)
+    expect(codecsEqual({ kind: 'Delta', size: 8 }, { kind: 'Delta' }, 'UInt64')).toBe(true)
+  })
+
+  test('compares respelled codecs equal', () => {
+    const same: Array<[string, ColumnCodecSpec, ColumnCodecSpec]> = [
+      ['String', { kind: 'ZSTD' }, { kind: 'ZSTD', level: 1 }],
+      ['String', { kind: 'LZ4HC' }, { kind: 'LZ4HC', level: 9 }],
+      ['UInt64', { kind: 'DoubleDelta', size: 8 }, { kind: 'DoubleDelta' }],
+      ['Float64', { kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'FPC', level: 12, floatSize: 4 }],
+      ['Float64', { kind: 'FPC', level: 12, floatSize: 4 }, { kind: 'FPC' }],
+      ['String', [{ kind: 'LZ4' }], { kind: 'LZ4' }],
+      ['String', codec.raw('NONE'), { kind: 'NONE' }],
+      ['String', codec.raw('ZSTD'), { kind: 'ZSTD', level: 1 }],
+      ['String', codec.raw('ZSTD, AES_128_GCM_SIV'), codec.raw('ZSTD(1), AES_128_GCM_SIV')],
+      ['UInt64', { kind: 'T64', mode: 'byte' }, { kind: 'T64' }],
+    ]
+    for (const [type, a, b] of same) expect(codecFingerprint(a, type)).toBe(codecFingerprint(b, type))
+  })
+
+  test('tells apart a ZSTD window and a T64 bit mode', () => {
+    expect(codecFingerprint({ kind: 'ZSTD', level: 3, windowLog: 24 })).not.toBe(codecFingerprint({ kind: 'ZSTD', level: 3 }))
+    expect(codecFingerprint({ kind: 'T64', mode: 'bit' })).not.toBe(codecFingerprint({ kind: 'T64' }))
   })
 })

@@ -158,7 +158,7 @@ def test_parse_raw_fallback_round_trips_through_render() -> None:
 
 def test_parse_falls_back_to_raw_when_known_codec_has_unexpected_args() -> None:
     cases = {
-        "CODEC(ZSTD(3, 1))": "ZSTD(3, 1)",
+        "CODEC(ZSTD(3, 24, 1))": "ZSTD(3, 24, 1)",
         "CODEC(LZ4HC(9, 1))": "LZ4HC(9, 1)",
         "CODEC(Delta(4, 2))": "Delta(4, 2)",
         "CODEC(LZ4(1))": "LZ4(1)",
@@ -176,8 +176,8 @@ def test_parse_reads_a_negative_level_back_from_the_unsigned_form_clickhouse_pri
     lz4hc = parse_codec("CODEC(LZ4HC(18446744073709551614))")
     assert zstd is not None
     assert lz4hc is not None
-    assert [c.model_dump() for c in zstd] == [{"kind": "ZSTD", "level": -1}]
-    assert [c.model_dump() for c in lz4hc] == [{"kind": "LZ4HC", "level": -2}]
+    assert [c.model_dump(exclude_none=True) for c in zstd] == [{"kind": "ZSTD", "level": -1}]
+    assert [c.model_dump(exclude_none=True) for c in lz4hc] == [{"kind": "LZ4HC", "level": -2}]
 
 
 # ───────────── canonicalizeCodec ─────────────
@@ -197,12 +197,20 @@ def test_canonicalize_fills_in_lz4hc_default_level() -> None:
     ]
 
 
-def test_canonicalize_fills_in_delta_double_delta_gorilla_default_size() -> None:
-    for kind in ["Delta", "DoubleDelta", "Gorilla"]:
-        canon = canonicalize_codec({"kind": kind})
-        assert [c.model_dump(exclude_none=True) for c in canon] == [
-            {"kind": kind, "size": 1}
-        ]
+def test_canonicalize_keeps_bare_delta_gorilla_and_drops_double_delta_size() -> None:
+    # #465: ClickHouse fills in the column's value width for a bare Delta/Gorilla.
+    def canon(spec: CodecSpecInput) -> list[dict[str, Any]]:
+        return [c.model_dump(exclude_none=True) for c in canonicalize_codec(spec)]
+
+    assert canon({"kind": "Delta"}) == [{"kind": "Delta"}]
+    assert canon({"kind": "Delta", "size": 1}) == [{"kind": "Delta", "size": 1}]
+    assert canon({"kind": "DoubleDelta", "size": 4}) == [{"kind": "DoubleDelta"}]
+    assert canon({"kind": "Gorilla"}) == [{"kind": "Gorilla"}]
+
+
+def test_canonicalize_keeps_a_malformed_atom_as_written() -> None:
+    [step] = canonicalize_codec({"kind": "ZSTD", "level": 1.5})
+    assert step.model_dump() == {"kind": "invalid", "value": {"kind": "ZSTD", "level": 1.5}}
 
 
 def test_canonicalize_trims_raw_expression_whitespace() -> None:
@@ -275,11 +283,9 @@ _STORED: list[tuple[CodecSpecInput, str]] = [
     ({"kind": "LZ4HC", "level": 0}, "CODEC(LZ4HC(0))"),
     ({"kind": "LZ4HC", "level": -1}, "CODEC(LZ4HC(18446744073709551615))"),
     ({"kind": "LZ4HC", "level": 12}, "CODEC(LZ4HC(12))"),
-    ([{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(1), ZSTD(1))"),
     ([{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"),
     ([{"kind": "DoubleDelta"}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
     ([{"kind": "DoubleDelta", "size": 4}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
-    ([{"kind": "Gorilla"}, {"kind": "LZ4"}], "CODEC(Gorilla(1), LZ4)"),
     ([{"kind": "Gorilla", "size": 8}, {"kind": "ZSTD", "level": 2}], "CODEC(Gorilla(8), ZSTD(2))"),
     ([{"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "LZ4"}], "CODEC(FPC(12), LZ4)"),
     (
@@ -343,3 +349,76 @@ def test_codec_fingerprint_matches_the_typescript_strings() -> None:
         codec_fingerprint(parse_codec("CODEC(Delta(8), DoubleDelta, FPC(12), ZSTD(1))"))
         == "Delta(8),DoubleDelta,FPC(12),ZSTD(1)"
     )
+
+
+# ───────────── codec forms ClickHouse stores (#465) ─────────────
+
+
+def test_render_bare_delta_gorilla_and_never_a_double_delta_size() -> None:
+    assert render_codec([{"kind": "Delta"}, {"kind": "ZSTD"}]) == "CODEC(Delta, ZSTD)"
+    assert render_codec({"kind": "Gorilla"}) == "CODEC(Gorilla)"
+    assert render_codec({"kind": "DoubleDelta", "size": 8}) == "CODEC(DoubleDelta)"
+
+
+def test_render_and_parse_zstd_window_t64_mode_fpc_level_and_default() -> None:
+    forms: list[tuple[CodecSpecInput, str]] = [
+        ({"kind": "ZSTD", "level": 3, "windowLog": 24}, "CODEC(ZSTD(3, 24))"),
+        ({"kind": "T64", "mode": "bit"}, "CODEC(T64('bit'))"),
+        ({"kind": "FPC"}, "CODEC(FPC)"),
+        ({"kind": "FPC", "level": 12}, "CODEC(FPC(12))"),
+        ([{"kind": "Delta"}, {"kind": "Default"}], "CODEC(Delta, Default)"),
+    ]
+    for spec, sql in forms:
+        assert render_codec(spec) == sql
+        parsed = parse_codec(sql)
+        assert parsed is not None
+        expected = spec if isinstance(spec, list) else [spec]
+        assert [c.model_dump(by_alias=True, exclude_none=True) for c in parsed] == expected
+    t64 = parse_codec("CODEC(T64('byte'))")
+    assert t64 is not None
+    assert [c.model_dump(exclude_none=True) for c in t64] == [{"kind": "T64", "mode": "byte"}]
+
+
+def test_codec_fingerprint_fills_in_the_value_width_for_bare_delta_or_gorilla() -> None:
+    widths: list[tuple[str, CodecSpecInput, str]] = [
+        ("UInt64", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(8), ZSTD(1))"),
+        ("UInt32", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(4), ZSTD(1))"),
+        ("Date", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(2), ZSTD(1))"),
+        ("DateTime64(3, 'UTC')", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(8), ZSTD(1))"),
+        ("Nullable(UInt64)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"),
+        ("Array(Float64)", {"kind": "Gorilla"}, "CODEC(Gorilla(8))"),
+        ("Float32", {"kind": "Gorilla"}, "CODEC(Gorilla(4))"),
+        ("Tuple(a UInt8, b UInt64)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta, LZ4)"),
+        ("Map(UInt32, UInt32)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"),
+        ("UInt64", codec_raw("Delta, Default"), "CODEC(Delta(8), Default)"),
+        ("UInt64", [{"kind": "Delta", "size": 4}, {"kind": "ZSTD"}], "CODEC(Delta(4), ZSTD(1))"),
+    ]
+    for type_, spec, stored in widths:
+        assert codec_fingerprint(spec, type_) == codec_fingerprint(parse_codec(stored), type_)
+    # An explicit size is compared as written: no equivalence with the bare form.
+    assert not codecs_equal({"kind": "Delta", "size": 1}, {"kind": "Delta"}, "UInt64")
+    assert codecs_equal({"kind": "Delta", "size": 8}, {"kind": "Delta"}, "UInt64")
+
+
+def test_codec_fingerprint_compares_respelled_codecs_equal() -> None:
+    same: list[tuple[str, CodecSpecInput, CodecSpecInput]] = [
+        ("String", {"kind": "ZSTD"}, {"kind": "ZSTD", "level": 1}),
+        ("String", {"kind": "LZ4HC"}, {"kind": "LZ4HC", "level": 9}),
+        ("UInt64", {"kind": "DoubleDelta", "size": 8}, {"kind": "DoubleDelta"}),
+        ("Float64", {"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "FPC", "level": 12, "floatSize": 4}),
+        ("Float64", {"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "FPC"}),
+        ("String", [{"kind": "LZ4"}], {"kind": "LZ4"}),
+        ("String", codec_raw("NONE"), {"kind": "NONE"}),
+        ("String", codec_raw("ZSTD"), {"kind": "ZSTD", "level": 1}),
+        ("String", codec_raw("ZSTD, AES_128_GCM_SIV"), codec_raw("ZSTD(1), AES_128_GCM_SIV")),
+        ("UInt64", {"kind": "T64", "mode": "byte"}, {"kind": "T64"}),
+    ]
+    for type_, a, b in same:
+        assert codec_fingerprint(a, type_) == codec_fingerprint(b, type_)
+
+
+def test_codec_fingerprint_tells_apart_a_zstd_window_and_a_t64_bit_mode() -> None:
+    assert codec_fingerprint({"kind": "ZSTD", "level": 3, "windowLog": 24}) != codec_fingerprint(
+        {"kind": "ZSTD", "level": 3}
+    )
+    assert codec_fingerprint({"kind": "T64", "mode": "bit"}) != codec_fingerprint({"kind": "T64"})

@@ -24,6 +24,7 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectRef
+from chkit.core.codec import parse_codec
 from chkit.core.model import (
     MaterializedViewRefresh,
     SkipIndexBloomFilter,
@@ -179,6 +180,44 @@ def test_render_emits_columns_with_optional_attrs() -> None:
     assert "nullable=True" in output
     assert 'default="hello"' in output
     assert 'comment="desc"' in output
+
+
+def test_render_pulls_stored_codecs_as_typed_atoms_without_filled_in_sizes() -> None:
+    # #465: the forms system.columns.compression_codec reports, as chkit (TS) pulls them.
+    stored = {
+        "d": ("UInt64", "CODEC(Delta(8), ZSTD(1))"),
+        "g": ("Float64", "CODEC(Gorilla(8))"),
+        "h": ("String", "CODEC(LZ4HC(0))"),
+        "f": ("Float64", "CODEC(FPC(12))"),
+        "dd": ("UInt64", "CODEC(DoubleDelta)"),
+        "tb": ("UInt64", "CODEC(T64('bit'))"),
+        "zw": ("String", "CODEC(ZSTD(3, 24))"),
+        "tu": ("Tuple(a UInt8, b UInt64)", "CODEC(Delta, LZ4)"),
+        "df": ("UInt64", "CODEC(Delta(8), Default)"),
+    }
+    t = table(
+        database="db",
+        name="t",
+        engine="MergeTree",
+        columns=[{"name": "id", "type": "UInt64"}]
+        + [
+            {"name": name, "type": type_, "codec": parse_codec(codec)}
+            for name, (type_, codec) in stored.items()
+        ],
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    output = render_schema_file([t])
+    assert 'ColumnDefinition(name="d", type="UInt64", codec=[{"kind": "Delta", "size": 8}, {"kind": "ZSTD", "level": 1}])' in output
+    assert 'codec={"kind": "Gorilla", "size": 8}' in output
+    assert 'codec={"kind": "LZ4HC", "level": 0}' in output
+    assert 'codec={"kind": "FPC", "level": 12}' in output
+    assert 'codec={"kind": "DoubleDelta"}' in output
+    assert 'codec={"kind": "T64", "mode": "bit"}' in output
+    assert 'codec={"kind": "ZSTD", "level": 3, "windowLog": 24}' in output
+    assert 'codec=[{"kind": "Delta"}, {"kind": "LZ4"}]' in output
+    assert 'codec=[{"kind": "Delta", "size": 8}, {"kind": "Default"}]' in output
+    assert "codec_raw" not in output
 
 
 def test_render_handles_view_and_materialized_view() -> None:

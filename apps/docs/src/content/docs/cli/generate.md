@@ -47,7 +47,7 @@ If there are no differences, no migration file is created.
 
 ### Operation order
 
-Operations run in groups. Without a rename, the order is drops, then `ALTER` statements, then `CREATE DATABASE`, then creates. When a rename is applied (a `--rename-*` flag or `renamedFrom`), the order is drops, then `CREATE DATABASE`, then table and dictionary renames, then the other `ALTER` statements (column renames included), then creates. Creates run tables first, then views, then dictionaries and materialized views; drops run one object type at a time. Each group is sorted by name. Statements for the same column keep their planned order: removing a column's expression (`REMOVE DEFAULT` or `REMOVE MATERIALIZED`) runs right before the column's `MODIFY COLUMN`.
+Operations run in groups. Without a rename, the order is drops, then `ALTER` statements, then `CREATE DATABASE`, then creates. When a rename is applied (a `--rename-*` flag or `renamedFrom`), the order is drops, then `CREATE DATABASE`, then table and dictionary renames, then the other `ALTER` statements (column renames included), then creates. Creates run tables first, then views, then dictionaries and materialized views; drops run one object type at a time. Each group is sorted by name. Statements for the same column keep their planned order: removing a column's expression (`REMOVE DEFAULT` or `REMOVE MATERIALIZED`) or codec (`REMOVE CODEC`) runs right before the column's `MODIFY COLUMN`.
 
 `generate` then reorders creates and drops by the dependencies between the objects in the migration: an object is created after every object it reads and dropped before them. A view that reads another view, a materialized view, or a dictionary is created after it, even when its name sorts first. Dependencies come from:
 
@@ -121,6 +121,10 @@ A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source
 `generate` warns when a dictionary being created or replaced this run has a literal `password '...'` in its `SOURCE(...)` — it will land in the committed migration file as plain text. This prints to the console and is included as a `warnings` array in `--json` output.
 
 The one exception: a dictionary whose `source` still carries ClickHouse's `[HIDDEN]` introspection placeholder (written by [`chkit pull`](/plugins/pull/#credential-handling-hidden-passwords) when it can't recover the real password) never produces a migration on its own — chkit doesn't know the real value, so it can't safely diff or render it. Replace `[HIDDEN]` with a real credential in the schema file first.
+
+### Experimental codec warnings
+
+`generate` warns about every operation that sets the experimental [`ALP` codec](/schema/dsl-reference/#codec-columncodecspec-optional), which ClickHouse rejects unless `allow_experimental_codecs` is 1. Apply such a migration with `chkit migrate --apply --setting allow_experimental_codecs=1`. The warning prints to the console and is included in the `warnings` array of `--json` output.
 
 ### Dryrun mode
 
