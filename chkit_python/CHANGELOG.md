@@ -127,6 +127,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `check --json` and `status --json` leave `database` out when no database is configured, as
+  in TS (#452). With a plugin target (such as an ObsessionDB service) and no `clickhouse`
+  block, a missing target database wrote `"database": null`; now `databaseMissing` comes
+  alone.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured
